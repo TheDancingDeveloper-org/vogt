@@ -138,7 +138,8 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 USER sprooty
 WORKDIR /home/sprooty
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-       | sh -s -- -y --default-toolchain stable --profile minimal --component rustfmt clippy \
+       | sh -s -- -y --default-toolchain stable --profile minimal \
+           --component rustfmt --component clippy \
     && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-pc-windows-gnu \
     && cargo install cargo-deb cargo-zigbuild cargo-xwin cargo-watch
 
