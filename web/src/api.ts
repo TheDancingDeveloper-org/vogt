@@ -175,6 +175,9 @@ export const api = {
   guiProcesses: () => req<GuiProc[]>("GET", "/api/gui/processes"),
   guiKill: (pid: number) =>
     req<{ ok: boolean }>("POST", `/api/gui/kill?pid=${pid}`),
+
+  pushTest: (title = "MyDevEnv2 test", body = "Push notifications are working.") =>
+    req<{ ok: number; fail: number }>("POST", "/api/push/test", { title, body }),
 };
 
 export interface PublicConfig {

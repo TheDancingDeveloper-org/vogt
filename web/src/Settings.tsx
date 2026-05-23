@@ -1,5 +1,15 @@
-import { Component, Show, createSignal } from "solid-js";
+import { Component, Show, createSignal, onMount } from "solid-js";
 import { getBase, getToken, setBase, setToken } from "./api";
+import {
+  currentSubscription,
+  isNativePlatform,
+  isPushSupported,
+  pushPermission,
+  pushSelfTest,
+  subscribeNativeFcm,
+  subscribePush,
+  unsubscribePush,
+} from "./push";
 
 interface Props {
   open: boolean;
@@ -9,13 +19,64 @@ interface Props {
 const Settings: Component<Props> = (props) => {
   const [token, setT] = createSignal(getToken());
   const [base, setB] = createSignal(getBase());
+  const [pushOn, setPushOn] = createSignal(false);
+  const [pushPerm, setPushPerm] = createSignal<NotificationPermission>("default");
+  const [pushBusy, setPushBusy] = createSignal(false);
+  const [pushMsg, setPushMsg] = createSignal<string | null>(null);
+
+  const refreshPushState = async () => {
+    setPushPerm(await pushPermission());
+    setPushOn((await currentSubscription()) !== null);
+  };
+
+  onMount(() => {
+    if (isPushSupported()) {
+      void refreshPushState();
+    }
+  });
 
   const save = () => {
     setToken(token().trim());
     setBase(base().trim());
     props.onClose();
-    // Force a soft reload so the new credentials take effect everywhere.
     location.reload();
+  };
+
+  const togglePush = async () => {
+    setPushBusy(true);
+    setPushMsg(null);
+    try {
+      if (pushOn()) {
+        await unsubscribePush();
+        setPushMsg("Notifications turned off.");
+      } else {
+        // Inside Capacitor: register native FCM via the plugin; otherwise
+        // fall back to the browser's PushManager + VAPID.
+        const label = navigator.userAgent.slice(0, 60);
+        const r = isNativePlatform()
+          ? await subscribeNativeFcm(label)
+          : await subscribePush(label);
+        setPushMsg(`Subscribed (id ${r.id.slice(0, 12)}…)`);
+      }
+      await refreshPushState();
+    } catch (e) {
+      setPushMsg(`Push: ${(e as Error).message}`);
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const testPush = async () => {
+    setPushBusy(true);
+    setPushMsg(null);
+    try {
+      const r = await pushSelfTest();
+      setPushMsg(`Test dispatched: ${r.ok} ok / ${r.fail} fail`);
+    } catch (e) {
+      setPushMsg(`Test failed: ${(e as Error).message}`);
+    } finally {
+      setPushBusy(false);
+    }
   };
 
   return (
@@ -39,11 +100,48 @@ const Settings: Component<Props> = (props) => {
               type="text"
               value={base()}
               onInput={(e) => setB(e.currentTarget.value)}
-              placeholder="http://mydevenv2.tailnet.ts.net:8910"
+              placeholder="https://mydevenv2.sprooty.com"
               autocomplete="off"
               spellcheck={false}
             />
           </label>
+
+          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+
+          <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+            <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
+              Push notifications
+            </div>
+            <Show
+              when={isPushSupported()}
+              fallback={
+                <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
+                  Not supported in this browser.
+                </div>
+              }
+            >
+              <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
+                Notify me when a session is waiting for input
+                (permission: <code>{pushPerm()}</code>).
+              </div>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button onClick={togglePush} disabled={pushBusy()}>
+                  {pushOn() ? "Disable" : "Enable"} push
+                </button>
+                <button
+                  onClick={testPush}
+                  disabled={pushBusy() || !pushOn()}
+                  title="Server fans out a test notification to all subscriptions"
+                >
+                  Send test
+                </button>
+              </div>
+              <Show when={pushMsg()}>
+                <div style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{pushMsg()}</div>
+              </Show>
+            </Show>
+          </div>
+
           <div class="modal-actions">
             <button onClick={props.onClose}>Cancel</button>
             <button onClick={save}>Save & reload</button>
