@@ -87,7 +87,7 @@ steps:
         from_secret: komodo_api_secret
     commands:
       - apk add --no-cache bash git curl python3 >/dev/null
-      - curl -sSf -H "Authorization: token $GIT_AUTH_TOKEN" -o /tmp/komodo-deploy.sh https://repo.indexarr.net/indexarr/ops/raw/branch/main/scripts/komodo-deploy.sh
+      - 'curl -sSf -H "Authorization: token $GIT_AUTH_TOKEN" -o /tmp/komodo-deploy.sh https://repo.indexarr.net/indexarr/ops/raw/branch/main/scripts/komodo-deploy.sh'
       - chmod +x /tmp/komodo-deploy.sh
       - STACK_NAME=prod-mydevenv2 STACK_DIR=personal/mydevenv2 IMAGE_NAME=repo.indexarr.net/indexarr/mydevenv2 IMAGE_TAG=$CI_COMMIT_SHA bash /tmp/komodo-deploy.sh
 
