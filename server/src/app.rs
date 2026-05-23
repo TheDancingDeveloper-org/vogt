@@ -1,0 +1,70 @@
+use std::sync::Arc;
+
+use axum::{
+    middleware,
+    routing::{get, post},
+    Router,
+};
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
+
+use crate::{api, auth, config::Config, events::EventBus, sessions::SessionRegistry, ws};
+
+pub struct AppState {
+    pub config: Arc<Config>,
+    pub sessions: Arc<SessionRegistry>,
+    pub bus: EventBus,
+}
+
+pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
+    let cfg = Arc::new(cfg);
+    let bus = EventBus::default();
+    let sessions = Arc::new(SessionRegistry::new(Arc::clone(&cfg), bus.clone()));
+    let state = Arc::new(AppState {
+        config: cfg,
+        sessions,
+        bus,
+    });
+
+    // Public: only /healthz. WebSocket auth is per-handler (header OR query).
+    let public = Router::new().route("/healthz", get(api::healthz));
+
+    let api_routes = Router::new()
+        .route(
+            "/api/sessions",
+            get(api::list_sessions).post(api::create_session),
+        )
+        .route(
+            "/api/sessions/{id}",
+            get(api::get_session)
+                .patch(api::rename_session)
+                .delete(api::delete_session),
+        )
+        .route("/api/sessions/{id}/kill", post(api::kill_session))
+        .route("/api/events", get(api::events_stream))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            auth::require_bearer,
+        ));
+
+    // WS handles its own auth so query-param tokens work (browsers can't set
+    // Authorization on a WebSocket handshake).
+    let ws_routes = Router::new().route("/api/sessions/{id}/attach", get(ws::attach));
+
+    let router = Router::new()
+        .merge(public)
+        .merge(api_routes)
+        .merge(ws_routes)
+        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::very_permissive())
+        .with_state(Arc::clone(&state));
+
+    (router, state)
+}
+
+pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
+    let bind = cfg.bind;
+    let (router, _state) = router(cfg);
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    tracing::info!(addr = %bind, "mydevenv2-server listening");
+    axum::serve(listener, router).await
+}
