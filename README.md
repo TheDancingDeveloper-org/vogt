@@ -51,7 +51,7 @@ What's still on the user's plate before Phase 5 is fully verifiable:
 4. Decide the workspace bind-mount strategy on Node B (NFS / Syncthing / direct).
 5. To actually use the GUI tab, set `START_SWAY=1` and `GUI_STREAM_URL=…` once Selkies is reachable inside the pod.
 
-Phase 6 (web push + Capacitor wrap) and Phase 7 (Android KVM VM) remain.
+Phase 6 (web push + Android Capacitor wrap, sideloaded APK — iOS deferred) and Phase 7 (Android emulator KVM VM) remain.
 
 ## Running the server
 

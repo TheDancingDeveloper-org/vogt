@@ -18,7 +18,7 @@ It needs to handle three workloads:
 - tmux as the multiplexing primitive. Keybindings are too dense; the server owning sessions and the UI providing mouse/touch tab switching gives the same outcome with no keybinding tax.
 - Per-project isolation / ephemeral environments. I do all my dev in `~/Working` with 50+ repos checked out; the directory boundary is the project boundary. One persistent pod is the right unit.
 - Public internet exposure. Tailscale-only. The threat model is "convenient access from my own devices," not "share with collaborators."
-- A second native codebase for mobile. A responsive PWA wrapped in Capacitor is the mobile story.
+- A second native codebase for mobile. A responsive PWA wrapped in Capacitor (Android only for MVP, sideloaded APK — no Play Store, no iOS) is the mobile story. iOS users get the PWA via Safari Add-to-Home-Screen.
 
 ## Why a rewrite rather than fixing MyDevEnv v1
 

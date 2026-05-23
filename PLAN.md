@@ -34,8 +34,10 @@
                           │
                 ┌─────────┴──────────┐
                 ▼                    ▼
-        Browser (PWA)         Mobile (Capacitor wrap)
-       desktop + tablet       iOS + Android, push notifications
+        Browser (PWA)         Android (Capacitor wrap)
+       desktop + tablet       installable APK + FCM push
+       (incl. iOS Safari      (iOS is browser-only for now
+        Add-to-Home-Screen)    — see "Out of scope")
 ```
 
 ## Components
@@ -79,9 +81,13 @@ Mobile-specific UX:
 - Wake lock while a terminal is focused
 - Web push notification when a watched session goes `waiting-for-input`
 
-### Mobile wrap
+### Mobile wrap (Android only for MVP)
 
-Capacitor wraps the PWA. Adds native push notifications, proper home-screen install on iOS, deep links. No second codebase.
+Capacitor wraps the PWA into an installable Android app. Adds native FCM push, home-screen install, and deep links. No second codebase.
+
+**Distribution:** sideload the APK directly for MVP — no Play Store listing, no signing-key registration, no review cycle. `gradlew assembleRelease` produces an APK; copy it to the phone (USB / Tailscale share / GitHub release) and `adb install` or open it from the file manager. The phone needs "Install unknown apps" enabled for the source app once.
+
+**iOS deferred.** PWA still works in Safari via Add-to-Home-Screen — that gets the install, the standalone shell, and (on iOS 16.4+ for installed PWAs) web push. What's deferred is the Capacitor iOS build / App Store distribution / APNs registration, all of which need an Apple developer account.
 
 ### GUI layer (Sway + Selkies)
 
@@ -129,10 +135,11 @@ Sequenced to deliver a usable system as fast as possible and defer the fiddliest
 - GUI tab type in the web UI
 - Test with Chromium running an Angular dev server
 
-### Phase 6 — Push + Capacitor wrap (~2-3 days)
-- Web push subscription on the server
+### Phase 6 — Push + Android Capacitor wrap (~2-3 days)
+- Web push subscription on the server (works for any browser PWA; the same code path drives Android FCM via Capacitor's `PushNotifications` plugin)
 - Push notification on activity transitions to `waiting-for-input`
-- Capacitor wrap for iOS + Android installable apps
+- Capacitor wrap producing a sideloadable Android APK (no Play Store listing for MVP)
+- iOS is intentionally out of scope this phase — PWA in Safari still works
 
 ### Phase 7 — Android emulator VM (~1 week)
 - libvirt VM template
@@ -146,6 +153,8 @@ Sequenced to deliver a usable system as fast as possible and defer the fiddliest
 - Per-project isolated environments
 - Public exposure / multi-user / team features
 - Native desktop wrapper (web UI in a browser is enough)
+- **iOS Capacitor build / App Store distribution / APNs** — requires Apple developer account. iOS users get the PWA via Safari Add-to-Home-Screen (with web push on 16.4+ when installed).
+- **Android Play Store listing** — sideloaded APK is the MVP distribution; revisit only if I want it on someone else's phone.
 - VS Code extension ecosystem (use Monaco directly; if I ever need extensions, run upstream code-server unmodified on a separate port and link out)
 - Real-time collaborative editing
 - Embedded language servers (LSP can come later as a tab feature if needed; Claude/Codex are the primary "intelligence" layer)
@@ -157,5 +166,5 @@ These don't block Phase 1 but should be answered before the relevant phase:
 - **Container runtime for the dev pod**: LXC vs Docker vs Incus. Leaning LXC/Incus for systemd-like behaviour, but Docker is fine if simpler operationally on Node B.
 - **PWA framework**: React, Solid, or Svelte. Solid leans fastest for the dense reactive UI; React has the largest ecosystem for xterm.js + Monaco bindings.
 - **Selkies vs KasmVNC** for the GUI layer — try Selkies first, fall back if setup is too fragile.
-- **Push provider** for iOS — Apple Push via Capacitor, requires Apple developer account. Android via FCM.
+- **FCM project setup** — need a Firebase project with the Android app registered, the `google-services.json` dropped into the Capacitor Android project, and the FCM server key stored as `HOMELAB_MYDEVENV2_FCM_SERVER_KEY` in Infisical for the server to use. (iOS APNs is intentionally out of scope per "Out of scope (v2)".)
 - **Where the server runs** — directly on Node B vs inside the dev pod itself. Inside the pod is cleaner (single artefact, single lifecycle).
