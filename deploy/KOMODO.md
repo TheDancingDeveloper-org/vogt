@@ -97,12 +97,12 @@ MagicDNS is on, or `http://100.x.y.z:8910`.
 
 ## 6. Workspace bind-mount
 
-The compose mounts `/data/docker/mydevenv2/workspace` → `/home/sprooty/Working`
+The compose mounts `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` → `/home/sprooty/Working`
 inside the container. To dogfood the real workspace, point that path at a
 shared mount of the dev machine's `~/Working`. Options:
 
 - **NFS** export `~/Working` from Sprooty-PC-UBNT, mount on Node B at
-  `/data/docker/mydevenv2/workspace` (existing TrueNAS pattern in
+  `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` (existing TrueNAS pattern in
   `~/truenas/`).
 - **Syncthing** between Sprooty-PC-UBNT and Node B for offline-friendly sync.
 - **Direct on Node B** — treat the pod as the canonical workspace and pull
