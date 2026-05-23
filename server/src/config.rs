@@ -18,6 +18,13 @@ pub struct Config {
     /// URL the web UI's GUI tab should iframe. Phase 5: point this at
     /// Selkies-GStreamer or KasmVNC. None disables the GUI tab.
     pub gui_stream_url: Option<String>,
+    /// Where persistent state lives (push subscriptions, VAPID keys).
+    /// Defaults to $HOME/.local/share/mydevenv2.
+    pub state_dir: std::path::PathBuf,
+    /// FCM service-account JSON (the full contents, not a path). Sourced
+    /// from `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` env or config file. Empty
+    /// disables FCM push (web-push still works for browser subscriptions).
+    pub fcm_service_account_json: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -30,6 +37,8 @@ struct FileConfig {
     activity_idle_after_ms: Option<u64>,
     workspace_root: Option<String>,
     gui_stream_url: Option<String>,
+    state_dir: Option<String>,
+    fcm_service_account_json: Option<String>,
 }
 
 pub fn load(
@@ -91,6 +100,15 @@ pub fn load(
             .gui_stream_url
             .or_else(|| std::env::var("GUI_STREAM_URL").ok())
             .filter(|s| !s.is_empty()),
+        state_dir: from_file
+            .state_dir
+            .map(std::path::PathBuf::from)
+            .or_else(|| dirs_home().map(|h| h.join(".local/share/mydevenv2")))
+            .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/mydevenv2")),
+        fcm_service_account_json: from_file
+            .fcm_service_account_json
+            .or_else(|| std::env::var("MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON").ok())
+            .filter(|s| !s.trim().is_empty()),
     })
 }
 

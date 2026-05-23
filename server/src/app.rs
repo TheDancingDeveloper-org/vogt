@@ -8,9 +8,10 @@ use axum::{
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::gui as gui_handlers;
+use crate::push_api;
 use crate::{
     api, assets, auth, config::Config, events::EventBus, files, git, gui::GuiRegistry,
-    sessions::SessionRegistry, ws,
+    push::PushManager, sessions::SessionRegistry, ws,
 };
 
 pub struct AppState {
@@ -18,6 +19,7 @@ pub struct AppState {
     pub sessions: Arc<SessionRegistry>,
     pub bus: EventBus,
     pub gui: Arc<GuiRegistry>,
+    pub push: Arc<PushManager>,
 }
 
 pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
@@ -25,17 +27,27 @@ pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
     let bus = EventBus::default();
     let sessions = Arc::new(SessionRegistry::new(Arc::clone(&cfg), bus.clone()));
     let gui = Arc::new(GuiRegistry::new());
+    let push = Arc::new(
+        PushManager::new(&cfg.state_dir, cfg.fcm_service_account_json.as_deref())
+            .expect("push manager init"),
+    );
     let state = Arc::new(AppState {
         config: cfg,
         sessions,
         bus,
         gui,
+        push,
     });
 
-    // Public: /healthz and /api/config (returns no secrets, used at boot).
+    // Background task: fan out a push notification whenever a session enters
+    // `waiting-for-input`. Subscribes to the events bus.
+    push_api::spawn_activity_watcher(Arc::clone(&state));
+
+    // Public: /healthz, /api/config, /api/push/public-key. None reveal secrets.
     let public = Router::new()
         .route("/healthz", get(api::healthz))
-        .route("/api/config", get(gui_handlers::public_config));
+        .route("/api/config", get(gui_handlers::public_config))
+        .route("/api/push/public-key", get(push_api::public_key));
 
     let api_routes = Router::new()
         .route(
@@ -61,6 +73,10 @@ pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/gui/launch", post(gui_handlers::launch))
         .route("/api/gui/processes", get(gui_handlers::processes))
         .route("/api/gui/kill", post(gui_handlers::kill_proc))
+        .route("/api/push/subscribe", post(push_api::subscribe))
+        .route("/api/push/unsubscribe", post(push_api::unsubscribe))
+        .route("/api/push/list", get(push_api::list))
+        .route("/api/push/test", post(push_api::test_dispatch))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_bearer,

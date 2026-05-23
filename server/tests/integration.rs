@@ -21,6 +21,8 @@ fn test_config() -> Config {
         activity_idle_after_ms: 200,
         workspace_root: std::env::temp_dir(),
         gui_stream_url: None,
+        state_dir: tempfile::tempdir().unwrap().keep(),
+        fcm_service_account_json: None,
     }
 }
 
@@ -66,6 +68,73 @@ async fn config_endpoint_is_public_and_returns_shape() {
         "missing gui_stream_url"
     );
     assert!(body["version"].as_str().is_some(), "missing version");
+}
+
+#[tokio::test]
+async fn push_subscribe_list_unsubscribe() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // VAPID public key is reachable without auth and non-empty.
+    let pk: Value = reqwest::get(format!("{base}/api/push/public-key"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!pk["vapid_public_key"].as_str().unwrap_or("").is_empty());
+
+    // Subscribe a fake FCM token.
+    let r: Value = client
+        .post(format!("{base}/api/push/subscribe"))
+        .json(&json!({
+            "kind": "fcm",
+            "token": "fake-test-token-12345",
+            "label": "test-device",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = r["id"].as_str().unwrap().to_string();
+
+    let list: Vec<Value> = client
+        .get(format!("{base}/api/push/list"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(list.iter().any(|s| s["id"] == id));
+
+    // Re-subscribing the same token is idempotent (same id).
+    let r2: Value = client
+        .post(format!("{base}/api/push/subscribe"))
+        .json(&json!({"kind":"fcm","token":"fake-test-token-12345"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r2["id"], r["id"]);
+
+    let r: Value = client
+        .post(format!("{base}/api/push/unsubscribe"))
+        .json(&json!({"id": id}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["ok"], true);
 }
 
 #[tokio::test]
@@ -351,6 +420,8 @@ async fn file_api_round_trip() {
         activity_idle_after_ms: 200,
         workspace_root: tmp.path().canonicalize().unwrap(),
         gui_stream_url: None,
+        state_dir: tempfile::tempdir().unwrap().keep(),
+        fcm_service_account_json: None,
     };
     let (router, _state) = router(cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -479,6 +550,8 @@ async fn git_status_log_branch() {
         activity_idle_after_ms: 200,
         workspace_root: repo.canonicalize().unwrap(),
         gui_stream_url: None,
+        state_dir: tempfile::tempdir().unwrap().keep(),
+        fcm_service_account_json: None,
     };
     let (router, _state) = router(cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

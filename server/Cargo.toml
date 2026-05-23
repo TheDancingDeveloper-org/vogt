@@ -45,10 +45,17 @@ time = { version = "0.3", features = ["serde", "formatting"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 
+# Phase 6 — push notifications
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+web-push = "0.10"
+jsonwebtoken = "9"
+base64 = "0.22"
+sha2 = "0.10"
+ring = "0.17"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tokio-tungstenite = "0.24"
 tempfile = "3"
