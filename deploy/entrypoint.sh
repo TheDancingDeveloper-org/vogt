@@ -17,10 +17,19 @@
 set -euo pipefail
 
 if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
-    # The container needs the TUN device passed through and CAP_NET_ADMIN;
-    # see deploy/docker-compose.yml.
-    sudo tailscaled --tun=userspace-networking >/var/log/tailscaled.log 2>&1 &
-    sleep 1
+    # Userspace networking — no TUN device passthrough required from the host.
+    # Logs go to /tmp because /var/log is root-owned (we run as `sprooty`).
+    sudo -b sh -c 'tailscaled \
+        --tun=userspace-networking \
+        --state=/var/lib/tailscale/tailscaled.state \
+        --socket=/var/run/tailscale/tailscaled.sock \
+        >/tmp/tailscaled.log 2>&1'
+    # Wait for the socket to appear before `tailscale up` — racing it gives
+    # the "doesn't appear to be running" error.
+    for i in $(seq 1 30); do
+        [[ -S /var/run/tailscale/tailscaled.sock ]] && break
+        sleep 0.2
+    done
     sudo tailscale up \
         --authkey="${TAILSCALE_AUTH_KEY}" \
         --hostname="${TAILSCALE_HOSTNAME:-mydevenv2}" \
