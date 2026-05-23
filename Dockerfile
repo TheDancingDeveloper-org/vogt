@@ -18,20 +18,20 @@ COPY web/ ./
 RUN pnpm build
 
 # ─── Stage 2: rust binary with embedded web/ ────────────────────────────────
-FROM rust:1.85-bookworm AS server-build
+FROM rust:1.95-bookworm AS server-build
 WORKDIR /app
-# Cache deps separately from source
 COPY Cargo.toml Cargo.lock ./
 COPY server/Cargo.toml ./server/Cargo.toml
-RUN mkdir -p server/src \
-    && echo 'fn main(){}' > server/src/main.rs \
-    && echo '' > server/src/lib.rs \
-    && cargo build --release -p mydevenv2-server || true
-RUN rm -rf server/src
 COPY server/src ./server/src
 COPY --from=web-build /app/web/dist ./web/dist
-RUN cargo build --release -p mydevenv2-server
-RUN strip target/release/mydevenv2-server
+# BuildKit cache mounts keep registry/git deps + the target dir warm across
+# rebuilds without the brittle "dummy main.rs to prime deps" dance.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --release -p mydevenv2-server \
+    && cp target/release/mydevenv2-server /usr/local/bin/mydevenv2-server \
+    && strip /usr/local/bin/mydevenv2-server
 
 # ─── Stage 3: runtime + dev tooling ─────────────────────────────────────────
 FROM ubuntu:26.04
@@ -59,12 +59,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI (DooD pattern — docker.sock mounted from host)
-RUN install -m 0755 -d /etc/apt/keyrings \
+RUN . /etc/os-release \
+    && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
     && chmod a+r /etc/apt/keyrings/docker.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-            https://download.docker.com/linux/ubuntu noble stable" \
+            https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" \
        > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -81,10 +82,11 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && rm -rf /var/lib/apt/lists/*
 
 # Tailscale (TUN device must be passed in at runtime)
-RUN curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg \
+RUN . /etc/os-release \
+    && curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${VERSION_CODENAME}.noarmor.gpg" \
        > /usr/share/keyrings/tailscale-archive-keyring.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] \
-            https://pkgs.tailscale.com/stable/ubuntu noble main" \
+            https://pkgs.tailscale.com/stable/ubuntu ${VERSION_CODENAME} main" \
        > /etc/apt/sources.list.d/tailscale.list \
     && apt-get update && apt-get install -y --no-install-recommends tailscale \
     && rm -rf /var/lib/apt/lists/*
@@ -135,7 +137,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 # sccache (apt package lacks Redis support; pull from GitHub)
 ARG SCCACHE_VERSION=0.10.0
 RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-       | tar -xz --strip-components=1 -C /home/sprooty/.cargo/bin sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache \
+       | tar -xz -C /tmp \
+    && mv "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /home/sprooty/.cargo/bin/sccache \
     && chmod +x /home/sprooty/.cargo/bin/sccache
 
 # Python tools the user expects (uv, ruff)
@@ -143,8 +146,9 @@ RUN pip3 install --user --break-system-packages --no-cache-dir uv ruff || true
 
 USER root
 
-# The server binary (built in stage 2 with the web bundle embedded)
-COPY --from=server-build /app/target/release/mydevenv2-server /usr/local/bin/mydevenv2-server
+# The server binary (built in stage 2 with the web bundle embedded; cache
+# mounts in stage 2 mean we have to copy out of /usr/local/bin, not /app).
+COPY --from=server-build /usr/local/bin/mydevenv2-server /usr/local/bin/mydevenv2-server
 RUN chmod +x /usr/local/bin/mydevenv2-server
 
 # Entrypoint script — joins tailscale (optional), starts the server.
