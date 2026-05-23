@@ -12,8 +12,8 @@
 # ─── Stage 1: web bundle ────────────────────────────────────────────────────
 FROM node:22-bookworm AS web-build
 WORKDIR /app/web
-COPY web/package.json web/pnpm-lock.yaml* ./
-RUN npm install -g pnpm@10 && pnpm install --frozen-lockfile=false
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN npm install -g pnpm@10 && pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm build
 

@@ -54,7 +54,7 @@ steps:
     image: node:22-bookworm
     commands:
       - npm install -g pnpm@10 >/dev/null
-      - cd web && pnpm install --frozen-lockfile=false >/dev/null && pnpm typecheck
+      - cd web && pnpm install --frozen-lockfile >/dev/null && pnpm typecheck
 
   - name: build-and-push
     image: woodpeckerci/plugin-docker-buildx
