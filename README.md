@@ -37,6 +37,19 @@ From-scratch redesign of [MyDevEnv](../MyDevEnv). Same goal — a centrally-host
 - Client: new `git` tab kind. Status pane groups entries by kind (conflicted / staged / modified / renamed / deleted / untracked); click a path to load a Monaco diff editor (HEAD vs working tree). Recent commits below; branch + ahead/behind chip up top.
 - Deep-link route `/#/g/<repo>` opens the git tab for that repo.
 
+**Phase 6 (push + Android Capacitor APK) — code-complete; runtime push delivery pending real-device verification.**
+
+- Server: VAPID web-push (any modern browser PushManager subscription, including installed-PWA iOS Safari 16.4+) + FCM HTTP v1 (native Capacitor tokens). Service-account JWT → OAuth2 with token caching. Subscriptions persist as JSON under `state_dir`; auto-prune on 404/410.
+- Server routes: `POST /api/push/subscribe`, `POST /api/push/unsubscribe`, `GET /api/push/list`, `POST /api/push/test`, `GET /api/push/public-key` (public — no token needed).
+- Activity watcher: fires push to all subscriptions when any session enters `waiting-for-input`.
+- Web: `/sw.js` + `/manifest.webmanifest` for PWA install + push event handling. Settings modal gains "Enable push" / "Send test" with current-permission visibility.
+- Mobile: `mobile/` Capacitor 7 Android wrap (`com.sprooty.mydevenv2`). WebView loads `https://mydevenv2.sprooty.com` directly so UI updates ship without rebuilding the APK. `@capacitor/push-notifications` registers a native FCM token at first launch; the same `/api/push/subscribe` endpoint accepts both transports.
+- CI: `mobile-apk` step builds the debug APK and uploads to the Forgejo generic package registry — sideload with `curl -fsSL -o app.apk -H "Authorization: token $FORGEJO_TOKEN" https://repo.indexarr.net/api/packages/indexarr/generic/mydevenv2-apk/latest/app-debug.apk`.
+
+Phase 7 (Android emulator KVM VM) remains.
+
+---
+
 **Phase 5 (GUI tab + dev-pod packaging) — code-complete; pending real-pod verification.**
 
 - Server: `POST /api/gui/launch`, `GET /api/gui/processes`, `POST /api/gui/kill?pid=`. Optional `via_sway` prefixes with `swaymsg exec --`. `GET /api/config` (public) returns `gui_stream_url` for the web UI to iframe.
