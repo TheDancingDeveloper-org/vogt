@@ -7,7 +7,7 @@ use axum::{
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::{api, auth, config::Config, events::EventBus, sessions::SessionRegistry, ws};
+use crate::{api, assets, auth, config::Config, events::EventBus, sessions::SessionRegistry, ws};
 
 pub struct AppState {
     pub config: Arc<Config>,
@@ -50,10 +50,18 @@ pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // Authorization on a WebSocket handshake).
     let ws_routes = Router::new().route("/api/sessions/{id}/attach", get(ws::attach));
 
+    // Embedded PWA. The catch-all comes last so /healthz and /api/* keep
+    // priority. SPA-style fallback to index.html for unknown paths is in
+    // `assets::not_found`.
+    let asset_routes = Router::new()
+        .route("/", get(assets::root))
+        .route("/{*path}", get(assets::asset_wild));
+
     let router = Router::new()
         .merge(public)
         .merge(api_routes)
         .merge(ws_routes)
+        .merge(asset_routes)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::very_permissive())
         .with_state(Arc::clone(&state));

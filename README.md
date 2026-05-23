@@ -16,7 +16,16 @@ From-scratch redesign of [MyDevEnv](../MyDevEnv). Same goal — a centrally-host
 - Activity state machine: `idle` / `running` / `waiting-for-input` / `errored`, with regex heuristics on the stripped output tail
 - SSE event stream of server-wide session events
 
-Phase 2 (web UI) starts next.
+**Phase 2 (web UI MVP) — complete.** Solid + Vite + TS PWA at `web/`, embedded into the server binary via `rust-embed`:
+
+- Responsive shell — tab strip + main pane + drawer; three breakpoints, one component tree
+- xterm.js terminal tab attached over WebSocket with snapshot replay
+- Mobile modifier-key row (Esc / Tab / Ctrl (sticky) / arrows / `/` / `|` / `~` / Enter)
+- Per-tab activity badges driven by SSE; pulse animation for `running` and `waiting-for-input`
+- Deep-link URLs via HashRouter (`/#/t/<session-id>`)
+- Settings modal stores bearer token + (optional) backend base URL in localStorage
+
+Phase 3 (file tree + editor) starts next.
 
 ## Running the server
 
@@ -95,6 +104,29 @@ If the client falls too far behind the broadcast buffer the server sends `{"type
 ## Tests
 
 ```bash
-cargo test          # unit tests
-cargo test --test integration   # end-to-end (HTTP + WS)
+cargo test                       # unit tests
+cargo test --test integration    # end-to-end (HTTP + WS)
+cd web && pnpm typecheck         # PWA TypeScript check
+```
+
+## Building the embedded PWA
+
+The Rust server `cargo build` embeds whatever is in `web/dist/` at compile
+time. To refresh:
+
+```bash
+cd web && pnpm install && pnpm build
+cd .. && cargo build --release
+```
+
+For UI development, run the server on its native port and Vite dev server
+in parallel — Vite proxies `/api` and the WS endpoint to the backend:
+
+```bash
+# terminal 1
+MYDEVENV2_TOKEN=$(openssl rand -hex 24) cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
+
+# terminal 2
+cd web && pnpm dev
+# → http://127.0.0.1:5173, paste the token into Settings (⚙)
 ```
