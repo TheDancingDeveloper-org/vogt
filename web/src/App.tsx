@@ -10,6 +10,7 @@ import {
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
 import Terminal from "./Terminal";
 import Editor from "./Editor";
+import GitTab from "./Git";
 import ModKeyRow from "./ModKeyRow";
 import Settings from "./Settings";
 import FileTree from "./FileTree";
@@ -29,6 +30,7 @@ import {
   closeTab,
   focusTab,
   openEditorTab,
+  openGitTab,
   openTerminalTab,
   tabsStore,
   type Tab,
@@ -95,6 +97,10 @@ const App: Component = () => {
     } else if (path.startsWith("/e/") && params.path) {
       // Decode the wildcard segment back into a real path.
       openEditorTab(decodeURIComponent(params.path));
+    } else if (path.startsWith("/g/") && params.path !== undefined) {
+      openGitTab(decodeURIComponent(params.path));
+    } else if (path === "/g") {
+      openGitTab("");
     }
   });
 
@@ -153,7 +159,17 @@ const App: Component = () => {
             </span>
           </div>
           <div class="drawer-actions">
-            <button onClick={onCreate}>+ New session</button>
+            <button onClick={onCreate}>+ Session</button>
+            <button
+              onClick={() => {
+                openGitTab("");
+                navigate("/g/");
+                setDrawerOpen(false);
+              }}
+              title="Open git tab for workspace root"
+            >
+              ⎇ Git
+            </button>
             <button onClick={() => setSettingsOpen(true)} title="Settings">
               ⚙
             </button>
@@ -222,14 +238,16 @@ const App: Component = () => {
                 onClick={() => {
                   focusTab(t.id);
                   if (t.kind === "terminal") navigate(`/t/${t.sessionId}`);
-                  else navigate(`/e/${encodeURIComponent(t.path)}`);
+                  else if (t.kind === "editor")
+                    navigate(`/e/${encodeURIComponent(t.path)}`);
+                  else navigate(`/g/${encodeURIComponent(t.repo)}`);
                 }}
               >
                 <Show when={t.kind === "terminal"}>
                   <span class={`activity-dot ${tabActivityClass(t) ?? "idle"}`} />
                 </Show>
                 <span class="label">
-                  {t.kind === "editor" ? "📄 " : ""}
+                  {t.kind === "editor" ? "📄 " : t.kind === "git" ? "⎇ " : ""}
                   {t.label}
                 </span>
                 <Show when={t.kind === "editor" && t.dirty}>
@@ -280,6 +298,11 @@ const App: Component = () => {
                         tabId={tab().id}
                         path={(tab() as Extract<Tab, { kind: "editor" }>).path}
                       />
+                    )}
+                  </Show>
+                  <Show when={t.kind === "git" && t}>
+                    {(tab) => (
+                      <GitTab repo={(tab() as Extract<Tab, { kind: "git" }>).repo} />
                     )}
                   </Show>
                 </div>

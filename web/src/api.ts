@@ -150,7 +150,64 @@ export const api = {
       "GET",
       `/api/search?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`,
     ),
+
+  gitStatus: (repo = "") =>
+    req<GitStatusResp>("GET", `/api/git/status?repo=${encodeURIComponent(repo)}`),
+  gitLog: (repo = "", n = 50) =>
+    req<GitLogEntry[]>(
+      "GET",
+      `/api/git/log?repo=${encodeURIComponent(repo)}&n=${n}`,
+    ),
+  gitBranch: (repo = "") =>
+    req<GitBranch>("GET", `/api/git/branch?repo=${encodeURIComponent(repo)}`),
+  gitDiff: (repo: string, path: string, staged = false) =>
+    req<GitDiffResp>(
+      "GET",
+      `/api/git/diff?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(path)}&staged=${staged}`,
+    ),
 };
+
+export type GitStatusKind =
+  | "untracked"
+  | "modified"
+  | "staged"
+  | "conflicted"
+  | "renamed"
+  | "deleted";
+
+export interface GitStatusEntry {
+  path: string;
+  index: string;
+  worktree: string;
+  kind: GitStatusKind;
+}
+
+export interface GitStatusResp {
+  repo: string;
+  branch: string;
+  ahead: number;
+  behind: number;
+  entries: GitStatusEntry[];
+}
+
+export interface GitLogEntry {
+  hash: string;
+  short: string;
+  author: string;
+  date: string;
+  subject: string;
+}
+
+export interface GitBranch {
+  current: string;
+  all: string[];
+}
+
+export interface GitDiffResp {
+  path: string;
+  current: string;
+  head: string;
+}
 
 /**
  * Subscribe to server-wide events via SSE. Returns an unsubscribe function.

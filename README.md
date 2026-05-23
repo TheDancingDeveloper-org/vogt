@@ -31,7 +31,13 @@ From-scratch redesign of [MyDevEnv](../MyDevEnv). Same goal — a centrally-host
 - Client: file tree in the drawer with lazy expand; Monaco editor as a new tab kind, lazily imported so the first paint stays at ~93 KB gz; Ctrl/Cmd+S saves; per-tab dirty indicator; tab state persisted to localStorage.
 - Deep-link route `/#/e/<path>` opens an editor tab on that file.
 
-Phase 4 (git tab) starts next.
+**Phase 4 (git tab) — complete, read-only.**
+
+- Server: `GET /api/git/{status,diff,log,branch}` — auto-detects repo root by walking up from the supplied `?repo=` relative path. Shells out to `git`.
+- Client: new `git` tab kind. Status pane groups entries by kind (conflicted / staged / modified / renamed / deleted / untracked); click a path to load a Monaco diff editor (HEAD vs working tree). Recent commits below; branch + ahead/behind chip up top.
+- Deep-link route `/#/g/<repo>` opens the git tab for that repo.
+
+Phase 5 (GUI streaming via Sway + Selkies) starts next.
 
 ## Running the server
 

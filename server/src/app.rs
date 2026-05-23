@@ -8,7 +8,7 @@ use axum::{
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
-    api, assets, auth, config::Config, events::EventBus, files, sessions::SessionRegistry, ws,
+    api, assets, auth, config::Config, events::EventBus, files, git, sessions::SessionRegistry, ws,
 };
 
 pub struct AppState {
@@ -47,6 +47,10 @@ pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/dir", get(files::list_dir))
         .route("/api/tree", get(files::tree))
         .route("/api/search", get(files::search))
+        .route("/api/git/status", get(git::status))
+        .route("/api/git/diff", get(git::diff))
+        .route("/api/git/log", get(git::log))
+        .route("/api/git/branch", get(git::branch))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_bearer,

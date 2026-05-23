@@ -393,6 +393,98 @@ async fn file_api_round_trip() {
     }
 }
 
+#[tokio::test]
+async fn git_status_log_branch() {
+    // Spin up a fresh git repo in a tempdir as the workspace, then drive
+    // the read-only git API against it.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let sh = |cmd: &str| {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{cmd}: {:?}", out);
+    };
+    sh("git init -q -b main");
+    sh("git config user.email t@t");
+    sh("git config user.name t");
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    sh("git add a.txt && git commit -q -m 'init'");
+    std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(repo.join("b.txt"), "untracked\n").unwrap();
+
+    let cfg = Config {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        token: TEST_TOKEN.to_string(),
+        scrollback_bytes: 64 * 1024,
+        default_shell: "/bin/bash".to_string(),
+        default_cwd: repo.to_path_buf(),
+        activity_idle_after_ms: 200,
+        workspace_root: repo.canonicalize().unwrap(),
+    };
+    let (router, _state) = router(cfg);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let st: Value = client
+        .get(format!("{base}/api/git/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(st["branch"], "main");
+    let entries = st["entries"].as_array().unwrap();
+    let paths: Vec<&str> = entries.iter().filter_map(|e| e["path"].as_str()).collect();
+    assert!(paths.contains(&"a.txt"));
+    assert!(paths.contains(&"b.txt"));
+
+    let log: Vec<Value> = client
+        .get(format!("{base}/api/git/log?n=10"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["subject"], "init");
+
+    let br: Value = client
+        .get(format!("{base}/api/git/branch"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(br["current"], "main");
+
+    let diff: Value = client
+        .get(format!("{base}/api/git/diff?path=a.txt"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(diff["head"], "one\n");
+    assert_eq!(diff["current"], "one\ntwo\n");
+}
+
 async fn collect_binary_until(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,

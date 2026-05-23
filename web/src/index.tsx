@@ -11,6 +11,8 @@ render(
       <Route path="/" component={App} />
       <Route path="/t/:id" component={App} />
       <Route path="/e/*path" component={App} />
+      <Route path="/g" component={App} />
+      <Route path="/g/*path" component={App} />
     </HashRouter>
   ),
   document.getElementById("root")!,
