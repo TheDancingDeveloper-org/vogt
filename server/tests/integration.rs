@@ -19,6 +19,7 @@ fn test_config() -> Config {
         default_shell: "/bin/bash".to_string(),
         default_cwd: std::env::temp_dir(),
         activity_idle_after_ms: 200,
+        workspace_root: std::env::temp_dir(),
     }
 }
 
@@ -279,6 +280,117 @@ async fn ws_attach_echoes_input_and_replays_on_reattach() {
         .delete(format!("{base}/api/sessions/{id}"))
         .send()
         .await;
+}
+
+#[tokio::test]
+async fn file_api_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("hello.txt"), "first").unwrap();
+    std::fs::create_dir(tmp.path().join("sub")).unwrap();
+    std::fs::write(tmp.path().join("sub/nested.md"), "# nested").unwrap();
+
+    let cfg = Config {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        token: TEST_TOKEN.to_string(),
+        scrollback_bytes: 64 * 1024,
+        default_shell: "/bin/bash".to_string(),
+        default_cwd: tmp.path().to_path_buf(),
+        activity_idle_after_ms: 200,
+        workspace_root: tmp.path().canonicalize().unwrap(),
+    };
+    let (router, _state) = router(cfg);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // List root
+    let dir: Vec<Value> = client
+        .get(format!("{base}/api/dir?path="))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let names: Vec<&str> = dir.iter().filter_map(|e| e["name"].as_str()).collect();
+    assert!(names.contains(&"hello.txt"));
+    assert!(names.contains(&"sub"));
+
+    // Read existing file
+    let r: Value = client
+        .get(format!("{base}/api/files?path=hello.txt"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["content"], "first");
+
+    // Write a new file
+    let w = client
+        .put(format!("{base}/api/files"))
+        .json(&json!({ "path": "new.txt", "content": "fresh" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(w.status(), StatusCode::OK);
+    let bytes_on_disk = std::fs::read_to_string(tmp.path().join("new.txt")).unwrap();
+    assert_eq!(bytes_on_disk, "fresh");
+
+    // Path-traversal rejected
+    let escape = client
+        .get(format!("{base}/api/files?path=../escape"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(escape.status(), StatusCode::BAD_REQUEST);
+
+    // Tree with depth 1 includes nested.md
+    let tree: Vec<Value> = client
+        .get(format!("{base}/api/tree?depth=1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let sub = tree
+        .iter()
+        .find(|n| n["name"] == "sub")
+        .expect("sub node present");
+    let kids: Vec<&str> = sub["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    assert!(kids.contains(&"nested.md"));
+
+    // Search (skip if rg isn't installed; just don't fail the suite)
+    let s = client
+        .get(format!("{base}/api/search?q=nested"))
+        .send()
+        .await
+        .unwrap();
+    if s.status() == StatusCode::OK {
+        let hits: Vec<Value> = s.json().await.unwrap();
+        assert!(
+            hits.iter().any(|h| h["path"]
+                .as_str()
+                .map(|p| p.ends_with("nested.md"))
+                .unwrap_or(false)),
+            "rg search should find nested; got {hits:?}"
+        );
+    }
 }
 
 async fn collect_binary_until(

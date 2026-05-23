@@ -12,6 +12,9 @@ pub struct Config {
     pub default_shell: String,
     pub default_cwd: std::path::PathBuf,
     pub activity_idle_after_ms: u64,
+    /// Root the file API operates inside. Any request path is resolved
+    /// against this and rejected if it escapes the root.
+    pub workspace_root: std::path::PathBuf,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -22,6 +25,7 @@ struct FileConfig {
     default_shell: Option<String>,
     default_cwd: Option<String>,
     activity_idle_after_ms: Option<u64>,
+    workspace_root: Option<String>,
 }
 
 pub fn load(
@@ -55,6 +59,15 @@ pub fn load(
         ));
     }
 
+    let workspace_root_raw = from_file.workspace_root.map(std::path::PathBuf::from);
+    let workspace_root = workspace_root_raw
+        .or_else(|| dirs_home().map(|h| h.join("Working")))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let workspace_root = workspace_root
+        .canonicalize()
+        .map_err(|e| ApiError::Config(format!("workspace_root {workspace_root:?}: {e}")))?;
+
     Ok(Config {
         bind,
         token,
@@ -69,6 +82,7 @@ pub fn load(
             .or_else(dirs_home)
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp")),
         activity_idle_after_ms: from_file.activity_idle_after_ms.unwrap_or(1_500),
+        workspace_root,
     })
 }
 

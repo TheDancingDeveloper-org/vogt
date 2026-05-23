@@ -25,7 +25,13 @@ From-scratch redesign of [MyDevEnv](../MyDevEnv). Same goal — a centrally-host
 - Deep-link URLs via HashRouter (`/#/t/<session-id>`)
 - Settings modal stores bearer token + (optional) backend base URL in localStorage
 
-Phase 3 (file tree + editor) starts next.
+**Phase 3 (files + editor) — complete.**
+
+- Server: `workspace_root`-scoped file API — `GET /api/dir`, `GET /api/tree`, `GET/PUT /api/files`, `GET /api/search` (via ripgrep). Path-traversal guarded with strict component checks; binary detection; 5 MiB read cap.
+- Client: file tree in the drawer with lazy expand; Monaco editor as a new tab kind, lazily imported so the first paint stays at ~93 KB gz; Ctrl/Cmd+S saves; per-tab dirty indicator; tab state persisted to localStorage.
+- Deep-link route `/#/e/<path>` opens an editor tab on that file.
+
+Phase 4 (git tab) starts next.
 
 ## Running the server
 

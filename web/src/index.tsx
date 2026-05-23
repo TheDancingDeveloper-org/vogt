@@ -10,6 +10,7 @@ render(
     <HashRouter>
       <Route path="/" component={App} />
       <Route path="/t/:id" component={App} />
+      <Route path="/e/*path" component={App} />
     </HashRouter>
   ),
   document.getElementById("root")!,

@@ -6,6 +6,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod files;
 pub mod pty;
 pub mod scrollback;
 pub mod sessions;

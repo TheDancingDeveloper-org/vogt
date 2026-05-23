@@ -89,12 +89,39 @@ async function req<T>(
   return text ? (JSON.parse(text) as T) : (undefined as T);
 }
 
+export interface FileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+}
+
+export interface TreeNode {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  children?: TreeNode[] | null;
+}
+
+export interface FileRead {
+  path: string;
+  size: number;
+  content: string | null;
+  content_base64: string | null;
+  is_binary: boolean;
+}
+
+export interface SearchHit {
+  path: string;
+  line: number;
+  text: string;
+}
+
 export const api = {
   listSessions: () => req<SessionSummary[]>("GET", "/api/sessions"),
   createSession: (s: CreateSessionRequest) =>
     req<SessionSummary>("POST", "/api/sessions", s),
-  getSession: (id: string) =>
-    req<SessionDetail>("GET", `/api/sessions/${id}`),
+  getSession: (id: string) => req<SessionDetail>("GET", `/api/sessions/${id}`),
   renameSession: (id: string, name: string) =>
     req<{ ok: boolean }>("PATCH", `/api/sessions/${id}`, { name }),
   killSession: (id: string) =>
@@ -102,6 +129,27 @@ export const api = {
   deleteSession: (id: string) =>
     req<{ ok: boolean }>("DELETE", `/api/sessions/${id}`),
   health: () => req<{ ok: boolean }>("GET", "/healthz"),
+
+  listDir: (path = "") =>
+    req<FileEntry[]>("GET", `/api/dir?path=${encodeURIComponent(path)}`),
+  tree: (path = "", depth = 1) =>
+    req<TreeNode[]>(
+      "GET",
+      `/api/tree?path=${encodeURIComponent(path)}&depth=${depth}`,
+    ),
+  readFile: (path: string) =>
+    req<FileRead>("GET", `/api/files?path=${encodeURIComponent(path)}`),
+  writeFile: (path: string, content: string, create_parents = false) =>
+    req<{ ok: boolean; bytes: number }>("PUT", "/api/files", {
+      path,
+      content,
+      create_parents,
+    }),
+  search: (q: string, path = "") =>
+    req<SearchHit[]>(
+      "GET",
+      `/api/search?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`,
+    ),
 };
 
 /**

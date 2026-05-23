@@ -7,10 +7,12 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
-import { useNavigate, useParams } from "@solidjs/router";
+import { useLocation, useNavigate, useParams } from "@solidjs/router";
 import Terminal from "./Terminal";
+import Editor from "./Editor";
 import ModKeyRow from "./ModKeyRow";
 import Settings from "./Settings";
+import FileTree from "./FileTree";
 import {
   createSession,
   deleteSession,
@@ -23,6 +25,14 @@ import {
   startEventStream,
   stopEventStream,
 } from "./store";
+import {
+  closeTab,
+  focusTab,
+  openEditorTab,
+  openTerminalTab,
+  tabsStore,
+  type Tab,
+} from "./tabs";
 import type { ActivityState, SessionSummary } from "./api";
 import { getToken } from "./api";
 
@@ -43,9 +53,16 @@ function activityLabel(s: ActivityState, exit: number | null): string {
   }
 }
 
+function tabActivityClass(tab: Tab): string | null {
+  if (tab.kind !== "terminal") return null;
+  const s = sessionsStore.sessions[tab.sessionId];
+  return s ? activityClass(s) : "idle";
+}
+
 const App: Component = () => {
   const navigate = useNavigate();
-  const params = useParams<{ id?: string }>();
+  const params = useParams<{ id?: string; path?: string }>();
+  const location = useLocation();
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [toast, setToast] = createSignal<string | null>(null);
@@ -54,7 +71,6 @@ const App: Component = () => {
     setTimeout(() => setToast(null), 2500);
   };
 
-  // Single shared sender so the modkey row can write into the focused PTY.
   let activeSend: ((data: string) => void) | null = null;
 
   onMount(() => {
@@ -68,19 +84,26 @@ const App: Component = () => {
 
   onCleanup(() => stopEventStream());
 
-  const activeId = createMemo(() => params.id ?? null);
-
-  const orderedSessions = createMemo<SessionSummary[]>(() =>
-    sessionsStore.order
-      .map((id) => sessionsStore.sessions[id])
-      .filter((s): s is SessionSummary => Boolean(s)),
-  );
+  // Sync URL → tabs. /t/:id focuses or opens a terminal tab; /e/:path opens
+  // an editor tab. Empty route keeps whichever tab was last active.
+  createMemo(() => {
+    const path = location.pathname;
+    if (path.startsWith("/t/") && params.id) {
+      const sess = sessionsStore.sessions[params.id];
+      const label = sess?.name ?? params.id.slice(0, 6);
+      openTerminalTab(params.id, label);
+    } else if (path.startsWith("/e/") && params.path) {
+      // Decode the wildcard segment back into a real path.
+      openEditorTab(decodeURIComponent(params.path));
+    }
+  });
 
   const onCreate = async () => {
     const name = prompt("Session name", `shell-${Date.now() % 1000}`);
     if (!name) return;
     try {
       const s = await createSession(name);
+      openTerminalTab(s.id, s.name);
       navigate(`/t/${s.id}`, { replace: false });
       setDrawerOpen(false);
     } catch (e) {
@@ -88,7 +111,7 @@ const App: Component = () => {
     }
   };
 
-  const onRename = async (s: SessionSummary) => {
+  const onRenameSession = async (s: SessionSummary) => {
     const name = prompt("Rename session", s.name);
     if (!name || name === s.name) return;
     try {
@@ -98,17 +121,18 @@ const App: Component = () => {
     }
   };
 
-  const onClose = async (s: SessionSummary) => {
+  const onCloseSession = async (s: SessionSummary) => {
     if (!confirm(`Kill and remove "${s.name}"?`)) return;
     try {
-      // Best-effort kill first; ignore if already dead.
       try {
         await killSession(s.id);
       } catch {
         /* may already be dead */
       }
       await deleteSession(s.id);
-      if (activeId() === s.id) navigate("/", { replace: true });
+      // Also close any tab pointing to this session.
+      const id = `term:${s.id}`;
+      closeTab(id);
     } catch (e) {
       showToast(`close failed: ${(e as Error).message}`);
     }
@@ -140,22 +164,47 @@ const App: Component = () => {
             </div>
           </Show>
           <div class="session-list">
-            <For each={orderedSessions()} fallback={<div class="empty">No sessions yet.</div>}>
+            <For
+              each={sessionsStore.order
+                .map((id) => sessionsStore.sessions[id])
+                .filter((s): s is SessionSummary => Boolean(s))}
+              fallback={<div class="empty">No sessions yet.</div>}
+            >
               {(s) => (
                 <div
-                  class={`session-row ${activeId() === s.id ? "active" : ""}`}
+                  class={`session-row ${
+                    tabsStore.active === `term:${s.id}` ? "active" : ""
+                  }`}
                   onClick={() => {
+                    openTerminalTab(s.id, s.name);
                     navigate(`/t/${s.id}`);
                     setDrawerOpen(false);
                   }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    onRenameSession(s);
+                  }}
                 >
-                  <span class={`activity-dot ${activityClass(s)}`} title={activityLabel(s.activity, s.exit_code)} />
+                  <span
+                    class={`activity-dot ${activityClass(s)}`}
+                    title={activityLabel(s.activity, s.exit_code)}
+                  />
                   <span class="name">{s.name}</span>
-                  <span class="meta">{(s.scrollback_bytes / 1024).toFixed(0)}k</span>
+                  <span
+                    class="close"
+                    title="Kill & remove"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void onCloseSession(s);
+                    }}
+                  >
+                    ×
+                  </span>
                 </div>
               )}
             </For>
           </div>
+          <FileTree onOpen={() => setDrawerOpen(false)} />
         </aside>
 
         <div class="tab-strip">
@@ -166,24 +215,31 @@ const App: Component = () => {
           >
             ☰
           </button>
-          <For each={orderedSessions()}>
-            {(s) => (
+          <For each={tabsStore.tabs}>
+            {(t) => (
               <button
-                class={`tab ${activeId() === s.id ? "active" : ""}`}
-                onClick={() => navigate(`/t/${s.id}`)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  onRename(s);
+                class={`tab ${tabsStore.active === t.id ? "active" : ""}`}
+                onClick={() => {
+                  focusTab(t.id);
+                  if (t.kind === "terminal") navigate(`/t/${t.sessionId}`);
+                  else navigate(`/e/${encodeURIComponent(t.path)}`);
                 }}
-                title={activityLabel(s.activity, s.exit_code)}
               >
-                <span class={`activity-dot ${activityClass(s)}`} />
-                <span class="label">{s.name}</span>
+                <Show when={t.kind === "terminal"}>
+                  <span class={`activity-dot ${tabActivityClass(t) ?? "idle"}`} />
+                </Show>
+                <span class="label">
+                  {t.kind === "editor" ? "📄 " : ""}
+                  {t.label}
+                </span>
+                <Show when={t.kind === "editor" && t.dirty}>
+                  <span class="dirty-dot" title="unsaved changes" />
+                </Show>
                 <span
                   class="close"
                   onClick={(e) => {
                     e.stopPropagation();
-                    void onClose(s);
+                    closeTab(t.id);
                   }}
                 >
                   ×
@@ -195,21 +251,45 @@ const App: Component = () => {
 
         <main class="main">
           <div class="tab-view">
-            <Show
-              when={activeId() && sessionsStore.sessions[activeId()!]}
-              fallback={
-                <div class="empty">
-                  <div>Select or create a session to begin.</div>
-                  <button onClick={onCreate}>+ New session</button>
+            <For each={tabsStore.tabs}>
+              {(t) => (
+                <div
+                  style={{
+                    display: tabsStore.active === t.id ? "flex" : "none",
+                    "flex-direction": "column",
+                    flex: 1,
+                    "min-height": 0,
+                    "min-width": 0,
+                  }}
+                >
+                  <Show when={t.kind === "terminal" && t.kind === "terminal" && t}>
+                    {(tab) => (
+                      <Terminal
+                        sessionId={(tab() as Extract<Tab, { kind: "terminal" }>).sessionId}
+                        registerSend={(fn) => {
+                          if (tabsStore.active === t.id) {
+                            activeSend = (data) => fn(data);
+                          }
+                        }}
+                      />
+                    )}
+                  </Show>
+                  <Show when={t.kind === "editor" && t}>
+                    {(tab) => (
+                      <Editor
+                        tabId={tab().id}
+                        path={(tab() as Extract<Tab, { kind: "editor" }>).path}
+                      />
+                    )}
+                  </Show>
                 </div>
-              }
-            >
-              <Terminal
-                sessionId={activeId()!}
-                registerSend={(fn) => {
-                  activeSend = (data) => fn(data);
-                }}
-              />
+              )}
+            </For>
+            <Show when={tabsStore.tabs.length === 0}>
+              <div class="empty">
+                <div>Open a file from the drawer or create a session.</div>
+                <button onClick={onCreate}>+ New session</button>
+              </div>
             </Show>
           </div>
           <ModKeyRow send={(d) => activeSend?.(d)} />

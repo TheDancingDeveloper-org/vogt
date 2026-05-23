@@ -394,3 +394,75 @@ input[type="password"]:focus {
   gap: 8px;
   justify-content: flex-end;
 }
+
+/* File tree */
+.file-tree {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  border-top: 1px solid var(--bd);
+}
+.tree-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.tree-row {
+  padding: 1px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 3px;
+}
+.tree-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* Editor tab */
+.editor-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  background: #1e1e1e;
+}
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--bd);
+  font-size: 12px;
+  background: var(--bg-elev);
+  flex: 0 0 auto;
+}
+.editor-path {
+  font-family: ui-monospace, monospace;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.editor-status {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.editor-host {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Dirty indicator on tab */
+.tab .dirty-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 2px;
+  background: var(--accent);
+  border-radius: 50%;
+}

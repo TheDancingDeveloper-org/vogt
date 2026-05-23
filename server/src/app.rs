@@ -7,7 +7,9 @@ use axum::{
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::{api, assets, auth, config::Config, events::EventBus, sessions::SessionRegistry, ws};
+use crate::{
+    api, assets, auth, config::Config, events::EventBus, files, sessions::SessionRegistry, ws,
+};
 
 pub struct AppState {
     pub config: Arc<Config>,
@@ -41,6 +43,10 @@ pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
         )
         .route("/api/sessions/{id}/kill", post(api::kill_session))
         .route("/api/events", get(api::events_stream))
+        .route("/api/files", get(files::read_file).put(files::write_file))
+        .route("/api/dir", get(files::list_dir))
+        .route("/api/tree", get(files::tree))
+        .route("/api/search", get(files::search))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_bearer,
