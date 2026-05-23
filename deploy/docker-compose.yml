@@ -41,6 +41,9 @@ services:
       # Phase 5: when sway+selkies is wired, set both of these.
       START_SWAY: "0"
       GUI_STREAM_URL: ""
+      # Phase 6: FCM service-account JSON (single-line). Empty disables FCM
+      # transport; web-push still works for any browser subscription.
+      MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON: ${MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON}
       # The cargo cache is on the host bind-mount; sccache hits Redis on Node B.
       SCCACHE_REDIS: redis://100.92.54.45:6380
 

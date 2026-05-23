@@ -56,6 +56,27 @@ steps:
       - npm install -g pnpm@10 >/dev/null
       - cd web && pnpm install --frozen-lockfile >/dev/null && pnpm typecheck
 
+  - name: mobile-apk
+    image: cimg/android:2025.04.1-node
+    environment:
+      GIT_AUTH_TOKEN:
+        from_secret: git_auth_token
+    commands:
+      - cd mobile
+      - sudo npm install -g pnpm@10 >/dev/null
+      - pnpm install --frozen-lockfile=false >/dev/null
+      - npx cap sync android
+      - cd android && ./gradlew assembleDebug --no-daemon -q
+      - cd ..
+      - APK=android/app/build/outputs/apk/debug/app-debug.apk
+      - ls -lh "$APK"
+      - 'curl -fsSL -T "$APK" -H "Authorization: token $GIT_AUTH_TOKEN" "https://repo.indexarr.net/api/packages/indexarr/generic/mydevenv2-apk/${CI_COMMIT_SHA}/app-debug.apk"'
+      - 'curl -fsSL -X DELETE -H "Authorization: token $GIT_AUTH_TOKEN" "https://repo.indexarr.net/api/packages/indexarr/generic/mydevenv2-apk/latest/app-debug.apk" || true'
+      - 'curl -fsSL -T "$APK" -H "Authorization: token $GIT_AUTH_TOKEN" "https://repo.indexarr.net/api/packages/indexarr/generic/mydevenv2-apk/latest/app-debug.apk"'
+    when:
+      - event: push
+        branch: main
+
   - name: build-and-push
     image: woodpeckerci/plugin-docker-buildx
     settings:
