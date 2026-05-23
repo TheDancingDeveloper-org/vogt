@@ -56,6 +56,58 @@ async fn healthz_is_public() {
 }
 
 #[tokio::test]
+async fn config_endpoint_is_public_and_returns_shape() {
+    let (base, _h) = boot().await;
+    let res = reqwest::get(format!("{base}/api/config")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await.unwrap();
+    assert!(
+        body.get("gui_stream_url").is_some(),
+        "missing gui_stream_url"
+    );
+    assert!(body["version"].as_str().is_some(), "missing version");
+}
+
+#[tokio::test]
+async fn gui_launch_lists_and_kills() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let launched: Value = client
+        .post(format!("{base}/api/gui/launch"))
+        .json(&json!({ "command": ["sleep", "10"], "via_sway": false }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pid = launched["pid"].as_u64().expect("pid in launch response");
+
+    let procs: Vec<Value> = client
+        .get(format!("{base}/api/gui/processes"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        procs.iter().any(|p| p["pid"].as_u64() == Some(pid)),
+        "expected pid {pid} in {procs:?}"
+    );
+
+    let k = client
+        .post(format!("{base}/api/gui/kill?pid={pid}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(k.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn list_sessions_rejects_missing_auth() {
     let (base, _h) = boot().await;
     let res = reqwest::get(format!("{base}/api/sessions")).await.unwrap();
