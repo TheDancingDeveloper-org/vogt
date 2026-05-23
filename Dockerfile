@@ -105,24 +105,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xwayland chromium \
     && rm -rf /var/lib/apt/lists/*
 
-# Selkies-GStreamer (WebRTC stream of the Sway compositor)
-# Upstream ships a deb in their release page; pinning is intentional — this is
-# the part of Phase 5 most likely to need re-pinning later.
-ARG SELKIES_VERSION=1.6.2
+# GStreamer + WebRTC bits for in-pod GUI streaming.
+#
+# Selkies-GStreamer used to ship a `selkies-gstreamer` package on PyPI; the
+# project renamed/restructured and the pinned name no longer resolves. Install
+# the GStreamer plugins (useful for any WebRTC stack), and treat the Selkies
+# install itself as best-effort here — wire the actual streamer in a follow-up
+# (likely via the upstream Docker image or a `pip install selkies` once the
+# new pypi name stabilises).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
         gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
         gstreamer1.0-libav gstreamer1.0-tools \
         python3-pip libgstreamer1.0-0 \
-    && pip3 install --break-system-packages --no-cache-dir \
-        "selkies-gstreamer==${SELKIES_VERSION}" \
-        "selkies-gstreamer-web==${SELKIES_VERSION}" || true \
     && rm -rf /var/lib/apt/lists/*
+RUN pip3 install --break-system-packages --no-cache-dir selkies 2>/dev/null \
+    || echo "selkies pip package not available — install upstream Docker image or wire later"
 
 # Rust toolchain (full dev env so user can build inside the pod too)
 ARG SPROOTY_UID=1000
 ARG SPROOTY_GID=1000
-RUN groupadd -g ${SPROOTY_GID} sprooty \
+# Ubuntu 26.04 ships a default `ubuntu` user at UID/GID 1000 — remove it so
+# we own those numbers (matters because the host bind-mounts /home/sprooty
+# expect that uid).
+RUN userdel -r ubuntu 2>/dev/null || true \
+    && groupdel ubuntu 2>/dev/null || true \
+    && groupadd -g ${SPROOTY_GID} sprooty \
     && useradd -m -s /bin/bash -u ${SPROOTY_UID} -g ${SPROOTY_GID} sprooty \
     && usermod -aG sudo sprooty \
     && echo 'sprooty ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-sprooty
