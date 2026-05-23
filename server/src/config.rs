@@ -15,6 +15,9 @@ pub struct Config {
     /// Root the file API operates inside. Any request path is resolved
     /// against this and rejected if it escapes the root.
     pub workspace_root: std::path::PathBuf,
+    /// URL the web UI's GUI tab should iframe. Phase 5: point this at
+    /// Selkies-GStreamer or KasmVNC. None disables the GUI tab.
+    pub gui_stream_url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -26,6 +29,7 @@ struct FileConfig {
     default_cwd: Option<String>,
     activity_idle_after_ms: Option<u64>,
     workspace_root: Option<String>,
+    gui_stream_url: Option<String>,
 }
 
 pub fn load(
@@ -83,6 +87,10 @@ pub fn load(
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp")),
         activity_idle_after_ms: from_file.activity_idle_after_ms.unwrap_or(1_500),
         workspace_root,
+        gui_stream_url: from_file
+            .gui_stream_url
+            .or_else(|| std::env::var("GUI_STREAM_URL").ok())
+            .filter(|s| !s.is_empty()),
     })
 }
 

@@ -20,6 +20,7 @@ fn test_config() -> Config {
         default_cwd: std::env::temp_dir(),
         activity_idle_after_ms: 200,
         workspace_root: std::env::temp_dir(),
+        gui_stream_url: None,
     }
 }
 
@@ -297,6 +298,7 @@ async fn file_api_round_trip() {
         default_cwd: tmp.path().to_path_buf(),
         activity_idle_after_ms: 200,
         workspace_root: tmp.path().canonicalize().unwrap(),
+        gui_stream_url: None,
     };
     let (router, _state) = router(cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -424,6 +426,7 @@ async fn git_status_log_branch() {
         default_cwd: repo.to_path_buf(),
         activity_idle_after_ms: 200,
         workspace_root: repo.canonicalize().unwrap(),
+        gui_stream_url: None,
     };
     let (router, _state) = router(cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

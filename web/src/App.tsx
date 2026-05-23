@@ -11,9 +11,12 @@ import { useLocation, useNavigate, useParams } from "@solidjs/router";
 import Terminal from "./Terminal";
 import Editor from "./Editor";
 import GitTab from "./Git";
+import GuiTab from "./Gui";
 import ModKeyRow from "./ModKeyRow";
 import Settings from "./Settings";
 import FileTree from "./FileTree";
+import { api as apiModule } from "./api";
+import type { PublicConfig } from "./api";
 import {
   createSession,
   deleteSession,
@@ -31,6 +34,7 @@ import {
   focusTab,
   openEditorTab,
   openGitTab,
+  openGuiTab,
   openTerminalTab,
   tabsStore,
   type Tab,
@@ -74,8 +78,18 @@ const App: Component = () => {
   };
 
   let activeSend: ((data: string) => void) | null = null;
+  const [publicCfg, setPublicCfg] = createSignal<PublicConfig | null>(null);
 
   onMount(() => {
+    // Public config is independent of the bearer token — fetch it eagerly
+    // so the GUI tab knows whether to render the iframe or the placeholder.
+    apiModule
+      .publicConfig()
+      .then((c) => setPublicCfg(c))
+      .catch(() => {
+        /* server may be down; non-fatal */
+      });
+
     if (!getToken()) {
       setSettingsOpen(true);
       return;
@@ -101,6 +115,8 @@ const App: Component = () => {
       openGitTab(decodeURIComponent(params.path));
     } else if (path === "/g") {
       openGitTab("");
+    } else if (path === "/gui") {
+      openGuiTab();
     }
   });
 
@@ -169,6 +185,16 @@ const App: Component = () => {
               title="Open git tab for workspace root"
             >
               ⎇ Git
+            </button>
+            <button
+              onClick={() => {
+                openGuiTab();
+                navigate("/gui");
+                setDrawerOpen(false);
+              }}
+              title="Open the GUI stream tab"
+            >
+              🖥 GUI
             </button>
             <button onClick={() => setSettingsOpen(true)} title="Settings">
               ⚙
@@ -240,14 +266,22 @@ const App: Component = () => {
                   if (t.kind === "terminal") navigate(`/t/${t.sessionId}`);
                   else if (t.kind === "editor")
                     navigate(`/e/${encodeURIComponent(t.path)}`);
-                  else navigate(`/g/${encodeURIComponent(t.repo)}`);
+                  else if (t.kind === "git")
+                    navigate(`/g/${encodeURIComponent(t.repo)}`);
+                  else navigate(`/gui`);
                 }}
               >
                 <Show when={t.kind === "terminal"}>
                   <span class={`activity-dot ${tabActivityClass(t) ?? "idle"}`} />
                 </Show>
                 <span class="label">
-                  {t.kind === "editor" ? "📄 " : t.kind === "git" ? "⎇ " : ""}
+                  {t.kind === "editor"
+                    ? "📄 "
+                    : t.kind === "git"
+                      ? "⎇ "
+                      : t.kind === "gui"
+                        ? "🖥 "
+                        : ""}
                   {t.label}
                 </span>
                 <Show when={t.kind === "editor" && t.dirty}>
@@ -304,6 +338,9 @@ const App: Component = () => {
                     {(tab) => (
                       <GitTab repo={(tab() as Extract<Tab, { kind: "git" }>).repo} />
                     )}
+                  </Show>
+                  <Show when={t.kind === "gui"}>
+                    <GuiTab streamUrl={publicCfg()?.gui_stream_url ?? null} />
                   </Show>
                 </div>
               )}

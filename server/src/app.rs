@@ -7,28 +7,35 @@ use axum::{
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
+use crate::gui as gui_handlers;
 use crate::{
-    api, assets, auth, config::Config, events::EventBus, files, git, sessions::SessionRegistry, ws,
+    api, assets, auth, config::Config, events::EventBus, files, git, gui::GuiRegistry,
+    sessions::SessionRegistry, ws,
 };
 
 pub struct AppState {
     pub config: Arc<Config>,
     pub sessions: Arc<SessionRegistry>,
     pub bus: EventBus,
+    pub gui: Arc<GuiRegistry>,
 }
 
 pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
     let cfg = Arc::new(cfg);
     let bus = EventBus::default();
     let sessions = Arc::new(SessionRegistry::new(Arc::clone(&cfg), bus.clone()));
+    let gui = Arc::new(GuiRegistry::new());
     let state = Arc::new(AppState {
         config: cfg,
         sessions,
         bus,
+        gui,
     });
 
-    // Public: only /healthz. WebSocket auth is per-handler (header OR query).
-    let public = Router::new().route("/healthz", get(api::healthz));
+    // Public: /healthz and /api/config (returns no secrets, used at boot).
+    let public = Router::new()
+        .route("/healthz", get(api::healthz))
+        .route("/api/config", get(gui_handlers::public_config));
 
     let api_routes = Router::new()
         .route(
@@ -51,6 +58,9 @@ pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/git/diff", get(git::diff))
         .route("/api/git/log", get(git::log))
         .route("/api/git/branch", get(git::branch))
+        .route("/api/gui/launch", post(gui_handlers::launch))
+        .route("/api/gui/processes", get(gui_handlers::processes))
+        .route("/api/gui/kill", post(gui_handlers::kill_proc))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_bearer,

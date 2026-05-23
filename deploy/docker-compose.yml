@@ -1,0 +1,58 @@
+# MyDevEnv2 — Komodo stack
+#
+# Copy this file into the ops repo at `personal/mydevenv2/docker-compose.yml`,
+# then create the Komodo stack (see deploy/KOMODO.md). The CI pipeline
+# rewrites the image: line to pin the deployed SHA.
+#
+# Bind-mount paths are absolute by design — Komodo clones the stack to a
+# fresh directory each deploy and `./relative` paths resolve to nothing.
+
+services:
+  mydevenv2:
+    image: repo.indexarr.net/indexarr/mydevenv2:latest
+    container_name: mydevenv2
+    restart: unless-stopped
+    hostname: mydevenv2
+
+    # Bridge networking + an explicit port. Tailscale runs in userspace mode
+    # inside the container (see entrypoint.sh), so no TUN device pass-through
+    # is required — the pod just becomes reachable at 100.x.x.x via Tailscale.
+    ports:
+      - "8910:8910"
+
+    volumes:
+      # The workspace. ALL development happens here.
+      - /data/docker/mydevenv2/workspace:/home/sprooty/Working
+      # Persist sprooty's home (caches, history, etc.) across pod rebuilds.
+      - /data/docker/mydevenv2/home:/home/sprooty
+      # Persist tailscaled state so we don't re-auth on every restart.
+      - /data/docker/mydevenv2/tailscale:/var/lib/tailscale
+      # DooD: containers launched from inside the pod hit the host daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    environment:
+      # Server
+      MYDEVENV2_TOKEN: ${MYDEVENV2_TOKEN}
+      MYDEVENV2_BIND: 0.0.0.0:8910
+      RUST_LOG: info
+      # Tailscale auto-join. Issue a one-shot reusable key from the admin UI.
+      TAILSCALE_AUTH_KEY: ${HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY}
+      TAILSCALE_HOSTNAME: mydevenv2
+      # Phase 5: when sway+selkies is wired, set both of these.
+      START_SWAY: "0"
+      GUI_STREAM_URL: ""
+      # The cargo cache is on the host bind-mount; sccache hits Redis on Node B.
+      SCCACHE_REDIS: redis://100.92.54.45:6380
+
+    # Tailscale's userspace mode doesn't need NET_ADMIN, but Sway/Selkies
+    # later will benefit from /dev/dri pass-through if you want GPU encode.
+    # Uncomment when Phase 5 lands.
+    # devices:
+    #   - /dev/dri:/dev/dri
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8910/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

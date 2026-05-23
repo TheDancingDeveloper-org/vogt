@@ -612,3 +612,48 @@ input[type="password"]:focus {
   min-height: 0;
   min-width: 0;
 }
+
+/* GUI tab */
+.gui-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.gui-toolbar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--bd);
+  background: var(--bg-elev);
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.gui-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: #000;
+}
+.gui-procs {
+  border-top: 1px solid var(--bd);
+  background: var(--bg-elev);
+  padding: 4px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 120px;
+  overflow-y: auto;
+  flex: 0 0 auto;
+}
+.gui-proc {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.meta {
+  color: var(--fg-muted);
+  font-size: 11px;
+}

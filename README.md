@@ -37,7 +37,21 @@ From-scratch redesign of [MyDevEnv](../MyDevEnv). Same goal — a centrally-host
 - Client: new `git` tab kind. Status pane groups entries by kind (conflicted / staged / modified / renamed / deleted / untracked); click a path to load a Monaco diff editor (HEAD vs working tree). Recent commits below; branch + ahead/behind chip up top.
 - Deep-link route `/#/g/<repo>` opens the git tab for that repo.
 
-Phase 5 (GUI streaming via Sway + Selkies) starts next.
+**Phase 5 (GUI tab + dev-pod packaging) — code-complete; pending real-pod verification.**
+
+- Server: `POST /api/gui/launch`, `GET /api/gui/processes`, `POST /api/gui/kill?pid=`. Optional `via_sway` prefixes with `swaymsg exec --`. `GET /api/config` (public) returns `gui_stream_url` for the web UI to iframe.
+- Client: new `gui` tab kind iframing the configured stream URL; toolbar to launch arbitrary GUI commands; running-processes list with kill buttons. Deep-link `/#/gui`.
+- Packaging: `Dockerfile` (multi-stage: web bundle → rust release → Ubuntu 26.04 runtime with all of TOOLING.md + Sway + Selkies-GStreamer + Tailscale userspace). `deploy/docker-compose.yml` ready for the ops repo, `deploy/KOMODO.md` with one-time stack-creation steps, `deploy/entrypoint.sh` orchestrates Tailscale + optional Sway + server.
+- CI: `.woodpecker.yml` runs fmt/clippy/test/web-typecheck, builds the image with `:latest` + `:${CI_COMMIT_SHA}`, then triggers `komodo-deploy` against `prod-mydevenv2` in `ops/personal/mydevenv2/`.
+
+What's still on the user's plate before Phase 5 is fully verifiable:
+1. Create the Forgejo container-registry credentials (or confirm `git_auth_token` works) for the first `build-and-push`.
+2. Add `personal/mydevenv2/docker-compose.yml` to the ops repo and create the Komodo stack (see `deploy/KOMODO.md`).
+3. Mint `MYDEVENV2_TOKEN` + `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` in Infisical and add to the Komodo stack `environment`.
+4. Decide the workspace bind-mount strategy on Node B (NFS / Syncthing / direct).
+5. To actually use the GUI tab, set `START_SWAY=1` and `GUI_STREAM_URL=…` once Selkies is reachable inside the pod.
+
+Phase 6 (web push + Capacitor wrap) and Phase 7 (Android KVM VM) remain.
 
 ## Running the server
 

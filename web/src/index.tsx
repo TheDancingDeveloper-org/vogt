@@ -13,6 +13,7 @@ render(
       <Route path="/e/*path" component={App} />
       <Route path="/g" component={App} />
       <Route path="/g/*path" component={App} />
+      <Route path="/gui" component={App} />
     </HashRouter>
   ),
   document.getElementById("root")!,

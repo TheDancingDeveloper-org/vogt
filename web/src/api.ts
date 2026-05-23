@@ -165,7 +165,28 @@ export const api = {
       "GET",
       `/api/git/diff?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(path)}&staged=${staged}`,
     ),
+
+  // Public — no token required.
+  publicConfig: () =>
+    fetch(`${getBase()}/api/config`).then((r) => r.json() as Promise<PublicConfig>),
+
+  guiLaunch: (command: string[], via_sway = true) =>
+    req<GuiProc>("POST", "/api/gui/launch", { command, via_sway }),
+  guiProcesses: () => req<GuiProc[]>("GET", "/api/gui/processes"),
+  guiKill: (pid: number) =>
+    req<{ ok: boolean }>("POST", `/api/gui/kill?pid=${pid}`),
 };
+
+export interface PublicConfig {
+  gui_stream_url: string | null;
+  version: string;
+}
+
+export interface GuiProc {
+  pid: number;
+  command: string[];
+  launched_at: string;
+}
 
 export type GitStatusKind =
   | "untracked"

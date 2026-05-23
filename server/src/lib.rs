@@ -8,6 +8,7 @@ pub mod error;
 pub mod events;
 pub mod files;
 pub mod git;
+pub mod gui;
 pub mod pty;
 pub mod scrollback;
 pub mod sessions;

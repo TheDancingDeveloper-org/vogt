@@ -1,0 +1,132 @@
+# MyDevEnv2 — CI pipeline (Woodpecker)
+#
+# Steps:
+#   fmt / clippy / test         Rust checks
+#   web-typecheck               TS sanity on the PWA
+#   build-and-push              Single Docker image tagged :latest + :<sha>
+#   komodo-deploy               Pin the SHA in ops/personal/mydevenv2/ and
+#                               trigger a Komodo redeploy on Node B
+#   discord-success / -failure  Notifications
+
+when:
+  - event: push
+    branch: main
+  - event: manual
+  - event: pull_request
+
+steps:
+  - name: fmt
+    image: rust:1.85-bookworm
+    environment:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_REDIS: "redis://100.92.54.45:6380"
+    commands:
+      - curl -sSfL "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C /tmp && mv /tmp/sccache-v0.10.0-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
+      - rustup component add rustfmt
+      - cargo fmt --all -- --check
+
+  - name: clippy
+    image: rust:1.85-bookworm
+    environment:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_REDIS: "redis://100.92.54.45:6380"
+    commands:
+      - curl -sSfL "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C /tmp && mv /tmp/sccache-v0.10.0-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
+      - rustup component add clippy
+      # web/dist doesn't exist in CI yet; create an empty placeholder so
+      # rust-embed compiles. The build-and-push stage produces the real one.
+      - mkdir -p web/dist && touch web/dist/.placeholder
+      - cargo clippy --all-targets -- -D warnings
+
+  - name: test
+    image: rust:1.85-bookworm
+    environment:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_REDIS: "redis://100.92.54.45:6380"
+    commands:
+      - curl -sSfL "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C /tmp && mv /tmp/sccache-v0.10.0-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
+      - apt-get update >/dev/null && apt-get install -y --no-install-recommends git ripgrep >/dev/null
+      - mkdir -p web/dist && touch web/dist/.placeholder
+      - cargo test --all
+      - sccache --show-stats
+
+  - name: web-typecheck
+    image: node:22-bookworm
+    commands:
+      - npm install -g pnpm@10 >/dev/null
+      - cd web && pnpm install --frozen-lockfile=false >/dev/null && pnpm typecheck
+
+  - name: build-and-push
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: repo.indexarr.net/indexarr/mydevenv2
+      registry: repo.indexarr.net
+      username:
+        from_secret: git_auth_token
+      password:
+        from_secret: git_auth_token
+      dockerfile: Dockerfile
+      tags:
+        - latest
+        - ${CI_COMMIT_SHA}
+    when:
+      - event: push
+        branch: main
+
+  - name: komodo-deploy
+    image: alpine:3.23
+    when:
+      - event: push
+        branch: main
+    environment:
+      GIT_AUTH_TOKEN:
+        from_secret: git_auth_token
+      KOMODO_API_KEY:
+        from_secret: komodo_api_key
+      KOMODO_API_SECRET:
+        from_secret: komodo_api_secret
+    commands:
+      - apk add --no-cache bash git curl python3 >/dev/null
+      - curl -sSf -H "Authorization: token $GIT_AUTH_TOKEN" -o /tmp/komodo-deploy.sh https://repo.indexarr.net/indexarr/ops/raw/branch/main/scripts/komodo-deploy.sh
+      - chmod +x /tmp/komodo-deploy.sh
+      - STACK_NAME=prod-mydevenv2 STACK_DIR=personal/mydevenv2 IMAGE_NAME=repo.indexarr.net/indexarr/mydevenv2 IMAGE_TAG=$CI_COMMIT_SHA bash /tmp/komodo-deploy.sh
+
+  - name: discord-success
+    image: alpine/curl
+    environment:
+      DISCORD_WEBHOOK_URL:
+        from_secret: discord_webhook_url
+    commands:
+      - |
+        HASH=$(echo $CI_COMMIT_SHA | head -c 7)
+        curl -sf -H "Content-Type: application/json" -d "{
+          \"embeds\": [{
+            \"title\": \"Build Successful\",
+            \"description\": \"**${CI_REPO}** — [$HASH]($CI_REPO_URL/commit/$CI_COMMIT_SHA)\",
+            \"color\": 5025616,
+            \"footer\": {\"text\": \"$CI_REPO • $CI_COMMIT_AUTHOR\"},
+            \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+          }]
+        }" "$DISCORD_WEBHOOK_URL" || true
+    when:
+      - status: [success]
+
+  - name: discord-failure
+    image: alpine/curl
+    environment:
+      DISCORD_WEBHOOK_URL:
+        from_secret: discord_webhook_url
+    commands:
+      - |
+        HASH=$(echo $CI_COMMIT_SHA | head -c 7)
+        curl -sf -H "Content-Type: application/json" -d "{
+          \"embeds\": [{
+            \"title\": \"Build Failed\",
+            \"description\": \"**${CI_REPO}** — [$HASH]($CI_REPO_URL/commit/$CI_COMMIT_SHA)\",
+            \"color\": 15548997,
+            \"footer\": {\"text\": \"$CI_REPO • $CI_COMMIT_AUTHOR\"},
+            \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+          }]
+        }" "$DISCORD_WEBHOOK_URL" || true
+    when:
+      - status: [failure]
