@@ -1,14 +1,13 @@
 import { Component, Show, createSignal, onMount } from "solid-js";
 import { getBase, getToken, setBase, setToken } from "./api";
 import {
-  currentSubscription,
-  isNativePlatform,
-  isPushSupported,
+  currentPushEnabled,
+  isPushAvailable,
   pushPermission,
   pushSelfTest,
-  subscribeNativeFcm,
-  subscribePush,
-  unsubscribePush,
+  subscribePushNotifications,
+  unsubscribePushNotifications,
+  type PushPermissionState,
 } from "./push";
 
 interface Props {
@@ -20,17 +19,17 @@ const Settings: Component<Props> = (props) => {
   const [token, setT] = createSignal(getToken());
   const [base, setB] = createSignal(getBase());
   const [pushOn, setPushOn] = createSignal(false);
-  const [pushPerm, setPushPerm] = createSignal<NotificationPermission>("default");
+  const [pushPerm, setPushPerm] = createSignal<PushPermissionState>("default");
   const [pushBusy, setPushBusy] = createSignal(false);
   const [pushMsg, setPushMsg] = createSignal<string | null>(null);
 
   const refreshPushState = async () => {
     setPushPerm(await pushPermission());
-    setPushOn((await currentSubscription()) !== null);
+    setPushOn(await currentPushEnabled());
   };
 
   onMount(() => {
-    if (isPushSupported()) {
+    if (isPushAvailable()) {
       void refreshPushState();
     }
   });
@@ -47,15 +46,11 @@ const Settings: Component<Props> = (props) => {
     setPushMsg(null);
     try {
       if (pushOn()) {
-        await unsubscribePush();
+        await unsubscribePushNotifications();
         setPushMsg("Notifications turned off.");
       } else {
-        // Inside Capacitor: register native FCM via the plugin; otherwise
-        // fall back to the browser's PushManager + VAPID.
         const label = navigator.userAgent.slice(0, 60);
-        const r = isNativePlatform()
-          ? await subscribeNativeFcm(label)
-          : await subscribePush(label);
+        const r = await subscribePushNotifications(label);
         setPushMsg(`Subscribed (id ${r.id.slice(0, 12)}…)`);
       }
       await refreshPushState();
@@ -113,7 +108,7 @@ const Settings: Component<Props> = (props) => {
               Push notifications
             </div>
             <Show
-              when={isPushSupported()}
+              when={isPushAvailable()}
               fallback={
                 <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
                   Not supported in this browser.

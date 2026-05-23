@@ -102,7 +102,8 @@ impl PushManager {
         let mut state: Store = if store_path.exists() {
             let raw = std::fs::read_to_string(&store_path)
                 .map_err(|e| ApiError::Config(format!("read {}: {e}", store_path.display())))?;
-            serde_json::from_str(&raw).unwrap_or_default()
+            serde_json::from_str(&raw)
+                .map_err(|e| ApiError::Config(format!("parse {}: {e}", store_path.display())))?
         } else {
             Store::default()
         };
@@ -383,5 +384,17 @@ mod tests {
             token: "abc".into(),
         };
         assert_eq!(a.id(), b.id());
+    }
+
+    #[test]
+    fn corrupt_store_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("push.json"), "{not-json").expect("write corrupt store");
+
+        let err = match PushManager::new(dir.path(), None) {
+            Ok(_) => panic!("corrupt push store should fail"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("parse"), "unexpected error: {err}");
     }
 }

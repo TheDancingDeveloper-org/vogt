@@ -16,18 +16,17 @@ export interface PushPublicKey {
 }
 
 export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
+  if (isNativePlatform()) {
+    void registerNativePushHandlers();
+  }
+
   if (!("serviceWorker" in navigator)) return null;
   try {
     const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
     // Click messages from sw.js navigate the foreground tab.
     navigator.serviceWorker.addEventListener("message", (ev) => {
       if (ev.data?.type === "navigate" && typeof ev.data.url === "string") {
-        const url = ev.data.url as string;
-        if (url.startsWith("/")) {
-          location.hash = url.replace(/^\/?#?/, "#");
-        } else {
-          location.href = url;
-        }
+        navigateFromPushUrl(ev.data.url as string);
       }
     });
     return reg;
@@ -36,7 +35,22 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
   }
 }
 
-export async function pushPermission(): Promise<NotificationPermission> {
+export type PushPermissionState =
+  | NotificationPermission
+  | "prompt"
+  | "prompt-with-rationale"
+  | "unknown";
+
+export async function pushPermission(): Promise<PushPermissionState> {
+  if (isNativePlatform()) {
+    try {
+      const { PushNotifications } = await import("@capacitor/push-notifications");
+      const perm = await PushNotifications.checkPermissions();
+      return perm.receive;
+    } catch {
+      return "unknown";
+    }
+  }
   if (!("Notification" in window)) return "denied";
   return Notification.permission;
 }
@@ -57,6 +71,10 @@ export function isPushSupported(): boolean {
   );
 }
 
+export function isPushAvailable(): boolean {
+  return isNativePlatform() || isPushSupported();
+}
+
 async function getRegistration(): Promise<ServiceWorkerRegistration | null> {
   if (!("serviceWorker" in navigator)) return null;
   const reg = await navigator.serviceWorker.ready.catch(() => null);
@@ -67,6 +85,15 @@ export async function currentSubscription(): Promise<PushSubscription | null> {
   const reg = await getRegistration();
   if (!reg) return null;
   return reg.pushManager.getSubscription();
+}
+
+const NATIVE_SUB_ID_KEY = "mydevenv2.push.nativeSubId";
+
+export async function currentPushEnabled(): Promise<boolean> {
+  if (isNativePlatform()) {
+    return Boolean(localStorage.getItem(NATIVE_SUB_ID_KEY));
+  }
+  return (await currentSubscription()) !== null;
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
@@ -160,6 +187,18 @@ export async function unsubscribePush(): Promise<void> {
   });
 }
 
+export async function subscribePushNotifications(label?: string): Promise<{ id: string }> {
+  return isNativePlatform() ? subscribeNativeFcm(label) : subscribePush(label);
+}
+
+export async function unsubscribePushNotifications(): Promise<void> {
+  if (isNativePlatform()) {
+    await unsubscribeNativeFcm();
+    return;
+  }
+  await unsubscribePush();
+}
+
 export async function pushSelfTest(): Promise<{ ok: number; fail: number }> {
   return api.pushTest();
 }
@@ -182,12 +221,43 @@ export function isNativePlatform(): boolean {
   return Boolean(w.Capacitor?.isNativePlatform?.());
 }
 
-/// Subscribe via Capacitor's native FCM plugin. Resolves with the server-side
-/// subscription id once the token is registered AND posted to /api/push/subscribe.
+function navigateFromPushUrl(url: string) {
+  if (url.startsWith("/#")) {
+    location.hash = url.slice(1);
+  } else if (url.startsWith("/")) {
+    location.hash = `#${url}`;
+  } else {
+    location.href = url;
+  }
+}
+
+let nativeHandlersRegistered = false;
+
+async function registerNativePushHandlers() {
+  if (nativeHandlersRegistered) return;
+  nativeHandlersRegistered = true;
+
+  try {
+    const { PushNotifications } = await import("@capacitor/push-notifications");
+    await PushNotifications.addListener("pushNotificationActionPerformed", (action) => {
+      const url = action.notification.data?.url;
+      if (typeof url === "string" && url.length > 0) {
+        navigateFromPushUrl(url);
+      }
+    });
+  } catch {
+    nativeHandlersRegistered = false;
+  }
+}
+
+// Subscribe via Capacitor's native FCM plugin. Resolves with the server-side
+// subscription id once the token is registered AND posted to /api/push/subscribe.
 export async function subscribeNativeFcm(label?: string): Promise<{ id: string }> {
   if (!isNativePlatform()) {
     throw new Error("not running inside Capacitor");
   }
+  await registerNativePushHandlers();
+
   // Dynamic import — the plugin is only needed inside the native wrap.
   const { PushNotifications } = await import("@capacitor/push-notifications");
 
@@ -196,23 +266,55 @@ export async function subscribeNativeFcm(label?: string): Promise<{ id: string }
     throw new Error(`native notification permission ${perm.receive}`);
   }
 
-  await PushNotifications.register();
-
-  // Wait once for the `registration` event to fire with our FCM token.
-  const token: string = await new Promise((resolve, reject) => {
+  // Wait once for the `registration` event to fire with our FCM token. Attach
+  // listeners before register() so a fast native callback cannot be missed.
+  let cleanupTokenListeners: (() => void) | undefined;
+  const tokenPromise: Promise<string> = new Promise((resolve, reject) => {
+    let registrationHandle: { remove: () => Promise<void> } | undefined;
+    let errorHandle: { remove: () => Promise<void> } | undefined;
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      void registrationHandle?.remove();
+      void errorHandle?.remove();
+    };
+    cleanupTokenListeners = cleanup;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn();
+    };
     const timer = setTimeout(
-      () => reject(new Error("FCM registration timed out")),
+      () => settle(() => reject(new Error("FCM registration timed out"))),
       15_000,
     );
-    void PushNotifications.addListener("registration", (t) => {
-      clearTimeout(timer);
-      resolve(t.value);
-    });
-    void PushNotifications.addListener("registrationError", (err) => {
-      clearTimeout(timer);
-      reject(new Error(`FCM registration error: ${JSON.stringify(err)}`));
-    });
+    void PushNotifications.addListener("registration", (t) =>
+      settle(() => resolve(t.value)),
+    )
+      .then((h) => {
+        registrationHandle = h;
+      })
+      .catch((err) =>
+        settle(() => reject(new Error(`FCM listener error: ${JSON.stringify(err)}`))),
+      );
+    void PushNotifications.addListener("registrationError", (err) =>
+      settle(() => reject(new Error(`FCM registration error: ${JSON.stringify(err)}`))),
+    )
+      .then((h) => {
+        errorHandle = h;
+      })
+      .catch((err) =>
+        settle(() => reject(new Error(`FCM error-listener error: ${JSON.stringify(err)}`))),
+      );
   });
+  try {
+    await PushNotifications.register();
+  } catch (e) {
+    cleanupTokenListeners?.();
+    throw e;
+  }
+  const token = await tokenPromise;
 
   const tok = getToken();
   const r = await fetch(`${getBase()}/api/push/subscribe`, {
@@ -224,5 +326,33 @@ export async function subscribeNativeFcm(label?: string): Promise<{ id: string }
     body: JSON.stringify({ kind: "fcm", token, label }),
   });
   if (!r.ok) throw new Error(`subscribe: ${r.status} ${await r.text()}`);
-  return r.json();
+  const registered = (await r.json()) as { id: string };
+  localStorage.setItem(NATIVE_SUB_ID_KEY, registered.id);
+  return registered;
+}
+
+export async function unsubscribeNativeFcm(): Promise<void> {
+  if (!isNativePlatform()) {
+    throw new Error("not running inside Capacitor");
+  }
+
+  const id = localStorage.getItem(NATIVE_SUB_ID_KEY);
+  const { PushNotifications } = await import("@capacitor/push-notifications");
+
+  try {
+    await PushNotifications.unregister();
+  } finally {
+    if (id) {
+      const tok = getToken();
+      await fetch(`${getBase()}/api/push/unsubscribe`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+        },
+        body: JSON.stringify({ id }),
+      });
+    }
+    localStorage.removeItem(NATIVE_SUB_ID_KEY);
+  }
 }
