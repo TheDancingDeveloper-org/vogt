@@ -91,7 +91,10 @@ steps:
       - cd android && ./gradlew assembleDebug --no-daemon -q && cd ..
       - ls -lh android/app/build/outputs/apk/debug/app-debug.apk
       - |
-        set -euo pipefail
+        # cimg/android runs commands with /bin/sh (dash), so no `set -o pipefail`.
+        # The forgejo-api wrapper logs status before any pipe, so a failure
+        # upstream of a `| python3` still has a clear pipeline-log error line.
+        set -eu
         APK=android/app/build/outputs/apk/debug/app-debug.apk
         REPO=/api/v1/repos/indexarr/MyDevEnv2
 
