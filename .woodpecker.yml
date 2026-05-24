@@ -81,9 +81,12 @@ steps:
       GIT_AUTH_TOKEN:
         from_secret: git_auth_token
     commands:
+      # cimg/android runs as circleci (UID 3434); the workspace was cloned by
+      # alpine/git as root. Take ownership so pnpm can write node_modules.
+      - sudo chown -R circleci:circleci .
       - cd mobile
       - sudo npm install -g pnpm@10 >/dev/null
-      - pnpm install --frozen-lockfile=false >/dev/null
+      - pnpm install --frozen-lockfile=false
       - npx cap sync android
       - cd android && ./gradlew assembleDebug --no-daemon -q && cd ..
       - ls -lh android/app/build/outputs/apk/debug/app-debug.apk
