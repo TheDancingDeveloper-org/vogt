@@ -66,13 +66,34 @@ steps:
       - sudo npm install -g pnpm@10 >/dev/null
       - pnpm install --frozen-lockfile=false >/dev/null
       - npx cap sync android
-      - cd android && ./gradlew assembleDebug --no-daemon -q
-      - cd ..
-      - APK=android/app/build/outputs/apk/debug/app-debug.apk
-      - ls -lh "$APK"
-      - 'curl -fsSL -T "$APK" -H "Authorization: token $GIT_AUTH_TOKEN" "https://repo.indexarr.net/api/packages/indexarr/generic/mydevenv2-apk/${CI_COMMIT_SHA}/app-debug.apk"'
-      - 'curl -fsSL -X DELETE -H "Authorization: token $GIT_AUTH_TOKEN" "https://repo.indexarr.net/api/packages/indexarr/generic/mydevenv2-apk/latest/app-debug.apk" || true'
-      - 'curl -fsSL -T "$APK" -H "Authorization: token $GIT_AUTH_TOKEN" "https://repo.indexarr.net/api/packages/indexarr/generic/mydevenv2-apk/latest/app-debug.apk"'
+      - cd android && ./gradlew assembleDebug --no-daemon -q && cd ..
+      - ls -lh android/app/build/outputs/apk/debug/app-debug.apk
+      - |
+        APK=android/app/build/outputs/apk/debug/app-debug.apk
+        BASE=https://repo.indexarr.net/api/v1/repos/indexarr/MyDevEnv2
+        AUTH="Authorization: token $GIT_AUTH_TOKEN"
+
+        # Delete existing apk-latest release (if any)
+        EXISTING_ID=$(curl -sf -H "$AUTH" "$BASE/releases/tags/apk-latest" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
+        if [ -n "$EXISTING_ID" ]; then
+          curl -sf -X DELETE -H "$AUTH" "$BASE/releases/$EXISTING_ID" || true
+        fi
+        # Delete the git tag so we can recreate the release cleanly
+        curl -sf -X DELETE -H "$AUTH" "$BASE/tags/apk-latest" || true
+
+        # Create fresh pre-release tagged apk-latest
+        RELEASE_ID=$(curl -sf -X POST \
+          -H "$AUTH" -H "Content-Type: application/json" \
+          -d "{\"tag_name\":\"apk-latest\",\"target_commitish\":\"$CI_COMMIT_SHA\",\"name\":\"Latest APK (debug)\",\"prerelease\":true,\"body\":\"Debug APK — commit $CI_COMMIT_SHA\"}" \
+          "$BASE/releases" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+        # Attach the APK as a release asset
+        curl -sf -X POST \
+          -H "$AUTH" \
+          -F "attachment=@$APK" \
+          "$BASE/releases/$RELEASE_ID/assets?name=mydevenv2-debug.apk"
     when:
       - event: push
         branch: main
