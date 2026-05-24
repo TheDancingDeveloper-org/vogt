@@ -37,7 +37,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
-    PATH=/home/sprooty/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    NPM_CONFIG_PREFIX=/home/sprooty/.npm-global \
+    PATH=/home/sprooty/.npm-global/bin:/home/sprooty/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Core system + dev utilities (per TOOLING.md)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -52,10 +53,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Node 22 + pnpm
+# Node 22 + pnpm. Override NPM_CONFIG_PREFIX for this one install so pnpm
+# lands in /usr/local (survives the runtime /home/sprooty bind mount).
+# User-installed globals go to $NPM_CONFIG_PREFIX (/home/sprooty/.npm-global).
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g pnpm \
+    && npm install -g --prefix=/usr/local pnpm \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI (DooD pattern — docker.sock mounted from host)
