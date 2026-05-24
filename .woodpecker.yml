@@ -14,25 +14,26 @@ when:
   - event: manual
   - event: pull_request
 
-# Disable the default clone (which uses Woodpecker's stored OAuth token).
-# The actual checkout is done in the first step below, where org secrets work.
+# Custom clone using org secret. The default OAuth-based clone started 403'ing
+# (pipelines #17+), so we authenticate explicitly with git_auth_token.
+#
+# IMPORTANT: use $VAR (no braces) for env-var references in commands. Woodpecker
+# template-substitutes ${VAR} before the container runs — unknown vars become
+# empty strings. Use $$VAR or $${VAR} to escape Woodpecker's templating if you
+# need braces. CI_* built-ins are fine either way.
 clone:
   git:
-    image: alpine
-    commands:
-      - "true"
-
-steps:
-  - name: checkout
     image: alpine/git
     environment:
       GIT_AUTH_TOKEN:
         from_secret: git_auth_token
     commands:
       - git init
-      - git remote add origin "https://git:${GIT_AUTH_TOKEN}@repo.indexarr.net/indexarr/MyDevEnv2.git"
-      - git fetch --no-tags --depth=1 origin "${CI_COMMIT_SHA}"
+      - git remote add origin "https://git:$GIT_AUTH_TOKEN@repo.indexarr.net/indexarr/MyDevEnv2.git"
+      - git fetch --no-tags --depth=1 origin "$CI_COMMIT_SHA"
       - git checkout FETCH_HEAD
+
+steps:
   - name: fmt
     image: rust:1.95-bookworm
     environment:
