@@ -91,31 +91,35 @@ steps:
       - cd android && ./gradlew assembleDebug --no-daemon -q && cd ..
       - ls -lh android/app/build/outputs/apk/debug/app-debug.apk
       - |
+        set -euo pipefail
         APK=android/app/build/outputs/apk/debug/app-debug.apk
-        BASE=https://repo.indexarr.net/api/v1/repos/indexarr/MyDevEnv2
-        AUTH="Authorization: token $GIT_AUTH_TOKEN"
+        REPO=/api/v1/repos/indexarr/MyDevEnv2
 
-        # Delete existing apk-latest release (if any)
-        EXISTING_ID=$(curl -sf -H "$AUTH" "$BASE/releases/tags/apk-latest" \
-          | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
+        # Pull the shared Forgejo API wrapper from ops. Logs status + body on
+        # errors instead of swallowing them — see scripts/forgejo-api.sh in
+        # indexarr/ops for why this isn't inline curl.
+        sudo curl -sSf -H "Authorization: token $GIT_AUTH_TOKEN" \
+          -o /usr/local/bin/forgejo-api \
+          https://repo.indexarr.net/indexarr/ops/raw/branch/main/scripts/forgejo-api.sh
+        sudo chmod +x /usr/local/bin/forgejo-api
+        export FORGEJO_TOKEN="$GIT_AUTH_TOKEN"
+
+        # Clear any existing apk-latest release+tag so the create below can't
+        # collide. --allow 404 = "fine if nothing was there".
+        EXISTING_ID=$(forgejo-api GET "$REPO/releases/tags/apk-latest" --allow 404 \
+          | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
         if [ -n "$EXISTING_ID" ]; then
-          curl -sf -X DELETE -H "$AUTH" "$BASE/releases/$EXISTING_ID" || true
+          forgejo-api DELETE "$REPO/releases/$EXISTING_ID" --allow 404 >/dev/null
         fi
-        # Delete the git tag so we can recreate the release cleanly
-        curl -sf -X DELETE -H "$AUTH" "$BASE/tags/apk-latest" || true
+        forgejo-api DELETE "$REPO/tags/apk-latest" --allow 404 >/dev/null
 
-        # Create fresh pre-release tagged apk-latest
-        RELEASE_ID=$(curl -sf -X POST \
-          -H "$AUTH" -H "Content-Type: application/json" \
-          -d "{\"tag_name\":\"apk-latest\",\"target_commitish\":\"$CI_COMMIT_SHA\",\"name\":\"Latest APK (debug)\",\"prerelease\":true,\"body\":\"Debug APK — commit $CI_COMMIT_SHA\"}" \
-          "$BASE/releases" \
+        RELEASE_ID=$(forgejo-api POST "$REPO/releases" \
+          --data "{\"tag_name\":\"apk-latest\",\"target_commitish\":\"$CI_COMMIT_SHA\",\"name\":\"Latest APK (debug)\",\"prerelease\":true,\"body\":\"Debug APK — commit $CI_COMMIT_SHA\"}" \
           | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 
-        # Attach the APK as a release asset
-        curl -sf -X POST \
-          -H "$AUTH" \
-          -F "attachment=@$APK" \
-          "$BASE/releases/$RELEASE_ID/assets?name=mydevenv2-debug.apk"
+        forgejo-api POST "$REPO/releases/$RELEASE_ID/assets?name=mydevenv2-debug.apk" \
+          --form "attachment=@$APK" >/dev/null
+        echo "uploaded $APK to release $RELEASE_ID"
     when:
       - event: push
         branch: main
