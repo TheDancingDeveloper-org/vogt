@@ -3,6 +3,10 @@ import { Component, createSignal, For } from "solid-js";
 interface Props {
   /** Send raw bytes/text into the active terminal's PTY stdin. */
   send: (data: string) => void;
+  /** Copy current xterm selection (if any) to clipboard. */
+  onCopy?: () => void;
+  /** Paste clipboard into the active terminal. */
+  onPaste?: () => void;
 }
 
 /**
@@ -48,6 +52,8 @@ const ModKeyRow: Component<Props> = (props) => {
     { label: "|", send: () => send("|") },
     { label: "~", send: () => send("~") },
     { label: "Enter", send: () => send("\r") },
+    { label: "Copy", send: () => props.onCopy?.() },
+    { label: "Paste", send: () => props.onPaste?.() },
   ];
 
   // After a non-Ctrl key tap, if Ctrl was armed we already consumed it.

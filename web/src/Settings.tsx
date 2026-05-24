@@ -35,10 +35,15 @@ const Settings: Component<Props> = (props) => {
   });
 
   const save = () => {
-    setToken(token().trim());
-    setBase(base().trim());
+    const newTok = token().trim();
+    const newBase = base().trim();
+    const changed = newTok !== getToken() || newBase !== getBase();
+    setToken(newTok);
+    setBase(newBase);
     props.onClose();
-    location.reload();
+    // Only reload if the connection identity actually changed — otherwise we
+    // throw away open terminals just to pick up a no-op edit.
+    if (changed) location.reload();
   };
 
   const togglePush = async () => {
@@ -88,6 +93,16 @@ const Settings: Component<Props> = (props) => {
               autocomplete="off"
               spellcheck={false}
             />
+            <div
+              style={{
+                "font-size": "11px",
+                color: "var(--fg-muted)",
+                "margin-top": "3px",
+              }}
+            >
+              Stored in this browser's localStorage. Anyone with access to this
+              browser profile (or able to run JS in it) can read it.
+            </div>
           </label>
           <label>
             Backend base URL (blank = same origin)

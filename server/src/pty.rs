@@ -49,6 +49,7 @@ pub struct SessionSummary {
     pub activity: ActivityState,
     pub exit_code: Option<i32>,
     pub scrollback_bytes: u64,
+    pub cwd: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
 }
@@ -57,6 +58,7 @@ pub struct Session {
     pub id: Uuid,
     pub name: Mutex<String>,
     pub created_at: time::OffsetDateTime,
+    pub cwd: String,
     idle_after_ms: u64,
 
     scrollback: Mutex<Scrollback>,
@@ -94,6 +96,7 @@ impl Session {
             activity: *self.activity.lock(),
             exit_code: *self.exit_code.lock(),
             scrollback_bytes: sb.total_written(),
+            cwd: self.cwd.clone(),
             created_at: self.created_at,
         }
     }
@@ -200,6 +203,7 @@ pub fn spawn(
         .as_deref()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| default_cwd.to_path_buf());
+    let cwd_display = cwd.to_string_lossy().into_owned();
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");
     cmd.env("MYDEVENV2_SESSION", &spec.name);
@@ -231,6 +235,7 @@ pub fn spawn(
         id: Uuid::new_v4(),
         name: Mutex::new(spec.name.clone()),
         created_at: time::OffsetDateTime::now_utc(),
+        cwd: cwd_display,
         idle_after_ms: activity_idle_after_ms,
         scrollback: Mutex::new(Scrollback::new(scrollback_bytes)),
         writer: Mutex::new(writer),

@@ -48,8 +48,9 @@ export async function refreshSessions(): Promise<void> {
 export async function createSession(
   name: string,
   command?: string[],
+  cwd?: string,
 ): Promise<SessionSummary> {
-  const s = await api.createSession({ name, command });
+  const s = await api.createSession({ name, command, cwd });
   setStore(
     produce((st) => {
       st.sessions[s.id] = s;
@@ -101,8 +102,10 @@ export function startEventStream(): void {
       setConnected(true);
       switch (ev.type) {
         case "session-created":
-          // Refresh to pick up full summary fields (created_at etc.).
-          void refreshSessions();
+          // Skip the refetch if we already know this id (the local create
+          // already inserted it). Only refresh for sessions that some *other*
+          // client made.
+          if (!store.sessions[ev.id]) void refreshSessions();
           break;
         case "session-renamed":
           setStore(

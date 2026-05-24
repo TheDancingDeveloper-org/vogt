@@ -2,13 +2,13 @@ import {
   Component,
   For,
   Show,
-  createMemo,
+  createEffect,
   createSignal,
   onCleanup,
   onMount,
 } from "solid-js";
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
-import Terminal from "./Terminal";
+import Terminal, { type TerminalActions } from "./Terminal";
 import Editor from "./Editor";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
@@ -65,24 +65,83 @@ function tabActivityClass(tab: Tab): string | null {
   return s ? activityClass(s) : "idle";
 }
 
+function pathFor(tab: Tab): string {
+  if (tab.kind === "terminal") return `/t/${tab.sessionId}`;
+  if (tab.kind === "editor") return `/e/${encodeURIComponent(tab.path)}`;
+  if (tab.kind === "git") return `/g/${encodeURIComponent(tab.repo)}`;
+  return "/gui";
+}
+
 const App: Component = () => {
   const navigate = useNavigate();
   const params = useParams<{ id?: string; path?: string }>();
   const location = useLocation();
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+
+  // Toast: errors stay longer than info messages.
   const [toast, setToast] = createSignal<string | null>(null);
-  const showToast = (m: string) => {
+  let toastTimer: number | undefined;
+  const showToast = (m: string, opts: { kind?: "info" | "error" } = {}) => {
+    if (toastTimer !== undefined) window.clearTimeout(toastTimer);
     setToast(m);
-    setTimeout(() => setToast(null), 2500);
+    const ms = opts.kind === "error" ? 6000 : 2500;
+    toastTimer = window.setTimeout(() => setToast(null), ms);
   };
 
-  let activeSend: ((data: string) => void) | null = null;
+  // Per-tab terminal action registry. Solid keeps Terminal components mounted
+  // across tab switches, so we register actions by tab id on mount and read
+  // them via a getter keyed on the active tab. This avoids the stale-closure
+  // problem of single mutable `activeSend` / `activeCopy` refs.
+  const senders = new Map<string, (data: string | ArrayBuffer) => void>();
+  const actions = new Map<string, TerminalActions>();
+  const activeSend = (data: string) => {
+    const id = tabsStore.active;
+    if (id) senders.get(id)?.(data);
+  };
+  const activeCopy = async () => {
+    const id = tabsStore.active;
+    if (id) await actions.get(id)?.copy();
+  };
+  const activePaste = async () => {
+    const id = tabsStore.active;
+    if (id) await actions.get(id)?.paste();
+  };
+
+  // Custom prompt / confirm modals — native `prompt()` / `confirm()` are
+  // blocked or ignored in some PWA contexts (iOS standalone) and look out of
+  // place on mobile. These promises resolve when the user picks an option.
+  interface PromptReq {
+    title: string;
+    defaultValue?: string;
+    placeholder?: string;
+    resolve: (v: string | null) => void;
+  }
+  interface ConfirmReq {
+    title: string;
+    body?: string;
+    resolve: (ok: boolean) => void;
+  }
+  const [promptReq, setPromptReq] = createSignal<PromptReq | null>(null);
+  const [confirmReq, setConfirmReq] = createSignal<ConfirmReq | null>(null);
+  const [promptDraft, setPromptDraft] = createSignal("");
+  const promptUser = (
+    title: string,
+    defaultValue = "",
+    placeholder = "",
+  ): Promise<string | null> => {
+    setPromptDraft(defaultValue);
+    return new Promise((resolve) =>
+      setPromptReq({ title, defaultValue, placeholder, resolve }),
+    );
+  };
+  const confirmUser = (title: string, body?: string): Promise<boolean> => {
+    return new Promise((resolve) => setConfirmReq({ title, body, resolve }));
+  };
+
   const [publicCfg, setPublicCfg] = createSignal<PublicConfig | null>(null);
 
   onMount(() => {
-    // Public config is independent of the bearer token — fetch it eagerly
-    // so the GUI tab knows whether to render the iframe or the placeholder.
     apiModule
       .publicConfig()
       .then((c) => setPublicCfg(c))
@@ -100,16 +159,17 @@ const App: Component = () => {
 
   onCleanup(() => stopEventStream());
 
-  // Sync URL → tabs. /t/:id focuses or opens a terminal tab; /e/:path opens
-  // an editor tab. Empty route keeps whichever tab was last active.
-  createMemo(() => {
+  // URL → tabs syncing. createEffect (not createMemo) — we want side effects,
+  // not a memoised value.
+  createEffect(() => {
     const path = location.pathname;
     if (path.startsWith("/t/") && params.id) {
       const sess = sessionsStore.sessions[params.id];
+      // Don't auto-create phantoms for ids the server doesn't know about.
+      if (!sess && sessionsStore.ready) return;
       const label = sess?.name ?? params.id.slice(0, 6);
       openTerminalTab(params.id, label);
     } else if (path.startsWith("/e/") && params.path) {
-      // Decode the wildcard segment back into a real path.
       openEditorTab(decodeURIComponent(params.path));
     } else if (path.startsWith("/g/") && params.path !== undefined) {
       openGitTab(decodeURIComponent(params.path));
@@ -120,31 +180,87 @@ const App: Component = () => {
     }
   });
 
-  const onCreate = async () => {
-    const name = prompt("Session name", `shell-${Date.now() % 1000}`);
+  const onCreate = async (cwd?: string) => {
+    const name = await promptUser(
+      cwd ? `New session in ${cwd}` : "New session",
+      `shell-${Date.now() % 1000}`,
+      "name",
+    );
     if (!name) return;
     try {
-      const s = await createSession(name);
+      const s = await createSession(name, undefined, cwd);
       openTerminalTab(s.id, s.name);
       navigate(`/t/${s.id}`, { replace: false });
       setDrawerOpen(false);
     } catch (e) {
-      showToast(`create failed: ${(e as Error).message}`);
+      showToast(`create failed: ${(e as Error).message}`, { kind: "error" });
     }
   };
 
   const onRenameSession = async (s: SessionSummary) => {
-    const name = prompt("Rename session", s.name);
+    const name = await promptUser("Rename session", s.name);
     if (!name || name === s.name) return;
     try {
       await renameSession(s.id, name);
     } catch (e) {
-      showToast(`rename failed: ${(e as Error).message}`);
+      showToast(`rename failed: ${(e as Error).message}`, { kind: "error" });
     }
   };
 
+  const onDuplicateSession = async (s: SessionSummary) => {
+    try {
+      const name = `${s.name}-copy`;
+      const dup = await createSession(name, undefined, s.cwd || undefined);
+      openTerminalTab(dup.id, dup.name);
+      navigate(`/t/${dup.id}`);
+      setDrawerOpen(false);
+    } catch (e) {
+      showToast(`duplicate failed: ${(e as Error).message}`, { kind: "error" });
+    }
+  };
+
+  const closeTabAndNavigate = (tabId: string) => {
+    const tab = tabsStore.tabs.find((t) => t.id === tabId);
+    const onThisTab =
+      (location.pathname.startsWith("/t/") && `term:${params.id}` === tabId) ||
+      (location.pathname.startsWith("/e/") &&
+        `edit:${decodeURIComponent(params.path ?? "")}` === tabId) ||
+      (location.pathname.startsWith("/g") &&
+        `git:${decodeURIComponent(params.path ?? "")}` === tabId) ||
+      (location.pathname === "/gui" && tabId === "gui");
+
+    // Drop any per-tab registrations so we don't leak references.
+    senders.delete(tabId);
+    actions.delete(tabId);
+
+    closeTab(tabId);
+    if (tab) {
+      // Persist tab list — already done inside closeTab. No-op here.
+    }
+    if (!onThisTab) return;
+    const next = tabsStore.tabs.find((t) => t.id === tabsStore.active);
+    navigate(next ? pathFor(next) : "/", { replace: true });
+  };
+
+  const requestCloseTab = async (tabId: string) => {
+    const tab = tabsStore.tabs.find((t) => t.id === tabId);
+    if (tab && tab.kind === "editor" && tab.dirty) {
+      const ok = await confirmUser(
+        "Discard unsaved changes?",
+        `${tab.path} has unsaved edits.`,
+      );
+      if (!ok) return;
+    }
+    closeTabAndNavigate(tabId);
+  };
+
   const onCloseSession = async (s: SessionSummary) => {
-    if (!confirm(`Kill and remove "${s.name}"?`)) return;
+    const ok = await confirmUser(
+      `Kill and remove "${s.name}"?`,
+      "The shell and its scrollback will be discarded.",
+    );
+    if (!ok) return;
+    closeTabAndNavigate(`term:${s.id}`);
     try {
       try {
         await killSession(s.id);
@@ -152,19 +268,56 @@ const App: Component = () => {
         /* may already be dead */
       }
       await deleteSession(s.id);
-      // Also close any tab pointing to this session.
-      const id = `term:${s.id}`;
-      closeTab(id);
     } catch (e) {
-      showToast(`close failed: ${(e as Error).message}`);
+      showToast(`close failed: ${(e as Error).message}`, { kind: "error" });
     }
   };
+
+  // Keyboard shortcuts. Browser reserves Ctrl+T / Ctrl+W / Ctrl+Tab so we use
+  // Ctrl+Shift+T (new), Ctrl+Shift+W (close active), Ctrl+Alt+Arrow (cycle).
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    const k = e.key.toLowerCase();
+    if (e.shiftKey && k === "t") {
+      e.preventDefault();
+      void onCreate();
+      return;
+    }
+    if (e.shiftKey && k === "w") {
+      const active = tabsStore.active;
+      if (active) {
+        e.preventDefault();
+        void requestCloseTab(active);
+      }
+      return;
+    }
+    if (e.altKey && (k === "arrowright" || k === "arrowleft")) {
+      const tabs = tabsStore.tabs;
+      if (tabs.length === 0) return;
+      const idx = Math.max(
+        0,
+        tabs.findIndex((t) => t.id === tabsStore.active),
+      );
+      const delta = k === "arrowright" ? 1 : -1;
+      const next = tabs[(idx + delta + tabs.length) % tabs.length];
+      if (next) {
+        e.preventDefault();
+        focusTab(next.id);
+        navigate(pathFor(next));
+      }
+    }
+  };
+  onMount(() => window.addEventListener("keydown", onKeyDown));
+  onCleanup(() => window.removeEventListener("keydown", onKeyDown));
 
   return (
     <>
       <div class="app">
         <Show when={drawerOpen()}>
-          <div class="drawer-scrim" onClick={() => setDrawerOpen(false)} />
+          <div
+            class="drawer-scrim"
+            onPointerDown={() => setDrawerOpen(false)}
+          />
         </Show>
 
         <aside class={`drawer ${drawerOpen() ? "open" : ""}`}>
@@ -175,7 +328,7 @@ const App: Component = () => {
             </span>
           </div>
           <div class="drawer-actions">
-            <button onClick={onCreate}>+ Session</button>
+            <button onClick={() => onCreate()}>+ Session</button>
             <button
               onClick={() => {
                 openGitTab("");
@@ -224,14 +377,30 @@ const App: Component = () => {
                   }}
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    onRenameSession(s);
+                    void onRenameSession(s);
                   }}
+                  title={`${s.name}\ncwd: ${s.cwd}`}
                 >
                   <span
                     class={`activity-dot ${activityClass(s)}`}
                     title={activityLabel(s.activity, s.exit_code)}
                   />
-                  <span class="name">{s.name}</span>
+                  <div class="session-row-body">
+                    <span class="name">{s.name}</span>
+                    <Show when={s.cwd}>
+                      <span class="cwd">{s.cwd}</span>
+                    </Show>
+                  </div>
+                  <span
+                    class="row-btn"
+                    title="Duplicate (same cwd)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void onDuplicateSession(s);
+                    }}
+                  >
+                    ⧉
+                  </span>
                   <span
                     class="close"
                     title="Kill & remove"
@@ -257,19 +426,30 @@ const App: Component = () => {
           >
             ☰
           </button>
+          <button
+            class="menu-btn"
+            onClick={() => void onCreate()}
+            title="New terminal (Ctrl+Shift+T)"
+            aria-label="New terminal"
+          >
+            +
+          </button>
           <For each={tabsStore.tabs}>
             {(t) => (
               <button
                 class={`tab ${tabsStore.active === t.id ? "active" : ""}`}
                 onClick={() => {
                   focusTab(t.id);
-                  if (t.kind === "terminal") navigate(`/t/${t.sessionId}`);
-                  else if (t.kind === "editor")
-                    navigate(`/e/${encodeURIComponent(t.path)}`);
-                  else if (t.kind === "git")
-                    navigate(`/g/${encodeURIComponent(t.repo)}`);
-                  else navigate(`/gui`);
+                  navigate(pathFor(t));
                 }}
+                onAuxClick={(e) => {
+                  // Middle-click closes the tab (browser/editor convention).
+                  if (e.button === 1) {
+                    e.preventDefault();
+                    void requestCloseTab(t.id);
+                  }
+                }}
+                title={t.label}
               >
                 <Show when={t.kind === "terminal"}>
                   <span class={`activity-dot ${tabActivityClass(t) ?? "idle"}`} />
@@ -291,8 +471,9 @@ const App: Component = () => {
                   class="close"
                   onClick={(e) => {
                     e.stopPropagation();
-                    closeTab(t.id);
+                    void requestCloseTab(t.id);
                   }}
+                  onPointerDown={(e) => e.stopPropagation()}
                 >
                   ×
                 </span>
@@ -318,11 +499,8 @@ const App: Component = () => {
                     {(tab) => (
                       <Terminal
                         sessionId={(tab() as Extract<Tab, { kind: "terminal" }>).sessionId}
-                        registerSend={(fn) => {
-                          if (tabsStore.active === t.id) {
-                            activeSend = (data) => fn(data);
-                          }
-                        }}
+                        registerSend={(fn) => senders.set(t.id, fn)}
+                        registerActions={(a) => actions.set(t.id, a)}
                       />
                     )}
                   </Show>
@@ -348,15 +526,108 @@ const App: Component = () => {
             <Show when={tabsStore.tabs.length === 0}>
               <div class="empty">
                 <div>Open a file from the drawer or create a session.</div>
-                <button onClick={onCreate}>+ New session</button>
+                <button onClick={() => void onCreate()}>+ New session</button>
               </div>
             </Show>
           </div>
-          <ModKeyRow send={(d) => activeSend?.(d)} />
+          <ModKeyRow
+            send={(d) => activeSend(d)}
+            onCopy={() => void activeCopy()}
+            onPaste={() => void activePaste()}
+          />
         </main>
       </div>
 
       <Settings open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
+
+      <Show when={promptReq()}>
+        {(req) => (
+          <div
+            class="modal-backdrop"
+            onPointerDown={() => {
+              req().resolve(null);
+              setPromptReq(null);
+            }}
+          >
+            <div class="modal" onPointerDown={(e) => e.stopPropagation()}>
+              <h2>{req().title}</h2>
+              <input
+                type="text"
+                autofocus
+                value={promptDraft()}
+                placeholder={req().placeholder ?? ""}
+                onInput={(e) => setPromptDraft(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    req().resolve(promptDraft());
+                    setPromptReq(null);
+                  } else if (e.key === "Escape") {
+                    req().resolve(null);
+                    setPromptReq(null);
+                  }
+                }}
+              />
+              <div class="modal-actions">
+                <button
+                  onClick={() => {
+                    req().resolve(null);
+                    setPromptReq(null);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    req().resolve(promptDraft());
+                    setPromptReq(null);
+                  }}
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
+
+      <Show when={confirmReq()}>
+        {(req) => (
+          <div
+            class="modal-backdrop"
+            onPointerDown={() => {
+              req().resolve(false);
+              setConfirmReq(null);
+            }}
+          >
+            <div class="modal" onPointerDown={(e) => e.stopPropagation()}>
+              <h2>{req().title}</h2>
+              <Show when={req().body}>
+                <p style={{ color: "var(--fg-muted)", "font-size": "13px" }}>
+                  {req().body}
+                </p>
+              </Show>
+              <div class="modal-actions">
+                <button
+                  onClick={() => {
+                    req().resolve(false);
+                    setConfirmReq(null);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    req().resolve(true);
+                    setConfirmReq(null);
+                  }}
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Show>
 
       <Show when={toast()}>
         <div class="toast">{toast()}</div>

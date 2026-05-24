@@ -25,9 +25,39 @@ impl SessionRegistry {
         }
     }
 
-    pub fn create(&self, spec: SessionSpec) -> Result<Arc<Session>> {
+    pub fn create(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
         if spec.name.trim().is_empty() {
             return Err(ApiError::BadRequest("name must not be empty".into()));
+        }
+        // Resolve client-supplied cwd against workspace_root. Reject anything
+        // that escapes the workspace via `..` so a stray API call can't spawn
+        // a shell with cwd=/etc.
+        if let Some(raw) = spec.cwd.as_deref() {
+            let raw = raw.trim();
+            if !raw.is_empty() {
+                let candidate = std::path::Path::new(raw);
+                let abs = if candidate.is_absolute() {
+                    candidate.to_path_buf()
+                } else {
+                    self.cfg.workspace_root.join(raw.trim_start_matches('/'))
+                };
+                let canon = abs
+                    .canonicalize()
+                    .map_err(|e| ApiError::BadRequest(format!("cwd {raw:?}: {e}")))?;
+                let root = self
+                    .cfg
+                    .workspace_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.cfg.workspace_root.clone());
+                if !canon.starts_with(&root) {
+                    return Err(ApiError::BadRequest(format!(
+                        "cwd {raw:?} escapes workspace_root"
+                    )));
+                }
+                spec.cwd = Some(canon.to_string_lossy().into_owned());
+            } else {
+                spec.cwd = None;
+            }
         }
         // Names need not be unique — duplicates are merely confusing, not invalid.
         let spawned = pty::spawn(

@@ -12,6 +12,7 @@ export interface SessionSummary {
   activity: ActivityState;
   exit_code: number | null;
   scrollback_bytes: number;
+  cwd: string;
   created_at: string;
 }
 

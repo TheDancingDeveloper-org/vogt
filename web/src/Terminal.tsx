@@ -5,10 +5,21 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { openAttach } from "./api";
 
+export interface TerminalActions {
+  /** Copy the current xterm selection to the system clipboard. */
+  copy: () => Promise<void>;
+  /** Read clipboard and inject as PTY stdin. */
+  paste: () => Promise<void>;
+  /** Tell xterm to select everything in the visible buffer. */
+  selectAll: () => void;
+}
+
 interface Props {
   sessionId: string;
   /** Exposed so the parent can inject mobile-modkey input straight into the PTY. */
   registerSend?: (fn: (data: string | ArrayBuffer) => void) => void;
+  /** Exposed so the parent (modkey row, etc.) can drive copy/paste. */
+  registerActions?: (actions: TerminalActions) => void;
 }
 
 /**
@@ -90,6 +101,98 @@ const TerminalView: Component<Props> = (props) => {
 
     // Wire input: user keystrokes → PTY stdin.
     term.onData((data) => sendToPty(data));
+
+    // Clipboard plumbing.
+    const copySelection = async () => {
+      const sel = term?.getSelection() ?? "";
+      if (!sel) return;
+      try {
+        await navigator.clipboard.writeText(sel);
+      } catch {
+        // Fallback: use a hidden textarea + execCommand for older mobile WebViews.
+        const ta = document.createElement("textarea");
+        ta.value = sel;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand("copy");
+        } catch {
+          /* nothing else to try */
+        }
+        document.body.removeChild(ta);
+      }
+    };
+    const pasteFromClipboard = async () => {
+      let text = "";
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        // No permission / unsupported (iOS Safari without user gesture, etc.).
+        // Prompt the user as a last resort — preserves the feature on locked-
+        // down WebViews.
+        const v = window.prompt("Paste:");
+        if (v == null) return;
+        text = v;
+      }
+      if (text) sendToPty(text);
+    };
+
+    // Custom key handler for Ctrl+Shift+C/V and Cmd+C/V semantics.
+    // Returning false stops xterm from forwarding the keystroke to the PTY.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown") return true;
+      const meta = e.ctrlKey && e.shiftKey;
+      const mac = navigator.platform.toLowerCase().includes("mac") && e.metaKey;
+      if ((meta || mac) && (e.key === "c" || e.key === "C")) {
+        if (term?.hasSelection()) {
+          void copySelection();
+          return false;
+        }
+        // No selection: fall through so Ctrl+C still sends SIGINT.
+        return true;
+      }
+      if ((meta || mac) && (e.key === "v" || e.key === "V")) {
+        void pasteFromClipboard();
+        return false;
+      }
+      if ((meta || mac) && (e.key === "a" || e.key === "A")) {
+        term?.selectAll();
+        return false;
+      }
+      return true;
+    });
+
+    // Middle-click paste (matches xterm-on-Linux convention).
+    hostRef.addEventListener("auxclick", (e) => {
+      if ((e as MouseEvent).button === 1) {
+        e.preventDefault();
+        void pasteFromClipboard();
+      }
+    });
+
+    // Right-click: if there's a selection, copy it; otherwise paste. Bypasses
+    // the browser context menu — most users on mobile/desktop just want one
+    // of those two actions on a terminal.
+    hostRef.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (term?.hasSelection()) {
+        void copySelection();
+      } else {
+        void pasteFromClipboard();
+      }
+    });
+
+    // Auto-copy on selection-end is nice on desktop but surprising on mobile
+    // (long-press to select → release accidentally clobbers the clipboard).
+    // We hold this back and rely on the explicit shortcuts / context menu.
+
+    props.registerActions?.({
+      copy: copySelection,
+      paste: pasteFromClipboard,
+      selectAll: () => term?.selectAll(),
+    });
 
     // Resize plumbing
     resizeObserver = new ResizeObserver(() => {

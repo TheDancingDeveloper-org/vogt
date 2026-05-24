@@ -38,7 +38,7 @@ FROM ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     NPM_CONFIG_PREFIX=/home/sprooty/.npm-global \
-    PATH=/home/sprooty/.npm-global/bin:/home/sprooty/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/home/sprooty/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Core system + dev utilities (per TOOLING.md)
 RUN apt-get update && apt-get install -y --no-install-recommends \

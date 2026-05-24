@@ -37,6 +37,41 @@ if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
         --accept-dns=false || echo "tailscale up failed (continuing)"
 fi
 
+# ─── User CLI bootstrap ─────────────────────────────────────────────────────
+# /home/sprooty is bind-mounted from the host, which shadows anything we
+# installed into it during the image build. Install the user-level CLIs the
+# pod always wants here, on every boot, idempotently. Each install is
+# best-effort and runs in the background so it doesn't block the server.
+bootstrap_user_clis() {
+    local log=/tmp/mydevenv2-bootstrap.log
+    : >"$log"
+    {
+        echo "[bootstrap] starting $(date -Is)"
+        mkdir -p /home/sprooty/.npm-global /home/sprooty/.local/bin
+
+        if ! command -v codex >/dev/null 2>&1 || ! command -v theclawbay >/dev/null 2>&1; then
+            echo "[bootstrap] npm install -g @openai/codex theclawbay"
+            npm install -g @openai/codex theclawbay \
+                && echo "[bootstrap] npm install ok" \
+                || echo "[bootstrap] npm install failed (continuing)"
+        else
+            echo "[bootstrap] codex + theclawbay already present"
+        fi
+
+        if ! command -v claude >/dev/null 2>&1; then
+            echo "[bootstrap] installing claude CLI"
+            curl -fsSL https://claude.ai/install.sh | bash \
+                && echo "[bootstrap] claude install ok" \
+                || echo "[bootstrap] claude install failed (continuing)"
+        else
+            echo "[bootstrap] claude already present"
+        fi
+
+        echo "[bootstrap] done $(date -Is)"
+    } >>"$log" 2>&1
+}
+bootstrap_user_clis &
+
 if [[ "${START_SWAY:-0}" == "1" ]]; then
     # Headless sway needs XDG_RUNTIME_DIR. Selkies talks to it via WAYLAND_DISPLAY.
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$(id -u)}"
