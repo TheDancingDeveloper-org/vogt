@@ -16,12 +16,15 @@ when:
 
 clone:
   git:
-    image: woodpeckerci/plugin-git
-    settings:
-      netrc_machine: repo.indexarr.net
-      netrc_username: git
-      netrc_password:
+    image: alpine/git
+    environment:
+      GIT_AUTH_TOKEN:
         from_secret: git_auth_token
+    commands:
+      - git init
+      - git remote add origin "https://git:${GIT_AUTH_TOKEN}@repo.indexarr.net/indexarr/MyDevEnv2.git"
+      - git fetch --no-tags --depth=1 origin "${CI_COMMIT_SHA}"
+      - git checkout FETCH_HEAD
 
 steps:
   - name: fmt
