@@ -473,7 +473,6 @@ const App: Component = () => {
                     e.stopPropagation();
                     void requestCloseTab(t.id);
                   }}
-                  onPointerDown={(e) => e.stopPropagation()}
                 >
                   ×
                 </span>
