@@ -1,4 +1,4 @@
-import { Component, createEffect, onCleanup, onMount } from "solid-js";
+import { Component, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -41,6 +41,30 @@ const TerminalView: Component<Props> = (props) => {
   let reconnectDelay = 500;
   let destroyed = false;
   let visibilityHandler: (() => void) | null = null;
+  let pasteTextareaRef: HTMLTextAreaElement | undefined;
+  const [showPasteModal, setShowPasteModal] = createSignal(false);
+  let pasteResolve: ((v: string | null) => void) | null = null;
+
+  const promptPaste = (): Promise<string | null> =>
+    new Promise((resolve) => {
+      pasteResolve = resolve;
+      setShowPasteModal(true);
+    });
+
+  const confirmPasteModal = () => {
+    const text = pasteTextareaRef?.value ?? "";
+    const resolve = pasteResolve;
+    pasteResolve = null;
+    setShowPasteModal(false);
+    resolve?.(text || null);
+  };
+
+  const cancelPasteModal = () => {
+    const resolve = pasteResolve;
+    pasteResolve = null;
+    setShowPasteModal(false);
+    resolve?.(null);
+  };
 
   const sendToPty = (data: string | ArrayBuffer) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -133,10 +157,10 @@ const TerminalView: Component<Props> = (props) => {
       try {
         text = await navigator.clipboard.readText();
       } catch {
-        // No permission / unsupported (iOS Safari without user gesture, etc.).
-        // Prompt the user as a last resort — preserves the feature on locked-
-        // down WebViews.
-        const v = window.prompt("Paste:");
+        // Clipboard API unavailable / denied (common in Capacitor WebView).
+        // Fall back to a textarea modal — window.prompt has a character limit
+        // that silently truncates long tokens (e.g. infisical auth tokens).
+        const v = await promptPaste();
         if (v == null) return;
         text = v;
       }
@@ -312,7 +336,38 @@ const TerminalView: Component<Props> = (props) => {
     fit = null;
   });
 
-  return <div class="terminal-host" ref={hostRef} />;
+  return (
+    <>
+      <div class="terminal-host" ref={hostRef} />
+      <Show when={showPasteModal()}>
+        <div
+          class="paste-modal-backdrop"
+          onPointerDown={cancelPasteModal}
+        >
+          <div
+            class="paste-modal"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div class="paste-modal-title">Paste text</div>
+            <textarea
+              ref={(el) => { pasteTextareaRef = el; el.focus(); }}
+              class="paste-modal-textarea"
+              rows={5}
+              placeholder="Long-press here to paste from clipboard…"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) confirmPasteModal();
+                if (e.key === "Escape") cancelPasteModal();
+              }}
+            />
+            <div class="paste-modal-actions">
+              <button class="paste-modal-btn" onClick={cancelPasteModal}>Cancel</button>
+              <button class="paste-modal-btn primary" onClick={confirmPasteModal}>Paste</button>
+            </div>
+          </div>
+        </div>
+      </Show>
+    </>
+  );
 };
 
 export default TerminalView;

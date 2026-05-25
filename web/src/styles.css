@@ -761,3 +761,60 @@ input[type="password"]:focus {
   color: var(--fg-muted);
   font-size: 11px;
 }
+
+/* Paste modal (fallback when clipboard API is unavailable) */
+.paste-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.paste-modal {
+  background: var(--bg-elev);
+  border: 1px solid var(--bd-strong);
+  border-radius: 8px;
+  padding: 16px;
+  width: min(90vw, 380px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.paste-modal-title {
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+}
+.paste-modal-textarea {
+  background: var(--bg);
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  color: var(--fg);
+  padding: 8px;
+  font-family: monospace;
+  font-size: 12px;
+  resize: vertical;
+  width: 100%;
+}
+.paste-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.paste-modal-btn {
+  background: var(--bg-tab);
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 14px;
+}
+.paste-modal-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #000;
+  font-weight: 600;
+}
