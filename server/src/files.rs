@@ -4,7 +4,10 @@ use std::{
 };
 
 use axum::{
+    body::Body,
     extract::{Query, State},
+    http::{header, HeaderValue},
+    response::Response,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -123,6 +126,10 @@ pub struct FileRead {
 /// pathological file. ~5 MiB matches typical editor comfort.
 const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
 
+/// Hard cap for downloads — 512 MiB. Prevents trivially OOM-ing the server
+/// via download of a huge file from a workspace.
+const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+
 pub async fn read_file(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ReadQuery>,
@@ -162,6 +169,40 @@ pub async fn read_file(
         }
     };
     Ok(Json(resp))
+}
+
+pub async fn download_file(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ReadQuery>,
+) -> Result<Response> {
+    let p = safe_resolve(&state.config.workspace_root, &q.path)?;
+    let meta = tokio::fs::metadata(&p).await?;
+    if !meta.is_file() {
+        return Err(ApiError::BadRequest(format!("not a file: {}", q.path)));
+    }
+    if meta.len() > MAX_DOWNLOAD_BYTES {
+        return Err(ApiError::BadRequest(format!(
+            "file too large to download: {} bytes (max {})",
+            meta.len(),
+            MAX_DOWNLOAD_BYTES
+        )));
+    }
+    let bytes = tokio::fs::read(&p).await?;
+    let filename = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".into());
+    let disposition = format!("attachment; filename=\"{}\"", filename);
+    let response = Response::builder()
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"))
+        .header(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_str(&disposition)
+                .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+        )
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]

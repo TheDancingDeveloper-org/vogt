@@ -146,6 +146,23 @@ export const api = {
       content,
       create_parents,
     }),
+  downloadFile: async (path: string): Promise<void> => {
+    const url = `${getBase()}/api/files/download?path=${encodeURIComponent(path)}`;
+    const tok = getToken();
+    const res = await fetch(url, {
+      headers: tok ? { Authorization: `Bearer ${tok}` } : {},
+    });
+    if (!res.ok) throw new ApiError(res.status, await res.text());
+    const blob = await res.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = path.split("/").pop() || "download";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(objUrl);
+  },
   search: (q: string, path = "") =>
     req<SearchHit[]>(
       "GET",

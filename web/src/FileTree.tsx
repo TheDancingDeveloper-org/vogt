@@ -74,6 +74,20 @@ const TreeNodeView: Component<NodeProps> = (props) => {
             &gt;_
           </button>
         </Show>
+        <Show when={!props.node.is_dir}>
+          <button
+            class="tree-term-btn"
+            title="Download"
+            onClick={(e) => {
+              e.stopPropagation();
+              api.downloadFile(props.node.path).catch((err) =>
+                console.error("download failed", err),
+              );
+            }}
+          >
+            ⬇
+          </button>
+        </Show>
       </div>
       <Show when={open() && props.node.is_dir}>
         <div style={{ "padding-left": "14px" }}>
