@@ -130,6 +130,21 @@ const TerminalView: Component<Props> = (props) => {
     // Wire input: user keystrokes → PTY stdin.
     term.onData((data) => sendToPty(data));
 
+    // Intercept browser paste events (Ctrl+V / Edit→Paste) in the capture phase,
+    // before xterm.js wraps them in bracketed-paste sequences (\x1b[200~...\x1b[201~).
+    // Programs like infisical that don't implement bracketed-paste mode receive the
+    // escape sequences as literal input, corrupting base64 tokens.
+    term.textarea?.addEventListener(
+      "paste",
+      (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const text = (e as ClipboardEvent).clipboardData?.getData("text/plain") ?? "";
+        if (text) sendToPty(text);
+      },
+      true, // capture phase — runs before xterm's bubble-phase listener
+    );
+
     // Clipboard plumbing.
     const copySelection = async () => {
       const sel = term?.getSelection() ?? "";
