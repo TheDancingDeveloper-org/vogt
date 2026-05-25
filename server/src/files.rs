@@ -194,7 +194,10 @@ pub async fn download_file(
         .unwrap_or_else(|| "download".into());
     let disposition = format!("attachment; filename=\"{}\"", filename);
     let response = Response::builder()
-        .header(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"))
+        .header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        )
         .header(
             header::CONTENT_DISPOSITION,
             HeaderValue::from_str(&disposition)
