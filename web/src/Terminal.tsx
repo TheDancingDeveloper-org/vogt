@@ -37,6 +37,10 @@ const TerminalView: Component<Props> = (props) => {
   let fit: FitAddon | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let inSnapshot = true;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectDelay = 500;
+  let destroyed = false;
+  let visibilityHandler: (() => void) | null = null;
 
   const sendToPty = (data: string | ArrayBuffer) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -207,15 +211,35 @@ const TerminalView: Component<Props> = (props) => {
 
     props.registerSend?.(sendToPty);
 
+    // On mobile the OS kills the WebSocket when the app is backgrounded.
+    // Reconnect immediately when the page becomes visible again.
+    visibilityHandler = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        reconnectDelay = 500;
+        connect();
+      }
+    };
+    document.addEventListener("visibilitychange", visibilityHandler);
+
     connect();
   });
+
+  function scheduleReconnect(delayMs = reconnectDelay) {
+    if (destroyed || reconnectTimer !== null) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (!destroyed) connect();
+    }, delayMs);
+    reconnectDelay = Math.min(reconnectDelay * 2, 8_000);
+  }
 
   function connect() {
     inSnapshot = true;
     ws = openAttach(props.sessionId);
     ws.addEventListener("open", () => {
-      // Force a fresh resize as soon as we're attached so the server's PTY
-      // tracks the visible dimensions, not the 80x24 default.
+      reconnectDelay = 500;
       sendResize();
     });
     ws.addEventListener("message", (ev) => {
@@ -226,27 +250,24 @@ const TerminalView: Component<Props> = (props) => {
             | { type: "snapshot-done" }
             | { type: "lag"; note?: string };
           if (ctrl.type === "snapshot-start") {
-            // Clear screen + scrollback before replaying. Otherwise the
-            // snapshot prints on top of a stale buffer.
             term?.reset();
             inSnapshot = true;
           } else if (ctrl.type === "snapshot-done") {
             inSnapshot = false;
             sendResize();
           } else if (ctrl.type === "lag") {
-            // Server kicked us for being too slow — reattach.
-            term?.write(
-              "\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n",
-            );
+            term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
+            // Cancel any timer so the close event below doesn't double-schedule.
+            if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            reconnectDelay = 500;
             ws?.close();
-            setTimeout(connect, 100);
+            scheduleReconnect(100);
           }
         } catch {
           /* ignore non-JSON text frames */
         }
         return;
       }
-      // Binary frame: PTY output. ev.data is an ArrayBuffer.
       const buf = new Uint8Array(ev.data as ArrayBuffer);
       term?.write(buf);
     });
@@ -254,6 +275,7 @@ const TerminalView: Component<Props> = (props) => {
       if (!inSnapshot) {
         term?.write("\r\n\x1b[33m[disconnected]\x1b[0m\r\n");
       }
+      scheduleReconnect();
     });
     ws.addEventListener("error", () => {
       // Browser fires both error + close; close handler is enough.
@@ -272,6 +294,12 @@ const TerminalView: Component<Props> = (props) => {
   });
 
   onCleanup(() => {
+    destroyed = true;
+    if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (visibilityHandler) {
+      document.removeEventListener("visibilitychange", visibilityHandler);
+      visibilityHandler = null;
+    }
     resizeObserver?.disconnect();
     try {
       ws?.close();
