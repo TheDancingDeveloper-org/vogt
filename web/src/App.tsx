@@ -6,6 +6,7 @@ import {
   createSignal,
   onCleanup,
   onMount,
+  untrack,
 } from "solid-js";
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
 import Terminal, { type TerminalActions } from "./Terminal";
@@ -243,12 +244,16 @@ const App: Component = () => {
   };
 
   // Once the server session list is loaded, remove tabs for sessions that no
-  // longer exist (e.g. after a server restart). This stops Terminal components
-  // from looping on 404 WS reconnects and blocking the HTTP/1.1 connection pool.
+  // longer exist (e.g. after a server restart). Runs exactly once: sessionsStore.ready
+  // is the only tracked dependency. tabsStore and sessionsStore.sessions are read via
+  // untrack so that subsequent tab opens/session arrivals don't re-trigger this and
+  // incorrectly treat a brand-new tab (whose SSE event hasn't arrived yet) as stale.
   createEffect(() => {
     if (!sessionsStore.ready) return;
-    const stale = tabsStore.tabs.filter(
-      (t) => t.kind === "terminal" && !sessionsStore.sessions[(t as Extract<Tab, { kind: "terminal" }>).sessionId],
+    const stale = untrack(() =>
+      tabsStore.tabs.filter(
+        (t) => t.kind === "terminal" && !sessionsStore.sessions[(t as Extract<Tab, { kind: "terminal" }>).sessionId],
+      )
     );
     for (const tab of stale) {
       closeTabAndNavigate(tab.id);
