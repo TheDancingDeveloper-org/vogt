@@ -242,6 +242,19 @@ const App: Component = () => {
     navigate(next ? pathFor(next) : "/", { replace: true });
   };
 
+  // Once the server session list is loaded, remove tabs for sessions that no
+  // longer exist (e.g. after a server restart). This stops Terminal components
+  // from looping on 404 WS reconnects and blocking the HTTP/1.1 connection pool.
+  createEffect(() => {
+    if (!sessionsStore.ready) return;
+    const stale = tabsStore.tabs.filter(
+      (t) => t.kind === "terminal" && !sessionsStore.sessions[(t as Extract<Tab, { kind: "terminal" }>).sessionId],
+    );
+    for (const tab of stale) {
+      closeTabAndNavigate(tab.id);
+    }
+  });
+
   const requestCloseTab = async (tabId: string) => {
     const tab = tabsStore.tabs.find((t) => t.id === tabId);
     if (tab && tab.kind === "editor" && tab.dirty) {

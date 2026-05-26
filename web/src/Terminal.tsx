@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { openAttach } from "./api";
+import { sessionsStore } from "./store";
 
 export interface TerminalActions {
   /** Copy the current xterm selection to the system clipboard. */
@@ -40,6 +41,7 @@ const TerminalView: Component<Props> = (props) => {
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectDelay = 500;
   let destroyed = false;
+  let sessionGone = false;
   let visibilityHandler: (() => void) | null = null;
   let pasteTextareaRef: HTMLTextAreaElement | undefined;
   const [showPasteModal, setShowPasteModal] = createSignal(false);
@@ -265,8 +267,20 @@ const TerminalView: Component<Props> = (props) => {
     connect();
   });
 
+  function markSessionGone() {
+    if (!sessionGone) {
+      sessionGone = true;
+      term?.write("\r\n\x1b[31m[session not found — server may have restarted]\x1b[0m\r\n");
+    }
+  }
+
+  function isSessionGone(): boolean {
+    return sessionsStore.ready && !sessionsStore.sessions[props.sessionId];
+  }
+
   function scheduleReconnect(delayMs = reconnectDelay) {
     if (destroyed || reconnectTimer !== null) return;
+    if (isSessionGone()) { markSessionGone(); return; }
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       if (!destroyed) connect();
@@ -275,6 +289,7 @@ const TerminalView: Component<Props> = (props) => {
   }
 
   function connect() {
+    if (isSessionGone()) { markSessionGone(); return; }
     inSnapshot = true;
     ws = openAttach(props.sessionId);
     ws.addEventListener("open", () => {
