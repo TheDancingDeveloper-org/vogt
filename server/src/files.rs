@@ -1,7 +1,4 @@
-use std::{
-    path::{Component, Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::Path, sync::Arc};
 
 use axum::{
     body::Body,
@@ -10,39 +7,16 @@ use axum::{
     response::Response,
     Json,
 };
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use tokio_util::io::ReaderStream;
 
 use crate::{
     app::AppState,
     error::{ApiError, Result},
+    workspace_path,
 };
-
-/// Resolve a client-supplied path *strictly* under `workspace_root`.
-///
-/// Rules:
-/// - Treat all paths as relative to `workspace_root`, stripping any leading `/`.
-/// - Reject `..` components outright (no clever escapes via `a/../../b`).
-/// - The final path need not exist; that's the handler's call.
-fn safe_resolve(root: &Path, requested: &str) -> Result<PathBuf> {
-    let rel = requested.trim_start_matches('/');
-    let mut out = root.to_path_buf();
-    for comp in Path::new(rel).components() {
-        match comp {
-            Component::Normal(s) => out.push(s),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(ApiError::BadRequest(
-                    "path contains '..' (parent component)".into(),
-                ));
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(ApiError::BadRequest("path must be relative".into()));
-            }
-        }
-    }
-    Ok(out)
-}
 
 /// Relativise a resolved absolute path back to the workspace root.
 fn rel_to(root: &Path, p: &Path) -> String {
@@ -70,7 +44,11 @@ pub async fn list_dir(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<FileEntry>>> {
-    let dir = safe_resolve(&state.config.workspace_root, &q.path)?;
+    let dir = if q.path.trim().is_empty() {
+        state.config.workspace_root.clone()
+    } else {
+        workspace_path::resolve_existing(&state.config.workspace_root, &q.path)?
+    };
     let meta = tokio::fs::metadata(&dir).await?;
     if !meta.is_dir() {
         return Err(ApiError::BadRequest(format!("not a directory: {}", q.path)));
@@ -126,15 +104,15 @@ pub struct FileRead {
 /// pathological file. ~5 MiB matches typical editor comfort.
 const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
 
-/// Hard cap for downloads — 512 MiB. Prevents trivially OOM-ing the server
-/// via download of a huge file from a workspace.
+/// Hard cap for downloads — 512 MiB. The body is streamed, so this caps
+/// transfer size rather than memory usage.
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
 pub async fn read_file(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ReadQuery>,
 ) -> Result<Json<FileRead>> {
-    let p = safe_resolve(&state.config.workspace_root, &q.path)?;
+    let p = workspace_path::resolve_existing(&state.config.workspace_root, &q.path)?;
     let meta = tokio::fs::metadata(&p).await?;
     if !meta.is_file() {
         return Err(ApiError::BadRequest(format!("not a file: {}", q.path)));
@@ -153,7 +131,7 @@ pub async fn read_file(
             path: rel_to(&state.config.workspace_root, &p),
             size: meta.len(),
             content: None,
-            content_base64: Some(base64(&bytes)),
+            content_base64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
             is_binary: true,
         }
     } else {
@@ -175,7 +153,7 @@ pub async fn download_file(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ReadQuery>,
 ) -> Result<Response> {
-    let p = safe_resolve(&state.config.workspace_root, &q.path)?;
+    let p = workspace_path::resolve_existing(&state.config.workspace_root, &q.path)?;
     let meta = tokio::fs::metadata(&p).await?;
     if !meta.is_file() {
         return Err(ApiError::BadRequest(format!("not a file: {}", q.path)));
@@ -187,7 +165,9 @@ pub async fn download_file(
             MAX_DOWNLOAD_BYTES
         )));
     }
-    let bytes = tokio::fs::read(&p).await?;
+    let file = tokio::fs::File::open(&p).await?;
+    let stream = ReaderStream::with_capacity(file, 64 * 1024);
+    let body = Body::from_stream(stream);
     let filename = p
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -203,7 +183,8 @@ pub async fn download_file(
             HeaderValue::from_str(&disposition)
                 .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
         )
-        .body(Body::from(bytes))
+        .header(header::CONTENT_LENGTH, HeaderValue::from(meta.len()))
+        .body(body)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(response)
 }
@@ -221,12 +202,17 @@ pub async fn write_file(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WriteReq>,
 ) -> Result<Json<serde_json::Value>> {
-    let p = safe_resolve(&state.config.workspace_root, &req.path)?;
     if req.create_parents {
-        if let Some(parent) = p.parent() {
+        // Need to materialise the parent before resolve_for_write can canonicalise it.
+        // strip_lexically equivalent via resolve_existing_or_lexical handles the validation
+        // of components; we then pull the parent and mkdir-p, asserting it's still under root.
+        let lexical =
+            workspace_path::resolve_existing_or_lexical(&state.config.workspace_root, &req.path)?;
+        if let Some(parent) = lexical.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
     }
+    let p = workspace_path::resolve_for_write(&state.config.workspace_root, &req.path)?;
     tokio::fs::write(&p, req.content.as_bytes()).await?;
     Ok(Json(
         serde_json::json!({ "ok": true, "bytes": req.content.len() }),
@@ -256,7 +242,11 @@ pub async fn tree(
     Query(q): Query<TreeQuery>,
 ) -> Result<Json<Vec<TreeNode>>> {
     let depth = q.depth.unwrap_or(0).min(3);
-    let dir = safe_resolve(&state.config.workspace_root, &q.path)?;
+    let dir = if q.path.trim().is_empty() {
+        state.config.workspace_root.clone()
+    } else {
+        workspace_path::resolve_existing(&state.config.workspace_root, &q.path)?
+    };
     let kids = walk_dir(&state.config.workspace_root, &dir, depth).await?;
     Ok(Json(kids))
 }
@@ -274,6 +264,11 @@ async fn walk_dir(root: &Path, dir: &Path, depth: u32) -> Result<Vec<TreeNode>> 
             Ok(ft) => ft,
             Err(_) => continue,
         };
+        // Don't follow symlinks during a tree walk — could escape the workspace
+        // root via an outward-pointing link.
+        if ft.is_symlink() {
+            continue;
+        }
         let children = if ft.is_dir() && depth > 0 {
             // Recurse — `Box::pin` to break the async-fn recursion size issue.
             Some(Box::pin(walk_dir(root, &path, depth - 1)).await?)
@@ -325,7 +320,11 @@ pub async fn search(
     if q.q.is_empty() {
         return Err(ApiError::BadRequest("q must not be empty".into()));
     }
-    let dir = safe_resolve(&state.config.workspace_root, &q.path)?;
+    let dir = if q.path.trim().is_empty() {
+        state.config.workspace_root.clone()
+    } else {
+        workspace_path::resolve_existing(&state.config.workspace_root, &q.path)?
+    };
     let cap = q.max.unwrap_or(200).min(SEARCH_HARD_CAP);
 
     let mut cmd = Command::new("rg");
@@ -382,64 +381,9 @@ fn looks_binary(b: &[u8]) -> bool {
     b[..n].contains(&0)
 }
 
-fn base64(b: &[u8]) -> String {
-    use std::fmt::Write as _;
-    const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(b.len().div_ceil(3) * 4);
-    let mut i = 0;
-    while i + 3 <= b.len() {
-        let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8) | (b[i + 2] as u32);
-        out.push(TBL[((n >> 18) & 0x3f) as usize] as char);
-        out.push(TBL[((n >> 12) & 0x3f) as usize] as char);
-        out.push(TBL[((n >> 6) & 0x3f) as usize] as char);
-        out.push(TBL[(n & 0x3f) as usize] as char);
-        i += 3;
-    }
-    let rem = b.len() - i;
-    if rem == 1 {
-        let n = (b[i] as u32) << 16;
-        let _ = write!(
-            out,
-            "{}{}==",
-            TBL[((n >> 18) & 0x3f) as usize] as char,
-            TBL[((n >> 12) & 0x3f) as usize] as char
-        );
-    } else if rem == 2 {
-        let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8);
-        let _ = write!(
-            out,
-            "{}{}{}=",
-            TBL[((n >> 18) & 0x3f) as usize] as char,
-            TBL[((n >> 12) & 0x3f) as usize] as char,
-            TBL[((n >> 6) & 0x3f) as usize] as char
-        );
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn safe_resolve_accepts_relative() {
-        let root = PathBuf::from("/tmp/foo");
-        assert_eq!(
-            safe_resolve(&root, "a/b").unwrap(),
-            PathBuf::from("/tmp/foo/a/b")
-        );
-        assert_eq!(
-            safe_resolve(&root, "/a/b").unwrap(),
-            PathBuf::from("/tmp/foo/a/b")
-        );
-    }
-
-    #[test]
-    fn safe_resolve_rejects_parent_dir() {
-        let root = PathBuf::from("/tmp/foo");
-        assert!(safe_resolve(&root, "../escape").is_err());
-        assert!(safe_resolve(&root, "a/../../escape").is_err());
-    }
 
     #[test]
     fn binary_detection() {

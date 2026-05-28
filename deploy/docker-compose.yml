@@ -28,6 +28,10 @@ services:
       # Persist tailscaled state so we don't re-auth on every restart.
       - /mnt/2tnvme/docker/volumes/mydevenv2/tailscale:/var/lib/tailscale
       # DooD: containers launched from inside the pod hit the host daemon.
+      # SECURITY: a compromise of the single bearer token escalates to host-
+      # level docker control via this socket. Acceptable for a personal
+      # tailnet-only dev pod; consider docker-socket-proxy or removing this
+      # mount for deployments where docker-in-pod isn't needed.
       - /var/run/docker.sock:/var/run/docker.sock
 
     environment:

@@ -1,32 +1,42 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseCode, CloseFrame, Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
+use subtle::ConstantTimeEq;
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
-use crate::{app::AppState, auth::ws_token_ok};
+use crate::app::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct AttachQuery {
-    /// Bearer token for browser clients that can't set Authorization on WS.
+    /// Legacy: token in query string. Deprecated — left in only so an existing
+    /// client that hasn't been redeployed still works. Real auth is via the
+    /// first text frame `{"type":"auth","token":"..."}`. Tokens passed here
+    /// land in proxy/access logs and shouldn't be relied on for new clients.
     pub token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 enum ClientControl {
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     Ping,
+    /// First-frame auth. Anything else before this is rejected.
+    Auth {
+        token: String,
+    },
 }
 
 /// Chunk size for streaming the scrollback snapshot back to the client.
@@ -34,24 +44,105 @@ enum ClientControl {
 /// avoids spikes in browser memory while the buffer parses.
 const SNAPSHOT_CHUNK: usize = 64 * 1024;
 
+/// How long a freshly-upgraded socket has to send `{"type":"auth",...}` before
+/// we drop it. Keeps unauth clients from hanging on to a socket indefinitely.
+const AUTH_DEADLINE: Duration = Duration::from_secs(5);
+
 pub async fn attach(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
     Query(q): Query<AttachQuery>,
-    headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !ws_token_ok(&state, &headers, q.token.as_deref()) {
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-    }
-    let session = match state.sessions.get(id) {
-        Ok(s) => s,
-        Err(_) => return (StatusCode::NOT_FOUND, "no such session").into_response(),
-    };
-    ws.on_upgrade(move |socket| handle_socket(socket, session))
+    // Do not check auth before upgrading — the bearer is supplied by the
+    // first client text frame so it doesn't end up in access/proxy logs.
+    // The legacy ?token= path still works for older clients.
+    let legacy = q.token.clone();
+    ws.on_upgrade(move |socket| handle_socket(socket, state, id, legacy))
 }
 
-async fn handle_socket(socket: WebSocket, session: Arc<crate::pty::Session>) {
+async fn close_with(socket: &mut WebSocket, code: CloseCode, reason: &'static str) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        })))
+        .await;
+}
+
+/// Returns true if `candidate` matches the configured server token (constant time).
+fn token_ok(state: &AppState, candidate: &str) -> bool {
+    bool::from(candidate.as_bytes().ct_eq(state.config.token.as_bytes()))
+}
+
+/// Read the first frame after upgrade. Must be an `auth` control frame OR the
+/// legacy `?token=` query param must have been correct. Returns Some(()) on
+/// success, None on failure (after sending a close frame).
+async fn authenticate(
+    socket: &mut WebSocket,
+    state: &Arc<AppState>,
+    legacy_token: Option<&str>,
+) -> Option<()> {
+    if let Some(tok) = legacy_token {
+        if token_ok(state, tok) {
+            return Some(());
+        }
+    }
+
+    let first = match tokio::time::timeout(AUTH_DEADLINE, socket.recv()).await {
+        Ok(Some(Ok(msg))) => msg,
+        Ok(Some(Err(_))) | Ok(None) => {
+            return None;
+        }
+        Err(_) => {
+            close_with(socket, 4408, "auth timeout").await;
+            return None;
+        }
+    };
+    let text = match first {
+        Message::Text(s) => s,
+        _ => {
+            close_with(socket, 4401, "auth frame required").await;
+            return None;
+        }
+    };
+    let parsed: ClientControl = match serde_json::from_str(&text) {
+        Ok(c) => c,
+        Err(_) => {
+            close_with(socket, 4401, "auth frame required").await;
+            return None;
+        }
+    };
+    match parsed {
+        ClientControl::Auth { token } if token_ok(state, &token) => Some(()),
+        _ => {
+            close_with(socket, 4401, "unauthorized").await;
+            None
+        }
+    }
+}
+
+async fn handle_socket(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    id: Uuid,
+    legacy_token: Option<String>,
+) {
+    if authenticate(&mut socket, &state, legacy_token.as_deref())
+        .await
+        .is_none()
+    {
+        return;
+    }
+
+    let session = match state.sessions.get(id) {
+        Ok(s) => s,
+        Err(_) => {
+            close_with(&mut socket, 4404, "no such session").await;
+            return;
+        }
+    };
+
     let (mut sink, mut stream) = socket.split();
 
     // Subscribe BEFORE snapshotting so no broadcast chunks are missed in the gap.
@@ -111,6 +202,9 @@ async fn handle_socket(socket: WebSocket, session: Arc<crate::pty::Session>) {
                             let _ = writer_session.resize(cols, rows);
                         }
                         Ok(ClientControl::Ping) => {}
+                        Ok(ClientControl::Auth { .. }) => {
+                            // Already authenticated; ignore further auth frames.
+                        }
                         Err(_) => {
                             // Plain-text input (some tools send text frames).
                             if writer_session.write_input(s.as_bytes()).is_err() {

@@ -9,16 +9,26 @@
 # Built and pushed by .woodpecker.yml as repo.indexarr.net/indexarr/mydevenv2.
 # Deployed via Komodo (see deploy/docker-compose.yml).
 
+# Pinned tool versions. Bump deliberately, alongside a fresh rebuild + smoke
+# test on the target periphery. Out-of-band pins also live in the woodpecker
+# pipeline so CI builds bit-identical artefacts.
+ARG NODE_IMAGE=node:22-bookworm
+ARG RUST_IMAGE=rust:1.95-bookworm
+ARG PNPM_VERSION=10.18.0
+ARG SCCACHE_VERSION=0.10.0
+ARG SELKIES_VERSION=1.6.2
+
 # ─── Stage 1: web bundle ────────────────────────────────────────────────────
-FROM node:22-bookworm AS web-build
+FROM ${NODE_IMAGE} AS web-build
 WORKDIR /app/web
+ARG PNPM_VERSION
 COPY web/package.json web/pnpm-lock.yaml ./
-RUN npm install -g pnpm@10 && pnpm install --frozen-lockfile
+RUN npm install -g pnpm@${PNPM_VERSION} && pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm build
 
 # ─── Stage 2: rust binary with embedded web/ ────────────────────────────────
-FROM rust:1.95-bookworm AS server-build
+FROM ${RUST_IMAGE} AS server-build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY server/Cargo.toml ./server/Cargo.toml
@@ -110,20 +120,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # GStreamer + WebRTC bits for in-pod GUI streaming.
 #
-# Selkies-GStreamer used to ship a `selkies-gstreamer` package on PyPI; the
-# project renamed/restructured and the pinned name no longer resolves. Install
-# the GStreamer plugins (useful for any WebRTC stack), and treat the Selkies
-# install itself as best-effort here — wire the actual streamer in a follow-up
-# (likely via the upstream Docker image or a `pip install selkies` once the
-# new pypi name stabilises).
+# Selkies-GStreamer was previously installed best-effort because the PyPI name
+# was unstable. We now pin a known-good version and record the result in
+# /etc/mydevenv2/features.json so the server can expose accurate "what's
+# available" state via /api/config without misleading users about GUI support.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
         gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
         gstreamer1.0-libav gstreamer1.0-tools \
         python3-pip libgstreamer1.0-0 \
     && rm -rf /var/lib/apt/lists/*
-RUN pip3 install --break-system-packages --no-cache-dir selkies 2>/dev/null \
-    || echo "selkies pip package not available — install upstream Docker image or wire later"
+
+ARG SELKIES_VERSION
+RUN install -d /etc/mydevenv2 \
+    && if pip3 install --break-system-packages --no-cache-dir "selkies==${SELKIES_VERSION}"; then \
+        echo "{\"selkies\":\"${SELKIES_VERSION}\"}" > /etc/mydevenv2/features.json; \
+    else \
+        echo "selkies==${SELKIES_VERSION} unavailable — GUI streaming disabled in this image" >&2; \
+        echo "{\"selkies\":null}" > /etc/mydevenv2/features.json; \
+    fi
 
 # Rust toolchain (full dev env so user can build inside the pod too)
 ARG SPROOTY_UID=1000
@@ -147,14 +162,19 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && cargo install cargo-deb cargo-zigbuild cargo-xwin cargo-watch
 
 # sccache (apt package lacks Redis support; pull from GitHub)
-ARG SCCACHE_VERSION=0.10.0
+ARG SCCACHE_VERSION
 RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
        | tar -xz -C /tmp \
     && mv "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /home/sprooty/.cargo/bin/sccache \
     && chmod +x /home/sprooty/.cargo/bin/sccache
 
-# Python tools the user expects (uv, ruff)
-RUN pip3 install --user --break-system-packages --no-cache-dir uv ruff || true
+# Python tools the user expects (uv, ruff). Fail the build if they don't
+# install — silent fallback would leave the pod with broken Python tooling
+# that surfaces as cryptic command-not-found errors at runtime.
+ARG UV_VERSION=0.5.20
+ARG RUFF_VERSION=0.7.4
+RUN pip3 install --user --break-system-packages --no-cache-dir \
+        "uv==${UV_VERSION}" "ruff==${RUFF_VERSION}"
 
 USER root
 

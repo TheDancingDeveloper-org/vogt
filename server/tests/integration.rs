@@ -23,6 +23,8 @@ fn test_config() -> Config {
         gui_stream_url: None,
         state_dir: tempfile::tempdir().unwrap().keep(),
         fcm_service_account_json: None,
+        vapid_subject: "mailto:test@example.invalid".to_string(),
+        allowed_origins: vec![],
     }
 }
 
@@ -294,8 +296,11 @@ async fn ws_attach(
     id: &str,
 ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let ws_url = base.replace("http://", "ws://");
-    let url = format!("{ws_url}/api/sessions/{id}/attach?token={TEST_TOKEN}");
-    let (ws, _resp) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let url = format!("{ws_url}/api/sessions/{id}/attach");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(url).await.unwrap();
+    // First-frame auth (the legacy ?token= path still works but is deprecated).
+    let auth = serde_json::json!({"type": "auth", "token": TEST_TOKEN}).to_string();
+    ws.send(Message::Text(auth.into())).await.unwrap();
     ws
 }
 
@@ -422,6 +427,8 @@ async fn file_api_round_trip() {
         gui_stream_url: None,
         state_dir: tempfile::tempdir().unwrap().keep(),
         fcm_service_account_json: None,
+        vapid_subject: "mailto:test@example.invalid".to_string(),
+        allowed_origins: vec![],
     };
     let (router, _state) = router(cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -552,6 +559,8 @@ async fn git_status_log_branch() {
         gui_stream_url: None,
         state_dir: tempfile::tempdir().unwrap().keep(),
         fcm_service_account_json: None,
+        vapid_subject: "mailto:test@example.invalid".to_string(),
+        allowed_origins: vec![],
     };
     let (router, _state) = router(cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

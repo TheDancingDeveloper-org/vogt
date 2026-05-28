@@ -160,11 +160,25 @@ pub async fn kill_proc(
 pub struct PublicConfig {
     pub gui_stream_url: Option<String>,
     pub version: &'static str,
+    /// Build-time feature availability, read from `/etc/mydevenv2/features.json`.
+    /// `{"selkies": "1.6.2"}` when present, `{"selkies": null}` when the image
+    /// was built without Selkies. UI hides the GUI tab when selkies is null.
+    pub features: serde_json::Value,
 }
 
 pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicConfig> {
     Json(PublicConfig {
         gui_stream_url: state.config.gui_stream_url.clone(),
         version: env!("CARGO_PKG_VERSION"),
+        features: load_features(),
     })
+}
+
+fn load_features() -> serde_json::Value {
+    // Read once per request — the file is tiny and avoids needing a refresh
+    // on process restart if the operator updates it out of band.
+    std::fs::read_to_string("/etc/mydevenv2/features.json")
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
 }

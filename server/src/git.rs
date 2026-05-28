@@ -1,5 +1,5 @@
 use std::{
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -13,31 +13,12 @@ use tokio::process::Command;
 use crate::{
     app::AppState,
     error::{ApiError, Result},
+    workspace_path,
 };
 
-/// Same strict path-component guard as files.rs, intentionally duplicated
-/// here so module dependencies stay flat. Resolves a relative repo path
-/// under `workspace_root`.
-fn safe_under(root: &Path, requested: &str) -> Result<PathBuf> {
-    let rel = requested.trim_start_matches('/');
-    let mut out = root.to_path_buf();
-    for comp in Path::new(rel).components() {
-        match comp {
-            Component::Normal(s) => out.push(s),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(ApiError::BadRequest("path contains '..'".into()));
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(ApiError::BadRequest("path must be relative".into()));
-            }
-        }
-    }
-    Ok(out)
-}
-
 /// Walk upwards from `start` (inclusive) until we find a `.git` directory.
-async fn find_repo_root(start: &Path) -> Result<PathBuf> {
+/// Stops at `boundary` (exclusive) so we can't walk past the workspace root.
+async fn find_repo_root(start: &Path, boundary: &Path) -> Result<PathBuf> {
     let mut cur = start.to_path_buf();
     loop {
         if tokio::fs::try_exists(cur.join(".git"))
@@ -46,9 +27,12 @@ async fn find_repo_root(start: &Path) -> Result<PathBuf> {
         {
             return Ok(cur);
         }
+        if cur == boundary {
+            return Err(ApiError::NotFound);
+        }
         match cur.parent() {
-            Some(p) => cur = p.to_path_buf(),
-            None => return Err(ApiError::NotFound),
+            Some(p) if p.starts_with(boundary) || p == boundary => cur = p.to_path_buf(),
+            _ => return Err(ApiError::NotFound),
         }
     }
 }
@@ -56,8 +40,13 @@ async fn find_repo_root(start: &Path) -> Result<PathBuf> {
 /// Resolve a repo from query: ?repo= relative to workspace_root, else
 /// workspace_root itself. Returns the canonical repo root (with .git).
 async fn resolve_repo(state: &Arc<AppState>, repo: &str) -> Result<PathBuf> {
-    let candidate = safe_under(&state.config.workspace_root, repo)?;
-    find_repo_root(&candidate).await
+    let root = &state.config.workspace_root;
+    let candidate = if repo.trim().is_empty() {
+        root.clone()
+    } else {
+        workspace_path::resolve_existing(root, repo)?
+    };
+    find_repo_root(&candidate, root).await
 }
 
 async fn run_git(repo: &Path, args: &[&str]) -> Result<String> {

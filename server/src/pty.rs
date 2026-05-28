@@ -248,7 +248,7 @@ pub fn spawn(
         exit_code: Mutex::new(None),
     });
 
-    spawn_reader_thread(Arc::clone(&session), reader, tx, bus.clone());
+    spawn_reader_thread(Arc::clone(&session), reader, tx, bus.clone())?;
     spawn_exit_waiter(Arc::clone(&session), bus.clone());
     spawn_activity_ticker(Arc::clone(&session), bus);
 
@@ -260,7 +260,7 @@ fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     tx: broadcast::Sender<OutputChunk>,
     bus: EventBus,
-) {
+) -> Result<()> {
     std::thread::Builder::new()
         .name(format!("pty-read-{}", session.id))
         .spawn(move || {
@@ -290,7 +290,8 @@ fn spawn_reader_thread(
                 }
             }
         })
-        .expect("spawn pty reader thread");
+        .map_err(|e| ApiError::Pty(format!("spawn pty reader thread: {e}")))?;
+    Ok(())
 }
 
 fn spawn_exit_waiter(session: Arc<Session>, bus: EventBus) {

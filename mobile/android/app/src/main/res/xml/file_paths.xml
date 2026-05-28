@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Capacitor's bundled FileProvider needs at least one path. The app doesn't
+  share user files through the provider today; keep this narrow so a misuse
+  can't expose arbitrary external storage. Add a specific sub-path here only
+  if a plugin actually needs to share content via content:// URIs.
+-->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <external-path name="my_images" path="." />
-    <cache-path name="my_cache_images" path="." />
+    <cache-path name="shared_cache" path="shared/" />
 </paths>

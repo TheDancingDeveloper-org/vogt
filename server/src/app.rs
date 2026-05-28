@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
+    http::{header, HeaderValue, Method},
     middleware,
     routing::{get, post},
     Router,
@@ -28,8 +29,12 @@ pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
     let sessions = Arc::new(SessionRegistry::new(Arc::clone(&cfg), bus.clone()));
     let gui = Arc::new(GuiRegistry::new());
     let push = Arc::new(
-        PushManager::new(&cfg.state_dir, cfg.fcm_service_account_json.as_deref())
-            .expect("push manager init"),
+        PushManager::with_subject(
+            &cfg.state_dir,
+            cfg.fcm_service_account_json.as_deref(),
+            &cfg.vapid_subject,
+        )
+        .expect("push manager init"),
     );
     let state = Arc::new(AppState {
         config: cfg,
@@ -94,16 +99,43 @@ pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/", get(assets::root))
         .route("/{*path}", get(assets::asset_wild));
 
+    let cors = build_cors(&state.config.allowed_origins);
+
     let router = Router::new()
         .merge(public)
         .merge(api_routes)
         .merge(ws_routes)
         .merge(asset_routes)
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::very_permissive())
+        .layer(cors)
         .with_state(Arc::clone(&state));
 
     (router, state)
+}
+
+fn build_cors(origins: &[String]) -> CorsLayer {
+    let parsed: Vec<HeaderValue> = origins
+        .iter()
+        .filter_map(|o| HeaderValue::from_str(o).ok())
+        .collect();
+    let layer = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+        .allow_credentials(false)
+        .max_age(std::time::Duration::from_secs(600));
+    if parsed.is_empty() {
+        // No origins configured = same-origin only. Don't emit Access-Control-*.
+        layer
+    } else {
+        layer.allow_origin(parsed)
+    }
 }
 
 pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {

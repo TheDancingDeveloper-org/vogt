@@ -25,6 +25,13 @@ pub struct Config {
     /// from `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` env or config file. Empty
     /// disables FCM push (web-push still works for browser subscriptions).
     pub fcm_service_account_json: Option<String>,
+    /// VAPID `subject` (`mailto:` or `https:` URL). RFC 8292 requires this on
+    /// the JWT we sign for web-push.
+    pub vapid_subject: String,
+    /// Comma-separated allow-list of origins for the CORS layer. Defaults to
+    /// the production origin plus the local Vite dev origin. Override with
+    /// `MYDEVENV2_ALLOWED_ORIGINS` (comma-separated) or the config file.
+    pub allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -39,6 +46,8 @@ struct FileConfig {
     gui_stream_url: Option<String>,
     state_dir: Option<String>,
     fcm_service_account_json: Option<String>,
+    vapid_subject: Option<String>,
+    allowed_origins: Option<Vec<String>>,
 }
 
 pub fn load(
@@ -109,7 +118,43 @@ pub fn load(
             .fcm_service_account_json
             .or_else(|| std::env::var("MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON").ok())
             .filter(|s| !s.trim().is_empty()),
+        vapid_subject: from_file
+            .vapid_subject
+            .or_else(|| std::env::var("MYDEVENV2_VAPID_SUBJECT").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "mailto:admin@example.invalid".to_string()),
+        allowed_origins: parse_allowed_origins(
+            from_file.allowed_origins,
+            std::env::var("MYDEVENV2_ALLOWED_ORIGINS").ok(),
+        ),
     })
+}
+
+fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<String> {
+    if let Some(list) = file {
+        return list
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    if let Some(s) = env {
+        let list: Vec<String> = s
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !list.is_empty() {
+            return list;
+        }
+    }
+    // Defaults: deployed PWA + Vite dev server. Adjust via MYDEVENV2_ALLOWED_ORIGINS
+    // for staging/preview environments.
+    vec![
+        "https://mydevenv2.sprooty.com".to_string(),
+        "http://localhost:5173".to_string(),
+        "http://127.0.0.1:5173".to_string(),
+    ]
 }
 
 fn dirs_home() -> Option<std::path::PathBuf> {

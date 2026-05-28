@@ -15,6 +15,7 @@ pub mod push_api;
 pub mod push_fcm;
 pub mod scrollback;
 pub mod sessions;
+pub mod workspace_path;
 pub mod ws;
 
 pub use app::{router, serve_forever};

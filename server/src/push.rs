@@ -95,6 +95,14 @@ pub struct PushManager {
 
 impl PushManager {
     pub fn new(state_dir: &Path, fcm_sa_json: Option<&str>) -> Result<Self> {
+        Self::with_subject(state_dir, fcm_sa_json, "mailto:admin@example.invalid")
+    }
+
+    pub fn with_subject(
+        state_dir: &Path,
+        fcm_sa_json: Option<&str>,
+        vapid_subject: &str,
+    ) -> Result<Self> {
         std::fs::create_dir_all(state_dir)
             .map_err(|e| ApiError::Config(format!("state_dir {}: {e}", state_dir.display())))?;
         let store_path = state_dir.join("push.json");
@@ -110,9 +118,15 @@ impl PushManager {
 
         // Materialise a VAPID identity on first use.
         if state.vapid.is_none() {
-            state.vapid = Some(generate_vapid()?);
+            state.vapid = Some(generate_vapid(vapid_subject)?);
             persist(&store_path, &state)?;
             info!("generated new VAPID keypair under {}", state_dir.display());
+        } else if let Some(v) = state.vapid.as_mut() {
+            // Allow operators to update the subject without regenerating keys.
+            if v.subject != vapid_subject {
+                v.subject = vapid_subject.to_string();
+                persist(&store_path, &state)?;
+            }
         }
 
         let web = IsahcWebPushClient::new()
@@ -311,7 +325,7 @@ fn persist(path: &Path, state: &Store) -> Result<()> {
 /// Mint an EC P-256 keypair for VAPID. Returns the private key as PKCS8 PEM
 /// (what the web-push crate expects) and the public key as base64url-no-pad
 /// (what the browser expects in `applicationServerKey`).
-fn generate_vapid() -> Result<Vapid> {
+fn generate_vapid(subject: &str) -> Result<Vapid> {
     use base64::Engine as _;
 
     // The `web-push` crate gives us no key-gen helper; openssl is the obvious
@@ -342,7 +356,7 @@ fn generate_vapid() -> Result<Vapid> {
     Ok(Vapid {
         private_pem: pem,
         public_b64url,
-        subject: "mailto:sprooty@sprooty.com".to_string(),
+        subject: subject.to_string(),
     })
 }
 
@@ -365,7 +379,7 @@ mod tests {
 
     #[test]
     fn vapid_roundtrip() {
-        let v = generate_vapid().expect("keygen");
+        let v = generate_vapid("mailto:test@example.invalid").expect("keygen");
         assert!(v.private_pem.contains("BEGIN PRIVATE KEY"));
         // Decoded public key should be exactly 65 bytes (SEC1 uncompressed).
         let pk = base64::engine::general_purpose::URL_SAFE_NO_PAD

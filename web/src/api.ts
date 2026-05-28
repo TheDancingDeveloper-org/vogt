@@ -201,6 +201,8 @@ export const api = {
 export interface PublicConfig {
   gui_stream_url: string | null;
   version: string;
+  /** Build-time feature availability, e.g. `{ selkies: "1.6.2" | null }`. */
+  features?: Record<string, string | null | undefined>;
 }
 
 export interface GuiProc {
@@ -307,14 +309,23 @@ export function subscribeEvents(
 }
 
 /**
- * Open a WebSocket attached to a session. Token via query string because
- * browsers cannot set Authorization on a WS handshake.
+ * Open a WebSocket attached to a session. The bearer token is sent as the
+ * first text frame after `open` (`{"type":"auth","token":"..."}`) — browsers
+ * can't set Authorization on a WS handshake, and we don't want the token
+ * leaking into proxy/access logs via the query string.
  */
 export function openAttach(id: string): WebSocket {
   const base = getBase() || `${location.protocol}//${location.host}`;
   const wsBase = base.replace(/^http/, "ws");
-  const tok = encodeURIComponent(getToken());
-  const ws = new WebSocket(`${wsBase}/api/sessions/${id}/attach?token=${tok}`);
+  const ws = new WebSocket(`${wsBase}/api/sessions/${id}/attach`);
   ws.binaryType = "arraybuffer";
+  const tok = getToken();
+  ws.addEventListener(
+    "open",
+    () => {
+      ws.send(JSON.stringify({ type: "auth", token: tok }));
+    },
+    { once: true },
+  );
   return ws;
 }

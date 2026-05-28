@@ -94,12 +94,29 @@ export function updateActivity(id: string, state: ActivityState) {
 }
 
 let unsubscribeEvents: (() => void) | null = null;
+let reconnectAttempts = 0;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+function nextReconnectDelay(): number {
+  // Exponential backoff with jitter, capped at ~30s. Starts at 1s.
+  // Sustained outages with many open clients otherwise hit the server with
+  // a thundering herd every 2s.
+  const base = Math.min(30_000, 1_000 * 2 ** reconnectAttempts);
+  reconnectAttempts = Math.min(reconnectAttempts + 1, 6);
+  const jitter = Math.random() * base * 0.3;
+  return Math.floor(base + jitter);
+}
 
 export function startEventStream(): void {
   if (unsubscribeEvents) return;
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   unsubscribeEvents = subscribeEvents(
     (ev: ServerEvent) => {
       setConnected(true);
+      reconnectAttempts = 0;
       switch (ev.type) {
         case "session-created":
           // Skip the refetch if we already know this id (the local create
@@ -130,9 +147,12 @@ export function startEventStream(): void {
     },
     () => {
       setConnected(false);
-      // Auto-reconnect with a short backoff if the stream drops.
       unsubscribeEvents = null;
-      setTimeout(() => startEventStream(), 2_000);
+      const delay = nextReconnectDelay();
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        startEventStream();
+      }, delay);
     },
   );
 }
@@ -140,4 +160,9 @@ export function startEventStream(): void {
 export function stopEventStream(): void {
   unsubscribeEvents?.();
   unsubscribeEvents = null;
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  reconnectAttempts = 0;
 }
