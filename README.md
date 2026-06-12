@@ -61,8 +61,9 @@ What's still on the user's plate before Phase 5 is fully verifiable:
 1. Create the Forgejo container-registry credentials (or confirm `git_auth_token` works) for the first `build-and-push`.
 2. Add `personal/mydevenv2/docker-compose.yml` to the ops repo and create the Komodo stack (see `deploy/KOMODO.md`).
 3. Mint `MYDEVENV2_TOKEN` + `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` in Infisical and add to the Komodo stack `environment`.
-4. Decide the workspace bind-mount strategy on Node B (NFS / Syncthing / direct).
-5. To actually use the GUI tab, set `START_SWAY=1` and `GUI_STREAM_URL=…` once Selkies is reachable inside the pod.
+4. Create the read-only `mydevenv2-agents` Infisical Universal Auth identity and add `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` + `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` to the Komodo stack if authenticated agent access is required.
+5. Decide the workspace bind-mount strategy on Node B (NFS / Syncthing / direct).
+6. To actually use the GUI tab, set `START_SWAY=1` and `GUI_STREAM_URL=...` once Selkies is reachable inside the pod.
 
 Phase 6 (web push + Android Capacitor wrap, sideloaded APK — iOS deferred) and Phase 7 (Android emulator KVM VM) remain.
 

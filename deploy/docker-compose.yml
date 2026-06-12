@@ -39,6 +39,11 @@ services:
       MYDEVENV2_TOKEN: ${MYDEVENV2_TOKEN}
       MYDEVENV2_BIND: 0.0.0.0:8910
       RUST_LOG: info
+      # Optional agent service auth. Create a read-only Infisical Universal
+      # Auth identity and paste its credentials into the Komodo stack env.
+      INFISICAL_API_URL: http://100.92.54.45:8400
+      INFISICAL_CLIENT_ID: ${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID:-}
+      INFISICAL_CLIENT_SECRET: ${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET:-}
       # Tailscale auto-join. Issue a one-shot reusable key from the admin UI.
       TAILSCALE_AUTH_KEY: ${HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY}
       TAILSCALE_HOSTNAME: mydevenv2

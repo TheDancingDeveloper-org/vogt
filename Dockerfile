@@ -183,9 +183,15 @@ USER root
 COPY --from=server-build /usr/local/bin/mydevenv2-server /usr/local/bin/mydevenv2-server
 RUN chmod +x /usr/local/bin/mydevenv2-server
 
-# Entrypoint script — joins tailscale (optional), starts the server.
+# Runtime scripts. Agent-specific CLIs are optional; these helpers only broker
+# credentials on demand for neutral tools already present in the image.
 COPY deploy/entrypoint.sh /usr/local/bin/mydevenv2-entrypoint
-RUN chmod +x /usr/local/bin/mydevenv2-entrypoint
+COPY deploy/agent-auth.sh /usr/local/bin/mydevenv2-agent-auth
+COPY deploy/git-askpass.sh /usr/local/bin/mydevenv2-git-askpass
+RUN chmod +x \
+    /usr/local/bin/mydevenv2-entrypoint \
+    /usr/local/bin/mydevenv2-agent-auth \
+    /usr/local/bin/mydevenv2-git-askpass
 
 EXPOSE 8910
 VOLUME ["/home/sprooty/Working"]

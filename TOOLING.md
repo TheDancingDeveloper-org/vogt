@@ -1,6 +1,6 @@
 # MyDevEnv2 — Tooling Baseline
 
-Captured from review of `MyDevEnv/Dockerfile.server` (v1). The new pod must provide at least this tooling so existing workflows (Claude Code, Codex, builds for all the apps under `~/Working/Active/apps/`) work without reinstalling on every spin-up.
+Captured from review of `MyDevEnv/Dockerfile.server` (v1). The pod provides a neutral development baseline for builds under `~/Working/Active/apps/`. Codex and Claude are optional clients and are not installed during container bootstrap.
 
 ## Base OS
 
@@ -55,26 +55,30 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
 
 | Secret | Infisical location | Purpose |
 |---|---|---|
-| `MYDEVENV_TAILSCALE_AUTH_KEY` | `apps` project, env `prod` | Auto-join the pod to the tailnet on startup |
-| `MYDEVENV_TOKEN` | (new — generate per deployment) | Bearer token for MyDevEnv2 server API auth |
-| Other app-specific secrets | Infisical `apps` / `cicd` / `infrastructure` | Fetched on demand via `infisical secrets get` inside terminals |
+| `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` | `apps` project, env `prod` | Auto-join the pod to the tailnet on startup |
+| `MYDEVENV2_TOKEN` | `apps` project, env `prod` | Bearer token for MyDevEnv2 server API auth |
+| `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` | `apps` project, env `prod` | Optional read-only Universal Auth identity for agent service access |
+| `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` | `apps` project, env `prod` | Secret for the optional agent identity |
+| Other app-specific secrets | Infisical `apps` / `cicd` / `infrastructure` | Fetched on demand by `mydevenv2-agent-auth` |
 
-Fetch the Tailscale key at pod start:
+MyDevEnv2 fetches service credentials on demand rather than exporting them at
+container startup:
 
 ```bash
-infisical secrets get MYDEVENV_TAILSCALE_AUTH_KEY \
-    --domain https://se.sprooty.com \
-    --projectId 76b1ebe1-3656-4cef-952c-30d5d489c6e7 \
-    --env prod --plain
+mydevenv2-agent-auth check
+mydevenv2-agent-auth run -- gh api user
+mydevenv2-agent-auth shell
 ```
 
-Then `tailscale up --authkey="$KEY" --hostname=mydevenv2 --accept-routes`.
+The machine identity must have read-only access to the `cicd`, `infrastructure`,
+and `apps` Infisical projects. The helper uses the direct tailnet endpoint
+`http://100.92.54.45:8400` to avoid the browser-facing Caddy auth gate.
 
 ## Things v1 had that v2 should reconsider
 
 - **The `xdg-open` shim** — was a workaround for VS Code Remote's browser forwarding. With no code-server in v2, this shim isn't needed. URLs printed in a terminal can be click-handled by the web UI itself (xterm.js link addon → POST to server → server can launch in Sway-Chromium or just copy to client clipboard).
 - **The `/home/sprooty → /workspace` symlink** — existed to make VS Code Remote SSH paths line up. Reconsider for v2: simpler to bind-mount the workspace at `/home/sprooty/Working` directly so paths match the host exactly. No symlink wrangling.
-- **SSH server on port 2223** — useful for emergency / IDE-less access. Keep. Same config (key-only, no passwords, no X11).
+- **SSH server on port 2223** — v1 exposed this for emergency / IDE-less access, but v2 currently does not start or expose `sshd`. Prefer the server-owned PTY sessions and the host workspace bind mount unless an explicit emergency SSH path is added later.
 
 ## New things v2 needs
 
