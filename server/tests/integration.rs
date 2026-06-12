@@ -300,7 +300,7 @@ async fn ws_attach(
     let (mut ws, _resp) = tokio_tungstenite::connect_async(url).await.unwrap();
     // First-frame auth (the legacy ?token= path still works but is deprecated).
     let auth = serde_json::json!({"type": "auth", "token": TEST_TOKEN}).to_string();
-    ws.send(Message::Text(auth.into())).await.unwrap();
+    ws.send(Message::Text(auth)).await.unwrap();
     ws
 }
 
