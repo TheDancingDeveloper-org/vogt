@@ -1,4 +1,4 @@
-use std::{borrow::Cow, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     extract::{
@@ -47,35 +47,6 @@ const SNAPSHOT_CHUNK: usize = 64 * 1024;
 /// How long a freshly-upgraded socket has to send `{"type":"auth",...}` before
 /// we drop it. Keeps unauth clients from hanging on to a socket indefinitely.
 const AUTH_DEADLINE: Duration = Duration::from_secs(5);
-
-const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
-const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
-
-fn strip_bracketed_paste_markers(data: &[u8]) -> Cow<'_, [u8]> {
-    let has_marker = data
-        .windows(BRACKETED_PASTE_START.len())
-        .any(|w| w == BRACKETED_PASTE_START)
-        || data
-            .windows(BRACKETED_PASTE_END.len())
-            .any(|w| w == BRACKETED_PASTE_END);
-    if !has_marker {
-        return Cow::Borrowed(data);
-    }
-
-    let mut out = Vec::with_capacity(data.len());
-    let mut i = 0;
-    while i < data.len() {
-        if data[i..].starts_with(BRACKETED_PASTE_START) {
-            i += BRACKETED_PASTE_START.len();
-        } else if data[i..].starts_with(BRACKETED_PASTE_END) {
-            i += BRACKETED_PASTE_END.len();
-        } else {
-            out.push(data[i]);
-            i += 1;
-        }
-    }
-    Cow::Owned(out)
-}
 
 pub async fn attach(
     ws: WebSocketUpgrade,
@@ -220,8 +191,7 @@ async fn handle_socket(
             let Ok(msg) = msg else { break };
             match msg {
                 Message::Binary(data) => {
-                    let data = strip_bracketed_paste_markers(&data);
-                    if writer_session.write_input(data.as_ref()).is_err() {
+                    if writer_session.write_input(&data).is_err() {
                         break;
                     }
                 }
@@ -237,8 +207,7 @@ async fn handle_socket(
                         }
                         Err(_) => {
                             // Plain-text input (some tools send text frames).
-                            let data = strip_bracketed_paste_markers(s.as_bytes());
-                            if writer_session.write_input(data.as_ref()).is_err() {
+                            if writer_session.write_input(s.as_bytes()).is_err() {
                                 break;
                             }
                         }
@@ -295,31 +264,5 @@ async fn handle_socket(
     tokio::select! {
         _ = inbound => {}
         _ = outbound => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::strip_bracketed_paste_markers;
-    use std::borrow::Cow;
-
-    #[test]
-    fn leaves_input_without_bracketed_paste_markers_borrowed() {
-        let input = b"plain-token-text";
-        let stripped = strip_bracketed_paste_markers(input);
-        assert!(matches!(stripped, Cow::Borrowed(_)));
-        assert_eq!(stripped.as_ref(), input);
-    }
-
-    #[test]
-    fn strips_wrapped_bracketed_paste_token() {
-        let stripped = strip_bracketed_paste_markers(b"\x1b[200~abc123+/=\x1b[201~");
-        assert_eq!(stripped.as_ref(), b"abc123+/=");
-    }
-
-    #[test]
-    fn strips_multiple_bracketed_paste_markers() {
-        let stripped = strip_bracketed_paste_markers(b"one\x1b[200~two\x1b[201~three");
-        assert_eq!(stripped.as_ref(), b"onetwothree");
     }
 }

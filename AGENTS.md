@@ -22,7 +22,7 @@ Before changing files here:
 | Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port) |
 | Public URL | `https://mydevenv2.sprooty.com` |
 | DB / state | None (Postgres-less by design). Sessions in-memory; push subscriptions persisted as JSON under `state_dir`. |
-| Secrets used at runtime | `MYDEVENV2_TOKEN` (API bearer), `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` (Tailscale userspace), `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` / `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` (optional agent service auth), `HOMELAB_MYDEVENV2_VAPID_*` + FCM service account JSON for push — all in Infisical `apps` and pasted into the Komodo stack `environment` |
+| Secrets used at runtime | `MYDEVENV2_TOKEN` (API bearer), `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` (Tailscale userspace), `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` / `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` (required production agent service auth), `HOMELAB_MYDEVENV2_VAPID_*` + FCM service account JSON for push — all in Infisical `apps` and pasted into the Komodo stack `environment` |
 
 From-scratch rewrite of `../MyDevEnv`: same centrally-hosted, Tailscale-accessible dev environment goal, built without the v1 surface area of a code-server fork and multiple half-finished native clients. Active status: Phase 1-6 code-complete; Phase 7 (KVM-backed Android emulator VM) pending.
 
@@ -82,7 +82,7 @@ Pipeline non-standard bits:
 
 Runtime container: multi-stage `Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `TOOLING.md` toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server.
 
-Codex and Claude are deliberately not installed or authenticated by container bootstrap. Optional AI clients are user-managed. Service access for those clients is brokered on demand by `mydevenv2-agent-auth`.
+Codex and Claude are deliberately not installed by container bootstrap. Optional AI clients are user-managed. Production default-shell sessions are authenticated through `mydevenv2-agent-auth`; explicit-command sessions can invoke the helper directly.
 
 Outstanding before Phase 5 GUI tab is fully verifiable: items 1-6 in `README.md` under "What's still on the user's plate".
 
@@ -95,6 +95,10 @@ mydevenv2-agent-auth check
 mydevenv2-agent-auth run -- <command>
 mydevenv2-agent-auth shell
 ```
+
+With `MYDEVENV2_AUTO_AGENT_AUTH=1`, sessions created without an explicit
+`command` automatically use `mydevenv2-agent-auth shell`. Explicit-command
+sessions are not wrapped.
 
 These commands require the read-only Infisical Universal Auth credentials `INFISICAL_CLIENT_ID` and `INFISICAL_CLIENT_SECRET`, injected by the Komodo stack from:
 
@@ -111,7 +115,9 @@ Use `mydevenv2-agent-auth check` to prove authenticated access to:
 - GitHub org API: `gh api orgs/AusAgentSmith-org`
 - Komodo API: `http://100.92.54.45:3011/read`
 
-If `INFISICAL_CLIENT_ID` or `INFISICAL_CLIENT_SECRET` is missing, authenticated agent service work is blocked until the Komodo stack environment includes the MyDevEnv2 machine identity.
+The production compose requires both identity values and validates the broker
+at startup. If either is missing or invalid, deployment must fail rather than
+starting a healthy-looking server without service access.
 
 ## 6. Workspace synchronization
 

@@ -7,7 +7,7 @@ use crate::{
     config::Config,
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
-    pty::{self, Session, SessionSpec, SessionSummary},
+    pty::{self, Session, SessionSpec, SessionSummary, SpawnDefaults},
 };
 
 pub struct SessionRegistry {
@@ -62,10 +62,14 @@ impl SessionRegistry {
         // Names need not be unique — duplicates are merely confusing, not invalid.
         let spawned = pty::spawn(
             &spec,
-            &self.cfg.default_shell,
-            &self.cfg.default_cwd,
-            self.cfg.scrollback_bytes,
-            self.cfg.activity_idle_after_ms,
+            SpawnDefaults {
+                default_shell: &self.cfg.default_shell,
+                auto_agent_auth: self.cfg.auto_agent_auth,
+                agent_auth_helper: &self.cfg.agent_auth_helper,
+                default_cwd: &self.cfg.default_cwd,
+                scrollback_bytes: self.cfg.scrollback_bytes,
+                activity_idle_after_ms: self.cfg.activity_idle_after_ms,
+            },
             self.bus.clone(),
         )?;
         let session = spawned.session;

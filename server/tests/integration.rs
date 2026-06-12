@@ -1,7 +1,7 @@
 //! End-to-end integration tests: start the real Axum server on an OS-assigned
 //! port, talk to it over HTTP + WebSocket the same way a client would.
 
-use std::time::Duration;
+use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use mydevenv2_server::{app::router, Config};
@@ -25,11 +25,16 @@ fn test_config() -> Config {
         fcm_service_account_json: None,
         vapid_subject: "mailto:test@example.invalid".to_string(),
         allowed_origins: vec![],
+        auto_agent_auth: false,
+        agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
     }
 }
 
 async fn boot() -> (String, tokio::task::JoinHandle<()>) {
-    let cfg = test_config();
+    boot_with_config(test_config()).await
+}
+
+async fn boot_with_config(cfg: Config) -> (String, tokio::task::JoinHandle<()>) {
     let (router, _state) = router(cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -410,6 +415,59 @@ async fn ws_attach_echoes_input_and_replays_on_reattach() {
 }
 
 #[tokio::test]
+async fn default_session_uses_agent_auth_helper_when_enabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let helper = tmp.path().join("agent-auth");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\n[ \"$1\" = shell ] || exit 64\nprintf 'agent-wrapper-ok\\n'\nexec /bin/cat\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&helper).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&helper, permissions).unwrap();
+
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.auto_agent_auth = true;
+    cfg.agent_auth_helper = helper;
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "authenticated-shell" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut ws = ws_attach(&base, &id).await;
+    let output = collect_binary_until(&mut ws, b"agent-wrapper-ok", Duration::from_secs(2)).await;
+    assert!(
+        output
+            .windows(b"agent-wrapper-ok".len())
+            .any(|w| w == b"agent-wrapper-ok"),
+        "agent auth helper output not seen; got {:?}",
+        String::from_utf8_lossy(&output)
+    );
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
 async fn file_api_round_trip() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("hello.txt"), "first").unwrap();
@@ -429,6 +487,8 @@ async fn file_api_round_trip() {
         fcm_service_account_json: None,
         vapid_subject: "mailto:test@example.invalid".to_string(),
         allowed_origins: vec![],
+        auto_agent_auth: false,
+        agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
     };
     let (router, _state) = router(cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -561,6 +621,8 @@ async fn git_status_log_branch() {
         fcm_service_account_json: None,
         vapid_subject: "mailto:test@example.invalid".to_string(),
         allowed_origins: vec![],
+        auto_agent_auth: false,
+        agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
     };
     let (router, _state) = router(cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

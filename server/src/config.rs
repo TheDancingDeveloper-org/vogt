@@ -32,6 +32,12 @@ pub struct Config {
     /// the production origin plus the local Vite dev origin. Override with
     /// `MYDEVENV2_ALLOWED_ORIGINS` (comma-separated) or the config file.
     pub allowed_origins: Vec<String>,
+    /// When enabled, default interactive sessions are started through the
+    /// agent-auth helper so Forgejo/Woodpecker/GitHub/Komodo credentials are
+    /// available in the child shell without exporting them from PID 1.
+    pub auto_agent_auth: bool,
+    /// Helper executable used when `auto_agent_auth` is enabled.
+    pub agent_auth_helper: std::path::PathBuf,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -48,6 +54,8 @@ struct FileConfig {
     fcm_service_account_json: Option<String>,
     vapid_subject: Option<String>,
     allowed_origins: Option<Vec<String>>,
+    auto_agent_auth: Option<bool>,
+    agent_auth_helper: Option<String>,
 }
 
 pub fn load(
@@ -90,6 +98,24 @@ pub fn load(
         .canonicalize()
         .map_err(|e| ApiError::Config(format!("workspace_root {workspace_root:?}: {e}")))?;
 
+    let auto_agent_auth = match std::env::var("MYDEVENV2_AUTO_AGENT_AUTH") {
+        Ok(v) => Some(parse_bool_env("MYDEVENV2_AUTO_AGENT_AUTH", &v)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(e) => {
+            return Err(ApiError::Config(format!(
+                "reading MYDEVENV2_AUTO_AGENT_AUTH: {e}"
+            )));
+        }
+    }
+    .or(from_file.auto_agent_auth)
+    .unwrap_or(false);
+
+    let agent_auth_helper = std::env::var("MYDEVENV2_AGENT_AUTH_HELPER")
+        .ok()
+        .or(from_file.agent_auth_helper)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin/mydevenv2-agent-auth"));
+
     Ok(Config {
         bind,
         token,
@@ -127,7 +153,19 @@ pub fn load(
             from_file.allowed_origins,
             std::env::var("MYDEVENV2_ALLOWED_ORIGINS").ok(),
         ),
+        auto_agent_auth,
+        agent_auth_helper,
     })
+}
+
+fn parse_bool_env(name: &str, raw: &str) -> Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(ApiError::Config(format!(
+            "{name} must be one of 1/0, true/false, yes/no, or on/off"
+        ))),
+    }
 }
 
 fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<String> {

@@ -61,7 +61,7 @@ What's still on the user's plate before Phase 5 is fully verifiable:
 1. Create the Forgejo container-registry credentials (or confirm `git_auth_token` works) for the first `build-and-push`.
 2. Add `personal/mydevenv2/docker-compose.yml` to the ops repo and create the Komodo stack (see `deploy/KOMODO.md`).
 3. Mint `MYDEVENV2_TOKEN` + `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` in Infisical and add to the Komodo stack `environment`.
-4. Create the read-only `mydevenv2-agents` Infisical Universal Auth identity and add `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` + `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` to the Komodo stack if authenticated agent access is required.
+4. Create the read-only `mydevenv2-agents` Infisical Universal Auth identity and add `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` + `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` to the Komodo stack. The production compose requires them.
 5. Decide the workspace bind-mount strategy on Node B (NFS / Syncthing / direct).
 6. To actually use the GUI tab, set `START_SWAY=1` and `GUI_STREAM_URL=...` once Selkies is reachable inside the pod.
 
@@ -88,6 +88,8 @@ scrollback_bytes = 262144
 default_shell = "/bin/bash"
 default_cwd   = "/home/sprooty/Working"
 activity_idle_after_ms = 1500
+auto_agent_auth = false
+agent_auth_helper = "/usr/local/bin/mydevenv2-agent-auth"
 ```
 
 Pass with `--config mydevenv2.toml`. CLI flags > env > config file.

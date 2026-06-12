@@ -57,12 +57,14 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
 |---|---|---|
 | `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` | `apps` project, env `prod` | Auto-join the pod to the tailnet on startup |
 | `MYDEVENV2_TOKEN` | `apps` project, env `prod` | Bearer token for MyDevEnv2 server API auth |
-| `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` | `apps` project, env `prod` | Optional read-only Universal Auth identity for agent service access |
-| `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` | `apps` project, env `prod` | Secret for the optional agent identity |
+| `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` | `apps` project, env `prod` | Read-only Universal Auth identity required by the production agent shells |
+| `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` | `apps` project, env `prod` | Secret for the production agent identity |
 | Other app-specific secrets | Infisical `apps` / `cicd` / `infrastructure` | Fetched on demand by `mydevenv2-agent-auth` |
 
-MyDevEnv2 fetches service credentials on demand rather than exporting them at
-container startup:
+MyDevEnv2 fetches service credentials into child shells rather than exporting
+service tokens from PID 1. Production default sessions are wrapped
+automatically; these commands remain useful for validation and explicit
+commands:
 
 ```bash
 mydevenv2-agent-auth check
@@ -73,6 +75,9 @@ mydevenv2-agent-auth shell
 The machine identity must have read-only access to the `cicd`, `infrastructure`,
 and `apps` Infisical projects. The helper uses the direct tailnet endpoint
 `http://100.92.54.45:8400` to avoid the browser-facing Caddy auth gate.
+
+The Docker CLI uses the host daemon socket. The compose `group_add` value must
+match `stat -c %g /var/run/docker.sock` on Node B (currently `984`).
 
 ## Things v1 had that v2 should reconsider
 

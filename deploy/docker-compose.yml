@@ -13,6 +13,10 @@ services:
     container_name: mydevenv2
     restart: unless-stopped
     hostname: mydevenv2
+    # Host docker.sock is owned by a host-specific group. Add that GID so
+    # `docker` works in normal sessions without sudo; override if Node B changes.
+    group_add:
+      - "${DOCKER_SOCKET_GID:-984}"
 
     # Bridge networking + an explicit port. Tailscale runs in userspace mode
     # inside the container (see entrypoint.sh), so no TUN device pass-through
@@ -39,11 +43,14 @@ services:
       MYDEVENV2_TOKEN: ${MYDEVENV2_TOKEN}
       MYDEVENV2_BIND: 0.0.0.0:8910
       RUST_LOG: info
-      # Optional agent service auth. Create a read-only Infisical Universal
-      # Auth identity and paste its credentials into the Komodo stack env.
+      # Agent service auth. Default interactive sessions run through
+      # mydevenv2-agent-auth so Forgejo/Woodpecker/GitHub/Komodo credentials
+      # are available to shell-launched tools without persisting tokens.
       INFISICAL_API_URL: http://100.92.54.45:8400
-      INFISICAL_CLIENT_ID: ${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID:-}
-      INFISICAL_CLIENT_SECRET: ${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET:-}
+      INFISICAL_CLIENT_ID: ${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID:?HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID is required for prod-mydevenv2 agent auth}
+      INFISICAL_CLIENT_SECRET: ${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET:?HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET is required for prod-mydevenv2 agent auth}
+      MYDEVENV2_AGENT_AUTH_REQUIRED: "1"
+      MYDEVENV2_AUTO_AGENT_AUTH: "1"
       # Tailscale auto-join. Issue a one-shot reusable key from the admin UI.
       TAILSCALE_AUTH_KEY: ${HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY}
       TAILSCALE_HOSTNAME: mydevenv2

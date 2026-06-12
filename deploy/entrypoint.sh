@@ -41,10 +41,23 @@ fi
 # carries neutral infrastructure tooling; optional agents can be installed by
 # the user. A dedicated Infisical machine identity enables on-demand service
 # auth through `mydevenv2-agent-auth` without exporting tokens to PID 1.
+agent_auth_required="${MYDEVENV2_AGENT_AUTH_REQUIRED:-0}"
 if [[ -n "${INFISICAL_CLIENT_ID:-}" && -n "${INFISICAL_CLIENT_SECRET:-}" ]]; then
     echo "agent service auth available via mydevenv2-agent-auth"
+    if [[ "$agent_auth_required" == "1" || "$agent_auth_required" == "true" ]]; then
+        echo "validating required agent service auth"
+        if ! mydevenv2-agent-auth run -- true; then
+            echo "agent service auth validation failed" >&2
+            exit 1
+        fi
+    fi
 else
-    echo "agent service auth unavailable: Infisical machine identity not configured" >&2
+    if [[ "$agent_auth_required" == "1" || "$agent_auth_required" == "true" ]]; then
+        echo "agent service auth required but Infisical machine identity is not configured" >&2
+        exit 1
+    else
+        echo "agent service auth unavailable: Infisical machine identity not configured" >&2
+    fi
 fi
 
 if [[ "${START_SWAY:-0}" == "1" ]]; then

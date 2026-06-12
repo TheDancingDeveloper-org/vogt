@@ -12,7 +12,7 @@ cp ~/Working/Active/apps/MyDevEnv2/deploy/docker-compose.yml personal/mydevenv2/
 git add personal/mydevenv2 && git commit -m "add prod-mydevenv2 stack" && git push
 ```
 
-## 2. Mint runtime secrets and the optional agent identity
+## 2. Mint runtime secrets and the agent identity
 
 ```bash
 # Server token
@@ -24,7 +24,7 @@ openssl rand -hex 32
 # -> store as HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY (apps project, env prod)
 ```
 
-For authenticated agent access, create an Infisical Machine Identity:
+Create an Infisical Machine Identity for production agent access:
 
 1. Open Organization Settings -> Machine Identities -> Create.
 2. Name it `mydevenv2-agents`.
@@ -36,12 +36,12 @@ For authenticated agent access, create an Infisical Machine Identity:
 
 Paste all four runtime values into the Komodo stack `environment` field. Komodo
 does not read Infisical directly; it writes its environment field into a `.env`
-file at deploy time. The agent identity is optional for the MyDevEnv2 server, but
-`mydevenv2-agent-auth` will remain unavailable until both credentials are set.
+file at deploy time. The production compose rejects empty identity values and
+the entrypoint validates credential retrieval before starting the server.
 
-Codex and Claude are not installed or authenticated by this bootstrap. They are
-optional clients and can use the neutral `mydevenv2-agent-auth` helper when
-installed by a user.
+Codex and Claude are not installed by this bootstrap. They are optional clients;
+default interactive sessions are authenticated through the neutral
+`mydevenv2-agent-auth` helper when installed by a user.
 
 ## 3. Create the stack via the Komodo API
 

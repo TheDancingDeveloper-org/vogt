@@ -1,5 +1,6 @@
 use std::{
     io::{Read, Write},
+    path::Path,
     sync::Arc,
     time::Instant,
 };
@@ -167,14 +168,20 @@ pub struct SpawnedSession {
     pub session: Arc<Session>,
 }
 
+pub struct SpawnDefaults<'a> {
+    pub default_shell: &'a str,
+    pub auto_agent_auth: bool,
+    pub agent_auth_helper: &'a Path,
+    pub default_cwd: &'a Path,
+    pub scrollback_bytes: usize,
+    pub activity_idle_after_ms: u64,
+}
+
 /// Spawn a PTY-backed session running `spec.command` (or the default shell if
 /// `None`). Starts the reader thread, the exit waiter, and the activity ticker.
 pub fn spawn(
     spec: &SessionSpec,
-    default_shell: &str,
-    default_cwd: &std::path::Path,
-    scrollback_bytes: usize,
-    activity_idle_after_ms: u64,
+    defaults: SpawnDefaults<'_>,
     bus: EventBus,
 ) -> Result<SpawnedSession> {
     let pty_system = portable_pty::native_pty_system();
@@ -196,13 +203,18 @@ pub fn spawn(
             }
             c
         }
-        _ => CommandBuilder::new(default_shell),
+        _ if defaults.auto_agent_auth => {
+            let mut c = CommandBuilder::new(defaults.agent_auth_helper);
+            c.arg("shell");
+            c
+        }
+        _ => CommandBuilder::new(defaults.default_shell),
     };
     let cwd = spec
         .cwd
         .as_deref()
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| default_cwd.to_path_buf());
+        .unwrap_or_else(|| defaults.default_cwd.to_path_buf());
     let cwd_display = cwd.to_string_lossy().into_owned();
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");
@@ -236,8 +248,8 @@ pub fn spawn(
         name: Mutex::new(spec.name.clone()),
         created_at: time::OffsetDateTime::now_utc(),
         cwd: cwd_display,
-        idle_after_ms: activity_idle_after_ms,
-        scrollback: Mutex::new(Scrollback::new(scrollback_bytes)),
+        idle_after_ms: defaults.activity_idle_after_ms,
+        scrollback: Mutex::new(Scrollback::new(defaults.scrollback_bytes)),
         writer: Mutex::new(writer),
         master: Mutex::new(pair.master),
         child: Mutex::new(Some(child)),
