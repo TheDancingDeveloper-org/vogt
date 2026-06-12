@@ -13,11 +13,18 @@ import { createSession } from "./store";
 interface Props {
   /** Called after opening an editor tab so the drawer can auto-close on mobile. */
   onOpen?: () => void;
+  promptPath?: (
+    title: string,
+    defaultValue?: string,
+    placeholder?: string,
+  ) => Promise<string | null>;
+  onError?: (message: string) => void;
 }
 
 interface NodeProps {
   node: TreeNode;
   onOpen?: () => void;
+  onOpenFile: (path: string) => void;
   onOpenTerminalHere: (path: string) => void;
 }
 
@@ -30,9 +37,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
 
   const toggle = async () => {
     if (!props.node.is_dir) {
-      // File: open in editor
-      openEditorTab(props.node.path);
-      props.onOpen?.();
+      props.onOpenFile(props.node.path);
       return;
     }
     const next = !open();
@@ -101,6 +106,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
               <TreeNodeView
                 node={child}
                 onOpen={props.onOpen}
+                onOpenFile={props.onOpenFile}
                 onOpenTerminalHere={props.onOpenTerminalHere}
               />
             )}
@@ -115,6 +121,35 @@ const FileTree: Component<Props> = (props) => {
   const [tree, { refetch }] = createResource(() => api.tree("", 0));
   const navigate = useNavigate();
 
+  const openFile = (path: string) => {
+    openEditorTab(path);
+    navigate(`/e/${encodeURIComponent(path)}`);
+    props.onOpen?.();
+  };
+
+  const reportError = (message: string) => {
+    if (props.onError) props.onError(message);
+    else console.error(message);
+  };
+
+  const newFile = async () => {
+    if (!props.promptPath) return;
+    const raw = await props.promptPath(
+      "New file",
+      "",
+      "relative/path/to/file.txt",
+    );
+    const path = raw?.trim().replace(/^\/+/, "") ?? "";
+    if (!path) return;
+    try {
+      await api.writeFile(path, "", true);
+      openFile(path);
+      void refetch();
+    } catch (e) {
+      reportError(`new file failed: ${(e as Error).message}`);
+    }
+  };
+
   const openTerminalHere = async (path: string) => {
     // Server resolves a relative path against workspace_root, so we pass the
     // path verbatim. "" → workspace_root (default cwd).
@@ -126,7 +161,7 @@ const FileTree: Component<Props> = (props) => {
       props.onOpen?.();
     } catch (e) {
       console.error("open terminal here failed", e);
-      alert(`open terminal here failed: ${(e as Error).message}`);
+      reportError(`open terminal here failed: ${(e as Error).message}`);
     }
   };
 
@@ -134,13 +169,22 @@ const FileTree: Component<Props> = (props) => {
     <div class="file-tree">
       <div class="drawer-header">
         <span>Files</span>
-        <button
-          style={{ "font-size": "11px", padding: "2px 6px" }}
-          onClick={() => refetch()}
-          title="Refresh"
-        >
-          ⟳
-        </button>
+        <span class="drawer-header-actions">
+          <button
+            style={{ "font-size": "11px", padding: "2px 6px" }}
+            onClick={() => void newFile()}
+            title="New file"
+          >
+            +
+          </button>
+          <button
+            style={{ "font-size": "11px", padding: "2px 6px" }}
+            onClick={() => refetch()}
+            title="Refresh"
+          >
+            ⟳
+          </button>
+        </span>
       </div>
       <Show when={tree.error}>
         <div style={{ padding: "8px 10px", color: "#ff7b72", "font-size": "12px" }}>
@@ -153,6 +197,7 @@ const FileTree: Component<Props> = (props) => {
             <TreeNodeView
               node={n}
               onOpen={props.onOpen}
+              onOpenFile={openFile}
               onOpenTerminalHere={openTerminalHere}
             />
           )}

@@ -165,7 +165,7 @@ const Editor: Component<Props> = (props) => {
           </Show>
         </span>
         <button onClick={save} disabled={status() === "loading"}>
-          Save (Ctrl+S)
+          Save
         </button>
       </div>
       <div class="editor-host" ref={host} />

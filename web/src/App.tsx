@@ -9,7 +9,8 @@ import {
   untrack,
 } from "solid-js";
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
-import Terminal, { type TerminalActions } from "./Terminal";
+import type { TerminalActions } from "./Terminal";
+import TerminalWorkspace from "./TerminalWorkspace";
 import Editor from "./Editor";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
@@ -433,7 +434,11 @@ const App: Component = () => {
               )}
             </For>
           </div>
-          <FileTree onOpen={() => setDrawerOpen(false)} />
+          <FileTree
+            onOpen={() => setDrawerOpen(false)}
+            promptPath={promptUser}
+            onError={(message) => showToast(message, { kind: "error" })}
+          />
         </aside>
 
         <div class="tab-strip">
@@ -514,10 +519,22 @@ const App: Component = () => {
                 >
                   <Show when={t.kind === "terminal" && t.kind === "terminal" && t}>
                     {(tab) => (
-                      <Terminal
+                      <TerminalWorkspace
+                        tabId={tab().id}
                         sessionId={(tab() as Extract<Tab, { kind: "terminal" }>).sessionId}
                         registerSend={(fn) => senders.set(t.id, fn)}
                         registerActions={(a) => actions.set(t.id, a)}
+                        confirmClosePane={(session) =>
+                          confirmUser(
+                            session
+                              ? `Kill pane "${session.name}"?`
+                              : "Kill pane?",
+                            "The shell and its scrollback will be discarded.",
+                          )
+                        }
+                        onError={(message) =>
+                          showToast(message, { kind: "error" })
+                        }
                       />
                     )}
                   </Show>

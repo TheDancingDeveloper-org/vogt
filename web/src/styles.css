@@ -138,6 +138,11 @@ input[type="password"]:focus {
   letter-spacing: 0.04em;
   color: var(--fg-muted);
 }
+.drawer-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 
 .drawer-actions {
   display: flex;
@@ -383,6 +388,112 @@ input[type="password"]:focus {
 }
 .terminal-host .xterm-viewport {
   background-color: transparent !important;
+}
+
+.terminal-workspace {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+}
+.terminal-workspace-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--bd);
+  background: var(--bg-elev);
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.terminal-workspace-title {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-weight: 600;
+}
+.terminal-workspace-cwd {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  direction: rtl;
+  text-align: left;
+}
+.terminal-workspace-error {
+  min-width: 0;
+  max-width: min(320px, 30vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--activity-errored);
+}
+.terminal-workspace-toolbar button {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.terminal-layout {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: #000;
+}
+.terminal-split {
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  gap: 4px;
+}
+.terminal-split.row {
+  flex-direction: row;
+}
+.terminal-split.column {
+  flex-direction: column;
+}
+.terminal-pane {
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #111820;
+  background: #000;
+  overflow: hidden;
+}
+.terminal-pane.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.35);
+}
+.terminal-pane .terminal-host {
+  padding: 4px 0 0 6px;
+}
+
+@media (max-width: 768px) {
+  .terminal-workspace-toolbar {
+    overflow-x: auto;
+  }
+  .terminal-workspace-cwd,
+  .terminal-workspace-error {
+    display: none;
+  }
+  .terminal-workspace-title {
+    flex: 1 0 90px;
+  }
 }
 
 .modkey-row {
