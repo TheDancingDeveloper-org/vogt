@@ -119,6 +119,28 @@ The production compose requires both identity values and validates the broker
 at startup. If either is missing or invalid, deployment must fail rather than
 starting a healthy-looking server without service access.
 
+### June 2026 auth recovery note
+
+Root cause: the running MyDevEnv2 container was created on June 12, 2026 at
+03:05 UTC with empty `INFISICAL_CLIENT_ID` / `INFISICAL_CLIENT_SECRET` values,
+even though Komodo later held valid identity credentials. Existing sessions
+inherited PID 1's stale environment. Default sessions also launched plain Bash,
+so only explicit `mydevenv2-agent-auth shell` sessions loaded Forgejo,
+Woodpecker, GitHub, Komodo, and Docker access. SSH was intentionally not
+configured, and the container user lacked the host Docker socket group
+(`984`).
+
+Fixes applied here:
+
+- Default interactive sessions can auto-wrap through the auth broker
+  (`MYDEVENV2_AUTO_AGENT_AUTH=1`).
+- Production compose requires the Infisical identity credentials, adds Docker
+  socket GID `984`, and sets authenticated shells as the default.
+- Startup can require and validate agent authentication before serving traffic.
+
+Validation for the recovery covered Infisical, Forgejo, Woodpecker, GitHub,
+Komodo, Docker access, Clippy, and the full Rust test suite.
+
 ## 6. Workspace synchronization
 
 MyDevEnv2 does not expose an SSH server. Its workspace is a Node B host bind mount:
