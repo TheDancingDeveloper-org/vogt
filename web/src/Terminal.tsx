@@ -46,6 +46,9 @@ const TerminalView: Component<Props> = (props) => {
   let pasteTextareaRef: HTMLTextAreaElement | undefined;
   const [showPasteModal, setShowPasteModal] = createSignal(false);
   let pasteResolve: ((v: string | null) => void) | null = null;
+  const bracketedPasteStart = "\x1b[200~";
+  const bracketedPasteEnd = "\x1b[201~";
+  const inputChunkBytes = 16 * 1024;
 
   const promptPaste = (): Promise<string | null> =>
     new Promise((resolve) => {
@@ -68,12 +71,26 @@ const TerminalView: Component<Props> = (props) => {
     resolve?.(null);
   };
 
+  const stripBracketedPasteMarkers = (data: string): string =>
+    data.replaceAll(bracketedPasteStart, "").replaceAll(bracketedPasteEnd, "");
+
+  const sendBytesToPty = (bytes: Uint8Array<ArrayBuffer>) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (bytes.length <= inputChunkBytes) {
+      ws.send(bytes);
+      return;
+    }
+    for (let offset = 0; offset < bytes.length; offset += inputChunkBytes) {
+      ws.send(bytes.slice(offset, offset + inputChunkBytes));
+    }
+  };
+
   const sendToPty = (data: string | ArrayBuffer) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       if (typeof data === "string") {
-        ws.send(new TextEncoder().encode(data));
+        sendBytesToPty(new TextEncoder().encode(stripBracketedPasteMarkers(data)));
       } else {
-        ws.send(data);
+        sendBytesToPty(new Uint8Array(data));
       }
     }
   };
@@ -136,15 +153,17 @@ const TerminalView: Component<Props> = (props) => {
     // before xterm.js wraps them in bracketed-paste sequences (\x1b[200~...\x1b[201~).
     // Programs like infisical that don't implement bracketed-paste mode receive the
     // escape sequences as literal input, corrupting base64 tokens.
-    term.textarea?.addEventListener(
+    const handleBrowserPaste = (e: ClipboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      if (text) sendToPty(text);
+    };
+    hostRef.addEventListener(
       "paste",
-      (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const text = (e as ClipboardEvent).clipboardData?.getData("text/plain") ?? "";
-        if (text) sendToPty(text);
-      },
-      true, // capture phase — runs before xterm's bubble-phase listener
+      handleBrowserPaste,
+      true, // capture phase on an ancestor — runs before xterm's listener
     );
 
     // Clipboard plumbing.
