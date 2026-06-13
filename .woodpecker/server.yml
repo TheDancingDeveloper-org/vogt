@@ -9,10 +9,21 @@
 #   discord-success / -failure  Notifications
 
 when:
+  # Skip the server pipeline (which builds the image and redeploys prod via
+  # Komodo) for client-only changes — the desktop client lives in `client/`
+  # and has its own workflow (`.woodpecker/client.yml`).
   - event: push
     branch: main
+    path:
+      exclude:
+        - client/**
+        - .woodpecker/client.yml
   - event: manual
   - event: pull_request
+    path:
+      exclude:
+        - client/**
+        - .woodpecker/client.yml
 
 # Custom clone using org secret. The default OAuth-based clone started 403'ing
 # (pipelines #17+), so we authenticate explicitly with git_auth_token.
