@@ -6,9 +6,10 @@ mod terminal_view;
 
 use fluent_app::FluentApp;
 use fluent_core::ThemeProvider as _;
-use fluent_primitives::{Button, ButtonAppearance, Label, LabelSize};
+use fluent_primitives::{Button, ButtonAppearance, Field, Label, LabelSize, TextInput};
 use gpui::{
-    div, prelude::*, px, Context, Entity, FontWeight, IntoElement, Render, SharedString, Window,
+    div, prelude::*, px, ClickEvent, Context, Entity, FontWeight, IntoElement, Render,
+    SharedString, Window,
 };
 use uuid::Uuid;
 
@@ -38,6 +39,9 @@ struct RootView {
     sessions: Vec<SessionSummary>,
     status: SharedString,
     active: Option<(Uuid, Entity<TerminalView>)>,
+    url_input: Entity<TextInput>,
+    token_input: Entity<TextInput>,
+    show_settings: bool,
 }
 
 impl RootView {
@@ -47,22 +51,88 @@ impl RootView {
         let status: SharedString = if configured {
             "Connecting…".into()
         } else {
-            SharedString::from(format!(
-                "No token set — edit {}",
-                ClientConfig::path().display()
-            ))
+            "Enter the server URL and API token".into()
         };
+        let url_input = cx.new(|_| {
+            TextInput::new()
+                .placeholder("https://mydevenv2.sprooty.com")
+                .value(cfg.server_url.clone())
+        });
+        let token_input = cx.new(|_| {
+            TextInput::new()
+                .placeholder("API token")
+                .masked(true)
+                .value(cfg.token.clone())
+        });
         let view = Self {
             api,
             configured,
             sessions: Vec::new(),
             status,
             active: None,
+            url_input,
+            token_input,
+            // Open straight to settings until the server is configured.
+            show_settings: !configured,
         };
         if configured {
             view.refresh_sessions(cx);
         }
         view
+    }
+
+    /// Read the settings inputs, persist config, and reconnect.
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        let server_url = self.url_input.read(cx).text().trim().to_string();
+        let token = self.token_input.read(cx).text().trim().to_string();
+        let cfg = ClientConfig { server_url, token };
+        if let Err(e) = cfg.save() {
+            self.status = SharedString::from(format!("save failed: {e}"));
+            cx.notify();
+            return;
+        }
+        self.api = ApiClient::new(cfg.base(), cfg.token.clone());
+        self.configured = cfg.is_configured();
+        self.active = None;
+        self.show_settings = false;
+        if self.configured {
+            self.status = "Connecting…".into();
+            self.refresh_sessions(cx);
+        } else {
+            self.status = "Enter the server URL and API token".into();
+            self.show_settings = true;
+        }
+        cx.notify();
+    }
+
+    fn settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors.clone();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(14.0))
+            .bg(colors.surface)
+            .child(Label::new("Server settings").size(LabelSize::Title))
+            .child(
+                div()
+                    .w(px(440.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.0))
+                    .child(Field::new(self.url_input.clone()).label("Server URL"))
+                    .child(Field::new(self.token_input.clone()).label("API token"))
+                    .child(
+                        Button::new("save-settings")
+                            .label("Save & Connect")
+                            .appearance(ButtonAppearance::Accent)
+                            .on_click(
+                                cx.listener(|view, _: &ClickEvent, _, cx| view.save_settings(cx)),
+                            ),
+                    ),
+            )
     }
 
     /// Fetch the session list on the tokio runtime; update on completion.
@@ -186,6 +256,14 @@ impl RootView {
                         Button::new("refresh")
                             .label("Refresh")
                             .on_click(cx.listener(|view, _, _, cx| view.refresh_sessions(cx))),
+                    )
+                    .child(
+                        Button::new("settings")
+                            .label("Settings")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.show_settings = !view.show_settings;
+                                cx.notify();
+                            })),
                     ),
             )
             .child(list)
@@ -204,27 +282,31 @@ impl Render for RootView {
         let colors = cx.theme().colors.clone();
         let sidebar = self.sidebar(cx);
 
-        let main: gpui::AnyElement = match &self.active {
-            Some((_, term)) => div().size_full().child(term.clone()).into_any_element(),
-            None => div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(8.0))
-                .bg(gpui::rgb(0x1e1e2e))
-                .child(
-                    div()
-                        .text_color(colors.on_subtle)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(if self.configured {
-                            "Select or create a session"
-                        } else {
-                            "Configure the server token to begin"
-                        }),
-                )
-                .into_any_element(),
+        let main: gpui::AnyElement = if self.show_settings {
+            self.settings_panel(cx).into_any_element()
+        } else {
+            match &self.active {
+                Some((_, term)) => div().size_full().child(term.clone()).into_any_element(),
+                None => div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(8.0))
+                    .bg(gpui::rgb(0x1e1e2e))
+                    .child(
+                        div()
+                            .text_color(colors.on_subtle)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(if self.configured {
+                                "Select or create a session"
+                            } else {
+                                "Configure the server token to begin"
+                            }),
+                    )
+                    .into_any_element(),
+            }
         };
 
         div()
