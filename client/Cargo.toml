@@ -26,6 +26,9 @@ path = "src/main.rs"
 # so `cargo test --no-default-features` exercises the protocol/terminal/client
 # layer without compiling the heavy GPUI graph.
 default = ["gui"]
+# Keep the Windows console subsystem (stdout/stderr) for debugging. Off by
+# default so the shipped app launches without a console window.
+console = []
 gui = [
     "dep:gpui",
     "dep:fluent-core",
@@ -84,3 +87,17 @@ dirs-next = "2"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Windows distribution profile for cross-compiling from Linux.
+#
+# gpui only precompiles its HLSL shaders (via fxc.exe, release-only) when the
+# *build host* is Windows; cross-compiling a release build from Linux fails to
+# produce `shaders_bytes.rs`. With `debug-assertions = true`, gpui's Windows
+# renderer takes the runtime-shader-compilation path (D3DCompile at startup, no
+# fxc needed) — so the binary builds on the Linux runner and still runs on
+# Windows. We keep release-level optimisation and strip for a shippable size.
+[profile.win-dist]
+inherits = "release"
+debug-assertions = true
+lto = false
+strip = true

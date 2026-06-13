@@ -1,10 +1,14 @@
 //! MyDevEnv2 native desktop client entry point.
 //!
-//! On Windows release builds we use the `windows` subsystem so launching the
-//! app doesn't pop a console window (mirrors rdpapp).
+//! On Windows we use the `windows` subsystem so launching the app doesn't pop a
+//! console window. This applies to all Windows builds (not just release):
+//! distribution uses the `win-dist` profile, which keeps `debug-assertions` on
+//! to dodge gpui's fxc-only release shader precompile when cross-compiling from
+//! Linux — so a `not(debug_assertions)` gate would wrongly leave it a console
+//! app. Build with `--features console` to keep stdio for debugging.
 
 #![cfg_attr(
-    all(target_os = "windows", not(debug_assertions)),
+    all(target_os = "windows", not(feature = "console")),
     windows_subsystem = "windows"
 )]
 

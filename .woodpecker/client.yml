@@ -125,8 +125,10 @@ steps:
       - *install_sccache
       - rustup target add x86_64-pc-windows-gnu
       - cd client
-      - cargo build --release --target x86_64-pc-windows-gnu
-      - EXE=target/x86_64-pc-windows-gnu/release/mydevenv2-client.exe
+      # win-dist (debug-assertions on) avoids gpui's fxc-only release shader
+      # precompile, which can't run when cross-compiling from Linux.
+      - cargo build --profile win-dist --target x86_64-pc-windows-gnu
+      - EXE=target/x86_64-pc-windows-gnu/win-dist/mydevenv2-client.exe
       - x86_64-w64-mingw32-strip "$EXE" || true
       - ls -lh "$EXE"
       - VERSION=$(echo "$CI_COMMIT_TAG" | sed 's/^v//'); [ -n "$VERSION" ] || VERSION=0.0.0
@@ -166,7 +168,7 @@ steps:
       - TAG="$CI_COMMIT_TAG"
       - VERSION=$(echo "$TAG" | sed 's/^v//'); [ -n "$VERSION" ] || VERSION=0.0.0
       - cp "MyDevEnv2-Setup-$VERSION.exe" "MyDevEnv2-Client-$TAG-Setup.exe"
-      - cp target/x86_64-pc-windows-gnu/release/mydevenv2-client.exe "MyDevEnv2-Client-$TAG-windows-x86_64.exe" 2>/dev/null || true
+      - cp target/x86_64-pc-windows-gnu/win-dist/mydevenv2-client.exe "MyDevEnv2-Client-$TAG-windows-x86_64.exe" 2>/dev/null || true
       - cp target/release/mydevenv2-client "MyDevEnv2-Client-$TAG-linux-x86_64" 2>/dev/null || true
       - sha256sum MyDevEnv2-Client-$TAG-* > "SHA256SUMS-$TAG.txt"
       - |
