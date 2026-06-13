@@ -1,0 +1,86 @@
+# MyDevEnv2 native desktop client.
+#
+# Its own Cargo workspace (root MyDevEnv2 excludes `client`) so the heavy
+# GPUI/FluentGUI dependency graph never slows the server build/CI.
+#
+# GUI stack: a vendored GPUI fork (Zed's GPU-accelerated UI framework) plus the
+# FluentGUI Fluent 2 design layer — the same stack the in-house `rdpapp` native
+# app uses. Built/tested on Linux; Windows is the primary deployment target.
+[workspace]
+
+[package]
+name = "mydevenv2-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Native desktop client for MyDevEnv2 (GPUI/FluentGUI)"
+repository = "https://repo.indexarr.net/indexarr/MyDevEnv2"
+rust-version = "1.80"
+
+[[bin]]
+name = "mydevenv2-client"
+path = "src/main.rs"
+
+[features]
+# The GUI is the real product; core networking/terminal logic builds without it
+# so `cargo test --no-default-features` exercises the protocol/terminal/client
+# layer without compiling the heavy GPUI graph.
+default = ["gui"]
+gui = [
+    "dep:gpui",
+    "dep:fluent-core",
+    "dep:fluent-app",
+    "dep:fluent-layout",
+    "dep:fluent-ribbon",
+    "dep:fluent-primitives",
+]
+
+[dependencies]
+# ── GUI: GPUI + FluentGUI (paths mirror rdpapp's, relative to this crate) ──────
+gpui = { path = "../../FluentGUI/crates/gpui", optional = true }
+fluent-core = { path = "../../FluentGUI/crates/fluent-core", optional = true }
+fluent-app = { path = "../../FluentGUI/crates/fluent-app", optional = true }
+fluent-layout = { path = "../../FluentGUI/crates/fluent-layout", optional = true }
+fluent-ribbon = { path = "../../FluentGUI/crates/fluent-ribbon", optional = true }
+fluent-primitives = { path = "../../FluentGUI/crates/fluent-primitives", optional = true }
+
+# ── Async runtime: server attach/SSE/HTTP run on a background tokio runtime ────
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+async-stream = "0.3"
+
+# ── Networking: REST + SSE over HTTPS, PTY attach over WSS. rustls everywhere ──
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+] }
+url = "2"
+
+# ── Terminal: VT100 parser + monospace glyph rasterizer (ported from rdpapp) ──
+vte = "0.13"
+unicode-width = "0.2"
+fontdue = "0.9"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# ── Serde / data ──────────────────────────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+dirs-next = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
