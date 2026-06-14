@@ -36,6 +36,20 @@ $base   = 'repo.indexarr.net/indexarr'
 $mdeUrl = "https://git:$($env:GIT_AUTH_TOKEN)@$base/MyDevEnv2.git"
 $fgUrl  = "https://git:$($env:GIT_AUTH_TOKEN)@$base/fluent-gpui.git"
 
+# git writes progress ("Cloning into...") to stderr; with ErrorActionPreference
+# 'Stop' PowerShell would treat that as fatal. Route git stderr to stdout and
+# rely on $LASTEXITCODE (checked by Run-Git) for real failures.
+$env:GIT_REDIRECT_STDERR = '2>&1'
+# Ensure the per-user Rust toolchain is on PATH regardless of which account the
+# Woodpecker agent runs as.
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+
+function Run-Git {
+    param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
+    & git @Args
+    if ($LASTEXITCODE -ne 0) { throw "git $($Args -join ' ') failed ($LASTEXITCODE)" }
+}
+
 Step "Workspace: $WORKROOT (tag=$TAG version=$VERSION)"
 New-Item -ItemType Directory -Force -Path $WORKROOT | Out-Null
 Set-Location $WORKROOT
@@ -43,37 +57,47 @@ Set-Location $WORKROOT
 # ── Checkout MyDevEnv2 (the client lives in client/) ─────────────────────────
 Step 'Checkout MyDevEnv2'
 if (-not (Test-Path 'MyDevEnv2/.git')) {
-    git clone --no-checkout $mdeUrl MyDevEnv2
+    Run-Git clone --no-checkout $mdeUrl MyDevEnv2
 }
 Push-Location MyDevEnv2
-git fetch --no-tags --depth 1 origin (if ($TAG) { "refs/tags/$TAG" } else { 'main' })
-git checkout --detach FETCH_HEAD
+$mdeRef = if ($TAG) { "refs/tags/$TAG" } else { 'main' }
+Run-Git fetch --no-tags --depth 1 origin $mdeRef
+Run-Git checkout --detach FETCH_HEAD
 Pop-Location
 
 # ── Checkout the gpui fork as a sibling so client's ../../FluentGUI resolves ──
 Step "Checkout fluent-gpui @ $FLUENTGUI_REF"
 if (-not (Test-Path 'FluentGUI/.git')) {
-    git clone --no-checkout $fgUrl FluentGUI
+    Run-Git clone --no-checkout $fgUrl FluentGUI
 }
 Push-Location FluentGUI
-git fetch --depth 1 origin $FLUENTGUI_REF
-git checkout --detach FETCH_HEAD
+Run-Git fetch --depth 1 origin $FLUENTGUI_REF
+Run-Git checkout --detach FETCH_HEAD
 Pop-Location
 
 # ── Build (native MSVC release: fxc precompiles shaders → runnable binary) ────
 Step 'cargo build --release (x86_64-pc-windows-msvc)'
 Set-Location (Join-Path $WORKROOT 'MyDevEnv2/client')
 $target = 'x86_64-pc-windows-msvc'
-rustup target add $target 2>$null | Out-Null
-cargo build --release --target $target
+& rustup target add $target 2>$null | Out-Null
+& cargo build --release --target $target
+if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
 $exe = Join-Path (Get-Location) "target/$target/release/mydevenv2-client.exe"
 if (-not (Test-Path $exe)) { throw "build did not produce $exe" }
 Get-Item $exe | ForEach-Object { Write-Host ("exe: {0} ({1:N1} MB)" -f $_.FullName, ($_.Length/1MB)) }
 
 # ── Installer (NSIS) ─────────────────────────────────────────────────────────
 Step 'makensis installer'
+$makensis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
+if (-not $makensis) {
+    foreach ($p in @("$env:ProgramFiles\NSIS\makensis.exe", "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) {
+        if (Test-Path $p) { $makensis = $p; break }
+    }
+}
+if (-not $makensis) { throw 'makensis.exe not found (install NSIS)' }
 $out = Join-Path (Get-Location) "MyDevEnv2-Setup-$VERSION.exe"
-makensis "/DVERSION=$VERSION" "/DSRCEXE=$exe" "/DOUTFILE=$out" installer/mydevenv2-client.nsi
+& $makensis "/DVERSION=$VERSION" "/DSRCEXE=$exe" "/DOUTFILE=$out" installer/mydevenv2-client.nsi
+if ($LASTEXITCODE -ne 0) { throw "makensis failed ($LASTEXITCODE)" }
 if (-not (Test-Path $out)) { throw "makensis did not produce $out" }
 
 if (-not $TAG) {

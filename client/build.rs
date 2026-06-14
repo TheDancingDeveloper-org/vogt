@@ -14,9 +14,14 @@
 //! includes the Common Controls v6 dependency, which is exactly what we need.
 
 fn main() {
-    // build.rs runs on the host; gate on the *target* OS so this only fires for
-    // Windows builds (native or cross).
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+    // Only embed our manifest when CROSS-compiling to Windows from a non-Windows
+    // host. On a native Windows build, gpui's own build.rs embeds the Common-
+    // Controls v6 manifest (its `windows-manifest` default feature); adding ours
+    // too yields two MANIFEST resources and the link fails with CVT1100
+    // "duplicate resource". gpui embeds it only when the *build host* is Windows,
+    // so for a Linux cross-build we must still add it ourselves.
+    let target_windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    if target_windows && !cfg!(windows) {
         use embed_manifest::{embed_manifest, new_manifest};
         embed_manifest(new_manifest("MyDevEnv2.Client")).expect("failed to embed Windows manifest");
     }
