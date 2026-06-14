@@ -23,7 +23,9 @@ when:
       include:
         - client/**
         - .woodpecker/client.yml
+  # Only client version tags — NOT the server's rolling `apk-latest` tag.
   - event: tag
+    ref: refs/tags/client-v*
   - event: manual
   - event: pull_request
     path:
@@ -128,13 +130,16 @@ steps:
       # win-dist (debug-assertions on) avoids gpui's fxc-only release shader
       # precompile, which can't run when cross-compiling from Linux.
       - cargo build --profile win-dist --target x86_64-pc-windows-gnu
-      - EXE=target/x86_64-pc-windows-gnu/win-dist/mydevenv2-client.exe
+      # Absolute path: makensis resolves a relative File source against the .nsi
+      # script's directory (installer/), not the shell cwd, so a relative
+      # target/... path is not found. Pass absolute paths to be unambiguous.
+      - EXE="$(pwd)/target/x86_64-pc-windows-gnu/win-dist/mydevenv2-client.exe"
       - x86_64-w64-mingw32-strip "$EXE" || true
       - ls -lh "$EXE"
-      - VERSION=$(echo "$CI_COMMIT_TAG" | sed 's/^v//'); [ -n "$VERSION" ] || VERSION=0.0.0
-      # makensis runs with cwd=client/, so File/OutFile paths are relative to it.
-      - makensis -DVERSION="$VERSION" -DSRCEXE="$EXE" -DOUTFILE="MyDevEnv2-Setup-$VERSION.exe" installer/mydevenv2-client.nsi
-      - ls -lh "MyDevEnv2-Setup-$VERSION.exe"
+      - VERSION=$(echo "$CI_COMMIT_TAG" | sed 's/^client-v//; s/^v//'); [ -n "$VERSION" ] || VERSION=0.0.0
+      - OUT="$(pwd)/MyDevEnv2-Setup-$VERSION.exe"
+      - makensis -DVERSION="$VERSION" -DSRCEXE="$EXE" -DOUTFILE="$OUT" installer/mydevenv2-client.nsi
+      - ls -lh "$OUT"
       - sccache --show-stats
 
   # ── Linux release binary (parity / smoke) ───────────────────────────────
@@ -166,7 +171,7 @@ steps:
       - apk add --no-cache curl jq coreutils
       - cd client
       - TAG="$CI_COMMIT_TAG"
-      - VERSION=$(echo "$TAG" | sed 's/^v//'); [ -n "$VERSION" ] || VERSION=0.0.0
+      - VERSION=$(echo "$TAG" | sed 's/^client-v//; s/^v//'); [ -n "$VERSION" ] || VERSION=0.0.0
       - cp "MyDevEnv2-Setup-$VERSION.exe" "MyDevEnv2-Client-$TAG-Setup.exe"
       - cp target/x86_64-pc-windows-gnu/win-dist/mydevenv2-client.exe "MyDevEnv2-Client-$TAG-windows-x86_64.exe" 2>/dev/null || true
       - cp target/release/mydevenv2-client "MyDevEnv2-Client-$TAG-linux-x86_64" 2>/dev/null || true
