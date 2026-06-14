@@ -93,14 +93,13 @@ embed-manifest = "1"
 lto = "thin"
 codegen-units = 1
 
-# Windows distribution profile for cross-compiling from Linux.
-#
-# gpui only precompiles its HLSL shaders (via fxc.exe, release-only) when the
-# *build host* is Windows; cross-compiling a release build from Linux fails to
-# produce `shaders_bytes.rs`. With `debug-assertions = true`, gpui's Windows
-# renderer takes the runtime-shader-compilation path (D3DCompile at startup, no
-# fxc needed) — so the binary builds on the Linux runner and still runs on
-# Windows. We keep release-level optimisation and strip for a shippable size.
+# DEV-ONLY Windows cross-build profile. Lets a Linux dev type-check/link the
+# Windows target without a Windows host, by flipping gpui to its debug
+# runtime-shader path (avoids the fxc-only release precompile that can't run on
+# Linux). The resulting binary is NOT distributable: gpui's debug path compiles
+# HLSL from source files at a build-machine path that doesn't exist on a user's
+# PC, so it fails at launch. Real Windows builds are native — see
+# `.woodpecker/client-windows.yml`.
 [profile.win-dist]
 inherits = "release"
 debug-assertions = true

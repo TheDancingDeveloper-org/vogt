@@ -1,16 +1,15 @@
-# MyDevEnv2 desktop client — CI/CD (Woodpecker)
+# MyDevEnv2 desktop client — Linux CI/CD (Woodpecker)
 #
 # The client (`client/`) is a native GPUI/FluentGUI app in its own Cargo
-# workspace. This workflow:
-#   core-check     fmt + clippy + test of the GPUI-free core (fast)
-#   clippy-gui     full clippy incl. the GPUI UI (compiles the GPUI graph)
-#   build-windows  cross-compile x86_64-pc-windows-gnu + NSIS installer
-#   build-linux    release Linux binary (smoke / parity)
-#   forgejo-release on tag: publish Setup.exe + binaries to the release page
+# workspace. This (Linux) workflow:
+#   core-check      fmt + clippy + test of the GPUI-free core (fast)
+#   clippy-gui      full clippy incl. the GPUI UI (compiles the GPUI graph)
+#   build-linux     release Linux binary
+#   forgejo-release on tag: publish the Linux binary to the release page
 #
-# GPUI Windows note: unlike rdpapp's older gpui 0.2.2 (which needed fxc.exe and
-# was best-effort), the FluentGUI gpui 0.2.5 fork cross-compiles cleanly to
-# windows-gnu from Linux with just mingw-w64 — verified producing a PE32+ exe.
+# Windows is built NATIVELY on the arbit-win agent (see client-windows.yml):
+# gpui precompiles its HLSL shaders via fxc only on a Windows host, so a Linux
+# cross-compile can't produce a runnable Windows binary.
 
 labels:
   backend: docker
@@ -112,35 +111,10 @@ steps:
       - cargo clippy --all-targets -- -D warnings
       - sccache --show-stats
 
-  # ── Windows cross-compile + NSIS installer ──────────────────────────────
-  - name: build-windows
-    image: rust:1.95-bookworm
-    environment:
-      GIT_AUTH_TOKEN:
-        from_secret: git_auth_token
-      RUSTC_WRAPPER: sccache
-      SCCACHE_REDIS: "redis://100.92.54.45:6380"
-    commands:
-      - *fluentgui_setup
-      - apt-get update >/dev/null
-      - apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 nasm nsis >/dev/null
-      - *install_sccache
-      - rustup target add x86_64-pc-windows-gnu
-      - cd client
-      # win-dist (debug-assertions on) avoids gpui's fxc-only release shader
-      # precompile, which can't run when cross-compiling from Linux.
-      - cargo build --profile win-dist --target x86_64-pc-windows-gnu
-      # Absolute path: makensis resolves a relative File source against the .nsi
-      # script's directory (installer/), not the shell cwd, so a relative
-      # target/... path is not found. Pass absolute paths to be unambiguous.
-      - EXE="$(pwd)/target/x86_64-pc-windows-gnu/win-dist/mydevenv2-client.exe"
-      - x86_64-w64-mingw32-strip "$EXE" || true
-      - ls -lh "$EXE"
-      - VERSION=$(echo "$CI_COMMIT_TAG" | sed 's/^client-v//; s/^v//'); [ -n "$VERSION" ] || VERSION=0.0.0
-      - OUT="$(pwd)/MyDevEnv2-Setup-$VERSION.exe"
-      - makensis -DVERSION="$VERSION" -DSRCEXE="$EXE" -DOUTFILE="$OUT" installer/mydevenv2-client.nsi
-      - ls -lh "$OUT"
-      - sccache --show-stats
+  # NOTE: Windows is built natively on the arbit-win agent — see
+  # `.woodpecker/client-windows.yml`. Cross-compiling gpui to Windows from Linux
+  # cannot produce a runnable binary (gpui precompiles its HLSL shaders via fxc
+  # only on a Windows host), so this workflow no longer builds/publishes Windows.
 
   # ── Linux release binary (parity / smoke) ───────────────────────────────
   - name: build-linux
@@ -171,26 +145,17 @@ steps:
       - apk add --no-cache curl jq coreutils
       - cd client
       - TAG="$CI_COMMIT_TAG"
-      - VERSION=$(echo "$TAG" | sed 's/^client-v//; s/^v//'); [ -n "$VERSION" ] || VERSION=0.0.0
-      - cp "MyDevEnv2-Setup-$VERSION.exe" "MyDevEnv2-Client-$TAG-Setup.exe"
-      - cp target/x86_64-pc-windows-gnu/win-dist/mydevenv2-client.exe "MyDevEnv2-Client-$TAG-windows-x86_64.exe" 2>/dev/null || true
-      - cp target/release/mydevenv2-client "MyDevEnv2-Client-$TAG-linux-x86_64" 2>/dev/null || true
+      - cp target/release/mydevenv2-client "MyDevEnv2-Client-$TAG-linux-x86_64"
       - |
         API="https://repo.indexarr.net/api/v1"
         REPO="indexarr/MyDevEnv2"
 
-        # Checksums over the artefacts that actually exist (kept in this block so
-        # cwd/vars match the upload loop below). Visible in the step log.
-        SUMS="SHA256SUMS-$TAG.txt"
-        : > "$SUMS"
-        for b in "MyDevEnv2-Client-$TAG-Setup.exe" "MyDevEnv2-Client-$TAG-windows-x86_64.exe" "MyDevEnv2-Client-$TAG-linux-x86_64"; do
-          [ -f "$b" ] && sha256sum "$b" | tee -a "$SUMS"
-        done
-        BODY="## MyDevEnv2 desktop client $TAG\n\n"
-        BODY="$BODY- **Windows installer**: \`MyDevEnv2-Client-$TAG-Setup.exe\`\n"
-        BODY="$BODY- **Windows portable**: \`MyDevEnv2-Client-$TAG-windows-x86_64.exe\`\n"
-        [ -f "MyDevEnv2-Client-$TAG-linux-x86_64" ] && BODY="$BODY- **Linux x86_64**: \`MyDevEnv2-Client-$TAG-linux-x86_64\`\n"
-        BODY="$BODY\nSHA256 checksums in \`SHA256SUMS-$TAG.txt\`"
+        # Linux-only assets here; Windows installer + portable exe are published
+        # to the same release by the native Windows workflow (client-windows.yml).
+        SUMS="SHA256SUMS-$TAG-linux.txt"
+        sha256sum "MyDevEnv2-Client-$TAG-linux-x86_64" | tee "$SUMS"
+
+        BODY="## MyDevEnv2 desktop client $TAG\n\n- **Linux x86_64**: \`MyDevEnv2-Client-$TAG-linux-x86_64\`\n\nWindows installer is attached by the native Windows build."
 
         EXISTING=$(curl -sf -H "Authorization: token $GIT_AUTH_TOKEN" "$API/repos/$REPO/releases/tags/$TAG" 2>/dev/null || true)
         RELEASE_ID=$(echo "$EXISTING" | jq -r '.id // empty' 2>/dev/null || true)
@@ -203,7 +168,7 @@ steps:
         if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
           echo "ERROR: failed to resolve Forgejo release id"; exit 1
         fi
-        for f in "MyDevEnv2-Client-$TAG-Setup.exe" "MyDevEnv2-Client-$TAG-windows-x86_64.exe" "MyDevEnv2-Client-$TAG-linux-x86_64" "SHA256SUMS-$TAG.txt"; do
+        for f in "MyDevEnv2-Client-$TAG-linux-x86_64" "$SUMS"; do
           [ -f "$f" ] || continue
           curl -sf -X POST -H "Authorization: token $GIT_AUTH_TOKEN" \
             -F "attachment=@$f" "$API/repos/$REPO/releases/$RELEASE_ID/assets" > /dev/null \
