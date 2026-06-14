@@ -84,6 +84,11 @@ log = "0.4"
 env_logger = "0.11"
 dirs-next = "2"
 
+# Pure-Rust Windows manifest embedding (build.rs). Unconditional so it's present
+# on a Linux host cross-compiling to Windows; build.rs gates on the *target* OS.
+[build-dependencies]
+embed-manifest = "1"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
