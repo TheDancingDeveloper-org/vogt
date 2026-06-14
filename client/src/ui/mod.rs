@@ -13,11 +13,12 @@ use gpui::{
 };
 use uuid::Uuid;
 
+use futures_util::StreamExt as _;
 use mydevenv2_client::{
     bridge,
     client::ApiClient,
     config::ClientConfig,
-    protocol::{SessionSpec, SessionSummary},
+    protocol::{ServerEvent, SessionSpec, SessionSummary},
 };
 
 use terminal_view::TerminalView;
@@ -42,6 +43,9 @@ struct RootView {
     url_input: Entity<TextInput>,
     token_input: Entity<TextInput>,
     show_settings: bool,
+    /// Bumped each time the SSE stream is (re)started so a stale stream from a
+    /// previous server/token stops applying updates.
+    events_gen: u64,
 }
 
 impl RootView {
@@ -64,7 +68,7 @@ impl RootView {
                 .masked(true)
                 .value(cfg.token.clone())
         });
-        let view = Self {
+        let mut view = Self {
             api,
             configured,
             sessions: Vec::new(),
@@ -74,11 +78,98 @@ impl RootView {
             token_input,
             // Open straight to settings until the server is configured.
             show_settings: !configured,
+            events_gen: 0,
         };
         if configured {
             view.refresh_sessions(cx);
+            view.start_events(cx);
         }
         view
+    }
+
+    /// Subscribe to the server's `/api/events` SSE stream and apply live
+    /// session/activity updates. Reconnects automatically until superseded by a
+    /// newer generation (server/token change).
+    fn start_events(&mut self, cx: &mut Context<Self>) {
+        self.events_gen += 1;
+        let generation = self.events_gen;
+        let api = self.api.clone();
+        let handle = bridge::handle();
+        cx.spawn(
+            move |weak: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let mut cx = cx.clone();
+                async move {
+                    loop {
+                        // Run the SSE stream on the tokio runtime; forward decoded
+                        // events to this gpui task over a channel.
+                        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+                        let api2 = api.clone();
+                        let pump = handle.spawn(async move {
+                            if let Ok(stream) = api2.events().await {
+                                futures_util::pin_mut!(stream);
+                                while let Some(ev) = stream.next().await {
+                                    if tx.send(ev).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+
+                        let mut superseded = false;
+                        while let Some(ev) = rx.recv().await {
+                            let stop = weak
+                                .update(&mut cx, |v, cx| {
+                                    if v.events_gen != generation {
+                                        return true;
+                                    }
+                                    v.apply_event(ev, cx);
+                                    false
+                                })
+                                .unwrap_or(true);
+                            if stop {
+                                superseded = true;
+                                break;
+                            }
+                        }
+                        let _ = pump.await;
+
+                        let current = weak
+                            .update(&mut cx, |v, _| v.events_gen == generation)
+                            .unwrap_or(false);
+                        if superseded || !current {
+                            break;
+                        }
+                        // Stream dropped — back off, then reconnect.
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(3))
+                            .await;
+                    }
+                }
+            },
+        )
+        .detach();
+    }
+
+    /// Apply one server event to local state.
+    fn apply_event(&mut self, ev: ServerEvent, cx: &mut Context<Self>) {
+        match ev {
+            ServerEvent::Activity { id, state } => {
+                if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+                    s.activity = state;
+                    cx.notify();
+                }
+            }
+            ServerEvent::SessionRenamed { id, name } => {
+                if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+                    s.name = name;
+                    cx.notify();
+                }
+            }
+            // Create/kill change the set — simplest correct path is a re-list.
+            ServerEvent::SessionCreated { .. } | ServerEvent::SessionKilled { .. } => {
+                self.refresh_sessions(cx);
+            }
+        }
     }
 
     /// Read the settings inputs, persist config, and reconnect.
@@ -98,6 +189,7 @@ impl RootView {
         if self.configured {
             self.status = "Connecting…".into();
             self.refresh_sessions(cx);
+            self.start_events(cx);
         } else {
             self.status = "Enter the server URL and API token".into();
             self.show_settings = true;
