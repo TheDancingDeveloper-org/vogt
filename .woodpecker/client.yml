@@ -175,10 +175,17 @@ steps:
       - cp "MyDevEnv2-Setup-$VERSION.exe" "MyDevEnv2-Client-$TAG-Setup.exe"
       - cp target/x86_64-pc-windows-gnu/win-dist/mydevenv2-client.exe "MyDevEnv2-Client-$TAG-windows-x86_64.exe" 2>/dev/null || true
       - cp target/release/mydevenv2-client "MyDevEnv2-Client-$TAG-linux-x86_64" 2>/dev/null || true
-      - sha256sum MyDevEnv2-Client-$TAG-* > "SHA256SUMS-$TAG.txt"
       - |
         API="https://repo.indexarr.net/api/v1"
         REPO="indexarr/MyDevEnv2"
+
+        # Checksums over the artefacts that actually exist (kept in this block so
+        # cwd/vars match the upload loop below). Visible in the step log.
+        SUMS="SHA256SUMS-$TAG.txt"
+        : > "$SUMS"
+        for b in "MyDevEnv2-Client-$TAG-Setup.exe" "MyDevEnv2-Client-$TAG-windows-x86_64.exe" "MyDevEnv2-Client-$TAG-linux-x86_64"; do
+          [ -f "$b" ] && sha256sum "$b" | tee -a "$SUMS"
+        done
         BODY="## MyDevEnv2 desktop client $TAG\n\n"
         BODY="$BODY- **Windows installer**: \`MyDevEnv2-Client-$TAG-Setup.exe\`\n"
         BODY="$BODY- **Windows portable**: \`MyDevEnv2-Client-$TAG-windows-x86_64.exe\`\n"
