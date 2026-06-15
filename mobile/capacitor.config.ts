@@ -18,6 +18,10 @@ const config: CapacitorConfig = {
   appName: "MyDevEnv2",
   webDir: "web",
   bundledWebRuntime: false,
+  zoomEnabled: true,
+  android: {
+    zoomEnabled: true,
+  },
   server: {
     url: "https://mydevenv2.sprooty.com",
     cleartext: false,

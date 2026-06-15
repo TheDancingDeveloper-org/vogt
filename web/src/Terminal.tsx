@@ -6,6 +6,12 @@ import "@xterm/xterm/css/xterm.css";
 import { openAttach } from "./api";
 import { sessionsStore } from "./store";
 
+const DEFAULT_FONT_SIZE = 13;
+const MIN_FONT_SIZE = 9;
+const MAX_FONT_SIZE = 24;
+const FONT_SIZE_STORAGE_KEY = "mydevenv2.terminalFontSize.v1";
+const FONT_SIZE_EVENT = "mydevenv2:terminal-font-size";
+
 export interface TerminalActions {
   /** Copy the current xterm selection to the system clipboard. */
   copy: () => Promise<void>;
@@ -21,6 +27,46 @@ interface Props {
   registerSend?: (fn: (data: string | ArrayBuffer) => void) => void;
   /** Exposed so the parent (modkey row, etc.) can drive copy/paste. */
   registerActions?: (actions: TerminalActions) => void;
+}
+
+function clampFontSize(value: number): number {
+  return Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, value));
+}
+
+function readTerminalFontSize(): number {
+  try {
+    const raw = localStorage.getItem(FONT_SIZE_STORAGE_KEY);
+    if (!raw) return DEFAULT_FONT_SIZE;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed)
+      ? clampFontSize(parsed)
+      : DEFAULT_FONT_SIZE;
+  } catch {
+    return DEFAULT_FONT_SIZE;
+  }
+}
+
+function writeTerminalFontSize(fontSize: number) {
+  const next = clampFontSize(Math.round(fontSize * 2) / 2);
+  try {
+    localStorage.setItem(FONT_SIZE_STORAGE_KEY, String(next));
+  } catch {
+    /* storage can be unavailable in private / locked-down contexts */
+  }
+  window.dispatchEvent(
+    new CustomEvent(FONT_SIZE_EVENT, { detail: { fontSize: next } }),
+  );
+}
+
+function configureTerminalTextarea(textarea: HTMLTextAreaElement | undefined) {
+  if (!textarea) return;
+  textarea.setAttribute("autocorrect", "on");
+  textarea.setAttribute("autocapitalize", "none");
+  textarea.setAttribute("autocomplete", "on");
+  textarea.setAttribute("inputmode", "text");
+  textarea.setAttribute("enterkeyhint", "enter");
+  textarea.spellcheck = true;
+  textarea.setAttribute("spellcheck", "true");
 }
 
 /**
@@ -39,10 +85,13 @@ const TerminalView: Component<Props> = (props) => {
   let resizeObserver: ResizeObserver | null = null;
   let inSnapshot = true;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let fitFrame: number | null = null;
   let reconnectDelay = 500;
   let destroyed = false;
   let sessionGone = false;
   let visibilityHandler: (() => void) | null = null;
+  let viewportHandler: (() => void) | null = null;
+  let fontSizeHandler: ((event: Event) => void) | null = null;
   let pasteTextareaRef: HTMLTextAreaElement | undefined;
   const [showPasteModal, setShowPasteModal] = createSignal(false);
   let pasteResolve: ((v: string | null) => void) | null = null;
@@ -89,17 +138,179 @@ const TerminalView: Component<Props> = (props) => {
     );
   };
 
+  const fitAndResize = () => {
+    if (
+      !term ||
+      !fit ||
+      !hostRef ||
+      hostRef.clientWidth <= 0 ||
+      hostRef.clientHeight <= 0
+    ) {
+      return;
+    }
+    try {
+      fit.fit();
+      sendResize();
+    } catch {
+      /* xterm can throw while its DOM is detaching or hidden */
+    }
+  };
+
+  const scheduleFit = () => {
+    if (fitFrame !== null) return;
+    fitFrame = requestAnimationFrame(() => {
+      fitFrame = null;
+      fitAndResize();
+    });
+  };
+
+  const applyFontSize = (fontSize: number) => {
+    if (!term) return;
+    term.options.fontSize = clampFontSize(fontSize);
+    scheduleFit();
+  };
+
+  const publishFontSize = (fontSize: number) => {
+    const next = clampFontSize(fontSize);
+    applyFontSize(next);
+    writeTerminalFontSize(next);
+  };
+
+  const estimateCellHeight = () => {
+    if (!term) return DEFAULT_FONT_SIZE * 1.2;
+    const lineHeight =
+      typeof term.options.lineHeight === "number" ? term.options.lineHeight : 1;
+    return Math.max(8, (term.options.fontSize ?? DEFAULT_FONT_SIZE) * lineHeight);
+  };
+
+  const installTouchGestures = () => {
+    if (!hostRef) return () => {};
+
+    let mode: "idle" | "scroll" | "pinch" = "idle";
+    let startX = 0;
+    let startY = 0;
+    let lastY = 0;
+    let lineRemainder = 0;
+    let pinchStartDistance = 0;
+    let pinchStartFontSize = readTerminalFontSize();
+
+    const touchDistance = (touches: TouchList): number => {
+      const a = touches[0];
+      const b = touches[1];
+      if (!a || !b) return 0;
+      return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    };
+
+    const resetScroll = (touch: Touch) => {
+      mode = "idle";
+      startX = touch.clientX;
+      startY = touch.clientY;
+      lastY = touch.clientY;
+      lineRemainder = 0;
+    };
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length === 1) {
+        const touch = event.touches[0];
+        if (touch) resetScroll(touch);
+        return;
+      }
+      if (event.touches.length === 2) {
+        mode = "pinch";
+        pinchStartDistance = touchDistance(event.touches);
+        pinchStartFontSize = term?.options.fontSize ?? readTerminalFontSize();
+        event.preventDefault();
+      }
+    };
+
+    const onTouchMove = (event: TouchEvent) => {
+      if (!term) return;
+
+      if (event.touches.length === 2) {
+        const distance = touchDistance(event.touches);
+        if (pinchStartDistance > 0 && distance > 0) {
+          mode = "pinch";
+          const scale = distance / pinchStartDistance;
+          publishFontSize(pinchStartFontSize * scale);
+        }
+        event.preventDefault();
+        return;
+      }
+
+      if (event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+
+      const totalX = touch.clientX - startX;
+      const totalY = touch.clientY - startY;
+      if (mode === "idle") {
+        const absX = Math.abs(totalX);
+        const absY = Math.abs(totalY);
+        if (absY < 8 && absX < 8) return;
+        if (absY < absX * 1.2) return;
+        mode = "scroll";
+      }
+
+      if (mode !== "scroll") return;
+      const dy = touch.clientY - lastY;
+      lastY = touch.clientY;
+      lineRemainder += -dy / estimateCellHeight();
+      const wholeLines =
+        lineRemainder > 0 ? Math.floor(lineRemainder) : Math.ceil(lineRemainder);
+      if (wholeLines !== 0) {
+        term.scrollLines(wholeLines);
+        lineRemainder -= wholeLines;
+      }
+      event.preventDefault();
+    };
+
+    const onTouchEnd = (event: TouchEvent) => {
+      if (event.touches.length === 1) {
+        const touch = event.touches[0];
+        if (touch) resetScroll(touch);
+        return;
+      }
+      mode = "idle";
+      lineRemainder = 0;
+    };
+
+    const onWheel = (event: WheelEvent) => {
+      if (!term || !event.ctrlKey) return;
+      event.preventDefault();
+      const delta = event.deltaY > 0 ? -0.5 : 0.5;
+      publishFontSize((term.options.fontSize ?? readTerminalFontSize()) + delta);
+    };
+
+    const listenerOptions: AddEventListenerOptions = { passive: false };
+    hostRef.addEventListener("touchstart", onTouchStart, listenerOptions);
+    hostRef.addEventListener("touchmove", onTouchMove, listenerOptions);
+    hostRef.addEventListener("touchend", onTouchEnd, listenerOptions);
+    hostRef.addEventListener("touchcancel", onTouchEnd, listenerOptions);
+    hostRef.addEventListener("wheel", onWheel, listenerOptions);
+
+    return () => {
+      hostRef?.removeEventListener("touchstart", onTouchStart);
+      hostRef?.removeEventListener("touchmove", onTouchMove);
+      hostRef?.removeEventListener("touchend", onTouchEnd);
+      hostRef?.removeEventListener("touchcancel", onTouchEnd);
+      hostRef?.removeEventListener("wheel", onWheel);
+    };
+  };
+
   onMount(() => {
     if (!hostRef) return;
+    const cleanupTouchGestures = installTouchGestures();
 
     term = new XTerm({
       fontFamily:
         '"JetBrainsMono Nerd Font", "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
+      fontSize: readTerminalFontSize(),
       lineHeight: 1.2,
       cursorBlink: true,
       scrollback: 5000,
       allowProposedApi: true,
+      scrollSensitivity: 2,
+      smoothScrollDuration: 0,
       theme: {
         background: "#000000",
         foreground: "#c9d1d9",
@@ -127,7 +338,8 @@ const TerminalView: Component<Props> = (props) => {
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
     term.open(hostRef);
-    fit.fit();
+    configureTerminalTextarea(term.textarea);
+    fitAndResize();
 
     // Wire input: user keystrokes → PTY stdin.
     term.onData((data) => sendToPty(data));
@@ -241,14 +453,21 @@ const TerminalView: Component<Props> = (props) => {
 
     // Resize plumbing
     resizeObserver = new ResizeObserver(() => {
-      try {
-        fit?.fit();
-        sendResize();
-      } catch {
-        /* no-op during teardown */
-      }
+      scheduleFit();
     });
     resizeObserver.observe(hostRef);
+
+    viewportHandler = () => scheduleFit();
+    window.addEventListener("resize", viewportHandler);
+    window.addEventListener("orientationchange", viewportHandler);
+    window.addEventListener("mydevenv2:viewport-resize", viewportHandler);
+
+    fontSizeHandler = (event: Event) => {
+      const fontSize = (event as CustomEvent<{ fontSize?: number }>).detail
+        ?.fontSize;
+      if (typeof fontSize === "number") applyFontSize(fontSize);
+    };
+    window.addEventListener(FONT_SIZE_EVENT, fontSizeHandler);
 
     props.registerSend?.(sendToPty);
 
@@ -265,6 +484,10 @@ const TerminalView: Component<Props> = (props) => {
     document.addEventListener("visibilitychange", visibilityHandler);
 
     connect();
+
+    onCleanup(() => {
+      cleanupTouchGestures();
+    });
   });
 
   function markSessionGone() {
@@ -350,9 +573,23 @@ const TerminalView: Component<Props> = (props) => {
   onCleanup(() => {
     destroyed = true;
     if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (fitFrame !== null) {
+      cancelAnimationFrame(fitFrame);
+      fitFrame = null;
+    }
     if (visibilityHandler) {
       document.removeEventListener("visibilitychange", visibilityHandler);
       visibilityHandler = null;
+    }
+    if (viewportHandler) {
+      window.removeEventListener("resize", viewportHandler);
+      window.removeEventListener("orientationchange", viewportHandler);
+      window.removeEventListener("mydevenv2:viewport-resize", viewportHandler);
+      viewportHandler = null;
+    }
+    if (fontSizeHandler) {
+      window.removeEventListener(FONT_SIZE_EVENT, fontSizeHandler);
+      fontSizeHandler = null;
     }
     resizeObserver?.disconnect();
     try {

@@ -19,6 +19,9 @@
   --tab-height: 36px;
   --modkey-height: 44px;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --app-width: 100vw;
+  --app-height: 100dvh;
+  --keyboard-inset: 0px;
 }
 
 * {
@@ -30,7 +33,10 @@ body,
 #root {
   margin: 0;
   padding: 0;
-  height: 100%;
+  width: 100%;
+  height: var(--app-height);
+  min-height: var(--app-height);
+  overflow: hidden;
   background: var(--bg);
   color: var(--fg);
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
@@ -42,6 +48,7 @@ body,
 body {
   padding: env(safe-area-inset-top) env(safe-area-inset-right)
     env(safe-area-inset-bottom) env(safe-area-inset-left);
+  overscroll-behavior: none;
 }
 
 button {
@@ -83,7 +90,10 @@ input[type="password"]:focus {
   grid-template-areas:
     "drawer tabs"
     "drawer main";
-  height: 100%;
+  width: var(--app-width);
+  height: var(--app-height);
+  min-height: 0;
+  overflow: hidden;
 }
 
 @media (max-width: 768px) {
@@ -351,6 +361,7 @@ input[type="password"]:focus {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 .tab-view {
@@ -380,6 +391,9 @@ input[type="password"]:focus {
   min-width: 0;
   padding: 4px 0 0 6px;
   background: #000;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  touch-action: pan-y pinch-zoom;
 }
 .terminal-host .xterm,
 .terminal-host .xterm-viewport,
@@ -388,6 +402,15 @@ input[type="password"]:focus {
 }
 .terminal-host .xterm-viewport {
   background-color: transparent !important;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+.terminal-host .xterm-screen {
+  touch-action: pan-y pinch-zoom;
+}
+.terminal-host .xterm-helper-textarea {
+  font-size: 16px;
 }
 
 .terminal-workspace {
@@ -397,6 +420,7 @@ input[type="password"]:focus {
   display: flex;
   flex-direction: column;
   background: #000;
+  overflow: hidden;
 }
 .terminal-workspace-toolbar {
   display: flex;
@@ -451,6 +475,7 @@ input[type="password"]:focus {
   gap: 4px;
   padding: 4px;
   background: #000;
+  overflow: hidden;
 }
 .terminal-split {
   flex: 1 1 0;
@@ -483,6 +508,30 @@ input[type="password"]:focus {
   padding: 4px 0 0 6px;
 }
 
+.terminal-composer {
+  display: none;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 42px;
+  padding: 5px 6px;
+  border-top: 1px solid var(--bd);
+  background: var(--bg-elev);
+}
+.terminal-composer input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  font-size: 16px;
+}
+.terminal-composer button {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 9px;
+  font-size: 12px;
+  touch-action: manipulation;
+}
+
 @media (max-width: 768px) {
   .terminal-workspace-toolbar {
     overflow-x: auto;
@@ -493,6 +542,12 @@ input[type="password"]:focus {
   }
   .terminal-workspace-title {
     flex: 1 0 90px;
+  }
+}
+
+@media (max-width: 768px) and (pointer: coarse) {
+  .terminal-composer {
+    display: flex;
   }
 }
 

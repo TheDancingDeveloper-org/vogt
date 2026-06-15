@@ -280,6 +280,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
   const [activePaneId, setActivePaneId] = createSignal(initial.activePaneId);
   const [busy, setBusy] = createSignal<SplitDirection | "close" | null>(null);
   const [error, setError] = createSignal<string | null>(null);
+  const [draft, setDraft] = createSignal("");
   const paneSenders = new Map<string, (data: string | ArrayBuffer) => void>();
   const paneActions = new Map<string, TerminalActions>();
 
@@ -300,6 +301,14 @@ const TerminalWorkspace: Component<Props> = (props) => {
 
   const sendToActive = (data: string | ArrayBuffer) => {
     paneSenders.get(activePaneId())?.(data);
+  };
+
+  const sendDraft = (submit: boolean) => {
+    const text = draft();
+    if (!text && !submit) return;
+    if (text) sendToActive(text);
+    if (submit) sendToActive("\r");
+    setDraft("");
   };
 
   const workspaceActions: TerminalActions = {
@@ -464,6 +473,36 @@ const TerminalWorkspace: Component<Props> = (props) => {
           }
         />
       </div>
+      <form
+        class="terminal-composer"
+        onSubmit={(event) => {
+          event.preventDefault();
+          sendDraft(true);
+        }}
+      >
+        <input
+          type="text"
+          value={draft()}
+          onInput={(event) => setDraft(event.currentTarget.value)}
+          placeholder="Command"
+          autocomplete="on"
+          autocorrect="on"
+          autocapitalize="none"
+          spellcheck={true}
+          enterkeyhint="send"
+        />
+        <button
+          type="button"
+          onClick={() => sendDraft(false)}
+          disabled={!draft()}
+          title="Send text without Enter"
+        >
+          Insert
+        </button>
+        <button type="submit" title="Send text and Enter">
+          Enter
+        </button>
+      </form>
     </div>
   );
 };
