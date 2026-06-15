@@ -6,7 +6,7 @@
 //! server route except `/healthz` and `/api/config`, so it is stored locally
 //! and sent as `Authorization: Bearer` (HTTP) or the first `auth` frame (WS).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +56,8 @@ impl ClientConfig {
     pub fn save(&self) -> Result<(), String> {
         let path = Self::path();
         let json = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, json).map_err(|e| e.to_string())
+        std::fs::write(&path, json).map_err(|e| e.to_string())?;
+        secure_config_file(&path).map_err(|e| e.to_string())
     }
 
     /// Base URL with any trailing slash trimmed.
@@ -67,5 +68,42 @@ impl ClientConfig {
     /// True if enough is configured to attempt a connection.
     pub fn is_configured(&self) -> bool {
         !self.base().is_empty() && !self.token.is_empty()
+    }
+}
+
+#[cfg(unix)]
+fn secure_config_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(path, perms)
+}
+
+#[cfg(not(unix))]
+fn secure_config_file(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_trims_trailing_slashes() {
+        let cfg = ClientConfig {
+            server_url: "https://mydevenv2.sprooty.com///".into(),
+            token: "tok".into(),
+        };
+        assert_eq!(cfg.base(), "https://mydevenv2.sprooty.com");
+    }
+
+    #[test]
+    fn empty_token_is_not_configured() {
+        let cfg = ClientConfig {
+            server_url: "https://mydevenv2.sprooty.com".into(),
+            token: String::new(),
+        };
+        assert!(!cfg.is_configured());
     }
 }

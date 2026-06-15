@@ -121,3 +121,23 @@ that tag.
 - [x] Native Windows installer and portable exe via Woodpecker release tags
 - [ ] Real TabStrip / multiple simultaneous terminal panes in the native UI
 - [ ] File-tree / editor / git / diff tabs
+
+## Native app improvement backlog
+
+1. Multiple terminal tabs and panes: keep attached terminal views alive while
+   switching sessions, add a real content tab strip, support close-without-kill,
+   and later split panes.
+2. Session lifecycle controls: expose rename, duplicate, kill, delete, cwd,
+   command, and environment fields so the native client can manage sessions
+   without falling back to the PWA.
+3. PWA workflow parity: add native file browsing, text preview/edit, search,
+   git status, log, and diff views backed by the existing typed REST client.
+4. Terminal ergonomics: add scrollback search, explicit reattach after lag or
+   reconnect, clear/reset controls, configurable font sizing, and clearer
+   terminal status banners.
+5. Native polish: protect local credentials, integrate OS keychain storage,
+   add native waiting-for-input notifications, expose app/version/release
+   details, and add tray or menu actions for common commands.
+6. Desktop validation: keep the GPUI-free protocol and terminal tests fast,
+   then add GUI smoke coverage for first-run settings, session list, attach,
+   typing, resize, reconnect, and release packaging.

@@ -37,6 +37,8 @@ enum Status {
 }
 
 pub struct TerminalView {
+    ws_url: String,
+    token: String,
     term: TermProcessor,
     renderer: TermRenderer,
     last_frame: Option<Arc<RenderImage>>,
@@ -46,12 +48,16 @@ pub struct TerminalView {
     input: Option<UnboundedSender<AttachInput>>,
     status: Status,
     error: Option<String>,
+    search_query: String,
+    search_count: usize,
 }
 
 impl TerminalView {
     /// Attach to `session_id` on the given server and start streaming.
     pub fn new(ws_url: String, token: String, _session_id: Uuid, cx: &mut Context<Self>) -> Self {
-        let view = Self {
+        let mut view = Self {
+            ws_url,
+            token,
             term: TermProcessor::new(DEFAULT_COLS, DEFAULT_ROWS),
             renderer: TermRenderer::new(15.0),
             last_frame: None,
@@ -61,13 +67,55 @@ impl TerminalView {
             input: None,
             status: Status::Connecting,
             error: None,
+            search_query: String::new(),
+            search_count: 0,
         };
 
+        view.start_attach(cx);
+        view
+    }
+
+    pub fn reattach(&mut self, cx: &mut Context<Self>) {
+        if let Some(tx) = &self.input {
+            let _ = tx.send(AttachInput::Close);
+        }
+        self.input = None;
+        self.term.clear_all();
+        self.status = Status::Connecting;
+        self.error = None;
+        self.last_frame = None;
+        self.start_attach(cx);
+        cx.notify();
+    }
+
+    pub fn close(&self) {
+        if let Some(tx) = &self.input {
+            let _ = tx.send(AttachInput::Close);
+        }
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.term.clear_all();
+        self.last_frame = None;
+        self.search_count = 0;
+        cx.notify();
+    }
+
+    pub fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
+        self.search_query = query;
+        self.search_count = self.term.match_count(&self.search_query);
+        self.last_frame = None;
+        cx.notify();
+    }
+
+    fn start_attach(&mut self, cx: &mut Context<Self>) {
         // Spawn the attach on the tokio runtime (its internal `tokio::spawn`
         // needs a runtime context), then pump its events into the parser from a
         // GPUI async task so all terminal mutation stays on the foreground
         // thread.
         let handle = bridge::handle();
+        let ws_url = self.ws_url.clone();
+        let token = self.token.clone();
 
         cx.spawn(
             move |weak: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
@@ -106,7 +154,13 @@ impl TerminalView {
                                 let mut closed = false;
                                 for ev in batch {
                                     match ev {
-                                        AttachEvent::Output(bytes) => v.term.process(&bytes),
+                                        AttachEvent::Output(bytes) => {
+                                            v.term.process(&bytes);
+                                            if !v.search_query.trim().is_empty() {
+                                                v.search_count =
+                                                    v.term.match_count(&v.search_query);
+                                            }
+                                        }
                                         AttachEvent::SnapshotReady => v.status = Status::Live,
                                         AttachEvent::Lag(note) => {
                                             v.error = Some(format!("lagged: {note}"));
@@ -131,8 +185,6 @@ impl TerminalView {
             },
         )
         .detach();
-
-        view
     }
 
     fn send_input(&self, bytes: Vec<u8>) {
@@ -203,6 +255,9 @@ impl Render for TerminalView {
         let last_frame = self.last_frame.clone();
         let bounds_arc = Arc::clone(&self.bounds_arc);
         let err_banner = self.error.clone();
+        let status = self.status;
+        let search_query = self.search_query.clone();
+        let search_count = self.search_count;
 
         let canvas_el = canvas(
             move |bounds, _window, _cx| {
@@ -311,6 +366,36 @@ impl Render for TerminalView {
                 }
             }))
             .child(canvas_el);
+
+        if status == Status::Connecting {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(gpui::rgb(0x223355))
+                    .text_color(gpui::rgb(0xc8ddff))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Connecting..."),
+            );
+        }
+
+        if !search_query.trim().is_empty() {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(gpui::rgb(0x25311f))
+                    .text_color(gpui::rgb(0xcde8ba))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(format!("{search_count} matches")),
+            );
+        }
 
         if let Some(err) = err_banner {
             root = root.child(
