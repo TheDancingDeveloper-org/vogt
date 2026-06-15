@@ -8,6 +8,10 @@
 #                               trigger a Komodo redeploy on Node B
 #   discord-success / -failure  Notifications
 
+labels:
+  backend: docker
+  platform: linux/amd64
+
 when:
   # Skip the server pipeline (which builds the image and redeploys prod via
   # Komodo) for client-only changes — the desktop client lives in `client/`
