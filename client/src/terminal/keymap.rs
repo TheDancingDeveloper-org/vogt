@@ -62,6 +62,12 @@ pub fn key_to_bytes(k: &KeyInput<'_>) -> Option<Vec<u8>> {
         return Some(seq.to_vec());
     }
 
+    // Ctrl+Space → NUL. GPUI names the space key "space" on Windows (and " " on
+    // some platforms), so handle both spellings before the len==1 check below.
+    if k.ctrl && (key == "space" || key == " ") {
+        return Some(vec![0]);
+    }
+
     // Ctrl+letter / Ctrl+symbol → control byte (0x01-0x1f).
     if k.ctrl && key.len() == 1 {
         let c = key.chars().next()?.to_ascii_lowercase();

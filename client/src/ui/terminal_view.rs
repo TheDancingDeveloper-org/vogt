@@ -10,9 +10,9 @@
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    canvas, div, prelude::*, px, Bounds, Context, Corners, FocusHandle, FontWeight, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollWheelEvent,
-    Window,
+    canvas, div, prelude::*, px, Bounds, ClipboardItem, Context, Corners, FocusHandle, FontWeight,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage,
+    ScrollWheelEvent, Window,
 };
 use image::{Frame, ImageBuffer, Rgba};
 use tokio::sync::mpsc::UnboundedSender;
@@ -256,17 +256,40 @@ impl Render for TerminalView {
                 }),
             )
             .on_key_down(cx.listener(|view, ev: &gpui::KeyDownEvent, _, cx| {
-                // Any key returns to the live tail and drops selection.
+                let ks = &ev.keystroke;
+                let m = &ks.modifiers;
+                let key = ks.key.as_str();
+
+                // Ctrl+Shift+C → copy the current selection to the clipboard.
+                // Must run BEFORE we clear the selection below.
+                if m.control && m.shift && !m.alt && !m.platform && key == "c" {
+                    if let Some(text) = view.term.selected_text() {
+                        if !text.is_empty() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        }
+                    }
+                    return;
+                }
+                // Ctrl+Shift+V → paste clipboard text into the PTY.
+                if m.control && m.shift && !m.alt && !m.platform && key == "v" {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                        if !text.is_empty() {
+                            view.send_input(text.into_bytes());
+                        }
+                    }
+                    return;
+                }
+
+                // Any other key returns to the live tail and drops selection.
                 view.term.grid.scroll_offset = 0;
                 view.term.clear_selection();
-                let ks = &ev.keystroke;
                 let ki = KeyInput {
-                    key: ks.key.as_str(),
+                    key,
                     key_char: ks.key_char.as_deref(),
-                    ctrl: ks.modifiers.control,
-                    alt: ks.modifiers.alt,
-                    shift: ks.modifiers.shift,
-                    platform: ks.modifiers.platform,
+                    ctrl: m.control,
+                    alt: m.alt,
+                    shift: m.shift,
+                    platform: m.platform,
                 };
                 if let Some(bytes) = key_to_bytes(&ki) {
                     view.send_input(bytes);
