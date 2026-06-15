@@ -7,7 +7,7 @@
 │  Node B (Tailscale-exposed)                                 │
 │                                                             │
 │  ┌──────────────────────────────────────────────┐           │
-│  │  Persistent dev pod (LXC container)          │           │
+│  │  Persistent dev pod (Docker / Komodo stack)  │           │
 │  │  ─ /home/sprooty/Working bind-mounted        │           │
 │  │  ─ MyDevEnv2 server (Rust / Axum)            │           │
 │  │     • owns all PTYs                          │           │
@@ -32,12 +32,12 @@
                           ▲
                           │ Tailscale only
                           │
-                ┌─────────┴──────────┐
-                ▼                    ▼
-        Browser (PWA)         Android (Capacitor wrap)
-       desktop + tablet       installable APK + FCM push
-       (incl. iOS Safari      (iOS is browser-only for now
-        Add-to-Home-Screen)    — see "Out of scope")
+                ┌─────────┴──────────┬─────────────────────┐
+                ▼                    ▼                     ▼
+        Browser (PWA)         Android (Capacitor wrap)  Native desktop
+       desktop + tablet       installable APK + FCM     GPUI/FluentGUI
+       (incl. iOS Safari      push; loads deployed      client, Windows
+        Add-to-Home-Screen)   PWA directly              primary target
 ```
 
 ## Components
@@ -83,11 +83,39 @@ Mobile-specific UX:
 
 ### Mobile wrap (Android only for MVP)
 
-Capacitor wraps the PWA into an installable Android app. Adds native FCM push, home-screen install, and deep links. No second codebase.
+Capacitor 8 wraps the PWA into an installable Android app. Adds native FCM push,
+home-screen install, and deep links. No second UI codebase: the WebView loads
+`https://mydevenv2.sprooty.com` directly, with `mobile/web/` only as the
+Capacitor-required fallback bundle.
 
-**Distribution:** sideload the APK directly for MVP — no Play Store listing, no signing-key registration, no review cycle. `gradlew assembleRelease` produces an APK; copy it to the phone (USB / Tailscale share / GitHub release) and `adb install` or open it from the file manager. The phone needs "Install unknown apps" enabled for the source app once.
+**Distribution:** sideload the debug APK directly for MVP — no Play Store
+listing, no signing-key registration, no review cycle. The server Woodpecker
+workflow builds it with `assembleDebug` and publishes it to the Forgejo release
+tag `apk-latest` as `mydevenv2-debug.apk`. The phone needs "Install unknown
+apps" enabled for the source app once.
 
 **iOS deferred.** PWA still works in Safari via Add-to-Home-Screen — that gets the install, the standalone shell, and (on iOS 16.4+ for installed PWAs) web push. What's deferred is the Capacitor iOS build / App Store distribution / APNs registration, all of which need an Apple developer account.
+
+### Native desktop client
+
+The native client in `client/` is an optional high-performance front end for
+desktop use, not the primary deployment surface. It uses GPUI plus the in-house
+FluentGUI layer, matching `rdpapp`, and speaks the same server REST/SSE/WS
+protocol as the PWA.
+
+Current scope:
+
+- Windows is the primary release target; Linux builds are used for CI and
+  parity smoke testing.
+- In-app server URL/token settings are persisted to the platform config dir.
+- Session list, create/attach, terminal rendering, SSE activity updates, mouse
+  selection, and Ctrl+Shift+C/V are implemented.
+- Full file/editor/git/GUI parity with the PWA is future work.
+
+Releases use `client-v*` tags. `.woodpecker/client.yml` publishes the Linux
+artifact and `.woodpecker/client-windows.yml` builds natively on the Windows
+`arbit-win` agent, publishing the installer, portable exe, and checksums to the
+same Forgejo release.
 
 ### GUI layer (Sway + Selkies)
 
@@ -141,7 +169,12 @@ Sequenced to deliver a usable system as fast as possible and defer the fiddliest
 - Capacitor wrap producing a sideloadable Android APK (no Play Store listing for MVP)
 - iOS is intentionally out of scope this phase — PWA in Safari still works
 
-### Phase 7 — Android emulator VM (~1 week)
+### Native desktop client — added after Phase 6
+- GPUI/FluentGUI shell and native terminal core
+- In-app server settings, session list/create/attach, SSE live updates
+- Linux CI and native Windows release workflow on client tags
+
+### Phase 7 — Android emulator VM (~1 week, pending)
 - libvirt VM template
 - Start/stop API in server, button in UI
 - Selkies inside the VM
@@ -152,19 +185,32 @@ Sequenced to deliver a usable system as fast as possible and defer the fiddliest
 
 - Per-project isolated environments
 - Public exposure / multi-user / team features
-- Native desktop wrapper (web UI in a browser is enough)
 - **iOS Capacitor build / App Store distribution / APNs** — requires Apple developer account. iOS users get the PWA via Safari Add-to-Home-Screen (with web push on 16.4+ when installed).
 - **Android Play Store listing** — sideloaded APK is the MVP distribution; revisit only if I want it on someone else's phone.
 - VS Code extension ecosystem (use Monaco directly; if I ever need extensions, run upstream code-server unmodified on a separate port and link out)
 - Real-time collaborative editing
 - Embedded language servers (LSP can come later as a tab feature if needed; Claude/Codex are the primary "intelligence" layer)
 
-## Open decisions
+## Resolved decisions
 
-These don't block Phase 1 but should be answered before the relevant phase:
+- **Container runtime:** Docker image deployed by Komodo on Node B.
+- **PWA framework:** Solid + Vite + TypeScript.
+- **Deployment:** Forgejo push → Woodpecker build → Forgejo registry image →
+  ops compose SHA bump → Komodo `DeployStack`.
+- **Mobile distribution:** sideloaded Android APK from Forgejo release
+  `apk-latest`; iOS remains browser/PWA-only.
+- **Desktop client:** optional GPUI/FluentGUI native client, released from
+  `client-v*` tags.
+- **Service auth:** production default interactive sessions run through
+  `mydevenv2-agent-auth` using a read-only Infisical Universal Auth identity.
 
-- **Container runtime for the dev pod**: LXC vs Docker vs Incus. Leaning LXC/Incus for systemd-like behaviour, but Docker is fine if simpler operationally on Node B.
-- **PWA framework**: React, Solid, or Svelte. Solid leans fastest for the dense reactive UI; React has the largest ecosystem for xterm.js + Monaco bindings.
-- **Selkies vs KasmVNC** for the GUI layer — try Selkies first, fall back if setup is too fragile.
-- **FCM project setup** — need a Firebase project with the Android app registered, the `google-services.json` dropped into the Capacitor Android project, and the FCM server key stored as `HOMELAB_MYDEVENV2_FCM_SERVER_KEY` in Infisical for the server to use. (iOS APNs is intentionally out of scope per "Out of scope (v2)".)
-- **Where the server runs** — directly on Node B vs inside the dev pod itself. Inside the pod is cleaner (single artefact, single lifecycle).
+## Remaining decisions
+
+- **GUI stream activation:** Sway and Selkies are installed in the image, but
+  production still has `START_SWAY=0` and `GUI_STREAM_URL=""`. Enable and
+  verify Selkies before treating the GUI tab as operational.
+- **Android emulator VM:** Phase 7 still needs the libvirt/KVM VM, display
+  stream, ADB bridge, and UI controls.
+- **FCM real-device verification:** server-side FCM HTTP v1 and Capacitor token
+  registration are implemented, but push delivery still needs a real-device
+  smoke test with the production service-account JSON.

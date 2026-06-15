@@ -51,8 +51,14 @@ RootView (sidebar + status)  ──▶ ApiClient (reqwest, rustls)
 
 ## Build / test
 
+The client depends on the GPUI fork checked out as a sibling repo at
+`../../FluentGUI` from this crate. CI pins that checkout to
+`f601e54b4e58e416bc7495a75468b82af9a10545`.
+
 ```bash
 # Core logic only — fast, no GPUI graph:
+cargo fmt --check
+cargo clippy --no-default-features --all-targets -- -D warnings
 cargo test --no-default-features
 
 # Full app (compiles GPUI + FluentGUI):
@@ -60,11 +66,18 @@ cargo run            # debug
 cargo build --release
 ```
 
+Windows release builds must run natively on Windows with the MSVC toolchain,
+`fxc.exe`, NSIS, and the GPUI shader toolchain available. Linux
+cross-compiles are useful for type/link checks only; they do not produce a
+runnable Windows release binary because GPUI's release shader path precompiles
+HLSL through `fxc`.
+
 ## Configuration
 
-On first run the client reads/writes
-`~/.config/mydevenv2-client/config.json` (`%APPDATA%\mydevenv2-client\config.json`
-on Windows):
+On first run the client opens its settings panel until both a server URL and
+token are configured. The values are persisted to
+`~/.config/mydevenv2-client/config.json` on Linux and
+`%APPDATA%\mydevenv2-client\config.json` on Windows:
 
 ```json
 {
@@ -73,13 +86,38 @@ on Windows):
 }
 ```
 
-Until in-app settings land (see backlog), set the token by editing this file.
+The token is sent as `Authorization: Bearer` for HTTP/SSE and as the first
+WebSocket text frame (`{"type":"auth","token":"..."}`) before PTY attach
+snapshot replay begins.
+
+## CI / releases
+
+Client CI is split from the production server deploy workflow:
+
+- `.woodpecker/client.yml` runs on `client/**` pushes and `client-v*` tags on
+  Linux. It performs core checks, full GPUI clippy, and a Linux release build.
+  On tags it uploads `MyDevEnv2-Client-<tag>-linux-x86_64` plus checksums to
+  the Forgejo release.
+- `.woodpecker/client-windows.yml` runs on the Windows `arbit-win` agent for
+  `client-v*` tags and manual runs. It executes
+  `client/ci/windows/build-and-publish.ps1` from `C:\ci\mydevenv2\`, builds the
+  native MSVC release, runs NSIS, and uploads:
+  - `MyDevEnv2-Setup-<tag>.exe`
+  - `MyDevEnv2-Client-<tag>-windows-x86_64.exe`
+  - `SHA256SUMS-<tag>.txt`
+
+The latest verified release at the time of this doc update is `client-v0.1.4`.
+Both Linux and native Windows Woodpecker workflows completed successfully for
+that tag.
 
 ## Status
 
 - [x] Protocol types, REST/SSE/WS client, VT100 core, fontdue renderer (tested)
 - [x] GPUI shell: session sidebar, create/attach, live terminal, input
-- [ ] In-app settings (token entry)
-- [ ] SSE-driven live session/activity updates + real TabStrip
+- [x] In-app settings for server URL + token
+- [x] SSE-driven live session/activity updates
+- [x] Mouse selection plus Ctrl+Shift+C / Ctrl+Shift+V terminal clipboard flow
+- [x] Ctrl+Space/NUL and tested terminal key mapping
+- [x] Native Windows installer and portable exe via Woodpecker release tags
+- [ ] Real TabStrip / multiple simultaneous terminal panes in the native UI
 - [ ] File-tree / editor / git / diff tabs
-- [ ] Windows installer via Woodpecker CI → download host

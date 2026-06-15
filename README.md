@@ -5,8 +5,41 @@ From-scratch redesign of [MyDevEnv](../MyDevEnv). Same goal — a centrally-host
 - **[INTENT.md](INTENT.md)** — what I'm trying to achieve and why a rewrite
 - **[PLAN.md](PLAN.md)** — architecture, components, build order
 - **[TOOLING.md](TOOLING.md)** — required tools/toolchains for the dev pod (derived from v1 Dockerfile)
+- **[client/README.md](client/README.md)** — native GPUI desktop client
+- **[deploy/KOMODO.md](deploy/KOMODO.md)** — production stack and deploy notes
 
-## Status
+## Current status
+
+MyDevEnv2 is live as the Komodo stack `prod-mydevenv2`, with desired state in
+the `indexarr/ops` repo at `personal/mydevenv2/`. The production image is
+`repo.indexarr.net/indexarr/mydevenv2`, served on port `8910`, with the PWA and
+API at `https://mydevenv2.sprooty.com` through Caddy. The direct Node B health
+endpoint currently returns `{"ok":true}`; the public URL may be Caddy
+basic-auth gated before requests reach the app.
+
+The repository now has four build surfaces:
+
+- `server/` — Rust/Axum server plus embedded Solid PWA.
+- `web/` — Solid/Vite PWA served by the Rust binary.
+- `mobile/` — Capacitor 8 Android shell that loads the deployed PWA.
+- `client/` — native GPUI/FluentGUI desktop client, with Windows as the
+  primary release target.
+
+CI is split across `.woodpecker/`:
+
+- `.woodpecker/server.yml` runs server fmt/clippy/test, web typecheck, debug
+  APK build, Docker buildx, and Komodo deploy for non-`client/**` pushes to
+  `main`.
+- `.woodpecker/client.yml` runs Linux client checks/builds for `client/**`
+  pushes and publishes the Linux client artifact on `client-v*` tags.
+- `.woodpecker/client-windows.yml` runs on the Windows `arbit-win` agent for
+  `client-v*` tags and publishes the Windows installer, portable exe, and
+  checksums to the matching Forgejo release.
+
+Latest verified client release: `client-v0.1.4`, with both Linux and native
+Windows Woodpecker workflows green.
+
+## Server + PWA phases
 
 **Phase 1 (server foundation) — complete.** Single Axum binary at `server/`:
 
@@ -37,35 +70,40 @@ From-scratch redesign of [MyDevEnv](../MyDevEnv). Same goal — a centrally-host
 - Client: new `git` tab kind. Status pane groups entries by kind (conflicted / staged / modified / renamed / deleted / untracked); click a path to load a Monaco diff editor (HEAD vs working tree). Recent commits below; branch + ahead/behind chip up top.
 - Deep-link route `/#/g/<repo>` opens the git tab for that repo.
 
+**Phase 5 (GUI tab + dev-pod packaging) — code-complete and deployed; GUI stream disabled by default.**
+
+- Server: `POST /api/gui/launch`, `GET /api/gui/processes`, `POST /api/gui/kill?pid=`. Optional `via_sway` prefixes with `swaymsg exec --`. `GET /api/config` (public) returns `gui_stream_url` and build feature flags for the web UI.
+- Client: `gui` tab kind iframing the configured stream URL; toolbar to launch arbitrary GUI commands; running-processes list with kill buttons. Deep-link `/#/gui`.
+- Packaging: `Dockerfile` (multi-stage: web bundle → Rust release → Ubuntu 26.04 runtime with `TOOLING.md`, Sway, Selkies-GStreamer, Tailscale userspace, Docker CLI, Infisical, GitHub CLI, and the embedded PWA). `deploy/entrypoint.sh` orchestrates Tailscale → optional Sway → auth validation → server.
+- Production: the Komodo stack exists and is deployed. `START_SWAY=0` and `GUI_STREAM_URL=""` keep the GUI stream off until Selkies is wired and verified inside the pod.
+
 **Phase 6 (push + Android Capacitor APK) — code-complete; runtime push delivery pending real-device verification.**
 
 - Server: VAPID web-push (any modern browser PushManager subscription, including installed-PWA iOS Safari 16.4+) + FCM HTTP v1 (native Capacitor tokens). Service-account JWT → OAuth2 with token caching. Subscriptions persist as JSON under `state_dir`; auto-prune on 404/410.
 - Server routes: `POST /api/push/subscribe`, `POST /api/push/unsubscribe`, `GET /api/push/list`, `POST /api/push/test`, `GET /api/push/public-key` (public — no token needed).
 - Activity watcher: fires push to all subscriptions when any session enters `waiting-for-input`.
 - Web: `/sw.js` + `/manifest.webmanifest` for PWA install + push event handling. Settings modal gains "Enable push" / "Send test" with current-permission visibility.
-- Mobile: `mobile/` Capacitor 7 Android wrap (`com.sprooty.mydevenv2`). WebView loads `https://mydevenv2.sprooty.com` directly so UI updates ship without rebuilding the APK. `@capacitor/push-notifications` registers a native FCM token at first launch; the same `/api/push/subscribe` endpoint accepts both transports.
-- CI: `mobile-apk` step builds the debug APK and uploads to the Forgejo generic package registry — sideload with `curl -fsSL -o app.apk -H "Authorization: token $FORGEJO_TOKEN" https://repo.indexarr.net/api/packages/indexarr/generic/mydevenv2-apk/latest/app-debug.apk`.
+- Mobile: `mobile/` Capacitor 8 Android wrap (`com.sprooty.mydevenv2`). WebView loads `https://mydevenv2.sprooty.com` directly so UI updates ship without rebuilding the APK. `@capacitor/push-notifications` registers a native FCM token at first launch; the same `/api/push/subscribe` endpoint accepts both transports.
+- CI: `mobile-apk` builds the debug APK on pushes handled by `.woodpecker/server.yml` and uploads it to the Forgejo release tag `apk-latest` as `mydevenv2-debug.apk`.
 
 Phase 7 (Android emulator KVM VM) remains.
 
 ---
 
-**Phase 5 (GUI tab + dev-pod packaging) — code-complete; pending real-pod verification.**
+## Native desktop client
 
-- Server: `POST /api/gui/launch`, `GET /api/gui/processes`, `POST /api/gui/kill?pid=`. Optional `via_sway` prefixes with `swaymsg exec --`. `GET /api/config` (public) returns `gui_stream_url` for the web UI to iframe.
-- Client: new `gui` tab kind iframing the configured stream URL; toolbar to launch arbitrary GUI commands; running-processes list with kill buttons. Deep-link `/#/gui`.
-- Packaging: `Dockerfile` (multi-stage: web bundle → rust release → Ubuntu 26.04 runtime with all of TOOLING.md + Sway + Selkies-GStreamer + Tailscale userspace). `deploy/docker-compose.yml` ready for the ops repo, `deploy/KOMODO.md` with one-time stack-creation steps, `deploy/entrypoint.sh` orchestrates Tailscale + optional Sway + server.
-- CI: `.woodpecker.yml` runs fmt/clippy/test/web-typecheck, builds the image with `:latest` + `:${CI_COMMIT_SHA}`, then triggers `komodo-deploy` against `prod-mydevenv2` in `ops/personal/mydevenv2/`.
+The native client in `client/` is an active companion to the PWA, not a
+replacement for it. It uses GPUI plus the in-house FluentGUI layer, reuses the
+server's REST/SSE/WebSocket protocol, and currently provides:
 
-What's still on the user's plate before Phase 5 is fully verifiable:
-1. Create the Forgejo container-registry credentials (or confirm `git_auth_token` works) for the first `build-and-push`.
-2. Add `personal/mydevenv2/docker-compose.yml` to the ops repo and create the Komodo stack (see `deploy/KOMODO.md`).
-3. Mint `MYDEVENV2_TOKEN` + `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` in Infisical and add to the Komodo stack `environment`.
-4. Create the read-only `mydevenv2-agents` Infisical Universal Auth identity and add `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` + `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` to the Komodo stack. The production compose requires them.
-5. Decide the workspace bind-mount strategy on Node B (NFS / Syncthing / direct).
-6. To actually use the GUI tab, set `START_SWAY=1` and `GUI_STREAM_URL=...` once Selkies is reachable inside the pod.
+- In-app server URL/token settings persisted under the platform config dir.
+- Session list, session creation, attach, and live activity updates over SSE.
+- Native terminal rendering with scrollback, mouse selection, Ctrl+Shift+C/V,
+  and first-frame WebSocket auth.
+- Linux CI checks/builds and native Windows release builds on the `arbit-win`
+  Woodpecker agent.
 
-Phase 6 (web push + Android Capacitor wrap, sideloaded APK — iOS deferred) and Phase 7 (Android emulator KVM VM) remain.
+See [client/README.md](client/README.md) for build and release details.
 
 ## Running the server
 
@@ -87,7 +125,15 @@ token = "..."                  # or use MYDEVENV2_TOKEN env
 scrollback_bytes = 262144
 default_shell = "/bin/bash"
 default_cwd   = "/home/sprooty/Working"
+workspace_root = "/home/sprooty/Working"
 activity_idle_after_ms = 1500
+state_dir = "/home/sprooty/.local/share/mydevenv2"
+vapid_subject = "mailto:admin@example.invalid"
+allowed_origins = [
+  "https://mydevenv2.sprooty.com",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+]
 auto_agent_auth = false
 agent_auth_helper = "/usr/local/bin/mydevenv2-agent-auth"
 ```
@@ -110,9 +156,11 @@ ID=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 # List
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/api/sessions | jq
 
-# Attach over WebSocket (browser-friendly: token via query)
-websocat "ws://127.0.0.1:8910/api/sessions/$ID/attach?token=$TOKEN"
-# Type, see the shell respond. JSON control frames also work:
+# Attach over WebSocket. The first frame must authenticate:
+websocat "ws://127.0.0.1:8910/api/sessions/$ID/attach"
+# First paste:
+#   {"type":"auth","token":"'"$TOKEN"'"}
+# Then type and see the shell respond. JSON control frames also work:
 #   {"type":"resize","cols":120,"rows":40}
 
 # Stream server events (SSE)
@@ -136,6 +184,9 @@ On attach the server sends:
 
 From the client:
 
+- First text frame must be `{"type":"auth","token":"..."}`. Legacy
+  `?token=...` WebSocket auth still exists only for older clients and should
+  not be used for new code because URLs land in proxy/access logs.
 - **Binary frames** → written to PTY stdin
 - **Text frames** parsed as JSON control:
   - `{"type":"resize","cols":120,"rows":40}` — resize PTY
@@ -146,9 +197,16 @@ If the client falls too far behind the broadcast buffer the server sends `{"type
 ## Tests
 
 ```bash
-cargo test                       # unit tests
-cargo test --test integration    # end-to-end (HTTP + WS)
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test                       # server unit + integration tests
 cd web && pnpm typecheck         # PWA TypeScript check
+
+# Native client fast checks:
+cd client
+cargo fmt --check
+cargo clippy --no-default-features --all-targets -- -D warnings
+cargo test --no-default-features
 ```
 
 ## Building the embedded PWA

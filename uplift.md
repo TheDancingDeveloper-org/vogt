@@ -1,8 +1,9 @@
 # MyDevEnv2 - Uplift Backlog
 
-Review conducted 2026-05-28. This combines an independent three-aspect stack
-review with the existing `uplift.md`. Items that no longer matched the code
-were corrected rather than carried forward verbatim.
+Review conducted 2026-05-28 and refreshed after the June 2026 deploy/client
+work. This combines an independent three-aspect stack review with the existing
+`uplift.md`. Items that no longer matched the code were corrected rather than
+carried forward verbatim.
 
 ---
 
@@ -10,12 +11,11 @@ were corrected rather than carried forward verbatim.
 
 ### 1. Dependency and Toolchain Currency
 
-- [ ] **Frontend and mobile packages are a major generation behind** (`web/package.json`, `mobile/package.json`)
-  `pnpm outdated` on 2026-05-28 shows Vite `6.4.2 -> 8.0.14`, Capacitor
-  `7.6.5 -> 8.3.4`, `@xterm/xterm` `5.5.0 -> 6.0.0`, TypeScript
-  `5.9.3 -> 6.0.3`, and `@solidjs/router` `0.15.4 -> 0.16.1`.
-  Fix as one planned upgrade with web build/typecheck, Capacitor sync, APK
-  build, terminal attach, push registration, and PWA install smoke tests.
+- [x] **Frontend and mobile package major-generation uplift** (resolved June 2026)
+  `web/` and `mobile/` are on the newer Vite 8 / Capacitor 8 / xterm 6 /
+  TypeScript 6 generation. Keep future upgrades deliberate and verify web
+  build/typecheck, Capacitor sync, APK build, terminal attach, push
+  registration, and PWA install smoke tests.
 
 - [ ] **Rust dependency currency needs a deliberate pass** (`server/Cargo.toml`)
   Axum/Tokio/Tower are current in the lockfile, but several direct deps have
@@ -23,10 +23,9 @@ were corrected rather than carried forward verbatim.
   `web-push` `0.10 -> 0.11`, `portable-pty` `0.8 -> 0.9`, and `toml`
   `0.8 -> 1.1`. Treat this as compatibility work, not a blind `cargo update`.
 
-- [ ] **Mobile CI allows lockfile drift** (`.woodpecker.yml:89`)
-  `pnpm install --frozen-lockfile=false` can hide dependency changes in the APK
-  job. After the Capacitor upgrade, commit the mobile lockfile and switch this
-  back to `--frozen-lockfile`.
+- [x] **Mobile CI lockfile drift** (resolved June 2026)
+  `.woodpecker/server.yml` uses `pnpm install --frozen-lockfile` for the APK
+  job.
 
 ### 2. Runtime Image Reproducibility and Supply Chain
 
@@ -41,10 +40,10 @@ were corrected rather than carried forward verbatim.
   clients. Optional clients are user-managed; service credentials are brokered
   on demand by the image-baked `mydevenv2-agent-auth` helper.
 
-- [ ] **Best-effort installs hide missing functionality** (`Dockerfile:125-126`, `Dockerfile:157`)
-  Selkies, `uv`, and `ruff` can fail without breaking the image. Either make
-  them required and fail fast, or mark the feature disabled and surface that
-  state through health/config so the GUI/tooling gap is obvious.
+- [x] **Best-effort installs hide missing functionality** (resolved June 2026)
+  `uv` and `ruff` now fail the image build if they do not install. Selkies is
+  pinned; if installation fails, the image records `{"selkies":null}` in
+  `/etc/mydevenv2/features.json` and `/api/config` exposes that feature state.
 
 ### 3. Operational Boundaries and Observability
 
@@ -70,16 +69,15 @@ were corrected rather than carried forward verbatim.
 
 ### Security
 
-- [ ] **Symlink escape in workspace file/git APIs** (`server/src/files.rs:27-45`, `server/src/git.rs:21-36`)
-  The guards reject `..` components but do not prevent a symlink inside
-  `workspace_root` from pointing outside the workspace. Canonicalize existing
-  paths after resolution and assert they still start with `workspace_root`; for
-  writes, canonicalize the parent directory or use a capability/openat-style API.
+- [x] **Symlink escape in workspace file/git APIs** (resolved June 2026)
+  Filesystem endpoints now route through `server/src/workspace_path.rs`, which
+  canonicalizes existing paths, checks the canonical path remains under
+  `workspace_root`, and canonicalizes write parents before joining the final
+  filename.
 
-- [ ] **`CorsLayer::very_permissive()`** (`server/src/app.rs:103`)
-  Allows any origin with any headers. Lock this to the deployed origin plus the
-  Vite dev origin (`mydevenv2.sprooty.com`, `localhost:5173`) and keep the
-  allowed methods/headers narrow.
+- [x] **`CorsLayer::very_permissive()`** (resolved June 2026)
+  CORS is now built from `MYDEVENV2_ALLOWED_ORIGINS` / config, defaulting to the
+  production origin plus Vite dev origins with a narrow method/header list.
 
 - [ ] **Session cwd validation is separate from file/git validation** (`server/src/sessions.rs:35-57`)
   Session cwd handling canonicalizes and checks `workspace_root`, while file/git
@@ -88,9 +86,9 @@ were corrected rather than carried forward verbatim.
 
 ### Performance / Correctness
 
-- [ ] **512 MiB downloads read entirely into memory** (`server/src/files.rs:127-131`)
-  `tokio::fs::read` buffers the full file before responding. Use
-  `tokio::fs::File` plus a streaming body for bounded memory use.
+- [x] **512 MiB downloads read entirely into memory** (resolved June 2026)
+  `/api/files/download` streams through `tokio_util::io::ReaderStream` with a
+  512 MiB transfer cap. Editor reads still use the smaller 5 MiB in-memory cap.
 
 - [ ] **PTY reader thread panics on spawn failure** (`server/src/pty.rs:264-293`)
   `.expect("spawn pty reader thread")` takes down the process. Return a
@@ -103,12 +101,11 @@ were corrected rather than carried forward verbatim.
 
 ### Quality
 
-- [ ] **VAPID `subject` is hardcoded** (`server/src/push.rs:342-346`)
-  `"mailto:sprooty@sprooty.com"` is baked in. Move it to config/env.
+- [x] **VAPID `subject` is hardcoded** (resolved June 2026)
+  `vapid_subject` is configurable via TOML or `MYDEVENV2_VAPID_SUBJECT`.
 
-- [ ] **Duplicate path-validation logic** (`server/src/git.rs:21-36`, `server/src/files.rs:27-45`)
-  `safe_under()` and `safe_resolve()` are near-identical. Extract a shared
-  helper after fixing the symlink policy.
+- [x] **Duplicate path-validation logic** (resolved June 2026)
+  Shared policy lives in `server/src/workspace_path.rs`.
 
 - [ ] **Custom base64 is reinvented twice** (`server/src/files.rs:385-418`, `server/src/api.rs:98-132`)
   The `base64` crate is already a dependency. Use it for snapshots and file
@@ -124,10 +121,9 @@ were corrected rather than carried forward verbatim.
 
 ### Security
 
-- [ ] **Bearer token exposed in WebSocket URL** (`web/src/api.ts:315-318`)
-  `?token=<bearer>` leaks into server access logs, proxy logs, and browser
-  history. Switch to a WebSocket auth frame, e.g. first client text frame
-  `{"type":"auth","token":"..."}`, before accepting PTY input.
+- [x] **Bearer token exposed in WebSocket URL** (resolved June 2026)
+  Web and native clients now send first-frame WebSocket auth. The server keeps
+  legacy `?token=` support only for older clients.
 
 - [ ] **Stored token has no cross-tab logout/clear path** (`web/src/api.ts:39-48`, `web/src/Settings.tsx:37-47`)
   Clearing the token in one tab reloads only that tab. Add a logout/clear action
@@ -173,14 +169,13 @@ were corrected rather than carried forward verbatim.
 
 ### Security
 
-- [ ] **`android:allowBackup="true"`** (`mobile/android/app/src/main/AndroidManifest.xml:5`)
-  ADB/cloud backup can capture WebView state, including localStorage tokens. Set
-  `android:allowBackup="false"` or define backup rules that exclude sensitive
-  WebView/app data.
+- [x] **Android backup can capture stored auth state** (resolved June 2026)
+  `android:allowBackup="false"` and Android 12+ data extraction rules exclude
+  root/file/database/sharedpref/external data because WebView storage contains
+  the bearer token.
 
-- [ ] **File provider exposes broad external storage** (`mobile/android/app/src/main/res/xml/file_paths.xml:3-4`)
-  `<external-path path="." />` grants from the external storage root. Narrow it
-  to the specific directory the app needs, or remove the provider if unused.
+- [x] **File provider exposes broad external storage** (resolved June 2026)
+  The provider is narrowed to a cache subdirectory only.
 
 ### Build / Release
 
@@ -188,7 +183,7 @@ were corrected rather than carried forward verbatim.
   Enable R8/minification for release builds and verify ProGuard rules preserve
   Capacitor/Firebase classes.
 
-- [ ] **CI publishes a debug APK only** (`.woodpecker.yml:78-125`)
+- [ ] **CI publishes a debug APK only** (`.woodpecker/server.yml`)
   The release script exists locally, but CI builds and uploads `assembleDebug`.
   Add signed release build config before treating the APK as production-grade.
 
@@ -204,18 +199,14 @@ were corrected rather than carried forward verbatim.
 
 | # | Finding | Layer |
 |---|---------|-------|
-| 1 | Bearer token in WebSocket URL query string | Frontend |
-| 2 | Symlink escape in workspace file/git APIs | Backend |
-| 3 | One bearer token controls a Docker-socket dev pod | Stack / Ops |
-| 4 | `android:allowBackup` exposes stored auth state | Mobile |
-| 5 | `CorsLayer::very_permissive()` | Backend |
-| 6 | 512 MiB downloads buffered fully in RAM | Backend |
-| 7 | Runtime image reproducibility and live install scripts | Stack / Supply chain |
-| 8 | Frontend/mobile major dependency uplift | Stack / Dependencies |
-| 9 | SSE reconnection has no exponential backoff | Frontend |
-| 10 | PTY reader thread panics on spawn failure | Backend |
-| 11 | Selkies/tooling installs can fail silently | Stack / Runtime |
-| 12 | `google-services.json` needs FCM verification | Mobile |
+| 1 | One bearer token controls a Docker-socket dev pod | Stack / Ops |
+| 2 | Runtime image reproducibility and live install scripts | Stack / Supply chain |
+| 3 | SSE reconnection has no exponential backoff | Frontend |
+| 4 | PTY reader thread panics on spawn failure | Backend |
+| 5 | Release APK signing/shrinking + production-grade Android distribution | Mobile |
+| 6 | `google-services.json` / FCM real-device verification | Mobile |
+| 7 | Health/readiness should cover workspace, push store, Tailscale, GUI stream | Stack / Ops |
+| 8 | Audit logging and optional capability-scoped auth tokens | Stack / Ops |
 
 ## Merge Notes
 

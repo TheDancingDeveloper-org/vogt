@@ -1,7 +1,33 @@
 # Deploying MyDevEnv2 via Komodo
 
-This repo's CI pipeline expects a Komodo stack named **`prod-mydevenv2`** with
-its desired state in **`ops/personal/mydevenv2/`**. One-time setup:
+Production currently runs as the Komodo stack **`prod-mydevenv2`**. Desired
+state lives in the `indexarr/ops` repo at
+**`personal/mydevenv2/docker-compose.yml`**. The stack serves the Rust/Axum API
+and embedded PWA from port `8910`, with Caddy in front at
+`https://mydevenv2.sprooty.com`.
+
+Normal deploy flow:
+
+```text
+push to main touching server/web/mobile/deploy paths
+  -> .woodpecker/server.yml
+  -> fmt / clippy / test / web-typecheck / mobile-apk
+  -> Docker buildx pushes repo.indexarr.net/indexarr/mydevenv2:latest + :<sha>
+  -> ops/personal/mydevenv2/docker-compose.yml is bumped to :<sha>
+  -> Komodo DeployStack runs prod-mydevenv2
+```
+
+Client-only pushes under `client/**` intentionally do not rebuild or redeploy
+the production server image. They run `.woodpecker/client.yml`; `client-v*`
+tags also run `.woodpecker/client-windows.yml`.
+
+Manual redeploy of the currently pinned image is safe when you need Komodo to
+restart/recreate the stack without a new server image. Use the shared
+`ops/scripts/komodo-deploy.sh` with `IMAGE_TAG` set to the tag already pinned in
+ops, or call Komodo `DeployStack` directly. Do not invent SSH/docker-compose
+deploy steps.
+
+The rest of this file is bootstrap/recovery reference for recreating the stack.
 
 ## 1. Add the stack to the ops repo
 
@@ -34,10 +60,17 @@ Create an Infisical Machine Identity for production agent access:
    - `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID`
    - `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET`
 
-Paste all four runtime values into the Komodo stack `environment` field. Komodo
-does not read Infisical directly; it writes its environment field into a `.env`
-file at deploy time. The production compose rejects empty identity values and
-the entrypoint validates credential retrieval before starting the server.
+Paste the runtime values into the Komodo stack `environment` field. Komodo does
+not read Infisical directly; it writes its environment field into a `.env` file
+at deploy time. The production compose rejects empty identity values and the
+entrypoint validates credential retrieval before starting the server.
+
+Current production environment also expects:
+
+- `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` — single-line Firebase service-account
+  JSON for FCM HTTP v1. Empty disables native FCM while web-push still works.
+- `DOCKER_SOCKET_GID` — optional override for the host docker socket group
+  added to the container. Node B currently uses `984`.
 
 Codex and Claude are not installed by this bootstrap. They are optional clients;
 default interactive sessions are authenticated through the neutral
@@ -94,7 +127,8 @@ Node B periphery.)
 ## 4. First deploy
 
 ```bash
-# Manual one-time deploy. After this, CI handles redeploys on every push to main.
+# Manual one-time deploy. After this, server CI handles redeploys on applicable
+# pushes to main.
 curl -sS -X POST http://100.92.54.45:3011/execute \
   -H "X-Api-Key: $KOMODO_API_KEY" \
   -H "X-Api-Secret: $KOMODO_API_SECRET" \
@@ -102,10 +136,10 @@ curl -sS -X POST http://100.92.54.45:3011/execute \
   -d '{"type":"DeployStack","params":{"stack":"prod-mydevenv2"}}'
 ```
 
-## 5. Caddy entry (optional, recommended)
+## 5. Caddy entry
 
-To reach the pod via `mydevenv2.sprooty.com` (Tailscale-served), add to
-Node B's Caddyfile:
+To reach the pod via `mydevenv2.sprooty.com`, Node B's Caddy routes to the host
+port:
 
 ```caddyfile
 mydevenv2.sprooty.com {
@@ -113,21 +147,20 @@ mydevenv2.sprooty.com {
 }
 ```
 
-Otherwise just open the Tailscale IP directly: `http://mydevenv2:8910` if
-MagicDNS is on, or `http://100.x.y.z:8910`.
+The public route can be protected by Caddy basic auth before traffic reaches
+the app; direct tailnet health is available at `http://100.92.54.45:8910/healthz`
+from inside the tailnet.
 
 ## 6. Workspace bind-mount
 
 The compose mounts `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` → `/home/sprooty/Working`
-inside the container. To dogfood the real workspace, point that path at a
-shared mount of the dev machine's `~/Working`. Options:
+inside the container. This is the active workspace mount on Node B:
 
-- **NFS** export `~/Working` from Sprooty-PC-UBNT, mount on Node B at
-  `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` (existing TrueNAS pattern in
-  `~/truenas/`).
-- **Syncthing** between Sprooty-PC-UBNT and Node B for offline-friendly sync.
-- **Direct on Node B** — treat the pod as the canonical workspace and pull
-  repos there.
+- Node B host path: `/mnt/2tnvme/docker/volumes/mydevenv2/workspace`
+- Container path: `/home/sprooty/Working`
+- Local workspace path: `/home/sprooty/Working`
 
-Whichever you pick, the path inside the container stays `/home/sprooty/Working`
-so all tooling and paths line up with the dev machine.
+Workspace synchronization is handled outside the app. The workspace-root
+`mutagen.yml` should target Node B at
+`sprooty@100.92.54.45:/mnt/2tnvme/docker/volumes/mydevenv2/workspace`; do not
+target the retired MyDevEnv v1 endpoint.

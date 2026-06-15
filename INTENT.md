@@ -22,7 +22,7 @@ It needs to handle three workloads:
 
 ## Why a rewrite rather than fixing MyDevEnv v1
 
-v1 has the right core (Rust/Axum server that owns PTYs, broadcasts to clients, exposes file + git APIs) but accumulated too many half-finished surface layers — a code-server fork, a Tauri desktop, a React Native mobile app, a separate native APK wrapper, two web UIs. The foundation is salvageable but the directory is hard to navigate and the surface is hard to reason about. v2 starts clean, keeps the server primitives in spirit, and builds exactly one client UI (responsive web + Capacitor wrap).
+v1 has the right core (Rust/Axum server that owns PTYs, broadcasts to clients, exposes file + git APIs) but accumulated too many half-finished surface layers — a code-server fork, a Tauri desktop, a React Native mobile app, a separate native APK wrapper, two web UIs. The foundation is salvageable but the directory is hard to navigate and the surface is hard to reason about. v2 starts clean, keeps the server primitives in spirit, and keeps the browser/PWA as the primary UI. The native GPUI desktop client is an optional companion that speaks the same server protocol rather than a second backend or replacement product.
 
 ## Success criteria
 

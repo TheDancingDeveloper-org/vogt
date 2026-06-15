@@ -14,17 +14,17 @@ Before changing files here:
 
 | | |
 |---|---|
-| Type | Rust (Axum) + Solid/Vite PWA (embedded via `rust-embed`) + Capacitor Android wrap |
+| Type | Rust (Axum) + Solid/Vite PWA (embedded via `rust-embed`) + Capacitor Android wrap + optional GPUI desktop client |
 | Repo | `repo.indexarr.net/indexarr/MyDevEnv2` |
-| CI pipeline | `.woodpecker.yml` — fmt/clippy/test -> web-typecheck -> mobile-apk -> buildx -> komodo-deploy |
+| CI pipeline | `.woodpecker/server.yml` — fmt/clippy/test -> web-typecheck -> mobile-apk -> buildx -> komodo-deploy; `.woodpecker/client.yml` + `.woodpecker/client-windows.yml` build/release the native client |
 | Deploys to | Komodo stack `prod-mydevenv2` (ops repo path `personal/mydevenv2/`) — target periphery is the one running mydevenv2.sprooty.com (see ops repo) |
 | Image | `repo.indexarr.net/indexarr/mydevenv2` (`:latest` + `:<sha>`) |
 | Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port) |
 | Public URL | `https://mydevenv2.sprooty.com` |
 | DB / state | None (Postgres-less by design). Sessions in-memory; push subscriptions persisted as JSON under `state_dir`. |
-| Secrets used at runtime | `MYDEVENV2_TOKEN` (API bearer), `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` (Tailscale userspace), `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` / `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` (required production agent service auth), `HOMELAB_MYDEVENV2_VAPID_*` + FCM service account JSON for push — all in Infisical `apps` and pasted into the Komodo stack `environment` |
+| Secrets used at runtime | `MYDEVENV2_TOKEN` (API bearer), `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` (Tailscale userspace), `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` / `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` (required production agent service auth), optional `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` for native FCM — all in Infisical `apps` and pasted into the Komodo stack `environment`. VAPID keys are generated and persisted under `state_dir`. |
 
-From-scratch rewrite of `../MyDevEnv`: same centrally-hosted, Tailscale-accessible dev environment goal, built without the v1 surface area of a code-server fork and multiple half-finished native clients. Active status: Phase 1-6 code-complete; Phase 7 (KVM-backed Android emulator VM) pending.
+From-scratch rewrite of `../MyDevEnv`: same centrally-hosted, Tailscale-accessible dev environment goal, built without the v1 surface area of a code-server fork and multiple half-finished native clients. Active status: Phase 1-6 code-complete and deployed; optional GPUI desktop client released from `client-v*` tags; Phase 7 (KVM-backed Android emulator VM) pending.
 
 ## 2. Architecture
 
@@ -79,12 +79,13 @@ Pipeline non-standard bits:
 - `mobile-apk` builds the Capacitor debug APK and uploads it to Forgejo releases API tag `apk-latest`, not the generic-package registry. Idempotence is delete-then-create using `scripts/forgejo-api.sh` from `indexarr/ops`.
 - `cimg/android` runs as `circleci` (UID 3434) but the workspace was cloned by `alpine/git` as root. The pipeline does `sudo chown -R circleci:circleci .` before pnpm.
 - Komodo deploy pins the SHA in `ops/personal/mydevenv2/docker-compose.yml` through standard `scripts/komodo-deploy.sh` (`STACK_NAME=prod-mydevenv2 STACK_DIR=personal/mydevenv2`).
+- Native desktop client releases are tag-driven. Push a `client-v*` tag to run both `.woodpecker/client.yml` and `.woodpecker/client-windows.yml`; Windows builds natively on the `arbit-win` agent and publishes installer/portable artifacts to the matching Forgejo release.
 
 Runtime container: multi-stage `Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `TOOLING.md` toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server.
 
 Codex and Claude are deliberately not installed by container bootstrap. Optional AI clients are user-managed. Production default-shell sessions are authenticated through `mydevenv2-agent-auth`; explicit-command sessions can invoke the helper directly.
 
-Outstanding before Phase 5 GUI tab is fully verifiable: items 1-6 in `README.md` under "What's still on the user's plate".
+Outstanding before the GUI tab is operational in production: set `START_SWAY=1`, set `GUI_STREAM_URL`, and verify Selkies from inside the pod. The stack itself, auth identity, workspace mount, and Komodo deploy path already exist.
 
 ## 5. Agent service authentication
 
