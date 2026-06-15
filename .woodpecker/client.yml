@@ -1,6 +1,6 @@
 # MyDevEnv2 desktop client — Linux CI/CD (Woodpecker)
 #
-# The client (`client/`) is a native GPUI/FluentGUI app in its own Cargo
+# The client (`client/`) is a native fluent-gpui app in its own Cargo
 # workspace. This (Linux) workflow:
 #   core-check      fmt + clippy + test of the GPUI-free core (fast)
 #   clippy-gui      full clippy incl. the GPUI UI (compiles the GPUI graph)
@@ -51,20 +51,10 @@ clone:
       - git checkout FETCH_HEAD
 
 variables:
-  # The client depends on FluentGUI by relative path (`../../FluentGUI` from
-  # client/ = a sibling of the repo checkout). Clone the gpui fork there.
-  # TODO: pin FLUENTGUI_REF to the gpui-0.2.5 release commit for reproducibility.
-  # NB: use brace-free $VARs only — Woodpecker template-substitutes ${VAR}
-  # before the shell runs (see server.yml header).
-  # Pinned to the gpui-0.2.5 commit on indexarr/fluent-gpui main the client was
-  # built and verified against. Bump deliberately alongside a client API update.
-  - &fluentgui_setup |
-    FLUENTGUI_REF=f601e54b4e58e416bc7495a75468b82af9a10545
-    if [ ! -d ../FluentGUI/.git ]; then
-      git clone --no-checkout "https://git:$GIT_AUTH_TOKEN@repo.indexarr.net/indexarr/fluent-gpui.git" ../FluentGUI
-    fi
-    git -C ../FluentGUI fetch --depth=1 origin "$FLUENTGUI_REF"
-    git -C ../FluentGUI checkout --detach FETCH_HEAD
+  # fluent-gpui is consumed directly from
+  # https://github.com/AusAgentSmith-org/fluent-gpui.git at the commit pinned in
+  # client/Cargo.toml and Cargo.lock. Bump deliberately alongside a client API
+  # update.
   # GPUI's Linux backend + fontconfig need these dev headers.
   - &linux_build_deps |
     apt-get update >/dev/null
@@ -85,7 +75,6 @@ steps:
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: "redis://100.92.54.45:6380"
     commands:
-      - *fluentgui_setup
       - *install_sccache
       - rustup component add rustfmt clippy
       - cd client
@@ -103,7 +92,6 @@ steps:
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: "redis://100.92.54.45:6380"
     commands:
-      - *fluentgui_setup
       - *linux_build_deps
       - *install_sccache
       - rustup component add clippy
@@ -125,7 +113,6 @@ steps:
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: "redis://100.92.54.45:6380"
     commands:
-      - *fluentgui_setup
       - *linux_build_deps
       - *install_sccache
       - cd client

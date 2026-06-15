@@ -1,11 +1,11 @@
 # MyDevEnv2 native desktop client.
 #
 # Its own Cargo workspace (root MyDevEnv2 excludes `client`) so the heavy
-# GPUI/FluentGUI dependency graph never slows the server build/CI.
+# fluent-gpui dependency graph never slows the server build/CI.
 #
-# GUI stack: a vendored GPUI fork (Zed's GPU-accelerated UI framework) plus the
-# FluentGUI Fluent 2 design layer — the same stack the in-house `rdpapp` native
-# app uses. Built/tested on Linux; Windows is the primary deployment target.
+# GUI stack: AusAgentSmith-org/fluent-gpui (a vendored GPUI fork plus Fluent 2
+# design/layout crates). Built/tested on Linux; Windows is the primary
+# deployment target.
 [workspace]
 
 [package]
@@ -13,7 +13,7 @@ name = "mydevenv2-client"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Native desktop client for MyDevEnv2 (GPUI/FluentGUI)"
+description = "Native desktop client for MyDevEnv2 (fluent-gpui)"
 repository = "https://repo.indexarr.net/indexarr/MyDevEnv2"
 rust-version = "1.80"
 
@@ -39,13 +39,13 @@ gui = [
 ]
 
 [dependencies]
-# ── GUI: GPUI + FluentGUI (paths mirror rdpapp's, relative to this crate) ──────
-gpui = { path = "../../FluentGUI/crates/gpui", optional = true }
-fluent-core = { path = "../../FluentGUI/crates/fluent-core", optional = true }
-fluent-app = { path = "../../FluentGUI/crates/fluent-app", optional = true }
-fluent-layout = { path = "../../FluentGUI/crates/fluent-layout", optional = true }
-fluent-ribbon = { path = "../../FluentGUI/crates/fluent-ribbon", optional = true }
-fluent-primitives = { path = "../../FluentGUI/crates/fluent-primitives", optional = true }
+# ── GUI: pinned AusAgentSmith-org/fluent-gpui framework ──────────────────────
+gpui = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545", package = "gpui", optional = true }
+fluent-core = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545", package = "fluent-core", optional = true }
+fluent-app = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545", package = "fluent-app", optional = true }
+fluent-layout = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545", package = "fluent-layout", optional = true }
+fluent-ribbon = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545", package = "fluent-ribbon", optional = true }
+fluent-primitives = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545", package = "fluent-primitives", optional = true }
 
 # ── Async runtime: server attach/SSE/HTTP run on a background tokio runtime ────
 tokio = { version = "1", features = ["full"] }

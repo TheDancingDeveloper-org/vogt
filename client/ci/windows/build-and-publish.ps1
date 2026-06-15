@@ -17,7 +17,6 @@
 #   CI_COMMIT_TAG    e.g. client-v0.1.3  (empty => dev build, no publish)
 #   GIT_AUTH_TOKEN   Forgejo token (git clone + release API)   [required]
 # Optional:
-#   FLUENTGUI_REF    fluent-gpui commit/ref (default: the pinned 0.2.5 commit)
 #   WORKROOT         build root (default: $env:TEMP\mydevenv2-client-ci)
 
 $ErrorActionPreference = 'Stop'
@@ -36,14 +35,12 @@ if (-not $env:GIT_AUTH_TOKEN) { throw 'GIT_AUTH_TOKEN is required' }
 $env:GCM_CREDENTIAL_STORE = 'none'
 $env:GIT_TERMINAL_PROMPT = '0'
 $TAG = $env:CI_COMMIT_TAG
-$FLUENTGUI_REF = if ($env:FLUENTGUI_REF) { $env:FLUENTGUI_REF } else { 'f601e54b4e58e416bc7495a75468b82af9a10545' }
 $WORKROOT = if ($env:WORKROOT) { $env:WORKROOT } else { Join-Path $env:TEMP 'mydevenv2-client-ci' }
 $VERSION = if ($TAG) { $TAG -replace '^client-v','' -replace '^v','' } else { '0.0.0' }
 if (-not $VERSION) { $VERSION = '0.0.0' }
 
 $base   = 'repo.indexarr.net/indexarr'
 $mdeUrl = "https://git:$($env:GIT_AUTH_TOKEN)@$base/MyDevEnv2.git"
-$fgUrl  = "https://git:$($env:GIT_AUTH_TOKEN)@$base/fluent-gpui.git"
 
 # git writes progress ("Cloning into...") to stderr; with ErrorActionPreference
 # 'Stop' PowerShell would treat that as fatal. Route git stderr to stdout and
@@ -92,16 +89,6 @@ if (-not (Test-Path 'MyDevEnv2/.git')) {
 Push-Location MyDevEnv2
 $mdeRef = if ($TAG) { "refs/tags/$TAG" } else { 'main' }
 Run-Git fetch --no-tags --depth 1 origin $mdeRef
-Run-Git checkout --detach --force FETCH_HEAD
-Pop-Location
-
-# ── Checkout the gpui fork as a sibling so client's ../../FluentGUI resolves ──
-Step "Checkout fluent-gpui @ $FLUENTGUI_REF"
-if (-not (Test-Path 'FluentGUI/.git')) {
-    Run-Git clone --no-checkout $fgUrl FluentGUI
-}
-Push-Location FluentGUI
-Run-Git fetch --depth 1 origin $FLUENTGUI_REF
 Run-Git checkout --detach --force FETCH_HEAD
 Pop-Location
 

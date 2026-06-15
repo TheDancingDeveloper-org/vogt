@@ -5,11 +5,13 @@ mod terminal_view;
 
 use fluent_app::FluentApp;
 use fluent_core::ThemeProvider as _;
-use fluent_layout::{MessageBar, MessageIntent};
+use fluent_layout::{
+    MessageBar, MessageIntent, SelectableList, SelectableListItem, TabItem, TabStrip,
+};
 use fluent_primitives::{Button, ButtonAppearance, Field, Label, LabelSize, TextInput};
 use gpui::{
     div, prelude::*, px, ClickEvent, Context, Entity, FontWeight, IntoElement, Render,
-    SharedString, StatefulInteractiveElement, Window,
+    SharedString, Window,
 };
 use uuid::Uuid;
 
@@ -85,6 +87,7 @@ struct RootView {
     status: SharedString,
     tabs: Vec<NativeTab>,
     active_tab: Option<String>,
+    tab_strip: Option<Entity<TabStrip>>,
     url_input: Entity<TextInput>,
     token_input: Entity<TextInput>,
     new_name_input: Entity<TextInput>,
@@ -146,6 +149,7 @@ impl RootView {
             status,
             tabs: Vec::new(),
             active_tab: None,
+            tab_strip: None,
             url_input,
             token_input,
             new_name_input,
@@ -180,6 +184,65 @@ impl RootView {
             NativeTab::Terminal { view, .. } if tab.id() == active => Some(view.clone()),
             _ => None,
         })
+    }
+
+    fn rebuild_tab_strip(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() {
+            self.tab_strip = None;
+            cx.notify();
+            return;
+        }
+
+        let tabs = self.tabs.clone();
+        let active_index = self
+            .active_tab
+            .as_deref()
+            .and_then(|id| tabs.iter().position(|tab| tab.id() == id))
+            .unwrap_or(0);
+        let root = cx.entity().downgrade();
+        let strip = cx.new(move |cx: &mut Context<TabStrip>| {
+            let mut ts = TabStrip::new(cx);
+            for tab in &tabs {
+                ts.add_tab(TabItem::new(tab.id()).label(tab.label()).closable(true));
+            }
+            ts.active = active_index.min(ts.tabs.len().saturating_sub(1));
+
+            let select_root = root.clone();
+            ts = ts.on_select(move |idx, _strip, _window, cx| {
+                let _ = select_root.update(cx, |root, cx| root.set_active_tab_by_index(idx, cx));
+            });
+
+            let close_root = root.clone();
+            ts.on_close(move |idx, _strip, _window, cx| {
+                let _ = close_root.update(cx, |root, cx| root.close_tab_by_index(idx, cx));
+            })
+        });
+        self.tab_strip = Some(strip);
+        cx.notify();
+    }
+
+    fn set_active_tab_by_index(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(idx) {
+            self.active_tab = Some(tab.id());
+            self.rebuild_tab_strip(cx);
+        }
+    }
+
+    fn close_tab_by_index(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(idx).cloned() else {
+            return;
+        };
+        if let NativeTab::Terminal { view, .. } = &tab {
+            view.update(cx, |v, _| v.close());
+        }
+        self.tabs.remove(idx);
+        if self.tabs.is_empty() {
+            self.active_tab = None;
+        } else if self.active_tab.as_deref() == Some(tab.id().as_str()) {
+            let next = idx.saturating_sub(1).min(self.tabs.len().saturating_sub(1));
+            self.active_tab = self.tabs.get(next).map(NativeTab::id);
+        }
+        self.rebuild_tab_strip(cx);
     }
 
     /// Subscribe to the server's `/api/events` SSE stream and apply live
@@ -264,6 +327,7 @@ impl RootView {
                         }
                     }
                 }
+                self.rebuild_tab_strip(cx);
                 cx.notify();
             }
             ServerEvent::SessionCreated { .. } | ServerEvent::SessionKilled { .. } => {
@@ -290,6 +354,7 @@ impl RootView {
         self.configured = cfg.is_configured();
         self.tabs.clear();
         self.active_tab = None;
+        self.tab_strip = None;
         self.show_settings = false;
         if self.configured {
             self.status = "Connecting...".into();
@@ -378,7 +443,7 @@ impl RootView {
         if self.tabs.iter().any(|tab| tab.id() == tab_id) {
             self.active_tab = Some(tab_id);
             self.status = SharedString::from(format!("attached {id}"));
-            cx.notify();
+            self.rebuild_tab_strip(cx);
             return;
         }
         let label = self
@@ -397,22 +462,12 @@ impl RootView {
         });
         self.active_tab = Some(tab_id);
         self.status = SharedString::from(format!("attached {id}"));
-        cx.notify();
+        self.rebuild_tab_strip(cx);
     }
 
     fn close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
         if let Some(idx) = self.tabs.iter().position(|t| t.id() == tab_id) {
-            let tab = self.tabs.remove(idx);
-            if let NativeTab::Terminal { view, .. } = tab {
-                view.update(cx, |v, _| v.close());
-            }
-            if self.active_tab.as_deref() == Some(tab_id) {
-                self.active_tab = self
-                    .tabs
-                    .get(idx.saturating_sub(1).min(self.tabs.len().saturating_sub(1)))
-                    .map(NativeTab::id);
-            }
-            cx.notify();
+            self.close_tab_by_index(idx, cx);
         }
     }
 
@@ -422,7 +477,7 @@ impl RootView {
         }
         self.active_tab = Some("files".into());
         self.load_dir(cx);
-        cx.notify();
+        self.rebuild_tab_strip(cx);
     }
 
     fn open_git_tab(&mut self, cx: &mut Context<Self>) {
@@ -431,12 +486,7 @@ impl RootView {
         }
         self.active_tab = Some("git".into());
         self.load_git(cx);
-        cx.notify();
-    }
-
-    fn set_active_tab(&mut self, id: String, cx: &mut Context<Self>) {
-        self.active_tab = Some(id);
-        cx.notify();
+        self.rebuild_tab_strip(cx);
     }
 
     fn active_session(&self) -> Option<&SessionSummary> {
@@ -482,6 +532,7 @@ impl RootView {
                                     }
                                 }
                                 v.status = "Renamed session".into();
+                                v.rebuild_tab_strip(cx);
                             }
                             Ok(Err(e)) => {
                                 v.status = SharedString::from(format!("rename failed: {e}"))
@@ -837,21 +888,41 @@ impl RootView {
         let colors = cx.theme().colors.clone();
         let active_id = self.active_terminal_id();
 
-        let mut list = div().flex().flex_col().gap(px(4.0)).w_full();
-        for s in &self.sessions {
-            let id = s.id;
-            let is_active = active_id == Some(id);
-            let label = format!("{} {}", s.activity.badge(), s.name);
-            list = list.child(
-                Button::new(SharedString::from(format!("sess-{id}")))
-                    .label(label)
-                    .appearance(if is_active {
-                        ButtonAppearance::Accent
-                    } else {
-                        ButtonAppearance::Subtle
-                    })
-                    .on_click(cx.listener(move |view, _, _, cx| view.attach(id, cx))),
-            );
+        let selected = active_id.map(|id| id.to_string());
+        let items = self
+            .sessions
+            .iter()
+            .map(|s| {
+                SelectableListItem::new(s.id.to_string(), s.name.clone())
+                    .subtitle(s.cwd.clone())
+                    .badge(s.activity.badge())
+                    .meta(format!("{} KiB", s.scrollback_bytes / 1024))
+                    .emphasized(active_id == Some(s.id))
+            })
+            .collect::<Vec<_>>();
+
+        let root = cx.entity().downgrade();
+        let mut list = SelectableList::new("session-list")
+            .items(items)
+            .empty_text(if self.configured {
+                "No sessions"
+            } else {
+                "Configure server settings"
+            })
+            .row_height(58.0)
+            .on_select(move |id, _window, cx| {
+                if let Ok(id) = Uuid::parse_str(id.as_ref()) {
+                    let _ = root.update(cx, |view, cx| view.attach(id, cx));
+                }
+            });
+        let root = cx.entity().downgrade();
+        list = list.on_activate(move |id, _event, _window, cx| {
+            if let Ok(id) = Uuid::parse_str(id.as_ref()) {
+                let _ = root.update(cx, |view, cx| view.attach(id, cx));
+            }
+        });
+        if let Some(selected) = selected {
+            list = list.selected(selected);
         }
 
         let mut sidebar = div()
@@ -1009,64 +1080,13 @@ impl RootView {
 
     fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors.clone();
-        let active = self.active_tab.clone();
-        let mut row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(38.0))
+        div()
+            .w_full()
             .bg(colors.tab_strip_bg)
-            .border_b_1()
-            .border_color(colors.stroke_neutral_subtle)
-            .overflow_hidden();
-
-        for tab in &self.tabs {
-            let id = tab.id();
-            let close_id = id.clone();
-            let is_active = active.as_deref() == Some(id.as_str());
-            let closable = true;
-            let mut tab_el = div()
-                .id(SharedString::from(format!("tab-{id}")))
-                .h_full()
-                .min_w(px(120.0))
-                .max_w(px(220.0))
-                .px(px(10.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .border_r_1()
-                .border_color(colors.stroke_neutral_subtle)
-                .bg(if is_active {
-                    colors.tab_active_bg
-                } else {
-                    colors.tab_strip_bg
-                })
-                .on_click(cx.listener(move |view, _, _, cx| view.set_active_tab(id.clone(), cx)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .font_weight(if is_active {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::NORMAL
-                        })
-                        .child(tab.label()),
-                );
-            if closable {
-                tab_el = tab_el.child(
-                    Button::new(SharedString::from(format!("close-{close_id}")))
-                        .label("x")
-                        .appearance(ButtonAppearance::Subtle)
-                        .on_click(cx.listener(move |view, _, _, cx| view.close_tab(&close_id, cx))),
-                );
-            }
-            row = row.child(tab_el);
-        }
-        row
+            .child(match &self.tab_strip {
+                Some(strip) => strip.clone().into_any_element(),
+                None => div().h(px(0.0)).into_any_element(),
+            })
     }
 
     fn files_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
