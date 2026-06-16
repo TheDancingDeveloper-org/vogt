@@ -106,6 +106,19 @@ Client CI is split from the production server deploy workflow:
   - `MyDevEnv2-Client-<tag>-windows-x86_64.exe`
   - `SHA256SUMS-<tag>.txt`
 
+Important Windows release behavior:
+
+- Linux cross-builds are only checks. They are not shipped because GPUI's
+  release shader path requires `fxc.exe` on native Windows.
+- The Windows workflow does not use the current agent workspace. It has
+  `skip_clone: true`; `build-and-publish.ps1` clones Forgejo itself, fetching
+  `refs/tags/<client-v*>` for tag builds or `main` for manual untagged builds.
+- Uncommitted local changes cannot appear in the native Windows artifacts.
+  Commit and push the client changes, then push a `client-v*` tag to publish a
+  Windows installer and portable exe containing those changes.
+- A manual Windows workflow run without a tag builds Forgejo `main` and exits
+  without publishing release assets.
+
 The latest verified release at the time of this doc update is `client-v0.1.4`.
 Both Linux and native Windows Woodpecker workflows completed successfully for
 that tag.

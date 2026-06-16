@@ -42,6 +42,7 @@ services:
       # Server
       MYDEVENV2_TOKEN: ${MYDEVENV2_TOKEN}
       MYDEVENV2_BIND: 0.0.0.0:8910
+      MYDEVENV2_SCROLLBACK_BYTES: ${MYDEVENV2_SCROLLBACK_BYTES:-4194304}
       RUST_LOG: info
       # Agent service auth. Default interactive sessions run through
       # mydevenv2-agent-auth so Forgejo/Woodpecker/GitHub/Komodo credentials

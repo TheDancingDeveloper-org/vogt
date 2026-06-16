@@ -44,7 +44,7 @@ Windows Woodpecker workflows green.
 **Phase 1 (server foundation) — complete.** Single Axum binary at `server/`:
 
 - Bearer-token gated HTTP API for session lifecycle (create / list / get / rename / kill / delete)
-- Per-session PTY with a ring-buffer scrollback (default 256 KiB)
+- Per-session PTY with a ring-buffer scrollback (default 4 MiB)
 - WebSocket attach endpoint with scrollback snapshot replay + live broadcast to multiple clients
 - Activity state machine: `idle` / `running` / `waiting-for-input` / `errored`, with regex heuristics on the stripped output tail
 - SSE event stream of server-wide session events
@@ -122,7 +122,7 @@ Optional TOML config (`mydevenv2.toml`):
 ```toml
 bind = "0.0.0.0:8910"
 token = "..."                  # or use MYDEVENV2_TOKEN env
-scrollback_bytes = 262144
+scrollback_bytes = 4194304
 default_shell = "/bin/bash"
 default_cwd   = "/home/sprooty/Working"
 workspace_root = "/home/sprooty/Working"

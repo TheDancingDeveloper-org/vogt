@@ -11,6 +11,8 @@ use gpui::{
     div, prelude::*, px, ClickEvent, Context, Entity, FontWeight, IntoElement, Render,
     SharedString, Window,
 };
+#[cfg(target_os = "windows")]
+use gpui::{svg, WindowControlArea};
 use uuid::Uuid;
 
 use futures_util::StreamExt as _;
@@ -23,13 +25,20 @@ use mydevenv2_client::{
 
 use terminal_view::TerminalView;
 
+const APP_TITLE: &str = "MyDevEnv2";
+const APP_ID: &str = "com.sprooty.mydevenv2-client";
+const WINDOW_W: f32 = 1240.0;
+const WINDOW_H: f32 = 820.0;
+const WINDOW_MIN_W: f32 = 760.0;
+const WINDOW_MIN_H: f32 = 500.0;
+
 /// Launch the desktop client. Blocks on the GPUI event loop until the window
 /// closes.
 pub fn run(cfg: ClientConfig) {
-    FluentApp::new("MyDevEnv2")
-        .window_size(1240.0, 820.0)
-        .window_min_size(760.0, 500.0)
-        .app_id("com.sprooty.mydevenv2-client")
+    FluentApp::new(APP_TITLE)
+        .window_size(WINDOW_W, WINDOW_H)
+        .window_min_size(WINDOW_MIN_W, WINDOW_MIN_H)
+        .app_id(APP_ID)
         .dark_theme()
         .run(move |cx| cx.new(|cx| RootView::new(cfg, cx)));
 }
@@ -811,6 +820,105 @@ impl RootView {
         .detach();
     }
 
+    #[cfg(target_os = "windows")]
+    fn windows_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors.clone();
+        let fg = colors.on_neutral;
+        let ctrl_hover = colors.subtle_hover;
+        let close_hover: gpui::Hsla = gpui::rgb(0xC42B1C).into();
+
+        // GPUI's Windows backend consumes these regions during WM_NCHITTEST.
+        div()
+            .flex()
+            .flex_col()
+            .h(px(36.0))
+            .w_full()
+            .bg(colors.surface_dim)
+            .border_b_1()
+            .border_color(colors.stroke_neutral_subtle)
+            .child(div().h(px(6.0)).w_full())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .h(px(30.0))
+                    .w_full()
+                    .px(px(6.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .h_full()
+                            .flex_1()
+                            .min_w_0()
+                            .pl(px(6.0))
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg)
+                            .window_control_area(WindowControlArea::Drag)
+                            .child(APP_TITLE),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .h_full()
+                            .child(
+                                div()
+                                    .id("windows-titlebar-min")
+                                    .w(px(46.0))
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(move |s| s.bg(ctrl_hover))
+                                    .window_control_area(WindowControlArea::Min)
+                                    .child(
+                                        svg()
+                                            .path("icons/minimize.svg")
+                                            .size(px(10.0))
+                                            .text_color(fg),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("windows-titlebar-max")
+                                    .w(px(46.0))
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(move |s| s.bg(ctrl_hover))
+                                    .window_control_area(WindowControlArea::Max)
+                                    .child(
+                                        svg()
+                                            .path("icons/maximize.svg")
+                                            .size(px(10.0))
+                                            .text_color(fg),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("windows-titlebar-close")
+                                    .w(px(46.0))
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(move |s| s.bg(close_hover))
+                                    .window_control_area(WindowControlArea::Close)
+                                    .child(
+                                        svg()
+                                            .path("icons/dismiss.svg")
+                                            .size(px(10.0))
+                                            .text_color(fg),
+                                    ),
+                            ),
+                    ),
+            )
+    }
+
     fn settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors.clone();
         div()
@@ -1403,13 +1511,19 @@ impl Render for RootView {
                 .into_any_element()
         };
 
-        div()
+        let body = div()
             .flex()
             .flex_row()
             .size_full()
             .bg(colors.surface)
             .child(sidebar)
-            .child(div().flex_grow().min_w_0().h_full().child(main))
+            .child(div().flex_grow().min_w_0().h_full().child(main));
+
+        let root = div().size_full().flex().flex_col();
+        #[cfg(target_os = "windows")]
+        let root = root.child(self.windows_title_bar(cx));
+
+        root.child(div().flex_grow().min_h_0().child(body))
     }
 }
 

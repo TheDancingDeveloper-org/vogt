@@ -42,7 +42,7 @@ impl TermColor {
     }
 }
 
-const HISTORY_MAX: usize = 5000;
+const HISTORY_MAX: usize = 50_000;
 
 pub const DEFAULT_COLS: usize = 200;
 pub const DEFAULT_ROWS: usize = 50;
@@ -276,11 +276,18 @@ impl TermGrid {
     }
 
     /// Scroll by `delta` lines (positive = up into history, negative = toward live).
-    pub fn scroll_by(&mut self, delta: isize) {
+    /// Returns true when the visible scroll offset changed.
+    pub fn scroll_by(&mut self, delta: isize) -> bool {
         let max = self.history.len();
+        let old = self.scroll_offset;
         self.scroll_offset = (self.scroll_offset as isize + delta).clamp(0, max as isize) as usize;
         // Scrolling moves content under the selection's viewport coords; drop it.
-        self.clear_selection();
+        if self.scroll_offset != old {
+            self.clear_selection();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -896,6 +903,37 @@ mod tests {
         assert_eq!(term.match_count("alpha"), 2);
         assert_eq!(term.match_count("BETA"), 1);
         assert_eq!(term.match_count(""), 0);
+    }
+
+    #[test]
+    fn scroll_by_moves_into_history_and_back_to_live() {
+        let mut term = TermProcessor::new(8, 2);
+        term.process(b"one\r\ntwo\r\nthree\r\nfour");
+        assert!(term.grid.history.len() >= 2);
+        assert_eq!(term.grid.scroll_offset, 0);
+
+        assert!(term.grid.scroll_by(1));
+        assert_eq!(term.grid.scroll_offset, 1);
+        assert!(
+            term.visible_text().contains("three"),
+            "visible text was {:?}",
+            term.visible_text()
+        );
+
+        assert!(term.grid.scroll_by(-1));
+        assert_eq!(term.grid.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_by_reports_false_at_scroll_limits() {
+        let mut term = TermProcessor::new(8, 2);
+        term.process(b"one\r\ntwo\r\nthree");
+
+        assert!(!term.grid.scroll_by(-1));
+        let max = term.grid.history.len();
+        assert!(term.grid.scroll_by(max as isize + 100));
+        assert_eq!(term.grid.scroll_offset, max);
+        assert!(!term.grid.scroll_by(1));
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub struct TerminalView {
     error: Option<String>,
     search_query: String,
     search_count: usize,
+    wheel_remainder_lines: f32,
 }
 
 impl TerminalView {
@@ -69,6 +70,7 @@ impl TerminalView {
             error: None,
             search_query: String::new(),
             search_count: 0,
+            wheel_remainder_lines: 0.0,
         };
 
         view.start_attach(cx);
@@ -106,6 +108,30 @@ impl TerminalView {
         self.search_count = self.term.match_count(&self.search_query);
         self.last_frame = None;
         cx.notify();
+    }
+
+    fn scroll_terminal_by_wheel(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        use gpui::ScrollDelta;
+
+        let lines = match ev.delta {
+            ScrollDelta::Lines(p) => p.y,
+            ScrollDelta::Pixels(p) => f32::from(p.y) / self.renderer.cell_h() as f32,
+        };
+        if !lines.is_finite() || lines == 0.0 {
+            return;
+        }
+
+        self.wheel_remainder_lines += lines;
+        let whole_lines = self.wheel_remainder_lines.trunc() as isize;
+        if whole_lines == 0 {
+            return;
+        }
+        self.wheel_remainder_lines -= whole_lines as f32;
+
+        if self.term.grid.scroll_by(whole_lines) {
+            self.last_frame = None;
+            cx.notify();
+        }
     }
 
     fn start_attach(&mut self, cx: &mut Context<Self>) {
@@ -353,17 +379,7 @@ impl Render for TerminalView {
                 cx.notify();
             }))
             .on_scroll_wheel(cx.listener(|view, ev: &ScrollWheelEvent, _, cx| {
-                use gpui::ScrollDelta;
-                let lines = match ev.delta {
-                    ScrollDelta::Lines(p) => p.y,
-                    ScrollDelta::Pixels(p) => p.y / px(20.0),
-                };
-                let delta = (lines.round() as isize) * 3;
-                if delta != 0 {
-                    view.term.grid.scroll_by(delta);
-                    view.last_frame = None;
-                    cx.notify();
-                }
+                view.scroll_terminal_by_wheel(ev, cx);
             }))
             .child(canvas_el);
 

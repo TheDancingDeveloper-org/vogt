@@ -81,6 +81,15 @@ Pipeline non-standard bits:
 - Komodo deploy pins the SHA in `ops/personal/mydevenv2/docker-compose.yml` through standard `scripts/komodo-deploy.sh` (`STACK_NAME=prod-mydevenv2 STACK_DIR=personal/mydevenv2`).
 - Native desktop client releases are tag-driven. Push a `client-v*` tag to run both `.woodpecker/client.yml` and `.woodpecker/client-windows.yml`; Windows builds natively on the `arbit-win` agent and publishes installer/portable artifacts to the matching Forgejo release.
 
+Native desktop client Windows release pipeline:
+
+- A Linux cross-build is only a type/link check for this GPUI client. It is not a release-quality runnable Windows binary because GPUI's release shader path needs `fxc.exe` on a native Windows host, while debug/cross builds depend on build-machine shader source paths.
+- The real Windows artifacts come only from `.woodpecker/client-windows.yml` on the `arbit-win` Windows agent. That workflow runs `C:\ci\mydevenv2\build-and-publish.ps1`, whose version-controlled source is `client/ci/windows/build-and-publish.ps1`.
+- The Windows script has `skip_clone: true` and performs its own Forgejo checkout. With `CI_COMMIT_TAG=client-v*`, it fetches `refs/tags/$CI_COMMIT_TAG`; without a tag, it fetches `main`.
+- Consequence: uncommitted local changes in this workspace are never included in a native Windows build. To get a Windows binary containing local changes, first commit and push those changes, then push a `client-v*` tag. A manual Windows workflow run without a tag builds Forgejo `main` only and skips publish.
+- Tag release outputs are attached to the Forgejo release: `MyDevEnv2-Client-$TAG-Setup.exe`, `MyDevEnv2-Client-$TAG-windows-x86_64.exe`, and `SHA256SUMS-$TAG.txt`. The Linux client workflow attaches `MyDevEnv2-Client-$TAG-linux-x86_64` to the same release.
+- Before claiming a new Windows binary exists, check the matching Forgejo release assets or the `.woodpecker/client-windows.yml` run. Local commands such as `cargo check --target x86_64-pc-windows-gnu` and `cargo clippy --target x86_64-pc-windows-gnu` do not produce the release binary.
+
 Runtime container: multi-stage `Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `TOOLING.md` toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server.
 
 Codex and Claude are deliberately not installed by container bootstrap. Optional AI clients are user-managed. Production default-shell sessions are authenticated through `mydevenv2-agent-auth`; explicit-command sessions can invoke the helper directly.

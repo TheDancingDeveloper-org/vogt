@@ -4,6 +4,8 @@ use serde::Deserialize;
 
 use crate::error::{ApiError, Result};
 
+const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind: SocketAddr,
@@ -119,7 +121,9 @@ pub fn load(
     Ok(Config {
         bind,
         token,
-        scrollback_bytes: from_file.scrollback_bytes.unwrap_or(256 * 1024),
+        scrollback_bytes: parse_usize_env("MYDEVENV2_SCROLLBACK_BYTES")?
+            .or(from_file.scrollback_bytes)
+            .unwrap_or(DEFAULT_SCROLLBACK_BYTES),
         default_shell: from_file
             .default_shell
             .or_else(|| std::env::var("SHELL").ok())
@@ -168,6 +172,23 @@ fn parse_bool_env(name: &str, raw: &str) -> Result<bool> {
     }
 }
 
+fn parse_usize_env(name: &str) -> Result<Option<usize>> {
+    match std::env::var(name) {
+        Ok(v) => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = trimmed
+                .parse::<usize>()
+                .map_err(|e| ApiError::Config(format!("{name} must be an integer: {e}")))?;
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
+    }
+}
+
 fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<String> {
     if let Some(list) = file {
         return list
@@ -197,4 +218,29 @@ fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<
 
 fn dirs_home() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_scrollback_bytes_env() {
+        const NAME: &str = "MYDEVENV2_TEST_SCROLLBACK_BYTES_VALID";
+        std::env::set_var(NAME, "1048576");
+        let parsed = parse_usize_env(NAME).unwrap();
+        std::env::remove_var(NAME);
+
+        assert_eq!(parsed, Some(1_048_576));
+    }
+
+    #[test]
+    fn rejects_invalid_scrollback_bytes_env() {
+        const NAME: &str = "MYDEVENV2_TEST_SCROLLBACK_BYTES_INVALID";
+        std::env::set_var(NAME, "not-a-number");
+        let err = parse_usize_env(NAME).unwrap_err();
+        std::env::remove_var(NAME);
+
+        assert!(err.to_string().contains(NAME));
+    }
 }
