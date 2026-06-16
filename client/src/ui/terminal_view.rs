@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use gpui::{
     canvas, div, prelude::*, px, Bounds, ClipboardItem, Context, Corners, FocusHandle, FontWeight,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage,
-    ScrollWheelEvent, Window,
+    ScrollDelta, ScrollWheelEvent, Window,
 };
 use image::{Frame, ImageBuffer, Rgba};
 use tokio::sync::mpsc::UnboundedSender;
@@ -28,6 +28,7 @@ use mydevenv2_client::{
 /// real canvas bounds.
 const DEFAULT_PX_W: u32 = 960;
 const DEFAULT_PX_H: u32 = 600;
+const PAGE_SCROLL_SENTINEL: f32 = u32::MAX as f32;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Status {
@@ -111,15 +112,11 @@ impl TerminalView {
     }
 
     fn scroll_terminal_by_wheel(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        use gpui::ScrollDelta;
-
-        let lines = match ev.delta {
-            ScrollDelta::Lines(p) => p.y,
-            ScrollDelta::Pixels(p) => f32::from(p.y) / self.renderer.cell_h() as f32,
-        };
+        let lines = wheel_delta_to_lines(ev.delta, self.renderer.cell_h(), self.term.grid.rows);
         if !lines.is_finite() || lines == 0.0 {
             return;
         }
+        cx.stop_propagation();
 
         self.wheel_remainder_lines += lines;
         let whole_lines = self.wheel_remainder_lines.trunc() as isize;
@@ -261,6 +258,38 @@ impl TerminalView {
             self.last_frame = Some(to_render_image(frame));
         }
     }
+}
+
+fn wheel_delta_to_lines(delta: ScrollDelta, cell_h: usize, rows: usize) -> f32 {
+    let lines = match delta {
+        ScrollDelta::Lines(p) => dominant_axis(p.x, p.y),
+        ScrollDelta::Pixels(p) => {
+            let cell_h = cell_h.max(1) as f32;
+            dominant_axis(f32::from(p.x), f32::from(p.y)) / cell_h
+        }
+    };
+    normalize_wheel_lines(lines, rows)
+}
+
+fn dominant_axis(x: f32, y: f32) -> f32 {
+    if x.abs() > y.abs() {
+        x
+    } else {
+        y
+    }
+}
+
+fn normalize_wheel_lines(lines: f32, rows: usize) -> f32 {
+    if !lines.is_finite() || lines == 0.0 {
+        return 0.0;
+    }
+
+    let page = rows.saturating_sub(1).max(1) as f32;
+    if lines.abs() >= PAGE_SCROLL_SENTINEL / 2.0 {
+        return lines.signum() * page;
+    }
+
+    lines.clamp(-page, page)
 }
 
 fn to_render_image(frame: mydevenv2_client::terminal::TermFrame) -> Arc<RenderImage> {
@@ -430,5 +459,55 @@ impl Render for TerminalView {
         }
 
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{point, px};
+
+    #[test]
+    fn wheel_lines_use_vertical_delta() {
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Lines(point(0.0, 3.0)), 18, 50),
+            3.0
+        );
+    }
+
+    #[test]
+    fn wheel_lines_fall_back_to_horizontal_delta() {
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Lines(point(-3.0, 0.0)), 18, 50),
+            -3.0
+        );
+    }
+
+    #[test]
+    fn wheel_pixels_convert_by_cell_height() {
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Pixels(point(px(0.0), px(36.0))), 18, 50),
+            2.0
+        );
+    }
+
+    #[test]
+    fn wheel_page_sentinel_maps_to_one_viewport() {
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Lines(point(0.0, u32::MAX as f32)), 18, 50),
+            49.0
+        );
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Lines(point(0.0, -(u32::MAX as f32))), 18, 50),
+            -49.0
+        );
+    }
+
+    #[test]
+    fn wheel_delta_is_clamped_to_one_viewport() {
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Lines(point(0.0, 500.0)), 18, 50),
+            49.0
+        );
     }
 }
