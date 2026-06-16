@@ -240,7 +240,7 @@ impl RootView {
             return;
         };
         if let NativeTab::Terminal { view, .. } = &tab {
-            view.update(cx, |v, _| v.close());
+            view.update(cx, |v, cx| v.close(cx));
         }
         self.tabs.remove(idx);
         if self.tabs.is_empty() {
@@ -354,7 +354,7 @@ impl RootView {
         }
         for tab in &self.tabs {
             if let NativeTab::Terminal { view, .. } = tab {
-                view.update(cx, |v, _| v.close());
+                view.update(cx, |v, cx| v.close(cx));
             }
         }
         self.api = ApiClient::new(cfg.base(), cfg.token.clone());

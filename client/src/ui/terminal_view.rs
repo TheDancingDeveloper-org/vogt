@@ -2,10 +2,9 @@
 //! renders the live grid.
 //!
 //! Pattern mirrors `rdpapp`'s `LocalTermView`: a `fontdue`-rasterized BGRA
-//! frame painted onto a `canvas`, `request_animation_frame` to keep the live
-//! view ticking, and `on_key_down`/`on_scroll_wheel`/mouse listeners for input.
-//! Server output arrives on the background tokio runtime and is fed into the
-//! parser from a GPUI async task via `weak.update`.
+//! frame painted onto a `canvas`, plus `on_key_down`/`on_scroll_wheel`/mouse
+//! listeners for input. Server output arrives on the background tokio runtime
+//! and is fed into the parser from a GPUI async task via `weak.update`.
 
 use std::sync::{Arc, Mutex};
 
@@ -43,6 +42,9 @@ pub struct TerminalView {
     term: TermProcessor,
     renderer: TermRenderer,
     last_frame: Option<Arc<RenderImage>>,
+    /// Old frame handles whose GPUI sprite-atlas entries need to be evicted on
+    /// the next paint before a replacement terminal image is uploaded.
+    stale_frames: Vec<Arc<RenderImage>>,
     focus_handle: FocusHandle,
     bounds_arc: Arc<Mutex<Option<Bounds<Pixels>>>>,
     last_size_px: (u32, u32),
@@ -63,6 +65,7 @@ impl TerminalView {
             term: TermProcessor::new(DEFAULT_COLS, DEFAULT_ROWS),
             renderer: TermRenderer::new(15.0),
             last_frame: None,
+            stale_frames: Vec::new(),
             focus_handle: cx.focus_handle(),
             bounds_arc: Arc::new(Mutex::new(None)),
             last_size_px: (0, 0),
@@ -86,20 +89,21 @@ impl TerminalView {
         self.term.clear_all();
         self.status = Status::Connecting;
         self.error = None;
-        self.last_frame = None;
+        self.invalidate_frame();
         self.start_attach(cx);
         cx.notify();
     }
 
-    pub fn close(&self) {
+    pub fn close(&mut self, cx: &mut Context<Self>) {
         if let Some(tx) = &self.input {
             let _ = tx.send(AttachInput::Close);
         }
+        self.drop_cached_frames(cx);
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.term.clear_all();
-        self.last_frame = None;
+        self.invalidate_frame();
         self.search_count = 0;
         cx.notify();
     }
@@ -107,7 +111,7 @@ impl TerminalView {
     pub fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
         self.search_query = query;
         self.search_count = self.term.match_count(&self.search_query);
-        self.last_frame = None;
+        self.invalidate_frame();
         cx.notify();
     }
 
@@ -126,7 +130,7 @@ impl TerminalView {
         self.wheel_remainder_lines -= whole_lines as f32;
 
         if self.term.grid.scroll_by(whole_lines) {
-            self.last_frame = None;
+            self.invalidate_frame();
             cx.notify();
         }
     }
@@ -195,7 +199,7 @@ impl TerminalView {
                                 if closed {
                                     v.status = Status::Closed;
                                 }
-                                v.last_frame = None;
+                                v.invalidate_frame();
                                 cx.notify();
                                 closed
                             })
@@ -228,26 +232,50 @@ impl TerminalView {
         ))
     }
 
+    fn invalidate_frame(&mut self) {
+        if let Some(frame) = self.last_frame.take() {
+            self.stale_frames.push(frame);
+        }
+    }
+
+    fn drop_cached_frames(&mut self, cx: &mut Context<Self>) {
+        if let Some(frame) = self.last_frame.take() {
+            cx.drop_image(frame, None);
+        }
+        for frame in self.stale_frames.drain(..) {
+            cx.drop_image(frame, None);
+        }
+    }
+
+    fn drop_stale_frames(&mut self, window: &mut Window) {
+        for frame in self.stale_frames.drain(..) {
+            let _ = window.drop_image(frame);
+        }
+    }
+
     /// Recompute size, resize the PTY if needed, and re-rasterize if dirty.
     fn refresh_frame(&mut self) {
-        if let Ok(slot) = self.bounds_arc.lock() {
-            if let Some(bounds) = *slot {
-                let pw = u32::from(bounds.size.width);
-                let ph = u32::from(bounds.size.height);
-                if (pw, ph) != self.last_size_px && pw > 0 && ph > 0 {
-                    self.last_size_px = (pw, ph);
-                    let (cols, rows) = self.renderer.cols_rows_for(pw, ph);
-                    self.term.resize(cols, rows);
-                    if let Some(tx) = &self.input {
-                        let _ = tx.send(AttachInput::Resize {
-                            cols: cols as u16,
-                            rows: rows as u16,
-                        });
-                    }
-                    self.last_frame = None;
-                }
+        let next_size = self
+            .bounds_arc
+            .lock()
+            .ok()
+            .and_then(|slot| slot.map(|bounds| bounds.size))
+            .map(|size| (u32::from(size.width), u32::from(size.height)))
+            .filter(|&(pw, ph)| pw > 0 && ph > 0 && (pw, ph) != self.last_size_px);
+
+        if let Some((pw, ph)) = next_size {
+            self.last_size_px = (pw, ph);
+            let (cols, rows) = self.renderer.cols_rows_for(pw, ph);
+            self.term.resize(cols, rows);
+            if let Some(tx) = &self.input {
+                let _ = tx.send(AttachInput::Resize {
+                    cols: cols as u16,
+                    rows: rows as u16,
+                });
             }
+            self.invalidate_frame();
         }
+
         let (pw, ph) = if self.last_size_px.0 > 0 && self.last_size_px.1 > 0 {
             self.last_size_px
         } else {
@@ -300,12 +328,8 @@ fn to_render_image(frame: mydevenv2_client::terminal::TermFrame) -> Arc<RenderIm
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.drop_stale_frames(window);
         self.refresh_frame();
-
-        // Keep the live view ticking while connected.
-        if self.status != Status::Closed {
-            window.request_animation_frame();
-        }
 
         let last_frame = self.last_frame.clone();
         let bounds_arc = Arc::clone(&self.bounds_arc);
@@ -315,8 +339,11 @@ impl Render for TerminalView {
         let search_count = self.search_count;
 
         let canvas_el = canvas(
-            move |bounds, _window, _cx| {
+            move |bounds, window, _cx| {
                 if let Ok(mut slot) = bounds_arc.lock() {
+                    if slot.map_or(true, |prev| prev != bounds) {
+                        window.request_animation_frame();
+                    }
                     *slot = Some(bounds);
                 }
                 last_frame
@@ -344,7 +371,7 @@ impl Render for TerminalView {
                     window.focus(&view.focus_handle);
                     if let Some((row, col)) = view.cell_at(ev.position) {
                         view.term.grid.begin_selection(row, col);
-                        view.last_frame = None;
+                        view.invalidate_frame();
                         cx.notify();
                     }
                 }),
@@ -353,7 +380,7 @@ impl Render for TerminalView {
                 if ev.pressed_button == Some(MouseButton::Left) {
                     if let Some((row, col)) = view.cell_at(ev.position) {
                         view.term.grid.update_selection(row, col);
-                        view.last_frame = None;
+                        view.invalidate_frame();
                         cx.notify();
                     }
                 }
@@ -361,7 +388,7 @@ impl Render for TerminalView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|view, _ev: &MouseUpEvent, _window, cx| {
-                    view.last_frame = None;
+                    view.invalidate_frame();
                     cx.notify();
                 }),
             )
@@ -404,7 +431,7 @@ impl Render for TerminalView {
                 if let Some(bytes) = key_to_bytes(&ki) {
                     view.send_input(bytes);
                 }
-                view.last_frame = None;
+                view.invalidate_frame();
                 cx.notify();
             }))
             .on_scroll_wheel(cx.listener(|view, ev: &ScrollWheelEvent, _, cx| {
