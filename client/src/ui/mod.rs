@@ -5,9 +5,7 @@ mod terminal_view;
 
 use fluent_app::FluentApp;
 use fluent_core::ThemeProvider as _;
-use fluent_layout::{
-    MessageBar, MessageIntent, SelectableList, SelectableListItem, TabItem, TabStrip,
-};
+use fluent_layout::{MessageBar, MessageIntent, TabItem, TabStrip};
 use fluent_primitives::{Button, ButtonAppearance, Field, Label, LabelSize, TextInput};
 use gpui::{
     div, prelude::*, px, ClickEvent, Context, Entity, FontWeight, IntoElement, Render,
@@ -888,41 +886,115 @@ impl RootView {
         let colors = cx.theme().colors.clone();
         let active_id = self.active_terminal_id();
 
-        let selected = active_id.map(|id| id.to_string());
-        let items = self
-            .sessions
-            .iter()
-            .map(|s| {
-                SelectableListItem::new(s.id.to_string(), s.name.clone())
-                    .subtitle(s.cwd.clone())
-                    .badge(s.activity.badge())
-                    .meta(format!("{} KiB", s.scrollback_bytes / 1024))
-                    .emphasized(active_id == Some(s.id))
-            })
-            .collect::<Vec<_>>();
+        let mut list = div()
+            .id("session-list")
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .w_full()
+            .min_h_0()
+            .flex_grow()
+            .overflow_y_scroll();
 
-        let root = cx.entity().downgrade();
-        let mut list = SelectableList::new("session-list")
-            .items(items)
-            .empty_text(if self.configured {
+        if self.sessions.is_empty() {
+            let message = if self.configured {
                 "No sessions"
             } else {
                 "Configure server settings"
-            })
-            .row_height(58.0)
-            .on_select(move |id, _window, cx| {
-                if let Ok(id) = Uuid::parse_str(id.as_ref()) {
-                    let _ = root.update(cx, |view, cx| view.attach(id, cx));
-                }
-            });
-        let root = cx.entity().downgrade();
-        list = list.on_activate(move |id, _event, _window, cx| {
-            if let Ok(id) = Uuid::parse_str(id.as_ref()) {
-                let _ = root.update(cx, |view, cx| view.attach(id, cx));
+            };
+            list = list.child(
+                div()
+                    .min_h(px(116.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(colors.on_subtle_disabled)
+                    .child(message),
+            );
+        } else {
+            for session in &self.sessions {
+                let id = session.id;
+                let is_active = active_id == Some(id);
+                let row_bg = if is_active {
+                    colors.neutral_selected
+                } else {
+                    colors.surface
+                };
+                let hover_bg = if is_active {
+                    colors.neutral_selected
+                } else {
+                    colors.neutral_hover
+                };
+
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("session-row-{id}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .w_full()
+                        .min_h(px(58.0))
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .rounded(px(6.0))
+                        .bg(row_bg)
+                        .border_1()
+                        .border_color(if is_active {
+                            colors.stroke_neutral
+                        } else {
+                            colors.stroke_neutral_subtle
+                        })
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(hover_bg))
+                        .on_click(cx.listener(move |view, _, _, cx| view.attach(id, cx)))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(18.0))
+                                .text_color(colors.on_subtle)
+                                .child(session.activity.badge()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .gap(px(2.0))
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .font_weight(if is_active {
+                                            FontWeight::SEMIBOLD
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
+                                        .child(session.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(12.0))
+                                        .text_color(colors.on_subtle)
+                                        .child(session.cwd.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.0))
+                                .text_color(colors.on_subtle)
+                                .child(format!("{} KiB", session.scrollback_bytes / 1024)),
+                        ),
+                );
             }
-        });
-        if let Some(selected) = selected {
-            list = list.selected(selected);
         }
 
         let mut sidebar = div()
