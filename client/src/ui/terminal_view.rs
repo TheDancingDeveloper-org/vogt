@@ -19,7 +19,10 @@ use uuid::Uuid;
 
 use mydevenv2_client::{
     bridge,
-    terminal::{key_to_bytes, KeyInput, TermProcessor, TermRenderer, DEFAULT_COLS, DEFAULT_ROWS},
+    terminal::{
+        key_to_bytes, KeyInput, TermProcessor, TermRenderer, DEFAULT_COLS, DEFAULT_FONT_SIZE,
+        DEFAULT_ROWS, MAX_FONT_SIZE, MIN_FONT_SIZE,
+    },
     ws::{self, AttachEvent, AttachInput},
 };
 
@@ -28,11 +31,19 @@ use mydevenv2_client::{
 const DEFAULT_PX_W: u32 = 960;
 const DEFAULT_PX_H: u32 = 600;
 const PAGE_SCROLL_SENTINEL: f32 = u32::MAX as f32;
+/// Font-size step applied per Ctrl+wheel notch / zoom button press.
+const ZOOM_STEP: f32 = 1.0;
+/// Reconnect backoff bounds for an unexpectedly dropped attach (#7).
+const RECONNECT_MIN_SECS: u64 = 1;
+const RECONNECT_MAX_SECS: u64 = 15;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Status {
     Connecting,
     Live,
+    /// Dropped unexpectedly; an automatic reconnect is scheduled (#7).
+    Reconnecting,
+    /// Closed deliberately (user killed/closed); no auto-reconnect.
     Closed,
 }
 
@@ -54,16 +65,33 @@ pub struct TerminalView {
     search_query: String,
     search_count: usize,
     wheel_remainder_lines: f32,
+    /// Current terminal font size; changed by Ctrl+wheel and zoom buttons (#3).
+    font_size: f32,
+    /// True once the user has deliberately closed this view; suppresses the
+    /// auto-reconnect path so a killed session does not respawn (#7).
+    user_closed: bool,
+    /// Bumped on each (re)attach so a stale attach loop from a prior generation
+    /// stops feeding this view after a reconnect or manual reattach.
+    attach_gen: u64,
+    /// Consecutive auto-reconnect attempts, for backoff.
+    reconnect_attempts: u32,
 }
 
 impl TerminalView {
     /// Attach to `session_id` on the given server and start streaming.
-    pub fn new(ws_url: String, token: String, _session_id: Uuid, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        ws_url: String,
+        token: String,
+        _session_id: Uuid,
+        font_size: f32,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let font_size = font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
         let mut view = Self {
             ws_url,
             token,
             term: TermProcessor::new(DEFAULT_COLS, DEFAULT_ROWS),
-            renderer: TermRenderer::new(15.0),
+            renderer: TermRenderer::new(font_size),
             last_frame: None,
             stale_frames: Vec::new(),
             focus_handle: cx.focus_handle(),
@@ -75,17 +103,83 @@ impl TerminalView {
             search_query: String::new(),
             search_count: 0,
             wheel_remainder_lines: 0.0,
+            font_size,
+            user_closed: false,
+            attach_gen: 0,
+            reconnect_attempts: 0,
         };
 
         view.start_attach(cx);
         view
     }
 
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    /// Apply a new font size: re-rasterize, recompute the grid for the current
+    /// viewport, and resize the PTY so the server matches (#3).
+    pub fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        if self.renderer.set_font_size(size) {
+            self.font_size = self.renderer.font_size();
+            // Force a reflow against the existing pixel viewport.
+            self.last_size_px = (0, 0);
+            self.invalidate_frame();
+            cx.notify();
+        }
+    }
+
+    /// Step the font size by `delta` (Ctrl+wheel notches / +/- buttons).
+    pub fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let target = self.font_size + delta;
+        self.set_font_size(target, cx);
+    }
+
+    pub fn zoom_reset(&mut self, cx: &mut Context<Self>) {
+        self.set_font_size(DEFAULT_FONT_SIZE, cx);
+    }
+
+    /// Scroll the viewport into scrollback history by `lines` (positive = up
+    /// toward older output). Returns true if the offset changed.
+    pub fn scroll_lines(&mut self, lines: isize, cx: &mut Context<Self>) -> bool {
+        if self.term.grid.scroll_by(lines) {
+            self.invalidate_frame();
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Jump straight to the oldest retained scrollback line.
+    pub fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
+        let max = self.term.grid.history.len() as isize;
+        self.scroll_lines(max, cx);
+    }
+
+    /// Snap back to the live tail (offset 0).
+    pub fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+        let cur = self.term.grid.scroll_offset as isize;
+        if cur > 0 {
+            self.scroll_lines(-cur, cx);
+        }
+    }
+
+    /// Current scroll position: (offset, history_len). offset 0 == live tail.
+    pub fn scroll_state(&self) -> (usize, usize) {
+        (self.term.grid.scroll_offset, self.term.grid.history.len())
+    }
+
+    /// Force a fresh attach now (manual "Reconnect" button / post-lag). Clears
+    /// the grid and supersedes any in-flight attach or pending auto-reconnect.
     pub fn reattach(&mut self, cx: &mut Context<Self>) {
         if let Some(tx) = &self.input {
             let _ = tx.send(AttachInput::Close);
         }
         self.input = None;
+        self.attach_gen += 1;
+        self.reconnect_attempts = 0;
+        self.user_closed = false;
         self.term.clear_all();
         self.status = Status::Connecting;
         self.error = None;
@@ -95,9 +189,12 @@ impl TerminalView {
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.user_closed = true;
+        self.attach_gen += 1;
         if let Some(tx) = &self.input {
             let _ = tx.send(AttachInput::Close);
         }
+        self.input = None;
         self.drop_cached_frames(cx);
     }
 
@@ -116,6 +213,16 @@ impl TerminalView {
     }
 
     fn scroll_terminal_by_wheel(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        // Ctrl+wheel zooms the font instead of scrolling, like a browser (#3).
+        if ev.modifiers.control {
+            let dir = wheel_zoom_direction(ev.delta);
+            if dir != 0.0 {
+                cx.stop_propagation();
+                self.zoom_by(dir * ZOOM_STEP, cx);
+            }
+            return;
+        }
+
         let lines = wheel_delta_to_lines(ev.delta, self.renderer.cell_h(), self.term.grid.rows);
         if !lines.is_finite() || lines == 0.0 {
             return;
@@ -143,6 +250,8 @@ impl TerminalView {
         let handle = bridge::handle();
         let ws_url = self.ws_url.clone();
         let token = self.token.clone();
+        self.attach_gen += 1;
+        let generation = self.attach_gen;
 
         cx.spawn(
             move |weak: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
@@ -156,19 +265,29 @@ impl TerminalView {
                         Ok(a) => a,
                         Err(e) => {
                             let _ = weak.update(&mut cx, |v, cx| {
-                                v.status = Status::Closed;
-                                v.error = Some(format!("attach task failed: {e}"));
-                                cx.notify();
+                                if v.attach_gen == generation {
+                                    v.error = Some(format!("attach task failed: {e}"));
+                                    v.schedule_reconnect(cx);
+                                }
                             });
                             return;
                         }
                     };
                     // Hand the input channel to the view so keystrokes can be sent.
                     let input_tx = attach.input_tx.clone();
-                    let _ = weak.update(&mut cx, |v, cx| {
-                        v.input = Some(input_tx);
-                        cx.notify();
-                    });
+                    let superseded = weak
+                        .update(&mut cx, |v, cx| {
+                            if v.attach_gen != generation {
+                                return true;
+                            }
+                            v.input = Some(input_tx);
+                            cx.notify();
+                            false
+                        })
+                        .unwrap_or(true);
+                    if superseded {
+                        return;
+                    }
 
                     // Stream events; drain greedily to batch bursts.
                     while let Some(ev) = attach.event_rx.recv().await {
@@ -178,6 +297,11 @@ impl TerminalView {
                         }
                         let stop = weak
                             .update(&mut cx, |v, cx| {
+                                // A newer attach generation owns the view now;
+                                // stop applying this stale stream's events.
+                                if v.attach_gen != generation {
+                                    return true;
+                                }
                                 let mut closed = false;
                                 for ev in batch {
                                     match ev {
@@ -188,16 +312,18 @@ impl TerminalView {
                                                     v.term.match_count(&v.search_query);
                                             }
                                         }
-                                        AttachEvent::SnapshotReady => v.status = Status::Live,
+                                        AttachEvent::SnapshotReady => {
+                                            v.status = Status::Live;
+                                            // A clean snapshot means the link is
+                                            // healthy; reset backoff.
+                                            v.reconnect_attempts = 0;
+                                        }
                                         AttachEvent::Lag(note) => {
                                             v.error = Some(format!("lagged: {note}"));
                                         }
                                         AttachEvent::Closed => closed = true,
                                         AttachEvent::Error(e) => v.error = Some(e),
                                     }
-                                }
-                                if closed {
-                                    v.status = Status::Closed;
                                 }
                                 v.invalidate_frame();
                                 cx.notify();
@@ -208,6 +334,60 @@ impl TerminalView {
                             break;
                         }
                     }
+
+                    // The socket ended. If this is still the active generation
+                    // and the user did not deliberately close it, auto-reconnect
+                    // (covers WS IO errors such as OS 10054). (#7)
+                    let _ = weak.update(&mut cx, |v, cx| {
+                        if v.attach_gen == generation {
+                            v.input = None;
+                            v.schedule_reconnect(cx);
+                        }
+                    });
+                }
+            },
+        )
+        .detach();
+    }
+
+    /// Schedule an automatic reconnect with bounded exponential backoff, unless
+    /// the user deliberately closed this view. (#7)
+    fn schedule_reconnect(&mut self, cx: &mut Context<Self>) {
+        if self.user_closed {
+            self.status = Status::Closed;
+            cx.notify();
+            return;
+        }
+        self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+        let backoff = RECONNECT_MIN_SECS
+            .saturating_mul(1 << (self.reconnect_attempts.min(4) - 1).min(31))
+            .min(RECONNECT_MAX_SECS);
+        self.status = Status::Reconnecting;
+        self.error = Some(format!(
+            "disconnected — reconnecting in {backoff}s (attempt {})",
+            self.reconnect_attempts
+        ));
+        self.invalidate_frame();
+        cx.notify();
+
+        let target_gen = self.attach_gen;
+        cx.spawn(
+            move |weak: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let mut cx = cx.clone();
+                async move {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(backoff))
+                        .await;
+                    let _ = weak.update(&mut cx, |v, cx| {
+                        // Only fire if nothing else re-attached in the meantime and
+                        // the user has not since closed the view.
+                        if v.attach_gen == target_gen && !v.user_closed {
+                            v.status = Status::Connecting;
+                            v.error = None;
+                            v.start_attach(cx);
+                            cx.notify();
+                        }
+                    });
                 }
             },
         )
@@ -299,6 +479,21 @@ fn wheel_delta_to_lines(delta: ScrollDelta, cell_h: usize, rows: usize) -> f32 {
     normalize_wheel_lines(lines, rows)
 }
 
+/// Direction (+1 zoom in, -1 zoom out, 0 none) for a Ctrl+wheel notch.
+fn wheel_zoom_direction(delta: ScrollDelta) -> f32 {
+    let v = match delta {
+        ScrollDelta::Lines(p) => dominant_axis(p.x, p.y),
+        ScrollDelta::Pixels(p) => dominant_axis(f32::from(p.x), f32::from(p.y)),
+    };
+    if v > 0.0 {
+        1.0
+    } else if v < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
 fn dominant_axis(x: f32, y: f32) -> f32 {
     if x.abs() > y.abs() {
         x
@@ -320,6 +515,20 @@ fn normalize_wheel_lines(lines: f32, rows: usize) -> f32 {
     lines.clamp(-page, page)
 }
 
+/// A small absolutely-positioned status pill in the terminal's top-left.
+fn status_pill(text: &'static str, bg: u32, fg: u32) -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .px(px(8.0))
+        .py(px(4.0))
+        .bg(gpui::rgb(bg))
+        .text_color(gpui::rgb(fg))
+        .font_weight(FontWeight::MEDIUM)
+        .child(text)
+}
+
 fn to_render_image(frame: mydevenv2_client::terminal::TermFrame) -> Arc<RenderImage> {
     let buf = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(frame.width, frame.height, frame.bgra)
         .expect("terminal image buffer dimensions match");
@@ -337,6 +546,7 @@ impl Render for TerminalView {
         let status = self.status;
         let search_query = self.search_query.clone();
         let search_count = self.search_count;
+        let (scroll_offset, scroll_history) = self.scroll_state();
 
         let canvas_el = canvas(
             move |bounds, window, _cx| {
@@ -417,6 +627,46 @@ impl Render for TerminalView {
                     return;
                 }
 
+                // ── Zoom: Ctrl+= / Ctrl+- / Ctrl+0 (browser-style). (#3) ──
+                if m.control && !m.alt && !m.platform {
+                    match key {
+                        "=" | "+" => {
+                            view.zoom_by(ZOOM_STEP, cx);
+                            return;
+                        }
+                        "-" => {
+                            view.zoom_by(-ZOOM_STEP, cx);
+                            return;
+                        }
+                        "0" => {
+                            view.zoom_reset(cx);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // ── Scrollback navigation keys (do not reach the PTY). (#2/#4) ──
+                // Shift+PageUp/PageDown page through history; Ctrl+Home/End jump
+                // to the oldest line / live tail.
+                let page = view.term.grid.rows.saturating_sub(1).max(1) as isize;
+                if m.shift && !m.control && !m.alt && key == "pageup" {
+                    view.scroll_lines(page, cx);
+                    return;
+                }
+                if m.shift && !m.control && !m.alt && key == "pagedown" {
+                    view.scroll_lines(-page, cx);
+                    return;
+                }
+                if m.control && !m.alt && key == "home" {
+                    view.scroll_to_top(cx);
+                    return;
+                }
+                if m.control && !m.alt && key == "end" {
+                    view.scroll_to_bottom(cx);
+                    return;
+                }
+
                 // Any other key returns to the live tail and drops selection.
                 view.term.grid.scroll_offset = 0;
                 view.term.clear_selection();
@@ -439,18 +689,34 @@ impl Render for TerminalView {
             }))
             .child(canvas_el);
 
-        if status == Status::Connecting {
+        match status {
+            Status::Connecting => {
+                root = root.child(status_pill("Connecting…", 0x223355, 0xc8ddff));
+            }
+            Status::Reconnecting => {
+                root = root.child(status_pill("Reconnecting…", 0x3a2d12, 0xffd9a0));
+            }
+            Status::Closed => {
+                root = root.child(status_pill("Disconnected", 0x3a1414, 0xffb4b4));
+            }
+            Status::Live => {}
+        }
+
+        // Scroll-position indicator while scrolled up into history (#2/#4).
+        if scroll_offset > 0 && scroll_history > 0 {
             root = root.child(
                 div()
                     .absolute()
-                    .top_0()
-                    .left_0()
+                    .bottom_0()
+                    .right_0()
                     .px(px(8.0))
                     .py(px(4.0))
-                    .bg(gpui::rgb(0x223355))
-                    .text_color(gpui::rgb(0xc8ddff))
+                    .bg(gpui::rgb(0x2a2a3a))
+                    .text_color(gpui::rgb(0xc8c8d8))
                     .font_weight(FontWeight::MEDIUM)
-                    .child("Connecting..."),
+                    .child(format!(
+                        "▲ {scroll_offset}/{scroll_history} (Ctrl+End → live)"
+                    )),
             );
         }
 
@@ -493,6 +759,27 @@ impl Render for TerminalView {
 mod tests {
     use super::*;
     use gpui::{point, px};
+
+    #[test]
+    fn ctrl_wheel_zoom_direction_matches_sign() {
+        assert_eq!(
+            wheel_zoom_direction(ScrollDelta::Lines(point(0.0, 2.0))),
+            1.0
+        );
+        assert_eq!(
+            wheel_zoom_direction(ScrollDelta::Lines(point(0.0, -2.0))),
+            -1.0
+        );
+        assert_eq!(
+            wheel_zoom_direction(ScrollDelta::Lines(point(0.0, 0.0))),
+            0.0
+        );
+        // Pixel deltas resolve by dominant axis too.
+        assert_eq!(
+            wheel_zoom_direction(ScrollDelta::Pixels(point(px(0.0), px(-9.0)))),
+            -1.0
+        );
+    }
 
     #[test]
     fn wheel_lines_use_vertical_delta() {

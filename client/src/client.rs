@@ -202,6 +202,19 @@ impl ApiClient {
         Self::expect_ok(resp).await
     }
 
+    /// Upload raw bytes to `dest_path` under the workspace root, base64-encoded
+    /// so binary files survive the JSON transport. Creates parent dirs. (#5)
+    pub async fn upload_file(&self, dest_path: &str, bytes: &[u8]) -> Result<()> {
+        use base64::Engine as _;
+        let req = WriteReq {
+            path: dest_path.to_string(),
+            content: String::new(),
+            content_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            create_parents: true,
+        };
+        self.write_file(&req).await
+    }
+
     pub async fn search(&self, query: &str, path: &str, max: usize) -> Result<Vec<SearchHit>> {
         self.get_json(&format!(
             "/api/search?q={}&path={}&max={max}",

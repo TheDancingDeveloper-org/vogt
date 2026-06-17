@@ -131,10 +131,14 @@ pub struct FileRead {
 }
 
 /// Body for `PUT /api/files`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct WriteReq {
     pub path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content: String,
+    /// Base64-encoded raw bytes; lets the native client upload binary files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
     #[serde(default)]
     pub create_parents: bool,
 }

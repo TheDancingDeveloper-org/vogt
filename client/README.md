@@ -132,25 +132,28 @@ that tag.
 - [x] Mouse selection plus Ctrl+Shift+C / Ctrl+Shift+V terminal clipboard flow
 - [x] Ctrl+Space/NUL and tested terminal key mapping
 - [x] Native Windows installer and portable exe via Woodpecker release tags
+- [x] Terminal zoom (Ctrl+wheel / buttons / Ctrl±0), persisted
+- [x] Scrollback history nav (Shift+PageUp/Down, Ctrl+Home/End) + position indicator
+- [x] Auto-reconnect on WS drop (OS 10054) + manual Reconnect button
+- [x] Files tab: native OS upload picker, breadcrumb nav, clickable listing
+- [x] Resizable + collapsible (icon-rail) sidebar, persisted
+- [x] Black-on-dark contrast floor in the terminal renderer + themed panels
 - [ ] Real TabStrip / multiple simultaneous terminal panes in the native UI
-- [ ] File-tree / editor / git / diff tabs
+- [ ] In-app file editor / git diff tabs
+
+See `UPLIFT.md` for the June 2026 GUI uplift details (maps each change to its
+original request).
 
 ## Native app improvement backlog
 
-1. Multiple terminal tabs and panes: keep attached terminal views alive while
-   switching sessions, add a real content tab strip, support close-without-kill,
-   and later split panes.
-2. Session lifecycle controls: expose rename, duplicate, kill, delete, cwd,
-   command, and environment fields so the native client can manage sessions
-   without falling back to the PWA.
-3. PWA workflow parity: add native file browsing, text preview/edit, search,
-   git status, log, and diff views backed by the existing typed REST client.
-4. Terminal ergonomics: add scrollback search, explicit reattach after lag or
-   reconnect, clear/reset controls, configurable font sizing, and clearer
-   terminal status banners.
-5. Native polish: protect local credentials, integrate OS keychain storage,
-   add native waiting-for-input notifications, expose app/version/release
-   details, and add tray or menu actions for common commands.
-6. Desktop validation: keep the GPUI-free protocol and terminal tests fast,
-   then add GUI smoke coverage for first-run settings, session list, attach,
-   typing, resize, reconnect, and release packaging.
+1. Multiple terminal panes: keep attached terminal views alive while switching
+   sessions and later split panes (tabs + close-without-kill already done).
+2. In-app editing: file preview is read-only; add edit/save and git diff views.
+3. Button tooltips: `fluent_primitives::Button` needs a `.tooltip()` builder
+   (we own FluentGUI — add it there and re-pin the rev). Icon-only buttons
+   currently rely on labels/context.
+4. Native polish: OS keychain credential storage, waiting-for-input
+   notifications, app/version/release surface, tray/menu actions.
+5. Desktop validation: keep the GPUI-free protocol/terminal tests fast; add GUI
+   smoke coverage for first-run settings, attach, typing, resize, reconnect,
+   upload, and release packaging.

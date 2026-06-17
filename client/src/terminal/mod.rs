@@ -9,4 +9,4 @@ pub mod renderer;
 
 pub use grid::{TermProcessor, DEFAULT_COLS, DEFAULT_ROWS};
 pub use keymap::{key_to_bytes, KeyInput};
-pub use renderer::{TermFrame, TermRenderer};
+pub use renderer::{TermFrame, TermRenderer, DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE};

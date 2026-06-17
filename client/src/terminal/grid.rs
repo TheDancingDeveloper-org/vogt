@@ -937,6 +937,32 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_replayed_then_resized_keeps_full_history_scrollable() {
+        // Mirrors the attach sequence: a large scrollback snapshot is replayed
+        // into a default-sized grid, then the view resizes to the real window.
+        // History must remain fully scrollable afterwards (regression for the
+        // "can only scroll new data" report). (#2)
+        let mut term = TermProcessor::new(80, 24);
+        for i in 0..500 {
+            term.process(format!("line {i}\r\n").as_bytes());
+        }
+        let history_before = term.grid.history.len();
+        assert!(history_before >= 400, "history was {history_before}");
+
+        // Resize as the canvas reports real bounds.
+        term.resize(120, 40);
+        // The whole history is still reachable by scrolling up.
+        assert!(term.grid.scroll_by(history_before as isize));
+        assert_eq!(term.grid.scroll_offset, term.grid.history.len());
+        // Earliest retained content is visible at the top of the viewport.
+        assert!(
+            term.visible_text().contains("line "),
+            "expected history text, got {:?}",
+            term.visible_text()
+        );
+    }
+
+    #[test]
     fn alt_screen_switch_isolates_content() {
         let mut term = TermProcessor::new(10, 4);
         term.process(b"main");

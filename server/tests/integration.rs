@@ -538,6 +538,29 @@ async fn file_api_round_trip() {
     let bytes_on_disk = std::fs::read_to_string(tmp.path().join("new.txt")).unwrap();
     assert_eq!(bytes_on_disk, "fresh");
 
+    // Upload binary bytes via content_base64 (native client upload path).
+    use base64::Engine as _;
+    let raw: &[u8] = &[0x00, 0x01, 0xff, 0xfe, b'h', b'i'];
+    let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+    let wb = client
+        .put(format!("{base}/api/files"))
+        .json(&json!({ "path": "up/bin.dat", "content_base64": b64, "create_parents": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wb.status(), StatusCode::OK);
+    let on_disk = std::fs::read(tmp.path().join("up/bin.dat")).unwrap();
+    assert_eq!(on_disk, raw);
+
+    // A malformed base64 body is a 400, not a 500.
+    let bad = client
+        .put(format!("{base}/api/files"))
+        .json(&json!({ "path": "bad.dat", "content_base64": "!!!notbase64!!!" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
     // Path-traversal rejected
     let escape = client
         .get(format!("{base}/api/files?path=../escape"))

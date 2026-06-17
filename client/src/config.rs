@@ -12,6 +12,19 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_SERVER_URL: &str = "https://mydevenv2.sprooty.com";
 
+/// Default terminal font size persisted when the user has not changed zoom.
+pub const DEFAULT_FONT_SIZE: f32 = 15.0;
+/// Default sidebar width in logical pixels.
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 288.0;
+
+fn default_font_size() -> f32 {
+    DEFAULT_FONT_SIZE
+}
+
+fn default_sidebar_width() -> f32 {
+    DEFAULT_SIDEBAR_WIDTH
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
     /// Base URL, e.g. `https://mydevenv2.sprooty.com` (no trailing slash).
@@ -19,6 +32,15 @@ pub struct ClientConfig {
     /// API bearer token (`MYDEVENV2_TOKEN` on the server).
     #[serde(default)]
     pub token: String,
+    /// Persisted terminal zoom level (font size in px). (#3)
+    #[serde(default = "default_font_size")]
+    pub font_size: f32,
+    /// Persisted left-sidebar width in logical px. (#8)
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+    /// Whether the sidebar is collapsed to the icon rail. (#8)
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
 }
 
 impl Default for ClientConfig {
@@ -26,6 +48,9 @@ impl Default for ClientConfig {
         Self {
             server_url: DEFAULT_SERVER_URL.to_string(),
             token: String::new(),
+            font_size: DEFAULT_FONT_SIZE,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            sidebar_collapsed: false,
         }
     }
 }
@@ -94,6 +119,7 @@ mod tests {
         let cfg = ClientConfig {
             server_url: "https://mydevenv2.sprooty.com///".into(),
             token: "tok".into(),
+            ..Default::default()
         };
         assert_eq!(cfg.base(), "https://mydevenv2.sprooty.com");
     }
@@ -103,7 +129,40 @@ mod tests {
         let cfg = ClientConfig {
             server_url: "https://mydevenv2.sprooty.com".into(),
             token: String::new(),
+            ..Default::default()
         };
         assert!(!cfg.is_configured());
+    }
+
+    #[test]
+    fn config_defaults_are_sane() {
+        let cfg = ClientConfig::default();
+        assert_eq!(cfg.font_size, DEFAULT_FONT_SIZE);
+        assert_eq!(cfg.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
+        assert!(!cfg.sidebar_collapsed);
+    }
+
+    #[test]
+    fn config_round_trips_new_fields() {
+        let cfg = ClientConfig {
+            font_size: 20.0,
+            sidebar_width: 320.0,
+            sidebar_collapsed: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: ClientConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.font_size, 20.0);
+        assert_eq!(back.sidebar_width, 320.0);
+        assert!(back.sidebar_collapsed);
+    }
+
+    #[test]
+    fn config_tolerates_missing_new_fields() {
+        // An older config file without the new keys must still load.
+        let json = r#"{"server_url":"https://x","token":"t"}"#;
+        let cfg: ClientConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.font_size, DEFAULT_FONT_SIZE);
+        assert_eq!(cfg.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
     }
 }

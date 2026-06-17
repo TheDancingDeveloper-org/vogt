@@ -192,7 +192,13 @@ pub async fn download_file(
 #[derive(Debug, Deserialize)]
 pub struct WriteReq {
     pub path: String,
+    /// UTF-8 text body. Used when `content_base64` is absent.
+    #[serde(default)]
     pub content: String,
+    /// Base64-encoded raw bytes. Takes precedence over `content` and lets the
+    /// native client upload arbitrary (binary) files, not just UTF-8 text.
+    #[serde(default)]
+    pub content_base64: Option<String>,
     /// If true, create parent dirs; default false.
     #[serde(default)]
     pub create_parents: bool,
@@ -202,6 +208,14 @@ pub async fn write_file(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WriteReq>,
 ) -> Result<Json<serde_json::Value>> {
+    // Decode the payload first so a bad base64 body fails before any mkdir.
+    let bytes: Vec<u8> = match &req.content_base64 {
+        Some(b64) => base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .map_err(|e| ApiError::BadRequest(format!("invalid content_base64: {e}")))?,
+        None => req.content.into_bytes(),
+    };
+
     if req.create_parents {
         // Need to materialise the parent before resolve_for_write can canonicalise it.
         // strip_lexically equivalent via resolve_existing_or_lexical handles the validation
@@ -213,10 +227,9 @@ pub async fn write_file(
         }
     }
     let p = workspace_path::resolve_for_write(&state.config.workspace_root, &req.path)?;
-    tokio::fs::write(&p, req.content.as_bytes()).await?;
-    Ok(Json(
-        serde_json::json!({ "ok": true, "bytes": req.content.len() }),
-    ))
+    let n = bytes.len();
+    tokio::fs::write(&p, &bytes).await?;
+    Ok(Json(serde_json::json!({ "ok": true, "bytes": n })))
 }
 
 #[derive(Debug, Serialize)]

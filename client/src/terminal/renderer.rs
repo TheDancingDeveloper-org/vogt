@@ -19,6 +19,37 @@ const SEL: (u8, u8, u8) = (0x33, 0x47, 0x7a);
 /// Block-cursor colour.
 const CURSOR: (u8, u8, u8) = (0xcc, 0xcc, 0xcc);
 
+/// Minimum and maximum font sizes the user can zoom to (Ctrl+wheel / buttons).
+pub const MIN_FONT_SIZE: f32 = 7.0;
+pub const MAX_FONT_SIZE: f32 = 40.0;
+/// Default terminal font size used on first launch.
+pub const DEFAULT_FONT_SIZE: f32 = 15.0;
+
+/// Perceptual luminance (0–255) of an RGB triple, Rec. 601 weights.
+fn luminance(r: u8, g: u8, b: u8) -> u32 {
+    (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000
+}
+
+/// Lift a foreground colour that is too close to the dark terminal background
+/// up to a readable floor, so "black on dark" text never disappears (#6). Only
+/// near-black foregrounds are touched; everything else is returned unchanged.
+fn readable_fg(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    // Floor matched roughly to the background luminance plus headroom.
+    const FLOOR: u32 = 96;
+    let lum = luminance(r, g, b);
+    if lum >= FLOOR {
+        return (r, g, b);
+    }
+    // Pure (or near) black → neutral mid-grey that reads on the dark bg.
+    if r as u32 + g as u32 + b as u32 <= 24 {
+        return (0x8a, 0x8a, 0x8a);
+    }
+    // Otherwise scale the existing hue up to the contrast floor.
+    let scale = (FLOOR as f32 / lum.max(1) as f32).min(4.0);
+    let lift = |c: u8| ((c as f32 * scale).round() as u32).min(255) as u8;
+    (lift(r), lift(g), lift(b))
+}
+
 /// A finished frame: `width * height` BGRA pixels, row-major, top-left origin.
 pub struct TermFrame {
     pub width: u32,
@@ -67,6 +98,30 @@ impl TermRenderer {
 
     pub fn cell_h(&self) -> usize {
         self.cell_h
+    }
+
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    /// Change the rasterization font size (clamped), recomputing cell metrics
+    /// and dropping the glyph cache. Returns true if the size actually changed.
+    pub fn set_font_size(&mut self, size: f32) -> bool {
+        let size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        if (size - self.font_size).abs() < 0.01 {
+            return false;
+        }
+        self.font_size = size;
+        let lm = self
+            .font
+            .horizontal_line_metrics(size)
+            .expect("font has no horizontal metrics");
+        self.cell_h = (lm.new_line_size.ceil() as usize).max(1);
+        self.ascent = lm.ascent.ceil() as isize;
+        let (m, _) = self.font.rasterize('M', size);
+        self.cell_w = (m.advance_width.ceil().max(1.0) as usize).max(1);
+        self.cache.clear();
+        true
     }
 
     /// Grid dimensions (cols, rows) that fit a pixel viewport, each at least 1.
@@ -168,6 +223,11 @@ impl TermRenderer {
                         } else {
                             (cell.bg.r, cell.bg.g, cell.bg.b)
                         }
+                    } else if cell.bg.is_default {
+                        // Only lift low-contrast glyphs against the terminal's
+                        // own dark background; an explicit cell bg (e.g. a
+                        // coloured block) keeps the author's exact fg.
+                        readable_fg(cell.fg.r, cell.fg.g, cell.fg.b)
                     } else {
                         (cell.fg.r, cell.fg.g, cell.fg.b)
                     };
@@ -261,6 +321,30 @@ mod tests {
         let (cols, rows) = r.cols_rows_for(800, 600);
         assert!(cols >= 1 && rows >= 1);
         assert!(cols * r.cell_w() <= 800 + r.cell_w());
+    }
+
+    #[test]
+    fn set_font_size_changes_cell_metrics() {
+        let mut r = TermRenderer::new(15.0);
+        let (w0, h0) = (r.cell_w(), r.cell_h());
+        assert!(r.set_font_size(28.0));
+        assert!(r.cell_w() > w0 && r.cell_h() > h0);
+        // Idempotent within clamp + epsilon.
+        assert!(!r.set_font_size(28.0));
+        // Clamped to bounds.
+        r.set_font_size(1000.0);
+        assert_eq!(r.font_size(), MAX_FONT_SIZE);
+        r.set_font_size(0.0);
+        assert_eq!(r.font_size(), MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn readable_fg_lifts_pure_black_only_on_default_bg() {
+        // Pure black is lifted to a readable grey.
+        let lifted = readable_fg(0, 0, 0);
+        assert!(luminance(lifted.0, lifted.1, lifted.2) >= 96);
+        // A bright colour is untouched.
+        assert_eq!(readable_fg(0xcc, 0xcc, 0xcc), (0xcc, 0xcc, 0xcc));
     }
 
     #[test]
