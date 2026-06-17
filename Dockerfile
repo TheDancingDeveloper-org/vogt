@@ -168,15 +168,31 @@ RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_
     && mv "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /home/sprooty/.cargo/bin/sccache \
     && chmod +x /home/sprooty/.cargo/bin/sccache
 
-# Python tools the user expects (uv, ruff). Fail the build if they don't
-# install — silent fallback would leave the pod with broken Python tooling
-# that surfaces as cryptic command-not-found errors at runtime.
+USER root
+
+# Java + Gradle. Installed globally (/opt + a /usr/local/bin symlink) so they
+# survive the /home/sprooty bind mount at runtime. gradle finds the JDK via
+# `java` on PATH, so no JAVA_HOME juggling needed.
+ARG GRADLE_VERSION=8.12
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openjdk-21-jdk-headless \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+       -o /tmp/gradle.zip \
+    && unzip -q /tmp/gradle.zip -d /opt \
+    && ln -s "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle \
+    && rm /tmp/gradle.zip
+
+# Python tools the user expects (uv, ruff, pytest). Installed globally into
+# /usr/local (system pip lands scripts in /usr/local/bin) so they survive the
+# /home/sprooty bind mount — a --user install would be shadowed at runtime.
+# Fail the build if they don't install — silent fallback would leave the pod
+# with broken Python tooling that surfaces as cryptic command-not-found errors.
 ARG UV_VERSION=0.5.20
 ARG RUFF_VERSION=0.7.4
-RUN pip3 install --user --break-system-packages --no-cache-dir \
-        "uv==${UV_VERSION}" "ruff==${RUFF_VERSION}"
-
-USER root
+ARG PYTEST_VERSION=8.3.4
+RUN pip3 install --break-system-packages --no-cache-dir \
+        "uv==${UV_VERSION}" "ruff==${RUFF_VERSION}" "pytest==${PYTEST_VERSION}"
 
 # The server binary (built in stage 2 with the web bundle embedded; cache
 # mounts in stage 2 mean we have to copy out of /usr/local/bin, not /app).
