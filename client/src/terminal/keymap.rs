@@ -96,6 +96,12 @@ pub fn key_to_bytes(k: &KeyInput<'_>) -> Option<Vec<u8>> {
                 return Some(prefix_alt(k.alt, key_char.as_bytes()));
             }
         }
+        // The Windows GPUI backend names the spacebar "space" and does not
+        // populate `key_char` for it, so the len==1 fallback below would miss
+        // it. Handle the named spelling explicitly so plain space still types.
+        if key == "space" {
+            return Some(prefix_alt(k.alt, b" "));
+        }
         if key.len() == 1 {
             let c = key.chars().next()?;
             if c.is_ascii_graphic() || c == ' ' {
@@ -181,5 +187,29 @@ mod tests {
     #[test]
     fn pure_modifier_is_none() {
         assert_eq!(key_to_bytes(&k("shift", None)), None);
+    }
+
+    #[test]
+    fn space_types_via_named_key_without_key_char() {
+        // Windows GPUI backend: key == "space", key_char == None.
+        assert_eq!(key_to_bytes(&k("space", None)).unwrap(), b" ");
+        // Some backends supply the literal char as key_char.
+        assert_eq!(key_to_bytes(&k("space", Some(" "))).unwrap(), b" ");
+        // Other backends name the key " " directly.
+        assert_eq!(key_to_bytes(&k(" ", Some(" "))).unwrap(), b" ");
+    }
+
+    #[test]
+    fn alt_space_prefixes_escape() {
+        let mut ki = k("space", None);
+        ki.alt = true;
+        assert_eq!(key_to_bytes(&ki).unwrap(), vec![0x1b, b' ']);
+    }
+
+    #[test]
+    fn ctrl_space_still_nul_for_named_key() {
+        let mut ki = k("space", None);
+        ki.ctrl = true;
+        assert_eq!(key_to_bytes(&ki).unwrap(), vec![0]);
     }
 }
