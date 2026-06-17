@@ -43,6 +43,19 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
 - Node 22 (from NodeSource)
 - `pnpm` global install
 
+### Android (Capacitor app under `mobile/`)
+
+- JDK 21 (`openjdk-21-jdk-headless`); `JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64`
+- Android SDK installed to `/opt/android-sdk` (NOT `~/Android/Sdk` — the home
+  bind mount would shadow it at runtime). `ANDROID_HOME` / `ANDROID_SDK_ROOT`
+  both point there; `sdkmanager`, `adb`, `apkanalyzer` are on PATH.
+- SDK packages: `cmdline-tools;latest`, `platform-tools`,
+  `platforms;android-35`, `platforms;android-36`, `build-tools;35.0.0`,
+  `build-tools;36.0.0`. Licenses accepted at build time.
+- Builds run through the committed wrapper (`mobile/android/gradlew`), not
+  system gradle. The Capacitor project currently targets compile/target SDK 35
+  (`mobile/android/variables.gradle`); SDK 36 is installed ahead of the bump.
+
 ## Container + cloud tools
 
 - Docker CLI + compose plugin (DooD pattern — talks to host daemon via socket mount; container itself doesn't run dockerd)
@@ -50,6 +63,9 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
 - `rclone`
 - `infisical` (CLI for secret retrieval; already used in CI and at runtime)
 - `tailscale` (joins the tailnet at container start)
+- `step` (Smallstep CLI — self-issues short-lived SSH certs against the Node B
+  step-ca via `step ssh certificate ...`; the only host-shell SSH path for
+  in-pod agents)
 
 ## Auth keys / secrets needed at pod startup
 

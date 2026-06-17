@@ -45,10 +45,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # ─── Stage 3: runtime + dev tooling ─────────────────────────────────────────
 FROM ubuntu:26.04
+# Android SDK lives in /opt (NOT ~/Android/Sdk): the runtime bind-mounts the
+# host home over /home/sprooty, so anything under $HOME vanishes at runtime —
+# same reason gradle/uv/pnpm are installed system-wide below.
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     NPM_CONFIG_PREFIX=/home/sprooty/.npm-global \
-    PATH=/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/home/sprooty/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+    ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
+    PATH=/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/home/sprooty/.cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Core system + dev utilities (per TOOLING.md)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -111,6 +117,16 @@ RUN curl -fsSL https://rclone.org/install.sh | bash
 RUN curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | bash \
     && apt-get install -y --no-install-recommends infisical \
     && rm -rf /var/lib/apt/lists/*
+
+# Smallstep `step` CLI — used to self-issue short-lived SSH certificates against
+# the step-ca on Node B (`step ssh certificate ...`), the only path to host-shell
+# SSH for in-pod agents. Installed from the official .deb (lands at /usr/bin/step).
+ARG STEP_CLI_VERSION=0.30.6
+RUN curl -fsSL \
+        "https://github.com/smallstep/cli/releases/download/v${STEP_CLI_VERSION}/step-cli_${STEP_CLI_VERSION}-1_amd64.deb" \
+        -o /tmp/step-cli.deb \
+    && apt-get install -y --no-install-recommends /tmp/step-cli.deb \
+    && rm -f /tmp/step-cli.deb /var/lib/apt/lists/*
 
 # Sway (headless Wayland compositor) + minimal apps for in-pod GUI testing
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -182,6 +198,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && unzip -q /tmp/gradle.zip -d /opt \
     && ln -s "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle \
     && rm /tmp/gradle.zip
+
+# Android SDK (for the Capacitor android project under mobile/). Installed to
+# /opt/android-sdk so it survives the /home/sprooty bind mount at runtime — a
+# ~/Android/Sdk install would be shadowed. sdkmanager/adb/apkanalyzer are put
+# on PATH via the ANDROID_HOME entries in the stage-3 ENV above. The committed
+# Gradle wrapper (mobile/android/gradlew) drives builds; system gradle is only
+# a convenience for ad-hoc use.
+#
+# Package set per the dev-pod spec: cmdline-tools;latest, platform-tools,
+# platforms;android-35 + android-36, build-tools;35.0.0 + 36.0.0.
+ARG ANDROID_CMDLINE_TOOLS_VERSION=14742923
+RUN install -d /opt/android-sdk/cmdline-tools \
+    && curl -fsSL \
+        "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" \
+        -o /tmp/cmdline-tools.zip \
+    && unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools \
+    # The zip unpacks to a top-level cmdline-tools/; sdkmanager expects it at
+    # cmdline-tools/latest/.
+    && mv /tmp/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest \
+    && rm -rf /tmp/cmdline-tools.zip /tmp/cmdline-tools \
+    # Accept licenses first (yes feeds the interactive prompts), then install.
+    && yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null \
+    && /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --install \
+        "cmdline-tools;latest" \
+        "platform-tools" \
+        "platforms;android-35" \
+        "platforms;android-36" \
+        "build-tools;35.0.0" \
+        "build-tools;36.0.0" \
+    # Owned by sprooty so in-pod Gradle builds can write license acks and any
+    # auto-managed SDK components at runtime (the SDK lives in /opt, which is
+    # not bind-mounted, so this ownership persists from the image).
+    && chown -R ${SPROOTY_UID}:${SPROOTY_GID} /opt/android-sdk
 
 # Python tools the user expects (uv, ruff, pytest). Installed globally into
 # /usr/local (system pip lands scripts in /usr/local/bin) so they survive the
