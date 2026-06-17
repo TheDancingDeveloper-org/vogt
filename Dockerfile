@@ -126,7 +126,8 @@ RUN curl -fsSL \
         "https://github.com/smallstep/cli/releases/download/v${STEP_CLI_VERSION}/step-cli_${STEP_CLI_VERSION}-1_amd64.deb" \
         -o /tmp/step-cli.deb \
     && apt-get install -y --no-install-recommends /tmp/step-cli.deb \
-    && rm -f /tmp/step-cli.deb /var/lib/apt/lists/*
+    && rm -f /tmp/step-cli.deb \
+    && rm -rf /var/lib/apt/lists/*
 
 # Sway (headless Wayland compositor) + minimal apps for in-pod GUI testing
 RUN apt-get update && apt-get install -y --no-install-recommends \
