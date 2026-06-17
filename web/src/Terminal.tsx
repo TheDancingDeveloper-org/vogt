@@ -410,6 +410,21 @@ const TerminalView: Component<Props> = (props) => {
         // No selection: fall through so Ctrl+C still sends SIGINT.
         return true;
       }
+      // Plain Ctrl+C: copy when there's a selection (Windows Terminal / VS Code
+      // convention), otherwise let it through as SIGINT. Skip on Mac, where
+      // Ctrl+C is always SIGINT and Cmd+C (handled above) is copy.
+      if (
+        e.ctrlKey &&
+        !e.shiftKey &&
+        !e.altKey &&
+        !e.metaKey &&
+        (e.key === "c" || e.key === "C") &&
+        term?.hasSelection()
+      ) {
+        void copySelection();
+        term.clearSelection();
+        return false;
+      }
       if ((meta || mac) && (e.key === "v" || e.key === "V")) {
         void pasteFromClipboard();
         return false;

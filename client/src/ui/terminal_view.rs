@@ -607,15 +607,33 @@ impl Render for TerminalView {
                 let m = &ks.modifiers;
                 let key = ks.key.as_str();
 
-                // Ctrl+Shift+C → copy the current selection to the clipboard.
+                // Ctrl+Shift+C → always copy the current selection.
                 // Must run BEFORE we clear the selection below.
                 if m.control && m.shift && !m.alt && !m.platform && key == "c" {
                     if let Some(text) = view.term.selected_text() {
                         if !text.is_empty() {
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            view.term.clear_selection();
+                            view.invalidate_frame();
+                            cx.notify();
                         }
                     }
                     return;
+                }
+                // Plain Ctrl+C: copy when there is a selection (Windows
+                // Terminal / VS Code convention), otherwise fall through so it
+                // sends SIGINT (ETX) to the PTY as a terminal expects.
+                if m.control && !m.shift && !m.alt && !m.platform && key == "c" {
+                    if let Some(text) = view.term.selected_text() {
+                        if !text.is_empty() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            view.term.clear_selection();
+                            view.invalidate_frame();
+                            cx.notify();
+                            return;
+                        }
+                    }
+                    // No selection → fall through to key_to_bytes (Ctrl+C = ETX).
                 }
                 // Ctrl+Shift+V → paste clipboard text into the PTY.
                 if m.control && m.shift && !m.alt && !m.platform && key == "v" {
