@@ -24,9 +24,9 @@ export interface TerminalActions {
 interface Props {
   sessionId: string;
   /** Exposed so the parent can inject mobile-modkey input straight into the PTY. */
-  registerSend?: (fn: (data: string | ArrayBuffer) => void) => void;
+  registerSend?: (fn: ((data: string | ArrayBuffer) => void) | null) => void;
   /** Exposed so the parent (modkey row, etc.) can drive copy/paste. */
-  registerActions?: (actions: TerminalActions) => void;
+  registerActions?: (actions: TerminalActions | null) => void;
 }
 
 function clampFontSize(value: number): number {
@@ -92,6 +92,7 @@ const TerminalView: Component<Props> = (props) => {
   let visibilityHandler: (() => void) | null = null;
   let viewportHandler: (() => void) | null = null;
   let fontSizeHandler: ((event: Event) => void) | null = null;
+  let terminalDomCleanup: (() => void) | null = null;
   let pasteTextareaRef: HTMLTextAreaElement | undefined;
   const [showPasteModal, setShowPasteModal] = createSignal(false);
   let pasteResolve: ((v: string | null) => void) | null = null;
@@ -348,14 +349,15 @@ const TerminalView: Component<Props> = (props) => {
     // before xterm.js wraps them in bracketed-paste sequences (\x1b[200~...\x1b[201~).
     // Programs like infisical that don't implement bracketed-paste mode receive the
     // escape sequences as literal input, corrupting base64 tokens.
+    const onPasteCapture = (e: ClipboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      if (text) sendToPty(text);
+    };
     term.textarea?.addEventListener(
       "paste",
-      (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const text = (e as ClipboardEvent).clipboardData?.getData("text/plain") ?? "";
-        if (text) sendToPty(text);
-      },
+      onPasteCapture,
       true, // capture phase — runs before xterm's bubble-phase listener
     );
 
@@ -437,24 +439,32 @@ const TerminalView: Component<Props> = (props) => {
     });
 
     // Middle-click paste (matches xterm-on-Linux convention).
-    hostRef.addEventListener("auxclick", (e) => {
-      if ((e as MouseEvent).button === 1) {
+    const onAuxClick = (e: MouseEvent) => {
+      if (e.button === 1) {
         e.preventDefault();
         void pasteFromClipboard();
       }
-    });
+    };
+    hostRef.addEventListener("auxclick", onAuxClick);
 
     // Right-click: if there's a selection, copy it; otherwise paste. Bypasses
     // the browser context menu — most users on mobile/desktop just want one
     // of those two actions on a terminal.
-    hostRef.addEventListener("contextmenu", (e) => {
+    const onContextMenu = (e: MouseEvent) => {
       e.preventDefault();
       if (term?.hasSelection()) {
         void copySelection();
       } else {
         void pasteFromClipboard();
       }
-    });
+    };
+    hostRef.addEventListener("contextmenu", onContextMenu);
+    terminalDomCleanup = () => {
+      term?.textarea?.removeEventListener("paste", onPasteCapture, true);
+      hostRef?.removeEventListener("auxclick", onAuxClick);
+      hostRef?.removeEventListener("contextmenu", onContextMenu);
+      terminalDomCleanup = null;
+    };
 
     // Auto-copy on selection-end is nice on desktop but surprising on mobile
     // (long-press to select → release accidentally clobbers the clipboard).
@@ -606,6 +616,13 @@ const TerminalView: Component<Props> = (props) => {
       window.removeEventListener(FONT_SIZE_EVENT, fontSizeHandler);
       fontSizeHandler = null;
     }
+    terminalDomCleanup?.();
+    if (pasteResolve) {
+      pasteResolve(null);
+      pasteResolve = null;
+    }
+    props.registerSend?.(null);
+    props.registerActions?.(null);
     resizeObserver?.disconnect();
     try {
       ws?.close();

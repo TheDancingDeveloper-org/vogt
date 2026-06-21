@@ -7,6 +7,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  onCleanup,
 } from "solid-js";
 import Terminal, { type TerminalActions } from "./Terminal";
 import type { SessionSummary } from "./api";
@@ -42,8 +43,8 @@ interface SavedLayout {
 interface Props {
   tabId: string;
   sessionId: string;
-  registerSend?: (fn: (data: string | ArrayBuffer) => void) => void;
-  registerActions?: (actions: TerminalActions) => void;
+  registerSend?: (fn: ((data: string | ArrayBuffer) => void) | null) => void;
+  registerActions?: (actions: TerminalActions | null) => void;
   confirmClosePane?: (session: SessionSummary | null) => Promise<boolean>;
   onError?: (message: string) => void;
 }
@@ -229,9 +230,9 @@ interface LayoutNodeProps {
   onFocusPane: (paneId: string) => void;
   registerPaneSend: (
     paneId: string,
-    fn: (data: string | ArrayBuffer) => void,
+    fn: ((data: string | ArrayBuffer) => void) | null,
   ) => void;
-  registerPaneActions: (paneId: string, actions: TerminalActions) => void;
+  registerPaneActions: (paneId: string, actions: TerminalActions | null) => void;
 }
 
 const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
@@ -326,6 +327,13 @@ const TerminalWorkspace: Component<Props> = (props) => {
   createEffect(() => {
     props.registerSend?.(sendToActive);
     props.registerActions?.(workspaceActions);
+  });
+
+  onCleanup(() => {
+    paneSenders.clear();
+    paneActions.clear();
+    props.registerSend?.(null);
+    props.registerActions?.(null);
   });
 
   createEffect(() => {
@@ -467,10 +475,14 @@ const TerminalWorkspace: Component<Props> = (props) => {
           node={root()}
           activePaneId={activePaneId()}
           onFocusPane={setActivePaneId}
-          registerPaneSend={(paneId, fn) => paneSenders.set(paneId, fn)}
-          registerPaneActions={(paneId, actions) =>
-            paneActions.set(paneId, actions)
-          }
+          registerPaneSend={(paneId, fn) => {
+            if (fn) paneSenders.set(paneId, fn);
+            else paneSenders.delete(paneId);
+          }}
+          registerPaneActions={(paneId, actions) => {
+            if (actions) paneActions.set(paneId, actions);
+            else paneActions.delete(paneId);
+          }}
         />
       </div>
       <form

@@ -159,7 +159,10 @@ const App: Component = () => {
     startEventStream();
   });
 
-  onCleanup(() => stopEventStream());
+  onCleanup(() => {
+    stopEventStream();
+    if (toastTimer !== undefined) window.clearTimeout(toastTimer);
+  });
 
   // URL → tabs syncing. createEffect (not createMemo) — we want side effects,
   // not a memoised value.
@@ -522,8 +525,14 @@ const App: Component = () => {
                       <TerminalWorkspace
                         tabId={tab().id}
                         sessionId={(tab() as Extract<Tab, { kind: "terminal" }>).sessionId}
-                        registerSend={(fn) => senders.set(t.id, fn)}
-                        registerActions={(a) => actions.set(t.id, a)}
+                        registerSend={(fn) => {
+                          if (fn) senders.set(t.id, fn);
+                          else senders.delete(t.id);
+                        }}
+                        registerActions={(a) => {
+                          if (a) actions.set(t.id, a);
+                          else actions.delete(t.id);
+                        }}
                         confirmClosePane={(session) =>
                           confirmUser(
                             session

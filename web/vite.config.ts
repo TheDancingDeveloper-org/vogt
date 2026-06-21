@@ -22,6 +22,6 @@ export default defineConfig({
     target: "es2022",
     outDir: "dist",
     emptyOutDir: true,
-    sourcemap: true,
+    sourcemap: process.env.VITE_SOURCEMAP === "1",
   },
 });

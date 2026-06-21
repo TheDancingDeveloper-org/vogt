@@ -15,6 +15,8 @@ export interface PushPublicKey {
   fcm_enabled: boolean;
 }
 
+let serviceWorkerMessageHandlerRegistered = false;
+
 export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
   if (isNativePlatform()) {
     void registerNativePushHandlers();
@@ -24,11 +26,14 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
   try {
     const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
     // Click messages from sw.js navigate the foreground tab.
-    navigator.serviceWorker.addEventListener("message", (ev) => {
-      if (ev.data?.type === "navigate" && typeof ev.data.url === "string") {
-        navigateFromPushUrl(ev.data.url as string);
-      }
-    });
+    if (!serviceWorkerMessageHandlerRegistered) {
+      serviceWorkerMessageHandlerRegistered = true;
+      navigator.serviceWorker.addEventListener("message", (ev) => {
+        if (ev.data?.type === "navigate" && typeof ev.data.url === "string") {
+          navigateFromPushUrl(ev.data.url as string);
+        }
+      });
+    }
     return reg;
   } catch {
     return null;
