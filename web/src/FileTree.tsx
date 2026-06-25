@@ -232,7 +232,7 @@ const FileTree: Component<Props> = (props) => {
         </div>
       </Show>
       <div class="tree-scroll">
-        <For each={tree() ?? []}>
+        <For each={filteredTree()}>
           {(n) => (
             <TreeNodeView
               node={n}
