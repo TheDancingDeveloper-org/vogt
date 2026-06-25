@@ -17,6 +17,7 @@ import GuiTab from "./Gui";
 import ModKeyRow from "./ModKeyRow";
 import Settings from "./Settings";
 import FileTree from "./FileTree";
+import CommandPalette from "./CommandPalette";
 import { api as apiModule } from "./api";
 import type { PublicConfig } from "./api";
 import {
@@ -80,6 +81,7 @@ const App: Component = () => {
   const location = useLocation();
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
 
   // Toast: errors stay longer than info messages.
   const [toast, setToast] = createSignal<string | null>(null);
@@ -297,7 +299,15 @@ const App: Component = () => {
 
   // Keyboard shortcuts. Browser reserves Ctrl+T / Ctrl+W / Ctrl+Tab so we use
   // Ctrl+Shift+T (new), Ctrl+Shift+W (close active), Ctrl+Alt+Arrow (cycle).
+  // Ctrl+K / Cmd+K opens the command palette.
   const onKeyDown = (e: KeyboardEvent) => {
+    // Command palette: Ctrl+K or Cmd+K
+    if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+      e.preventDefault();
+      setCommandPaletteOpen(true);
+      return;
+    }
+
     if (!e.ctrlKey && !e.metaKey) return;
     const k = e.key.toLowerCase();
     if (e.shiftKey && k === "t") {
@@ -678,6 +688,13 @@ const App: Component = () => {
       <Show when={toast()}>
         <div class="toast">{toast()}</div>
       </Show>
+
+      <CommandPalette
+        open={commandPaletteOpen()}
+        onClose={() => setCommandPaletteOpen(false)}
+        onCreateSession={() => void onCreate()}
+        onOpenFile={() => setDrawerOpen(true)}
+      />
     </>
   );
 };
