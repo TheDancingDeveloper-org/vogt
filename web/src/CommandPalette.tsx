@@ -115,6 +115,23 @@ const CommandPalette: Component<Props> = (props) => {
       }));
   };
 
+  const recentFileCommands = (): Command[] => {
+    return getRecentFiles()
+      .slice(0, 5)
+      .map((f, i) => ({
+        id: `recent-${i}`,
+        label: f.path.split("/").pop() || f.path,
+        description: f.path,
+        icon: "📄",
+        action: () => {
+          openEditorTab(f.path);
+          navigate(`/e/${encodeURIComponent(f.path)}`);
+          props.onClose();
+        },
+        category: "Recent Files",
+      }));
+  };
+
   const allCommands = (): Command[] => {
     return [...baseCommands(), ...recentFileCommands(), ...sessionCommands()];
   };
