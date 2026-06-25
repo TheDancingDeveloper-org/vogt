@@ -1110,3 +1110,142 @@ input[type="password"]:focus {
   gap: 4px;
 }
 
+/* Template Selector */
+.template-selector {
+  min-width: min(500px, 90vw);
+  max-width: 600px;
+}
+
+.template-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.template-item {
+  width: 100%;
+  text-align: left;
+  padding: 12px 16px;
+  background: var(--bg);
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.template-item:hover {
+  background: var(--bg-tab);
+  border-color: var(--accent);
+}
+
+.template-item-name {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--fg);
+  margin-bottom: 4px;
+}
+
+.template-item-desc {
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
+.template-selected {
+  background: var(--bg);
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.template-selected-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.template-selected-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.template-back-btn {
+  background: transparent;
+  border: 1px solid var(--bd);
+  color: var(--fg-muted);
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.template-back-btn:hover {
+  background: var(--bg-tab);
+  color: var(--fg);
+}
+
+.template-selected-desc {
+  color: var(--fg-muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.template-env {
+  margin-top: 12px;
+  font-size: 12px;
+}
+
+.template-env strong {
+  color: var(--fg);
+}
+
+.template-env ul {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0 0;
+}
+
+.template-env li {
+  padding: 4px 0;
+  color: var(--fg-muted);
+}
+
+.template-env code {
+  background: var(--bg-elev);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.form-group input {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  color: var(--fg);
+  font-size: 14px;
+}
+
+.form-group input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+

@@ -164,6 +164,8 @@ pub struct PublicConfig {
     /// `{"selkies": "1.6.2"}` when present, `{"selkies": null}` when the image
     /// was built without Selkies. UI hides the GUI tab when selkies is null.
     pub features: serde_json::Value,
+    /// Session templates for quick session creation.
+    pub session_templates: Vec<crate::config::SessionTemplate>,
 }
 
 pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicConfig> {
@@ -171,6 +173,7 @@ pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicCon
         gui_stream_url: state.config.gui_stream_url.clone(),
         version: env!("CARGO_PKG_VERSION"),
         features: load_features(),
+        session_templates: state.config.session_templates.clone(),
     })
 }
 

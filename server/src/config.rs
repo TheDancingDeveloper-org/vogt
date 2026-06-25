@@ -1,10 +1,60 @@
 use std::{net::SocketAddr, path::Path};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{ApiError, Result};
 
 const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTemplate {
+    pub name: String,
+    pub description: String,
+    pub command: Option<Vec<String>>,
+    pub cwd: Option<String>,
+    pub env: Vec<(String, String)>,
+}
+
+impl SessionTemplate {
+    pub fn default_templates() -> Vec<Self> {
+        vec![
+            SessionTemplate {
+                name: "Shell".to_string(),
+                description: "Default shell session".to_string(),
+                command: None,
+                cwd: None,
+                env: vec![],
+            },
+            SessionTemplate {
+                name: "Node Dev".to_string(),
+                description: "Node.js development environment".to_string(),
+                command: Some(vec!["bash".to_string()]),
+                cwd: None,
+                env: vec![
+                    ("NODE_ENV".to_string(), "development".to_string()),
+                ],
+            },
+            SessionTemplate {
+                name: "Rust Build".to_string(),
+                description: "Rust development with cargo".to_string(),
+                command: Some(vec!["bash".to_string()]),
+                cwd: None,
+                env: vec![
+                    ("RUST_BACKTRACE".to_string(), "1".to_string()),
+                ],
+            },
+            SessionTemplate {
+                name: "Python Env".to_string(),
+                description: "Python development environment".to_string(),
+                command: Some(vec!["bash".to_string()]),
+                cwd: None,
+                env: vec![
+                    ("PYTHONUNBUFFERED".to_string(), "1".to_string()),
+                ],
+            },
+        ]
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -40,6 +90,8 @@ pub struct Config {
     pub auto_agent_auth: bool,
     /// Helper executable used when `auto_agent_auth` is enabled.
     pub agent_auth_helper: std::path::PathBuf,
+    /// Session templates available for quick session creation.
+    pub session_templates: Vec<SessionTemplate>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -58,6 +110,7 @@ struct FileConfig {
     allowed_origins: Option<Vec<String>>,
     auto_agent_auth: Option<bool>,
     agent_auth_helper: Option<String>,
+    session_templates: Option<Vec<SessionTemplate>>,
 }
 
 pub fn load(
@@ -159,6 +212,9 @@ pub fn load(
         ),
         auto_agent_auth,
         agent_auth_helper,
+        session_templates: from_file
+            .session_templates
+            .unwrap_or_else(SessionTemplate::default_templates),
     })
 }
 

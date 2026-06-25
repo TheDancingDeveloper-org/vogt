@@ -18,8 +18,9 @@ import ModKeyRow from "./ModKeyRow";
 import Settings from "./Settings";
 import FileTree from "./FileTree";
 import CommandPalette from "./CommandPalette";
+import TemplateSelector from "./TemplateSelector";
 import { api as apiModule } from "./api";
-import type { PublicConfig } from "./api";
+import type { PublicConfig, SessionTemplate } from "./api";
 import {
   createSession,
   deleteSession,
@@ -82,6 +83,7 @@ const App: Component = () => {
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
+  const [templateSelectorOpen, setTemplateSelectorOpen] = createSignal(false);
 
   // Toast: errors stay longer than info messages.
   const [toast, setToast] = createSignal<string | null>(null);
@@ -187,7 +189,14 @@ const App: Component = () => {
     }
   });
 
-  const onCreate = async (cwd?: string) => {
+  const onCreate = async (cwd?: string, template?: SessionTemplate) => {
+    // If template selector should be shown
+    if (!template && publicCfg()?.session_templates && publicCfg()!.session_templates!.length > 1) {
+      setTemplateSelectorOpen(true);
+      return;
+    }
+
+    // Default session creation (no template or single template)
     const name = await promptUser(
       cwd ? `New session in ${cwd}` : "New session",
       `shell-${Date.now() % 1000}`,
@@ -195,7 +204,29 @@ const App: Component = () => {
     );
     if (!name) return;
     try {
-      const s = await createSession(name, undefined, cwd);
+      const s = await createSession(
+        name,
+        template?.command || undefined,
+        cwd,
+        template?.env,
+      );
+      openTerminalTab(s.id, s.name);
+      navigate(`/t/${s.id}`, { replace: false });
+      setDrawerOpen(false);
+    } catch (e) {
+      showToast(`create failed: ${(e as Error).message}`, { kind: "error" });
+    }
+  };
+
+  const onTemplateSelect = async (template: SessionTemplate, name: string, cwd?: string) => {
+    setTemplateSelectorOpen(false);
+    try {
+      const s = await createSession(
+        name,
+        template.command || undefined,
+        cwd || template.cwd || undefined,
+        template.env,
+      );
       openTerminalTab(s.id, s.name);
       navigate(`/t/${s.id}`, { replace: false });
       setDrawerOpen(false);
@@ -694,6 +725,13 @@ const App: Component = () => {
         onClose={() => setCommandPaletteOpen(false)}
         onCreateSession={() => void onCreate()}
         onOpenFile={() => setDrawerOpen(true)}
+      />
+
+      <TemplateSelector
+        open={templateSelectorOpen()}
+        onClose={() => setTemplateSelectorOpen(false)}
+        onSelect={onTemplateSelect}
+        templates={publicCfg()?.session_templates || []}
       />
     </>
   );

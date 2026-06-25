@@ -20,6 +20,7 @@ export interface CreateSessionRequest {
   name: string;
   command?: string[];
   cwd?: string;
+  env?: [string, string][];
   cols?: number;
   rows?: number;
 }
@@ -198,11 +199,20 @@ export const api = {
     req<{ ok: number; fail: number }>("POST", "/api/push/test", { title, body }),
 };
 
+export interface SessionTemplate {
+  name: string;
+  description: string;
+  command: string[] | null;
+  cwd: string | null;
+  env: [string, string][];
+}
+
 export interface PublicConfig {
   gui_stream_url: string | null;
   version: string;
   /** Build-time feature availability, e.g. `{ selkies: "1.6.2" | null }`. */
   features?: Record<string, string | null | undefined>;
+  session_templates?: SessionTemplate[];
 }
 
 export interface GuiProc {

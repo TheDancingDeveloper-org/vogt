@@ -49,8 +49,9 @@ export async function createSession(
   name: string,
   command?: string[],
   cwd?: string,
+  env?: [string, string][],
 ): Promise<SessionSummary> {
-  const s = await api.createSession({ name, command, cwd });
+  const s = await api.createSession({ name, command, cwd, env });
   setStore(
     produce((st) => {
       st.sessions[s.id] = s;
