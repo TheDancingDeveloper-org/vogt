@@ -8,6 +8,7 @@ import {
 } from "./monaco";
 import { setEditorDirty } from "./tabs";
 import { addRecentFile } from "./recentFiles";
+import { getMinimapEnabled, setMinimapEnabled } from "./editorPrefs";
 
 interface Props {
   tabId: string;
@@ -23,6 +24,14 @@ const Editor: Component<Props> = (props) => {
   );
   const [error, setError] = createSignal<string | null>(null);
   const [savedAt, setSavedAt] = createSignal<number | null>(null);
+  const [minimapOn, setMinimapOn] = createSignal(getMinimapEnabled());
+
+  const toggleMinimap = () => {
+    const next = !minimapOn();
+    setMinimapOn(next);
+    setMinimapEnabled(next);
+    editor?.updateOptions({ minimap: { enabled: next } });
+  };
   let resizeObserver: ResizeObserver | null = null;
   let savedContent = "";
   let disposed = false;
@@ -79,7 +88,7 @@ const Editor: Component<Props> = (props) => {
         fontFamily:
           '"JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace, monospace',
         fontSize: 13,
-        minimap: { enabled: false },
+        minimap: { enabled: getMinimapEnabled() },
         wordWrap: "on",
         scrollBeyondLastLine: false,
         renderWhitespace: "selection",
@@ -141,6 +150,13 @@ const Editor: Component<Props> = (props) => {
             </span>
           </Show>
         </span>
+        <button
+          onClick={toggleMinimap}
+          title="Toggle minimap"
+          class={minimapOn() ? "active" : ""}
+        >
+          🗺
+        </button>
         <button onClick={save} disabled={status() === "loading"}>
           Save
         </button>
