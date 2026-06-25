@@ -23,6 +23,7 @@ import FileTree from "./FileTree";
 import CommandPalette from "./CommandPalette";
 import TemplateSelector from "./TemplateSelector";
 import { getLayoutMode } from "./layout";
+import { mergeTemplates } from "./customTemplates";
 import { api as apiModule } from "./api";
 import type { PublicConfig, SessionTemplate } from "./api";
 import {
@@ -198,9 +199,12 @@ const App: Component = () => {
     }
   });
 
+  // Server defaults merged with user's custom templates from localStorage.
+  const allTemplates = () => mergeTemplates(publicCfg()?.session_templates ?? []);
+
   const onCreate = async (cwd?: string, template?: SessionTemplate) => {
     // If template selector should be shown
-    if (!template && publicCfg()?.session_templates && publicCfg()!.session_templates!.length > 1) {
+    if (!template && allTemplates().length > 1) {
       setTemplateSelectorOpen(true);
       return;
     }
@@ -752,7 +756,7 @@ const App: Component = () => {
         open={templateSelectorOpen()}
         onClose={() => setTemplateSelectorOpen(false)}
         onSelect={onTemplateSelect}
-        templates={publicCfg()?.session_templates || []}
+        templates={allTemplates()}
       />
 
       <KeyboardShortcuts

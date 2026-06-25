@@ -1,6 +1,7 @@
 import { Component, Show, createSignal, onMount } from "solid-js";
 import { getBase, getToken, setBase, setToken } from "./api";
 import { getLayoutMode, setLayoutMode, type LayoutMode } from "./layout";
+import TemplateEditor from "./TemplateEditor";
 import {
   currentPushEnabled,
   isPushAvailable,
@@ -24,6 +25,7 @@ const Settings: Component<Props> = (props) => {
   const [pushPerm, setPushPerm] = createSignal<PushPermissionState>("default");
   const [pushBusy, setPushBusy] = createSignal(false);
   const [pushMsg, setPushMsg] = createSignal<string | null>(null);
+  const [templateEditorOpen, setTemplateEditorOpen] = createSignal(false);
 
   const refreshPushState = async () => {
     setPushPerm(await pushPermission());
@@ -163,6 +165,20 @@ const Settings: Component<Props> = (props) => {
 
           <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
+              Session Templates
+            </div>
+            <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
+              Create custom session templates with preset commands and environment variables.
+            </div>
+            <button onClick={() => setTemplateEditorOpen(true)}>
+              Manage Custom Templates
+            </button>
+          </div>
+
+          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+
+          <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+            <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
               Push notifications
             </div>
             <Show
@@ -201,6 +217,10 @@ const Settings: Component<Props> = (props) => {
           </div>
         </div>
       </div>
+      <TemplateEditor
+        open={templateEditorOpen()}
+        onClose={() => setTemplateEditorOpen(false)}
+      />
     </Show>
   );
 };
