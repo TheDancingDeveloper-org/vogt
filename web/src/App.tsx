@@ -741,6 +741,20 @@ const App: Component = () => {
         <div class="toast">{toast()}</div>
       </Show>
 
+      <CommandPalette
+        open={commandPaletteOpen()}
+        onClose={() => setCommandPaletteOpen(false)}
+        onCreateSession={() => void onCreate()}
+        onOpenFile={() => setDrawerOpen(true)}
+      />
+
+      <TemplateSelector
+        open={templateSelectorOpen()}
+        onClose={() => setTemplateSelectorOpen(false)}
+        onSelect={onTemplateSelect}
+        templates={publicCfg()?.session_templates || []}
+      />
+
       <KeyboardShortcuts
         open={shortcutsOpen()}
         onClose={() => setShortcutsOpen(false)}
