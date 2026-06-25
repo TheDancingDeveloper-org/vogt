@@ -24,6 +24,7 @@ import CommandPalette from "./CommandPalette";
 import TemplateSelector from "./TemplateSelector";
 import { getLayoutMode } from "./layout";
 import { mergeTemplates } from "./customTemplates";
+import { isBookmarked, toggleBookmark, bookmarks } from "./bookmarks";
 import { api as apiModule } from "./api";
 import type { PublicConfig, SessionTemplate } from "./api";
 import {
@@ -438,7 +439,15 @@ const App: Component = () => {
             <For
               each={sessionsStore.order
                 .map((id) => sessionsStore.sessions[id])
-                .filter((s): s is SessionSummary => Boolean(s))}
+                .filter((s): s is SessionSummary => Boolean(s))
+                .sort((a, b) => {
+                  // Bookmarked sessions float to the top. `bookmarks()` is read
+                  // here so this re-sorts reactively when a bookmark toggles.
+                  const set = new Set(bookmarks());
+                  const aB = set.has(a.id) ? 0 : 1;
+                  const bB = set.has(b.id) ? 0 : 1;
+                  return aB - bB;
+                })}
               fallback={<div class="empty">No sessions yet.</div>}
             >
               {(s) => (
@@ -467,6 +476,16 @@ const App: Component = () => {
                       <span class="cwd">{s.cwd}</span>
                     </Show>
                   </div>
+                  <span
+                    class="row-btn"
+                    title={isBookmarked(s.id) ? "Remove bookmark" : "Bookmark"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleBookmark(s.id);
+                    }}
+                  >
+                    {isBookmarked(s.id) ? "★" : "☆"}
+                  </span>
                   <span
                     class="row-btn"
                     title="Duplicate (same cwd)"
