@@ -66,7 +66,10 @@ const TreeNodeView: Component<NodeProps> = (props) => {
           {props.node.is_dir ? (open() ? "▾" : "▸") : " "}
         </span>
         <span style={{ "margin-left": "2px", flex: 1, "min-width": 0, overflow: "hidden", "text-overflow": "ellipsis" }}>
-          {props.node.is_dir ? "📁" : "📄"} {props.node.name}
+          <span class="tree-icon">
+            {props.node.is_dir ? getFolderIcon(open()) : getFileIcon(props.node.path)}
+          </span>
+          {props.node.name}
         </span>
         <Show when={props.node.is_dir}>
           <button

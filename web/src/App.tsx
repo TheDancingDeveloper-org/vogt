@@ -16,6 +16,7 @@ import EditorWorkspace from "./EditorWorkspace";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
 import History from "./History";
+import KeyboardShortcuts from "./KeyboardShortcuts";
 import ModKeyRow from "./ModKeyRow";
 import Settings from "./Settings";
 import FileTree from "./FileTree";

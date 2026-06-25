@@ -1,7 +1,8 @@
 import { Component, For, Show, createSignal, onMount } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { sessionsStore } from "./store";
-import { openGitTab, openHistoryTab, openTerminalTab } from "./tabs";
+import { openGitTab, openTerminalTab } from "./tabs";
+import { openHistoryTab } from "./tabs";
 
 export interface Command {
   id: string;
