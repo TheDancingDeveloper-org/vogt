@@ -71,7 +71,7 @@ const KeyboardShortcuts: Component<Props> = (props) => {
     const byCategory: Record<string, Shortcut[]> = {};
     filtered.forEach((s) => {
       if (!byCategory[s.category]) byCategory[s.category] = [];
-      byCategory[s.category].push(s);
+      byCategory[s.category]!.push(s);
     });
     return byCategory;
   };
