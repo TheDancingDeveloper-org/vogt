@@ -88,6 +88,7 @@ const App: Component = () => {
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
   const [templateSelectorOpen, setTemplateSelectorOpen] = createSignal(false);
+  const [shortcutsOpen, setShortcutsOpen] = createSignal(false);
 
   // Toast: errors stay longer than info messages.
   const [toast, setToast] = createSignal<string | null>(null);
@@ -740,18 +741,9 @@ const App: Component = () => {
         <div class="toast">{toast()}</div>
       </Show>
 
-      <CommandPalette
-        open={commandPaletteOpen()}
-        onClose={() => setCommandPaletteOpen(false)}
-        onCreateSession={() => void onCreate()}
-        onOpenFile={() => setDrawerOpen(true)}
-      />
-
-      <TemplateSelector
-        open={templateSelectorOpen()}
-        onClose={() => setTemplateSelectorOpen(false)}
-        onSelect={onTemplateSelect}
-        templates={publicCfg()?.session_templates || []}
+      <KeyboardShortcuts
+        open={shortcutsOpen()}
+        onClose={() => setShortcutsOpen(false)}
       />
     </>
   );
