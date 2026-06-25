@@ -197,6 +197,9 @@ export const api = {
 
   pushTest: (title = "MyDevEnv2 test", body = "Push notifications are working.") =>
     req<{ ok: number; fail: number }>("POST", "/api/push/test", { title, body }),
+
+  getBase: () => getBase(),
+  getToken: () => getToken(),
 };
 
 export interface SessionTemplate {

@@ -4,7 +4,8 @@ export type Tab =
   | { id: string; kind: "terminal"; sessionId: string; label: string }
   | { id: string; kind: "editor"; path: string; label: string; dirty?: boolean }
   | { id: string; kind: "git"; repo: string; label: string }
-  | { id: string; kind: "gui"; label: string };
+  | { id: string; kind: "gui"; label: string }
+  | { id: string; kind: "history"; label: string };
 
 interface TabsStore {
   tabs: Tab[];
@@ -124,6 +125,25 @@ export function openGuiTab(): Tab {
     return existing;
   }
   const tab: Tab = { id, kind: "gui", label: "GUI" };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+export function openHistoryTab(): Tab {
+  const id = "history";
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind: "history", label: "📜 History" };
   setStore(
     produce((s) => {
       s.tabs.push(tab);

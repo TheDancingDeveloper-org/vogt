@@ -14,7 +14,7 @@ use crate::error::{ApiError, Result};
 
 /// Session history database manager
 pub struct SessionHistory {
-    pool: SqlitePool,
+    pub pool: SqlitePool,
     log_dir: PathBuf,
 }
 

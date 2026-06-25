@@ -1,7 +1,7 @@
 import { Component, For, Show, createSignal, onMount } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { sessionsStore } from "./store";
-import { openGitTab, openTerminalTab } from "./tabs";
+import { openGitTab, openHistoryTab, openTerminalTab } from "./tabs";
 
 export interface Command {
   id: string;
@@ -85,11 +85,12 @@ const CommandPalette: Component<Props> = (props) => {
     {
       id: "search-history",
       label: "Search History",
-      description: "Search through session history (coming soon)",
+      description: "Search through session history",
       icon: "🔍",
       action: () => {
+        openHistoryTab();
+        navigate("/history");
         props.onClose();
-        // TODO: implement when history is ready
       },
       category: "History",
     },

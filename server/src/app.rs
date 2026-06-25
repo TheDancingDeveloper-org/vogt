@@ -12,7 +12,7 @@ use crate::gui as gui_handlers;
 use crate::push_api;
 use crate::{
     api, assets, auth, config::Config, events::EventBus, files, git, gui::GuiRegistry,
-    history::SessionHistory, push::PushManager, sessions::SessionRegistry, ws,
+    history::SessionHistory, history_api, push::PushManager, sessions::SessionRegistry, ws,
 };
 
 pub struct AppState {
@@ -98,6 +98,9 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/push/unsubscribe", post(push_api::unsubscribe))
         .route("/api/push/list", get(push_api::list))
         .route("/api/push/test", post(push_api::test_dispatch))
+        .route("/api/history/sessions", get(history_api::list_sessions))
+        .route("/api/history/search", get(history_api::search_sessions))
+        .route("/api/history/{id}", get(history_api::get_session).delete(history_api::delete_session))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_bearer,

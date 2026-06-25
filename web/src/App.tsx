@@ -15,6 +15,7 @@ import Editor from "./Editor";
 import EditorWorkspace from "./EditorWorkspace";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
+import History from "./History";
 import ModKeyRow from "./ModKeyRow";
 import Settings from "./Settings";
 import FileTree from "./FileTree";
@@ -620,6 +621,9 @@ const App: Component = () => {
                   </Show>
                   <Show when={t.kind === "gui"}>
                     <GuiTab streamUrl={publicCfg()?.gui_stream_url ?? null} />
+                  </Show>
+                  <Show when={t.kind === "history"}>
+                    <History onError={(msg) => showToast(msg, { kind: "error" })} />
                   </Show>
                 </div>
               )}

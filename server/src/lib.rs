@@ -10,6 +10,7 @@ pub mod files;
 pub mod git;
 pub mod gui;
 pub mod history;
+pub mod history_api;
 pub mod pty;
 pub mod push;
 pub mod push_api;
