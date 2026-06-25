@@ -3,6 +3,13 @@ import { useNavigate } from "@solidjs/router";
 import { sessionsStore } from "./store";
 import { openGitTab, openTerminalTab, openHistoryTab, openEditorTab, openGuiTab } from "./tabs";
 import { getRecentFiles } from "./recentFiles";
+import { api } from "./api";
+
+interface HistorySearchResult {
+  session_id: string;
+  session_name: string;
+  match_snippet: string;
+}
 
 export interface Command {
   id: string;
@@ -36,7 +43,51 @@ const CommandPalette: Component<Props> = (props) => {
   const navigate = useNavigate();
   const [query, setQuery] = createSignal("");
   const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const [historyResults, setHistoryResults] = createSignal<HistorySearchResult[]>([]);
   let inputRef: HTMLInputElement | undefined;
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // When the query starts with ">", search session history (debounced).
+  const maybeSearchHistory = (q: string) => {
+    if (searchTimer) clearTimeout(searchTimer);
+    if (!q.startsWith(">")) {
+      setHistoryResults([]);
+      return;
+    }
+    const term = q.slice(1).trim();
+    if (!term) {
+      setHistoryResults([]);
+      return;
+    }
+    searchTimer = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `${api.getBase()}/api/history/search?q=${encodeURIComponent(term)}`,
+          { headers: { Authorization: `Bearer ${api.getToken()}` } },
+        );
+        if (res.ok) {
+          setHistoryResults((await res.json()) as HistorySearchResult[]);
+        }
+      } catch {
+        setHistoryResults([]);
+      }
+    }, 250);
+  };
+
+  const historyCommands = (): Command[] => {
+    return historyResults().map((r, i) => ({
+      id: `history-${i}`,
+      label: r.session_name,
+      description: r.match_snippet.replace(/<\/?mark>/g, ""),
+      icon: "🔍",
+      action: () => {
+        openHistoryTab();
+        navigate("/history");
+        props.onClose();
+      },
+      category: "History Matches",
+    }));
+  };
 
   const baseCommands = (): Command[] => [
     {
@@ -174,6 +225,8 @@ const CommandPalette: Component<Props> = (props) => {
 
   const filteredCommands = () => {
     const q = query().trim();
+    // History search mode: ">term" shows session-history matches only.
+    if (q.startsWith(">")) return historyCommands();
     if (!q) return allCommands();
     return allCommands().filter(
       (cmd) =>
@@ -210,8 +263,10 @@ const CommandPalette: Component<Props> = (props) => {
 
   // Reset selection when query changes
   const handleInput = (e: InputEvent) => {
-    setQuery((e.target as HTMLInputElement).value);
+    const value = (e.target as HTMLInputElement).value;
+    setQuery(value);
     setSelectedIndex(0);
+    maybeSearchHistory(value);
   };
 
   return (
@@ -228,7 +283,7 @@ const CommandPalette: Component<Props> = (props) => {
               ref={inputRef}
               type="text"
               class="command-palette-input"
-              placeholder="Type a command or search..."
+              placeholder="Type a command, or > to search history..."
               value={query()}
               onInput={handleInput}
               onKeyDown={handleKeyDown}
