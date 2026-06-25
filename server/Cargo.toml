@@ -46,6 +46,9 @@ time = { version = "0.3", features = ["serde", "formatting"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 
+# Session history
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
 # Phase 6 — push notifications
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 web-push = "0.10"
