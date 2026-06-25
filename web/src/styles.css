@@ -1248,4 +1248,165 @@ input[type="password"]:focus {
   border-color: var(--accent);
 }
 
+/* Editor Workspace (IDE Layout) */
+.editor-workspace {
+  display: flex;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+.editor-sidebar {
+  width: 280px;
+  min-width: 200px;
+  max-width: 500px;
+  background: var(--bg-elev);
+  border-right: 1px solid var(--bd);
+  display: flex;
+  flex-direction: column;
+  resize: horizontal;
+  overflow: auto;
+}
+
+.editor-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--bd);
+  background: var(--bg);
+}
+
+.editor-sidebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.editor-sidebar-collapse,
+.editor-sidebar-expand {
+  background: transparent;
+  border: 1px solid var(--bd);
+  color: var(--fg-muted);
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.editor-sidebar-collapse:hover,
+.editor-sidebar-expand:hover {
+  background: var(--bg-tab);
+  color: var(--fg);
+}
+
+.editor-sidebar-expand {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 10;
+}
+
+.editor-sidebar-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.editor-sidebar-placeholder {
+  padding: 20px;
+  text-align: center;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.editor-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  position: relative;
+}
+
+.editor-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--bd);
+  padding: 4px 8px;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.editor-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-elev);
+  border: 1px solid var(--bd);
+  border-radius: 4px 4px 0 0;
+  color: var(--fg-muted);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.1s;
+}
+
+.editor-tab:hover {
+  background: var(--bg-tab);
+  color: var(--fg);
+}
+
+.editor-tab.active {
+  background: var(--bg);
+  color: var(--fg);
+  border-bottom-color: var(--bg);
+}
+
+.editor-tab-label {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editor-tab-dirty {
+  color: var(--accent);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.editor-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-muted);
+}
+
+.editor-empty-message {
+  text-align: center;
+  max-width: 400px;
+}
+
+.editor-empty-message h3 {
+  margin: 0 0 8px 0;
+  font-size: 18px;
+  color: var(--fg);
+}
+
+.editor-empty-message p {
+  margin: 0;
+  font-size: 14px;
+}
+
+
 

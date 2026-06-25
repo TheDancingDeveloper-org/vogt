@@ -12,6 +12,7 @@ import { useLocation, useNavigate, useParams } from "@solidjs/router";
 import type { TerminalActions } from "./Terminal";
 import TerminalWorkspace from "./TerminalWorkspace";
 import Editor from "./Editor";
+import EditorWorkspace from "./EditorWorkspace";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
 import ModKeyRow from "./ModKeyRow";
@@ -19,6 +20,7 @@ import Settings from "./Settings";
 import FileTree from "./FileTree";
 import CommandPalette from "./CommandPalette";
 import TemplateSelector from "./TemplateSelector";
+import { getLayoutMode } from "./layout";
 import { api as apiModule } from "./api";
 import type { PublicConfig, SessionTemplate } from "./api";
 import {
@@ -146,6 +148,10 @@ const App: Component = () => {
   };
 
   const [publicCfg, setPublicCfg] = createSignal<PublicConfig | null>(null);
+  const layoutMode = getLayoutMode();
+
+  // Check if we're in IDE mode
+  const isIDEMode = layoutMode === "ide";
 
   onMount(() => {
     apiModule
@@ -549,19 +555,27 @@ const App: Component = () => {
         </div>
 
         <main class="main">
-          <div class="tab-view">
-            <For each={tabsStore.tabs}>
-              {(t) => (
-                <div
-                  style={{
-                    display: tabsStore.active === t.id ? "flex" : "none",
-                    "flex-direction": "column",
-                    flex: 1,
-                    "min-height": 0,
-                    "min-width": 0,
-                  }}
-                >
-                  <Show when={t.kind === "terminal" && t.kind === "terminal" && t}>
+          <Show
+            when={!isIDEMode}
+            fallback={
+              <EditorWorkspace
+                onNotify={(message, kind) => showToast(message, { kind })}
+              />
+            }
+          >
+            <div class="tab-view">
+              <For each={tabsStore.tabs}>
+                {(t) => (
+                  <div
+                    style={{
+                      display: tabsStore.active === t.id ? "flex" : "none",
+                      "flex-direction": "column",
+                      flex: 1,
+                      "min-height": 0,
+                      "min-width": 0,
+                    }}
+                  >
+                    <Show when={t.kind === "terminal" && t.kind === "terminal" && t}>
                     {(tab) => (
                       <TerminalWorkspace
                         tabId={tab().id}
@@ -617,6 +631,7 @@ const App: Component = () => {
               </div>
             </Show>
           </div>
+          </Show>
           <ModKeyRow
             send={(d) => activeSend(d)}
             onCopy={() => void activeCopy()}

@@ -1,5 +1,6 @@
 import { Component, Show, createSignal, onMount } from "solid-js";
 import { getBase, getToken, setBase, setToken } from "./api";
+import { getLayoutMode, setLayoutMode, type LayoutMode } from "./layout";
 import {
   currentPushEnabled,
   isPushAvailable,
@@ -18,6 +19,7 @@ interface Props {
 const Settings: Component<Props> = (props) => {
   const [token, setT] = createSignal(getToken());
   const [base, setB] = createSignal(getBase());
+  const [layoutMode, setL] = createSignal<LayoutMode>(getLayoutMode());
   const [pushOn, setPushOn] = createSignal(false);
   const [pushPerm, setPushPerm] = createSignal<PushPermissionState>("default");
   const [pushBusy, setPushBusy] = createSignal(false);
@@ -37,13 +39,21 @@ const Settings: Component<Props> = (props) => {
   const save = () => {
     const newTok = token().trim();
     const newBase = base().trim();
-    const changed = newTok !== getToken() || newBase !== getBase();
+    const newLayout = layoutMode();
+    const tokChanged = newTok !== getToken();
+    const baseChanged = newBase !== getBase();
+    const layoutChanged = newLayout !== getLayoutMode();
+
     setToken(newTok);
     setBase(newBase);
+    setLayoutMode(newLayout);
+
     props.onClose();
-    // Only reload if the connection identity actually changed — otherwise we
-    // throw away open terminals just to pick up a no-op edit.
-    if (changed) location.reload();
+
+    // Reload if connection identity or layout changed
+    if (tokChanged || baseChanged || layoutChanged) {
+      location.reload();
+    }
   };
 
   const togglePush = async () => {
@@ -115,6 +125,39 @@ const Settings: Component<Props> = (props) => {
               spellcheck={false}
             />
           </label>
+
+          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+
+          <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+            <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
+              Layout Mode
+            </div>
+            <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
+              Choose between tabbed mode (default) or IDE mode with persistent file tree.
+            </div>
+            <div style={{ display: "flex", gap: "8px" }}>
+              <label style={{ display: "flex", "align-items": "center", gap: "6px", cursor: "pointer" }}>
+                <input
+                  type="radio"
+                  name="layout"
+                  value="tabbed"
+                  checked={layoutMode() === "tabbed"}
+                  onChange={() => setL("tabbed")}
+                />
+                <span style={{ "font-size": "13px" }}>Tabbed (default)</span>
+              </label>
+              <label style={{ display: "flex", "align-items": "center", gap: "6px", cursor: "pointer" }}>
+                <input
+                  type="radio"
+                  name="layout"
+                  value="ide"
+                  checked={layoutMode() === "ide"}
+                  onChange={() => setL("ide")}
+                />
+                <span style={{ "font-size": "13px" }}>IDE Mode</span>
+              </label>
+            </div>
+          </div>
 
           <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
 
