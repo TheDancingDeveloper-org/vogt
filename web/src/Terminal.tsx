@@ -5,6 +5,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { openAttach } from "./api";
 import { sessionsStore } from "./store";
+import { getTheme, TERMINAL_THEME_EVENT } from "./terminalThemes";
 
 const DEFAULT_FONT_SIZE = 13;
 const MIN_FONT_SIZE = 9;
@@ -94,6 +95,7 @@ const TerminalView: Component<Props> = (props) => {
   let visibilityHandler: (() => void) | null = null;
   let viewportHandler: (() => void) | null = null;
   let fontSizeHandler: ((event: Event) => void) | null = null;
+  let themeHandler: (() => void) | null = null;
   let terminalDomCleanup: (() => void) | null = null;
   let pasteTextareaRef: HTMLTextAreaElement | undefined;
   const [showPasteModal, setShowPasteModal] = createSignal(false);
@@ -314,28 +316,7 @@ const TerminalView: Component<Props> = (props) => {
       allowProposedApi: true,
       scrollSensitivity: 2,
       smoothScrollDuration: 0,
-      theme: {
-        background: "#000000",
-        foreground: "#c9d1d9",
-        cursor: "#58a6ff",
-        selectionBackground: "#1f6feb55",
-        black: "#484f58",
-        red: "#ff7b72",
-        green: "#7ee787",
-        yellow: "#d29922",
-        blue: "#58a6ff",
-        magenta: "#bc8cff",
-        cyan: "#39c5cf",
-        white: "#c9d1d9",
-        brightBlack: "#6e7681",
-        brightRed: "#ffa198",
-        brightGreen: "#56d364",
-        brightYellow: "#e3b341",
-        brightBlue: "#79c0ff",
-        brightMagenta: "#d2a8ff",
-        brightCyan: "#56d4dd",
-        brightWhite: "#f0f6fc",
-      },
+      theme: getTheme(),
     });
     fit = new FitAddon();
     term.loadAddon(fit);
@@ -535,6 +516,11 @@ const TerminalView: Component<Props> = (props) => {
     };
     window.addEventListener(FONT_SIZE_EVENT, fontSizeHandler);
 
+    themeHandler = () => {
+      if (term) term.options.theme = getTheme();
+    };
+    window.addEventListener(TERMINAL_THEME_EVENT, themeHandler);
+
     props.registerSend?.(sendToPty);
 
     // On mobile the OS kills the WebSocket when the app is backgrounded.
@@ -656,6 +642,10 @@ const TerminalView: Component<Props> = (props) => {
     if (fontSizeHandler) {
       window.removeEventListener(FONT_SIZE_EVENT, fontSizeHandler);
       fontSizeHandler = null;
+    }
+    if (themeHandler) {
+      window.removeEventListener(TERMINAL_THEME_EVENT, themeHandler);
+      themeHandler = null;
     }
     terminalDomCleanup?.();
     if (pasteResolve) {
