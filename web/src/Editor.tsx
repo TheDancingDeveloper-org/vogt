@@ -47,6 +47,8 @@ const Editor: Component<Props> = (props) => {
 
   onMount(async () => {
     if (!host) return;
+    // Track this file as recently opened
+    addRecentFile(props.path);
     const mountedHost = host;
     try {
       const [monaco, file] = await Promise.all([
