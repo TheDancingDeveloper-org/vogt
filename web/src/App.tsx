@@ -544,6 +544,9 @@ const App: Component = () => {
                         onError={(message) =>
                           showToast(message, { kind: "error" })
                         }
+                        onNotify={(message, kind) =>
+                          showToast(message, { kind })
+                        }
                       />
                     )}
                   </Show>

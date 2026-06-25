@@ -13,8 +13,8 @@ const FONT_SIZE_STORAGE_KEY = "mydevenv2.terminalFontSize.v1";
 const FONT_SIZE_EVENT = "mydevenv2:terminal-font-size";
 
 export interface TerminalActions {
-  /** Copy the current xterm selection to the system clipboard. */
-  copy: () => Promise<void>;
+  /** Copy the current xterm selection to the system clipboard. Returns true on success. */
+  copy: () => Promise<boolean>;
   /** Read clipboard and inject as PTY stdin. */
   paste: () => Promise<void>;
   /** Tell xterm to select everything in the visible buffer. */
@@ -27,6 +27,8 @@ interface Props {
   registerSend?: (fn: ((data: string | ArrayBuffer) => void) | null) => void;
   /** Exposed so the parent (modkey row, etc.) can drive copy/paste. */
   registerActions?: (actions: TerminalActions | null) => void;
+  /** Optional callback for user-facing notifications (copy success/failure). */
+  onNotify?: (message: string, kind?: "info" | "error") => void;
 }
 
 function clampFontSize(value: number): number {
@@ -362,25 +364,48 @@ const TerminalView: Component<Props> = (props) => {
     );
 
     // Clipboard plumbing.
-    const copySelection = async () => {
+    const copySelection = async (): Promise<boolean> => {
       const sel = term?.getSelection() ?? "";
-      if (!sel) return;
+      if (!sel) return false;
+
+      // First, check if we have clipboard permissions in secure contexts
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        try {
+          await navigator.clipboard.writeText(sel);
+          return true;
+        } catch (err) {
+          console.warn("Clipboard API failed, trying fallback:", err);
+        }
+      }
+
+      // Fallback: use a hidden textarea + execCommand for older mobile WebViews
+      // or when clipboard permissions are denied.
       try {
-        await navigator.clipboard.writeText(sel);
-      } catch {
-        // Fallback: use a hidden textarea + execCommand for older mobile WebViews.
         const ta = document.createElement("textarea");
         ta.value = sel;
         ta.style.position = "fixed";
         ta.style.opacity = "0";
+        ta.style.left = "-9999px";
+        ta.setAttribute("readonly", "");
         document.body.appendChild(ta);
-        ta.select();
-        try {
-          document.execCommand("copy");
-        } catch {
-          /* nothing else to try */
-        }
+
+        // For iOS Safari
+        ta.contentEditable = "true";
+        ta.readOnly = false;
+
+        const range = document.createRange();
+        range.selectNodeContents(ta);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        ta.setSelectionRange(0, ta.value.length);
+
+        const success = document.execCommand("copy");
         document.body.removeChild(ta);
+        return success;
+      } catch (err) {
+        console.error("All copy methods failed:", err);
+        return false;
       }
     };
     const pasteFromClipboard = async () => {
@@ -406,7 +431,13 @@ const TerminalView: Component<Props> = (props) => {
       const mac = navigator.platform.toLowerCase().includes("mac") && e.metaKey;
       if ((meta || mac) && (e.key === "c" || e.key === "C")) {
         if (term?.hasSelection()) {
-          void copySelection();
+          copySelection().then((success) => {
+            if (success) {
+              props.onNotify?.("Copied to clipboard", "info");
+            } else {
+              props.onNotify?.("Copy failed - check clipboard permissions", "error");
+            }
+          });
           return false;
         }
         // No selection: fall through so Ctrl+C still sends SIGINT.
@@ -423,7 +454,11 @@ const TerminalView: Component<Props> = (props) => {
         (e.key === "c" || e.key === "C") &&
         term?.hasSelection()
       ) {
-        void copySelection();
+        copySelection().then((success) => {
+          if (success) {
+            props.onNotify?.("Copied to clipboard", "info");
+          }
+        });
         term.clearSelection();
         return false;
       }
@@ -453,7 +488,13 @@ const TerminalView: Component<Props> = (props) => {
     const onContextMenu = (e: MouseEvent) => {
       e.preventDefault();
       if (term?.hasSelection()) {
-        void copySelection();
+        copySelection().then((success) => {
+          if (success) {
+            props.onNotify?.("Copied to clipboard", "info");
+          } else {
+            props.onNotify?.("Copy failed - check clipboard permissions", "error");
+          }
+        });
       } else {
         void pasteFromClipboard();
       }

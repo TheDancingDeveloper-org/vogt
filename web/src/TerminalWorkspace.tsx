@@ -47,6 +47,7 @@ interface Props {
   registerActions?: (actions: TerminalActions | null) => void;
   confirmClosePane?: (session: SessionSummary | null) => Promise<boolean>;
   onError?: (message: string) => void;
+  onNotify?: (message: string, kind?: "info" | "error") => void;
 }
 
 const STORAGE_KEY = "mydevenv2.terminalLayouts.v1";
@@ -233,6 +234,7 @@ interface LayoutNodeProps {
     fn: ((data: string | ArrayBuffer) => void) | null,
   ) => void;
   registerPaneActions: (paneId: string, actions: TerminalActions | null) => void;
+  onNotify?: (message: string, kind?: "info" | "error") => void;
 }
 
 const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
@@ -251,6 +253,7 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
             registerActions={(actions) =>
               props.registerPaneActions(pane().id, actions)
             }
+            onNotify={props.onNotify}
           />
         </div>
       )}
@@ -266,6 +269,7 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
                 onFocusPane={props.onFocusPane}
                 registerPaneSend={props.registerPaneSend}
                 registerPaneActions={props.registerPaneActions}
+                onNotify={props.onNotify}
               />
             )}
           </For>
@@ -314,7 +318,8 @@ const TerminalWorkspace: Component<Props> = (props) => {
 
   const workspaceActions: TerminalActions = {
     copy: async () => {
-      await paneActions.get(activePaneId())?.copy();
+      const result = await paneActions.get(activePaneId())?.copy();
+      return result ?? false;
     },
     paste: async () => {
       await paneActions.get(activePaneId())?.paste();
@@ -483,6 +488,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
             if (actions) paneActions.set(paneId, actions);
             else paneActions.delete(paneId);
           }}
+          onNotify={props.onNotify}
         />
       </div>
       <form
