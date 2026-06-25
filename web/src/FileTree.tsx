@@ -123,6 +123,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
 
 const FileTree: Component<Props> = (props) => {
   const [tree, { refetch }] = createResource(() => api.tree("", 0));
+  const [searchQuery, setSearchQuery] = createSignal("");
   const navigate = useNavigate();
 
   const openFile = (path: string) => {
@@ -169,8 +170,43 @@ const FileTree: Component<Props> = (props) => {
     }
   };
 
+  const filteredTree = () => {
+    const query = searchQuery().toLowerCase();
+    if (!query || !tree()) return tree() || [];
+
+    const filterNode = (node: TreeNode): TreeNode | null => {
+      const nameMatch = node.name.toLowerCase().includes(query);
+
+      if (node.is_dir && node.children) {
+        const filteredChildren = node.children
+          .map(filterNode)
+          .filter((n): n is TreeNode => n !== null);
+
+        if (nameMatch || filteredChildren.length > 0) {
+          return { ...node, children: filteredChildren };
+        }
+        return null;
+      }
+
+      return nameMatch ? node : null;
+    };
+
+    return tree()!
+      .map(filterNode)
+      .filter((n): n is TreeNode => n !== null);
+  };
+
   return (
     <div class="file-tree">
+      <div class="file-tree-header">
+        <input
+          type="search"
+          class="file-tree-search"
+          placeholder="Filter files..."
+          value={searchQuery()}
+          onInput={(e) => setSearchQuery(e.currentTarget.value)}
+        />
+      </div>
       <div class="drawer-header">
         <span>Files</span>
         <span class="drawer-header-actions">
