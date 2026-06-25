@@ -1935,6 +1935,96 @@ input[type="password"]:focus {
   font-weight: 600;
 }
 
+/* Split Editor */
+.split-editor {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.split-horizontal {
+  flex-direction: column;
+}
+
+.split-vertical {
+  flex-direction: row;
+}
+
+.split-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 100px;
+  min-height: 100px;
+  border: 2px solid transparent;
+  transition: border-color 0.2s;
+}
+
+.split-pane.active {
+  border-color: var(--accent);
+}
+
+.split-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--bd);
+}
+
+.split-pane-path {
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.split-pane-close {
+  background: transparent;
+  border: 1px solid var(--bd);
+  color: var(--fg-muted);
+  padding: 0px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.split-pane-close:hover {
+  background: var(--activity-errored);
+  border-color: var(--activity-errored);
+  color: #fff;
+}
+
+.split-pane-editor {
+  flex: 1;
+  overflow: hidden;
+}
+
+.split-handle {
+  flex-shrink: 0;
+  background: var(--bd);
+  cursor: ew-resize;
+}
+
+.split-horizontal .split-handle {
+  height: 4px;
+  cursor: ns-resize;
+}
+
+.split-vertical .split-handle {
+  width: 4px;
+  cursor: ew-resize;
+}
+
+.split-handle:hover {
+  background: var(--accent);
+}
+
+
 
 
 
