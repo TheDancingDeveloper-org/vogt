@@ -1,7 +1,7 @@
 import { Component, For, Show, createSignal, onMount } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { sessionsStore } from "./store";
-import { openGitTab, openTerminalTab, openHistoryTab, openEditorTab } from "./tabs";
+import { openGitTab, openTerminalTab, openHistoryTab, openEditorTab, openGuiTab } from "./tabs";
 import { getRecentFiles } from "./recentFiles";
 
 export interface Command {
@@ -18,6 +18,8 @@ interface Props {
   onClose: () => void;
   onCreateSession?: () => void;
   onOpenFile?: () => void;
+  onOpenSettings?: () => void;
+  onShowShortcuts?: () => void;
 }
 
 function fuzzyMatch(pattern: string, text: string): boolean {
@@ -94,6 +96,40 @@ const CommandPalette: Component<Props> = (props) => {
         props.onClose();
       },
       category: "History",
+    },
+    {
+      id: "open-gui",
+      label: "Open GUI Stream",
+      description: "Open the GUI stream tab",
+      icon: "🖥",
+      action: () => {
+        openGuiTab();
+        navigate("/gui");
+        props.onClose();
+      },
+      category: "View",
+    },
+    {
+      id: "open-settings",
+      label: "Open Settings",
+      description: "Configure token, layout, templates, notifications",
+      icon: "⚙",
+      action: () => {
+        props.onOpenSettings?.();
+        props.onClose();
+      },
+      category: "View",
+    },
+    {
+      id: "show-shortcuts",
+      label: "Keyboard Shortcuts",
+      description: "View all keyboard shortcuts",
+      icon: "⌨",
+      action: () => {
+        props.onShowShortcuts?.();
+        props.onClose();
+      },
+      category: "Help",
     },
   ];
 

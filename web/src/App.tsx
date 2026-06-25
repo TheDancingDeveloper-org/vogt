@@ -750,6 +750,8 @@ const App: Component = () => {
         onClose={() => setCommandPaletteOpen(false)}
         onCreateSession={() => void onCreate()}
         onOpenFile={() => setDrawerOpen(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onShowShortcuts={() => setShortcutsOpen(true)}
       />
 
       <TemplateSelector
