@@ -12,7 +12,7 @@ use crate::gui as gui_handlers;
 use crate::push_api;
 use crate::{
     api, assets, auth, config::Config, events::EventBus, files, git, gui::GuiRegistry,
-    push::PushManager, sessions::SessionRegistry, ws,
+    history::SessionHistory, push::PushManager, sessions::SessionRegistry, ws,
 };
 
 pub struct AppState {
@@ -21,9 +21,10 @@ pub struct AppState {
     pub bus: EventBus,
     pub gui: Arc<GuiRegistry>,
     pub push: Arc<PushManager>,
+    pub history: Option<Arc<SessionHistory>>,
 }
 
-pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
+pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     let cfg = Arc::new(cfg);
     let bus = EventBus::default();
     let sessions = Arc::new(SessionRegistry::new(Arc::clone(&cfg), bus.clone()));
@@ -36,12 +37,26 @@ pub fn router(cfg: Config) -> (Router, Arc<AppState>) {
         )
         .expect("push manager init"),
     );
+
+    // Initialize session history (optional, continues if init fails)
+    let history = match SessionHistory::new(&cfg.state_dir).await {
+        Ok(h) => {
+            tracing::info!("session history enabled");
+            Some(Arc::new(h))
+        }
+        Err(e) => {
+            tracing::warn!("session history disabled: {}", e);
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         config: cfg,
         sessions,
         bus,
         gui,
         push,
+        history,
     });
 
     // Background task: fan out a push notification whenever a session enters
@@ -140,7 +155,7 @@ fn build_cors(origins: &[String]) -> CorsLayer {
 
 pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
     let bind = cfg.bind;
-    let (router, _state) = router(cfg);
+    let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(addr = %bind, "mydevenv2-server listening");
     axum::serve(listener, router).await
