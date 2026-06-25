@@ -7,6 +7,7 @@ import {
   type TextModel,
 } from "./monaco";
 import { setEditorDirty } from "./tabs";
+import { addRecentFile } from "./recentFiles";
 
 interface Props {
   tabId: string;
