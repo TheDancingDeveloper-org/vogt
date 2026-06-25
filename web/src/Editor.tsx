@@ -115,7 +115,7 @@ const Editor: Component<Props> = (props) => {
     <div class="editor-shell">
       <div class="editor-toolbar">
         <div class="editor-breadcrumb">
-          <For each={path().split("/").filter(Boolean)}>
+          <For each={props.path.split("/").filter(Boolean)}>
             {(segment, idx) => (
               <>
                 <Show when={idx() > 0}>

@@ -135,25 +135,6 @@ export function openGuiTab(): Tab {
   return tab;
 }
 
-export function openHistoryTab(): Tab {
-  const id = "history";
-  const existing = store.tabs.find((t) => t.id === id);
-  if (existing) {
-    setStore("active", id);
-    persist();
-    return existing;
-  }
-  const tab: Tab = { id, kind: "history", label: "📜 History" };
-  setStore(
-    produce((s) => {
-      s.tabs.push(tab);
-      s.active = id;
-    }),
-  );
-  persist();
-  return tab;
-}
-
 export function openGitTab(repo: string): Tab {
   const id = `git:${repo}`;
   const existing = store.tabs.find((t) => t.id === id);
