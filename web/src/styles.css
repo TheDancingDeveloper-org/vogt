@@ -717,6 +717,33 @@ input[type="password"]:focus {
   white-space: nowrap;
   flex: 1;
 }
+
+.editor-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-family: ui-monospace, monospace;
+  color: var(--fg);
+  overflow: hidden;
+  flex: 1;
+}
+
+.breadcrumb-segment {
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.breadcrumb-segment:last-child {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.breadcrumb-separator {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
 .editor-status {
   color: var(--fg-muted);
   font-size: 11px;

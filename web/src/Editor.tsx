@@ -114,7 +114,18 @@ const Editor: Component<Props> = (props) => {
   return (
     <div class="editor-shell">
       <div class="editor-toolbar">
-        <span class="editor-path">{props.path}</span>
+        <div class="editor-breadcrumb">
+          <For each={path().split("/").filter(Boolean)}>
+            {(segment, idx) => (
+              <>
+                <Show when={idx() > 0}>
+                  <span class="breadcrumb-separator">/</span>
+                </Show>
+                <span class="breadcrumb-segment">{segment}</span>
+              </>
+            )}
+          </For>
+        </div>
         <span class="editor-status">
           <Show when={status() === "loading"}>loading…</Show>
           <Show when={status() === "saving"}>saving…</Show>
