@@ -27,6 +27,7 @@ fn test_config() -> Config {
         allowed_origins: vec![],
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
+        session_templates: vec![],
     }
 }
 
@@ -35,7 +36,7 @@ async fn boot() -> (String, tokio::task::JoinHandle<()>) {
 }
 
 async fn boot_with_config(cfg: Config) -> (String, tokio::task::JoinHandle<()>) {
-    let (router, _state) = router(cfg);
+    let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
@@ -489,8 +490,9 @@ async fn file_api_round_trip() {
         allowed_origins: vec![],
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
+        session_templates: vec![],
     };
-    let (router, _state) = router(cfg);
+    let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -646,8 +648,9 @@ async fn git_status_log_branch() {
         allowed_origins: vec![],
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
+        session_templates: vec![],
     };
-    let (router, _state) = router(cfg);
+    let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {

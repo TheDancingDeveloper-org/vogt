@@ -30,27 +30,21 @@ impl SessionTemplate {
                 description: "Node.js development environment".to_string(),
                 command: Some(vec!["bash".to_string()]),
                 cwd: None,
-                env: vec![
-                    ("NODE_ENV".to_string(), "development".to_string()),
-                ],
+                env: vec![("NODE_ENV".to_string(), "development".to_string())],
             },
             SessionTemplate {
                 name: "Rust Build".to_string(),
                 description: "Rust development with cargo".to_string(),
                 command: Some(vec!["bash".to_string()]),
                 cwd: None,
-                env: vec![
-                    ("RUST_BACKTRACE".to_string(), "1".to_string()),
-                ],
+                env: vec![("RUST_BACKTRACE".to_string(), "1".to_string())],
             },
             SessionTemplate {
                 name: "Python Env".to_string(),
                 description: "Python development environment".to_string(),
                 command: Some(vec!["bash".to_string()]),
                 cwd: None,
-                env: vec![
-                    ("PYTHONUNBUFFERED".to_string(), "1".to_string()),
-                ],
+                env: vec![("PYTHONUNBUFFERED".to_string(), "1".to_string())],
             },
         ]
     }

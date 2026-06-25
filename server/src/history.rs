@@ -2,7 +2,6 @@
 // Logs session metadata and optionally PTY output for replay and search.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
@@ -39,6 +38,20 @@ pub struct SearchResult {
     pub rank: f64,
 }
 
+/// Parameters for archiving a completed session. Grouped into a struct so the
+/// archive call site stays readable and clippy's argument-count lint is happy.
+#[derive(Debug, Clone)]
+pub struct ArchiveRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub created_at: OffsetDateTime,
+    pub ended_at: Option<OffsetDateTime>,
+    pub exit_code: Option<i32>,
+    pub cwd: Option<String>,
+    pub command: Option<String>,
+    pub scrollback_bytes: u64,
+}
+
 impl SessionHistory {
     /// Initialize the session history database
     pub async fn new(state_dir: &Path) -> Result<Self> {
@@ -63,6 +76,11 @@ impl SessionHistory {
         history.init_schema().await?;
 
         Ok(history)
+    }
+
+    /// Directory where per-session scrollback logs are persisted for replay.
+    pub fn log_dir(&self) -> &Path {
+        &self.log_dir
     }
 
     /// Initialize database schema
@@ -109,22 +127,15 @@ impl SessionHistory {
     }
 
     /// Archive a completed session
-    pub async fn archive_session(
-        &self,
-        id: Uuid,
-        name: String,
-        created_at: OffsetDateTime,
-        ended_at: Option<OffsetDateTime>,
-        exit_code: Option<i32>,
-        cwd: Option<String>,
-        command: Option<String>,
-        scrollback_bytes: u64,
-    ) -> Result<()> {
-        let created_str = created_at.format(&time::format_description::well_known::Rfc3339)
+    pub async fn archive_session(&self, record: ArchiveRecord) -> Result<()> {
+        let created_str = record
+            .created_at
+            .format(&time::format_description::well_known::Rfc3339)
             .map_err(|e| ApiError::Internal(format!("time format error: {}", e)))?;
 
-        let ended_str = ended_at.and_then(|t| {
-            t.format(&time::format_description::well_known::Rfc3339).ok()
+        let ended_str = record.ended_at.and_then(|t| {
+            t.format(&time::format_description::well_known::Rfc3339)
+                .ok()
         });
 
         sqlx::query(
@@ -137,14 +148,14 @@ impl SessionHistory {
                 scrollback_bytes = excluded.scrollback_bytes
             "#,
         )
-        .bind(id.to_string())
-        .bind(name)
+        .bind(record.id.to_string())
+        .bind(record.name)
         .bind(created_str)
         .bind(ended_str)
-        .bind(exit_code)
-        .bind(cwd)
-        .bind(command)
-        .bind(scrollback_bytes as i64)
+        .bind(record.exit_code)
+        .bind(record.cwd)
+        .bind(record.command)
+        .bind(record.scrollback_bytes as i64)
         .execute(&self.pool)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to archive session: {}", e)))?;
@@ -153,11 +164,7 @@ impl SessionHistory {
     }
 
     /// List archived sessions
-    pub async fn list_sessions(
-        &self,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<SessionMetadata>> {
+    pub async fn list_sessions(&self, limit: usize, offset: usize) -> Result<Vec<SessionMetadata>> {
         let sessions = sqlx::query_as::<_, SessionMetadata>(
             r#"
             SELECT id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes
@@ -176,11 +183,7 @@ impl SessionHistory {
     }
 
     /// Search session output
-    pub async fn search(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<SearchResult>> {
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let results = sqlx::query(
             r#"
             SELECT
@@ -256,7 +259,8 @@ impl SessionHistory {
     /// Clean up old sessions beyond retention period
     pub async fn cleanup_old_sessions(&self, retention_days: u32) -> Result<usize> {
         let cutoff = OffsetDateTime::now_utc() - time::Duration::days(retention_days as i64);
-        let cutoff_str = cutoff.format(&time::format_description::well_known::Rfc3339)
+        let cutoff_str = cutoff
+            .format(&time::format_description::well_known::Rfc3339)
             .map_err(|e| ApiError::Internal(format!("time format error: {}", e)))?;
 
         let result = sqlx::query(
