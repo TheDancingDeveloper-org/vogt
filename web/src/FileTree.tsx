@@ -9,6 +9,7 @@ import { useNavigate } from "@solidjs/router";
 import { api, type TreeNode } from "./api";
 import { openEditorTab, openTerminalTab } from "./tabs";
 import { createSession } from "./store";
+import { getFileIcon, getFolderIcon } from "./fileIcons";
 
 interface Props {
   /** Called after opening an editor tab so the drawer can auto-close on mobile. */
