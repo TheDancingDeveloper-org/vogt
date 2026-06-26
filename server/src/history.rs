@@ -1,7 +1,10 @@
 // Session history storage and retrieval using SQLite.
 // Logs session metadata and optionally PTY output for replay and search.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
@@ -83,6 +86,20 @@ impl SessionHistory {
         &self.log_dir
     }
 
+    /// Path for the raw PTY output log belonging to a session.
+    pub fn log_path(&self, id: Uuid) -> PathBuf {
+        self.log_dir.join(format!("{id}.log"))
+    }
+
+    /// Open a per-session raw output log for append.
+    pub fn open_log_writer(&self, id: Uuid) -> Result<File> {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.log_path(id))
+            .map_err(|e| ApiError::Internal(format!("failed to open session log: {e}")))
+    }
+
     /// Initialize database schema
     async fn init_schema(&self) -> Result<()> {
         sqlx::query(
@@ -143,8 +160,11 @@ impl SessionHistory {
             INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
                 ended_at = excluded.ended_at,
                 exit_code = excluded.exit_code,
+                cwd = excluded.cwd,
+                command = excluded.command,
                 scrollback_bytes = excluded.scrollback_bytes
             "#,
         )
@@ -165,6 +185,7 @@ impl SessionHistory {
 
     /// List archived sessions
     pub async fn list_sessions(&self, limit: usize, offset: usize) -> Result<Vec<SessionMetadata>> {
+        let limit = limit.min(200);
         let sessions = sqlx::query_as::<_, SessionMetadata>(
             r#"
             SELECT id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes
@@ -184,6 +205,10 @@ impl SessionHistory {
 
     /// Search session output
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let Some(fts_query) = user_query_to_fts(query) else {
+            return Ok(Vec::new());
+        };
+        let limit = limit.min(100);
         let results = sqlx::query(
             r#"
             SELECT
@@ -199,7 +224,7 @@ impl SessionHistory {
             LIMIT ?
             "#,
         )
-        .bind(query)
+        .bind(fts_query)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
@@ -221,6 +246,22 @@ impl SessionHistory {
 
     /// Index session output for full-text search
     pub async fn index_output(&self, session_id: Uuid, output: &str) -> Result<()> {
+        self.replace_index_output(session_id, output).await
+    }
+
+    /// Replace indexed output for a session. Used by the archive lifecycle so
+    /// retries do not accumulate duplicate FTS rows.
+    pub async fn replace_index_output(&self, session_id: Uuid, output: &str) -> Result<()> {
+        sqlx::query("DELETE FROM session_output_fts WHERE session_id = ?")
+            .bind(session_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to clear indexed output: {}", e)))?;
+
+        if output.trim().is_empty() {
+            return Ok(());
+        }
+
         sqlx::query(
             r#"
             INSERT INTO session_output_fts (session_id, output_text)
@@ -233,6 +274,18 @@ impl SessionHistory {
         .await
         .map_err(|e| ApiError::Internal(format!("failed to index output: {}", e)))?;
 
+        Ok(())
+    }
+
+    /// Archive metadata and replace the searchable output in one public call.
+    pub async fn archive_session_with_output(
+        &self,
+        record: ArchiveRecord,
+        output: &str,
+    ) -> Result<()> {
+        let session_id = record.id;
+        self.archive_session(record).await?;
+        self.replace_index_output(session_id, output).await?;
         Ok(())
     }
 
@@ -263,6 +316,24 @@ impl SessionHistory {
             .format(&time::format_description::well_known::Rfc3339)
             .map_err(|e| ApiError::Internal(format!("time format error: {}", e)))?;
 
+        let ids = sqlx::query("SELECT id FROM sessions WHERE created_at < ?")
+            .bind(&cutoff_str)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("cleanup query failed: {}", e)))?;
+
+        for row in ids {
+            let id: String = row.get("id");
+            sqlx::query("DELETE FROM session_output_fts WHERE session_id = ?")
+                .bind(&id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| ApiError::Internal(format!("cleanup fts failed: {}", e)))?;
+            if let Ok(uuid) = Uuid::parse_str(&id) {
+                remove_log_file(self.log_path(uuid))?;
+            }
+        }
+
         let result = sqlx::query(
             r#"
             DELETE FROM sessions
@@ -275,5 +346,55 @@ impl SessionHistory {
         .map_err(|e| ApiError::Internal(format!("cleanup failed: {}", e)))?;
 
         Ok(result.rows_affected() as usize)
+    }
+
+    /// Delete archived metadata, searchable output, and the raw log.
+    pub async fn delete_session(&self, id: Uuid) -> Result<bool> {
+        sqlx::query("DELETE FROM session_output_fts WHERE session_id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("delete fts failed: {}", e)))?;
+
+        let result = sqlx::query("DELETE FROM sessions WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("delete failed: {}", e)))?;
+
+        remove_log_file(self.log_path(id))?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+fn user_query_to_fts(query: &str) -> Option<String> {
+    let tokens: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter_map(|part| {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(format!("\"{}\"", trimmed.replace('"', "\"\"")))
+            }
+        })
+        .take(16)
+        .collect();
+
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" AND "))
+    }
+}
+
+fn remove_log_file(path: PathBuf) -> Result<()> {
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(ApiError::Internal(format!(
+            "failed to remove session log {}: {e}",
+            path.display()
+        ))),
     }
 }

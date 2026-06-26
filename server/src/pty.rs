@@ -1,7 +1,11 @@
 use std::{
+    fs::File,
     io::{Read, Write},
-    path::Path,
-    sync::Arc,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Instant,
 };
 
@@ -13,9 +17,10 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
-    activity::{classify, ActivityState},
+    activity::{classify, strip_ansi, ActivityState},
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
+    history::{ArchiveRecord, SessionHistory},
     scrollback::Scrollback,
 };
 
@@ -59,7 +64,9 @@ pub struct Session {
     pub id: Uuid,
     pub name: Mutex<String>,
     pub created_at: time::OffsetDateTime,
+    ended_at: Mutex<Option<time::OffsetDateTime>>,
     pub cwd: String,
+    command: Option<String>,
     idle_after_ms: u64,
 
     scrollback: Mutex<Scrollback>,
@@ -74,6 +81,9 @@ pub struct Session {
     last_output: Mutex<Option<Instant>>,
     activity: Mutex<ActivityState>,
     exit_code: Mutex<Option<i32>>,
+    history_log_path: Option<PathBuf>,
+    reader_done: AtomicBool,
+    archive_started: AtomicBool,
 }
 
 impl Session {
@@ -177,12 +187,37 @@ pub struct SpawnDefaults<'a> {
     pub activity_idle_after_ms: u64,
 }
 
+fn command_display(spec: &SessionSpec, defaults: &SpawnDefaults<'_>) -> String {
+    if let Some(argv) = spec.command.as_ref().filter(|argv| !argv.is_empty()) {
+        return argv
+            .iter()
+            .map(|arg| shell_escape(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    if defaults.auto_agent_auth {
+        return format!("{} shell", defaults.agent_auth_helper.display());
+    }
+    defaults.default_shell.to_string()
+}
+
+fn shell_escape(arg: &str) -> String {
+    if arg.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b':' | b'=' | b'+')
+    }) {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
 /// Spawn a PTY-backed session running `spec.command` (or the default shell if
 /// `None`). Starts the reader thread, the exit waiter, and the activity ticker.
 pub fn spawn(
     spec: &SessionSpec,
     defaults: SpawnDefaults<'_>,
     bus: EventBus,
+    history: Option<Arc<SessionHistory>>,
 ) -> Result<SpawnedSession> {
     let pty_system = portable_pty::native_pty_system();
     let size = PtySize {
@@ -242,12 +277,25 @@ pub fn spawn(
         .map_err(|e| ApiError::Pty(format!("take_writer: {e}")))?;
 
     let (tx, _rx) = broadcast::channel::<OutputChunk>(1024);
+    let id = Uuid::new_v4();
+    let command = Some(command_display(spec, &defaults));
+    let runtime = tokio::runtime::Handle::current();
+    let history_log_path = history.as_ref().map(|h| h.log_path(id));
+    let history_log = history.as_ref().and_then(|h| match h.open_log_writer(id) {
+        Ok(file) => Some(file),
+        Err(e) => {
+            tracing::warn!(session = %id, error = %e, "session history log disabled");
+            None
+        }
+    });
 
     let session = Arc::new(Session {
-        id: Uuid::new_v4(),
+        id,
         name: Mutex::new(spec.name.clone()),
         created_at: time::OffsetDateTime::now_utc(),
+        ended_at: Mutex::new(None),
         cwd: cwd_display,
+        command,
         idle_after_ms: defaults.activity_idle_after_ms,
         scrollback: Mutex::new(Scrollback::new(defaults.scrollback_bytes)),
         writer: Mutex::new(writer),
@@ -258,10 +306,21 @@ pub fn spawn(
         last_output: Mutex::new(None),
         activity: Mutex::new(ActivityState::Running),
         exit_code: Mutex::new(None),
+        history_log_path,
+        reader_done: AtomicBool::new(false),
+        archive_started: AtomicBool::new(false),
     });
 
-    spawn_reader_thread(Arc::clone(&session), reader, tx, bus.clone())?;
-    spawn_exit_waiter(Arc::clone(&session), bus.clone());
+    spawn_reader_thread(
+        Arc::clone(&session),
+        reader,
+        tx,
+        bus.clone(),
+        history.clone(),
+        history_log,
+        runtime.clone(),
+    )?;
+    spawn_exit_waiter(Arc::clone(&session), bus.clone(), history.clone(), runtime);
     spawn_activity_ticker(Arc::clone(&session), bus);
 
     Ok(SpawnedSession { session })
@@ -272,6 +331,9 @@ fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     tx: broadcast::Sender<OutputChunk>,
     bus: EventBus,
+    history: Option<Arc<SessionHistory>>,
+    mut history_log: Option<File>,
+    runtime: tokio::runtime::Handle,
 ) -> Result<()> {
     std::thread::Builder::new()
         .name(format!("pty-read-{}", session.id))
@@ -290,6 +352,17 @@ fn spawn_reader_thread(
                         let pos = pos_after - n as u64;
                         *session.last_output.lock() = Some(Instant::now());
 
+                        if let Some(log) = history_log.as_mut() {
+                            if let Err(e) = log.write_all(&data) {
+                                tracing::warn!(
+                                    session = %session.id,
+                                    error = %e,
+                                    "failed to append session history log"
+                                );
+                                history_log = None;
+                            }
+                        }
+
                         let _ = tx.send(OutputChunk { pos, data });
 
                         let new_state = compute_activity(&session, false);
@@ -301,12 +374,22 @@ fn spawn_reader_thread(
                     }
                 }
             }
+            if let Some(mut log) = history_log {
+                let _ = log.flush();
+            }
+            session.reader_done.store(true, Ordering::Release);
+            try_spawn_archive(&session, history, &runtime);
         })
         .map_err(|e| ApiError::Pty(format!("spawn pty reader thread: {e}")))?;
     Ok(())
 }
 
-fn spawn_exit_waiter(session: Arc<Session>, bus: EventBus) {
+fn spawn_exit_waiter(
+    session: Arc<Session>,
+    bus: EventBus,
+    history: Option<Arc<SessionHistory>>,
+    runtime: tokio::runtime::Handle,
+) {
     tokio::task::spawn_blocking(move || {
         let mut child = match session.child.lock().take() {
             Some(c) => c,
@@ -320,6 +403,7 @@ fn spawn_exit_waiter(session: Arc<Session>, bus: EventBus) {
             }
         };
         let code = status.exit_code() as i32;
+        *session.ended_at.lock() = Some(time::OffsetDateTime::now_utc());
         *session.exit_code.lock() = Some(code);
         let new_state = compute_activity(&session, code != 0);
         update_activity_if_changed(&session, new_state, &bus);
@@ -327,7 +411,73 @@ fn spawn_exit_waiter(session: Arc<Session>, bus: EventBus) {
             id: session.id,
             exit_code: Some(code),
         });
+        try_spawn_archive(&session, history, &runtime);
     });
+}
+
+fn try_spawn_archive(
+    session: &Arc<Session>,
+    history: Option<Arc<SessionHistory>>,
+    runtime: &tokio::runtime::Handle,
+) {
+    let Some(history) = history else {
+        return;
+    };
+    if !session.reader_done.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(exit_code) = session.exit_code() else {
+        return;
+    };
+    if session
+        .archive_started
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    let session = Arc::clone(session);
+    runtime.spawn(async move {
+        let output_bytes = read_history_output(&session).await;
+        let visible_output = strip_ansi(&output_bytes);
+        let output_text = String::from_utf8_lossy(&visible_output);
+        let scrollback_bytes = session.scrollback.lock().total_written();
+        let record = ArchiveRecord {
+            id: session.id,
+            name: session.name(),
+            created_at: session.created_at,
+            ended_at: (*session.ended_at.lock()).or(Some(time::OffsetDateTime::now_utc())),
+            exit_code: Some(exit_code),
+            cwd: Some(session.cwd.clone()),
+            command: session.command.clone(),
+            scrollback_bytes,
+        };
+
+        if let Err(e) = history
+            .archive_session_with_output(record, output_text.as_ref())
+            .await
+        {
+            tracing::warn!(session = %session.id, error = %e, "failed to archive session history");
+        }
+    });
+}
+
+async fn read_history_output(session: &Arc<Session>) -> Vec<u8> {
+    if let Some(path) = session.history_log_path.as_ref() {
+        match tokio::fs::read(path).await {
+            Ok(bytes) => return bytes,
+            Err(e) => {
+                tracing::warn!(
+                    session = %session.id,
+                    path = %path.display(),
+                    error = %e,
+                    "failed to read session history log; falling back to scrollback"
+                );
+            }
+        }
+    }
+    session.snapshot().0.to_vec()
 }
 
 fn spawn_activity_ticker(session: Arc<Session>, bus: EventBus) {

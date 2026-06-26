@@ -28,6 +28,7 @@ fn test_config() -> Config {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
         session_templates: vec![],
+        weather_location: None,
     }
 }
 
@@ -143,6 +144,113 @@ async fn push_subscribe_list_unsubscribe() {
         .await
         .unwrap();
     assert_eq!(r["ok"], true);
+}
+
+#[tokio::test]
+async fn daily_briefing_is_available_without_weather_config() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let body: Value = client
+        .get(format!("{base}/api/briefing/daily"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert!(body["generated_at"].as_str().is_some());
+    assert!(body["weather"].is_null());
+    assert_eq!(body["sessions"]["total"], 0);
+}
+
+#[tokio::test]
+async fn weather_requires_a_location() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let res = client
+        .get(format!("{base}/api/weather"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn agent_task_create_run_and_records_prompt_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "PX3 price monitor",
+            "prompt": "Check Australian Hisense PX3 prices and notify only on a price drop.",
+            "schedule": { "kind": "manual" },
+            "command": ["/bin/sh", "-lc", "printf 'task:%s run:%s\\n' \"$MYDEVENV2_AGENT_TASK_ID\" \"$MYDEVENV2_AGENT_TASK_RUN_ID\""],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["name"], "PX3 price monitor");
+    assert_eq!(created["notify_on_phrase"], "MYDEVENV2_NOTIFY:");
+
+    let run: Value = client
+        .post(format!("{base}/api/agent-tasks/{task_id}/run"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let prompt_file = run["prompt_file"].as_str().unwrap();
+    let session_id = run["session_id"].as_str().unwrap().to_string();
+    let prompt_text = std::fs::read_to_string(prompt_file).unwrap();
+    assert!(prompt_text.contains("Check Australian Hisense PX3 prices"));
+    assert!(prompt_text.contains("MYDEVENV2_NOTIFY:"));
+
+    let detail: Value = client
+        .get(format!("{base}/api/agent-tasks/{task_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["run_count"], 1);
+    assert_eq!(detail["runs"][0]["session_id"], session_id);
+
+    let sessions: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(sessions.iter().any(|s| s["id"] == session_id));
 }
 
 #[tokio::test]
@@ -295,6 +403,96 @@ async fn rename_session() {
         .delete(format!("{base}/api/sessions/{id}"))
         .send()
         .await;
+}
+
+#[tokio::test]
+async fn exited_sessions_are_archived_searchable_and_deletable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "archive-me",
+            "command": [
+                "/bin/sh",
+                "-lc",
+                "printf 'history-needle path/with punctuation\\n'; exit 7",
+            ],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let archived = loop {
+        let sessions: Vec<Value> = client
+            .get(format!("{base}/api/history/sessions?limit=20"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if let Some(session) = sessions.iter().find(|s| s["id"] == id) {
+            break session.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session was not archived; got {sessions:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    assert_eq!(archived["name"], "archive-me");
+    assert_eq!(archived["exit_code"], 7);
+    assert!(
+        archived["scrollback_bytes"].as_i64().unwrap_or_default() > 0,
+        "archive should record output bytes: {archived:?}"
+    );
+
+    let search: Vec<Value> = client
+        .get(format!(
+            "{base}/api/history/search?q=history-needle%20path%2Fwith"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        search.iter().any(|hit| hit["session_id"] == id),
+        "history search should find archived output; got {search:?}"
+    );
+
+    let del = client
+        .delete(format!("{base}/api/history/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), StatusCode::OK);
+
+    let after_delete = client
+        .get(format!("{base}/api/history/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after_delete.status(), StatusCode::NOT_FOUND);
 }
 
 async fn ws_attach(
@@ -491,6 +689,7 @@ async fn file_api_round_trip() {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
         session_templates: vec![],
+        weather_location: None,
     };
     let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -649,6 +848,7 @@ async fn git_status_log_branch() {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
         session_templates: vec![],
+        weather_location: None,
     };
     let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

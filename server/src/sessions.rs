@@ -7,20 +7,23 @@ use crate::{
     config::Config,
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
+    history::SessionHistory,
     pty::{self, Session, SessionSpec, SessionSummary, SpawnDefaults},
 };
 
 pub struct SessionRegistry {
     cfg: Arc<Config>,
     bus: EventBus,
+    history: Option<Arc<SessionHistory>>,
     sessions: DashMap<Uuid, Arc<Session>>,
 }
 
 impl SessionRegistry {
-    pub fn new(cfg: Arc<Config>, bus: EventBus) -> Self {
+    pub fn new(cfg: Arc<Config>, bus: EventBus, history: Option<Arc<SessionHistory>>) -> Self {
         Self {
             cfg,
             bus,
+            history,
             sessions: DashMap::new(),
         }
     }
@@ -71,6 +74,7 @@ impl SessionRegistry {
                 activity_idle_after_ms: self.cfg.activity_idle_after_ms,
             },
             self.bus.clone(),
+            self.history.clone(),
         )?;
         let session = spawned.session;
         self.sessions.insert(session.id, Arc::clone(&session));

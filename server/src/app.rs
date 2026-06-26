@@ -11,8 +11,17 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use crate::gui as gui_handlers;
 use crate::push_api;
 use crate::{
-    api, assets, auth, config::Config, events::EventBus, files, git, gui::GuiRegistry,
-    history::SessionHistory, history_api, push::PushManager, sessions::SessionRegistry, ws,
+    agent_tasks::{self, AgentTaskRegistry},
+    api, assets, auth, briefing,
+    config::Config,
+    events::EventBus,
+    files, git,
+    gui::GuiRegistry,
+    history::SessionHistory,
+    history_api,
+    push::PushManager,
+    sessions::SessionRegistry,
+    weather, ws,
 };
 
 pub struct AppState {
@@ -21,22 +30,13 @@ pub struct AppState {
     pub bus: EventBus,
     pub gui: Arc<GuiRegistry>,
     pub push: Arc<PushManager>,
+    pub agent_tasks: Arc<AgentTaskRegistry>,
     pub history: Option<Arc<SessionHistory>>,
 }
 
 pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     let cfg = Arc::new(cfg);
     let bus = EventBus::default();
-    let sessions = Arc::new(SessionRegistry::new(Arc::clone(&cfg), bus.clone()));
-    let gui = Arc::new(GuiRegistry::new());
-    let push = Arc::new(
-        PushManager::with_subject(
-            &cfg.state_dir,
-            cfg.fcm_service_account_json.as_deref(),
-            &cfg.vapid_subject,
-        )
-        .expect("push manager init"),
-    );
 
     // Initialize session history (optional, continues if init fails)
     let history = match SessionHistory::new(&cfg.state_dir).await {
@@ -50,18 +50,39 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         }
     };
 
+    let sessions = Arc::new(SessionRegistry::new(
+        Arc::clone(&cfg),
+        bus.clone(),
+        history.clone(),
+    ));
+    let gui = Arc::new(GuiRegistry::new());
+    let push = Arc::new(
+        PushManager::with_subject(
+            &cfg.state_dir,
+            cfg.fcm_service_account_json.as_deref(),
+            &cfg.vapid_subject,
+        )
+        .expect("push manager init"),
+    );
+    let agent_tasks = Arc::new(
+        AgentTaskRegistry::new(&cfg.state_dir, Arc::clone(&sessions), Arc::clone(&push))
+            .expect("agent task registry init"),
+    );
+
     let state = Arc::new(AppState {
         config: cfg,
         sessions,
         bus,
         gui,
         push,
+        agent_tasks,
         history,
     });
 
     // Background task: fan out a push notification whenever a session enters
     // `waiting-for-input`. Subscribes to the events bus.
     push_api::spawn_activity_watcher(Arc::clone(&state));
+    state.agent_tasks.spawn_scheduler();
 
     // Public: /healthz, /api/config, /api/push/public-key. None reveal secrets.
     let public = Router::new()
@@ -94,6 +115,21 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/gui/launch", post(gui_handlers::launch))
         .route("/api/gui/processes", get(gui_handlers::processes))
         .route("/api/gui/kill", post(gui_handlers::kill_proc))
+        .route("/api/weather", get(weather::forecast))
+        .route("/api/briefing/daily", get(briefing::daily))
+        .route(
+            "/api/agent-tasks",
+            get(agent_tasks::list).post(agent_tasks::create),
+        )
+        .route(
+            "/api/agent-tasks/{id}",
+            get(agent_tasks::get)
+                .patch(agent_tasks::update)
+                .delete(agent_tasks::delete),
+        )
+        .route("/api/agent-tasks/{id}/pause", post(agent_tasks::pause))
+        .route("/api/agent-tasks/{id}/resume", post(agent_tasks::resume))
+        .route("/api/agent-tasks/{id}/run", post(agent_tasks::run_now))
         .route("/api/push/subscribe", post(push_api::subscribe))
         .route("/api/push/unsubscribe", post(push_api::unsubscribe))
         .route("/api/push/list", get(push_api::list))

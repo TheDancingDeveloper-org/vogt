@@ -88,12 +88,9 @@ pub async fn delete_session(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("history not enabled".into()))?;
 
-    // Delete from database
-    sqlx::query("DELETE FROM sessions WHERE id = ?")
-        .bind(id.to_string())
-        .execute(&history.pool)
-        .await
-        .map_err(|e| ApiError::Internal(format!("delete failed: {}", e)))?;
+    if !history.delete_session(id).await? {
+        return Err(ApiError::NotFound);
+    }
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
