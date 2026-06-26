@@ -45,6 +45,7 @@ import {
   openEditorTab,
   openGitTab,
   openGuiTab,
+  openHistoryTab,
   openTerminalTab,
   tabsStore,
   type Tab,
@@ -79,7 +80,8 @@ function pathFor(tab: Tab): string {
   if (tab.kind === "terminal") return `/t/${tab.sessionId}`;
   if (tab.kind === "editor") return `/e/${encodeURIComponent(tab.path)}`;
   if (tab.kind === "git") return `/g/${encodeURIComponent(tab.repo)}`;
-  return "/gui";
+  if (tab.kind === "gui") return "/gui";
+  return "/history";
 }
 
 const App: Component = () => {
@@ -157,6 +159,9 @@ const App: Component = () => {
 
   // Check if we're in IDE mode
   const isIDEMode = layoutMode === "ide";
+  const activeKind = () =>
+    tabsStore.tabs.find((tab) => tab.id === tabsStore.active)?.kind ?? null;
+  const editorWorkspaceActive = () => isIDEMode && activeKind() === "editor";
 
   onMount(() => {
     apiModule
@@ -197,6 +202,8 @@ const App: Component = () => {
       openGitTab("");
     } else if (path === "/gui") {
       openGuiTab();
+    } else if (path === "/history") {
+      openHistoryTab();
     }
   });
 
@@ -279,7 +286,8 @@ const App: Component = () => {
         `edit:${decodeURIComponent(params.path ?? "")}` === tabId) ||
       (location.pathname.startsWith("/g") &&
         `git:${decodeURIComponent(params.path ?? "")}` === tabId) ||
-      (location.pathname === "/gui" && tabId === "gui");
+      (location.pathname === "/gui" && tabId === "gui") ||
+      (location.pathname === "/history" && tabId === "history");
 
     // Drop any per-tab registrations so we don't leak references.
     senders.delete(tabId);
@@ -581,31 +589,38 @@ const App: Component = () => {
         </div>
 
         <main class="main">
-          <Show
-            when={!isIDEMode}
-            fallback={
-              <EditorWorkspace
-                onNotify={(message, kind) => showToast(message, { kind })}
-              />
-            }
+          <Show when={editorWorkspaceActive()}>
+            <EditorWorkspace
+              promptPath={promptUser}
+              onNotify={(message, kind) => showToast(message, { kind })}
+            />
+          </Show>
+          <div
+            class="tab-view"
+            style={{ display: editorWorkspaceActive() ? "none" : "flex" }}
           >
-            <div class="tab-view">
-              <For each={tabsStore.tabs}>
-                {(t) => (
-                  <div
-                    style={{
-                      display: tabsStore.active === t.id ? "flex" : "none",
-                      "flex-direction": "column",
-                      flex: 1,
-                      "min-height": 0,
-                      "min-width": 0,
-                    }}
-                  >
-                    <Show when={t.kind === "terminal" && t.kind === "terminal" && t}>
+            <For each={tabsStore.tabs}>
+              {(t) => (
+                <div
+                  style={{
+                    display:
+                      tabsStore.active === t.id &&
+                      !(isIDEMode && t.kind === "editor")
+                        ? "flex"
+                        : "none",
+                    "flex-direction": "column",
+                    flex: 1,
+                    "min-height": 0,
+                    "min-width": 0,
+                  }}
+                >
+                  <Show when={t.kind === "terminal" && t}>
                     {(tab) => (
                       <TerminalWorkspace
                         tabId={tab().id}
-                        sessionId={(tab() as Extract<Tab, { kind: "terminal" }>).sessionId}
+                        sessionId={
+                          (tab() as Extract<Tab, { kind: "terminal" }>).sessionId
+                        }
                         registerSend={(fn) => {
                           if (fn) senders.set(t.id, fn);
                           else senders.delete(t.id);
@@ -631,7 +646,7 @@ const App: Component = () => {
                       />
                     )}
                   </Show>
-                  <Show when={t.kind === "editor" && t}>
+                  <Show when={t.kind === "editor" && !isIDEMode && t}>
                     {(tab) => (
                       <Editor
                         tabId={tab().id}
@@ -641,14 +656,18 @@ const App: Component = () => {
                   </Show>
                   <Show when={t.kind === "git" && t}>
                     {(tab) => (
-                      <GitTab repo={(tab() as Extract<Tab, { kind: "git" }>).repo} />
+                      <GitTab
+                        repo={(tab() as Extract<Tab, { kind: "git" }>).repo}
+                      />
                     )}
                   </Show>
                   <Show when={t.kind === "gui"}>
                     <GuiTab streamUrl={publicCfg()?.gui_stream_url ?? null} />
                   </Show>
                   <Show when={t.kind === "history"}>
-                    <History onError={(msg) => showToast(msg, { kind: "error" })} />
+                    <History
+                      onError={(msg) => showToast(msg, { kind: "error" })}
+                    />
                   </Show>
                 </div>
               )}
@@ -660,7 +679,6 @@ const App: Component = () => {
               </div>
             </Show>
           </div>
-          </Show>
           <ModKeyRow
             send={(d) => activeSend(d)}
             onCopy={() => void activeCopy()}
