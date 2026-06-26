@@ -17,7 +17,6 @@ const config: CapacitorConfig = {
   appId: "com.sprooty.mydevenv2",
   appName: "MyDevEnv2",
   webDir: "web",
-  bundledWebRuntime: false,
   zoomEnabled: true,
   android: {
     zoomEnabled: true,

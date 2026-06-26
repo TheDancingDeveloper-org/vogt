@@ -316,6 +316,18 @@ const TerminalWorkspace: Component<Props> = (props) => {
     setDraft("");
   };
 
+  const insertDraftNewline = (textarea: HTMLTextAreaElement) => {
+    const value = draft();
+    const start = textarea.selectionStart ?? value.length;
+    const end = textarea.selectionEnd ?? start;
+    const next = `${value.slice(0, start)}\n${value.slice(end)}`;
+    setDraft(next);
+    queueMicrotask(() => {
+      textarea.selectionStart = start + 1;
+      textarea.selectionEnd = start + 1;
+    });
+  };
+
   const workspaceActions: TerminalActions = {
     copy: async () => {
       const result = await paneActions.get(activePaneId())?.copy();
@@ -388,11 +400,16 @@ const TerminalWorkspace: Component<Props> = (props) => {
       const source = sessionsStore.sessions[pane.sessionId];
       const base = source?.name || "shell";
       const suffix = direction === "row" ? "right" : "down";
-      const session = await createSession(
-        `${base}-${suffix}-${Date.now() % 1000}`,
-        undefined,
-        source?.cwd || undefined,
-      );
+      const name = `${base}-${suffix}-${Date.now() % 1000}`;
+      let session: SessionSummary;
+      try {
+        session = await createSession(name, undefined, source?.cwd || undefined);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!message.includes("escapes workspace_root")) throw err;
+        session = await createSession(name);
+        props.onNotify?.("Split opened at the default cwd", "info");
+      }
       const nextPane = makePane(session.id);
       setRoot((current) =>
         insertPane(current, pane.id, direction, nextPane),
@@ -498,16 +515,26 @@ const TerminalWorkspace: Component<Props> = (props) => {
           sendDraft(true);
         }}
       >
-        <input
-          type="text"
+        <textarea
           value={draft()}
           onInput={(event) => setDraft(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            if (event.ctrlKey || event.metaKey) {
+              event.preventDefault();
+              insertDraftNewline(event.currentTarget);
+              return;
+            }
+            event.preventDefault();
+            sendDraft(true);
+          }}
           placeholder="Command"
           autocomplete="on"
           autocorrect="on"
           autocapitalize="none"
           spellcheck={true}
           enterkeyhint="send"
+          rows={2}
         />
         <button
           type="button"

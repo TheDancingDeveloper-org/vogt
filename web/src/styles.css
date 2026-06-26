@@ -276,17 +276,17 @@ input[type="password"]:focus {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
+  padding: 0 4px 0 10px;
   background: var(--bg-tab);
   border: 0;
   border-right: 1px solid var(--bd);
   border-radius: 0;
-  cursor: pointer;
   color: var(--fg-muted);
   min-width: 90px;
   max-width: 220px;
   white-space: nowrap;
   font-size: 13px;
+  flex: 0 0 auto;
 }
 .tab:hover {
   background: rgba(255, 255, 255, 0.04);
@@ -296,7 +296,22 @@ input[type="password"]:focus {
   color: var(--fg);
   border-bottom: 2px solid var(--accent);
 }
+.tab-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
 .tab .label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -308,10 +323,11 @@ input[type="password"]:focus {
   justify-content: center;
   border-radius: 3px;
   font-size: 14px;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
   opacity: 0.7;
-  /* Make sure taps on the X reach the span, not the parent button. */
-  position: relative;
-  z-index: 1;
   touch-action: manipulation;
 }
 .tab .close:hover {
@@ -518,11 +534,15 @@ input[type="password"]:focus {
   border-top: 1px solid var(--bd);
   background: var(--bg-elev);
 }
-.terminal-composer input {
+.terminal-composer textarea {
   flex: 1 1 auto;
   min-width: 0;
-  height: 32px;
+  min-height: 32px;
+  max-height: 76px;
   font-size: 16px;
+  resize: vertical;
+  line-height: 1.25;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .terminal-composer button {
   flex: 0 0 auto;
@@ -1383,13 +1403,12 @@ input[type="password"]:focus {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
+  padding: 0 4px 0 10px;
   background: var(--bg-elev);
   border: 1px solid var(--bd);
   border-radius: 4px 4px 0 0;
   color: var(--fg-muted);
   font-size: 13px;
-  cursor: pointer;
   white-space: nowrap;
   transition: all 0.1s;
 }
@@ -1405,6 +1424,19 @@ input[type="password"]:focus {
   border-bottom-color: var(--bg);
 }
 
+.editor-tab-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 0;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
 .editor-tab-label {
   max-width: 200px;
   overflow: hidden;
@@ -1415,6 +1447,27 @@ input[type="password"]:focus {
   color: var(--accent);
   font-size: 16px;
   line-height: 1;
+}
+
+.editor-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  opacity: 0.7;
+  touch-action: manipulation;
+}
+
+.editor-tab-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  opacity: 1;
 }
 
 .editor-tab-actions {

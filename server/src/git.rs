@@ -16,7 +16,7 @@ use crate::{
     workspace_path,
 };
 
-/// Walk upwards from `start` (inclusive) until we find a `.git` directory.
+/// Walk upwards from `start` (inclusive) until we find a `.git` entry.
 /// Stops at `boundary` (exclusive) so we can't walk past the workspace root.
 async fn find_repo_root(start: &Path, boundary: &Path) -> Result<PathBuf> {
     let mut cur = start.to_path_buf();
@@ -38,15 +38,20 @@ async fn find_repo_root(start: &Path, boundary: &Path) -> Result<PathBuf> {
 }
 
 /// Resolve a repo from query: ?repo= relative to workspace_root, else
-/// workspace_root itself. Returns the canonical repo root (with .git).
-async fn resolve_repo(state: &Arc<AppState>, repo: &str) -> Result<PathBuf> {
+/// workspace_root itself. Returns `None` when the path exists but no Git repo is
+/// present at or above it inside the workspace boundary.
+async fn resolve_repo(state: &Arc<AppState>, repo: &str) -> Result<Option<PathBuf>> {
     let root = &state.config.workspace_root;
     let candidate = if repo.trim().is_empty() {
         root.clone()
     } else {
         workspace_path::resolve_existing(root, repo)?
     };
-    find_repo_root(&candidate, root).await
+    match find_repo_root(&candidate, root).await {
+        Ok(repo) => Ok(Some(repo)),
+        Err(ApiError::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 async fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -67,6 +72,16 @@ async fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn repo_rel(root: &Path, repo: &Path) -> String {
+    repo.strip_prefix(root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| repo.to_string_lossy().into_owned())
+}
+
+fn requested_repo_label(repo: &str) -> String {
+    repo.trim().trim_start_matches('/').to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RepoQuery {
     #[serde(default)]
@@ -76,6 +91,7 @@ pub struct RepoQuery {
 #[derive(Debug, Serialize)]
 pub struct GitStatus {
     pub repo: String,
+    pub is_repo: bool,
     pub branch: String,
     pub ahead: u32,
     pub behind: u32,
@@ -106,7 +122,16 @@ pub async fn status(
     State(state): State<Arc<AppState>>,
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<GitStatus>> {
-    let repo = resolve_repo(&state, &q.repo).await?;
+    let Some(repo) = resolve_repo(&state, &q.repo).await? else {
+        return Ok(Json(GitStatus {
+            repo: requested_repo_label(&q.repo),
+            is_repo: false,
+            branch: String::new(),
+            ahead: 0,
+            behind: 0,
+            entries: Vec::new(),
+        }));
+    };
     let raw = run_git(
         &repo,
         &[
@@ -160,13 +185,9 @@ pub async fn status(
         });
     }
 
-    let repo_rel = repo
-        .strip_prefix(&state.config.workspace_root)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| repo.to_string_lossy().into_owned());
-
     Ok(Json(GitStatus {
-        repo: repo_rel,
+        repo: repo_rel(&state.config.workspace_root, &repo),
+        is_repo: true,
         branch,
         ahead,
         behind,
@@ -208,7 +229,9 @@ pub async fn diff(
     State(state): State<Arc<AppState>>,
     Query(q): Query<DiffQuery>,
 ) -> Result<Json<DiffResp>> {
-    let repo = resolve_repo(&state, &q.repo).await?;
+    let repo = resolve_repo(&state, &q.repo)
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
     // HEAD content via `git show HEAD:path`. Returns empty if untracked.
     let head_arg = format!("HEAD:{}", q.path);
@@ -254,7 +277,9 @@ pub async fn log(
     State(state): State<Arc<AppState>>,
     Query(q): Query<LogQuery>,
 ) -> Result<Json<Vec<LogEntry>>> {
-    let repo = resolve_repo(&state, &q.repo).await?;
+    let Some(repo) = resolve_repo(&state, &q.repo).await? else {
+        return Ok(Json(Vec::new()));
+    };
     let n = q.n.unwrap_or(50).min(500);
     // Use a record separator that doesn't appear in normal commit messages.
     let fmt = "%H%x01%h%x01%an%x01%ad%x01%s";
@@ -296,7 +321,12 @@ pub async fn branch(
     State(state): State<Arc<AppState>>,
     Query(q): Query<RepoQuery>,
 ) -> Result<Json<BranchInfo>> {
-    let repo = resolve_repo(&state, &q.repo).await?;
+    let Some(repo) = resolve_repo(&state, &q.repo).await? else {
+        return Ok(Json(BranchInfo {
+            current: String::new(),
+            all: Vec::new(),
+        }));
+    };
     let current = run_git(&repo, &["branch", "--show-current"])
         .await?
         .trim()

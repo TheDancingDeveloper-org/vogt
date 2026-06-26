@@ -615,19 +615,35 @@ impl RootView {
             cwd: non_empty(&session.cwd),
             ..Default::default()
         };
+        let fallback_spec = SessionSpec {
+            cwd: None,
+            ..spec.clone()
+        };
         cx.spawn(
             move |weak: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let mut cx = cx.clone();
                 async move {
                     let res = handle
-                        .spawn(async move { api.create_session(&spec).await })
+                        .spawn(async move {
+                            match api.create_session(&spec).await {
+                                Ok(summary) => Ok((summary, false)),
+                                Err(e) if e.to_string().contains("escapes workspace_root") => api
+                                    .create_session(&fallback_spec)
+                                    .await
+                                    .map(|summary| (summary, true)),
+                                Err(e) => Err(e),
+                            }
+                        })
                         .await;
                     let _ = weak.update(&mut cx, |v, cx| {
                         match res {
-                            Ok(Ok(summary)) => {
+                            Ok(Ok((summary, used_default_cwd))) => {
                                 let id = summary.id;
                                 v.sessions.push(summary);
                                 v.attach(id, cx);
+                                if used_default_cwd {
+                                    v.status = "Duplicate opened at the default cwd".into();
+                                }
                             }
                             Ok(Err(e)) => {
                                 v.status = SharedString::from(format!("duplicate failed: {e}"))
@@ -1827,23 +1843,36 @@ impl RootView {
         let colors = cx.theme().colors.clone();
         let mut status_entries = div().flex().flex_col().gap(px(3.0));
         if let Some(status) = &self.git_panel.status {
-            status_entries = status_entries.child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(colors.on_neutral)
-                    .child(format!(
-                        "{} on {} (+{} / -{})",
-                        status.repo, status.branch, status.ahead, status.behind
-                    )),
-            );
-            for entry in &status.entries {
+            if !status.is_repo {
+                let repo = if status.repo.is_empty() {
+                    "(workspace root)"
+                } else {
+                    status.repo.as_str()
+                };
                 status_entries = status_entries.child(
                     div()
-                        .font_family(".ZedMono")
-                        .text_size(px(12.0))
-                        .text_color(colors.on_neutral)
-                        .child(format!("{:?} {} {}", entry.kind, entry.index, entry.path)),
+                        .text_color(colors.on_subtle)
+                        .child(format!("{repo} is not a git repository")),
                 );
+            } else {
+                status_entries = status_entries.child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.on_neutral)
+                        .child(format!(
+                            "{} on {} (+{} / -{})",
+                            status.repo, status.branch, status.ahead, status.behind
+                        )),
+                );
+                for entry in &status.entries {
+                    status_entries = status_entries.child(
+                        div()
+                            .font_family(".ZedMono")
+                            .text_size(px(12.0))
+                            .text_color(colors.on_neutral)
+                            .child(format!("{:?} {} {}", entry.kind, entry.index, entry.path)),
+                    );
+                }
             }
         }
 

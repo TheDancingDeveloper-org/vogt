@@ -871,6 +871,7 @@ async fn git_status_log_branch() {
         .json()
         .await
         .unwrap();
+    assert_eq!(st["is_repo"], true);
     assert_eq!(st["branch"], "main");
     let entries = st["entries"].as_array().unwrap();
     let paths: Vec<&str> = entries.iter().filter_map(|e| e["path"].as_str()).collect();
@@ -908,6 +909,67 @@ async fn git_status_log_branch() {
         .unwrap();
     assert_eq!(diff["head"], "one\n");
     assert_eq!(diff["current"], "one\ntwo\n");
+}
+
+#[tokio::test]
+async fn git_endpoints_return_empty_for_non_repo_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("plain-dir")).unwrap();
+
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let st: Value = client
+        .get(format!("{base}/api/git/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(st["is_repo"], false);
+    assert_eq!(st["branch"], "");
+    assert!(st["entries"].as_array().unwrap().is_empty());
+
+    let nested_status: Value = client
+        .get(format!("{base}/api/git/status?repo=plain-dir"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(nested_status["repo"], "plain-dir");
+    assert_eq!(nested_status["is_repo"], false);
+    assert!(nested_status["entries"].as_array().unwrap().is_empty());
+
+    let log: Vec<Value> = client
+        .get(format!("{base}/api/git/log?n=10"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(log.is_empty());
+
+    let br: Value = client
+        .get(format!("{base}/api/git/branch"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(br["current"], "");
+    assert!(br["all"].as_array().unwrap().is_empty());
 }
 
 async fn collect_binary_until(

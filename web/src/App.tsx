@@ -269,7 +269,15 @@ const App: Component = () => {
   const onDuplicateSession = async (s: SessionSummary) => {
     try {
       const name = `${s.name}-copy`;
-      const dup = await createSession(name, undefined, s.cwd || undefined);
+      let dup: SessionSummary;
+      try {
+        dup = await createSession(name, undefined, s.cwd || undefined);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (!message.includes("escapes workspace_root")) throw e;
+        dup = await createSession(name);
+        showToast("Duplicate opened at the default cwd");
+      }
       openTerminalTab(dup.id, dup.name);
       navigate(`/t/${dup.id}`);
       setDrawerOpen(false);
@@ -543,12 +551,8 @@ const App: Component = () => {
           </button>
           <For each={tabsStore.tabs}>
             {(t) => (
-              <button
+              <div
                 class={`tab ${tabsStore.active === t.id ? "active" : ""}`}
-                onClick={() => {
-                  focusTab(t.id);
-                  navigate(pathFor(t));
-                }}
                 onAuxClick={(e) => {
                   // Middle-click closes the tab (browser/editor convention).
                   if (e.button === 1) {
@@ -558,32 +562,43 @@ const App: Component = () => {
                 }}
                 title={t.label}
               >
-                <Show when={t.kind === "terminal"}>
-                  <span class={`activity-dot ${tabActivityClass(t) ?? "idle"}`} />
-                </Show>
-                <span class="label">
-                  {t.kind === "editor"
-                    ? "📄 "
-                    : t.kind === "git"
-                      ? "⎇ "
-                      : t.kind === "gui"
-                        ? "🖥 "
-                        : ""}
-                  {t.label}
-                </span>
-                <Show when={t.kind === "editor" && t.dirty}>
-                  <span class="dirty-dot" title="unsaved changes" />
-                </Show>
-                <span
+                <button
+                  type="button"
+                  class="tab-main"
+                  onClick={() => {
+                    focusTab(t.id);
+                    navigate(pathFor(t));
+                  }}
+                >
+                  <Show when={t.kind === "terminal"}>
+                    <span class={`activity-dot ${tabActivityClass(t) ?? "idle"}`} />
+                  </Show>
+                  <span class="label">
+                    {t.kind === "editor"
+                      ? "📄 "
+                      : t.kind === "git"
+                        ? "⎇ "
+                        : t.kind === "gui"
+                          ? "🖥 "
+                          : ""}
+                    {t.label}
+                  </span>
+                  <Show when={t.kind === "editor" && t.dirty}>
+                    <span class="dirty-dot" title="unsaved changes" />
+                  </Show>
+                </button>
+                <button
+                  type="button"
                   class="close"
+                  aria-label={`Close ${t.label}`}
                   onClick={(e) => {
                     e.stopPropagation();
                     void requestCloseTab(t.id);
                   }}
                 >
                   ×
-                </span>
-              </button>
+                </button>
+              </div>
             )}
           </For>
         </div>
@@ -592,6 +607,7 @@ const App: Component = () => {
           <Show when={editorWorkspaceActive()}>
             <EditorWorkspace
               promptPath={promptUser}
+              onRequestCloseTab={(tabId) => void requestCloseTab(tabId)}
               onNotify={(message, kind) => showToast(message, { kind })}
             />
           </Show>

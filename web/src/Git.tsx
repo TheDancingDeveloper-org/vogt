@@ -8,7 +8,13 @@ import {
   createSignal,
   onCleanup,
 } from "solid-js";
-import { api, type GitStatusEntry, type GitStatusKind } from "./api";
+import {
+  api,
+  type GitLogEntry,
+  type GitStatusEntry,
+  type GitStatusKind,
+  type GitStatusResp,
+} from "./api";
 import { languageFor, loadMonaco, type DiffEditor, type TextModel } from "./monaco";
 
 interface Props {
@@ -41,6 +47,14 @@ const kindBadge: Record<GitStatusKind, string> = {
   deleted: "D",
   untracked: "?",
 };
+
+function isNotGitRepoError(message: string): boolean {
+  return (
+    message.includes("not found") ||
+    message.includes("not a git repository") ||
+    message.includes("Stopping at filesystem boundary")
+  );
+}
 
 const DiffView: Component<{ repo: string; path: string }> = (props) => {
   let host: HTMLDivElement | undefined;
@@ -132,15 +146,38 @@ const DiffView: Component<{ repo: string; path: string }> = (props) => {
 };
 
 const GitTab: Component<Props> = (props) => {
+  const [gitError, setGitError] = createSignal<string | null>(null);
   const [status, { refetch: refetchStatus }] = createResource(
     () => props.repo,
-    (repo) => api.gitStatus(repo),
+    async (repo): Promise<GitStatusResp | null> => {
+      try {
+        const result = await api.gitStatus(repo);
+        setGitError(null);
+        return result;
+      } catch (e) {
+        const message = (e as Error).message;
+        setGitError(
+          isNotGitRepoError(message)
+            ? "Not a git repository"
+            : message,
+        );
+        return null;
+      }
+    },
   );
   const [log, { refetch: refetchLog }] = createResource(
     () => props.repo,
-    (repo) => api.gitLog(repo, 30),
+    async (repo): Promise<GitLogEntry[]> => {
+      try {
+        return await api.gitLog(repo, 30);
+      } catch {
+        return [];
+      }
+    },
   );
   const [selected, setSelected] = createSignal<string | null>(null);
+  const notRepo = () =>
+    status()?.is_repo === false || gitError() === "Not a git repository";
 
   const grouped = createMemo(() => {
     const out: Record<GitStatusKind, GitStatusEntry[]> = {
@@ -169,7 +206,7 @@ const GitTab: Component<Props> = (props) => {
           {status()?.repo || props.repo || "(workspace root)"}
         </span>
         <span class="git-branch">
-          ⎇ {status()?.branch ?? "?"}
+          ⎇ {notRepo() ? "Not a git repository" : status()?.branch || gitError() || "?"}
           <Show when={status()?.ahead}>
             <span class="git-ab"> ↑{status()!.ahead}</span>
           </Show>
@@ -179,19 +216,24 @@ const GitTab: Component<Props> = (props) => {
         </span>
         <button onClick={refresh}>⟳ Refresh</button>
       </div>
-      <Show when={status.error}>
-        <div class="empty" style={{ color: "#ff7b72" }}>
-          {String(status.error)}
+      <Show when={gitError()}>
+        <div
+          class="empty"
+          style={{
+            color: gitError() === "Not a git repository" ? "var(--fg-muted)" : "#ff7b72",
+          }}
+        >
+          {gitError()}
         </div>
       </Show>
       <div class="git-body">
         <div class="git-left">
           <div class="git-section-title">Status</div>
           <Show
-            when={(status()?.entries.length ?? 0) > 0}
+            when={!notRepo() && (status()?.entries.length ?? 0) > 0}
             fallback={
               <div class="meta" style={{ padding: "8px" }}>
-                clean working tree
+                {notRepo() ? "not a git repository" : "clean working tree"}
               </div>
             }
           >

@@ -241,6 +241,7 @@ export interface GitStatusEntry {
 
 export interface GitStatusResp {
   repo: string;
+  is_repo?: boolean;
   branch: string;
   ahead: number;
   behind: number;

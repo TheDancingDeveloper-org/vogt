@@ -175,6 +175,8 @@ pub struct StatusEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitStatus {
     pub repo: String,
+    #[serde(default = "default_true")]
+    pub is_repo: bool,
     pub branch: String,
     #[serde(default)]
     pub ahead: u32,
@@ -182,6 +184,10 @@ pub struct GitStatus {
     pub behind: u32,
     #[serde(default)]
     pub entries: Vec<StatusEntry>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// `GET /api/git/diff` — HEAD vs working-tree (or staged) content of one file.

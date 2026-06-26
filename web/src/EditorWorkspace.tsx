@@ -25,6 +25,7 @@ interface Props {
     defaultValue?: string,
     placeholder?: string,
   ) => Promise<string | null>;
+  onRequestCloseTab?: (tabId: string) => void;
   onNotify?: (message: string, kind?: "info" | "error") => void;
 }
 
@@ -116,20 +117,37 @@ const EditorWorkspace: Component<Props> = (props) => {
           <div class="editor-tabs">
             <For each={editorTabs()}>
               {(tab) => (
-                <button
+                <div
                   class={`editor-tab ${
                     tabsStore.active === tab.id ? "active" : ""
                   }`}
-                  onClick={() => focusEditorTab(tab)}
                   title={tab.path}
                 >
-                  <span class="editor-tab-label">{tab.label}</span>
-                  <Show when={tab.dirty}>
-                    <span class="editor-tab-dirty" title="Unsaved changes">
-                      *
-                    </span>
-                  </Show>
-                </button>
+                  <button
+                    type="button"
+                    class="editor-tab-main"
+                    onClick={() => focusEditorTab(tab)}
+                  >
+                    <span class="editor-tab-label">{tab.label}</span>
+                    <Show when={tab.dirty}>
+                      <span class="editor-tab-dirty" title="Unsaved changes">
+                        *
+                      </span>
+                    </Show>
+                  </button>
+                  <button
+                    type="button"
+                    class="editor-tab-close"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      props.onRequestCloseTab?.(tab.id);
+                    }}
+                    aria-label={`Close ${tab.label}`}
+                    title="Close file"
+                  >
+                    x
+                  </button>
+                </div>
               )}
             </For>
             <div class="editor-tab-actions">
