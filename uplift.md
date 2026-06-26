@@ -90,6 +90,13 @@ carried forward verbatim.
   `/api/files/download` streams through `tokio_util::io::ReaderStream` with a
   512 MiB transfer cap. Editor reads still use the smaller 5 MiB in-memory cap.
 
+- [x] **Session history endpoints were not wired to the PTY lifecycle** (resolved 2026-06-26)
+  Exited sessions are now archived from the PTY exit/reader lifecycle into
+  SQLite, raw PTY logs are persisted under `state_dir/session-logs`, ANSI-stripped
+  output is indexed with FTS5, and history deletion removes metadata, FTS rows,
+  and raw logs. Integration coverage proves archive, search, get, and delete
+  through the real HTTP API.
+
 - [ ] **PTY reader thread panics on spawn failure** (`server/src/pty.rs:264-293`)
   `.expect("spawn pty reader thread")` takes down the process. Return a
   `Result` from reader setup and fail only that session.
@@ -131,6 +138,16 @@ carried forward verbatim.
   all tabs disconnect and clear state together.
 
 ### Correctness
+
+- [x] **Split editor foundation was not reachable and used synthetic pane ids** (resolved 2026-06-26)
+  IDE mode now exposes horizontal/vertical split controls, drag resizing, and
+  split pane focus. Split panes reference real editor tab IDs, so dirty-state
+  tracking and close/discard prompts remain tied to the canonical tab store.
+
+- [x] **IDE mode hid non-editor tabs** (resolved 2026-06-26)
+  The app now renders the IDE editor workspace only while an editor tab is
+  active. Terminal, git, GUI, and history tabs remain routable and usable in IDE
+  mode, and `/history` deep links open the history tab correctly.
 
 - [ ] **SSE reconnection is fixed at 2 s** (`web/src/store.ts:122-136`)
   Sustained outages cause every open client to retry on the same short interval.

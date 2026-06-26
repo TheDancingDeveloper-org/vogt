@@ -88,6 +88,14 @@ Windows Woodpecker workflows green.
 
 Phase 7 (Android emulator KVM VM) remains.
 
+**June 2026 UX uplift — code-complete.**
+
+- Command palette (`Ctrl/Cmd+K`) opens sessions, files, recent files, settings, GUI, git, shortcuts, and history search. Prefix a query with `>` to search archived session output.
+- Session history archives exited PTY sessions into SQLite under `state_dir`, writes raw logs under `state_dir/session-logs`, indexes ANSI-stripped output with FTS5, and exposes list/search/get/delete routes under `/api/history/*`.
+- IDE layout mode now embeds the real workspace file tree and keeps non-editor tabs usable. When an editor tab is active, the editor workspace can split files side-by-side or stacked, resize panes by dragging, and keeps dirty-state tracking tied to the real editor tabs.
+- Editor quality-of-life features include breadcrumbs, file icons, file-tree filtering, recent files, minimap toggle, and persisted layout/editor preferences.
+- Session templates, custom template editing, terminal themes, bookmarks, and keyboard shortcut reference are available from the PWA settings/commands.
+
 ---
 
 ## Native desktop client
