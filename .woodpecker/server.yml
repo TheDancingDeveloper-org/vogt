@@ -56,6 +56,10 @@ steps:
       SCCACHE_REDIS: "redis://100.92.54.45:6380"
     commands:
       - curl -sSfL "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C /tmp && mv /tmp/sccache-v0.10.0-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
+      # sccache Redis is a best-effort shared cache. If it's unreachable, build
+      # without it rather than failing CI — a down dev cache must never block a
+      # production image build. Exports persist across commands in the step.
+      - if ! timeout 3 bash -c 'exec 3<>/dev/tcp/100.92.54.45/6380' 2>/dev/null; then echo "WARN sccache Redis unreachable — building without cache"; export RUSTC_WRAPPER=""; fi
       - rustup component add rustfmt
       - cargo fmt --all -- --check
 
@@ -66,6 +70,8 @@ steps:
       SCCACHE_REDIS: "redis://100.92.54.45:6380"
     commands:
       - curl -sSfL "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C /tmp && mv /tmp/sccache-v0.10.0-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
+      # See fmt step: fall back to no-cache if the sccache Redis is down.
+      - if ! timeout 3 bash -c 'exec 3<>/dev/tcp/100.92.54.45/6380' 2>/dev/null; then echo "WARN sccache Redis unreachable — building without cache"; export RUSTC_WRAPPER=""; fi
       - rustup component add clippy
       # web/dist doesn't exist in CI yet; create an empty placeholder so
       # rust-embed compiles. The build-and-push stage produces the real one.
@@ -79,10 +85,12 @@ steps:
       SCCACHE_REDIS: "redis://100.92.54.45:6380"
     commands:
       - curl -sSfL "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C /tmp && mv /tmp/sccache-v0.10.0-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache
+      # See fmt step: fall back to no-cache if the sccache Redis is down.
+      - if ! timeout 3 bash -c 'exec 3<>/dev/tcp/100.92.54.45/6380' 2>/dev/null; then echo "WARN sccache Redis unreachable — building without cache"; export RUSTC_WRAPPER=""; fi
       - apt-get update >/dev/null && apt-get install -y --no-install-recommends git ripgrep >/dev/null
       - mkdir -p web/dist && touch web/dist/.placeholder
       - cargo test --all
-      - sccache --show-stats
+      - if [ -n "$RUSTC_WRAPPER" ]; then sccache --show-stats; fi
 
   - name: web-typecheck
     image: node:22-bookworm
