@@ -11,16 +11,21 @@
 #   MYDEVENV2_BIND               default 0.0.0.0:8910
 #   TAILSCALE_AUTH_KEY           if set, runs `tailscale up` with --hostname=mydevenv2
 #   TAILSCALE_HOSTNAME           default mydevenv2
+#   TAILSCALE_EXIT_NODE          if set, routes all egress via this exit node
+#                                (kernel mode; requires /dev/net/tun + NET_ADMIN
+#                                from the compose). LAN + tailnet stay direct.
 #   START_SWAY                   "1" → spawn sway in background with WAYLAND_DISPLAY=wayland-1
 #   GUI_STREAM_URL               passed through to the server; web UI iframes it
 
 set -euo pipefail
 
 if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
-    # Userspace networking — no TUN device passthrough required from the host.
-    # Logs go to /tmp because /var/log is root-owned (we run as `sprooty`).
+    # Kernel networking (real TUN) so an exit node can transparently capture
+    # this pod's egress. The compose must pass --device=/dev/net/tun and
+    # cap_add NET_ADMIN; without them tailscaled falls back and the exit node
+    # is a no-op. Logs go to /tmp because /var/log is root-owned (we run as
+    # `sprooty`). iptables is present in the image for the NAT/filter rules.
     sudo -b sh -c 'tailscaled \
-        --tun=userspace-networking \
         --state=/var/lib/tailscale/tailscaled.state \
         --socket=/var/run/tailscale/tailscaled.sock \
         >/tmp/tailscaled.log 2>&1'
@@ -30,11 +35,28 @@ if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
         [[ -S /var/run/tailscale/tailscaled.sock ]] && break
         sleep 0.2
     done
+    # Join the tailnet WITHOUT the exit node. This always establishes the
+    # tailnet + accepted subnet routes (e.g. 192.168.0.0/23), which is the
+    # lockout-proof control path — so a down exit node can never sever access.
     sudo tailscale up \
         --authkey="${TAILSCALE_AUTH_KEY}" \
         --hostname="${TAILSCALE_HOSTNAME:-mydevenv2}" \
         --accept-routes \
         --accept-dns=false || echo "tailscale up failed (continuing)"
+
+    # Apply the exit node as a separate, best-effort step. Split from `up` on
+    # purpose: `up --exit-node=<down node>` fails the whole join, but `set`
+    # degrades to direct egress if the node is unreachable and self-heals on a
+    # later boot. --exit-node-allow-lan-access keeps the container's own LAN
+    # (10.x, host services) reachable; accepted subnet routes like
+    # 192.168.0.0/23 keep working because a /23 beats the exit node's 0.0.0.0/0.
+    # Idempotent, so it's safe to run on every boot (a bare `up` clears it).
+    if [[ -n "${TAILSCALE_EXIT_NODE:-}" ]]; then
+        sudo tailscale set \
+            --exit-node="${TAILSCALE_EXIT_NODE}" \
+            --exit-node-allow-lan-access \
+            || echo "tailscale exit-node set failed (continuing without exit node)"
+    fi
 fi
 
 # Agent CLIs are deliberately not installed at container startup. The image
