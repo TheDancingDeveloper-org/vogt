@@ -34,12 +34,14 @@ RootView (sidebar + status)  ──▶ ApiClient (reqwest, rustls)
 - The PTY attach speaks the server's exact WebSocket protocol: an `auth` frame
   first, then `snapshot-start` → binary scrollback → `snapshot-done` → live
   binary frames; `resize`/`ping` as JSON control frames.
+- Shared wire DTOs now live in the sibling crate `../contract` so the server
+  and native client decode the same Rust contract types.
 
 ## Modules
 
 | Module | Responsibility |
 |---|---|
-| `protocol` | Wire types mirroring `server/src/{pty,files,git,events,activity}.rs` |
+| `protocol` | Thin re-export of the shared `mydevenv2-contract` wire types |
 | `client`   | REST + SSE `ApiClient` (reqwest/rustls) |
 | `ws`       | PTY attach over `tokio-tungstenite` (auth-first, snapshot replay) |
 | `terminal::grid` | VT100/ANSI emulator (`vte`), ported from rdpapp |

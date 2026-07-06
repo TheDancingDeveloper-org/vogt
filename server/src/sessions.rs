@@ -98,7 +98,7 @@ impl SessionRegistry {
             .iter()
             .map(|kv| kv.value().summary())
             .collect();
-        out.sort_by_key(|s| s.created_at);
+        out.sort_by_key(|s| s.created_at.clone());
         out
     }
 

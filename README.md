@@ -19,6 +19,7 @@ basic-auth gated before requests reach the app.
 
 The repository now has four build surfaces:
 
+- `contract/` — shared Rust wire DTOs for the server and native client.
 - `server/` — Rust/Axum server plus embedded Solid PWA.
 - `web/` — Solid/Vite PWA served by the Rust binary.
 - `mobile/` — Capacitor 8 Android shell that loads the deployed PWA.
@@ -208,6 +209,7 @@ If the client falls too far behind the broadcast buffer the server sends `{"type
 cargo fmt --check
 cargo clippy -- -D warnings
 cargo test                       # server unit + integration tests
+cargo test -p mydevenv2-contract # shared wire-contract tests
 cd web && pnpm typecheck         # PWA TypeScript check
 
 # Native client fast checks:

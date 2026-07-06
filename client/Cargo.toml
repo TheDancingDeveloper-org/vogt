@@ -39,6 +39,7 @@ gui = [
 ]
 
 [dependencies]
+mydevenv2-contract = { path = "../contract" }
 # ── GUI: pinned AusAgentSmith-org/fluent-gpui framework ──────────────────────
 gpui = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545", package = "gpui", optional = true }
 fluent-core = { git = "https://github.com/AusAgentSmith-org/fluent-gpui.git", rev = "f601e54b4e58e416bc7495a75468b82af9a10545", package = "fluent-core", optional = true }

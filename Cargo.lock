@@ -1694,6 +1694,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mydevenv2-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "mydevenv2-server"
 version = "0.1.0"
 dependencies = [
@@ -1707,6 +1716,7 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "mime_guess",
+ "mydevenv2-contract",
  "once_cell",
  "parking_lot",
  "portable-pty",

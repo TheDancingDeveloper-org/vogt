@@ -1,17 +1,8 @@
 use std::time::Instant;
 
+pub use mydevenv2_contract::ActivityState;
 use once_cell::sync::Lazy;
 use regex::bytes::RegexSet;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ActivityState {
-    Idle,
-    Running,
-    WaitingForInput,
-    Errored,
-}
 
 /// Patterns that indicate the program is waiting for the user. Matched against
 /// the *tail* of scrollback with ANSI escape sequences stripped.

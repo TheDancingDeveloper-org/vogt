@@ -6,16 +6,12 @@ use axum::{
     Json,
 };
 use futures_util::Stream;
+use mydevenv2_contract::{OkResponse, SessionDetail, SessionSummary};
 use serde::Deserialize;
-use serde_json::json;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use uuid::Uuid;
 
-use crate::{
-    app::AppState,
-    error::Result,
-    pty::{SessionSpec, SessionSummary},
-};
+use crate::{app::AppState, error::Result, pty::SessionSpec};
 
 pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
     Json(state.sessions.list())
@@ -32,15 +28,14 @@ pub async fn create_session(
 pub async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<SessionDetail>> {
     let s = state.sessions.get(id)?;
     let (snap, pos) = s.snapshot();
-    let body = json!({
-        "summary": s.summary(),
-        "scrollback_pos": pos,
-        "scrollback_base64": base64_encode(&snap),
-    });
-    Ok(Json(body))
+    Ok(Json(SessionDetail {
+        summary: s.summary(),
+        scrollback_pos: pos,
+        scrollback_base64: base64_encode(&snap),
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,25 +47,25 @@ pub async fn rename_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
     Json(req): Json<RenameReq>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<OkResponse>> {
     state.sessions.rename(id, req.name)?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(OkResponse::new(true)))
 }
 
 pub async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<OkResponse>> {
     state.sessions.remove(id)?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(OkResponse::new(true)))
 }
 
 pub async fn kill_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<OkResponse>> {
     state.sessions.kill(id)?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(OkResponse::new(true)))
 }
 
 pub async fn events_stream(
@@ -91,8 +86,8 @@ pub async fn events_stream(
     )
 }
 
-pub async fn healthz() -> Json<serde_json::Value> {
-    Json(json!({ "ok": true }))
+pub async fn healthz() -> Json<OkResponse> {
+    Json(OkResponse::new(true))
 }
 
 fn base64_encode(b: &[u8]) -> String {

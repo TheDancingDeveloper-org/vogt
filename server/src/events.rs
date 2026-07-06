@@ -1,20 +1,5 @@
-use serde::{Deserialize, Serialize};
+pub use mydevenv2_contract::ServerEvent;
 use tokio::sync::broadcast;
-use uuid::Uuid;
-
-use crate::activity::ActivityState;
-
-/// Server-wide events broadcast: session lifecycle + activity transitions.
-/// Per-session PTY output uses its own channel; this is the lightweight
-/// "what's happening overall" stream that backs the SSE /api/events endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
-pub enum ServerEvent {
-    SessionCreated { id: Uuid, name: String },
-    SessionRenamed { id: Uuid, name: String },
-    SessionKilled { id: Uuid, exit_code: Option<i32> },
-    Activity { id: Uuid, state: ActivityState },
-}
 
 #[derive(Clone)]
 pub struct EventBus {

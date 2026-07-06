@@ -15,6 +15,7 @@ name = "mydevenv2_server"
 path = "src/lib.rs"
 
 [dependencies]
+mydevenv2-contract = { path = "../contract" }
 axum = { version = "0.8", features = ["macros", "ws"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

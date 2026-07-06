@@ -10,9 +10,9 @@ use std::{
 };
 
 use bytes::Bytes;
+pub use mydevenv2_contract::{SessionSpec, SessionSummary};
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, PtySize};
-use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -31,33 +31,6 @@ use crate::{
 pub struct OutputChunk {
     pub pos: u64,
     pub data: Bytes,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionSpec {
-    pub name: String,
-    #[serde(default)]
-    pub command: Option<Vec<String>>,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub env: Option<Vec<(String, String)>>,
-    #[serde(default)]
-    pub cols: Option<u16>,
-    #[serde(default)]
-    pub rows: Option<u16>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionSummary {
-    pub id: Uuid,
-    pub name: String,
-    pub activity: ActivityState,
-    pub exit_code: Option<i32>,
-    pub scrollback_bytes: u64,
-    pub cwd: String,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: time::OffsetDateTime,
 }
 
 pub struct Session {
@@ -108,7 +81,7 @@ impl Session {
             exit_code: *self.exit_code.lock(),
             scrollback_bytes: sb.total_written(),
             cwd: self.cwd.clone(),
-            created_at: self.created_at,
+            created_at: format_rfc3339(self.created_at),
         }
     }
 
@@ -172,6 +145,11 @@ impl Session {
         }
         Ok(())
     }
+}
+
+fn format_rfc3339(ts: time::OffsetDateTime) -> String {
+    ts.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| ts.to_string())
 }
 
 pub struct SpawnedSession {

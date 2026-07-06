@@ -31,6 +31,14 @@ export interface SessionDetail {
   scrollback_base64: string;
 }
 
+export interface OkResponse {
+  ok: boolean;
+}
+
+export interface WriteFileResponse extends OkResponse {
+  bytes: number;
+}
+
 export type ServerEvent =
   | { type: "session-created"; id: string; name: string }
   | { type: "session-renamed"; id: string; name: string }
@@ -125,12 +133,12 @@ export const api = {
     req<SessionSummary>("POST", "/api/sessions", s),
   getSession: (id: string) => req<SessionDetail>("GET", `/api/sessions/${id}`),
   renameSession: (id: string, name: string) =>
-    req<{ ok: boolean }>("PATCH", `/api/sessions/${id}`, { name }),
+    req<OkResponse>("PATCH", `/api/sessions/${id}`, { name }),
   killSession: (id: string) =>
-    req<{ ok: boolean }>("POST", `/api/sessions/${id}/kill`),
+    req<OkResponse>("POST", `/api/sessions/${id}/kill`),
   deleteSession: (id: string) =>
-    req<{ ok: boolean }>("DELETE", `/api/sessions/${id}`),
-  health: () => req<{ ok: boolean }>("GET", "/healthz"),
+    req<OkResponse>("DELETE", `/api/sessions/${id}`),
+  health: () => req<OkResponse>("GET", "/healthz"),
 
   listDir: (path = "") =>
     req<FileEntry[]>("GET", `/api/dir?path=${encodeURIComponent(path)}`),
@@ -142,7 +150,7 @@ export const api = {
   readFile: (path: string) =>
     req<FileRead>("GET", `/api/files?path=${encodeURIComponent(path)}`),
   writeFile: (path: string, content: string, create_parents = false) =>
-    req<{ ok: boolean; bytes: number }>("PUT", "/api/files", {
+    req<WriteFileResponse>("PUT", "/api/files", {
       path,
       content,
       create_parents,

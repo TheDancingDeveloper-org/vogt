@@ -7,7 +7,8 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use serde::{Deserialize, Serialize};
+use mydevenv2_contract::{BranchInfo, DiffResp, GitStatus, LogEntry, StatusEntry, StatusKind};
+use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::{
@@ -86,36 +87,6 @@ fn requested_repo_label(repo: &str) -> String {
 pub struct RepoQuery {
     #[serde(default)]
     pub repo: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GitStatus {
-    pub repo: String,
-    pub is_repo: bool,
-    pub branch: String,
-    pub ahead: u32,
-    pub behind: u32,
-    pub entries: Vec<StatusEntry>,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct StatusEntry {
-    pub path: String,
-    /// XY codes per `git status --porcelain=v1` (index, worktree).
-    pub index: String,
-    pub worktree: String,
-    pub kind: StatusKind,
-}
-
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum StatusKind {
-    Untracked,
-    Modified,
-    Staged,
-    Conflicted,
-    Renamed,
-    Deleted,
 }
 
 pub async fn status(
@@ -215,16 +186,6 @@ pub struct DiffQuery {
     pub staged: bool,
 }
 
-#[derive(Debug, Serialize)]
-pub struct DiffResp {
-    pub path: String,
-    /// Working-tree (or staged) content of the file. Empty string if the
-    /// file has been deleted.
-    pub current: String,
-    /// HEAD content for diff. Empty string if the file is newly added.
-    pub head: String,
-}
-
 pub async fn diff(
     State(state): State<Arc<AppState>>,
     Query(q): Query<DiffQuery>,
@@ -264,15 +225,6 @@ pub struct LogQuery {
     pub n: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct LogEntry {
-    pub hash: String,
-    pub short: String,
-    pub author: String,
-    pub date: String,
-    pub subject: String,
-}
-
 pub async fn log(
     State(state): State<Arc<AppState>>,
     Query(q): Query<LogQuery>,
@@ -309,12 +261,6 @@ pub async fn log(
         });
     }
     Ok(Json(out))
-}
-
-#[derive(Debug, Serialize)]
-pub struct BranchInfo {
-    pub current: String,
-    pub all: Vec<String>,
 }
 
 pub async fn branch(

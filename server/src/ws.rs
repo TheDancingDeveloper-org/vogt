@@ -8,8 +8,8 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
+use mydevenv2_contract::{ClientControl, ServerControl};
 use serde::Deserialize;
-use serde_json::json;
 use subtle::ConstantTimeEq;
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
@@ -23,20 +23,6 @@ pub struct AttachQuery {
     /// first text frame `{"type":"auth","token":"..."}`. Tokens passed here
     /// land in proxy/access logs and shouldn't be relied on for new clients.
     pub token: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
-enum ClientControl {
-    Resize {
-        cols: u16,
-        rows: u16,
-    },
-    Ping,
-    /// First-frame auth. Anything else before this is rejected.
-    Auth {
-        token: String,
-    },
 }
 
 /// Chunk size for streaming the scrollback snapshot back to the client.
@@ -150,14 +136,13 @@ async fn handle_socket(
     let (snapshot, snap_pos) = session.snapshot();
 
     // Send a meta JSON header so clients know the session ID and current pos.
-    let meta = json!({
-        "type": "snapshot-start",
-        "session_id": session.id,
-        "scrollback_bytes": snapshot.len(),
-        "scrollback_pos": snap_pos,
-    });
+    let meta = ServerControl::SnapshotStart {
+        session_id: Some(session.id),
+        scrollback_bytes: snapshot.len() as u64,
+        scrollback_pos: snap_pos,
+    };
     if sink
-        .send(Message::Text(meta.to_string().into()))
+        .send(Message::Text(serde_json::to_string(&meta).unwrap().into()))
         .await
         .is_err()
     {
@@ -176,7 +161,9 @@ async fn handle_socket(
     }
     if sink
         .send(Message::Text(
-            json!({ "type": "snapshot-done" }).to_string().into(),
+            serde_json::to_string(&ServerControl::SnapshotDone)
+                .unwrap()
+                .into(),
         ))
         .await
         .is_err()
@@ -246,12 +233,11 @@ async fn handle_socket(
                     }
                 }
                 Err(RecvError::Lagged(_n)) => {
+                    let lag = ServerControl::Lag {
+                        note: "client too slow; reattach".into(),
+                    };
                     let _ = sink
-                        .send(Message::Text(
-                            json!({"type":"lag","note":"client too slow; reattach"})
-                                .to_string()
-                                .into(),
-                        ))
+                        .send(Message::Text(serde_json::to_string(&lag).unwrap().into()))
                         .await;
                     break;
                 }

@@ -4,6 +4,7 @@
 use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
+use mydevenv2_contract::SessionDetail;
 use mydevenv2_server::{app::router, Config};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
@@ -398,6 +399,44 @@ async fn rename_session() {
         .await
         .unwrap();
     assert_eq!(detail["summary"]["name"], "after");
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn get_session_returns_typed_detail_shape() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "detail-shape" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap();
+
+    let detail: SessionDetail = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(detail.summary.id.to_string(), id);
+    assert_eq!(detail.summary.name, "detail-shape");
+    assert!(detail.summary.created_at.contains('T'));
 
     let _ = client
         .delete(format!("{base}/api/sessions/{id}"))

@@ -3371,6 +3371,7 @@ dependencies = [
  "gpui",
  "image",
  "log",
+ "mydevenv2-contract",
  "reqwest",
  "serde",
  "serde_json",
@@ -3382,6 +3383,15 @@ dependencies = [
  "url",
  "uuid",
  "vte",
+]
+
+[[package]]
+name = "mydevenv2-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

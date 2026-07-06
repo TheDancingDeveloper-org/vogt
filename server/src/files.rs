@@ -8,7 +8,8 @@ use axum::{
     Json,
 };
 use base64::Engine as _;
-use serde::{Deserialize, Serialize};
+use mydevenv2_contract::{FileEntry, FileRead, SearchHit, TreeNode, WriteFileResponse, WriteReq};
+use serde::Deserialize;
 use tokio::process::Command;
 use tokio_util::io::ReaderStream;
 
@@ -24,14 +25,6 @@ fn rel_to(root: &Path, p: &Path) -> String {
         Ok(r) => r.to_string_lossy().into_owned(),
         Err(_) => p.to_string_lossy().into_owned(),
     }
-}
-
-#[derive(Debug, Serialize)]
-pub struct FileEntry {
-    pub name: String,
-    pub path: String,
-    pub is_dir: bool,
-    pub size: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,17 +80,6 @@ pub async fn list_dir(
 #[derive(Debug, Deserialize)]
 pub struct ReadQuery {
     pub path: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FileRead {
-    pub path: String,
-    pub size: u64,
-    /// UTF-8 content. If the file isn't valid UTF-8, the bytes are returned
-    /// base64-encoded in `content_base64` instead and `content` is null.
-    pub content: Option<String>,
-    pub content_base64: Option<String>,
-    pub is_binary: bool,
 }
 
 /// Hard cap on a single read — refuse if larger so we don't OOM serving a
@@ -189,25 +171,10 @@ pub async fn download_file(
     Ok(response)
 }
 
-#[derive(Debug, Deserialize)]
-pub struct WriteReq {
-    pub path: String,
-    /// UTF-8 text body. Used when `content_base64` is absent.
-    #[serde(default)]
-    pub content: String,
-    /// Base64-encoded raw bytes. Takes precedence over `content` and lets the
-    /// native client upload arbitrary (binary) files, not just UTF-8 text.
-    #[serde(default)]
-    pub content_base64: Option<String>,
-    /// If true, create parent dirs; default false.
-    #[serde(default)]
-    pub create_parents: bool,
-}
-
 pub async fn write_file(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WriteReq>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<WriteFileResponse>> {
     // Decode the payload first so a bad base64 body fails before any mkdir.
     let bytes: Vec<u8> = match &req.content_base64 {
         Some(b64) => base64::engine::general_purpose::STANDARD
@@ -229,15 +196,7 @@ pub async fn write_file(
     let p = workspace_path::resolve_for_write(&state.config.workspace_root, &req.path)?;
     let n = bytes.len();
     tokio::fs::write(&p, &bytes).await?;
-    Ok(Json(serde_json::json!({ "ok": true, "bytes": n })))
-}
-
-#[derive(Debug, Serialize)]
-pub struct TreeNode {
-    pub name: String,
-    pub path: String,
-    pub is_dir: bool,
-    pub children: Option<Vec<TreeNode>>,
+    Ok(Json(WriteFileResponse { ok: true, bytes: n }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -313,13 +272,6 @@ pub struct SearchQuery {
     /// Cap hits returned. Server also enforces a hard ceiling.
     #[serde(default)]
     pub max: Option<usize>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SearchHit {
-    pub path: String,
-    pub line: u64,
-    pub text: String,
 }
 
 const SEARCH_HARD_CAP: usize = 500;

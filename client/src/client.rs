@@ -129,17 +129,14 @@ impl ApiClient {
     /// Fetch a session's summary plus its base64 scrollback snapshot, decoded.
     pub async fn get_session(&self, id: Uuid) -> Result<SessionWithScrollback> {
         use base64::Engine as _;
-        let v: serde_json::Value = self.get_json(&format!("/api/sessions/{id}")).await?;
-        let summary: SessionSummary =
-            serde_json::from_value(v["summary"].clone()).context("decode session summary")?;
-        let scrollback_pos = v["scrollback_pos"].as_u64().unwrap_or(0);
-        let scrollback = v["scrollback_base64"]
-            .as_str()
-            .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+        let detail: crate::protocol::SessionDetail =
+            self.get_json(&format!("/api/sessions/{id}")).await?;
+        let scrollback = base64::engine::general_purpose::STANDARD
+            .decode(detail.scrollback_base64.as_bytes())
             .unwrap_or_default();
         Ok(SessionWithScrollback {
-            summary,
-            scrollback_pos,
+            summary: detail.summary,
+            scrollback_pos: detail.scrollback_pos,
             scrollback,
         })
     }
