@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { openAttach } from "./api";
+import { readClipboardText, writeClipboardText } from "./clipboard";
 import { sessionsStore } from "./store";
 import { getTheme, TERMINAL_THEME_EVENT } from "./terminalThemes";
 
@@ -349,14 +350,11 @@ const TerminalView: Component<Props> = (props) => {
       const sel = term?.getSelection() ?? "";
       if (!sel) return false;
 
-      // First, check if we have clipboard permissions in secure contexts
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        try {
-          await navigator.clipboard.writeText(sel);
-          return true;
-        } catch (err) {
-          console.warn("Clipboard API failed, trying fallback:", err);
-        }
+      try {
+        await writeClipboardText(sel);
+        return true;
+      } catch (err) {
+        console.warn("Clipboard write failed, trying fallback:", err);
       }
 
       // Fallback: use a hidden textarea + execCommand for older mobile WebViews
@@ -392,11 +390,10 @@ const TerminalView: Component<Props> = (props) => {
     const pasteFromClipboard = async () => {
       let text = "";
       try {
-        text = await navigator.clipboard.readText();
+        text = await readClipboardText();
       } catch {
-        // Clipboard API unavailable / denied (common in Capacitor WebView).
-        // Fall back to a textarea modal — window.prompt has a character limit
-        // that silently truncates long tokens (e.g. infisical auth tokens).
+        // Fall back to a textarea modal if the browser/native bridge refused
+        // the clipboard read.
         const v = await promptPaste();
         if (v == null) return;
         text = v;

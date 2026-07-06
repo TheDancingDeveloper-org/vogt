@@ -30,10 +30,37 @@ function installVisualViewportSizing() {
   window.visualViewport?.addEventListener("scroll", apply);
 }
 
+function installNativeInsetsFallback() {
+  const apply = () => {
+    const root = document.documentElement;
+    const dataset = root.dataset as DOMStringMap & {
+      nativeInsetTop?: string;
+      nativeInsetRight?: string;
+      nativeInsetBottom?: string;
+      nativeInsetLeft?: string;
+    };
+    const keys = {
+      top: "nativeInsetTop",
+      right: "nativeInsetRight",
+      bottom: "nativeInsetBottom",
+      left: "nativeInsetLeft",
+    } as const;
+    for (const side of ["top", "right", "bottom", "left"] as const) {
+      const key = keys[side];
+      const raw = dataset[key];
+      root.style.setProperty(`--native-safe-${side}`, raw ? `${raw}px` : "0px");
+    }
+  };
+
+  apply();
+  window.addEventListener("mydevenv2:native-insets", apply);
+}
+
 // Register the SW eagerly so push subscriptions can be created from the
 // Settings modal without waiting for first-paint.
 void registerServiceWorker();
 installVisualViewportSizing();
+installNativeInsetsFallback();
 
 // HashRouter avoids needing an SPA fallback configured on the embedding
 // Rust server: every navigation stays under index.html.

@@ -586,6 +586,26 @@ impl Render for TerminalView {
                     }
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|view, _ev: &MouseDownEvent, window, cx| {
+                    window.focus(&view.focus_handle);
+                    if let Some(text) = view.term.selected_text() {
+                        if !text.is_empty() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            view.term.clear_selection();
+                            view.invalidate_frame();
+                            cx.notify();
+                            return;
+                        }
+                    }
+                    if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                        if !text.is_empty() {
+                            view.send_input(text.into_bytes());
+                        }
+                    }
+                }),
+            )
             .on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _window, cx| {
                 if ev.pressed_button == Some(MouseButton::Left) {
                     if let Some((row, col)) = view.cell_at(ev.position) {
