@@ -1170,6 +1170,51 @@ textarea {
   font-size: 12px;
   flex: 0 0 auto;
 }
+.gui-label-input {
+  flex: 0 0 140px;
+}
+.gui-status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.gui-status-chip.online {
+  color: #7ee787;
+}
+.gui-status-chip.offline {
+  color: var(--fg-muted);
+}
+.gui-message {
+  padding: 6px 10px 0;
+}
+.gui-launchers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--bd);
+  background: rgba(255, 255, 255, 0.02);
+}
+.gui-launcher {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.gui-launcher-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.gui-launcher-main .meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .gui-frame {
   flex: 1;
   min-height: 0;
@@ -1193,6 +1238,17 @@ textarea {
   gap: 8px;
   align-items: center;
   font-size: 12px;
+}
+.gui-proc-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gui-proc-label {
+  color: var(--fg);
+  font-weight: 600;
 }
 .meta {
   color: var(--fg-muted);

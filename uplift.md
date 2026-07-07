@@ -46,25 +46,22 @@ backlog.
 1. **Richer push-notification controls**
    Per-session/task rules, quiet hours, and digests.
 
-2. **Mature the GUI tab**
-   Saved launchers, process labeling, and stream health visibility.
-
-3. **Improve mobile ergonomics in the web surface**
+2. **Improve mobile ergonomics in the web surface**
    Reconnect flows, tab management, terminal use, and touch-first editing.
 
-4. **Improve auth and onboarding UX**
+3. **Improve auth and onboarding UX**
    Bearer token setup and device-local profile handling.
 
-5. **Add lightweight admin / operational visibility in-app**
+4. **Add lightweight admin / operational visibility in-app**
    Sessions, push, GUI, auth-broker, and storage state.
 
-6. **User-configurable retention and quota controls**
+5. **User-configurable retention and quota controls**
    History, scrollback, prompts, and storage budgets.
 
-7. **Workspace search improvements**
+6. **Workspace search improvements**
    Filename/symbol search and tighter editor integration.
 
-8. **Stronger workspace awareness**
+7. **Stronger workspace awareness**
    Detected projects, task-runner shortcuts, and language-specific quick
    actions.
 
