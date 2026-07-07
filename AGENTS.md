@@ -189,4 +189,5 @@ The sync mode is `two-way-safe`. VCS metadata, machine-local Claude settings, ge
 
 ## 9. Status / backlog
 
-Tracked inline in `README.md` and `uplift.md`. Move to Forgejo issues if it gets unwieldy.
+Open backlog lives only in `uplift.md`. `README.md` carries shipped status and
+phase notes. Move backlog items to Forgejo issues if they become unwieldy.

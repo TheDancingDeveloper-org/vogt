@@ -156,19 +156,5 @@ that tag.
 - [ ] Real TabStrip / multiple simultaneous terminal panes in the native UI
 - [ ] In-app file editor / git diff tabs
 
-See `UPLIFT.md` for the June 2026 GUI uplift details (maps each change to its
-original request).
-
-## Native app improvement backlog
-
-1. Multiple terminal panes: keep attached terminal views alive while switching
-   sessions and later split panes (tabs + close-without-kill already done).
-2. In-app editing: file preview is read-only; add edit/save and git diff views.
-3. Button tooltips: `fluent_primitives::Button` needs a `.tooltip()` builder
-   (we own FluentGUI — add it there and re-pin the rev). Icon-only buttons
-   currently rely on labels/context.
-4. Native polish: OS keychain credential storage, waiting-for-input
-   notifications, app/version/release surface, tray/menu actions.
-5. Desktop validation: keep the GPUI-free protocol/terminal tests fast; add GUI
-   smoke coverage for first-run settings, attach, typing, resize, reconnect,
-   upload, and release packaging.
+This file is archival for the deprecated native desktop client. Open MyDevEnv2
+backlog items live only in `../uplift.md`.
