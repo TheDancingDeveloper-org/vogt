@@ -44,7 +44,8 @@ backlog.
    Per-session/task rules, quiet hours, and digests.
 
 2. **Improve mobile ergonomics in the web surface**
-   Reconnect flows, tab management, terminal use, and touch-first editing.
+   Reconnect visibility and mobile tab switching are better; remaining work is
+   deeper terminal-use polish and touch-first editing ergonomics.
 
 ---
 

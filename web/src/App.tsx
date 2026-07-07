@@ -107,6 +107,7 @@ const App: Component = () => {
   const params = useParams<{ id?: string; path?: string }>();
   const location = useLocation();
   const [drawerOpen, setDrawerOpen] = createSignal(false);
+  const [mobileTabsOpen, setMobileTabsOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
   const [templateSelectorOpen, setTemplateSelectorOpen] = createSignal(false);
@@ -176,6 +177,7 @@ const App: Component = () => {
 
   const [publicCfg, setPublicCfg] = createSignal<PublicConfig | null>(null);
   const layoutMode = getLayoutMode();
+  const activeTab = () => tabsStore.tabs.find((tab) => tab.id === tabsStore.active) ?? null;
 
   // Check if we're in IDE mode
   const isIDEMode = layoutMode === "ide";
@@ -268,6 +270,13 @@ const App: Component = () => {
     } catch (e) {
       showToast(`create failed: ${(e as Error).message}`, { kind: "error" });
     }
+  };
+
+  const retryRealtimeConnection = async () => {
+    stopEventStream();
+    await refreshSessions();
+    startEventStream();
+    showToast("Refreshing sessions and event stream...");
   };
 
   const onCreate = async (cwd?: string, template?: SessionTemplate) => {
@@ -563,6 +572,12 @@ const App: Component = () => {
             onPointerDown={() => setDrawerOpen(false)}
           />
         </Show>
+        <Show when={mobileTabsOpen()}>
+          <div
+            class="drawer-scrim"
+            onPointerDown={() => setMobileTabsOpen(false)}
+          />
+        </Show>
 
         <aside class={`drawer ${drawerOpen() ? "open" : ""}`}>
           <div class="drawer-header">
@@ -713,6 +728,14 @@ const App: Component = () => {
           >
             +
           </button>
+          <button
+            class="menu-btn"
+            onClick={() => setMobileTabsOpen(true)}
+            title="Show open tabs"
+            aria-label="Show open tabs"
+          >
+            {tabsStore.tabs.length}
+          </button>
           <For each={tabsStore.tabs}>
             {(t) => (
               <div
@@ -770,6 +793,17 @@ const App: Component = () => {
         </div>
 
         <main class="main">
+          <Show when={!isConnected() && getToken()}>
+            <div class="connection-banner">
+              <div class="connection-banner-copy">
+                <strong>Realtime connection lost</strong>
+                <span>{sessionsError() || "Trying to reconnect to the session event stream."}</span>
+              </div>
+              <button type="button" onClick={() => void retryRealtimeConnection()}>
+                Retry now
+              </button>
+            </div>
+          </Show>
           <Show when={editorWorkspaceActive()}>
             <EditorWorkspace
               promptPath={promptUser}
@@ -877,6 +911,59 @@ const App: Component = () => {
           />
         </main>
       </div>
+
+      <Show when={mobileTabsOpen()}>
+        <div class="mobile-tabs-sheet">
+          <div class="mobile-tabs-header">
+            <div>
+              <strong>Open tabs</strong>
+              <div class="mobile-tabs-meta">
+                {tabsStore.tabs.length} total
+                <Show when={activeTab()}>
+                  {(tab) => <span> • active: {tab().label}</span>}
+                </Show>
+              </div>
+            </div>
+            <button type="button" onClick={() => setMobileTabsOpen(false)}>
+              Close
+            </button>
+          </div>
+          <div class="mobile-tabs-list">
+            <For each={tabsStore.tabs}>
+              {(tab) => (
+                <div
+                  class={`mobile-tab-row ${tabsStore.active === tab.id ? "active" : ""}`}
+                >
+                  <button
+                    type="button"
+                    class="mobile-tab-main"
+                    onClick={() => {
+                      focusTab(tab.id);
+                      navigate(pathFor(tab));
+                      setMobileTabsOpen(false);
+                    }}
+                  >
+                    <span class="mobile-tab-title">
+                      <Show when={tab.kind === "terminal"}>
+                        <span class={`activity-dot ${tabActivityClass(tab) ?? "idle"}`} />
+                      </Show>
+                      {tab.label}
+                    </span>
+                    <span class="mobile-tab-kind">{tab.kind}</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="mobile-tab-close"
+                    onClick={() => void requestCloseTab(tab.id)}
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
+            </For>
+          </div>
+        </div>
+      </Show>
 
       <Settings
         open={settingsOpen()}

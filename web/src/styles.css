@@ -285,6 +285,128 @@ textarea {
   .tab-strip .menu-btn {
     display: inline-flex;
   }
+  .connection-banner {
+    padding-right: max(12px, var(--safe-right));
+  }
+  .mobile-tabs-sheet {
+    display: flex;
+    flex-direction: column;
+    padding-bottom: var(--safe-bottom);
+  }
+}
+
+.connection-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--bd);
+  background: rgba(248, 81, 73, 0.08);
+}
+
+.connection-banner-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.connection-banner-copy strong {
+  font-size: 12px;
+}
+
+.connection-banner-copy span {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.mobile-tabs-sheet {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 24;
+  display: none;
+  max-height: min(70vh, 560px);
+  background: var(--bg-elev);
+  border-top: 1px solid var(--bd-strong);
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.mobile-tabs-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid var(--bd);
+}
+
+.mobile-tabs-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.mobile-tabs-list {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  max-height: calc(min(70vh, 560px) - 60px);
+}
+
+.mobile-tab-row {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.mobile-tab-row.active {
+  background: rgba(88, 166, 255, 0.08);
+}
+
+.mobile-tab-main,
+.mobile-tab-close {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.mobile-tab-main {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  text-align: left;
+}
+
+.mobile-tab-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-tab-kind {
+  flex: 0 0 auto;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+
+.mobile-tab-close {
+  flex: 0 0 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-muted);
 }
 
 .tab {
