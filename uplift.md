@@ -14,8 +14,11 @@ backlog.
    `tokio-tungstenite`, `web-push`, `portable-pty`, and `toml`.
 
 2. **Runtime image reproducibility hardening** (`Dockerfile`)
-   Replace floating install-script/package-feed assumptions with more deliberate
-   pinning and checksum validation where practical.
+   The image now pins and checksum-verifies several downloaded tool archives
+   and drops the NodeSource / Infisical shell-pipe installers. Remaining work
+   is tightening still-floating third-party package sources (notably some apt
+   feeds and `cargo install` tools) and validating the full build on a
+   BuildKit-capable Docker host.
 
 3. **Bearer-token risk boundary** (`server/src/auth.rs`, `deploy/docker-compose.yml`)
    One token still gates PTY access, file writes, git inspection, GUI launch,

@@ -17,6 +17,13 @@ ARG RUST_IMAGE=rust:1.95-bookworm
 ARG PNPM_VERSION=10.18.0
 ARG SCCACHE_VERSION=0.10.0
 ARG SELKIES_VERSION=1.6.2
+ARG RUST_TOOLCHAIN=1.95.0
+ARG SCCACHE_SHA256=1fbb35e135660d04a2d5e42b59c7874d39b3deb17de56330b25b713ec59f849b
+ARG STEP_CLI_SHA256=5845c181251ffe43ca2331bc171e0b92324a71be9cf4ef76cd6fbbba4f2a3cc6
+ARG GRADLE_SHA256=7a00d51fb93147819aab76024feece20b6b84e420694101f276be952e08bef03
+ARG ANDROID_CMDLINE_TOOLS_SHA256=04453066b540409d975c676d781da1477479dde3761310f1a7eb92a1dfb15af7
+ARG RCLONE_VERSION=1.74.3
+ARG RCLONE_SHA256=dbee7ccd7a5d617e4ed4cd4555c16669b511abfe8d31164f61be35ac9e999bd2
 
 # ─── Stage 1: web bundle ────────────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS web-build
@@ -74,9 +81,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Node 22 + pnpm. Override NPM_CONFIG_PREFIX for this one install so pnpm
 # lands in /usr/local (survives the runtime /home/sprooty bind mount).
 # User-installed globals go to $NPM_CONFIG_PREFIX (/home/sprooty/.npm-global).
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ARG PNPM_VERSION
+ARG NODE_MAJOR=22
+RUN install -m 0755 -d /usr/share/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+       | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+    && chmod 0644 /usr/share/keyrings/nodesource.gpg \
+    && arch="$(dpkg --print-architecture)" \
+    && printf 'Types: deb\nURIs: https://deb.nodesource.com/node_%s.x\nSuites: nodistro\nComponents: main\nArchitectures: %s\nSigned-By: /usr/share/keyrings/nodesource.gpg\n' \
+       "${NODE_MAJOR}" "${arch}" > /etc/apt/sources.list.d/nodesource.sources \
+    && printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' \
+       > /etc/apt/preferences.d/nodejs \
+    && printf 'Package: nsolid\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' \
+       > /etc/apt/preferences.d/nsolid \
+    && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g --prefix=/usr/local pnpm \
+    && npm install -g --prefix=/usr/local "pnpm@${PNPM_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI (DooD pattern — docker.sock mounted from host)
@@ -113,10 +133,23 @@ RUN . /etc/os-release \
     && rm -rf /var/lib/apt/lists/*
 
 # rclone
-RUN curl -fsSL https://rclone.org/install.sh | bash
+ARG RCLONE_VERSION
+ARG RCLONE_SHA256
+RUN curl -fsSL "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip" \
+       -o /tmp/rclone.zip \
+    && echo "${RCLONE_SHA256}  /tmp/rclone.zip" | sha256sum -c - \
+    && unzip -q /tmp/rclone.zip -d /tmp/rclone \
+    && install -m 0755 "/tmp/rclone/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone \
+    && rm -rf /tmp/rclone /tmp/rclone.zip
 
 # Infisical CLI
-RUN curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | bash \
+RUN install -m 0755 -d /usr/share/keyrings \
+    && curl -1sLf https://artifacts-cli.infisical.com/infisical.gpg \
+       | gpg --dearmor -o /usr/share/keyrings/infisical-archive-keyring.gpg \
+    && chmod 0644 /usr/share/keyrings/infisical-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/infisical-archive-keyring.gpg] https://artifacts-cli.infisical.com/deb stable main" \
+       > /etc/apt/sources.list.d/infisical.list \
+    && apt-get update \
     && apt-get install -y --no-install-recommends infisical \
     && rm -rf /var/lib/apt/lists/*
 
@@ -124,9 +157,11 @@ RUN curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | bash \
 # the step-ca on Node B (`step ssh certificate ...`), the only path to host-shell
 # SSH for in-pod agents. Installed from the official .deb (lands at /usr/bin/step).
 ARG STEP_CLI_VERSION=0.30.6
+ARG STEP_CLI_SHA256
 RUN curl -fsSL \
         "https://github.com/smallstep/cli/releases/download/v${STEP_CLI_VERSION}/step-cli_${STEP_CLI_VERSION}-1_amd64.deb" \
         -o /tmp/step-cli.deb \
+    && echo "${STEP_CLI_SHA256}  /tmp/step-cli.deb" | sha256sum -c - \
     && apt-get install -y --no-install-recommends /tmp/step-cli.deb \
     && rm -f /tmp/step-cli.deb \
     && rm -rf /var/lib/apt/lists/*
@@ -174,16 +209,20 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 
 USER sprooty
 WORKDIR /home/sprooty
+ARG RUST_TOOLCHAIN
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-       | sh -s -- -y --default-toolchain stable --profile minimal \
+       | sh -s -- -y --default-toolchain ${RUST_TOOLCHAIN} --profile minimal \
            --component rustfmt --component clippy \
     && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-pc-windows-gnu \
-    && cargo install cargo-deb cargo-zigbuild cargo-xwin cargo-watch
+    && cargo install --locked cargo-deb cargo-zigbuild cargo-xwin cargo-watch
 
 # sccache (apt package lacks Redis support; pull from GitHub)
 ARG SCCACHE_VERSION
+ARG SCCACHE_SHA256
 RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-       | tar -xz -C /tmp \
+       -o /tmp/sccache.tar.gz \
+    && echo "${SCCACHE_SHA256}  /tmp/sccache.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/sccache.tar.gz -C /tmp \
     && mv "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /home/sprooty/.cargo/bin/sccache \
     && chmod +x /home/sprooty/.cargo/bin/sccache
 
@@ -193,11 +232,13 @@ USER root
 # survive the /home/sprooty bind mount at runtime. gradle finds the JDK via
 # `java` on PATH, so no JAVA_HOME juggling needed.
 ARG GRADLE_VERSION=8.12
+ARG GRADLE_SHA256
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openjdk-21-jdk-headless \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
        -o /tmp/gradle.zip \
+    && echo "${GRADLE_SHA256}  /tmp/gradle.zip" | sha256sum -c - \
     && unzip -q /tmp/gradle.zip -d /opt \
     && ln -s "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle \
     && rm /tmp/gradle.zip
@@ -212,10 +253,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Package set per the dev-pod spec: cmdline-tools;latest, platform-tools,
 # platforms;android-35 + android-36, build-tools;35.0.0 + 36.0.0.
 ARG ANDROID_CMDLINE_TOOLS_VERSION=14742923
+ARG ANDROID_CMDLINE_TOOLS_SHA256
 RUN install -d /opt/android-sdk/cmdline-tools \
     && curl -fsSL \
         "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" \
         -o /tmp/cmdline-tools.zip \
+    && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/cmdline-tools.zip" | sha256sum -c - \
     && unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools \
     # The zip unpacks to a top-level cmdline-tools/; sdkmanager expects it at
     # cmdline-tools/latest/.
