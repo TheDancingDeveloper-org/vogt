@@ -43,31 +43,28 @@ backlog.
 
 ## Frontend / PWA
 
-1. **Decide and implement installed-PWA offline behavior**
-   (`web/public/sw.js`, app/release notes)
-
-2. **Richer push-notification controls**
+1. **Richer push-notification controls**
    Per-session/task rules, quiet hours, and digests.
 
-3. **Mature the GUI tab**
+2. **Mature the GUI tab**
    Saved launchers, process labeling, and stream health visibility.
 
-4. **Improve mobile ergonomics in the web surface**
+3. **Improve mobile ergonomics in the web surface**
    Reconnect flows, tab management, terminal use, and touch-first editing.
 
-5. **Improve auth and onboarding UX**
+4. **Improve auth and onboarding UX**
    Bearer token setup and device-local profile handling.
 
-6. **Add lightweight admin / operational visibility in-app**
+5. **Add lightweight admin / operational visibility in-app**
    Sessions, push, GUI, auth-broker, and storage state.
 
-7. **User-configurable retention and quota controls**
+6. **User-configurable retention and quota controls**
    History, scrollback, prompts, and storage budgets.
 
-8. **Workspace search improvements**
+7. **Workspace search improvements**
    Filename/symbol search and tighter editor integration.
 
-9. **Stronger workspace awareness**
+8. **Stronger workspace awareness**
    Detected projects, task-runner shortcuts, and language-specific quick
    actions.
 

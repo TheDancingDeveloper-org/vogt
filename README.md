@@ -81,7 +81,7 @@ client release kept in Forgejo for historical reference.
 - Server: VAPID web-push (any modern browser PushManager subscription, including installed-PWA iOS Safari 16.4+) + FCM HTTP v1 (native Capacitor tokens). Service-account JWT → OAuth2 with token caching. Subscriptions persist as JSON under `state_dir`; auto-prune on 404/410.
 - Server routes: `POST /api/push/subscribe`, `POST /api/push/unsubscribe`, `GET /api/push/list`, `POST /api/push/test`, `GET /api/push/public-key` (public — no token needed).
 - Activity watcher: fires push to all subscriptions when any session enters `waiting-for-input`.
-- Web: `/sw.js` + `/manifest.webmanifest` for PWA install + push event handling. Settings modal gains "Enable push" / "Send test" with current-permission visibility.
+- Web: `/sw.js` + `/manifest.webmanifest` for PWA install + push event handling. Installed PWAs show an explicit offline fallback page instead of pretending to support disconnected use. Settings modal gains "Enable push" / "Send test" with current-permission visibility.
 - Mobile: `mobile/` Capacitor 8 Android wrap (`com.sprooty.mydevenv2`). WebView loads `https://mydevenv2.sprooty.com` directly so UI updates ship without rebuilding the APK. `@capacitor/push-notifications` registers a native FCM token at first launch; the same `/api/push/subscribe` endpoint accepts both transports.
 - CI: `mobile-apk` builds the debug APK on pushes handled by `.woodpecker/server.yml` and uploads it to the Forgejo release tag `apk-latest` as `mydevenv2-debug.apk`.
 
