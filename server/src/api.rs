@@ -1,7 +1,8 @@
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{convert::Infallible, path::Path as FsPath, sync::Arc, time::Duration};
 
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     response::{sse::Event, Sse},
     Json,
 };
@@ -92,6 +93,35 @@ pub async fn healthz() -> Json<OkResponse> {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ReadinessResponse {
+    pub ok: bool,
+    pub checks: Vec<ReadinessCheck>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReadinessCheck {
+    pub name: &'static str,
+    pub ok: bool,
+    pub detail: String,
+}
+
+pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadinessResponse>) {
+    let mut checks = Vec::with_capacity(4);
+    checks.push(check_workspace_root(&state.config.workspace_root).await);
+    checks.push(check_state_dir(&state.config.state_dir).await);
+    checks.push(check_tailscale().await);
+    checks.push(check_gui(state.config.gui_stream_url.is_some()).await);
+
+    let ok = checks.iter().all(|check| check.ok);
+    let status = if ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(ReadinessResponse { ok, checks }))
+}
+
+#[derive(Debug, Serialize)]
 pub struct OperationalStatus {
     pub version: &'static str,
     pub session_count: usize,
@@ -155,4 +185,216 @@ pub async fn operational_status(
             workspace_root: state.config.workspace_root.display().to_string(),
         },
     }))
+}
+
+async fn check_workspace_root(path: &FsPath) -> ReadinessCheck {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.is_dir() => match tokio::fs::read_dir(path).await {
+            Ok(_) => ReadinessCheck {
+                name: "workspace_root",
+                ok: true,
+                detail: format!("readable directory at {}", path.display()),
+            },
+            Err(err) => ReadinessCheck {
+                name: "workspace_root",
+                ok: false,
+                detail: format!("cannot read {}: {err}", path.display()),
+            },
+        },
+        Ok(_) => ReadinessCheck {
+            name: "workspace_root",
+            ok: false,
+            detail: format!("{} is not a directory", path.display()),
+        },
+        Err(err) => ReadinessCheck {
+            name: "workspace_root",
+            ok: false,
+            detail: format!("cannot stat {}: {err}", path.display()),
+        },
+    }
+}
+
+async fn check_state_dir(path: &FsPath) -> ReadinessCheck {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.is_dir() => {
+            let probe = path.join(".readyz-writecheck");
+            match tokio::fs::write(&probe, b"ok").await {
+                Ok(()) => {
+                    let _ = tokio::fs::remove_file(&probe).await;
+                    ReadinessCheck {
+                        name: "state_dir",
+                        ok: true,
+                        detail: format!("writable directory at {}", path.display()),
+                    }
+                }
+                Err(err) => ReadinessCheck {
+                    name: "state_dir",
+                    ok: false,
+                    detail: format!("cannot write {}: {err}", probe.display()),
+                },
+            }
+        }
+        Ok(_) => ReadinessCheck {
+            name: "state_dir",
+            ok: false,
+            detail: format!("{} is not a directory", path.display()),
+        },
+        Err(err) => ReadinessCheck {
+            name: "state_dir",
+            ok: false,
+            detail: format!("cannot stat {}: {err}", path.display()),
+        },
+    }
+}
+
+async fn check_tailscale() -> ReadinessCheck {
+    if std::env::var("TAILSCALE_AUTH_KEY")
+        .ok()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        return ReadinessCheck {
+            name: "tailscale",
+            ok: true,
+            detail: "not configured".into(),
+        };
+    }
+
+    if !FsPath::new("/var/run/tailscale/tailscaled.sock").exists() {
+        return ReadinessCheck {
+            name: "tailscale",
+            ok: false,
+            detail: "tailscaled socket missing".into(),
+        };
+    }
+
+    let output = match tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::process::Command::new("tailscale")
+            .args(["status", "--json"])
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
+            return ReadinessCheck {
+                name: "tailscale",
+                ok: false,
+                detail: format!("tailscale status failed: {err}"),
+            };
+        }
+        Err(_) => {
+            return ReadinessCheck {
+                name: "tailscale",
+                ok: false,
+                detail: "tailscale status timed out".into(),
+            };
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return ReadinessCheck {
+            name: "tailscale",
+            ok: false,
+            detail: format!(
+                "tailscale status exited {}: {}",
+                output.status,
+                stderr.trim()
+            ),
+        };
+    }
+
+    let status: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(status) => status,
+        Err(err) => {
+            return ReadinessCheck {
+                name: "tailscale",
+                ok: false,
+                detail: format!("invalid tailscale status JSON: {err}"),
+            };
+        }
+    };
+
+    let backend_state = status
+        .get("BackendState")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let online = status
+        .get("Self")
+        .and_then(|value| value.get("Online"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if backend_state == "Running" && online {
+        ReadinessCheck {
+            name: "tailscale",
+            ok: true,
+            detail: "running and online".into(),
+        }
+    } else {
+        ReadinessCheck {
+            name: "tailscale",
+            ok: false,
+            detail: format!("backend_state={backend_state}, online={online}"),
+        }
+    }
+}
+
+async fn check_gui(gui_stream_configured: bool) -> ReadinessCheck {
+    let sway_enabled = std::env::var("START_SWAY")
+        .ok()
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false);
+    if !sway_enabled {
+        return ReadinessCheck {
+            name: "gui",
+            ok: true,
+            detail: if gui_stream_configured {
+                "stream configured without local sway".into()
+            } else {
+                "disabled".into()
+            },
+        };
+    }
+
+    let output = match tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::process::Command::new("swaymsg")
+            .args(["-t", "get_version"])
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
+            return ReadinessCheck {
+                name: "gui",
+                ok: false,
+                detail: format!("swaymsg failed: {err}"),
+            };
+        }
+        Err(_) => {
+            return ReadinessCheck {
+                name: "gui",
+                ok: false,
+                detail: "swaymsg timed out".into(),
+            };
+        }
+    };
+
+    if output.status.success() {
+        ReadinessCheck {
+            name: "gui",
+            ok: true,
+            detail: "sway responsive".into(),
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        ReadinessCheck {
+            name: "gui",
+            ok: false,
+            detail: format!("sway unavailable: {}", stderr.trim()),
+        }
+    }
 }

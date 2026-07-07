@@ -149,8 +149,9 @@ mydevenv2.sprooty.com {
 ```
 
 The public route can be protected by Caddy basic auth before traffic reaches
-the app; direct tailnet health is available at `http://100.92.54.45:8910/healthz`
-from inside the tailnet.
+the app; direct tailnet liveness/readiness are available at
+`http://100.92.54.45:8910/healthz` and `http://100.92.54.45:8910/readyz` from
+inside the tailnet.
 
 ## 6. Workspace bind-mount
 

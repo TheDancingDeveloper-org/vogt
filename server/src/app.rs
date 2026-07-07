@@ -88,6 +88,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // Public: /healthz, /api/config, /api/push/public-key. None reveal secrets.
     let public = Router::new()
         .route("/healthz", get(api::healthz))
+        .route("/readyz", get(api::readyz))
         .route("/api/config", get(gui_handlers::public_config))
         .route("/api/push/public-key", get(push_api::public_key));
 

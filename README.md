@@ -159,8 +159,9 @@ Pass with `--config mydevenv2.toml`. CLI flags > env > config file.
 TOKEN=$MYDEVENV2_TOKEN
 BASE=http://127.0.0.1:8910
 
-# Health
+# Liveness / readiness
 curl -s $BASE/healthz
+curl -s $BASE/readyz
 
 # Create a session
 ID=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \

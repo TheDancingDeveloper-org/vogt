@@ -22,10 +22,10 @@ backlog.
    and a Docker-socket-mounted pod. Add stronger audit/rate-limit/capability
    controls.
 
-4. **Readiness beyond liveness** (`deploy/docker-compose.yml`, server health endpoints)
-   Add a readiness endpoint that checks workspace mount health, push store
-   access, Tailscale state, and GUI-related dependencies instead of relying
-   only on `/healthz`.
+4. **Promote `/readyz` into the live stack and validate it on Node B**
+   Repo-side readiness checks now cover workspace mount health, state-dir
+   writability, Tailscale state, and GUI dependencies. The remaining work is
+   syncing the compose healthcheck into `ops` and validating the live stack.
 
 5. **Docker socket boundary documentation / optional isolation** (`deploy/`)
    Keep the current DooD behavior explicit in operator docs and consider a
@@ -94,5 +94,5 @@ backlog.
 2. Runtime image reproducibility hardening
 3. Woodpecker Android signing secret provisioning
 4. Real-device native FCM verification
-5. Readiness beyond liveness
+5. Live `/readyz` rollout validation
 6. Production stack exit-node cleanup

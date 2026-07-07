@@ -83,7 +83,7 @@ services:
     #   - /dev/dri:/dev/dri
 
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8910/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8910/readyz"]
       interval: 30s
       timeout: 5s
       retries: 3

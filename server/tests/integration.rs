@@ -67,6 +67,43 @@ async fn healthz_is_public() {
 }
 
 #[tokio::test]
+async fn readyz_is_public_and_returns_checks() {
+    let (base, _h) = boot().await;
+    let res = reqwest::get(format!("{base}/readyz")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["ok"], true);
+    let checks = body["checks"].as_array().expect("missing checks");
+    assert!(!checks.is_empty(), "expected readiness checks");
+    assert!(checks.iter().any(|check| check["name"] == "workspace_root"));
+    assert!(checks.iter().any(|check| check["name"] == "state_dir"));
+}
+
+#[tokio::test]
+async fn readyz_fails_when_workspace_root_disappears() {
+    let workspace = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = workspace.path().to_path_buf();
+    cfg.workspace_root = workspace.path().to_path_buf();
+    cfg.state_dir = state_dir.path().to_path_buf();
+
+    let (base, _h) = boot_with_config(cfg).await;
+    workspace.close().unwrap();
+
+    let res = reqwest::get(format!("{base}/readyz")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["ok"], false);
+    let checks = body["checks"].as_array().expect("missing checks");
+    let workspace_check = checks
+        .iter()
+        .find(|check| check["name"] == "workspace_root")
+        .expect("missing workspace_root check");
+    assert_eq!(workspace_check["ok"], false);
+}
+
+#[tokio::test]
 async fn config_endpoint_is_public_and_returns_shape() {
     let (base, _h) = boot().await;
     let res = reqwest::get(format!("{base}/api/config")).await.unwrap();
