@@ -74,7 +74,7 @@ Optional TOML config at `mydevenv2.toml` (CLI > env > config); see README for ke
 Pipeline non-standard bits:
 
 - Custom `clone:` block uses `git_auth_token` because the default OAuth clone started 403'ing at pipeline #17. Reference pattern in root Woodpecker pitfalls #2 / #6.
-- `sccache` uses Redis on Node B (`100.92.54.45:6380`) for `fmt` / `clippy` / `test` steps. Do not `apt install sccache`; Debian's package lacks Redis support. The pipeline fetches the GitHub release binary v0.10.0.
+- `sccache` uses Redis on Node B (`100.92.54.45:6380`) for `fmt` / `clippy` / `test` steps. Do not `apt install sccache`; Debian's package lacks Redis support. The pipeline fetches and checksum-verifies the GitHub release binary v0.10.0.
 - `mkdir -p web/dist && touch web/dist/.placeholder` is used in `clippy` and `test` steps so `rust-embed` compiles before `build-and-push` produces the real bundle.
 - `mobile-apk` builds the Capacitor signed release APK and uploads it to Forgejo releases API tag `apk-latest`, not the generic-package registry. Signing material comes from Woodpecker secrets `mydevenv2_android_keystore_base64`, `mydevenv2_android_keystore_password`, `mydevenv2_android_key_alias`, and `mydevenv2_android_key_password`. Idempotence is delete-then-create using `scripts/forgejo-api.sh` from `indexarr/ops`.
 - `cimg/android` runs as `circleci` (UID 3434) but the workspace was cloned by `alpine/git` as root. The pipeline does `sudo chown -R circleci:circleci .` before pnpm.

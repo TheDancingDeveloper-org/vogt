@@ -18,6 +18,10 @@ ARG PNPM_VERSION=10.18.0
 ARG SCCACHE_VERSION=0.10.0
 ARG SELKIES_VERSION=1.6.2
 ARG RUST_TOOLCHAIN=1.95.0
+ARG CARGO_DEB_VERSION=3.7.0
+ARG CARGO_ZIGBUILD_VERSION=0.23.0
+ARG CARGO_XWIN_VERSION=0.23.0
+ARG CARGO_WATCH_VERSION=8.5.3
 ARG SCCACHE_SHA256=1fbb35e135660d04a2d5e42b59c7874d39b3deb17de56330b25b713ec59f849b
 ARG STEP_CLI_SHA256=5845c181251ffe43ca2331bc171e0b92324a71be9cf4ef76cd6fbbba4f2a3cc6
 ARG GRADLE_SHA256=7a00d51fb93147819aab76024feece20b6b84e420694101f276be952e08bef03
@@ -210,11 +214,18 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 USER sprooty
 WORKDIR /home/sprooty
 ARG RUST_TOOLCHAIN
+ARG CARGO_DEB_VERSION
+ARG CARGO_ZIGBUILD_VERSION
+ARG CARGO_XWIN_VERSION
+ARG CARGO_WATCH_VERSION
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
        | sh -s -- -y --default-toolchain ${RUST_TOOLCHAIN} --profile minimal \
            --component rustfmt --component clippy \
     && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-pc-windows-gnu \
-    && cargo install --locked cargo-deb cargo-zigbuild cargo-xwin cargo-watch
+    && cargo install --locked "cargo-deb@${CARGO_DEB_VERSION}" \
+    && cargo install --locked "cargo-zigbuild@${CARGO_ZIGBUILD_VERSION}" \
+    && cargo install --locked "cargo-xwin@${CARGO_XWIN_VERSION}" \
+    && cargo install --locked "cargo-watch@${CARGO_WATCH_VERSION}"
 
 # sccache (apt package lacks Redis support; pull from GitHub)
 ARG SCCACHE_VERSION

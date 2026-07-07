@@ -10,11 +10,11 @@ backlog.
 ## Stack / Ops
 
 1. **Runtime image reproducibility hardening** (`Dockerfile`)
-   The image now pins and checksum-verifies several downloaded tool archives
-   and drops the NodeSource / Infisical shell-pipe installers. Remaining work
-   is tightening still-floating third-party package sources (notably some apt
-   feeds and `cargo install` tools) and validating the full build on a
-   BuildKit-capable Docker host.
+   The image and Rust CI steps now pin and checksum-verify several downloaded
+   tool archives, pin the ad-hoc `cargo install` tool set, and avoid the old
+   NodeSource / Infisical shell-pipe installers. Remaining work is tightening
+   still-floating third-party apt feeds and validating the full image build on
+   a BuildKit-capable Docker host.
 
 2. **Bearer-token risk boundary** (`server/src/auth.rs`, `deploy/docker-compose.yml`)
    Repo-side audit logging, per-token mutation rate limits, and scoped token
