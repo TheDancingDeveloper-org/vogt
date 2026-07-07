@@ -1,5 +1,15 @@
 # MyDevEnv2 Desktop Client
 
+Deprecated on July 7, 2026.
+
+This native GPUI desktop client is no longer a supported MyDevEnv2 product
+surface. The supported desktop experience is the browser/PWA, and Android
+remains a thin native shell over that same web client.
+
+The `client/` tree is retained only as historical reference while the project
+decides whether to replace it with a thin Windows wrapper around the shared web
+UI. No active CI or release workflow remains for this client.
+
 A native, high-performance desktop client for the MyDevEnv2 server, built on
 **GPUI** (Zed's GPU-accelerated UI framework) via the in-house **FluentGUI**
 Fluent 2 design layer — the same stack as `rdpapp`.
@@ -93,6 +103,9 @@ WebSocket text frame (`{"type":"auth","token":"..."}`) before PTY attach
 snapshot replay begins.
 
 ## CI / releases
+
+Historical note: the CI/release details below describe the last active native
+client setup. They are no longer current as of July 7, 2026.
 
 Client CI is split from the production server deploy workflow:
 

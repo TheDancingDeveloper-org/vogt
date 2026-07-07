@@ -5,7 +5,7 @@ From-scratch redesign of [MyDevEnv](../MyDevEnv). Same goal — a centrally-host
 - **[INTENT.md](INTENT.md)** — what I'm trying to achieve and why a rewrite
 - **[PLAN.md](PLAN.md)** — architecture, components, build order
 - **[TOOLING.md](TOOLING.md)** — required tools/toolchains for the dev pod (derived from v1 Dockerfile)
-- **[client/README.md](client/README.md)** — native GPUI desktop client
+- **[client/README.md](client/README.md)** — archived notes for the deprecated native desktop client
 - **[deploy/KOMODO.md](deploy/KOMODO.md)** — production stack and deploy notes
 
 ## Current status
@@ -17,28 +17,26 @@ API at `https://mydevenv2.sprooty.com` through Caddy. The direct Node B health
 endpoint currently returns `{"ok":true}`; the public URL may be Caddy
 basic-auth gated before requests reach the app.
 
-The repository now has four build surfaces:
+The repository now has four core repo components and three supported product
+surfaces:
 
-- `contract/` — shared Rust wire DTOs for the server and native client.
+- `contract/` — shared Rust wire DTOs used by the server and retained legacy
+  native client code.
 - `server/` — Rust/Axum server plus embedded Solid PWA.
 - `web/` — Solid/Vite PWA served by the Rust binary.
 - `mobile/` — Capacitor 8 Android shell that loads the deployed PWA.
-- `client/` — native GPUI/FluentGUI desktop client, with Windows as the
-  primary release target.
+- `client/` — deprecated legacy GPUI desktop client source, retained only as
+  reference while the supported product remains the PWA and Android shell.
 
 CI is split across `.woodpecker/`:
 
 - `.woodpecker/server.yml` runs server fmt/clippy/test, web typecheck, debug
   APK build, Docker buildx, and Komodo deploy for non-`client/**` pushes to
   `main`.
-- `.woodpecker/client.yml` runs Linux client checks/builds for `client/**`
-  pushes and publishes the Linux client artifact on `client-v*` tags.
-- `.woodpecker/client-windows.yml` runs on the Windows `arbit-win` agent for
-  `client-v*` tags and publishes the Windows installer, portable exe, and
-  checksums to the matching Forgejo release.
 
-Latest verified client release: `client-v0.1.4`, with both Linux and native
-Windows Woodpecker workflows green.
+As of July 7, 2026, the native desktop client is deprecated. No client CI or
+release workflow remains active; `client-v0.1.4` is the last verified native
+client release kept in Forgejo for historical reference.
 
 ## Server + PWA phases
 
@@ -101,18 +99,16 @@ Phase 7 (Android emulator KVM VM) remains.
 
 ## Native desktop client
 
-The native client in `client/` is an active companion to the PWA, not a
-replacement for it. It uses GPUI plus the in-house FluentGUI layer, reuses the
-server's REST/SSE/WebSocket protocol, and currently provides:
+The GPUI desktop client under `client/` is deprecated as of July 7, 2026.
+MyDevEnv2 now treats the browser/PWA as the primary desktop experience, with
+the Android app remaining a thin native shell over the same web surface.
 
-- In-app server URL/token settings persisted under the platform config dir.
-- Session list, session creation, attach, and live activity updates over SSE.
-- Native terminal rendering with scrollback, mouse selection, Ctrl+Shift+C/V,
-  and first-frame WebSocket auth.
-- Linux CI checks/builds and native Windows release builds on the `arbit-win`
-  Woodpecker agent.
+The `client/` tree is kept only as legacy reference while a future thin Windows
+wrapper decision remains open. It is no longer released, no longer covered by
+active Woodpecker workflows, and should not be treated as a supported product
+surface.
 
-See [client/README.md](client/README.md) for build and release details.
+See [client/README.md](client/README.md) for the archived native-client notes.
 
 ## Running the server
 
@@ -212,7 +208,7 @@ cargo test                       # server unit + integration tests
 cargo test -p mydevenv2-contract # shared wire-contract tests
 cd web && pnpm typecheck         # PWA TypeScript check
 
-# Native client fast checks:
+# Legacy native client checks (deprecated surface; no active CI):
 cd client
 cargo fmt --check
 cargo clippy --no-default-features --all-targets -- -D warnings

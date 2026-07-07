@@ -33,11 +33,11 @@
                           │ Tailscale only
                           │
                 ┌─────────┴──────────┬─────────────────────┐
-                ▼                    ▼                     ▼
-        Browser (PWA)         Android (Capacitor wrap)  Native desktop
-       desktop + tablet       installable APK + FCM     GPUI/FluentGUI
-       (incl. iOS Safari      push; loads deployed      client, Windows
-        Add-to-Home-Screen)   PWA directly              primary target
+                ▼                    ▼
+        Browser (PWA)         Android (Capacitor wrap)
+       desktop + tablet       installable APK + FCM
+       (incl. iOS Safari      push; loads deployed
+        Add-to-Home-Screen)   PWA directly
 ```
 
 ## Components
@@ -98,24 +98,10 @@ apps" enabled for the source app once.
 
 ### Native desktop client
 
-The native client in `client/` is an optional high-performance front end for
-desktop use, not the primary deployment surface. It uses GPUI plus the in-house
-FluentGUI layer, matching `rdpapp`, and speaks the same server REST/SSE/WS
-protocol as the PWA.
-
-Current scope:
-
-- Windows is the primary release target; Linux builds are used for CI and
-  parity smoke testing.
-- In-app server URL/token settings are persisted to the platform config dir.
-- Session list, create/attach, terminal rendering, SSE activity updates, mouse
-  selection, and Ctrl+Shift+C/V are implemented.
-- Full file/editor/git/GUI parity with the PWA is future work.
-
-Releases use `client-v*` tags. `.woodpecker/client.yml` publishes the Linux
-artifact and `.woodpecker/client-windows.yml` builds natively on the Windows
-`arbit-win` agent, publishing the installer, portable exe, and checksums to the
-same Forgejo release.
+The GPUI desktop client under `client/` is deprecated as of July 7, 2026. It
+remains in-tree only as historical reference while the supported product
+surfaces are the PWA and the Android shell. No active release workflow remains
+for Linux or Windows builds.
 
 ### GUI layer (Sway + Selkies)
 
@@ -169,11 +155,6 @@ Sequenced to deliver a usable system as fast as possible and defer the fiddliest
 - Capacitor wrap producing a sideloadable Android APK (no Play Store listing for MVP)
 - iOS is intentionally out of scope this phase — PWA in Safari still works
 
-### Native desktop client — added after Phase 6
-- GPUI/FluentGUI shell and native terminal core
-- In-app server settings, session list/create/attach, SSE live updates
-- Linux CI and native Windows release workflow on client tags
-
 ### Phase 7 — Android emulator VM (~1 week, pending)
 - libvirt VM template
 - Start/stop API in server, button in UI
@@ -199,8 +180,8 @@ Sequenced to deliver a usable system as fast as possible and defer the fiddliest
   ops compose SHA bump → Komodo `DeployStack`.
 - **Mobile distribution:** sideloaded Android APK from Forgejo release
   `apk-latest`; iOS remains browser/PWA-only.
-- **Desktop client:** optional GPUI/FluentGUI native client, released from
-  `client-v*` tags.
+- **Desktop client:** browser/PWA is the supported desktop surface. The old
+  GPUI client is deprecated legacy code retained only for reference.
 - **Service auth:** production default interactive sessions run through
   `mydevenv2-agent-auth` using a read-only Infisical Universal Auth identity.
 

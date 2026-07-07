@@ -13,21 +13,19 @@ labels:
   platform: linux/amd64
 
 when:
-  # Skip the server pipeline (which builds the image and redeploys prod via
-  # Komodo) for client-only changes — the desktop client lives in `client/`
-  # and has its own workflow (`.woodpecker/client.yml`).
+  # Skip the server pipeline for edits isolated to the deprecated native
+  # desktop client tree. The supported product surfaces are the server, PWA,
+  # and Android wrap.
   - event: push
     branch: main
     path:
       exclude:
         - client/**
-        - .woodpecker/client.yml
   - event: manual
   - event: pull_request
     path:
       exclude:
         - client/**
-        - .woodpecker/client.yml
 
 # Custom clone using org secret. The default OAuth-based clone started 403'ing
 # (pipelines #17+), so we authenticate explicitly with git_auth_token.

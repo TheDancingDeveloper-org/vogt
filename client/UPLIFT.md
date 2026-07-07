@@ -1,5 +1,9 @@
 # Desktop Client GUI Uplift — June 2026
 
+Deprecated surface note: the native desktop client described here was
+deprecated on July 7, 2026. This document is kept only as historical handoff
+material for the archived `client/` tree.
+
 Handoff notes for the native GPUI desktop client (`client/`). This documents a
 pass over a list of GUI complaints (Windows desktop app). Each item below maps
 to the original request number. Written for the next agent picking up the work.

@@ -14,9 +14,9 @@ Before changing files here:
 
 | | |
 |---|---|
-| Type | Rust (Axum) + Solid/Vite PWA (embedded via `rust-embed`) + Capacitor Android wrap + optional GPUI desktop client |
+| Type | Rust (Axum) + Solid/Vite PWA (embedded via `rust-embed`) + Capacitor Android wrap + deprecated legacy GPUI desktop client source |
 | Repo | `repo.indexarr.net/indexarr/MyDevEnv2` |
-| CI pipeline | `.woodpecker/server.yml` — fmt/clippy/test -> web-typecheck -> mobile-apk -> buildx -> komodo-deploy; `.woodpecker/client.yml` + `.woodpecker/client-windows.yml` build/release the native client |
+| CI pipeline | `.woodpecker/server.yml` — fmt/clippy/test -> web-typecheck -> mobile-apk -> buildx -> komodo-deploy |
 | Deploys to | Komodo stack `prod-mydevenv2` (ops repo path `personal/mydevenv2/`) — target periphery is the one running mydevenv2.sprooty.com (see ops repo) |
 | Image | `repo.indexarr.net/indexarr/mydevenv2` (`:latest` + `:<sha>`) |
 | Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port) |
@@ -24,7 +24,7 @@ Before changing files here:
 | DB / state | None (Postgres-less by design). Sessions in-memory; push subscriptions persisted as JSON under `state_dir`. |
 | Secrets used at runtime | `MYDEVENV2_TOKEN` (API bearer), `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` (Tailscale userspace), `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` / `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` (required production agent service auth), optional `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` for native FCM — all in Infisical `apps` and pasted into the Komodo stack `environment`. VAPID keys are generated and persisted under `state_dir`. |
 
-From-scratch rewrite of `../MyDevEnv`: same centrally-hosted, Tailscale-accessible dev environment goal, built without the v1 surface area of a code-server fork and multiple half-finished native clients. Active status: Phase 1-6 code-complete and deployed; optional GPUI desktop client released from `client-v*` tags; Phase 7 (KVM-backed Android emulator VM) pending.
+From-scratch rewrite of `../MyDevEnv`: same centrally-hosted, Tailscale-accessible dev environment goal, built without the v1 surface area of a code-server fork and multiple half-finished native clients. Active status: Phase 1-6 code-complete and deployed; legacy GPUI desktop client deprecated on July 7, 2026; Phase 7 (KVM-backed Android emulator VM) pending.
 
 ## 2. Architecture
 
@@ -79,16 +79,10 @@ Pipeline non-standard bits:
 - `mobile-apk` builds the Capacitor debug APK and uploads it to Forgejo releases API tag `apk-latest`, not the generic-package registry. Idempotence is delete-then-create using `scripts/forgejo-api.sh` from `indexarr/ops`.
 - `cimg/android` runs as `circleci` (UID 3434) but the workspace was cloned by `alpine/git` as root. The pipeline does `sudo chown -R circleci:circleci .` before pnpm.
 - Komodo deploy pins the SHA in `ops/personal/mydevenv2/docker-compose.yml` through standard `scripts/komodo-deploy.sh` (`STACK_NAME=prod-mydevenv2 STACK_DIR=personal/mydevenv2`).
-- Native desktop client releases are tag-driven. Push a `client-v*` tag to run both `.woodpecker/client.yml` and `.woodpecker/client-windows.yml`; Windows builds natively on the `arbit-win` agent and publishes installer/portable artifacts to the matching Forgejo release.
-
-Native desktop client Windows release pipeline:
-
-- A Linux cross-build is only a type/link check for this GPUI client. It is not a release-quality runnable Windows binary because GPUI's release shader path needs `fxc.exe` on a native Windows host, while debug/cross builds depend on build-machine shader source paths.
-- The real Windows artifacts come only from `.woodpecker/client-windows.yml` on the `arbit-win` Windows agent. That workflow runs `C:\ci\mydevenv2\build-and-publish.ps1`, whose version-controlled source is `client/ci/windows/build-and-publish.ps1`.
-- The Windows script has `skip_clone: true` and performs its own Forgejo checkout. With `CI_COMMIT_TAG=client-v*`, it fetches `refs/tags/$CI_COMMIT_TAG`; without a tag, it fetches `main`.
-- Consequence: uncommitted local changes in this workspace are never included in a native Windows build. To get a Windows binary containing local changes, first commit and push those changes, then push a `client-v*` tag. A manual Windows workflow run without a tag builds Forgejo `main` only and skips publish.
-- Tag release outputs are attached to the Forgejo release: `MyDevEnv2-Client-$TAG-Setup.exe`, `MyDevEnv2-Client-$TAG-windows-x86_64.exe`, and `SHA256SUMS-$TAG.txt`. The Linux client workflow attaches `MyDevEnv2-Client-$TAG-linux-x86_64` to the same release.
-- Before claiming a new Windows binary exists, check the matching Forgejo release assets or the `.woodpecker/client-windows.yml` run. Local commands such as `cargo check --target x86_64-pc-windows-gnu` and `cargo clippy --target x86_64-pc-windows-gnu` do not produce the release binary.
+- The native desktop client under `client/` is deprecated as of July 7, 2026.
+  Its old Linux/Windows release workflows were removed. Keep the tree only as
+  legacy reference unless the project explicitly reintroduces a thin desktop
+  wrapper.
 
 Runtime container: multi-stage `Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `TOOLING.md` toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server.
 
