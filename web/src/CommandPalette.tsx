@@ -1,9 +1,22 @@
-import { Component, For, Show, createSignal, onMount } from "solid-js";
+import { Component, For, Show, createEffect, createSignal, onMount } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { sessionsStore } from "./store";
-import { openGitTab, openTerminalTab, openHistoryTab, openEditorTab, openGuiTab } from "./tabs";
+import {
+  openGitTab,
+  openTerminalTab,
+  openHistoryTab,
+  openEditorTab,
+  openGuiTab,
+  openTasksTab,
+  tabsStore,
+} from "./tabs";
 import { getRecentFiles } from "./recentFiles";
-import { api } from "./api";
+import { api, type AgentTask, type SessionTemplate } from "./api";
+import {
+  listWorkspaceLayouts,
+  workspaceLayoutSummary,
+  type SavedWorkspaceLayout,
+} from "./workspaceLayouts";
 
 interface HistorySearchResult {
   session_id: string;
@@ -27,6 +40,13 @@ interface Props {
   onOpenFile?: () => void;
   onOpenSettings?: () => void;
   onShowShortcuts?: () => void;
+  onError?: (message: string) => void;
+  templates?: SessionTemplate[];
+  onLaunchTemplate?: (template: SessionTemplate) => void | Promise<void>;
+  onSaveWorkspaceLayout?: () => boolean | void | Promise<boolean | void>;
+  onRestoreWorkspaceLayout?: (
+    layoutId: string,
+  ) => boolean | void | Promise<boolean | void>;
 }
 
 function fuzzyMatch(pattern: string, text: string): boolean {
@@ -44,8 +64,22 @@ const CommandPalette: Component<Props> = (props) => {
   const [query, setQuery] = createSignal("");
   const [selectedIndex, setSelectedIndex] = createSignal(0);
   const [historyResults, setHistoryResults] = createSignal<HistorySearchResult[]>([]);
+  const [agentTasks, setAgentTasks] = createSignal<AgentTask[]>([]);
+  const [savedLayouts, setSavedLayouts] = createSignal<SavedWorkspaceLayout[]>([]);
   let inputRef: HTMLInputElement | undefined;
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
+
+  createEffect(() => {
+    if (!props.open) return;
+    setSavedLayouts(listWorkspaceLayouts());
+    void api
+      .listAgentTasks()
+      .then((tasks) => setAgentTasks(tasks))
+      .catch((e) => {
+        setAgentTasks([]);
+        props.onError?.(`Failed to load agent tasks: ${(e as Error).message}`);
+      });
+  });
 
   // When the query starts with ">", search session history (debounced).
   const maybeSearchHistory = (q: string) => {
@@ -89,8 +123,9 @@ const CommandPalette: Component<Props> = (props) => {
     }));
   };
 
-  const baseCommands = (): Command[] => [
-    {
+  const baseCommands = (): Command[] => {
+    const commands: Command[] = [
+      {
       id: "new-session",
       label: "New Terminal Session",
       description: "Create a new shell session",
@@ -100,8 +135,8 @@ const CommandPalette: Component<Props> = (props) => {
         props.onCreateSession?.();
       },
       category: "Sessions",
-    },
-    {
+      },
+      {
       id: "new-file",
       label: "New File",
       description: "Create a new file in the workspace",
@@ -111,8 +146,8 @@ const CommandPalette: Component<Props> = (props) => {
         props.onOpenFile?.();
       },
       category: "Files",
-    },
-    {
+      },
+      {
       id: "open-file",
       label: "Open File...",
       description: "Browse and open a file from workspace",
@@ -123,8 +158,8 @@ const CommandPalette: Component<Props> = (props) => {
         props.onOpenFile?.();
       },
       category: "Files",
-    },
-    {
+      },
+      {
       id: "git-status",
       label: "Git Status",
       description: "Open git status view for workspace root",
@@ -135,8 +170,8 @@ const CommandPalette: Component<Props> = (props) => {
         props.onClose();
       },
       category: "Git",
-    },
-    {
+      },
+      {
       id: "search-history",
       label: "Search History",
       description: "Search through session history",
@@ -147,8 +182,20 @@ const CommandPalette: Component<Props> = (props) => {
         props.onClose();
       },
       category: "History",
-    },
-    {
+      },
+      {
+      id: "open-tasks",
+      label: "Open Agent Tasks",
+      description: "Inspect and run recurring agent tasks",
+      icon: "≡",
+      action: () => {
+        openTasksTab();
+        navigate("/tasks");
+        props.onClose();
+      },
+      category: "Tasks",
+      },
+      {
       id: "open-gui",
       label: "Open GUI Stream",
       description: "Open the GUI stream tab",
@@ -159,8 +206,8 @@ const CommandPalette: Component<Props> = (props) => {
         props.onClose();
       },
       category: "View",
-    },
-    {
+      },
+      {
       id: "open-settings",
       label: "Open Settings",
       description: "Configure token, layout, templates, notifications",
@@ -170,8 +217,8 @@ const CommandPalette: Component<Props> = (props) => {
         props.onClose();
       },
       category: "View",
-    },
-    {
+      },
+      {
       id: "show-shortcuts",
       label: "Keyboard Shortcuts",
       description: "View all keyboard shortcuts",
@@ -181,8 +228,91 @@ const CommandPalette: Component<Props> = (props) => {
         props.onClose();
       },
       category: "Help",
-    },
-  ];
+      },
+    ];
+
+    if (props.onSaveWorkspaceLayout) {
+      commands.splice(commands.length - 2, 0, {
+        id: "save-workspace-layout",
+        label: "Save Workspace Layout",
+        description: "Capture the current tabs and layout mode in this browser",
+        icon: "◫",
+        action: async () => {
+          props.onClose();
+          await props.onSaveWorkspaceLayout?.();
+          setSavedLayouts(listWorkspaceLayouts());
+        },
+        category: "Layouts",
+      });
+    }
+
+    return commands;
+  };
+
+  const tabCommands = (): Command[] => {
+    return tabsStore.tabs.map((tab) => ({
+      id: `tab-${tab.id}`,
+      label: tab.label,
+      description:
+        tab.kind === "terminal"
+          ? "Switch to terminal tab"
+          : tab.kind === "editor"
+            ? (tab.path || "Switch to editor tab")
+            : tab.kind === "git"
+              ? `Git ${tab.repo || "(workspace root)"}`
+              : `Switch to ${tab.kind} tab`,
+      icon:
+        tab.kind === "editor"
+          ? "📄"
+          : tab.kind === "git"
+            ? "⎇"
+            : tab.kind === "gui"
+              ? "🖥"
+              : tab.kind === "history"
+                ? "📜"
+                : tab.kind === "tasks"
+                  ? "≡"
+                  : "💻",
+      action: () => {
+        if (tab.kind === "terminal") {
+          openTerminalTab(tab.sessionId, tab.label);
+          navigate(`/t/${tab.sessionId}`);
+        } else if (tab.kind === "editor") {
+          openEditorTab(tab.path);
+          navigate(`/e/${encodeURIComponent(tab.path)}`);
+        } else if (tab.kind === "git") {
+          openGitTab(tab.repo);
+          navigate(tab.repo ? `/g/${encodeURIComponent(tab.repo)}` : "/g/");
+        } else if (tab.kind === "gui") {
+          openGuiTab();
+          navigate("/gui");
+        } else if (tab.kind === "history") {
+          openHistoryTab();
+          navigate("/history");
+        } else {
+          openTasksTab();
+          navigate("/tasks");
+        }
+        props.onClose();
+      },
+      category: "Open Tabs",
+    }));
+  };
+
+  const savedLayoutCommands = (): Command[] => {
+    if (!props.onRestoreWorkspaceLayout) return [];
+    return savedLayouts().map((layout) => ({
+      id: `layout-${layout.id}`,
+      label: `Restore ${layout.name}`,
+      description: workspaceLayoutSummary(layout),
+      icon: "◫",
+      action: async () => {
+        props.onClose();
+        await props.onRestoreWorkspaceLayout?.(layout.id);
+      },
+      category: "Layouts",
+    }));
+  };
 
   const sessionCommands = (): Command[] => {
     return sessionsStore.order
@@ -219,8 +349,50 @@ const CommandPalette: Component<Props> = (props) => {
       }));
   };
 
+  const templateCommands = (): Command[] => {
+    return (props.templates ?? []).map((template, index) => ({
+      id: `template-${index}`,
+      label: `Launch ${template.name}`,
+      description: template.description || "Create a session from this preset",
+      icon: "◇",
+      action: async () => {
+        await props.onLaunchTemplate?.(template);
+        props.onClose();
+      },
+      category: "Presets",
+    }));
+  };
+
+  const taskCommands = (): Command[] => {
+    return agentTasks().map((task) => ({
+      id: `task-${task.id}`,
+      label: `Run ${task.name}`,
+      description: `${task.status} • ${task.run_count} runs • ${task.schedule.kind}`,
+      icon: task.status === "active" ? "▶" : "⏸",
+      action: async () => {
+        try {
+          const run = await api.runAgentTask(task.id);
+          openTerminalTab(run.session_id, run.session_name);
+          navigate(`/t/${run.session_id}`);
+          props.onClose();
+        } catch (e) {
+          props.onError?.(`Failed to run task: ${(e as Error).message}`);
+        }
+      },
+      category: "Tasks",
+    }));
+  };
+
   const allCommands = (): Command[] => {
-    return [...baseCommands(), ...recentFileCommands(), ...sessionCommands()];
+    return [
+      ...baseCommands(),
+      ...tabCommands(),
+      ...recentFileCommands(),
+      ...sessionCommands(),
+      ...templateCommands(),
+      ...taskCommands(),
+      ...savedLayoutCommands(),
+    ];
   };
 
   const filteredCommands = () => {

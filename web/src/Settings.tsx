@@ -1,8 +1,13 @@
-import { Component, Show, For, createSignal, onMount } from "solid-js";
+import { Component, Show, For, createEffect, createSignal, onMount } from "solid-js";
 import { getBase, getToken, setBase, setToken } from "./api";
 import { getLayoutMode, setLayoutMode, type LayoutMode } from "./layout";
 import TemplateEditor from "./TemplateEditor";
 import { THEMES, getThemeName, setThemeName } from "./terminalThemes";
+import {
+  listWorkspaceLayouts,
+  workspaceLayoutSummary,
+  type SavedWorkspaceLayout,
+} from "./workspaceLayouts";
 import {
   currentPushEnabled,
   isPushAvailable,
@@ -16,6 +21,9 @@ import {
 interface Props {
   open: boolean;
   onClose: () => void;
+  onSaveWorkspaceLayout?: () => Promise<boolean | void>;
+  onRestoreWorkspaceLayout?: (layoutId: string) => Promise<boolean | void>;
+  onDeleteWorkspaceLayout?: (layoutId: string) => Promise<boolean | void>;
 }
 
 const Settings: Component<Props> = (props) => {
@@ -28,6 +36,13 @@ const Settings: Component<Props> = (props) => {
   const [pushMsg, setPushMsg] = createSignal<string | null>(null);
   const [templateEditorOpen, setTemplateEditorOpen] = createSignal(false);
   const [terminalTheme, setTerminalTheme] = createSignal(getThemeName());
+  const [workspaceLayouts, setWorkspaceLayouts] = createSignal<SavedWorkspaceLayout[]>(
+    listWorkspaceLayouts(),
+  );
+
+  const refreshLayouts = () => {
+    setWorkspaceLayouts(listWorkspaceLayouts());
+  };
 
   const refreshPushState = async () => {
     setPushPerm(await pushPermission());
@@ -39,6 +54,26 @@ const Settings: Component<Props> = (props) => {
       void refreshPushState();
     }
   });
+
+  createEffect(() => {
+    if (!props.open) return;
+    setT(getToken());
+    setB(getBase());
+    setL(getLayoutMode());
+    setTerminalTheme(getThemeName());
+    refreshLayouts();
+    if (isPushAvailable()) {
+      void refreshPushState();
+    }
+  });
+
+  const formatDate = (value: string) => {
+    try {
+      return new Date(value).toLocaleString();
+    } catch {
+      return value;
+    }
+  };
 
   const save = () => {
     const newTok = token().trim();
@@ -91,6 +126,21 @@ const Settings: Component<Props> = (props) => {
     } finally {
       setPushBusy(false);
     }
+  };
+
+  const saveWorkspaceLayout = async () => {
+    const changed = await props.onSaveWorkspaceLayout?.();
+    if (changed) refreshLayouts();
+  };
+
+  const restoreWorkspaceLayout = async (layoutId: string) => {
+    await props.onRestoreWorkspaceLayout?.(layoutId);
+    refreshLayouts();
+  };
+
+  const deleteWorkspaceLayout = async (layoutId: string) => {
+    const changed = await props.onDeleteWorkspaceLayout?.(layoutId);
+    if (changed) refreshLayouts();
   };
 
   return (
@@ -195,14 +245,76 @@ const Settings: Component<Props> = (props) => {
 
           <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
-              Session Templates
+              Workspace Presets
             </div>
             <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
-              Create custom session templates with preset commands and environment variables.
+              Create custom presets with repo-aware defaults, commands, and environment variables.
             </div>
             <button onClick={() => setTemplateEditorOpen(true)}>
-              Manage Custom Templates
+              Manage Presets
             </button>
+          </div>
+
+          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+
+          <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
+            <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
+              Saved Workspace Layouts
+            </div>
+            <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
+              Save named tab layouts in this browser profile. Terminal tabs come back only while their live sessions still exist.
+            </div>
+            <div style={{ display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
+              <button onClick={() => void saveWorkspaceLayout()}>
+                Save Current Layout
+              </button>
+            </div>
+            <Show
+              when={workspaceLayouts().length > 0}
+              fallback={
+                <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
+                  No saved layouts yet.
+                </div>
+              }
+            >
+              <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
+                <For each={workspaceLayouts()}>
+                  {(layout) => (
+                    <div
+                      style={{
+                        display: "flex",
+                        "justify-content": "space-between",
+                        gap: "12px",
+                        padding: "10px",
+                        border: "1px solid var(--bd)",
+                        "border-radius": "6px",
+                        background: "rgba(255,255,255,0.02)",
+                      }}
+                    >
+                      <div style={{ display: "flex", "flex-direction": "column", gap: "4px", "min-width": 0 }}>
+                        <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
+                          {layout.name}
+                        </div>
+                        <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
+                          {workspaceLayoutSummary(layout)}
+                        </div>
+                        <div style={{ "font-size": "11px", color: "var(--fg-muted)" }}>
+                          Updated {formatDate(layout.updated_at)}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: "8px", "align-items": "center", "flex-wrap": "wrap" }}>
+                        <button onClick={() => void restoreWorkspaceLayout(layout.id)}>
+                          Restore
+                        </button>
+                        <button onClick={() => void deleteWorkspaceLayout(layout.id)}>
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
           </div>
 
           <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />

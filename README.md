@@ -95,6 +95,14 @@ Phase 7 (Android emulator KVM VM) remains.
 - Editor quality-of-life features include breadcrumbs, file icons, file-tree filtering, recent files, minimap toggle, and persisted layout/editor preferences.
 - Session templates, custom template editing, terminal themes, bookmarks, and keyboard shortcut reference are available from the PWA settings/commands.
 
+**July 2026 workflow uplift — code-complete.**
+
+- Weather and daily briefing were removed; recurring work now lives in a first-class Tasks tab backed by `/api/agent-tasks`, with schedule management, run history, and session-open actions.
+- Session templates grew into richer workspace presets with tags, repo/path matching, placeholder expansion, and direct launch from the command palette or file tree.
+- File and git surfaces now cover common mutating workflows: move/delete/mkdir/duplicate in the workspace tree, plus stage/unstage/discard/commit/checkout in the git tab.
+- Saved workspace layouts capture browser-local tab sets and layout mode, and grouped terminal workspaces now support multiple panes plus broadcast input.
+- History gained filtering, archived-output search, pinning, replay-tail previews, and raw-log export for post-run inspection.
+
 ---
 
 ## Native desktop client

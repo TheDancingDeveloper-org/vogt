@@ -13,6 +13,7 @@ import type { TerminalActions } from "./Terminal";
 import TerminalWorkspace from "./TerminalWorkspace";
 import Editor from "./Editor";
 import EditorWorkspace from "./EditorWorkspace";
+import AgentTasks from "./AgentTasks";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
 import History from "./History";
@@ -22,8 +23,15 @@ import Settings from "./Settings";
 import FileTree from "./FileTree";
 import CommandPalette from "./CommandPalette";
 import TemplateSelector from "./TemplateSelector";
-import { getLayoutMode } from "./layout";
-import { mergeTemplates } from "./customTemplates";
+import { getLayoutMode, setLayoutMode } from "./layout";
+import {
+  buildDefaultSessionName,
+  mergeTemplates,
+  resolveTemplateContext,
+  resolveTemplateLaunch,
+  sortTemplatesForContext,
+  type TemplateContext,
+} from "./customTemplates";
 import { isBookmarked, toggleBookmark, bookmarks } from "./bookmarks";
 import { api as apiModule } from "./api";
 import type { PublicConfig, SessionTemplate } from "./api";
@@ -46,12 +54,20 @@ import {
   openGitTab,
   openGuiTab,
   openHistoryTab,
+  openTasksTab,
   openTerminalTab,
+  replaceTabs,
+  snapshotTabs,
   tabsStore,
   type Tab,
 } from "./tabs";
 import type { ActivityState, SessionSummary } from "./api";
 import { getToken } from "./api";
+import {
+  deleteWorkspaceLayout,
+  getWorkspaceLayout,
+  saveWorkspaceLayout,
+} from "./workspaceLayouts";
 
 function activityClass(s: SessionSummary): string {
   if (s.exit_code !== null) {
@@ -81,7 +97,8 @@ function pathFor(tab: Tab): string {
   if (tab.kind === "editor") return `/e/${encodeURIComponent(tab.path)}`;
   if (tab.kind === "git") return `/g/${encodeURIComponent(tab.repo)}`;
   if (tab.kind === "gui") return "/gui";
-  return "/history";
+  if (tab.kind === "history") return "/history";
+  return "/tasks";
 }
 
 const App: Component = () => {
@@ -92,6 +109,8 @@ const App: Component = () => {
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
   const [templateSelectorOpen, setTemplateSelectorOpen] = createSignal(false);
+  const [templateSelectorContext, setTemplateSelectorContext] =
+    createSignal<TemplateContext | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = createSignal(false);
 
   // Toast: errors stay longer than info messages.
@@ -204,15 +223,48 @@ const App: Component = () => {
       openGuiTab();
     } else if (path === "/history") {
       openHistoryTab();
+    } else if (path === "/tasks") {
+      openTasksTab();
     }
   });
 
   // Server defaults merged with user's custom templates from localStorage.
   const allTemplates = () => mergeTemplates(publicCfg()?.session_templates ?? []);
+  const availableTemplates = () =>
+    sortTemplatesForContext(allTemplates(), templateSelectorContext());
+
+  const activeTemplatePath = () => {
+    const active = tabsStore.tabs.find((tab) => tab.id === tabsStore.active);
+    if (!active) return undefined;
+    if (active.kind === "editor") {
+      const idx = active.path.lastIndexOf("/");
+      return idx >= 0 ? active.path.slice(0, idx) : "";
+    }
+    if (active.kind === "git") {
+      return active.repo || "";
+    }
+    return undefined;
+  };
+
+  const launchTemplateDirect = async (template: SessionTemplate) => {
+    const context = await resolveTemplateContext(activeTemplatePath());
+    const suggested = buildDefaultSessionName(template, context);
+    const name = await promptUser("New session from preset", suggested, "name");
+    if (!name) return;
+    try {
+      const launch = resolveTemplateLaunch(template, context, name);
+      const session = await createSession(name, launch.command, launch.cwd, launch.env);
+      openTerminalTab(session.id, session.name);
+      navigate(`/t/${session.id}`, { replace: false });
+    } catch (e) {
+      showToast(`create failed: ${(e as Error).message}`, { kind: "error" });
+    }
+  };
 
   const onCreate = async (cwd?: string, template?: SessionTemplate) => {
     // If template selector should be shown
     if (!template && allTemplates().length > 1) {
+      setTemplateSelectorContext(await resolveTemplateContext(cwd));
       setTemplateSelectorOpen(true);
       return;
     }
@@ -239,18 +291,24 @@ const App: Component = () => {
     }
   };
 
-  const onTemplateSelect = async (template: SessionTemplate, name: string, cwd?: string) => {
+  const onTemplateSelect = async (template: SessionTemplate, name: string) => {
     setTemplateSelectorOpen(false);
     try {
+      const launch = resolveTemplateLaunch(
+        template,
+        templateSelectorContext(),
+        name,
+      );
       const s = await createSession(
         name,
-        template.command || undefined,
-        cwd || template.cwd || undefined,
-        template.env,
+        launch.command,
+        launch.cwd,
+        launch.env,
       );
       openTerminalTab(s.id, s.name);
       navigate(`/t/${s.id}`, { replace: false });
       setDrawerOpen(false);
+      setTemplateSelectorContext(null);
     } catch (e) {
       showToast(`create failed: ${(e as Error).message}`, { kind: "error" });
     }
@@ -286,6 +344,89 @@ const App: Component = () => {
     }
   };
 
+  const onSaveWorkspaceLayout = async () => {
+    const now = new Date();
+    const suggestedName = `Layout ${now.toLocaleDateString()} ${now.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    })}`;
+    const name = await promptUser(
+      "Save workspace layout",
+      suggestedName,
+      "layout name",
+    );
+    if (!name?.trim()) return false;
+
+    const snapshot = snapshotTabs();
+    const layout = saveWorkspaceLayout({
+      name,
+      layout_mode: getLayoutMode(),
+      tabs: snapshot.tabs,
+      active: snapshot.active,
+    });
+    showToast(`Saved layout "${layout.name}"`);
+    return true;
+  };
+
+  const onRestoreWorkspaceLayout = async (layoutId: string) => {
+    const layout = getWorkspaceLayout(layoutId);
+    if (!layout) {
+      showToast("Saved layout not found", { kind: "error" });
+      return false;
+    }
+
+    const tabs = layout.tabs.filter(
+      (tab) =>
+        tab.kind !== "terminal" ||
+        !sessionsStore.ready ||
+        Boolean(sessionsStore.sessions[tab.sessionId]),
+    );
+    const skipped = layout.tabs.length - tabs.length;
+    const active =
+      layout.active && tabs.some((tab) => tab.id === layout.active)
+        ? layout.active
+        : tabs[0]?.id ?? null;
+    const nextActiveTab = tabs.find((tab) => tab.id === active) ?? null;
+    const modeChanged = layout.layout_mode !== getLayoutMode();
+
+    senders.clear();
+    actions.clear();
+    replaceTabs({ tabs, active });
+    setDrawerOpen(false);
+    setSettingsOpen(false);
+    setCommandPaletteOpen(false);
+    setLayoutMode(layout.layout_mode);
+
+    navigate(nextActiveTab ? pathFor(nextActiveTab) : "/", { replace: true });
+
+    if (modeChanged) {
+      window.location.reload();
+      return true;
+    }
+
+    if (skipped > 0) {
+      showToast(
+        `Restored "${layout.name}" and skipped ${skipped} missing live session${skipped === 1 ? "" : "s"}.`,
+      );
+    } else {
+      showToast(`Restored layout "${layout.name}"`);
+    }
+    return true;
+  };
+
+  const onDeleteWorkspaceLayout = async (layoutId: string) => {
+    const layout = getWorkspaceLayout(layoutId);
+    if (!layout) return false;
+    const ok = await confirmUser(
+      `Delete layout "${layout.name}"?`,
+      "This removes only the saved browser-local snapshot.",
+    );
+    if (!ok) return false;
+    deleteWorkspaceLayout(layoutId);
+    showToast(`Deleted layout "${layout.name}"`);
+    return true;
+  };
+
   const closeTabAndNavigate = (tabId: string) => {
     const tab = tabsStore.tabs.find((t) => t.id === tabId);
     const onThisTab =
@@ -295,7 +436,8 @@ const App: Component = () => {
       (location.pathname.startsWith("/g") &&
         `git:${decodeURIComponent(params.path ?? "")}` === tabId) ||
       (location.pathname === "/gui" && tabId === "gui") ||
-      (location.pathname === "/history" && tabId === "history");
+      (location.pathname === "/history" && tabId === "history") ||
+      (location.pathname === "/tasks" && tabId === "tasks");
 
     // Drop any per-tab registrations so we don't leak references.
     senders.delete(tabId);
@@ -434,6 +576,16 @@ const App: Component = () => {
             </button>
             <button
               onClick={() => {
+                openTasksTab();
+                navigate("/tasks");
+                setDrawerOpen(false);
+              }}
+              title="Open recurring agent tasks"
+            >
+              Tasks
+            </button>
+            <button
+              onClick={() => {
                 openGuiTab();
                 navigate("/gui");
                 setDrawerOpen(false);
@@ -529,6 +681,9 @@ const App: Component = () => {
           <FileTree
             onOpen={() => setDrawerOpen(false)}
             promptPath={promptUser}
+            onCreatePresetHere={(path) => {
+              void onCreate(path);
+            }}
             onError={(message) => showToast(message, { kind: "error" })}
           />
         </aside>
@@ -580,6 +735,8 @@ const App: Component = () => {
                         ? "⎇ "
                         : t.kind === "gui"
                           ? "🖥 "
+                          : t.kind === "tasks"
+                            ? "≡ "
                           : ""}
                     {t.label}
                   </span>
@@ -685,6 +842,15 @@ const App: Component = () => {
                       onError={(msg) => showToast(msg, { kind: "error" })}
                     />
                   </Show>
+                  <Show when={t.kind === "tasks"}>
+                    <AgentTasks
+                      onError={(msg) => showToast(msg, { kind: "error" })}
+                      onOpenSession={(sessionId, label) => {
+                        openTerminalTab(sessionId, label);
+                        navigate(`/t/${sessionId}`);
+                      }}
+                    />
+                  </Show>
                 </div>
               )}
             </For>
@@ -703,7 +869,13 @@ const App: Component = () => {
         </main>
       </div>
 
-      <Settings open={settingsOpen()} onClose={() => setSettingsOpen(false)} />
+      <Settings
+        open={settingsOpen()}
+        onClose={() => setSettingsOpen(false)}
+        onSaveWorkspaceLayout={() => onSaveWorkspaceLayout()}
+        onRestoreWorkspaceLayout={(layoutId) => onRestoreWorkspaceLayout(layoutId)}
+        onDeleteWorkspaceLayout={(layoutId) => onDeleteWorkspaceLayout(layoutId)}
+      />
 
       <Show when={promptReq()}>
         {(req) => (
@@ -805,13 +977,22 @@ const App: Component = () => {
         onOpenFile={() => setDrawerOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
         onShowShortcuts={() => setShortcutsOpen(true)}
+        onError={(message) => showToast(message, { kind: "error" })}
+        templates={availableTemplates()}
+        onLaunchTemplate={(template) => void launchTemplateDirect(template)}
+        onSaveWorkspaceLayout={() => onSaveWorkspaceLayout()}
+        onRestoreWorkspaceLayout={(layoutId) => onRestoreWorkspaceLayout(layoutId)}
       />
 
       <TemplateSelector
         open={templateSelectorOpen()}
-        onClose={() => setTemplateSelectorOpen(false)}
+        onClose={() => {
+          setTemplateSelectorOpen(false);
+          setTemplateSelectorContext(null);
+        }}
         onSelect={onTemplateSelect}
-        templates={allTemplates()}
+        templates={availableTemplates()}
+        context={templateSelectorContext()}
       />
 
       <KeyboardShortcuts

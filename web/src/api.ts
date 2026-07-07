@@ -39,6 +39,22 @@ export interface WriteFileResponse extends OkResponse {
   bytes: number;
 }
 
+export interface FileOpResponse extends OkResponse {
+  path?: string;
+}
+
+export type GitOpRequest =
+  | { op: "stage"; repo?: string; path: string }
+  | { op: "unstage"; repo?: string; path: string }
+  | { op: "discard"; repo?: string; path: string }
+  | { op: "commit"; repo?: string; message: string }
+  | { op: "checkout"; repo?: string; branch: string; create?: boolean };
+
+export interface GitOpResponse extends OkResponse {
+  branch?: string;
+  commit?: string;
+}
+
 export type ServerEvent =
   | { type: "session-created"; id: string; name: string }
   | { type: "session-renamed"; id: string; name: string }
@@ -121,10 +137,99 @@ export interface FileRead {
   is_binary: boolean;
 }
 
+export type FileOpRequest =
+  | { op: "move"; from: string; to: string; create_parents?: boolean }
+  | { op: "delete"; path: string; recursive?: boolean }
+  | { op: "mkdir"; path: string; parents?: boolean }
+  | { op: "duplicate"; from: string; to: string; create_parents?: boolean };
+
 export interface SearchHit {
   path: string;
   line: number;
   text: string;
+}
+
+export interface HistorySessionMetadata {
+  id: string;
+  name: string;
+  created_at: string;
+  ended_at: string | null;
+  exit_code: number | null;
+  cwd: string | null;
+  command: string | null;
+  scrollback_bytes: number;
+}
+
+export interface HistorySearchResult {
+  session_id: string;
+  session_name: string;
+  created_at: string;
+  match_snippet: string;
+  rank: number;
+}
+
+export interface HistoryLogPreview {
+  session_id: string;
+  text: string;
+  bytes: number;
+  total_bytes: number;
+  truncated: boolean;
+}
+
+export type AgentTaskStatus = "active" | "paused";
+export type AgentTaskRunTrigger = "manual" | "scheduled";
+
+export type AgentTaskSchedule =
+  | { kind: "manual" }
+  | { kind: "interval"; minutes: number }
+  | { kind: "daily"; times: string[] };
+
+export interface AgentTaskRun {
+  id: string;
+  task_id: string;
+  started_at: string;
+  trigger: AgentTaskRunTrigger;
+  session_id: string;
+  session_name: string;
+  prompt_file: string;
+  context_file: string;
+  status: "running" | "completed" | "errored";
+  completed_at: string | null;
+  exit_code: number | null;
+  summary: string | null;
+}
+
+export interface AgentTask {
+  id: string;
+  name: string;
+  prompt: string;
+  schedule: AgentTaskSchedule;
+  status: AgentTaskStatus;
+  command: string[] | null;
+  cwd: string | null;
+  env: [string, string][];
+  context: string | null;
+  notify_on_start: boolean;
+  notify_on_phrase: string | null;
+  next_run: string | null;
+  last_run: string | null;
+  run_count: number;
+  runs: AgentTaskRun[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentTaskUpsertRequest {
+  name: string;
+  prompt: string;
+  schedule: AgentTaskSchedule;
+  command?: string[] | null;
+  cwd?: string | null;
+  env?: [string, string][];
+  context?: string | null;
+  enabled?: boolean;
+  notify_on_start?: boolean;
+  notify_on_phrase?: string | null;
 }
 
 export const api = {
@@ -155,6 +260,18 @@ export const api = {
       content,
       create_parents,
     }),
+  writeFileBase64: (
+    path: string,
+    content_base64: string,
+    create_parents = false,
+  ) =>
+    req<WriteFileResponse>("PUT", "/api/files", {
+      path,
+      content_base64,
+      create_parents,
+    }),
+  fileOp: (request: FileOpRequest) =>
+    req<FileOpResponse>("POST", "/api/files/op", request),
   downloadFile: async (path: string): Promise<void> => {
     const url = `${getBase()}/api/files/download?path=${encodeURIComponent(path)}`;
     const tok = getToken();
@@ -178,6 +295,61 @@ export const api = {
       `/api/search?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`,
     ),
 
+  listAgentTasks: () => req<AgentTask[]>("GET", "/api/agent-tasks"),
+  getAgentTask: (id: string) => req<AgentTask>("GET", `/api/agent-tasks/${id}`),
+  createAgentTask: (task: AgentTaskUpsertRequest) =>
+    req<AgentTask>("POST", "/api/agent-tasks", task),
+  updateAgentTask: (id: string, task: Partial<AgentTaskUpsertRequest>) =>
+    req<AgentTask>("PATCH", `/api/agent-tasks/${id}`, task),
+  deleteAgentTask: (id: string) =>
+    req<OkResponse>("DELETE", `/api/agent-tasks/${id}`),
+  pauseAgentTask: (id: string) =>
+    req<AgentTask>("POST", `/api/agent-tasks/${id}/pause`),
+  resumeAgentTask: (id: string) =>
+    req<AgentTask>("POST", `/api/agent-tasks/${id}/resume`),
+  runAgentTask: (id: string) =>
+    req<AgentTaskRun>("POST", `/api/agent-tasks/${id}/run`),
+
+  listHistorySessions: (limit = 50, offset = 0) =>
+    req<HistorySessionMetadata[]>(
+      "GET",
+      `/api/history/sessions?limit=${limit}&offset=${offset}`,
+    ),
+  searchHistory: (query: string, limit = 20) =>
+    req<HistorySearchResult[]>(
+      "GET",
+      `/api/history/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+    ),
+  getHistorySession: (id: string) =>
+    req<HistorySessionMetadata>("GET", `/api/history/${id}`),
+  getHistorySessionLog: (id: string, tailBytes = 64 * 1024) =>
+    req<HistoryLogPreview>(
+      "GET",
+      `/api/history/${id}/log?tail_bytes=${tailBytes}`,
+    ),
+  deleteHistorySession: (id: string) =>
+    req<OkResponse>("DELETE", `/api/history/${id}`),
+  downloadHistorySession: async (id: string): Promise<void> => {
+    const url = `${getBase()}/api/history/${id}/download`;
+    const tok = getToken();
+    const res = await fetch(url, {
+      headers: tok ? { Authorization: `Bearer ${tok}` } : {},
+    });
+    if (!res.ok) throw new ApiError(res.status, await res.text());
+    const blob = await res.blob();
+    const disposition = res.headers.get("content-disposition") ?? "";
+    const match = disposition.match(/filename=\"([^\"]+)\"/i);
+    const filename = match?.[1] || `${id}.log`;
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(objUrl);
+  },
+
   gitStatus: (repo = "") =>
     req<GitStatusResp>("GET", `/api/git/status?repo=${encodeURIComponent(repo)}`),
   gitLog: (repo = "", n = 50) =>
@@ -192,6 +364,8 @@ export const api = {
       "GET",
       `/api/git/diff?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(path)}&staged=${staged}`,
     ),
+  gitOp: (request: GitOpRequest) =>
+    req<GitOpResponse>("POST", "/api/git/op", request),
 
   // Public — no token required.
   publicConfig: () =>
@@ -216,6 +390,10 @@ export interface SessionTemplate {
   command: string[] | null;
   cwd: string | null;
   env: [string, string][];
+  default_name?: string | null;
+  match_repo_names?: string[];
+  match_path_prefixes?: string[];
+  tags?: string[];
 }
 
 export interface PublicConfig {

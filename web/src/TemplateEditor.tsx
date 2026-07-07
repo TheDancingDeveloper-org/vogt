@@ -1,10 +1,10 @@
 import { Component, For, Show, createSignal } from "solid-js";
 import type { SessionTemplate } from "./api";
 import {
-  getCustomTemplates,
   addCustomTemplate,
-  updateCustomTemplate,
   deleteCustomTemplate,
+  getCustomTemplates,
+  updateCustomTemplate,
 } from "./customTemplates";
 
 interface Props {
@@ -26,6 +26,10 @@ const TemplateEditor: Component<Props> = (props) => {
   const [description, setDescription] = createSignal("");
   const [command, setCommand] = createSignal("");
   const [cwd, setCwd] = createSignal("");
+  const [defaultName, setDefaultName] = createSignal("");
+  const [matchRepoNames, setMatchRepoNames] = createSignal("");
+  const [matchPathPrefixes, setMatchPathPrefixes] = createSignal("");
+  const [tags, setTags] = createSignal("");
   const [envPairs, setEnvPairs] = createSignal<EnvPair[]>([]);
 
   const refresh = () => setTemplates(getCustomTemplates());
@@ -35,44 +39,83 @@ const TemplateEditor: Component<Props> = (props) => {
     setDescription("");
     setCommand("");
     setCwd("");
+    setDefaultName("");
+    setMatchRepoNames("");
+    setMatchPathPrefixes("");
+    setTags("");
     setEnvPairs([]);
     setEditingIndex(null);
   };
 
   const startNew = () => {
     resetForm();
-    setEditingIndex(-1); // -1 means "new"
+    setEditingIndex(-1);
+  };
+
+  const loadTemplate = (template: SessionTemplate) => {
+    setName(template.name);
+    setDescription(template.description);
+    setCommand(template.command ? template.command.join("\n") : "");
+    setCwd(template.cwd ?? "");
+    setDefaultName(template.default_name ?? "");
+    setMatchRepoNames((template.match_repo_names ?? []).join(", "));
+    setMatchPathPrefixes((template.match_path_prefixes ?? []).join("\n"));
+    setTags((template.tags ?? []).join(", "));
+    setEnvPairs(template.env.map(([key, value]) => ({ key, value })));
   };
 
   const startEdit = (index: number) => {
-    const t = templates()[index];
-    if (!t) return;
-    setName(t.name);
-    setDescription(t.description);
-    setCommand(t.command ? t.command.join(" ") : "");
-    setCwd(t.cwd ?? "");
-    setEnvPairs(t.env.map(([key, value]) => ({ key, value })));
+    const template = templates()[index];
+    if (!template) return;
+    loadTemplate(template);
     setEditingIndex(index);
+  };
+
+  const startCopy = (index: number) => {
+    const template = templates()[index];
+    if (!template) return;
+    loadTemplate(template);
+    setName(`${template.name} Copy`);
+    setEditingIndex(-1);
   };
 
   const buildTemplate = (): SessionTemplate => ({
     name: name().trim(),
     description: description().trim(),
-    command: command().trim() ? command().trim().split(/\s+/) : null,
+    command: (() => {
+      const args = command()
+        .split("\n")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      return args.length > 0 ? args : null;
+    })(),
     cwd: cwd().trim() || null,
     env: envPairs()
-      .filter((p) => p.key.trim())
-      .map((p) => [p.key.trim(), p.value] as [string, string]),
+      .filter((pair) => pair.key.trim())
+      .map((pair) => [pair.key.trim(), pair.value] as [string, string]),
+    default_name: defaultName().trim() || null,
+    match_repo_names: matchRepoNames()
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+    match_path_prefixes: matchPathPrefixes()
+      .split("\n")
+      .map((value) => value.trim())
+      .filter(Boolean),
+    tags: tags()
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
   });
 
   const save = () => {
     if (!name().trim()) return;
     const template = buildTemplate();
-    const idx = editingIndex();
-    if (idx === -1) {
+    const index = editingIndex();
+    if (index === -1) {
       addCustomTemplate(template);
-    } else if (idx !== null) {
-      updateCustomTemplate(idx, template);
+    } else if (index !== null) {
+      updateCustomTemplate(index, template);
     }
     refresh();
     resetForm();
@@ -88,16 +131,19 @@ const TemplateEditor: Component<Props> = (props) => {
     setEnvPairs([...envPairs(), { key: "", value: "" }]);
   };
 
-  const updateEnvPair = (index: number, field: "key" | "value", val: string) => {
+  const updateEnvPair = (
+    index: number,
+    field: "key" | "value",
+    value: string,
+  ) => {
     const pairs = [...envPairs()];
-    if (pairs[index]) {
-      pairs[index] = { ...pairs[index], [field]: val };
-      setEnvPairs(pairs);
-    }
+    if (!pairs[index]) return;
+    pairs[index] = { ...pairs[index], [field]: value };
+    setEnvPairs(pairs);
   };
 
   const removeEnvPair = (index: number) => {
-    setEnvPairs(envPairs().filter((_, i) => i !== index));
+    setEnvPairs(envPairs().filter((_, current) => current !== index));
   };
 
   return (
@@ -110,7 +156,7 @@ const TemplateEditor: Component<Props> = (props) => {
       >
         <div class="template-editor" onClick={(e) => e.stopPropagation()}>
           <div class="template-editor-header">
-            <h2>Custom Session Templates</h2>
+            <h2>Workspace Presets</h2>
             <button class="template-editor-close" onClick={props.onClose}>
               ×
             </button>
@@ -122,27 +168,33 @@ const TemplateEditor: Component<Props> = (props) => {
               fallback={
                 <div class="template-editor-list">
                   <button class="template-add-btn" onClick={startNew}>
-                    + New Template
+                    + New Preset
                   </button>
                   <Show
                     when={templates().length > 0}
                     fallback={
                       <div class="template-editor-empty">
-                        No custom templates yet. Click "New Template" to create one.
+                        No custom presets yet. Click "New Preset" to create one.
                       </div>
                     }
                   >
                     <For each={templates()}>
-                      {(t, index) => (
+                      {(template, index) => (
                         <div class="template-editor-item">
                           <div class="template-editor-item-info">
-                            <div class="template-editor-item-name">{t.name}</div>
+                            <div class="template-editor-item-name">{template.name}</div>
                             <div class="template-editor-item-desc">
-                              {t.description}
+                              {template.description}
                             </div>
+                            <Show when={(template.tags?.length ?? 0) > 0}>
+                              <div class="template-editor-item-meta">
+                                {(template.tags ?? []).join(" • ")}
+                              </div>
+                            </Show>
                           </div>
                           <div class="template-editor-item-actions">
                             <button onClick={() => startEdit(index())}>Edit</button>
+                            <button onClick={() => startCopy(index())}>Copy</button>
                             <button
                               class="danger"
                               onClick={() => remove(index())}
@@ -164,7 +216,7 @@ const TemplateEditor: Component<Props> = (props) => {
                     type="text"
                     value={name()}
                     onInput={(e) => setName(e.currentTarget.value)}
-                    placeholder="My Custom Environment"
+                    placeholder="Rust service shell"
                     autofocus
                   />
                 </div>
@@ -175,27 +227,67 @@ const TemplateEditor: Component<Props> = (props) => {
                     type="text"
                     value={description()}
                     onInput={(e) => setDescription(e.currentTarget.value)}
-                    placeholder="What this template is for"
+                    placeholder="Preset for this repo or workspace area"
                   />
                 </div>
 
                 <div class="form-group">
-                  <label>Command (optional, space-separated)</label>
-                  <input
-                    type="text"
+                  <label>Command Args (optional, one per line)</label>
+                  <textarea
+                    rows={5}
                     value={command()}
                     onInput={(e) => setCommand(e.currentTarget.value)}
-                    placeholder="bash"
+                    placeholder={"/bin/sh\n-lc\ncargo test"}
                   />
                 </div>
 
                 <div class="form-group">
-                  <label>Working Directory (optional)</label>
+                  <label>Working Directory</label>
                   <input
                     type="text"
                     value={cwd()}
                     onInput={(e) => setCwd(e.currentTarget.value)}
-                    placeholder="~/projects/myapp"
+                    placeholder="{repo}/server or Active/apps/MyDevEnv2"
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label>Default Session Name</label>
+                  <input
+                    type="text"
+                    value={defaultName()}
+                    onInput={(e) => setDefaultName(e.currentTarget.value)}
+                    placeholder="{repo_name}-dev-{timestamp}"
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label>Match Repo Names (comma-separated)</label>
+                  <input
+                    type="text"
+                    value={matchRepoNames()}
+                    onInput={(e) => setMatchRepoNames(e.currentTarget.value)}
+                    placeholder="MyDevEnv2, rustTorrent"
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label>Match Path Prefixes (one per line)</label>
+                  <textarea
+                    rows={4}
+                    value={matchPathPrefixes()}
+                    onInput={(e) => setMatchPathPrefixes(e.currentTarget.value)}
+                    placeholder={"Active/apps/MyDevEnv2\nsites/my-site"}
+                  />
+                </div>
+
+                <div class="form-group">
+                  <label>Tags (comma-separated)</label>
+                  <input
+                    type="text"
+                    value={tags()}
+                    onInput={(e) => setTags(e.currentTarget.value)}
+                    placeholder="rust, dev, repo-specific"
                   />
                 </div>
 
@@ -242,7 +334,7 @@ const TemplateEditor: Component<Props> = (props) => {
                     onClick={save}
                     disabled={!name().trim()}
                   >
-                    {editingIndex() === -1 ? "Create" : "Save"}
+                    {editingIndex() === -1 ? "Create Preset" : "Save Preset"}
                   </button>
                 </div>
               </div>

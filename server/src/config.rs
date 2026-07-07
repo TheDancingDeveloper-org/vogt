@@ -13,6 +13,14 @@ pub struct SessionTemplate {
     pub command: Option<Vec<String>>,
     pub cwd: Option<String>,
     pub env: Vec<(String, String)>,
+    #[serde(default)]
+    pub default_name: Option<String>,
+    #[serde(default)]
+    pub match_repo_names: Vec<String>,
+    #[serde(default)]
+    pub match_path_prefixes: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl SessionTemplate {
@@ -24,6 +32,10 @@ impl SessionTemplate {
                 command: None,
                 cwd: None,
                 env: vec![],
+                default_name: Some("shell-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["shell".to_string()],
             },
             SessionTemplate {
                 name: "Node Dev".to_string(),
@@ -31,6 +43,10 @@ impl SessionTemplate {
                 command: Some(vec!["bash".to_string()]),
                 cwd: None,
                 env: vec![("NODE_ENV".to_string(), "development".to_string())],
+                default_name: Some("{repo_name}-node-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["node".to_string(), "web".to_string()],
             },
             SessionTemplate {
                 name: "Rust Build".to_string(),
@@ -38,6 +54,10 @@ impl SessionTemplate {
                 command: Some(vec!["bash".to_string()]),
                 cwd: None,
                 env: vec![("RUST_BACKTRACE".to_string(), "1".to_string())],
+                default_name: Some("{repo_name}-rust-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["rust".to_string()],
             },
             SessionTemplate {
                 name: "Python Env".to_string(),
@@ -45,38 +65,12 @@ impl SessionTemplate {
                 command: Some(vec!["bash".to_string()]),
                 cwd: None,
                 env: vec![("PYTHONUNBUFFERED".to_string(), "1".to_string())],
+                default_name: Some("{repo_name}-py-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["python".to_string()],
             },
         ]
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WeatherLocation {
-    pub label: String,
-    pub latitude: f64,
-    pub longitude: f64,
-    #[serde(default)]
-    pub timezone: Option<String>,
-}
-
-impl WeatherLocation {
-    fn validate(&self) -> Result<()> {
-        if self.label.trim().is_empty() {
-            return Err(ApiError::Config(
-                "weather_location.label must not be empty".into(),
-            ));
-        }
-        if !(-90.0..=90.0).contains(&self.latitude) {
-            return Err(ApiError::Config(
-                "weather_location.latitude must be between -90 and 90".into(),
-            ));
-        }
-        if !(-180.0..=180.0).contains(&self.longitude) {
-            return Err(ApiError::Config(
-                "weather_location.longitude must be between -180 and 180".into(),
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -116,8 +110,6 @@ pub struct Config {
     pub agent_auth_helper: std::path::PathBuf,
     /// Session templates available for quick session creation.
     pub session_templates: Vec<SessionTemplate>,
-    /// Optional weather location used by the daily briefing endpoint.
-    pub weather_location: Option<WeatherLocation>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -137,7 +129,6 @@ struct FileConfig {
     auto_agent_auth: Option<bool>,
     agent_auth_helper: Option<String>,
     session_templates: Option<Vec<SessionTemplate>>,
-    weather_location: Option<WeatherLocation>,
 }
 
 pub fn load(
@@ -198,14 +189,6 @@ pub fn load(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin/mydevenv2-agent-auth"));
 
-    let weather_location = match from_file.weather_location {
-        Some(loc) => Some(loc),
-        None => parse_weather_location_env()?,
-    };
-    if let Some(loc) = weather_location.as_ref() {
-        loc.validate()?;
-    }
-
     Ok(Config {
         bind,
         token,
@@ -250,7 +233,6 @@ pub fn load(
         session_templates: from_file
             .session_templates
             .unwrap_or_else(SessionTemplate::default_templates),
-        weather_location,
     })
 }
 
@@ -306,43 +288,6 @@ fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<
         "http://localhost:5173".to_string(),
         "http://127.0.0.1:5173".to_string(),
     ]
-}
-
-fn parse_weather_location_env() -> Result<Option<WeatherLocation>> {
-    let lat = std::env::var("MYDEVENV2_WEATHER_LATITUDE").ok();
-    let lon = std::env::var("MYDEVENV2_WEATHER_LONGITUDE").ok();
-    let label = std::env::var("MYDEVENV2_WEATHER_LABEL").ok();
-    let timezone = std::env::var("MYDEVENV2_WEATHER_TIMEZONE")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-
-    if lat.is_none() && lon.is_none() && label.is_none() && timezone.is_none() {
-        return Ok(None);
-    }
-
-    let lat_raw = lat.ok_or_else(|| {
-        ApiError::Config("MYDEVENV2_WEATHER_LATITUDE is required with weather env config".into())
-    })?;
-    let lon_raw = lon.ok_or_else(|| {
-        ApiError::Config("MYDEVENV2_WEATHER_LONGITUDE is required with weather env config".into())
-    })?;
-    let latitude = lat_raw
-        .trim()
-        .parse::<f64>()
-        .map_err(|e| ApiError::Config(format!("MYDEVENV2_WEATHER_LATITUDE: {e}")))?;
-    let longitude = lon_raw
-        .trim()
-        .parse::<f64>()
-        .map_err(|e| ApiError::Config(format!("MYDEVENV2_WEATHER_LONGITUDE: {e}")))?;
-
-    Ok(Some(WeatherLocation {
-        label: label
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "Configured location".to_string()),
-        latitude,
-        longitude,
-        timezone,
-    }))
 }
 
 fn dirs_home() -> Option<std::path::PathBuf> {

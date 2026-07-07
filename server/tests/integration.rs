@@ -29,7 +29,6 @@ fn test_config() -> Config {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
         session_templates: vec![],
-        weather_location: None,
     }
 }
 
@@ -148,45 +147,6 @@ async fn push_subscribe_list_unsubscribe() {
 }
 
 #[tokio::test]
-async fn daily_briefing_is_available_without_weather_config() {
-    let (base, _h) = boot().await;
-    let client = reqwest::Client::builder()
-        .default_headers(auth())
-        .build()
-        .unwrap();
-
-    let body: Value = client
-        .get(format!("{base}/api/briefing/daily"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    assert!(body["generated_at"].as_str().is_some());
-    assert!(body["weather"].is_null());
-    assert_eq!(body["sessions"]["total"], 0);
-}
-
-#[tokio::test]
-async fn weather_requires_a_location() {
-    let (base, _h) = boot().await;
-    let client = reqwest::Client::builder()
-        .default_headers(auth())
-        .build()
-        .unwrap();
-
-    let res = client
-        .get(format!("{base}/api/weather"))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
 async fn agent_task_create_run_and_records_prompt_file() {
     let tmp = tempfile::tempdir().unwrap();
     let mut cfg = test_config();
@@ -242,6 +202,30 @@ async fn agent_task_create_run_and_records_prompt_file() {
         .unwrap();
     assert_eq!(detail["run_count"], 1);
     assert_eq!(detail["runs"][0]["session_id"], session_id);
+
+    let detail_after_exit: Value = loop {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let detail: Value = client
+            .get(format!("{base}/api/agent-tasks/{task_id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if detail["runs"][0]["status"] == "completed" {
+            break detail;
+        }
+    };
+    assert_eq!(detail_after_exit["runs"][0]["status"], "completed");
+    assert_eq!(detail_after_exit["runs"][0]["exit_code"], 0);
+    assert!(detail_after_exit["runs"][0]["completed_at"]
+        .as_str()
+        .is_some());
+    assert_eq!(
+        detail_after_exit["runs"][0]["summary"],
+        "Exited successfully"
+    );
 
     let sessions: Vec<Value> = client
         .get(format!("{base}/api/sessions"))
@@ -534,6 +518,95 @@ async fn exited_sessions_are_archived_searchable_and_deletable() {
     assert_eq!(after_delete.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn archived_history_log_preview_and_download_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "replay-me",
+            "command": [
+                "/bin/sh",
+                "-lc",
+                "printf 'first line\\nsecond line\\nthird line\\n'; exit 0",
+            ],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let session = client
+            .get(format!("{base}/api/history/{id}"))
+            .send()
+            .await
+            .unwrap();
+        if session.status() == StatusCode::OK {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session was not archived in time"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let preview: Value = client
+        .get(format!("{base}/api/history/{id}/log?tail_bytes=12"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preview["session_id"], id);
+    assert_eq!(preview["truncated"], true);
+    assert_eq!(preview["bytes"], 12);
+    assert!(
+        preview["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("third line"),
+        "preview should contain tail output: {preview:?}"
+    );
+
+    let download = client
+        .get(format!("{base}/api/history/{id}/download"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), StatusCode::OK);
+    let content_disposition = download
+        .headers()
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_disposition.contains("attachment"),
+        "download should set attachment disposition: {content_disposition}"
+    );
+    let body = download.text().await.unwrap();
+    assert!(body.contains("first line"));
+    assert!(body.contains("third line"));
+}
+
 async fn ws_attach(
     base: &str,
     id: &str,
@@ -728,7 +801,6 @@ async fn file_api_round_trip() {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
         session_templates: vec![],
-        weather_location: None,
     };
     let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -778,6 +850,16 @@ async fn file_api_round_trip() {
     let bytes_on_disk = std::fs::read_to_string(tmp.path().join("new.txt")).unwrap();
     assert_eq!(bytes_on_disk, "fresh");
 
+    // Create a directory via higher-level file ops.
+    let mkdir = client
+        .post(format!("{base}/api/files/op"))
+        .json(&json!({ "op": "mkdir", "path": "ops/deeper", "parents": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mkdir.status(), StatusCode::OK);
+    assert!(tmp.path().join("ops/deeper").is_dir());
+
     // Upload binary bytes via content_base64 (native client upload path).
     use base64::Engine as _;
     let raw: &[u8] = &[0x00, 0x01, 0xff, 0xfe, b'h', b'i'];
@@ -791,6 +873,78 @@ async fn file_api_round_trip() {
     assert_eq!(wb.status(), StatusCode::OK);
     let on_disk = std::fs::read(tmp.path().join("up/bin.dat")).unwrap();
     assert_eq!(on_disk, raw);
+
+    // Duplicate both a file and a directory tree.
+    let dup_file = client
+        .post(format!("{base}/api/files/op"))
+        .json(&json!({
+            "op": "duplicate",
+            "from": "hello.txt",
+            "to": "ops/hello-copy.txt",
+            "create_parents": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dup_file.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("ops/hello-copy.txt")).unwrap(),
+        "first"
+    );
+
+    let dup_dir = client
+        .post(format!("{base}/api/files/op"))
+        .json(&json!({
+            "op": "duplicate",
+            "from": "sub",
+            "to": "sub-copy"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dup_dir.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("sub-copy/nested.md")).unwrap(),
+        "# nested"
+    );
+
+    // Move/rename a file.
+    let mv = client
+        .post(format!("{base}/api/files/op"))
+        .json(&json!({
+            "op": "move",
+            "from": "new.txt",
+            "to": "ops/renamed.txt",
+            "create_parents": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mv.status(), StatusCode::OK);
+    assert!(!tmp.path().join("new.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("ops/renamed.txt")).unwrap(),
+        "fresh"
+    );
+
+    // Delete a copied file and directory tree.
+    let del_file = client
+        .post(format!("{base}/api/files/op"))
+        .json(&json!({ "op": "delete", "path": "ops/hello-copy.txt" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_file.status(), StatusCode::OK);
+    assert!(!tmp.path().join("ops/hello-copy.txt").exists());
+
+    let del_dir = client
+        .post(format!("{base}/api/files/op"))
+        .json(&json!({ "op": "delete", "path": "sub-copy", "recursive": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_dir.status(), StatusCode::OK);
+    assert!(!tmp.path().join("sub-copy").exists());
 
     // A malformed base64 body is a 400, not a 500.
     let bad = client
@@ -851,7 +1005,7 @@ async fn file_api_round_trip() {
 #[tokio::test]
 async fn git_status_log_branch() {
     // Spin up a fresh git repo in a tempdir as the workspace, then drive
-    // the read-only git API against it.
+    // the git API across status, diff, staging, commit, and branch workflow.
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     let sh = |cmd: &str| {
@@ -887,7 +1041,6 @@ async fn git_status_log_branch() {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
         session_templates: vec![],
-        weather_location: None,
     };
     let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -948,6 +1101,219 @@ async fn git_status_log_branch() {
         .unwrap();
     assert_eq!(diff["head"], "one\n");
     assert_eq!(diff["current"], "one\ntwo\n");
+
+    let stage_a: Value = client
+        .post(format!("{base}/api/git/op"))
+        .json(&json!({
+            "op": "stage",
+            "path": "a.txt",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stage_a["ok"], true);
+
+    let staged_status: Value = client
+        .get(format!("{base}/api/git/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let staged_a = staged_status["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == "a.txt")
+        .unwrap();
+    assert_eq!(staged_a["kind"], "staged");
+    assert_eq!(staged_a["index"], "M");
+    assert_eq!(staged_a["worktree"], " ");
+
+    let unstage_a: Value = client
+        .post(format!("{base}/api/git/op"))
+        .json(&json!({
+            "op": "unstage",
+            "path": "a.txt",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unstage_a["ok"], true);
+
+    let discard_a: Value = client
+        .post(format!("{base}/api/git/op"))
+        .json(&json!({
+            "op": "discard",
+            "path": "a.txt",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(discard_a["ok"], true);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "one\n"
+    );
+
+    let stage_b: Value = client
+        .post(format!("{base}/api/git/op"))
+        .json(&json!({
+            "op": "stage",
+            "path": "b.txt",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stage_b["ok"], true);
+
+    let unstage_b: Value = client
+        .post(format!("{base}/api/git/op"))
+        .json(&json!({
+            "op": "unstage",
+            "path": "b.txt",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unstage_b["ok"], true);
+
+    let discard_b: Value = client
+        .post(format!("{base}/api/git/op"))
+        .json(&json!({
+            "op": "discard",
+            "path": "b.txt",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(discard_b["ok"], true);
+    assert!(!repo.join("b.txt").exists());
+
+    std::fs::write(repo.join("b.txt"), "tracked now\n").unwrap();
+    let stage_commit_target: Value = client
+        .post(format!("{base}/api/git/op"))
+        .json(&json!({
+            "op": "stage",
+            "path": "b.txt",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stage_commit_target["ok"], true);
+
+    let commit: Value = client
+        .post(format!("{base}/api/git/op"))
+        .json(&json!({
+            "op": "commit",
+            "message": "add b",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(commit["ok"], true);
+    assert!(commit["commit"].as_str().unwrap().len() >= 7);
+
+    let clean_status: Value = client
+        .get(format!("{base}/api/git/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(clean_status["entries"].as_array().unwrap().is_empty());
+
+    let updated_log: Vec<Value> = client
+        .get(format!("{base}/api/git/log?n=10"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(updated_log.len(), 2);
+    assert_eq!(updated_log[0]["subject"], "add b");
+
+    let create_branch: Value = client
+        .post(format!("{base}/api/git/op"))
+        .json(&json!({
+            "op": "checkout",
+            "branch": "feature/git-workflow",
+            "create": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(create_branch["ok"], true);
+    assert_eq!(create_branch["branch"], "feature/git-workflow");
+
+    let branch_after_create: Value = client
+        .get(format!("{base}/api/git/branch"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(branch_after_create["current"], "feature/git-workflow");
+    let all_branches = branch_after_create["all"].as_array().unwrap();
+    assert!(all_branches
+        .iter()
+        .any(|branch| branch.as_str() == Some("feature/git-workflow")));
+
+    let checkout_main: Value = client
+        .post(format!("{base}/api/git/op"))
+        .json(&json!({
+            "op": "checkout",
+            "branch": "main",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(checkout_main["ok"], true);
+    assert_eq!(checkout_main["branch"], "main");
+
+    let branch_after_checkout: Value = client
+        .get(format!("{base}/api/git/branch"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(branch_after_checkout["current"], "main");
 }
 
 #[tokio::test]

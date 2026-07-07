@@ -19,7 +19,7 @@ services:
       - "${DOCKER_SOCKET_GID:-984}"
 
     # Bridge networking + an explicit port. Tailscale runs in KERNEL mode
-    # inside the container (see entrypoint.sh) so the hertzde3 exit node can
+    # inside the container (see entrypoint.sh) so an optional exit node can
     # transparently route egress; that needs the TUN device + NET_ADMIN below.
     # The pod becomes reachable at 100.x.x.x via Tailscale.
     ports:
@@ -65,10 +65,10 @@ services:
       # Tailscale auto-join. Issue a one-shot reusable key from the admin UI.
       TAILSCALE_AUTH_KEY: ${HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY}
       TAILSCALE_HOSTNAME: mydevenv2
-      # Route all public egress via this exit node (kernel mode, see above).
-      # Override/clear per deploy via the Komodo stack env. LAN + tailnet +
-      # accepted subnet routes (192.168.0.0/23) stay direct.
-      TAILSCALE_EXIT_NODE: ${MYDEVENV2_TAILSCALE_EXIT_NODE:-hertzde3}
+      # Route all public egress via this exit node when explicitly set
+      # (kernel mode, see above). Blank by default: LAN + tailnet + accepted
+      # subnet routes stay direct, and public egress does too until opted in.
+      TAILSCALE_EXIT_NODE: ${MYDEVENV2_TAILSCALE_EXIT_NODE:-}
       # Phase 5: when sway+selkies is wired, set both of these.
       START_SWAY: "0"
       GUI_STREAM_URL: ""

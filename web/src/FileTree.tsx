@@ -12,8 +12,8 @@ import { createSession } from "./store";
 import { getFileIcon, getFolderIcon } from "./fileIcons";
 
 interface Props {
-  /** Called after opening an editor tab so the drawer can auto-close on mobile. */
   onOpen?: () => void;
+  onCreatePresetHere?: (path: string) => void;
   promptPath?: (
     title: string,
     defaultValue?: string,
@@ -27,6 +27,27 @@ interface NodeProps {
   onOpen?: () => void;
   onOpenFile: (path: string) => void;
   onOpenTerminalHere: (path: string) => void;
+  onCreatePresetHere?: (path: string) => void;
+  onRenameMove: (node: TreeNode) => void;
+  onDuplicate: (node: TreeNode) => void;
+  onDelete: (node: TreeNode) => void;
+  onUploadHere: (path: string) => void;
+}
+
+function joinPath(dir: string, name: string): string {
+  const cleanDir = dir.replace(/^\/+|\/+$/g, "");
+  const cleanName = name.replace(/^\/+/, "");
+  return cleanDir ? `${cleanDir}/${cleanName}` : cleanName;
+}
+
+function duplicatePath(path: string): string {
+  const idx = path.lastIndexOf("/");
+  const dir = idx >= 0 ? path.slice(0, idx) : "";
+  const base = idx >= 0 ? path.slice(idx + 1) : path;
+  const dot = base.lastIndexOf(".");
+  const name = dot > 0 ? base.slice(0, dot) : base;
+  const ext = dot > 0 ? base.slice(dot) : "";
+  return joinPath(dir, `${name}-copy${ext}`);
 }
 
 const TreeNodeView: Component<NodeProps> = (props) => {
@@ -46,8 +67,8 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     if (next && (kids() === null || kids()?.length === 0)) {
       setLoading(true);
       try {
-        const t = await api.tree(props.node.path, 0);
-        setKids(t);
+        const tree = await api.tree(props.node.path, 0);
+        setKids(tree);
       } finally {
         setLoading(false);
       }
@@ -62,16 +83,49 @@ const TreeNodeView: Component<NodeProps> = (props) => {
         onClick={toggle}
         title={props.node.path}
       >
-        <span style={{ width: "14px", display: "inline-block", "text-align": "center" }}>
+        <span
+          style={{ width: "14px", display: "inline-block", "text-align": "center" }}
+        >
           {props.node.is_dir ? (open() ? "▾" : "▸") : " "}
         </span>
-        <span style={{ "margin-left": "2px", flex: 1, "min-width": 0, overflow: "hidden", "text-overflow": "ellipsis" }}>
+        <span
+          style={{
+            "margin-left": "2px",
+            flex: 1,
+            "min-width": 0,
+            overflow: "hidden",
+            "text-overflow": "ellipsis",
+          }}
+        >
           <span class="tree-icon">
             {props.node.is_dir ? getFolderIcon(open()) : getFileIcon(props.node.path)}
           </span>
           {props.node.name}
         </span>
+
         <Show when={props.node.is_dir}>
+          <Show when={props.onCreatePresetHere}>
+            <button
+              class="tree-term-btn"
+              title="Create from preset here"
+              onClick={(e) => {
+                e.stopPropagation();
+                props.onCreatePresetHere?.(props.node.path);
+              }}
+            >
+              ✦
+            </button>
+          </Show>
+          <button
+            class="tree-term-btn"
+            title="Upload here"
+            onClick={(e) => {
+              e.stopPropagation();
+              props.onUploadHere(props.node.path);
+            }}
+          >
+            ⇪
+          </button>
           <button
             class="tree-term-btn"
             title="Open terminal here"
@@ -83,6 +137,38 @@ const TreeNodeView: Component<NodeProps> = (props) => {
             &gt;_
           </button>
         </Show>
+
+        <button
+          class="tree-term-btn"
+          title="Rename or move"
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onRenameMove(props.node);
+          }}
+        >
+          ✎
+        </button>
+        <button
+          class="tree-term-btn"
+          title="Duplicate"
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onDuplicate(props.node);
+          }}
+        >
+          ⧉
+        </button>
+        <button
+          class="tree-term-btn danger"
+          title="Delete"
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onDelete(props.node);
+          }}
+        >
+          ×
+        </button>
+
         <Show when={!props.node.is_dir}>
           <button
             class="tree-term-btn"
@@ -112,6 +198,11 @@ const TreeNodeView: Component<NodeProps> = (props) => {
                 onOpen={props.onOpen}
                 onOpenFile={props.onOpenFile}
                 onOpenTerminalHere={props.onOpenTerminalHere}
+                onCreatePresetHere={props.onCreatePresetHere}
+                onRenameMove={props.onRenameMove}
+                onDuplicate={props.onDuplicate}
+                onDelete={props.onDelete}
+                onUploadHere={props.onUploadHere}
               />
             )}
           </For>
@@ -124,17 +215,23 @@ const TreeNodeView: Component<NodeProps> = (props) => {
 const FileTree: Component<Props> = (props) => {
   const [tree, { refetch }] = createResource(() => api.tree("", 0));
   const [searchQuery, setSearchQuery] = createSignal("");
+  const [uploadTarget, setUploadTarget] = createSignal<string>("");
   const navigate = useNavigate();
+  let uploadInputRef: HTMLInputElement | undefined;
+
+  const reportError = (message: string) => {
+    if (props.onError) props.onError(message);
+    else console.error(message);
+  };
+
+  const refreshTree = () => {
+    void refetch();
+  };
 
   const openFile = (path: string) => {
     openEditorTab(path);
     navigate(`/e/${encodeURIComponent(path)}`);
     props.onOpen?.();
-  };
-
-  const reportError = (message: string) => {
-    if (props.onError) props.onError(message);
-    else console.error(message);
   };
 
   const newFile = async () => {
@@ -149,24 +246,133 @@ const FileTree: Component<Props> = (props) => {
     try {
       await api.writeFile(path, "", true);
       openFile(path);
-      void refetch();
+      refreshTree();
     } catch (e) {
       reportError(`new file failed: ${(e as Error).message}`);
     }
   };
 
+  const newFolder = async () => {
+    if (!props.promptPath) return;
+    const raw = await props.promptPath(
+      "New folder",
+      "",
+      "relative/path/to/folder",
+    );
+    const path = raw?.trim().replace(/^\/+/, "") ?? "";
+    if (!path) return;
+    try {
+      await api.fileOp({ op: "mkdir", path, parents: true });
+      refreshTree();
+    } catch (e) {
+      reportError(`mkdir failed: ${(e as Error).message}`);
+    }
+  };
+
   const openTerminalHere = async (path: string) => {
-    // Server resolves a relative path against workspace_root, so we pass the
-    // path verbatim. "" → workspace_root (default cwd).
     const name = `sh ${path.split("/").pop() || "/"}`;
     try {
-      const s = await createSession(name, undefined, path);
-      openTerminalTab(s.id, s.name);
-      navigate(`/t/${s.id}`);
+      const session = await createSession(name, undefined, path);
+      openTerminalTab(session.id, session.name);
+      navigate(`/t/${session.id}`);
       props.onOpen?.();
     } catch (e) {
-      console.error("open terminal here failed", e);
       reportError(`open terminal here failed: ${(e as Error).message}`);
+    }
+  };
+
+  const renameMoveNode = async (node: TreeNode) => {
+    if (!props.promptPath) return;
+    const target = await props.promptPath(
+      `Rename or move ${node.name}`,
+      node.path,
+      "relative/path/to/new-name",
+    );
+    const nextPath = target?.trim().replace(/^\/+/, "") ?? "";
+    if (!nextPath || nextPath === node.path) return;
+    try {
+      const result = await api.fileOp({
+        op: "move",
+        from: node.path,
+        to: nextPath,
+        create_parents: true,
+      });
+      refreshTree();
+      if (!node.is_dir && result.path) {
+        openFile(result.path);
+      }
+    } catch (e) {
+      reportError(`move failed: ${(e as Error).message}`);
+    }
+  };
+
+  const duplicateNode = async (node: TreeNode) => {
+    if (!props.promptPath) return;
+    const target = await props.promptPath(
+      `Duplicate ${node.name}`,
+      duplicatePath(node.path),
+      "relative/path/to/copy",
+    );
+    const nextPath = target?.trim().replace(/^\/+/, "") ?? "";
+    if (!nextPath) return;
+    try {
+      const result = await api.fileOp({
+        op: "duplicate",
+        from: node.path,
+        to: nextPath,
+        create_parents: true,
+      });
+      refreshTree();
+      if (!node.is_dir && result.path) {
+        openFile(result.path);
+      }
+    } catch (e) {
+      reportError(`duplicate failed: ${(e as Error).message}`);
+    }
+  };
+
+  const deleteNode = async (node: TreeNode) => {
+    const ok = window.confirm(
+      node.is_dir
+        ? `Delete folder "${node.path}" and all contents?`
+        : `Delete file "${node.path}"?`,
+    );
+    if (!ok) return;
+    try {
+      await api.fileOp({
+        op: "delete",
+        path: node.path,
+        recursive: node.is_dir,
+      });
+      refreshTree();
+    } catch (e) {
+      reportError(`delete failed: ${(e as Error).message}`);
+    }
+  };
+
+  const triggerUpload = (targetDir = "") => {
+    setUploadTarget(targetDir);
+    uploadInputRef?.click();
+  };
+
+  const uploadFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    try {
+      for (const file of Array.from(files)) {
+        const buffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        const b64 = btoa(binary);
+        const dest = joinPath(uploadTarget(), file.name);
+        await api.writeFileBase64(dest, b64, true);
+      }
+      refreshTree();
+    } catch (e) {
+      reportError(`upload failed: ${(e as Error).message}`);
+    } finally {
+      if (uploadInputRef) uploadInputRef.value = "";
+      setUploadTarget("");
     }
   };
 
@@ -180,7 +386,7 @@ const FileTree: Component<Props> = (props) => {
       if (node.is_dir && node.children) {
         const filteredChildren = node.children
           .map(filterNode)
-          .filter((n): n is TreeNode => n !== null);
+          .filter((entry): entry is TreeNode => entry !== null);
 
         if (nameMatch || filteredChildren.length > 0) {
           return { ...node, children: filteredChildren };
@@ -193,11 +399,18 @@ const FileTree: Component<Props> = (props) => {
 
     return tree()!
       .map(filterNode)
-      .filter((n): n is TreeNode => n !== null);
+      .filter((entry): entry is TreeNode => entry !== null);
   };
 
   return (
     <div class="file-tree">
+      <input
+        ref={uploadInputRef}
+        type="file"
+        multiple
+        style={{ display: "none" }}
+        onChange={(e) => void uploadFiles(e.currentTarget.files)}
+      />
       <div class="file-tree-header">
         <input
           type="search"
@@ -219,7 +432,21 @@ const FileTree: Component<Props> = (props) => {
           </button>
           <button
             style={{ "font-size": "11px", padding: "2px 6px" }}
-            onClick={() => refetch()}
+            onClick={() => void newFolder()}
+            title="New folder"
+          >
+            □
+          </button>
+          <button
+            style={{ "font-size": "11px", padding: "2px 6px" }}
+            onClick={() => triggerUpload("")}
+            title="Upload files"
+          >
+            ⇪
+          </button>
+          <button
+            style={{ "font-size": "11px", padding: "2px 6px" }}
+            onClick={refreshTree}
             title="Refresh"
           >
             ⟳
@@ -233,12 +460,17 @@ const FileTree: Component<Props> = (props) => {
       </Show>
       <div class="tree-scroll">
         <For each={filteredTree()}>
-          {(n) => (
+          {(node) => (
             <TreeNodeView
-              node={n}
+              node={node}
               onOpen={props.onOpen}
               onOpenFile={openFile}
               onOpenTerminalHere={openTerminalHere}
+              onCreatePresetHere={props.onCreatePresetHere}
+              onRenameMove={(entry) => void renameMoveNode(entry)}
+              onDuplicate={(entry) => void duplicateNode(entry)}
+              onDelete={(entry) => void deleteNode(entry)}
+              onUploadHere={triggerUpload}
             />
           )}
         </For>

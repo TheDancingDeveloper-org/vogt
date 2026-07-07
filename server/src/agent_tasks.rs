@@ -18,6 +18,7 @@ use crate::{
     activity::strip_ansi,
     app::AppState,
     error::{ApiError, Result},
+    events::{EventBus, ServerEvent},
     pty::{Session, SessionSpec},
     push::PushManager,
     sessions::SessionRegistry,
@@ -86,6 +87,14 @@ pub struct AgentTaskRun {
     pub session_name: String,
     pub prompt_file: String,
     pub context_file: String,
+    #[serde(default = "default_run_status")]
+    pub status: AgentTaskRunStatus,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub completed_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -93,6 +102,18 @@ pub struct AgentTaskRun {
 pub enum AgentTaskRunTrigger {
     Manual,
     Scheduled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentTaskRunStatus {
+    Running,
+    Completed,
+    Errored,
+}
+
+fn default_run_status() -> AgentTaskRunStatus {
+    AgentTaskRunStatus::Running
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,6 +196,7 @@ impl AgentTaskRegistry {
             tasks: Mutex::new(tasks),
             executing: Mutex::new(HashSet::new()),
         };
+        registry.reconcile_run_history()?;
         registry.normalize_startup_schedule()?;
         Ok(registry)
     }
@@ -186,6 +208,31 @@ impl AgentTaskRegistry {
             loop {
                 registry.run_due_once().await;
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+    }
+
+    pub fn spawn_run_watcher(self: &Arc<Self>, bus: EventBus) {
+        let registry = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut rx = bus.subscribe();
+            loop {
+                match rx.recv().await {
+                    Ok(ServerEvent::SessionKilled { id, exit_code }) => {
+                        if let Err(e) = registry.complete_run_for_session(id, exit_code) {
+                            tracing::warn!(
+                                session = %id,
+                                error = %e,
+                                "failed to update agent task run outcome"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "agent task run watcher lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
     }
@@ -430,6 +477,10 @@ impl AgentTaskRegistry {
             session_name,
             prompt_file: prompt_file_display,
             context_file: context_file_display,
+            status: AgentTaskRunStatus::Running,
+            completed_at: None,
+            exit_code: None,
+            summary: None,
         };
 
         {
@@ -518,6 +569,48 @@ impl AgentTaskRegistry {
         Ok(out)
     }
 
+    fn complete_run_for_session(&self, session_id: Uuid, exit_code: Option<i32>) -> Result<()> {
+        let Some(code) = exit_code else {
+            return Ok(());
+        };
+        let completed_at = OffsetDateTime::now_utc();
+        let mut tasks = self.tasks.lock();
+        let mut changed = false;
+
+        for task in tasks.iter_mut() {
+            if let Some(run) = task
+                .runs
+                .iter_mut()
+                .rev()
+                .find(|run| run.session_id == session_id)
+            {
+                if run.status != AgentTaskRunStatus::Running {
+                    return Ok(());
+                }
+                run.exit_code = Some(code);
+                run.completed_at = Some(completed_at);
+                run.status = if code == 0 {
+                    AgentTaskRunStatus::Completed
+                } else {
+                    AgentTaskRunStatus::Errored
+                };
+                run.summary = Some(if code == 0 {
+                    "Exited successfully".to_string()
+                } else {
+                    format!("Exited with status {code}")
+                });
+                task.updated_at = completed_at;
+                changed = true;
+                break;
+            }
+        }
+
+        if changed {
+            self.save_locked(&tasks)?;
+        }
+        Ok(())
+    }
+
     fn advance_next_run(&self, id: Uuid) -> Result<()> {
         let mut tasks = self.tasks.lock();
         let task = tasks
@@ -547,6 +640,36 @@ impl AgentTaskRegistry {
                 changed = true;
             }
         }
+        if changed {
+            self.save_locked(&tasks)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_run_history(&self) -> Result<()> {
+        let now = OffsetDateTime::now_utc();
+        let mut changed = false;
+        let mut tasks = self.tasks.lock();
+
+        for task in tasks.iter_mut() {
+            let mut task_changed = false;
+            for run in &mut task.runs {
+                if run.status == AgentTaskRunStatus::Running
+                    && self.sessions.get(run.session_id).is_err()
+                {
+                    run.status = AgentTaskRunStatus::Errored;
+                    run.completed_at.get_or_insert(now);
+                    run.summary
+                        .get_or_insert_with(|| "Outcome unavailable after restart".to_string());
+                    task_changed = true;
+                    changed = true;
+                }
+            }
+            if task_changed {
+                task.updated_at = now;
+            }
+        }
+
         if changed {
             self.save_locked(&tasks)?;
         }

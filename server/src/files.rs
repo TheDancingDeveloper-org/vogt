@@ -9,7 +9,7 @@ use axum::{
 };
 use base64::Engine as _;
 use mydevenv2_contract::{FileEntry, FileRead, SearchHit, TreeNode, WriteFileResponse, WriteReq};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio_util::io::ReaderStream;
 
@@ -197,6 +197,186 @@ pub async fn write_file(
     let n = bytes.len();
     tokio::fs::write(&p, &bytes).await?;
     Ok(Json(WriteFileResponse { ok: true, bytes: n }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileOpResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum FileOpReq {
+    Move {
+        from: String,
+        to: String,
+        #[serde(default)]
+        create_parents: bool,
+    },
+    Delete {
+        path: String,
+        #[serde(default)]
+        recursive: bool,
+    },
+    Mkdir {
+        path: String,
+        #[serde(default)]
+        parents: bool,
+    },
+    Duplicate {
+        from: String,
+        to: String,
+        #[serde(default)]
+        create_parents: bool,
+    },
+}
+
+pub async fn operate(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<FileOpReq>,
+) -> Result<Json<FileOpResponse>> {
+    let root = &state.config.workspace_root;
+    match req {
+        FileOpReq::Move {
+            from,
+            to,
+            create_parents,
+        } => {
+            require_nonempty_path(&from)?;
+            require_nonempty_path(&to)?;
+            let src = workspace_path::resolve_existing(root, &from)?;
+            let dst = resolve_target(root, &to, create_parents).await?;
+            reject_same_or_nested_destination(&src, &dst).await?;
+            reject_existing_destination(&dst).await?;
+            tokio::fs::rename(&src, &dst).await?;
+            Ok(Json(FileOpResponse {
+                ok: true,
+                path: Some(rel_to(root, &dst)),
+            }))
+        }
+        FileOpReq::Delete { path, recursive } => {
+            require_nonempty_path(&path)?;
+            let resolved = workspace_path::resolve_existing(root, &path)?;
+            let meta = tokio::fs::metadata(&resolved).await?;
+            if meta.is_dir() {
+                if recursive {
+                    tokio::fs::remove_dir_all(&resolved).await?;
+                } else {
+                    tokio::fs::remove_dir(&resolved).await?;
+                }
+            } else {
+                tokio::fs::remove_file(&resolved).await?;
+            }
+            Ok(Json(FileOpResponse {
+                ok: true,
+                path: None,
+            }))
+        }
+        FileOpReq::Mkdir { path, parents } => {
+            require_nonempty_path(&path)?;
+            let dst = resolve_target(root, &path, parents).await?;
+            reject_existing_destination(&dst).await?;
+            if parents {
+                tokio::fs::create_dir_all(&dst).await?;
+            } else {
+                tokio::fs::create_dir(&dst).await?;
+            }
+            Ok(Json(FileOpResponse {
+                ok: true,
+                path: Some(rel_to(root, &dst)),
+            }))
+        }
+        FileOpReq::Duplicate {
+            from,
+            to,
+            create_parents,
+        } => {
+            require_nonempty_path(&from)?;
+            require_nonempty_path(&to)?;
+            let src = workspace_path::resolve_existing(root, &from)?;
+            let dst = resolve_target(root, &to, create_parents).await?;
+            reject_same_or_nested_destination(&src, &dst).await?;
+            reject_existing_destination(&dst).await?;
+            let meta = tokio::fs::metadata(&src).await?;
+            if meta.is_dir() {
+                copy_dir_recursive(&src, &dst).await?;
+            } else {
+                tokio::fs::copy(&src, &dst).await?;
+            }
+            Ok(Json(FileOpResponse {
+                ok: true,
+                path: Some(rel_to(root, &dst)),
+            }))
+        }
+    }
+}
+
+fn require_nonempty_path(path: &str) -> Result<()> {
+    if path.trim().is_empty() {
+        return Err(ApiError::BadRequest("path must not be empty".into()));
+    }
+    Ok(())
+}
+
+async fn resolve_target(
+    root: &Path,
+    path: &str,
+    create_parents: bool,
+) -> Result<std::path::PathBuf> {
+    if create_parents {
+        let lexical = workspace_path::resolve_existing_or_lexical(root, path)?;
+        if let Some(parent) = lexical.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+    workspace_path::resolve_for_write(root, path)
+}
+
+async fn reject_existing_destination(path: &Path) -> Result<()> {
+    match tokio::fs::metadata(path).await {
+        Ok(_) => Err(ApiError::Conflict(format!(
+            "destination already exists: {}",
+            path.display()
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(ApiError::Io(e)),
+    }
+}
+
+async fn reject_same_or_nested_destination(src: &Path, dst: &Path) -> Result<()> {
+    if src == dst {
+        return Err(ApiError::Conflict(
+            "source and destination are the same".into(),
+        ));
+    }
+    let meta = tokio::fs::metadata(src).await?;
+    if meta.is_dir() && dst.starts_with(src) {
+        return Err(ApiError::BadRequest(
+            "destination may not be inside the source directory".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
+    while let Some((current_src, current_dst)) = stack.pop() {
+        tokio::fs::create_dir(&current_dst).await?;
+        let mut rd = tokio::fs::read_dir(&current_src).await?;
+        while let Some(ent) = rd.next_entry().await? {
+            let src_path = ent.path();
+            let dst_path = current_dst.join(ent.file_name());
+            let ft = ent.file_type().await?;
+            if ft.is_dir() {
+                stack.push((src_path, dst_path));
+            } else {
+                tokio::fs::copy(src_path, dst_path).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

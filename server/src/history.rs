@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{FromRow, Row};
 use time::OffsetDateTime;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use uuid::Uuid;
 
 use crate::error::{ApiError, Result};
@@ -39,6 +40,15 @@ pub struct SearchResult {
     pub created_at: String,
     pub match_snippet: String,
     pub rank: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionLogPreview {
+    pub session_id: String,
+    pub text: String,
+    pub bytes: u64,
+    pub total_bytes: u64,
+    pub truncated: bool,
 }
 
 /// Parameters for archiving a completed session. Grouped into a struct so the
@@ -307,6 +317,45 @@ impl SessionHistory {
         })?;
 
         Ok(session)
+    }
+
+    /// Read the tail of an archived raw session log for replay-oriented views.
+    pub async fn read_log_preview(&self, id: Uuid, tail_bytes: u64) -> Result<SessionLogPreview> {
+        let path = self.log_path(id);
+        let mut file = tokio::fs::File::open(&path)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => ApiError::NotFound,
+                _ => ApiError::Internal(format!("failed to open session log: {e}")),
+            })?;
+        let total_bytes = file
+            .metadata()
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to stat session log: {e}")))?
+            .len();
+
+        let tail_bytes = tail_bytes.clamp(1, 256 * 1024);
+        let bytes = total_bytes.min(tail_bytes);
+        if total_bytes > bytes {
+            file.seek(std::io::SeekFrom::Start(total_bytes - bytes))
+                .await
+                .map_err(|e| ApiError::Internal(format!("failed to seek session log: {e}")))?;
+        }
+
+        let mut buf = vec![0_u8; bytes as usize];
+        if bytes > 0 {
+            file.read_exact(&mut buf)
+                .await
+                .map_err(|e| ApiError::Internal(format!("failed to read session log: {e}")))?;
+        }
+
+        Ok(SessionLogPreview {
+            session_id: id.to_string(),
+            text: String::from_utf8_lossy(&buf).into_owned(),
+            bytes,
+            total_bytes,
+            truncated: total_bytes > bytes,
+        })
     }
 
     /// Clean up old sessions beyond retention period

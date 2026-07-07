@@ -38,6 +38,7 @@ type TerminalLayoutNode = PaneNode | SplitNode;
 interface SavedLayout {
   root: TerminalLayoutNode;
   activePaneId: string;
+  broadcast?: boolean;
 }
 
 interface Props {
@@ -113,6 +114,7 @@ function readSavedLayout(tabId: string, sessionId: string): SavedLayout {
   const fallback = {
     root: makePane(sessionId),
     activePaneId: paneIdFor(sessionId),
+    broadcast: false,
   };
   const saved = readSavedLayouts()[tabId];
   const root = normalizeNode(saved?.root);
@@ -124,6 +126,7 @@ function readSavedLayout(tabId: string, sessionId: string): SavedLayout {
       findPane(root, savedActive)?.id ??
       firstPane(root)?.id ??
       fallback.activePaneId,
+    broadcast: Boolean(saved?.broadcast),
   };
 }
 
@@ -229,6 +232,7 @@ interface LayoutNodeProps {
   node: TerminalLayoutNode;
   activePaneId: string;
   onFocusPane: (paneId: string) => void;
+  interceptPaneInput: (paneId: string, data: string | ArrayBuffer) => boolean;
   registerPaneSend: (
     paneId: string,
     fn: ((data: string | ArrayBuffer) => void) | null,
@@ -248,6 +252,7 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
           onPointerDown={() => props.onFocusPane(pane().id)}
         >
           <Terminal
+            interceptInput={(data) => props.interceptPaneInput(pane().id, data)}
             sessionId={pane().sessionId}
             registerSend={(fn) => props.registerPaneSend(pane().id, fn)}
             registerActions={(actions) =>
@@ -267,6 +272,7 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
                 node={child}
                 activePaneId={props.activePaneId}
                 onFocusPane={props.onFocusPane}
+                interceptPaneInput={props.interceptPaneInput}
                 registerPaneSend={props.registerPaneSend}
                 registerPaneActions={props.registerPaneActions}
                 onNotify={props.onNotify}
@@ -283,6 +289,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
   const initial = readSavedLayout(props.tabId, props.sessionId);
   const [root, setRoot] = createSignal<TerminalLayoutNode>(initial.root);
   const [activePaneId, setActivePaneId] = createSignal(initial.activePaneId);
+  const [broadcast, setBroadcast] = createSignal(Boolean(initial.broadcast));
   const [busy, setBusy] = createSignal<SplitDirection | "close" | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [draft, setDraft] = createSignal("");
@@ -293,10 +300,17 @@ const TerminalWorkspace: Component<Props> = (props) => {
   const activePane = createMemo(
     () => findPane(root(), activePaneId()) ?? firstPane(root()),
   );
+  const paneSummaries = createMemo(() =>
+    panes().map((pane) => ({
+      pane,
+      session: sessionsStore.sessions[pane.sessionId],
+    })),
+  );
   const activeSession = createMemo(() => {
     const pane = activePane();
     return pane ? sessionsStore.sessions[pane.sessionId] : undefined;
   });
+  const broadcastEnabled = createMemo(() => broadcast() && panes().length > 1);
   const canCloseActivePane = createMemo(() => {
     const pane = activePane();
     return Boolean(
@@ -304,8 +318,27 @@ const TerminalWorkspace: Component<Props> = (props) => {
     );
   });
 
+  const sendToTargets = (data: string | ArrayBuffer, originPaneId?: string) => {
+    const targetPaneIds = broadcastEnabled()
+      ? panes().map((pane) => pane.id)
+      : [originPaneId ?? activePaneId()];
+    const seen = new Set<string>();
+    for (const paneId of targetPaneIds) {
+      if (seen.has(paneId)) continue;
+      seen.add(paneId);
+      paneSenders.get(paneId)?.(data);
+    }
+  };
+
+  const interceptPaneInput = (paneId: string, data: string | ArrayBuffer) => {
+    if (!broadcastEnabled()) return false;
+    if (paneId !== activePaneId()) return false;
+    sendToTargets(data, paneId);
+    return true;
+  };
+
   const sendToActive = (data: string | ArrayBuffer) => {
-    paneSenders.get(activePaneId())?.(data);
+    sendToTargets(data);
   };
 
   const sendDraft = (submit: boolean) => {
@@ -369,6 +402,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
     writeSavedLayout(props.tabId, {
       root: currentRoot,
       activePaneId: findPane(currentRoot, currentActive)?.id ?? firstPane(currentRoot)?.id ?? currentActive,
+      broadcast: broadcast(),
     });
   });
 
@@ -467,6 +501,13 @@ const TerminalWorkspace: Component<Props> = (props) => {
           <span class="terminal-workspace-error">{error()}</span>
         </Show>
         <button
+          class={broadcastEnabled() ? "active" : ""}
+          onClick={() => setBroadcast((value) => !value)}
+          title="Send keyboard, paste, composer, and shortcut input to every pane in this workspace"
+        >
+          {broadcastEnabled() ? "Broadcast on" : "Broadcast off"}
+        </button>
+        <button
           onClick={() => void splitActive("row")}
           disabled={busy() !== null}
           title="Split right"
@@ -492,11 +533,31 @@ const TerminalWorkspace: Component<Props> = (props) => {
           Close pane
         </button>
       </div>
+      <Show when={panes().length > 1}>
+        <div class="terminal-workspace-roster">
+          <span class={`terminal-workspace-roster-badge ${broadcastEnabled() ? "active" : ""}`}>
+            {broadcastEnabled() ? "Input fan-out" : "Active pane only"}
+          </span>
+          <For each={paneSummaries()}>
+            {({ pane, session }) => (
+              <button
+                class={`terminal-pane-chip ${activePaneId() === pane.id ? "active" : ""}`}
+                onClick={() => setActivePaneId(pane.id)}
+                title={session?.cwd || session?.name || pane.sessionId}
+              >
+                <span class={`activity-dot ${activityClass(session)}`} />
+                <span>{session?.name ?? pane.sessionId.slice(0, 8)}</span>
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
       <div class="terminal-layout">
         <LayoutNodeView
           node={root()}
           activePaneId={activePaneId()}
           onFocusPane={setActivePaneId}
+          interceptPaneInput={interceptPaneInput}
           registerPaneSend={(paneId, fn) => {
             if (fn) paneSenders.set(paneId, fn);
             else paneSenders.delete(paneId);

@@ -12,7 +12,7 @@ use crate::gui as gui_handlers;
 use crate::push_api;
 use crate::{
     agent_tasks::{self, AgentTaskRegistry},
-    api, assets, auth, briefing,
+    api, assets, auth,
     config::Config,
     events::EventBus,
     files, git,
@@ -21,7 +21,7 @@ use crate::{
     history_api,
     push::PushManager,
     sessions::SessionRegistry,
-    weather, ws,
+    ws,
 };
 
 pub struct AppState {
@@ -83,6 +83,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // `waiting-for-input`. Subscribes to the events bus.
     push_api::spawn_activity_watcher(Arc::clone(&state));
     state.agent_tasks.spawn_scheduler();
+    state.agent_tasks.spawn_run_watcher(state.bus.clone());
 
     // Public: /healthz, /api/config, /api/push/public-key. None reveal secrets.
     let public = Router::new()
@@ -104,6 +105,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/sessions/{id}/kill", post(api::kill_session))
         .route("/api/events", get(api::events_stream))
         .route("/api/files", get(files::read_file).put(files::write_file))
+        .route("/api/files/op", post(files::operate))
         .route("/api/files/download", get(files::download_file))
         .route("/api/dir", get(files::list_dir))
         .route("/api/tree", get(files::tree))
@@ -112,11 +114,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/git/diff", get(git::diff))
         .route("/api/git/log", get(git::log))
         .route("/api/git/branch", get(git::branch))
+        .route("/api/git/op", post(git::operate))
         .route("/api/gui/launch", post(gui_handlers::launch))
         .route("/api/gui/processes", get(gui_handlers::processes))
         .route("/api/gui/kill", post(gui_handlers::kill_proc))
-        .route("/api/weather", get(weather::forecast))
-        .route("/api/briefing/daily", get(briefing::daily))
         .route(
             "/api/agent-tasks",
             get(agent_tasks::list).post(agent_tasks::create),
@@ -136,6 +137,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/push/test", post(push_api::test_dispatch))
         .route("/api/history/sessions", get(history_api::list_sessions))
         .route("/api/history/search", get(history_api::search_sessions))
+        .route("/api/history/{id}/log", get(history_api::get_session_log))
+        .route(
+            "/api/history/{id}/download",
+            get(history_api::download_session_log),
+        )
         .route(
             "/api/history/{id}",
             get(history_api::get_session).delete(history_api::delete_session),

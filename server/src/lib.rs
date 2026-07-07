@@ -4,7 +4,6 @@ pub mod api;
 pub mod app;
 pub mod assets;
 pub mod auth;
-pub mod briefing;
 pub mod config;
 pub mod error;
 pub mod events;
@@ -19,7 +18,6 @@ pub mod push_api;
 pub mod push_fcm;
 pub mod scrollback;
 pub mod sessions;
-pub mod weather;
 pub mod workspace_path;
 pub mod ws;
 

@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 use mydevenv2_contract::{BranchInfo, DiffResp, GitStatus, LogEntry, StatusEntry, StatusKind};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use crate::{
@@ -71,6 +71,27 @@ async fn run_git(repo: &Path, args: &[&str]) -> Result<String> {
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn clean_repo_rel(path: &str) -> Result<String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(ApiError::BadRequest("path must not be empty".into()));
+    }
+    for comp in Path::new(path).components() {
+        match comp {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(ApiError::BadRequest(
+                    "path contains '..' (parent component)".into(),
+                ));
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(ApiError::BadRequest("path must be relative".into()));
+            }
+        }
+    }
+    Ok(path.to_string())
 }
 
 fn repo_rel(root: &Path, repo: &Path) -> String {
@@ -193,26 +214,27 @@ pub async fn diff(
     let repo = resolve_repo(&state, &q.repo)
         .await?
         .ok_or(ApiError::NotFound)?;
+    let path = clean_repo_rel(&q.path)?;
 
     // HEAD content via `git show HEAD:path`. Returns empty if untracked.
-    let head_arg = format!("HEAD:{}", q.path);
+    let head_arg = format!("HEAD:{path}");
     let head: String = run_git(&repo, &["show", &head_arg])
         .await
         .unwrap_or_default();
 
     let current = if q.staged {
         // Staged content — `git show :path`
-        let staged_arg = format!(":{}", q.path);
+        let staged_arg = format!(":{path}");
         run_git(&repo, &["show", &staged_arg])
             .await
             .unwrap_or_default()
     } else {
-        let full = repo.join(&q.path);
+        let full = repo.join(&path);
         tokio::fs::read_to_string(&full).await.unwrap_or_default()
     };
 
     Ok(Json(DiffResp {
-        path: q.path,
+        path,
         current,
         head,
     }))
@@ -290,6 +312,156 @@ pub async fn branch(
     Ok(Json(BranchInfo { current, all }))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum GitOpReq {
+    Stage {
+        #[serde(default)]
+        repo: String,
+        path: String,
+    },
+    Unstage {
+        #[serde(default)]
+        repo: String,
+        path: String,
+    },
+    Discard {
+        #[serde(default)]
+        repo: String,
+        path: String,
+    },
+    Commit {
+        #[serde(default)]
+        repo: String,
+        message: String,
+    },
+    Checkout {
+        #[serde(default)]
+        repo: String,
+        branch: String,
+        #[serde(default)]
+        create: bool,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitOpResp {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+pub async fn operate(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<GitOpReq>,
+) -> Result<Json<GitOpResp>> {
+    match req {
+        GitOpReq::Stage { repo, path } => {
+            let repo = resolve_repo(&state, &repo)
+                .await?
+                .ok_or(ApiError::NotFound)?;
+            let path = clean_repo_rel(&path)?;
+            run_git(&repo, &["add", "--", &path]).await?;
+            Ok(Json(GitOpResp {
+                ok: true,
+                branch: None,
+                commit: None,
+            }))
+        }
+        GitOpReq::Unstage { repo, path } => {
+            let repo = resolve_repo(&state, &repo)
+                .await?
+                .ok_or(ApiError::NotFound)?;
+            let path = clean_repo_rel(&path)?;
+            run_git(&repo, &["reset", "HEAD", "--", &path]).await?;
+            Ok(Json(GitOpResp {
+                ok: true,
+                branch: None,
+                commit: None,
+            }))
+        }
+        GitOpReq::Discard { repo, path } => {
+            let repo = resolve_repo(&state, &repo)
+                .await?
+                .ok_or(ApiError::NotFound)?;
+            let path = clean_repo_rel(&path)?;
+            let tracked = Command::new("git")
+                .args(["ls-files", "--error-unmatch", "--", &path])
+                .current_dir(&repo)
+                .output()
+                .await
+                .map_err(|e| ApiError::Internal(format!("spawn git: {e}")))?
+                .status
+                .success();
+            if tracked {
+                run_git(
+                    &repo,
+                    &[
+                        "restore",
+                        "--source=HEAD",
+                        "--staged",
+                        "--worktree",
+                        "--",
+                        &path,
+                    ],
+                )
+                .await?;
+            } else {
+                run_git(&repo, &["clean", "-fd", "--", &path]).await?;
+            }
+            Ok(Json(GitOpResp {
+                ok: true,
+                branch: None,
+                commit: None,
+            }))
+        }
+        GitOpReq::Commit { repo, message } => {
+            let repo = resolve_repo(&state, &repo)
+                .await?
+                .ok_or(ApiError::NotFound)?;
+            let message = message.trim();
+            if message.is_empty() {
+                return Err(ApiError::BadRequest("message must not be empty".into()));
+            }
+            run_git(&repo, &["commit", "-m", message]).await?;
+            let commit = run_git(&repo, &["rev-parse", "HEAD"])
+                .await?
+                .trim()
+                .to_string();
+            Ok(Json(GitOpResp {
+                ok: true,
+                branch: None,
+                commit: Some(commit),
+            }))
+        }
+        GitOpReq::Checkout {
+            repo,
+            branch,
+            create,
+        } => {
+            let repo = resolve_repo(&state, &repo)
+                .await?
+                .ok_or(ApiError::NotFound)?;
+            let branch = branch.trim();
+            if branch.is_empty() {
+                return Err(ApiError::BadRequest("branch must not be empty".into()));
+            }
+            if create {
+                run_git(&repo, &["checkout", "-b", branch]).await?;
+            } else {
+                run_git(&repo, &["checkout", branch]).await?;
+            }
+            Ok(Json(GitOpResp {
+                ok: true,
+                branch: Some(branch.to_string()),
+                commit: None,
+            }))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +475,13 @@ mod tests {
         assert_eq!(classify_status("U", "U"), StatusKind::Conflicted);
         assert_eq!(classify_status("R", " "), StatusKind::Renamed);
         assert_eq!(classify_status(" ", "D"), StatusKind::Deleted);
+    }
+
+    #[test]
+    fn clean_repo_rel_rejects_parent_and_absolute_paths() {
+        assert_eq!(clean_repo_rel("src/main.rs").unwrap(), "src/main.rs");
+        assert!(clean_repo_rel("").is_err());
+        assert!(clean_repo_rel("../outside").is_err());
+        assert!(clean_repo_rel("/absolute/path").is_err());
     }
 }

@@ -29,6 +29,8 @@ interface Props {
   registerSend?: (fn: ((data: string | ArrayBuffer) => void) | null) => void;
   /** Exposed so the parent (modkey row, etc.) can drive copy/paste. */
   registerActions?: (actions: TerminalActions | null) => void;
+  /** Optional parent hook to reroute local keyboard/paste input before it hits this PTY. */
+  interceptInput?: (data: string | ArrayBuffer) => boolean;
   /** Optional callback for user-facing notifications (copy success/failure). */
   onNotify?: (message: string, kind?: "info" | "error") => void;
 }
@@ -131,6 +133,11 @@ const TerminalView: Component<Props> = (props) => {
         ws.send(data);
       }
     }
+  };
+
+  const dispatchInput = (data: string | ArrayBuffer) => {
+    if (props.interceptInput?.(data)) return;
+    sendToPty(data);
   };
 
   const sendResize = () => {
@@ -327,7 +334,7 @@ const TerminalView: Component<Props> = (props) => {
     fitAndResize();
 
     // Wire input: user keystrokes → PTY stdin.
-    term.onData((data) => sendToPty(data));
+    term.onData((data) => dispatchInput(data));
 
     // Intercept browser paste events (Ctrl+V / Edit→Paste) in the capture phase,
     // before xterm.js wraps them in bracketed-paste sequences (\x1b[200~...\x1b[201~).
@@ -337,7 +344,7 @@ const TerminalView: Component<Props> = (props) => {
       e.preventDefault();
       e.stopPropagation();
       const text = e.clipboardData?.getData("text/plain") ?? "";
-      if (text) sendToPty(text);
+      if (text) dispatchInput(text);
     };
     term.textarea?.addEventListener(
       "paste",
@@ -398,7 +405,7 @@ const TerminalView: Component<Props> = (props) => {
         if (v == null) return;
         text = v;
       }
-      if (text) sendToPty(text);
+      if (text) dispatchInput(text);
     };
 
     // Custom key handler for Ctrl+Shift+C/V and Cmd+C/V semantics.

@@ -73,6 +73,8 @@ render(
       <Route path="/g" component={App} />
       <Route path="/g/*path" component={App} />
       <Route path="/gui" component={App} />
+      <Route path="/history" component={App} />
+      <Route path="/tasks" component={App} />
     </HashRouter>
   ),
   document.getElementById("root")!,
