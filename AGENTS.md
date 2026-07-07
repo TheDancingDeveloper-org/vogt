@@ -84,7 +84,7 @@ Pipeline non-standard bits:
   legacy reference unless the project explicitly reintroduces a thin desktop
   wrapper.
 
-Runtime container: multi-stage `Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `TOOLING.md` toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server.
+Runtime container: multi-stage `Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `TOOLING.md` toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server. The base compose is socketless; direct host Docker access is an explicit overlay via `deploy/docker-compose.docker-socket.yml`.
 
 Codex and Claude are deliberately not installed by container bootstrap. Optional AI clients are user-managed. Production default-shell sessions are authenticated through `mydevenv2-agent-auth`; explicit-command sessions can invoke the helper directly.
 
@@ -138,8 +138,9 @@ Fixes applied here:
 
 - Default interactive sessions can auto-wrap through the auth broker
   (`MYDEVENV2_AUTO_AGENT_AUTH=1`).
-- Production compose requires the Infisical identity credentials, adds Docker
-  socket GID `984`, and sets authenticated shells as the default.
+- Production compose requires the Infisical identity credentials and sets
+  authenticated shells as the default. Direct host Docker access, including
+  socket GID `984`, lives in the `docker-compose.docker-socket.yml` overlay.
 - Startup can require and validate agent authentication before serving traffic.
 
 Validation for the recovery covered Infisical, Forgejo, Woodpecker, GitHub,

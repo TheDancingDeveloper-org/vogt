@@ -32,11 +32,7 @@ backlog.
    writability, Tailscale state, and GUI dependencies. The remaining work is
    syncing the compose healthcheck into `ops` and validating the live stack.
 
-5. **Docker socket boundary documentation / optional isolation** (`deploy/`)
-   Keep the current DooD behavior explicit in operator docs and consider a
-   socket proxy or disabled-by-default pattern for lower-privilege deployments.
-
-6. **Production stack cleanup for exit-node config** (live Komodo stack / ops repo)
+5. **Production stack cleanup for exit-node config** (live Komodo stack / ops repo)
    The live stack still carries a stale `TAILSCALE_EXIT_NODE=hertzde3` setting
    that causes startup warnings before the app continues without an exit node.
 

@@ -73,7 +73,13 @@ client release kept in Forgejo for historical reference.
 
 - Server: `POST /api/gui/launch`, `GET /api/gui/processes`, `POST /api/gui/kill?pid=`. Optional `via_sway` prefixes with `swaymsg exec --`. `GET /api/config` (public) returns `gui_stream_url` and build feature flags for the web UI.
 - Client: `gui` tab kind iframing the configured stream URL; toolbar to launch arbitrary GUI commands; running-processes list with kill buttons. Deep-link `/#/gui`.
-- Packaging: `Dockerfile` (multi-stage: web bundle → Rust release → Ubuntu 26.04 runtime with `TOOLING.md`, Sway, Selkies-GStreamer, Tailscale userspace, Docker CLI, Infisical, GitHub CLI, and the embedded PWA). `deploy/entrypoint.sh` orchestrates Tailscale → optional Sway → auth validation → server.
+- Packaging: `Dockerfile` (multi-stage: web bundle → Rust release → Ubuntu
+  26.04 runtime with `TOOLING.md`, Sway, Selkies-GStreamer, Tailscale
+  userspace, Docker CLI, Infisical, GitHub CLI, and the embedded PWA).
+  `deploy/entrypoint.sh` orchestrates Tailscale → optional Sway → auth
+  validation → server, and the base Komodo compose is socketless by default;
+  trusted personal deployments opt into host Docker access through
+  `deploy/docker-compose.docker-socket.yml`.
 - Production: the Komodo stack exists and is deployed. `START_SWAY=0` and `GUI_STREAM_URL=""` keep the GUI stream off until Selkies is wired and verified inside the pod.
 
 **Phase 6 (push + Android Capacitor APK) — code-complete; runtime push delivery pending real-device verification.**
@@ -175,6 +181,11 @@ Pass with `--config mydevenv2.toml`. CLI flags > env > config file.
 `capabilities = []` means "authenticated read-only token". Mutating routes map
 to capability gates: `sessions`, `filesystem-write`, `git-write`,
 `gui-control`, `agent-tasks-write`, `push-write`, and `history-write`.
+
+The runtime image still includes Docker CLI tooling, but host-daemon access is
+deployment-specific. The base `deploy/docker-compose.yml` does not mount
+`/var/run/docker.sock`; the direct personal-homelab path adds it through
+`deploy/docker-compose.docker-socket.yml`.
 
 ## Smoke test with curl + websocat
 

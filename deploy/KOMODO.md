@@ -1,10 +1,9 @@
 # Deploying MyDevEnv2 via Komodo
 
 Production currently runs as the Komodo stack **`prod-mydevenv2`**. Desired
-state lives in the `indexarr/ops` repo at
-**`personal/mydevenv2/docker-compose.yml`**. The stack serves the Rust/Axum API
-and embedded PWA from port `8910`, with Caddy in front at
-`https://mydevenv2.sprooty.com`.
+state lives in the `indexarr/ops` repo at **`personal/mydevenv2/`**. The stack
+serves the Rust/Axum API and embedded PWA from port `8910`, with Caddy in
+front at `https://mydevenv2.sprooty.com`.
 
 Normal deploy flow:
 
@@ -36,8 +35,26 @@ The rest of this file is bootstrap/recovery reference for recreating the stack.
 cd ~/Working/Active/apps/ops
 mkdir -p personal/mydevenv2
 cp ~/Working/Active/apps/MyDevEnv2/deploy/docker-compose.yml personal/mydevenv2/
+cp ~/Working/Active/apps/MyDevEnv2/deploy/docker-compose.docker-socket.yml personal/mydevenv2/
 git add personal/mydevenv2 && git commit -m "add prod-mydevenv2 stack" && git push
 ```
+
+## 1a. Choose a Docker access mode
+
+The base `docker-compose.yml` is intentionally socketless. Add one of these
+overlay files to the Komodo stack `file_paths` list depending on the trust
+boundary you want:
+
+- `docker-compose.docker-socket.yml`
+  Current personal-homelab mode. Mounts `/var/run/docker.sock` directly into
+  the pod and adds the host socket group so `docker` works in normal sessions.
+- No overlay
+  Lower-privilege mode. Docker CLI remains installed in the image, but there is
+  no daemon socket inside the pod, so Docker commands fail closed instead of
+  silently inheriting host control.
+
+Current production uses the direct socket overlay because authenticated agent
+sessions and repo workflows still rely on host-daemon access.
 
 ## 2. Mint runtime secrets and the agent identity
 
@@ -76,7 +93,7 @@ Current production environment also expects:
 - `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` — single-line Firebase service-account
   JSON for FCM HTTP v1. Empty disables native FCM while web-push still works.
 - `DOCKER_SOCKET_GID` — optional override for the host docker socket group
-  added to the container. Node B currently uses `984`.
+  added by `docker-compose.docker-socket.yml`. Node B currently uses `984`.
 
 Codex and Claude are not installed by this bootstrap. They are optional clients;
 default interactive sessions are authenticated through the neutral
@@ -119,7 +136,7 @@ curl -sS -X POST http://100.92.54.45:3011/write \
       "repo": "indexarr/ops",
       "branch": "main",
       "run_directory": "personal/mydevenv2",
-      "file_paths": ["docker-compose.yml"],
+      "file_paths": ["docker-compose.yml", "docker-compose.docker-socket.yml"],
       "environment": "MYDEVENV2_TOKEN=$MYDEVENV2_TOKEN\nHOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY=$TS_KEY\nHOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID=$AGENT_CLIENT_ID\nHOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET=$AGENT_CLIENT_SECRET\n"
     }
   }
@@ -175,3 +192,15 @@ Workspace synchronization is handled outside the app. The workspace-root
 `mutagen.yml` should target Node B at
 `sprooty@100.92.54.45:/mnt/2tnvme/docker/volumes/mydevenv2/workspace`; do not
 target the retired MyDevEnv v1 endpoint.
+
+## 7. Docker boundary notes
+
+Direct Docker socket access is convenient but high-trust:
+
+- Any shell or API flow that can drive Docker inside the pod can control the
+  host daemon.
+- Scoped non-admin API tokens reduce HTTP blast radius, but an interactive
+  shell session in the direct-socket overlay still inherits host-daemon access.
+- For personal homelab use that may be acceptable; for broader sharing, keep
+  the base socketless stack or interpose a purpose-built socket proxy in front
+  of the daemon.

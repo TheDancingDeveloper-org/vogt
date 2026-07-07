@@ -58,7 +58,9 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
 
 ## Container + cloud tools
 
-- Docker CLI + compose plugin (DooD pattern — talks to host daemon via socket mount; container itself doesn't run dockerd)
+- Docker CLI + compose plugin (installed in the image, but daemon access is
+  deployment-selected: the base stack is socketless and the direct DooD mount
+  lives in `deploy/docker-compose.docker-socket.yml`)
 - `gh` (GitHub CLI)
 - `rclone`
 - `infisical` (CLI for secret retrieval; already used in CI and at runtime)
@@ -98,8 +100,9 @@ The machine identity must have read-only access to the `cicd`, `infrastructure`,
 and `apps` Infisical projects. The helper uses the direct tailnet endpoint
 `http://100.92.54.45:8400` to avoid the browser-facing Caddy auth gate.
 
-The Docker CLI uses the host daemon socket. The compose `group_add` value must
-match `stat -c %g /var/run/docker.sock` on Node B (currently `984`).
+When the direct-socket overlay is enabled, the Docker CLI uses the host daemon
+socket. The compose `group_add` value must match `stat -c %g
+/var/run/docker.sock` on Node B (currently `984`).
 
 ## Things v1 had that v2 did not carry forward
 

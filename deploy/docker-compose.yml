@@ -13,10 +13,6 @@ services:
     container_name: mydevenv2
     restart: unless-stopped
     hostname: mydevenv2
-    # Host docker.sock is owned by a host-specific group. Add that GID so
-    # `docker` works in normal sessions without sudo; override if Node B changes.
-    group_add:
-      - "${DOCKER_SOCKET_GID:-984}"
 
     # Bridge networking + an explicit port. Tailscale runs in KERNEL mode
     # inside the container (see entrypoint.sh) so an optional exit node can
@@ -41,12 +37,6 @@ services:
       - /mnt/2tnvme/docker/volumes/mydevenv2/home:/home/sprooty
       # Persist tailscaled state so we don't re-auth on every restart.
       - /mnt/2tnvme/docker/volumes/mydevenv2/tailscale:/var/lib/tailscale
-      # DooD: containers launched from inside the pod hit the host daemon.
-      # SECURITY: a compromise of the single bearer token escalates to host-
-      # level docker control via this socket. Acceptable for a personal
-      # tailnet-only dev pod; consider docker-socket-proxy or removing this
-      # mount for deployments where docker-in-pod isn't needed.
-      - /var/run/docker.sock:/var/run/docker.sock
 
     environment:
       # Server
@@ -83,6 +73,9 @@ services:
       MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON: ${MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON}
       # The cargo cache is on the host bind-mount; sccache hits Redis on Node B.
       SCCACHE_REDIS: redis://100.92.54.45:6380
+
+    # Host Docker access is intentionally NOT enabled in the base stack.
+    # Choose an explicit overlay in Komodo when you want host-daemon access.
 
     # Sway/Selkies (Phase 5) will benefit from /dev/dri pass-through for GPU
     # encode. Add it to the `devices:` list above when Phase 5 lands:
