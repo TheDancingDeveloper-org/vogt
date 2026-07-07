@@ -39,13 +39,7 @@ backlog.
 
 ## Backend
 
-1. **Unify session cwd validation with shared workspace path policy**
-   (`server/src/sessions.rs`, `server/src/workspace_path.rs`)
-
-2. **Handle PTY reader spawn failure without panicking**
-   (`server/src/pty.rs`)
-
-3. **Replace per-session 500 ms activity tickers with a lower-churn model**
+1. **Replace per-session 500 ms activity tickers with a lower-churn model**
    (`server/src/pty.rs`)
 
 ---

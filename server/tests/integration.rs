@@ -480,6 +480,61 @@ async fn session_name_limit_is_enforced() {
 }
 
 #[tokio::test]
+async fn session_cwd_must_stay_under_workspace_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace");
+    let nested = workspace.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+
+    let mut cfg = test_config();
+    cfg.default_cwd = workspace.clone();
+    cfg.workspace_root = workspace.canonicalize().unwrap();
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let create: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "cwd-test",
+            "command": ["/bin/cat"],
+            "cwd": nested.canonicalize().unwrap().to_string_lossy().into_owned()
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        create["cwd"],
+        nested.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
+    let id = create["id"].as_str().unwrap();
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+
+    let rejected = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "bad-cwd",
+            "command": ["/bin/cat"],
+            "cwd": outside.canonicalize().unwrap().to_string_lossy().into_owned()
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn get_session_returns_typed_detail_shape() {
     let (base, _h) = boot().await;
     let client = reqwest::Client::builder()

@@ -9,6 +9,7 @@ use crate::{
     events::{EventBus, ServerEvent},
     history::SessionHistory,
     pty::{self, Session, SessionSpec, SessionSummary, SpawnDefaults},
+    workspace_path,
 };
 
 pub struct SessionRegistry {
@@ -38,25 +39,14 @@ impl SessionRegistry {
         if let Some(raw) = spec.cwd.as_deref() {
             let raw = raw.trim();
             if !raw.is_empty() {
-                let candidate = std::path::Path::new(raw);
-                let abs = if candidate.is_absolute() {
-                    candidate.to_path_buf()
-                } else {
-                    self.cfg.workspace_root.join(raw.trim_start_matches('/'))
-                };
-                let canon = abs
-                    .canonicalize()
-                    .map_err(|e| ApiError::BadRequest(format!("cwd {raw:?}: {e}")))?;
-                let root = self
-                    .cfg
-                    .workspace_root
-                    .canonicalize()
-                    .unwrap_or_else(|_| self.cfg.workspace_root.clone());
-                if !canon.starts_with(&root) {
-                    return Err(ApiError::BadRequest(format!(
-                        "cwd {raw:?} escapes workspace_root"
-                    )));
-                }
+                let canon =
+                    workspace_path::resolve_existing_allow_absolute(&self.cfg.workspace_root, raw)
+                        .map_err(|e| match e {
+                            ApiError::BadRequest(msg) => {
+                                ApiError::BadRequest(format!("cwd {raw:?}: {msg}"))
+                            }
+                            other => other,
+                        })?;
                 spec.cwd = Some(canon.to_string_lossy().into_owned());
             } else {
                 spec.cwd = None;
