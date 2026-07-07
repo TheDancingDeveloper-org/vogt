@@ -391,6 +391,95 @@ async fn rename_session() {
 }
 
 #[tokio::test]
+async fn create_session_trims_name() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let create: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "  trimmed shell  ", "command": ["/bin/cat"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(create["name"], "trimmed shell");
+
+    let id = create["id"].as_str().unwrap();
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn rename_session_trims_name() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "before", "command": ["/bin/cat"] }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = client
+        .patch(format!("{base}/api/sessions/{id}"))
+        .json(&json!({ "name": "  after trim  " }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let detail: Value = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["summary"]["name"], "after trim");
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn session_name_limit_is_enforced() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let long = "a".repeat(257);
+
+    let create = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": long, "command": ["/bin/cat"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn get_session_returns_typed_detail_shape() {
     let (base, _h) = boot().await;
     let client = reqwest::Client::builder()

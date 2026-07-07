@@ -18,6 +18,8 @@ pub struct SessionRegistry {
     sessions: DashMap<Uuid, Arc<Session>>,
 }
 
+const MAX_SESSION_NAME_BYTES: usize = 256;
+
 impl SessionRegistry {
     pub fn new(cfg: Arc<Config>, bus: EventBus, history: Option<Arc<SessionHistory>>) -> Self {
         Self {
@@ -29,9 +31,7 @@ impl SessionRegistry {
     }
 
     pub fn create(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
-        if spec.name.trim().is_empty() {
-            return Err(ApiError::BadRequest("name must not be empty".into()));
-        }
+        spec.name = normalize_session_name(&spec.name)?;
         // Resolve client-supplied cwd against workspace_root. Reject anything
         // that escapes the workspace via `..` so a stray API call can't spawn
         // a shell with cwd=/etc.
@@ -104,9 +104,7 @@ impl SessionRegistry {
 
     pub fn rename(&self, id: Uuid, new_name: String) -> Result<()> {
         let s = self.get(id)?;
-        if new_name.trim().is_empty() {
-            return Err(ApiError::BadRequest("name must not be empty".into()));
-        }
+        let new_name = normalize_session_name(&new_name)?;
         s.rename(new_name.clone());
         self.bus
             .publish(ServerEvent::SessionRenamed { id, name: new_name });
@@ -129,5 +127,45 @@ impl SessionRegistry {
             .ok_or(ApiError::NotFound)?;
         let _ = s.kill();
         Ok(())
+    }
+}
+
+fn normalize_session_name(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::BadRequest("name must not be empty".into()));
+    }
+    let len = trimmed.len();
+    if len > MAX_SESSION_NAME_BYTES {
+        return Err(ApiError::BadRequest(format!(
+            "name must be at most {MAX_SESSION_NAME_BYTES} bytes after trimming (got {len})"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_session_name;
+
+    #[test]
+    fn trims_session_names() {
+        assert_eq!(
+            normalize_session_name("  spaced shell  ").unwrap(),
+            "spaced shell"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_session_names() {
+        let err = normalize_session_name("   ").unwrap_err();
+        assert!(err.to_string().contains("name must not be empty"));
+    }
+
+    #[test]
+    fn rejects_names_over_byte_limit() {
+        let long = "a".repeat(257);
+        let err = normalize_session_name(&long).unwrap_err();
+        assert!(err.to_string().contains("at most 256 bytes"));
     }
 }

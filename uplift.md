@@ -48,12 +48,6 @@ backlog.
 3. **Replace per-session 500 ms activity tickers with a lower-churn model**
    (`server/src/pty.rs`)
 
-4. **Replace custom base64 helpers with the `base64` crate**
-   (`server/src/files.rs`, `server/src/api.rs`)
-
-5. **Add a session-name length cap and consistent trimming**
-   (`server/src/api.rs`, `server/src/sessions.rs`)
-
 ---
 
 ## Frontend / PWA

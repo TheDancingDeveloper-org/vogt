@@ -5,6 +5,7 @@ use axum::{
     response::{sse::Event, Sse},
     Json,
 };
+use base64::Engine as _;
 use futures_util::Stream;
 use mydevenv2_contract::{OkResponse, SessionDetail, SessionSummary};
 use serde::Deserialize;
@@ -34,7 +35,7 @@ pub async fn get_session(
     Ok(Json(SessionDetail {
         summary: s.summary(),
         scrollback_pos: pos,
-        scrollback_base64: base64_encode(&snap),
+        scrollback_base64: base64::engine::general_purpose::STANDARD.encode(&snap),
     }))
 }
 
@@ -88,40 +89,4 @@ pub async fn events_stream(
 
 pub async fn healthz() -> Json<OkResponse> {
     Json(OkResponse::new(true))
-}
-
-fn base64_encode(b: &[u8]) -> String {
-    use std::fmt::Write as _;
-    // Hand-roll to avoid pulling in another crate at this stage.
-    const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(b.len().div_ceil(3) * 4);
-    let mut i = 0;
-    while i + 3 <= b.len() {
-        let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8) | (b[i + 2] as u32);
-        out.push(TBL[((n >> 18) & 0x3f) as usize] as char);
-        out.push(TBL[((n >> 12) & 0x3f) as usize] as char);
-        out.push(TBL[((n >> 6) & 0x3f) as usize] as char);
-        out.push(TBL[(n & 0x3f) as usize] as char);
-        i += 3;
-    }
-    let rem = b.len() - i;
-    if rem == 1 {
-        let n = (b[i] as u32) << 16;
-        let _ = write!(
-            out,
-            "{}{}==",
-            TBL[((n >> 18) & 0x3f) as usize] as char,
-            TBL[((n >> 12) & 0x3f) as usize] as char
-        );
-    } else if rem == 2 {
-        let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8);
-        let _ = write!(
-            out,
-            "{}{}{}=",
-            TBL[((n >> 18) & 0x3f) as usize] as char,
-            TBL[((n >> 12) & 0x3f) as usize] as char,
-            TBL[((n >> 6) & 0x3f) as usize] as char
-        );
-    }
-    out
 }
