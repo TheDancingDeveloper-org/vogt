@@ -1,4 +1,4 @@
-import { Component, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { Component, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -102,6 +102,7 @@ const TerminalView: Component<Props> = (props) => {
   let terminalDomCleanup: (() => void) | null = null;
   let pasteTextareaRef: HTMLTextAreaElement | undefined;
   const [showPasteModal, setShowPasteModal] = createSignal(false);
+  const [statusText, setStatusText] = createSignal<string | null>("Connecting...");
   let pasteResolve: ((v: string | null) => void) | null = null;
 
   const promptPaste = (): Promise<string | null> =>
@@ -549,6 +550,7 @@ const TerminalView: Component<Props> = (props) => {
   function markSessionGone() {
     if (!sessionGone) {
       sessionGone = true;
+      setStatusText("Session unavailable");
       term?.write("\r\n\x1b[31m[session not found — server may have restarted]\x1b[0m\r\n");
     }
   }
@@ -560,6 +562,7 @@ const TerminalView: Component<Props> = (props) => {
   function scheduleReconnect(delayMs = reconnectDelay) {
     if (destroyed || reconnectTimer !== null) return;
     if (isSessionGone()) { markSessionGone(); return; }
+    setStatusText(inSnapshot ? "Reconnecting terminal..." : "Reconnecting...");
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       if (!destroyed) connect();
@@ -570,6 +573,7 @@ const TerminalView: Component<Props> = (props) => {
   function connect() {
     if (isSessionGone()) { markSessionGone(); return; }
     inSnapshot = true;
+    setStatusText("Loading terminal...");
     ws = openAttach(props.sessionId);
     ws.addEventListener("open", () => {
       reconnectDelay = 500;
@@ -585,11 +589,14 @@ const TerminalView: Component<Props> = (props) => {
           if (ctrl.type === "snapshot-start") {
             term?.reset();
             inSnapshot = true;
+            setStatusText("Loading terminal...");
           } else if (ctrl.type === "snapshot-done") {
             inSnapshot = false;
+            setStatusText(null);
             sendResize();
           } else if (ctrl.type === "lag") {
             term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
+            setStatusText("Reattaching terminal...");
             // Cancel any timer so the close event below doesn't double-schedule.
             if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
             reconnectDelay = 500;
@@ -608,23 +615,13 @@ const TerminalView: Component<Props> = (props) => {
       if (!inSnapshot) {
         term?.write("\r\n\x1b[33m[disconnected]\x1b[0m\r\n");
       }
+      setStatusText(inSnapshot ? "Reconnecting terminal..." : "Reconnecting...");
       scheduleReconnect();
     });
     ws.addEventListener("error", () => {
       // Browser fires both error + close; close handler is enough.
     });
   }
-
-  // If the sessionId prop changes (e.g. parent reuses the component across
-  // tabs), reconnect cleanly. In Phase 2 each tab keys its own Terminal so
-  // this is defensive.
-  createEffect(() => {
-    const id = props.sessionId;
-    if (ws && id) {
-      // Only reconnect when id genuinely changes after first mount.
-      // No-op here; tracked for completeness.
-    }
-  });
 
   onCleanup(() => {
     destroyed = true;
@@ -672,7 +669,12 @@ const TerminalView: Component<Props> = (props) => {
 
   return (
     <>
-      <div class="terminal-host" ref={hostRef} />
+      <div class="terminal-shell">
+        <div class="terminal-host" ref={hostRef} />
+        <Show when={statusText()}>
+          {(text) => <div class="terminal-status-overlay">{text()}</div>}
+        </Show>
+      </div>
       <Show when={showPasteModal()}>
         <div
           class="paste-modal-backdrop"

@@ -63,6 +63,31 @@ export type ServerEvent =
 
 const TOKEN_KEY = "mydevenv2.token";
 const BASE_KEY = "mydevenv2.base";
+const AUTH_CHANNEL_NAME = "mydevenv2.auth";
+const AUTH_SOURCE_ID = `auth-${Math.random().toString(36).slice(2)}`;
+
+interface AuthStateMessage {
+  type: "auth-state";
+  source: string;
+  revision: number;
+}
+
+function broadcastAuthState() {
+  const message: AuthStateMessage = {
+    type: "auth-state",
+    source: AUTH_SOURCE_ID,
+    revision: Date.now(),
+  };
+  try {
+    if (typeof BroadcastChannel !== "undefined") {
+      const channel = new BroadcastChannel(AUTH_CHANNEL_NAME);
+      channel.postMessage(message);
+      channel.close();
+    }
+  } catch {
+    /* BroadcastChannel unavailable */
+  }
+}
 
 export function getToken(): string {
   return localStorage.getItem(TOKEN_KEY) ?? "";
@@ -71,6 +96,7 @@ export function getToken(): string {
 export function setToken(token: string) {
   if (token) localStorage.setItem(TOKEN_KEY, token);
   else localStorage.removeItem(TOKEN_KEY);
+  broadcastAuthState();
 }
 
 /**
@@ -85,6 +111,46 @@ export function getBase(): string {
 export function setBase(base: string) {
   if (base) localStorage.setItem(BASE_KEY, base.replace(/\/+$/, ""));
   else localStorage.removeItem(BASE_KEY);
+  broadcastAuthState();
+}
+
+export function clearStoredAuth() {
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(BASE_KEY);
+  } catch {
+    /* localStorage unavailable */
+  }
+  broadcastAuthState();
+}
+
+export function subscribeAuthState(onChange: () => void): () => void {
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === null || event.key === TOKEN_KEY || event.key === BASE_KEY) {
+      onChange();
+    }
+  };
+  window.addEventListener("storage", onStorage);
+
+  let channel: BroadcastChannel | null = null;
+  try {
+    if (typeof BroadcastChannel !== "undefined") {
+      channel = new BroadcastChannel(AUTH_CHANNEL_NAME);
+      channel.addEventListener("message", (event: MessageEvent<AuthStateMessage>) => {
+        const data = event.data;
+        if (data?.type === "auth-state" && data.source !== AUTH_SOURCE_ID) {
+          onChange();
+        }
+      });
+    }
+  } catch {
+    channel = null;
+  }
+
+  return () => {
+    window.removeEventListener("storage", onStorage);
+    channel?.close();
+  };
 }
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {

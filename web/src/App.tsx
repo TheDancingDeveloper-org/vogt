@@ -35,6 +35,7 @@ import {
 import { isBookmarked, toggleBookmark, bookmarks } from "./bookmarks";
 import { api as apiModule } from "./api";
 import type { PublicConfig, SessionTemplate } from "./api";
+import { subscribeAuthState } from "./api";
 import {
   createSession,
   deleteSession,
@@ -183,6 +184,10 @@ const App: Component = () => {
   const editorWorkspaceActive = () => isIDEMode && activeKind() === "editor";
 
   onMount(() => {
+    const unsubscribeAuthState = subscribeAuthState(() => {
+      stopEventStream();
+      window.location.reload();
+    });
     apiModule
       .publicConfig()
       .then((c) => setPublicCfg(c))
@@ -196,6 +201,10 @@ const App: Component = () => {
     }
     void refreshSessions();
     startEventStream();
+
+    onCleanup(() => {
+      unsubscribeAuthState();
+    });
   });
 
   onCleanup(() => {

@@ -1,5 +1,5 @@
 import { Component, Show, For, createEffect, createSignal, onMount } from "solid-js";
-import { getBase, getToken, setBase, setToken } from "./api";
+import { clearStoredAuth, getBase, getToken, setBase, setToken } from "./api";
 import { getLayoutMode, setLayoutMode, type LayoutMode } from "./layout";
 import TemplateEditor from "./TemplateEditor";
 import { THEMES, getThemeName, setThemeName } from "./terminalThemes";
@@ -95,6 +95,12 @@ const Settings: Component<Props> = (props) => {
     }
   };
 
+  const clearAuth = () => {
+    clearStoredAuth();
+    props.onClose();
+    location.reload();
+  };
+
   const togglePush = async () => {
     setPushBusy(true);
     setPushMsg(null);
@@ -179,6 +185,9 @@ const Settings: Component<Props> = (props) => {
               spellcheck={false}
             />
           </label>
+          <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
+            <button type="button" onClick={clearAuth}>Clear saved auth</button>
+          </div>
 
           <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
 

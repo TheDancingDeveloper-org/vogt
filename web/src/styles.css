@@ -416,6 +416,15 @@ textarea {
   gap: 12px;
 }
 
+.terminal-shell {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  background: #000;
+}
+
 .terminal-host {
   flex: 1;
   min-height: 0;
@@ -442,6 +451,21 @@ textarea {
 }
 .terminal-host .xterm-helper-textarea {
   font-size: 16px;
+}
+
+.terminal-status-overlay {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  padding: 6px 10px;
+  border: 1px solid rgba(240, 246, 252, 0.16);
+  border-radius: 6px;
+  background: rgba(13, 17, 23, 0.88);
+  color: var(--fg);
+  font-size: 12px;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
 }
 
 .terminal-workspace {
