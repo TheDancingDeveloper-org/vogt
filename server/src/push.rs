@@ -278,9 +278,8 @@ impl PushManager {
 
                 match self.web.send(built).await {
                     Ok(()) => Ok(()),
-                    Err(WebPushError::EndpointNotValid) | Err(WebPushError::EndpointNotFound) => {
-                        Err(PushSendErr::Gone)
-                    }
+                    Err(WebPushError::EndpointNotValid(_))
+                    | Err(WebPushError::EndpointNotFound(_)) => Err(PushSendErr::Gone),
                     Err(e) => Err(PushSendErr::Other(format!("web-push: {e}"))),
                 }
             }

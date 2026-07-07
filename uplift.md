@@ -9,30 +9,26 @@ backlog.
 
 ## Stack / Ops
 
-1. **Rust dependency currency pass** (`server/Cargo.toml`)
-   Review and deliberately upgrade aging direct dependencies such as
-   `tokio-tungstenite`, `web-push`, `portable-pty`, and `toml`.
-
-2. **Runtime image reproducibility hardening** (`Dockerfile`)
+1. **Runtime image reproducibility hardening** (`Dockerfile`)
    The image now pins and checksum-verifies several downloaded tool archives
    and drops the NodeSource / Infisical shell-pipe installers. Remaining work
    is tightening still-floating third-party package sources (notably some apt
    feeds and `cargo install` tools) and validating the full build on a
    BuildKit-capable Docker host.
 
-3. **Bearer-token risk boundary** (`server/src/auth.rs`, `deploy/docker-compose.yml`)
+2. **Bearer-token risk boundary** (`server/src/auth.rs`, `deploy/docker-compose.yml`)
    Repo-side audit logging, per-token mutation rate limits, and scoped token
    capabilities now exist. The remaining work is provisioning real non-admin
    tokens in production, moving the live clients onto them where appropriate,
    and deciding whether the primary token should keep full Docker-adjacent
    access long term.
 
-4. **Promote `/readyz` into the live stack and validate it on Node B**
+3. **Promote `/readyz` into the live stack and validate it on Node B**
    Repo-side readiness checks now cover workspace mount health, state-dir
    writability, Tailscale state, and GUI dependencies. The remaining work is
    syncing the compose healthcheck into `ops` and validating the live stack.
 
-5. **Production stack cleanup for exit-node config** (live Komodo stack / ops repo)
+4. **Production stack cleanup for exit-node config** (live Komodo stack / ops repo)
    The live stack still carries a stale `TAILSCALE_EXIT_NODE=hertzde3` setting
    that causes startup warnings before the app continues without an exit node.
 

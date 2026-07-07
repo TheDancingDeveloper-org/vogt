@@ -929,7 +929,7 @@ async fn ws_attach_with_token(
     let (mut ws, _resp) = tokio_tungstenite::connect_async(url).await.unwrap();
     // First-frame auth (the legacy ?token= path still works but is deprecated).
     let auth = serde_json::json!({"type": "auth", "token": token}).to_string();
-    ws.send(Message::Text(auth)).await.unwrap();
+    ws.send(Message::Text(auth.into())).await.unwrap();
     ws
 }
 
@@ -986,7 +986,7 @@ async fn ws_attach_echoes_input_and_replays_on_reattach() {
     );
 
     // 3) Write input → expect to see it echoed back.
-    ws.send(Message::Binary(b"hello-mydevenv\n".to_vec()))
+    ws.send(Message::Binary(b"hello-mydevenv\n".to_vec().into()))
         .await
         .unwrap();
 
