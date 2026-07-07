@@ -213,6 +213,14 @@ impl SessionHistory {
         Ok(sessions)
     }
 
+    pub async fn count_sessions(&self) -> Result<u64> {
+        let row = sqlx::query("SELECT COUNT(*) AS count FROM sessions")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to count sessions: {}", e)))?;
+        Ok(row.get::<i64, _>("count") as u64)
+    }
+
     /// Search session output
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let Some(fts_query) = user_query_to_fts(query) else {

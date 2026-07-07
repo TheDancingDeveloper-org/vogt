@@ -104,6 +104,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         )
         .route("/api/sessions/{id}/kill", post(api::kill_session))
         .route("/api/events", get(api::events_stream))
+        .route("/api/status", get(api::operational_status))
         .route("/api/files", get(files::read_file).put(files::write_file))
         .route("/api/files/op", post(files::operate))
         .route("/api/files/download", get(files::download_file))

@@ -49,19 +49,13 @@ backlog.
 2. **Improve mobile ergonomics in the web surface**
    Reconnect flows, tab management, terminal use, and touch-first editing.
 
-3. **Improve auth and onboarding UX**
-   Bearer token setup and device-local profile handling.
-
-4. **Add lightweight admin / operational visibility in-app**
-   Sessions, push, GUI, auth-broker, and storage state.
-
-5. **User-configurable retention and quota controls**
+3. **User-configurable retention and quota controls**
    History, scrollback, prompts, and storage budgets.
 
-6. **Workspace search improvements**
+4. **Workspace search improvements**
    Filename/symbol search and tighter editor integration.
 
-7. **Stronger workspace awareness**
+5. **Stronger workspace awareness**
    Detected projects, task-runner shortcuts, and language-specific quick
    actions.
 

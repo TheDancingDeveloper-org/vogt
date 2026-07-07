@@ -80,6 +80,49 @@ async fn config_endpoint_is_public_and_returns_shape() {
 }
 
 #[tokio::test]
+async fn status_endpoint_requires_auth_and_returns_shape() {
+    let (base, _h) = boot().await;
+
+    let unauth = reqwest::get(format!("{base}/api/status")).await.unwrap();
+    assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let body: Value = client
+        .get(format!("{base}/api/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert!(body["version"].as_str().is_some(), "missing version");
+    assert!(
+        body["session_count"].as_u64().is_some(),
+        "missing session_count"
+    );
+    assert!(
+        body["push_subscription_count"].as_u64().is_some(),
+        "missing push_subscription_count"
+    );
+    assert!(
+        body["gui_process_count"].as_u64().is_some(),
+        "missing gui_process_count"
+    );
+    assert!(
+        body["auth_broker"]["auto_agent_auth"].is_boolean(),
+        "missing auth_broker.auto_agent_auth"
+    );
+    assert!(
+        body["storage"]["workspace_root"].as_str().is_some(),
+        "missing storage.workspace_root"
+    );
+}
+
+#[tokio::test]
 async fn push_subscribe_list_unsubscribe() {
     let (base, _h) = boot().await;
     let client = reqwest::Client::builder()

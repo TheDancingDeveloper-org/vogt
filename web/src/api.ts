@@ -436,6 +436,7 @@ export const api = {
   // Public — no token required.
   publicConfig: () =>
     fetch(`${getBase()}/api/config`).then((r) => r.json() as Promise<PublicConfig>),
+  operationalStatus: () => req<OperationalStatus>("GET", "/api/status"),
 
   guiLaunch: (command: string[], via_sway = true) =>
     req<GuiProc>("POST", "/api/gui/launch", { command, via_sway }),
@@ -468,6 +469,27 @@ export interface PublicConfig {
   /** Build-time feature availability, e.g. `{ selkies: "1.6.2" | null }`. */
   features?: Record<string, string | null | undefined>;
   session_templates?: SessionTemplate[];
+}
+
+export interface OperationalStatus {
+  version: string;
+  session_count: number;
+  push_subscription_count: number;
+  gui_process_count: number;
+  gui_stream_configured: boolean;
+  fcm_enabled: boolean;
+  history: {
+    enabled: boolean;
+    archived_session_count: number | null;
+  };
+  auth_broker: {
+    auto_agent_auth: boolean;
+    helper: string;
+  };
+  storage: {
+    state_dir: string;
+    workspace_root: string;
+  };
 }
 
 export interface GuiProc {

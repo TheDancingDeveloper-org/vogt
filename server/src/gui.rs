@@ -45,6 +45,10 @@ impl GuiRegistry {
         g.retain(|p| pid_alive(p.pid));
         g.clone()
     }
+
+    pub fn count_alive(&self) -> usize {
+        self.list_alive().len()
+    }
 }
 
 impl Default for GuiRegistry {
