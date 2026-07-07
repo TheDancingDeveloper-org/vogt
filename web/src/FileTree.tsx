@@ -2,11 +2,13 @@ import {
   Component,
   For,
   Show,
+  createEffect,
   createResource,
   createSignal,
+  onCleanup,
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
-import { api, type TreeNode } from "./api";
+import { api, type FileSearchResult, type TreeNode } from "./api";
 import { openEditorTab, openTerminalTab } from "./tabs";
 import { createSession } from "./store";
 import { getFileIcon, getFolderIcon } from "./fileIcons";
@@ -215,7 +217,16 @@ const TreeNodeView: Component<NodeProps> = (props) => {
 const FileTree: Component<Props> = (props) => {
   const [tree, { refetch }] = createResource(() => api.tree("", 0));
   const [searchQuery, setSearchQuery] = createSignal("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = createSignal("");
   const [uploadTarget, setUploadTarget] = createSignal<string>("");
+  const [fileSearchResults] = createResource(
+    debouncedSearchQuery,
+    async (query): Promise<FileSearchResult[]> => {
+      const trimmed = query.trim();
+      if (!trimmed) return [];
+      return await api.searchFiles(trimmed);
+    },
+  );
   const navigate = useNavigate();
   let uploadInputRef: HTMLInputElement | undefined;
 
@@ -227,6 +238,12 @@ const FileTree: Component<Props> = (props) => {
   const refreshTree = () => {
     void refetch();
   };
+
+  createEffect(() => {
+    const query = searchQuery();
+    const timer = window.setTimeout(() => setDebouncedSearchQuery(query), 160);
+    onCleanup(() => window.clearTimeout(timer));
+  });
 
   const openFile = (path: string) => {
     openEditorTab(path);
@@ -375,32 +392,7 @@ const FileTree: Component<Props> = (props) => {
       setUploadTarget("");
     }
   };
-
-  const filteredTree = () => {
-    const query = searchQuery().toLowerCase();
-    if (!query || !tree()) return tree() || [];
-
-    const filterNode = (node: TreeNode): TreeNode | null => {
-      const nameMatch = node.name.toLowerCase().includes(query);
-
-      if (node.is_dir && node.children) {
-        const filteredChildren = node.children
-          .map(filterNode)
-          .filter((entry): entry is TreeNode => entry !== null);
-
-        if (nameMatch || filteredChildren.length > 0) {
-          return { ...node, children: filteredChildren };
-        }
-        return null;
-      }
-
-      return nameMatch ? node : null;
-    };
-
-    return tree()!
-      .map(filterNode)
-      .filter((entry): entry is TreeNode => entry !== null);
-  };
+  const searchActive = () => searchQuery().trim().length > 0;
 
   return (
     <div class="file-tree">
@@ -415,7 +407,7 @@ const FileTree: Component<Props> = (props) => {
         <input
           type="search"
           class="file-tree-search"
-          placeholder="Filter files..."
+          placeholder="Search files..."
           value={searchQuery()}
           onInput={(e) => setSearchQuery(e.currentTarget.value)}
         />
@@ -459,21 +451,55 @@ const FileTree: Component<Props> = (props) => {
         </div>
       </Show>
       <div class="tree-scroll">
-        <For each={filteredTree()}>
-          {(node) => (
-            <TreeNodeView
-              node={node}
-              onOpen={props.onOpen}
-              onOpenFile={openFile}
-              onOpenTerminalHere={openTerminalHere}
-              onCreatePresetHere={props.onCreatePresetHere}
-              onRenameMove={(entry) => void renameMoveNode(entry)}
-              onDuplicate={(entry) => void duplicateNode(entry)}
-              onDelete={(entry) => void deleteNode(entry)}
-              onUploadHere={triggerUpload}
-            />
-          )}
-        </For>
+        <Show
+          when={searchActive()}
+          fallback={
+            <For each={tree() ?? []}>
+              {(node) => (
+                <TreeNodeView
+                  node={node}
+                  onOpen={props.onOpen}
+                  onOpenFile={openFile}
+                  onOpenTerminalHere={openTerminalHere}
+                  onCreatePresetHere={props.onCreatePresetHere}
+                  onRenameMove={(entry) => void renameMoveNode(entry)}
+                  onDuplicate={(entry) => void duplicateNode(entry)}
+                  onDelete={(entry) => void deleteNode(entry)}
+                  onUploadHere={triggerUpload}
+                />
+              )}
+            </For>
+          }
+        >
+          <Show
+            when={!fileSearchResults.loading}
+            fallback={<div class="tree-search-meta">Searching workspace…</div>}
+          >
+            <Show
+              when={(fileSearchResults()?.length ?? 0) > 0}
+              fallback={<div class="tree-search-meta">No matching files</div>}
+            >
+              <div class="tree-search-meta">
+                {(fileSearchResults()?.length ?? 0).toString()} file match(es)
+              </div>
+              <For each={fileSearchResults() ?? []}>
+                {(file) => (
+                  <button
+                    class="tree-search-result"
+                    onClick={() => openFile(file.path)}
+                    title={file.path}
+                  >
+                    <span class="tree-icon">{getFileIcon(file.path)}</span>
+                    <span class="tree-search-main">
+                      <span class="tree-search-name">{file.name}</span>
+                      <span class="tree-search-path">{file.path}</span>
+                    </span>
+                  </button>
+                )}
+              </For>
+            </Show>
+          </Show>
+        </Show>
       </div>
     </div>
   );

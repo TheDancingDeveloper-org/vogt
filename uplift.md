@@ -58,10 +58,9 @@ backlog.
    History, scrollback, prompts, and storage budgets.
 
 4. **Workspace search improvements**
-   Filename search and direct editor-open integration now exist in the command
-   palette. Remaining work is symbol-oriented search/navigation and deciding
-   whether the file tree itself should adopt server-backed search for very
-   large workspaces.
+   Filename search and direct editor-open integration now exist in both the
+   command palette and the file tree, backed by the server-side filename
+   search API. Remaining work is symbol-oriented search/navigation.
 
 5. **Stronger workspace awareness**
    Detected projects, task-runner shortcuts, and language-specific quick
