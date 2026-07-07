@@ -23,6 +23,7 @@ export interface CreateSessionRequest {
   env?: [string, string][];
   cols?: number;
   rows?: number;
+  scrollback_bytes?: number;
 }
 
 export interface SessionDetail {

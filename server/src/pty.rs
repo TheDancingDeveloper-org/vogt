@@ -278,7 +278,9 @@ pub fn spawn(
         cwd: cwd_display,
         command,
         idle_after_ms: defaults.activity_idle_after_ms,
-        scrollback: Mutex::new(Scrollback::new(defaults.scrollback_bytes)),
+        scrollback: Mutex::new(Scrollback::new(
+            spec.scrollback_bytes.unwrap_or(defaults.scrollback_bytes),
+        )),
         writer: Mutex::new(writer),
         master: Mutex::new(pair.master),
         child: Mutex::new(Some(child)),

@@ -1,5 +1,6 @@
 import type { LayoutMode } from "./layout";
 import type { Tab, TabsStateSnapshot } from "./tabs";
+import { BROWSER_STORAGE_KEYS, getStoragePrefs } from "./storagePrefs";
 
 export interface SavedWorkspaceLayout {
   id: string;
@@ -17,7 +18,7 @@ interface SaveWorkspaceLayoutInput extends TabsStateSnapshot {
   layout_mode: LayoutMode;
 }
 
-const STORAGE_KEY = "mydevenv2.workspaceLayouts.v1";
+const STORAGE_KEY = BROWSER_STORAGE_KEYS.workspaceLayouts;
 
 function cloneTab(tab: Tab): Tab {
   return tab.kind === "editor" ? { ...tab, dirty: false } : { ...tab };
@@ -105,10 +106,16 @@ function readLayouts(): SavedWorkspaceLayout[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed
+    const next = parsed
       .map((entry) => normalizeLayout(entry))
       .filter((entry): entry is SavedWorkspaceLayout => Boolean(entry))
       .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
+    const limit = getStoragePrefs().maxWorkspaceLayouts;
+    const trimmed = limit <= 0 ? [] : next.slice(0, limit);
+    if (JSON.stringify(trimmed) !== JSON.stringify(parsed)) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
+    }
+    return trimmed;
   } catch {
     return [];
   }
@@ -116,7 +123,14 @@ function readLayouts(): SavedWorkspaceLayout[] {
 
 function writeLayouts(layouts: SavedWorkspaceLayout[]) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(layouts));
+    const limit = getStoragePrefs().maxWorkspaceLayouts;
+    const next =
+      limit <= 0
+        ? []
+        : [...layouts]
+            .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
+            .slice(0, limit);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
   } catch {
     /* quota / private mode */
   }
@@ -163,6 +177,14 @@ export function saveWorkspaceLayout(input: SaveWorkspaceLayoutInput): SavedWorks
 
 export function deleteWorkspaceLayout(id: string) {
   writeLayouts(readLayouts().filter((layout) => layout.id !== id));
+}
+
+export function clearWorkspaceLayouts() {
+  writeLayouts([]);
+}
+
+export function trimWorkspaceLayouts() {
+  void readLayouts();
 }
 
 export function workspaceLayoutSummary(layout: SavedWorkspaceLayout): string {

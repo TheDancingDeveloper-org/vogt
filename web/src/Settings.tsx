@@ -4,7 +4,9 @@ import { getLayoutMode, setLayoutMode, type LayoutMode } from "./layout";
 import TemplateEditor from "./TemplateEditor";
 import { THEMES, getThemeName, setThemeName } from "./terminalThemes";
 import {
+  clearWorkspaceLayouts,
   listWorkspaceLayouts,
+  trimWorkspaceLayouts,
   workspaceLayoutSummary,
   type SavedWorkspaceLayout,
 } from "./workspaceLayouts";
@@ -19,11 +21,27 @@ import {
 } from "./push";
 import type { OperationalStatus } from "./api";
 import {
+  clearAuthProfiles,
   deleteAuthProfile,
   listAuthProfiles,
   saveAuthProfile,
+  trimAuthProfiles,
   type AuthProfile,
 } from "./authProfiles";
+import { clearBookmarks, bookmarks, trimBookmarks } from "./bookmarks";
+import {
+  clearHistoryPins,
+  getPinnedHistoryIds,
+  trimHistoryPins,
+} from "./historyPins";
+import { clearRecentFiles, getRecentFiles, trimRecentFiles } from "./recentFiles";
+import {
+  BROWSER_STORAGE_KEYS,
+  formatScrollbackBytes,
+  getStoragePrefs,
+  saveStoragePrefs,
+  type StoragePrefs,
+} from "./storagePrefs";
 
 interface Props {
   open: boolean;
@@ -49,6 +67,8 @@ const Settings: Component<Props> = (props) => {
   const [authProfiles, setAuthProfiles] = createSignal<AuthProfile[]>(listAuthProfiles());
   const [profileName, setProfileName] = createSignal("");
   const [profileMsg, setProfileMsg] = createSignal<string | null>(null);
+  const [storagePrefs, setStoragePrefsState] = createSignal<StoragePrefs>(getStoragePrefs());
+  const [storageMsg, setStorageMsg] = createSignal<string | null>(null);
   const [opsStatus, setOpsStatus] = createSignal<OperationalStatus | null>(null);
   const [opsError, setOpsError] = createSignal<string | null>(null);
   const [browserStorage, setBrowserStorage] = createSignal<{
@@ -57,6 +77,15 @@ const Settings: Component<Props> = (props) => {
     estimateUsage?: number;
     estimateQuota?: number;
   } | null>(null);
+  const [managedStorage, setManagedStorage] = createSignal<
+    {
+      key: string;
+      label: string;
+      count: number;
+      limit: number;
+      bytes: number;
+    }[]
+  >([]);
 
   const refreshLayouts = () => {
     setWorkspaceLayouts(listWorkspaceLayouts());
@@ -64,6 +93,56 @@ const Settings: Component<Props> = (props) => {
 
   const refreshAuthProfiles = () => {
     setAuthProfiles(listAuthProfiles());
+  };
+
+  const bytesForKey = (key: string) => {
+    try {
+      const value = localStorage.getItem(key) ?? "";
+      return key.length + value.length;
+    } catch {
+      return 0;
+    }
+  };
+
+  const refreshManagedStorage = () => {
+    const prefs = getStoragePrefs();
+    setManagedStorage([
+      {
+        key: BROWSER_STORAGE_KEYS.authProfiles,
+        label: "Profiles",
+        count: listAuthProfiles().length,
+        limit: prefs.maxAuthProfiles,
+        bytes: bytesForKey(BROWSER_STORAGE_KEYS.authProfiles),
+      },
+      {
+        key: BROWSER_STORAGE_KEYS.workspaceLayouts,
+        label: "Layouts",
+        count: listWorkspaceLayouts().length,
+        limit: prefs.maxWorkspaceLayouts,
+        bytes: bytesForKey(BROWSER_STORAGE_KEYS.workspaceLayouts),
+      },
+      {
+        key: BROWSER_STORAGE_KEYS.recentFiles,
+        label: "Recent files",
+        count: getRecentFiles().length,
+        limit: prefs.maxRecentFiles,
+        bytes: bytesForKey(BROWSER_STORAGE_KEYS.recentFiles),
+      },
+      {
+        key: BROWSER_STORAGE_KEYS.sessionBookmarks,
+        label: "Bookmarks",
+        count: bookmarks().length,
+        limit: prefs.maxSessionBookmarks,
+        bytes: bytesForKey(BROWSER_STORAGE_KEYS.sessionBookmarks),
+      },
+      {
+        key: BROWSER_STORAGE_KEYS.historyPins,
+        label: "History pins",
+        count: getPinnedHistoryIds().length,
+        limit: prefs.maxHistoryPins,
+        bytes: bytesForKey(BROWSER_STORAGE_KEYS.historyPins),
+      },
+    ]);
   };
 
   const refreshPushState = async () => {
@@ -126,8 +205,11 @@ const Settings: Component<Props> = (props) => {
     setB(getBase());
     setL(getLayoutMode());
     setTerminalTheme(getThemeName());
+    setStoragePrefsState(getStoragePrefs());
+    setStorageMsg(null);
     refreshLayouts();
     refreshAuthProfiles();
+    refreshManagedStorage();
     setProfileName("");
     setProfileMsg(null);
     if (isPushAvailable()) {
@@ -154,6 +236,13 @@ const Settings: Component<Props> = (props) => {
   };
 
   const save = () => {
+    const savedPrefs = saveStoragePrefs(storagePrefs());
+    trimAuthProfiles();
+    trimWorkspaceLayouts();
+    trimRecentFiles();
+    trimBookmarks();
+    trimHistoryPins();
+    setStoragePrefsState(savedPrefs);
     const newTok = token().trim();
     const newBase = base().trim();
     const newLayout = layoutMode();
@@ -164,6 +253,9 @@ const Settings: Component<Props> = (props) => {
     setToken(newTok);
     setBase(newBase);
     setLayoutMode(newLayout);
+    refreshAuthProfiles();
+    refreshLayouts();
+    refreshManagedStorage();
 
     props.onClose();
 
@@ -177,6 +269,41 @@ const Settings: Component<Props> = (props) => {
     clearStoredAuth();
     props.onClose();
     location.reload();
+  };
+
+  const updateStoragePref = (key: keyof StoragePrefs, value: number) => {
+    setStoragePrefsState((current) => ({
+      ...current,
+      [key]: Math.max(0, Math.round(value)),
+    }));
+  };
+
+  const applyStorageLimitsNow = () => {
+    const savedPrefs = saveStoragePrefs(storagePrefs());
+    trimAuthProfiles();
+    trimWorkspaceLayouts();
+    trimRecentFiles();
+    trimBookmarks();
+    trimHistoryPins();
+    setStoragePrefsState(savedPrefs);
+    refreshAuthProfiles();
+    refreshLayouts();
+    refreshManagedStorage();
+    void refreshBrowserStorage();
+    setStorageMsg("Applied local retention limits.");
+  };
+
+  const clearManagedBrowserData = () => {
+    clearAuthProfiles();
+    clearWorkspaceLayouts();
+    clearRecentFiles();
+    clearBookmarks();
+    clearHistoryPins();
+    refreshAuthProfiles();
+    refreshLayouts();
+    refreshManagedStorage();
+    void refreshBrowserStorage();
+    setStorageMsg("Cleared stored profiles, layouts, recent files, bookmarks, and history pins.");
   };
 
   const storeCurrentProfile = () => {
@@ -503,6 +630,140 @@ const Settings: Component<Props> = (props) => {
                 </For>
               </div>
             </Show>
+          </div>
+
+          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+
+          <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
+            <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
+              Retention & storage
+            </div>
+            <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
+              Cap device-local data growth and set the default scrollback budget for new sessions launched from this browser.
+            </div>
+            <div
+              style={{
+                display: "grid",
+                "grid-template-columns": "repeat(auto-fit, minmax(160px, 1fr))",
+                gap: "8px",
+              }}
+            >
+              <label>
+                Recent files
+                <input
+                  type="number"
+                  min="0"
+                  max="200"
+                  value={storagePrefs().maxRecentFiles}
+                  onInput={(e) =>
+                    updateStoragePref("maxRecentFiles", Number(e.currentTarget.value || 0))
+                  }
+                />
+              </label>
+              <label>
+                Saved layouts
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={storagePrefs().maxWorkspaceLayouts}
+                  onInput={(e) =>
+                    updateStoragePref("maxWorkspaceLayouts", Number(e.currentTarget.value || 0))
+                  }
+                />
+              </label>
+              <label>
+                Auth profiles
+                <input
+                  type="number"
+                  min="0"
+                  max="50"
+                  value={storagePrefs().maxAuthProfiles}
+                  onInput={(e) =>
+                    updateStoragePref("maxAuthProfiles", Number(e.currentTarget.value || 0))
+                  }
+                />
+              </label>
+              <label>
+                Session bookmarks
+                <input
+                  type="number"
+                  min="0"
+                  max="200"
+                  value={storagePrefs().maxSessionBookmarks}
+                  onInput={(e) =>
+                    updateStoragePref("maxSessionBookmarks", Number(e.currentTarget.value || 0))
+                  }
+                />
+              </label>
+              <label>
+                History pins
+                <input
+                  type="number"
+                  min="0"
+                  max="200"
+                  value={storagePrefs().maxHistoryPins}
+                  onInput={(e) =>
+                    updateStoragePref("maxHistoryPins", Number(e.currentTarget.value || 0))
+                  }
+                />
+              </label>
+              <label>
+                New-session scrollback (KiB)
+                <input
+                  type="number"
+                  min="0"
+                  max="16384"
+                  step="64"
+                  value={Math.round(storagePrefs().defaultSessionScrollbackBytes / 1024)}
+                  onInput={(e) =>
+                    updateStoragePref(
+                      "defaultSessionScrollbackBytes",
+                      Math.max(0, Number(e.currentTarget.value || 0)) * 1024,
+                    )
+                  }
+                />
+              </label>
+            </div>
+            <div style={{ "font-size": "11px", color: "var(--fg-muted)", "line-height": 1.5 }}>
+              <div>
+                New sessions from this browser:{" "}
+                <code>{formatScrollbackBytes(storagePrefs().defaultSessionScrollbackBytes)}</code>
+              </div>
+              <div>
+                Set a limit to <code>0</code> to stop retaining that local category.
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
+              <button type="button" onClick={applyStorageLimitsNow}>
+                Apply limits now
+              </button>
+              <button type="button" onClick={clearManagedBrowserData}>
+                Clear managed browser data
+              </button>
+            </div>
+            <Show when={storageMsg()}>
+              <div style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{storageMsg()}</div>
+            </Show>
+            <div
+              style={{
+                display: "grid",
+                "grid-template-columns": "repeat(auto-fit, minmax(150px, 1fr))",
+                gap: "8px",
+              }}
+            >
+              <For each={managedStorage()}>
+                {(entry) => (
+                  <div style={opsCardStyle}>
+                    <div style={opsLabelStyle}>{entry.label}</div>
+                    <div style={opsValueStyle}>{entry.count}</div>
+                    <div style={opsMetaStyle}>
+                      Limit {entry.limit} • {formatBytes(entry.bytes)}
+                    </div>
+                  </div>
+                )}
+              </For>
+            </div>
           </div>
 
           <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />

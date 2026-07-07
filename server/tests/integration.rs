@@ -3,6 +3,7 @@
 
 use std::{os::unix::fs::PermissionsExt, time::Duration};
 
+use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use mydevenv2_contract::SessionDetail;
 use mydevenv2_server::{app::router, Config};
@@ -731,6 +732,51 @@ async fn get_session_returns_typed_detail_shape() {
         .delete(format!("{base}/api/sessions/{id}"))
         .send()
         .await;
+}
+
+#[tokio::test]
+async fn create_session_accepts_scrollback_override() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "scrollback-override",
+            "command": ["/bin/sh", "-lc", "printf 'abcdefghijk'"],
+            "scrollback_bytes": 8,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let detail: SessionDetail = loop {
+        let detail: SessionDetail = client
+            .get(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if detail.summary.exit_code.is_some() {
+            break detail;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    };
+
+    let snapshot = base64::engine::general_purpose::STANDARD
+        .decode(detail.scrollback_base64.as_bytes())
+        .unwrap();
+    assert_eq!(detail.summary.scrollback_bytes, 11);
+    assert_eq!(snapshot, b"defghijk");
 }
 
 #[tokio::test]

@@ -34,6 +34,8 @@ pub struct SessionSpec {
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrollback_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

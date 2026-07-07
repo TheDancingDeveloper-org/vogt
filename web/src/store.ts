@@ -2,6 +2,7 @@ import { createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { ActivityState, SessionSummary, ServerEvent } from "./api";
 import { api, subscribeEvents } from "./api";
+import { getStoragePrefs } from "./storagePrefs";
 
 interface SessionsStore {
   sessions: Record<string, SessionSummary>;
@@ -51,7 +52,14 @@ export async function createSession(
   cwd?: string,
   env?: [string, string][],
 ): Promise<SessionSummary> {
-  const s = await api.createSession({ name, command, cwd, env });
+  const scrollbackBytes = getStoragePrefs().defaultSessionScrollbackBytes;
+  const s = await api.createSession({
+    name,
+    command,
+    cwd,
+    env,
+    scrollback_bytes: scrollbackBytes > 0 ? scrollbackBytes : undefined,
+  });
   setStore(
     produce((st) => {
       st.sessions[s.id] = s;

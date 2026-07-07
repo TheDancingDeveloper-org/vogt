@@ -466,6 +466,7 @@ impl AgentTaskRegistry {
             env: Some(env),
             cols: Some(100),
             rows: Some(30),
+            scrollback_bytes: None,
         })?;
 
         let run = AgentTaskRun {

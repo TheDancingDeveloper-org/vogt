@@ -1,3 +1,5 @@
+import { BROWSER_STORAGE_KEYS, getStoragePrefs } from "./storagePrefs";
+
 export interface AuthProfile {
   id: string;
   name: string;
@@ -6,7 +8,7 @@ export interface AuthProfile {
   updated_at: string;
 }
 
-const STORAGE_KEY = "mydevenv2.authProfiles.v1";
+const STORAGE_KEY = BROWSER_STORAGE_KEYS.authProfiles;
 
 function normalizeProfile(profile: AuthProfile): AuthProfile {
   return {
@@ -32,7 +34,7 @@ export function listAuthProfiles(): AuthProfile[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed
+    const next = parsed
       .filter(
         (entry): entry is AuthProfile =>
           !!entry &&
@@ -45,13 +47,21 @@ export function listAuthProfiles(): AuthProfile[] {
       .map(normalizeProfile)
       .filter((entry) => entry.name && entry.token)
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    const limit = getStoragePrefs().maxAuthProfiles;
+    const trimmed = limit <= 0 ? [] : next.slice(0, limit);
+    if (JSON.stringify(trimmed) !== JSON.stringify(parsed)) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
+    }
+    return trimmed;
   } catch {
     return [];
   }
 }
 
 function writeAuthProfiles(profiles: AuthProfile[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
+  const limit = getStoragePrefs().maxAuthProfiles;
+  const next = limit <= 0 ? [] : profiles.slice(0, limit);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 }
 
 export function saveAuthProfile(profile: {
@@ -77,4 +87,12 @@ export function saveAuthProfile(profile: {
 export function deleteAuthProfile(id: string) {
   const profiles = listAuthProfiles().filter((entry) => entry.id !== id);
   writeAuthProfiles(profiles);
+}
+
+export function clearAuthProfiles() {
+  writeAuthProfiles([]);
+}
+
+export function trimAuthProfiles() {
+  void listAuthProfiles();
 }
