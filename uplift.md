@@ -63,13 +63,10 @@ backlog.
 
 ## Mobile / Android
 
-1. **Enable R8 / shrinking for release builds**
-   (`mobile/android/app/build.gradle`)
-
-2. **Produce a signed release APK in CI**
+1. **Produce a signed release APK in CI**
    (`.woodpecker/server.yml`)
 
-3. **Regenerate or verify `google-services.json` client selection**
+2. **Regenerate or verify `google-services.json` client selection**
    Confirm real-device FCM registration for `com.sprooty.mydevenv2`.
 
 ---
@@ -89,7 +86,7 @@ backlog.
 
 1. Bearer-token risk boundary
 2. Runtime image reproducibility hardening
-3. Android release/shrinking/signing
+3. Android release signing in CI
 4. FCM / `google-services.json` verification
 5. Readiness beyond liveness
 6. Production stack exit-node cleanup
