@@ -1,4 +1,9 @@
 type MonacoNs = typeof import("monaco-editor");
+import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
+import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
+import HtmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
+import TsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
 
 export type MonacoNamespace = MonacoNs;
 export type StandaloneEditor = import("monaco-editor").editor.IStandaloneCodeEditor;
@@ -6,22 +11,32 @@ export type DiffEditor = import("monaco-editor").editor.IStandaloneDiffEditor;
 export type TextModel = import("monaco-editor").editor.ITextModel;
 
 let monacoP: Promise<MonacoNs> | null = null;
-let noopWorkerUrl: string | null = null;
 
-function noopWorker(): Worker {
-  if (!noopWorkerUrl) {
-    noopWorkerUrl = URL.createObjectURL(
-      new Blob(["self.onmessage=()=>{}"], { type: "text/javascript" }),
-    );
+function getWorker(_: string, label: string): Worker {
+  switch (label) {
+    case "json":
+      return new JsonWorker();
+    case "css":
+    case "scss":
+    case "less":
+      return new CssWorker();
+    case "html":
+    case "handlebars":
+    case "razor":
+      return new HtmlWorker();
+    case "typescript":
+    case "javascript":
+      return new TsWorker();
+    default:
+      return new EditorWorker();
   }
-  return new Worker(noopWorkerUrl);
 }
 
 export function loadMonaco(): Promise<MonacoNs> {
   if (!monacoP) {
     monacoP = (async () => {
       (self as unknown as { MonacoEnvironment?: object }).MonacoEnvironment ??= {
-        getWorker: noopWorker,
+        getWorker,
       };
       return import("monaco-editor");
     })();

@@ -46,34 +46,28 @@ backlog.
 1. **Decide and implement installed-PWA offline behavior**
    (`web/public/sw.js`, app/release notes)
 
-2. **Reuse the Monaco diff editor instead of reinitializing on each path change**
-   (`web/src/Git.tsx`)
-
-3. **Consolidate Monaco loading and revisit worker behavior**
-   (`web/src/Editor.tsx`, `web/src/Git.tsx`)
-
-4. **Richer push-notification controls**
+2. **Richer push-notification controls**
    Per-session/task rules, quiet hours, and digests.
 
-5. **Mature the GUI tab**
+3. **Mature the GUI tab**
    Saved launchers, process labeling, and stream health visibility.
 
-6. **Improve mobile ergonomics in the web surface**
+4. **Improve mobile ergonomics in the web surface**
    Reconnect flows, tab management, terminal use, and touch-first editing.
 
-7. **Improve auth and onboarding UX**
+5. **Improve auth and onboarding UX**
    Bearer token setup and device-local profile handling.
 
-8. **Add lightweight admin / operational visibility in-app**
+6. **Add lightweight admin / operational visibility in-app**
    Sessions, push, GUI, auth-broker, and storage state.
 
-9. **User-configurable retention and quota controls**
+7. **User-configurable retention and quota controls**
    History, scrollback, prompts, and storage budgets.
 
-10. **Workspace search improvements**
+8. **Workspace search improvements**
    Filename/symbol search and tighter editor integration.
 
-11. **Stronger workspace awareness**
+9. **Stronger workspace awareness**
    Detected projects, task-runner shortcuts, and language-specific quick
    actions.
 
@@ -107,8 +101,7 @@ backlog.
 
 1. Bearer-token risk boundary
 2. Runtime image reproducibility hardening
-3. PTY reader spawn-failure handling
-4. Android release/shrinking/signing
-5. FCM / `google-services.json` verification
-6. Readiness beyond liveness
-7. Production stack exit-node cleanup
+3. Android release/shrinking/signing
+4. FCM / `google-services.json` verification
+5. Readiness beyond liveness
+6. Production stack exit-node cleanup

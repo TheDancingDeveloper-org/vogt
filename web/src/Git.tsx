@@ -18,7 +18,13 @@ import {
   type GitStatusKind,
   type GitStatusResp,
 } from "./api";
-import { languageFor, loadMonaco, type DiffEditor, type TextModel } from "./monaco";
+import {
+  languageFor,
+  loadMonaco,
+  type DiffEditor,
+  type MonacoNamespace,
+  type TextModel,
+} from "./monaco";
 
 interface Props {
   repo: string;
@@ -77,56 +83,69 @@ const DiffView: Component<{ repo: string; path: string; staged: boolean }> = (pr
   let resizeObserver: ResizeObserver | null = null;
   const [err, setErr] = createSignal<string | null>(null);
   let disposed = false;
-  let initGeneration = 0;
+  let loadGeneration = 0;
+  let monaco: MonacoNamespace | null = null;
 
-  const disposeDiff = () => {
-    resizeObserver?.disconnect();
-    resizeObserver = null;
+  const disposeModels = () => {
     editor?.setModel(null);
-    editor?.dispose();
-    editor = null;
     originalModel?.dispose();
     modifiedModel?.dispose();
     originalModel = null;
     modifiedModel = null;
-    if (host) host.innerHTML = "";
   };
 
-  const init = async (repo: string, path: string, staged: boolean, generation: number) => {
+  const disposeDiff = () => {
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    disposeModels();
+    editor?.dispose();
+    editor = null;
+  };
+
+  const ensureEditor = async (mountedHost: HTMLDivElement) => {
+    if (editor) return editor;
+    monaco ??= await loadMonaco();
+    if (disposed) return null;
+    editor = monaco.editor.createDiffEditor(mountedHost, {
+      theme: "vs-dark",
+      readOnly: true,
+      renderSideBySide: true,
+      automaticLayout: false,
+      fontFamily:
+        '"JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace, monospace',
+      fontSize: 13,
+      minimap: { enabled: false },
+    });
+    resizeObserver = new ResizeObserver(() => editor?.layout());
+    resizeObserver.observe(mountedHost);
+    return editor;
+  };
+
+  const loadDiff = async (repo: string, path: string, staged: boolean, generation: number) => {
     const mountedHost = host;
     if (!mountedHost) return;
     try {
       setErr(null);
-      const [monaco, d] = await Promise.all([
-        loadMonaco(),
+      const [nextEditor, d] = await Promise.all([
+        ensureEditor(mountedHost),
         api.gitDiff(repo, path, staged),
       ]);
-      if (disposed || generation !== initGeneration) return;
+      if (disposed || generation !== loadGeneration || !nextEditor || !monaco) return;
       const lang = languageFor(path);
       const original = monaco.editor.createModel(d.head, lang);
       const modified = monaco.editor.createModel(d.current, lang);
-      if (disposed || generation !== initGeneration) {
+      if (disposed || generation !== loadGeneration) {
         original.dispose();
         modified.dispose();
         return;
       }
+      disposeModels();
       originalModel = original;
       modifiedModel = modified;
-      editor = monaco.editor.createDiffEditor(mountedHost, {
-        theme: "vs-dark",
-        readOnly: true,
-        renderSideBySide: true,
-        automaticLayout: false,
-        fontFamily:
-          '"JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace, monospace',
-        fontSize: 13,
-        minimap: { enabled: false },
-      });
-      editor.setModel({ original, modified });
-      resizeObserver = new ResizeObserver(() => editor?.layout());
-      resizeObserver.observe(mountedHost);
+      nextEditor.setModel({ original, modified });
     } catch (e) {
-      if (!disposed && generation === initGeneration) {
+      if (!disposed && generation === loadGeneration) {
+        disposeModels();
         setErr(formatApiError(e));
       }
     }
@@ -136,14 +155,13 @@ const DiffView: Component<{ repo: string; path: string; staged: boolean }> = (pr
     const repo = props.repo;
     const path = props.path;
     const staged = props.staged;
-    initGeneration += 1;
-    disposeDiff();
-    void init(repo, path, staged, initGeneration);
+    loadGeneration += 1;
+    void loadDiff(repo, path, staged, loadGeneration);
   });
 
   onCleanup(() => {
     disposed = true;
-    initGeneration += 1;
+    loadGeneration += 1;
     disposeDiff();
   });
 
