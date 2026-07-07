@@ -365,10 +365,12 @@ export const api = {
       "GET",
       `/api/search?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`,
     ),
-  searchFiles: (q: string, path = "") =>
+  searchFiles: (q: string, path = "", max?: number) =>
     req<FileSearchResult[]>(
       "GET",
-      `/api/search/files?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`,
+      `/api/search/files?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}${
+        typeof max === "number" ? `&max=${max}` : ""
+      }`,
     ),
 
   listAgentTasks: () => req<AgentTask[]>("GET", "/api/agent-tasks"),

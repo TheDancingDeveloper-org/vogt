@@ -49,11 +49,6 @@ backlog.
 3. **User-configurable retention and quota controls**
    History, scrollback, prompts, and storage budgets.
 
-4. **Stronger workspace awareness**
-   The command palette now detects top-level project manifests and exposes
-   common runner shortcuts, but broader multi-project detection and
-   language-specific quick actions are still outstanding.
-
 ---
 
 ## Mobile / Android

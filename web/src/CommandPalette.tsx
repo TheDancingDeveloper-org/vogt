@@ -49,6 +49,86 @@ interface PackageJson {
   scripts?: Record<string, string>;
 }
 
+type PackageManager = "pnpm" | "yarn" | "npm";
+
+interface DetectedProject {
+  cwd: string;
+  displayName: string;
+  packageManager: PackageManager;
+  packageScripts: string[];
+  hasCargo: boolean;
+  hasPyproject: boolean;
+  hasJustfile: boolean;
+  hasMakefile: boolean;
+}
+
+interface MutableDetectedProject {
+  cwd: string;
+  packageManager: PackageManager;
+  packageJsonPath?: string;
+  packageName?: string;
+  packageScripts: string[];
+  hasCargo: boolean;
+  hasPyproject: boolean;
+  hasJustfile: boolean;
+  hasMakefile: boolean;
+}
+
+const PROJECT_MANIFEST_QUERIES = [
+  "package.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "package-lock.json",
+  "Cargo.toml",
+  "pyproject.toml",
+  "Justfile",
+  "justfile",
+  "Makefile",
+] as const;
+
+const PREFERRED_PACKAGE_SCRIPTS = ["dev", "typecheck", "build", "test", "lint", "start"];
+
+const IGNORED_PROJECT_SEGMENTS = new Set([
+  "node_modules",
+  "target",
+  "dist",
+  "build",
+  ".next",
+  ".nuxt",
+  ".turbo",
+  ".venv",
+  "venv",
+  "__pycache__",
+  "coverage",
+]);
+
+function parentDir(path: string): string {
+  const idx = path.lastIndexOf("/");
+  return idx >= 0 ? path.slice(0, idx) : "";
+}
+
+function leafName(path: string): string {
+  const idx = path.lastIndexOf("/");
+  return idx >= 0 ? path.slice(idx + 1) : path;
+}
+
+function pathLabel(path: string): string {
+  return path || "(workspace root)";
+}
+
+function isIgnoredProjectPath(path: string): boolean {
+  return path
+    .split("/")
+    .filter(Boolean)
+    .some((segment) => IGNORED_PROJECT_SEGMENTS.has(segment));
+}
+
+function comparePathDepth(a: string, b: string): number {
+  const aDepth = a ? a.split("/").length : 0;
+  const bDepth = b ? b.split("/").length : 0;
+  return aDepth - bDepth || a.localeCompare(b);
+}
+
 export interface Command {
   id: string;
   label: string;
@@ -150,102 +230,219 @@ const CommandPalette: Component<Props> = (props) => {
 
   const loadProjectCommands = async () => {
     try {
-      const entries = await api.listDir("");
-      const names = new Set(entries.map((entry) => entry.name));
-      const commands: Command[] = [];
+      const manifestResults = await Promise.all(
+        PROJECT_MANIFEST_QUERIES.map((name) => api.searchFiles(name, "", 40)),
+      );
+      const projects = new Map<string, MutableDetectedProject>();
 
-      const lockfileRunner = names.has("pnpm-lock.yaml")
-        ? "pnpm"
-        : names.has("yarn.lock")
-          ? "yarn"
-          : "npm";
-      const hasPackageJson = names.has("package.json");
-      const hasCargoToml = names.has("Cargo.toml");
-      const hasJustfile = names.has("Justfile") || names.has("justfile");
-      const hasMakefile = names.has("Makefile");
+      const ensureProject = (cwd: string): MutableDetectedProject => {
+        let existing = projects.get(cwd);
+        if (!existing) {
+          existing = {
+            cwd,
+            packageManager: "npm",
+            packageScripts: [],
+            hasCargo: false,
+            hasPyproject: false,
+            hasJustfile: false,
+            hasMakefile: false,
+          };
+          projects.set(cwd, existing);
+        }
+        return existing;
+      };
 
-      if (hasPackageJson) {
-        try {
-          const pkg = await api.readFile("package.json");
-          if (!pkg.is_binary && pkg.content) {
-            const parsed = JSON.parse(pkg.content) as PackageJson;
-            const scripts = parsed.scripts ?? {};
-            const preferred = ["dev", "typecheck", "build", "test", "lint", "start"];
-            const ordered = [
-              ...preferred.filter((name) => name in scripts),
-              ...Object.keys(scripts)
-                .filter((name) => !preferred.includes(name))
-                .sort(),
-            ].slice(0, 6);
-            commands.push(
-              ...ordered.map((script) => ({
-                id: `project-script-${script}`,
-                label: `Run ${lockfileRunner} ${script}`,
-                description: parsed.name
-                  ? `${parsed.name} • package.json script`
-                  : "package.json script",
-                icon: "▶",
-                action: () =>
-                  launchWorkspaceCommand(
-                    `${lockfileRunner}-${script}`,
-                    lockfileRunner === "npm"
-                      ? `npm run ${script}`
-                      : `${lockfileRunner} ${script}`,
-                  ),
-                category: "Project Actions",
-              })),
-            );
+      for (const matches of manifestResults) {
+        for (const file of matches) {
+          if (isIgnoredProjectPath(file.path)) continue;
+          const name = leafName(file.path);
+          const cwd = parentDir(file.path);
+          const project = ensureProject(cwd);
+          if (name === "pnpm-lock.yaml") {
+            project.packageManager = "pnpm";
+          } else if (name === "yarn.lock" && project.packageManager !== "pnpm") {
+            project.packageManager = "yarn";
+          } else if (name === "package-lock.json" && project.packageManager === "npm") {
+            project.packageManager = "npm";
+          } else if (name === "package.json") {
+            project.packageJsonPath = file.path;
+          } else if (name === "Cargo.toml") {
+            project.hasCargo = true;
+          } else if (name === "pyproject.toml") {
+            project.hasPyproject = true;
+          } else if (name === "Justfile" || name === "justfile") {
+            project.hasJustfile = true;
+          } else if (name === "Makefile") {
+            project.hasMakefile = true;
           }
-        } catch {
-          /* package metadata is optional for shortcuts */
         }
       }
 
-      if (hasCargoToml) {
-        commands.push(
-          {
-            id: "project-cargo-test",
-            label: "Run cargo test",
-            description: "Rust workspace checks",
-            icon: "🦀",
-            action: () => launchWorkspaceCommand("cargo-test", "cargo test --all"),
-            category: "Project Actions",
+      await Promise.all(
+        [...projects.values()].map(async (project) => {
+          if (!project.packageJsonPath) return;
+          try {
+            const pkg = await api.readFile(project.packageJsonPath);
+            if (pkg.is_binary || !pkg.content) return;
+            const parsed = JSON.parse(pkg.content) as PackageJson;
+            project.packageName = parsed.name;
+            const scripts = parsed.scripts ?? {};
+            project.packageScripts = [
+              ...PREFERRED_PACKAGE_SCRIPTS.filter((name) => name in scripts),
+              ...Object.keys(scripts)
+                .filter((name) => !PREFERRED_PACKAGE_SCRIPTS.includes(name))
+                .sort(),
+            ].slice(0, 5);
+          } catch {
+            /* package metadata is optional for shortcuts */
+          }
+        }),
+      );
+
+      const detectedProjects: DetectedProject[] = [...projects.values()]
+        .filter(
+          (project) =>
+            project.packageJsonPath ||
+            project.hasCargo ||
+            project.hasPyproject ||
+            project.hasJustfile ||
+            project.hasMakefile,
+        )
+        .sort((a, b) => comparePathDepth(a.cwd, b.cwd))
+        .map((project) => ({
+          cwd: project.cwd,
+          displayName: project.packageName || pathLabel(project.cwd),
+          packageManager: project.packageManager,
+          packageScripts: project.packageScripts,
+          hasCargo: project.hasCargo,
+          hasPyproject: project.hasPyproject,
+          hasJustfile: project.hasJustfile,
+          hasMakefile: project.hasMakefile,
+        }));
+
+      const commands: Command[] = [];
+      for (const project of detectedProjects) {
+        const location = pathLabel(project.cwd);
+
+        commands.push({
+          id: `project-terminal-${project.cwd || "root"}`,
+          label: `Open terminal in ${project.displayName}`,
+          description: location,
+          icon: "💻",
+          action: () => launchWorkspaceCommand(`shell-${project.displayName}`, "bash", project.cwd),
+          category: "Project Actions",
+        });
+
+        commands.push({
+          id: `project-git-${project.cwd || "root"}`,
+          label: `Open git status for ${project.displayName}`,
+          description: location,
+          icon: "⎇",
+          action: () => {
+            openGitTab(project.cwd);
+            navigate(project.cwd ? `/g/${encodeURIComponent(project.cwd)}` : "/g/");
+            props.onClose();
           },
-          {
-            id: "project-cargo-clippy",
-            label: "Run cargo clippy",
-            description: "Rust lint pass",
-            icon: "🦀",
+          category: "Project Actions",
+        });
+
+        commands.push(
+          ...project.packageScripts.map((script) => ({
+            id: `project-${project.cwd || "root"}-${project.packageManager}-${script}`,
+            label: `Run ${project.packageManager} ${script}`,
+            description: `${project.displayName} • ${location}`,
+            icon: "▶",
             action: () =>
               launchWorkspaceCommand(
-                "cargo-clippy",
-                "cargo clippy --all-targets --all-features -- -D warnings",
+                `${project.displayName}-${script}`,
+                project.packageManager === "npm"
+                  ? `npm run ${script}`
+                  : `${project.packageManager} ${script}`,
+                project.cwd,
               ),
             category: "Project Actions",
-          },
+          })),
         );
-      }
 
-      if (hasJustfile) {
-        commands.push({
-          id: "project-just",
-          label: "Run just",
-          description: "Task runner from Justfile",
-          icon: "▶",
-          action: () => launchWorkspaceCommand("just", "just"),
-          category: "Project Actions",
-        });
-      }
+        if (project.hasCargo) {
+          commands.push(
+            {
+              id: `project-${project.cwd || "root"}-cargo-test`,
+              label: "Run cargo test",
+              description: `${project.displayName} • ${location}`,
+              icon: "🦀",
+              action: () =>
+                launchWorkspaceCommand(
+                  `${project.displayName}-cargo-test`,
+                  "cargo test --all",
+                  project.cwd,
+                ),
+              category: "Project Actions",
+            },
+            {
+              id: `project-${project.cwd || "root"}-cargo-clippy`,
+              label: "Run cargo clippy",
+              description: `${project.displayName} • ${location}`,
+              icon: "🦀",
+              action: () =>
+                launchWorkspaceCommand(
+                  `${project.displayName}-cargo-clippy`,
+                  "cargo clippy --all-targets --all-features -- -D warnings",
+                  project.cwd,
+                ),
+              category: "Project Actions",
+            },
+          );
+        }
 
-      if (hasMakefile) {
-        commands.push({
-          id: "project-make",
-          label: "Run make",
-          description: "Task runner from Makefile",
-          icon: "▶",
-          action: () => launchWorkspaceCommand("make", "make"),
-          category: "Project Actions",
-        });
+        if (project.hasPyproject) {
+          commands.push(
+            {
+              id: `project-${project.cwd || "root"}-pytest`,
+              label: "Run pytest",
+              description: `${project.displayName} • ${location}`,
+              icon: "🐍",
+              action: () =>
+                launchWorkspaceCommand(`${project.displayName}-pytest`, "pytest", project.cwd),
+              category: "Project Actions",
+            },
+            {
+              id: `project-${project.cwd || "root"}-ruff`,
+              label: "Run ruff check",
+              description: `${project.displayName} • ${location}`,
+              icon: "🐍",
+              action: () =>
+                launchWorkspaceCommand(
+                  `${project.displayName}-ruff`,
+                  "ruff check .",
+                  project.cwd,
+                ),
+              category: "Project Actions",
+            },
+          );
+        }
+
+        if (project.hasJustfile) {
+          commands.push({
+            id: `project-${project.cwd || "root"}-just`,
+            label: "Run just",
+            description: `${project.displayName} • ${location}`,
+            icon: "▶",
+            action: () => launchWorkspaceCommand(`${project.displayName}-just`, "just", project.cwd),
+            category: "Project Actions",
+          });
+        }
+
+        if (project.hasMakefile) {
+          commands.push({
+            id: `project-${project.cwd || "root"}-make`,
+            label: "Run make",
+            description: `${project.displayName} • ${location}`,
+            icon: "▶",
+            action: () => launchWorkspaceCommand(`${project.displayName}-make`, "make", project.cwd),
+            category: "Project Actions",
+          });
+        }
       }
 
       setProjectCommands(commands);
