@@ -8,7 +8,7 @@ import {
   onMount,
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
-import { sessionsStore } from "./store";
+import { createSession, sessionsStore } from "./store";
 import {
   focusTab,
   openGitTab,
@@ -42,6 +42,11 @@ interface HistorySearchResult {
   session_id: string;
   session_name: string;
   match_snippet: string;
+}
+
+interface PackageJson {
+  name?: string;
+  scripts?: Record<string, string>;
 }
 
 export interface Command {
@@ -88,6 +93,7 @@ const CommandPalette: Component<Props> = (props) => {
   const [symbolResults, setSymbolResults] = createSignal<EditorSymbolResult[]>([]);
   const [symbolMessage, setSymbolMessage] = createSignal<string | null>(null);
   const [agentTasks, setAgentTasks] = createSignal<AgentTask[]>([]);
+  const [projectCommands, setProjectCommands] = createSignal<Command[]>([]);
   const [savedLayouts, setSavedLayouts] = createSignal<SavedWorkspaceLayout[]>([]);
   let inputRef: HTMLInputElement | undefined;
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -102,6 +108,7 @@ const CommandPalette: Component<Props> = (props) => {
         setAgentTasks([]);
         props.onError?.(`Failed to load agent tasks: ${(e as Error).message}`);
       });
+    void loadProjectCommands();
   });
 
   const activeEditorTab = () => {
@@ -120,6 +127,131 @@ const CommandPalette: Component<Props> = (props) => {
         fuzzyMatch(q, symbol.containerName ?? "") ||
         fuzzyMatch(q, symbol.path),
     );
+  };
+
+  const launchWorkspaceCommand = async (
+    label: string,
+    commandLine: string,
+    cwd = "",
+  ) => {
+    try {
+      const session = await createSession(
+        label.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+        ["bash", "-lc", commandLine],
+        cwd || undefined,
+      );
+      openTerminalTab(session.id, session.name);
+      navigate(`/t/${session.id}`);
+      props.onClose();
+    } catch (e) {
+      props.onError?.(`Failed to launch command: ${(e as Error).message}`);
+    }
+  };
+
+  const loadProjectCommands = async () => {
+    try {
+      const entries = await api.listDir("");
+      const names = new Set(entries.map((entry) => entry.name));
+      const commands: Command[] = [];
+
+      const lockfileRunner = names.has("pnpm-lock.yaml")
+        ? "pnpm"
+        : names.has("yarn.lock")
+          ? "yarn"
+          : "npm";
+      const hasPackageJson = names.has("package.json");
+      const hasCargoToml = names.has("Cargo.toml");
+      const hasJustfile = names.has("Justfile") || names.has("justfile");
+      const hasMakefile = names.has("Makefile");
+
+      if (hasPackageJson) {
+        try {
+          const pkg = await api.readFile("package.json");
+          if (!pkg.is_binary && pkg.content) {
+            const parsed = JSON.parse(pkg.content) as PackageJson;
+            const scripts = parsed.scripts ?? {};
+            const preferred = ["dev", "typecheck", "build", "test", "lint", "start"];
+            const ordered = [
+              ...preferred.filter((name) => name in scripts),
+              ...Object.keys(scripts)
+                .filter((name) => !preferred.includes(name))
+                .sort(),
+            ].slice(0, 6);
+            commands.push(
+              ...ordered.map((script) => ({
+                id: `project-script-${script}`,
+                label: `Run ${lockfileRunner} ${script}`,
+                description: parsed.name
+                  ? `${parsed.name} • package.json script`
+                  : "package.json script",
+                icon: "▶",
+                action: () =>
+                  launchWorkspaceCommand(
+                    `${lockfileRunner}-${script}`,
+                    lockfileRunner === "npm"
+                      ? `npm run ${script}`
+                      : `${lockfileRunner} ${script}`,
+                  ),
+                category: "Project Actions",
+              })),
+            );
+          }
+        } catch {
+          /* package metadata is optional for shortcuts */
+        }
+      }
+
+      if (hasCargoToml) {
+        commands.push(
+          {
+            id: "project-cargo-test",
+            label: "Run cargo test",
+            description: "Rust workspace checks",
+            icon: "🦀",
+            action: () => launchWorkspaceCommand("cargo-test", "cargo test --all"),
+            category: "Project Actions",
+          },
+          {
+            id: "project-cargo-clippy",
+            label: "Run cargo clippy",
+            description: "Rust lint pass",
+            icon: "🦀",
+            action: () =>
+              launchWorkspaceCommand(
+                "cargo-clippy",
+                "cargo clippy --all-targets --all-features -- -D warnings",
+              ),
+            category: "Project Actions",
+          },
+        );
+      }
+
+      if (hasJustfile) {
+        commands.push({
+          id: "project-just",
+          label: "Run just",
+          description: "Task runner from Justfile",
+          icon: "▶",
+          action: () => launchWorkspaceCommand("just", "just"),
+          category: "Project Actions",
+        });
+      }
+
+      if (hasMakefile) {
+        commands.push({
+          id: "project-make",
+          label: "Run make",
+          description: "Task runner from Makefile",
+          icon: "▶",
+          action: () => launchWorkspaceCommand("make", "make"),
+          category: "Project Actions",
+        });
+      }
+
+      setProjectCommands(commands);
+    } catch {
+      setProjectCommands([]);
+    }
   };
 
   // When the query starts with ">" or "/", search specialized indices
@@ -547,6 +679,7 @@ const CommandPalette: Component<Props> = (props) => {
   const allCommands = (): Command[] => {
     return [
       ...baseCommands(),
+      ...projectCommands(),
       ...tabCommands(),
       ...recentFileCommands(),
       ...sessionCommands(),

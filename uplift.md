@@ -58,8 +58,9 @@ backlog.
    History, scrollback, prompts, and storage budgets.
 
 4. **Stronger workspace awareness**
-   Detected projects, task-runner shortcuts, and language-specific quick
-   actions.
+   The command palette now detects top-level project manifests and exposes
+   common runner shortcuts, but broader multi-project detection and
+   language-specific quick actions are still outstanding.
 
 ---
 
