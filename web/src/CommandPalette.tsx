@@ -1,7 +1,16 @@
-import { Component, For, Show, createEffect, createSignal, onMount } from "solid-js";
+import {
+  Component,
+  For,
+  Show,
+  createEffect,
+  createSignal,
+  onCleanup,
+  onMount,
+} from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { sessionsStore } from "./store";
 import {
+  focusTab,
   openGitTab,
   openTerminalTab,
   openHistoryTab,
@@ -17,6 +26,12 @@ import {
   type FileSearchResult,
   type SessionTemplate,
 } from "./api";
+import {
+  focusEditorRange,
+  hasRegisteredEditor,
+  listEditorSymbols,
+  type EditorSymbolResult,
+} from "./editorRegistry";
 import {
   listWorkspaceLayouts,
   workspaceLayoutSummary,
@@ -70,6 +85,8 @@ const CommandPalette: Component<Props> = (props) => {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
   const [historyResults, setHistoryResults] = createSignal<HistorySearchResult[]>([]);
   const [fileResults, setFileResults] = createSignal<FileSearchResult[]>([]);
+  const [symbolResults, setSymbolResults] = createSignal<EditorSymbolResult[]>([]);
+  const [symbolMessage, setSymbolMessage] = createSignal<string | null>(null);
   const [agentTasks, setAgentTasks] = createSignal<AgentTask[]>([]);
   const [savedLayouts, setSavedLayouts] = createSignal<SavedWorkspaceLayout[]>([]);
   let inputRef: HTMLInputElement | undefined;
@@ -87,20 +104,43 @@ const CommandPalette: Component<Props> = (props) => {
       });
   });
 
+  const activeEditorTab = () => {
+    const activeId = tabsStore.active;
+    const active = tabsStore.tabs.find((tab) => tab.id === activeId);
+    return active?.kind === "editor" ? active : null;
+  };
+
+  const filterSymbols = (symbols: EditorSymbolResult[], term: string) => {
+    const q = term.trim();
+    if (!q) return symbols;
+    return symbols.filter(
+      (symbol) =>
+        fuzzyMatch(q, symbol.name) ||
+        fuzzyMatch(q, symbol.detail) ||
+        fuzzyMatch(q, symbol.containerName ?? "") ||
+        fuzzyMatch(q, symbol.path),
+    );
+  };
+
   // When the query starts with ">" or "/", search specialized indices
-  // (history or filenames) without mixing them into the base command list.
+  // (history, filenames, or current-file symbols) without mixing them into
+  // the base command list.
   const maybeSearchSpecial = (q: string) => {
     if (searchTimer) clearTimeout(searchTimer);
-    if (!q.startsWith(">") && !q.startsWith("/")) {
+    if (!q.startsWith(">") && !q.startsWith("/") && !q.startsWith("@")) {
       setHistoryResults([]);
       setFileResults([]);
+      setSymbolResults([]);
+      setSymbolMessage(null);
       return;
     }
     const mode = q[0];
     const term = q.slice(1).trim();
-    if (!term) {
+    if (!term && mode !== "@") {
       setHistoryResults([]);
       setFileResults([]);
+      setSymbolResults([]);
+      setSymbolMessage(null);
       return;
     }
     searchTimer = setTimeout(async () => {
@@ -116,17 +156,52 @@ const CommandPalette: Component<Props> = (props) => {
             setHistoryResults([]);
           }
           setFileResults([]);
+          setSymbolResults([]);
+          setSymbolMessage(null);
         } else {
-          const results = await api.searchFiles(term);
-          setFileResults(results);
           setHistoryResults([]);
+          if (mode === "/") {
+            const results = await api.searchFiles(term);
+            setFileResults(results);
+            setSymbolResults([]);
+            setSymbolMessage(null);
+            return;
+          }
+          setFileResults([]);
+          const active = activeEditorTab();
+          if (!active) {
+            setSymbolResults([]);
+            setSymbolMessage("Open a file to search symbols");
+            return;
+          }
+          if (!hasRegisteredEditor(active.id)) {
+            setSymbolResults([]);
+            setSymbolMessage("Current file is still loading");
+            return;
+          }
+          const symbols = await listEditorSymbols(active.id);
+          const filtered = filterSymbols(symbols, term);
+          setSymbolResults(filtered);
+          setSymbolMessage(
+            filtered.length > 0
+              ? null
+              : symbols.length > 0
+                ? "No matching symbols"
+                : "Current file does not provide symbol information",
+          );
         }
       } catch {
         setHistoryResults([]);
         setFileResults([]);
+        setSymbolResults([]);
+        setSymbolMessage(mode === "@" ? "Failed to load symbols" : null);
       }
     }, 250);
   };
+
+  onCleanup(() => {
+    if (searchTimer) clearTimeout(searchTimer);
+  });
 
   const historyCommands = (): Command[] => {
     return historyResults().map((r, i) => ({
@@ -155,6 +230,57 @@ const CommandPalette: Component<Props> = (props) => {
         props.onClose();
       },
       category: "File Matches",
+    }));
+  };
+
+  const symbolCommands = (): Command[] => {
+    const active = activeEditorTab();
+    if (!active) {
+      return [
+        {
+          id: "symbol-no-editor",
+          label: "Open a file to search symbols",
+          description: "Symbol search works against the active editor tab",
+          icon: "@",
+          action: () => undefined,
+          category: "Current File Symbols",
+        },
+      ];
+    }
+
+    if (symbolMessage()) {
+      return [
+        {
+          id: "symbol-message",
+          label: symbolMessage()!,
+          description: active.path,
+          icon: "@",
+          action: () => undefined,
+          category: "Current File Symbols",
+        },
+      ];
+    }
+
+    return symbolResults().map((symbol, i) => ({
+      id: `symbol-${i}`,
+      label: symbol.name,
+      description: [
+        symbol.containerName || active.path,
+        `line ${symbol.line}`,
+        symbol.detail,
+      ]
+        .filter(Boolean)
+        .join(" • "),
+      icon: "@",
+      action: () => {
+        focusTab(active.id);
+        navigate(`/e/${encodeURIComponent(active.path)}`);
+        props.onClose();
+        window.setTimeout(() => {
+          focusEditorRange(active.id, symbol.range);
+        }, 0);
+      },
+      category: "Current File Symbols",
     }));
   };
 
@@ -432,9 +558,10 @@ const CommandPalette: Component<Props> = (props) => {
 
   const filteredCommands = () => {
     const q = query().trim();
-    // History and filename search modes.
+    // History, filename, and symbol search modes.
     if (q.startsWith(">")) return historyCommands();
     if (q.startsWith("/")) return fileCommands();
+    if (q.startsWith("@")) return symbolCommands();
     if (!q) return allCommands();
     return allCommands().filter(
       (cmd) =>
@@ -491,7 +618,7 @@ const CommandPalette: Component<Props> = (props) => {
               ref={inputRef}
               type="text"
               class="command-palette-input"
-              placeholder="Type a command, / to search files, or > to search history..."
+              placeholder="Type a command, @ for symbols, / for files, or > for history..."
               value={query()}
               onInput={handleInput}
               onKeyDown={handleKeyDown}

@@ -9,6 +9,7 @@ import {
 import { setEditorDirty } from "./tabs";
 import { addRecentFile } from "./recentFiles";
 import { getMinimapEnabled, setMinimapEnabled } from "./editorPrefs";
+import { registerEditor } from "./editorRegistry";
 
 interface Props {
   tabId: string;
@@ -36,6 +37,7 @@ const Editor: Component<Props> = (props) => {
   let savedContent = "";
   let disposed = false;
   let contentChangeDisposable: { dispose: () => void } | null = null;
+  let unregisterEditor: () => void = () => undefined;
 
   const save = async () => {
     if (!editor) return;
@@ -101,6 +103,11 @@ const Editor: Component<Props> = (props) => {
         monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
         () => void save(),
       );
+      unregisterEditor = registerEditor(props.tabId, {
+        path: props.path,
+        getEditor: () => editor,
+        getModel: () => model,
+      });
       resizeObserver = new ResizeObserver(() => editor?.layout());
       resizeObserver.observe(mountedHost);
       setStatus("ready");
@@ -113,6 +120,7 @@ const Editor: Component<Props> = (props) => {
 
   onCleanup(() => {
     disposed = true;
+    unregisterEditor();
     resizeObserver?.disconnect();
     contentChangeDisposable?.dispose();
     editor?.dispose();

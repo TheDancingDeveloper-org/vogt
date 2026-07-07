@@ -9,6 +9,8 @@ export type MonacoNamespace = MonacoNs;
 export type StandaloneEditor = import("monaco-editor").editor.IStandaloneCodeEditor;
 export type DiffEditor = import("monaco-editor").editor.IStandaloneDiffEditor;
 export type TextModel = import("monaco-editor").editor.ITextModel;
+export type DocumentSymbol = import("monaco-editor").languages.DocumentSymbol;
+export type EditorRange = import("monaco-editor").IRange;
 
 let monacoP: Promise<MonacoNs> | null = null;
 
