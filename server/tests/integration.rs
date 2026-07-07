@@ -1318,6 +1318,39 @@ async fn file_api_round_trip() {
 }
 
 #[tokio::test]
+async fn file_name_search_returns_matching_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("docs")).unwrap();
+    std::fs::write(tmp.path().join("README.md"), "root").unwrap();
+    std::fs::write(tmp.path().join("docs").join("readme-notes.txt"), "nested").unwrap();
+    std::fs::write(tmp.path().join("docs").join("other.txt"), "other").unwrap();
+
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let hits: Vec<Value> = client
+        .get(format!("{base}/api/search/files?q=read"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert!(hits.iter().any(|hit| hit["path"] == "README.md"));
+    assert!(hits
+        .iter()
+        .any(|hit| hit["path"] == "docs/readme-notes.txt"));
+}
+
+#[tokio::test]
 async fn git_status_log_branch() {
     // Spin up a fresh git repo in a tempdir as the workspace, then drive
     // the git API across status, diff, staging, commit, and branch workflow.

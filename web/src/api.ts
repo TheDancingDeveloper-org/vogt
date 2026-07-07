@@ -215,6 +215,11 @@ export interface SearchHit {
   text: string;
 }
 
+export interface FileSearchResult {
+  path: string;
+  name: string;
+}
+
 export interface HistorySessionMetadata {
   id: string;
   name: string;
@@ -359,6 +364,11 @@ export const api = {
     req<SearchHit[]>(
       "GET",
       `/api/search?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`,
+    ),
+  searchFiles: (q: string, path = "") =>
+    req<FileSearchResult[]>(
+      "GET",
+      `/api/search/files?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`,
     ),
 
   listAgentTasks: () => req<AgentTask[]>("GET", "/api/agent-tasks"),

@@ -8,7 +8,9 @@ use axum::{
     Json,
 };
 use base64::Engine as _;
-use mydevenv2_contract::{FileEntry, FileRead, SearchHit, TreeNode, WriteFileResponse, WriteReq};
+use mydevenv2_contract::{
+    FileEntry, FileRead, FileSearchResult, SearchHit, TreeNode, WriteFileResponse, WriteReq,
+};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio_util::io::ReaderStream;
@@ -455,6 +457,7 @@ pub struct SearchQuery {
 }
 
 const SEARCH_HARD_CAP: usize = 500;
+const FILE_SEARCH_HARD_CAP: usize = 500;
 
 /// Search via `rg --json`. Requires `rg` on $PATH (TOOLING.md lists it as a
 /// baseline tool — fail loudly if it isn't installed).
@@ -520,6 +523,91 @@ pub async fn search(
     Ok(Json(hits))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct FileSearchQuery {
+    pub q: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub max: Option<usize>,
+}
+
+pub async fn search_files(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<FileSearchQuery>,
+) -> Result<Json<Vec<FileSearchResult>>> {
+    let needle = q.q.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return Err(ApiError::BadRequest("q must not be empty".into()));
+    }
+    let dir = if q.path.trim().is_empty() {
+        state.config.workspace_root.clone()
+    } else {
+        workspace_path::resolve_existing(&state.config.workspace_root, &q.path)?
+    };
+    let cap = q.max.unwrap_or(100).min(FILE_SEARCH_HARD_CAP);
+    let mut stack = vec![dir.clone()];
+    let mut out = Vec::new();
+
+    while let Some(current) = stack.pop() {
+        let mut rd = match tokio::fs::read_dir(&current).await {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        while let Some(ent) = rd.next_entry().await? {
+            let path = ent.path();
+            let name = ent.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let ft = match ent.file_type().await {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !ft.is_file() {
+                continue;
+            }
+            let rel = rel_to(&state.config.workspace_root, &path);
+            let rel_lc = rel.to_ascii_lowercase();
+            if !name.to_ascii_lowercase().contains(&needle) && !rel_lc.contains(&needle) {
+                continue;
+            }
+            out.push(FileSearchResult { path: rel, name });
+            if out.len() >= cap {
+                break;
+            }
+        }
+        if out.len() >= cap {
+            break;
+        }
+    }
+
+    out.sort_by(|a, b| {
+        let a_name = a.name.to_ascii_lowercase();
+        let b_name = b.name.to_ascii_lowercase();
+        let a_starts = a_name.starts_with(&needle);
+        let b_starts = b_name.starts_with(&needle);
+        match (a_starts, b_starts) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a
+                .path
+                .len()
+                .cmp(&b.path.len())
+                .then_with(|| a.path.cmp(&b.path)),
+        }
+    });
+
+    Ok(Json(out))
+}
+
 fn looks_binary(b: &[u8]) -> bool {
     // Standard "is binary" heuristic: NUL byte in the first 8 KiB.
     let n = b.len().min(8192);
@@ -534,5 +622,41 @@ mod tests {
     fn binary_detection() {
         assert!(!looks_binary(b"hello world"));
         assert!(looks_binary(b"hi\0there"));
+    }
+
+    #[test]
+    fn file_search_prefers_prefix_and_shorter_paths() {
+        let needle = "read".to_string();
+        let mut results = [
+            FileSearchResult {
+                path: "docs/notes/readme.txt".into(),
+                name: "readme.txt".into(),
+            },
+            FileSearchResult {
+                path: "read-this-first.md".into(),
+                name: "read-this-first.md".into(),
+            },
+            FileSearchResult {
+                path: "src/bread.rs".into(),
+                name: "bread.rs".into(),
+            },
+        ];
+        results.sort_by(|a, b| {
+            let a_name = a.name.to_ascii_lowercase();
+            let b_name = b.name.to_ascii_lowercase();
+            let a_starts = a_name.starts_with(&needle);
+            let b_starts = b_name.starts_with(&needle);
+            match (a_starts, b_starts) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a
+                    .path
+                    .len()
+                    .cmp(&b.path.len())
+                    .then_with(|| a.path.cmp(&b.path)),
+            }
+        });
+        assert_eq!(results[0].path, "read-this-first.md");
+        assert_eq!(results[1].path, "docs/notes/readme.txt");
     }
 }

@@ -114,6 +114,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/dir", get(files::list_dir))
         .route("/api/tree", get(files::tree))
         .route("/api/search", get(files::search))
+        .route("/api/search/files", get(files::search_files))
         .route("/api/git/status", get(git::status))
         .route("/api/git/diff", get(git::diff))
         .route("/api/git/log", get(git::log))

@@ -130,6 +130,12 @@ pub struct SearchHit {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSearchResult {
+    pub path: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StatusKind {

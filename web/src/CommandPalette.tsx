@@ -11,7 +11,12 @@ import {
   tabsStore,
 } from "./tabs";
 import { getRecentFiles } from "./recentFiles";
-import { api, type AgentTask, type SessionTemplate } from "./api";
+import {
+  api,
+  type AgentTask,
+  type FileSearchResult,
+  type SessionTemplate,
+} from "./api";
 import {
   listWorkspaceLayouts,
   workspaceLayoutSummary,
@@ -64,6 +69,7 @@ const CommandPalette: Component<Props> = (props) => {
   const [query, setQuery] = createSignal("");
   const [selectedIndex, setSelectedIndex] = createSignal(0);
   const [historyResults, setHistoryResults] = createSignal<HistorySearchResult[]>([]);
+  const [fileResults, setFileResults] = createSignal<FileSearchResult[]>([]);
   const [agentTasks, setAgentTasks] = createSignal<AgentTask[]>([]);
   const [savedLayouts, setSavedLayouts] = createSignal<SavedWorkspaceLayout[]>([]);
   let inputRef: HTMLInputElement | undefined;
@@ -81,29 +87,43 @@ const CommandPalette: Component<Props> = (props) => {
       });
   });
 
-  // When the query starts with ">", search session history (debounced).
-  const maybeSearchHistory = (q: string) => {
+  // When the query starts with ">" or "/", search specialized indices
+  // (history or filenames) without mixing them into the base command list.
+  const maybeSearchSpecial = (q: string) => {
     if (searchTimer) clearTimeout(searchTimer);
-    if (!q.startsWith(">")) {
+    if (!q.startsWith(">") && !q.startsWith("/")) {
       setHistoryResults([]);
+      setFileResults([]);
       return;
     }
+    const mode = q[0];
     const term = q.slice(1).trim();
     if (!term) {
       setHistoryResults([]);
+      setFileResults([]);
       return;
     }
     searchTimer = setTimeout(async () => {
       try {
-        const res = await fetch(
-          `${api.getBase()}/api/history/search?q=${encodeURIComponent(term)}`,
-          { headers: { Authorization: `Bearer ${api.getToken()}` } },
-        );
-        if (res.ok) {
-          setHistoryResults((await res.json()) as HistorySearchResult[]);
+        if (mode === ">") {
+          const res = await fetch(
+            `${api.getBase()}/api/history/search?q=${encodeURIComponent(term)}`,
+            { headers: { Authorization: `Bearer ${api.getToken()}` } },
+          );
+          if (res.ok) {
+            setHistoryResults((await res.json()) as HistorySearchResult[]);
+          } else {
+            setHistoryResults([]);
+          }
+          setFileResults([]);
+        } else {
+          const results = await api.searchFiles(term);
+          setFileResults(results);
+          setHistoryResults([]);
         }
       } catch {
         setHistoryResults([]);
+        setFileResults([]);
       }
     }, 250);
   };
@@ -120,6 +140,21 @@ const CommandPalette: Component<Props> = (props) => {
         props.onClose();
       },
       category: "History Matches",
+    }));
+  };
+
+  const fileCommands = (): Command[] => {
+    return fileResults().map((file, i) => ({
+      id: `file-${i}`,
+      label: file.name,
+      description: file.path,
+      icon: "📄",
+      action: () => {
+        openEditorTab(file.path);
+        navigate(`/e/${encodeURIComponent(file.path)}`);
+        props.onClose();
+      },
+      category: "File Matches",
     }));
   };
 
@@ -397,8 +432,9 @@ const CommandPalette: Component<Props> = (props) => {
 
   const filteredCommands = () => {
     const q = query().trim();
-    // History search mode: ">term" shows session-history matches only.
+    // History and filename search modes.
     if (q.startsWith(">")) return historyCommands();
+    if (q.startsWith("/")) return fileCommands();
     if (!q) return allCommands();
     return allCommands().filter(
       (cmd) =>
@@ -438,7 +474,7 @@ const CommandPalette: Component<Props> = (props) => {
     const value = (e.target as HTMLInputElement).value;
     setQuery(value);
     setSelectedIndex(0);
-    maybeSearchHistory(value);
+    maybeSearchSpecial(value);
   };
 
   return (
@@ -455,7 +491,7 @@ const CommandPalette: Component<Props> = (props) => {
               ref={inputRef}
               type="text"
               class="command-palette-input"
-              placeholder="Type a command, or > to search history..."
+              placeholder="Type a command, / to search files, or > to search history..."
               value={query()}
               onInput={handleInput}
               onKeyDown={handleKeyDown}
