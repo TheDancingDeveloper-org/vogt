@@ -49,6 +49,16 @@ fn default_tail_bytes() -> u64 {
     64 * 1024
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CleanupReq {
+    #[serde(default = "default_retention_days")]
+    retention_days: u32,
+}
+
+fn default_retention_days() -> u32 {
+    30
+}
+
 /// List archived sessions with pagination
 pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
@@ -179,4 +189,21 @@ pub async fn delete_session(
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn cleanup_sessions(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CleanupReq>,
+) -> Result<Json<serde_json::Value>> {
+    let history = state
+        .history
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("history not enabled".into()))?;
+
+    let removed = history.cleanup_old_sessions(req.retention_days).await?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "removed_sessions": removed,
+        "retention_days": req.retention_days,
+    })))
 }

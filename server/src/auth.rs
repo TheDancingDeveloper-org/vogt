@@ -321,7 +321,8 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     {
         return Some(TokenCapability::PushWrite);
     }
-    if path.starts_with("/api/history/") && *method == Method::DELETE {
+    if path.starts_with("/api/history/") && (*method == Method::DELETE || *method == Method::POST)
+    {
         return Some(TokenCapability::HistoryWrite);
     }
     None
@@ -422,6 +423,14 @@ mod tests {
         assert_eq!(
             required_capability(&Method::POST, "/api/push/test"),
             Some(TokenCapability::PushWrite)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/api/history/cleanup"),
+            Some(TokenCapability::HistoryWrite)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/api/agent-tasks/artifacts/cleanup"),
+            Some(TokenCapability::AgentTasksWrite)
         );
         assert_eq!(required_capability(&Method::GET, "/api/sessions"), None);
     }

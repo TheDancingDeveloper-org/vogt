@@ -18,7 +18,16 @@ use crate::error::{ApiError, Result};
 /// Session history database manager
 pub struct SessionHistory {
     pub pool: SqlitePool,
+    db_path: PathBuf,
     log_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryStorageStats {
+    pub archived_session_count: u64,
+    pub log_file_count: u64,
+    pub log_bytes: u64,
+    pub db_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -85,7 +94,11 @@ impl SessionHistory {
             .await
             .map_err(|e| ApiError::Internal(format!("failed to connect to history db: {}", e)))?;
 
-        let history = Self { pool, log_dir };
+        let history = Self {
+            pool,
+            db_path,
+            log_dir,
+        };
         history.init_schema().await?;
 
         Ok(history)
@@ -94,6 +107,10 @@ impl SessionHistory {
     /// Directory where per-session scrollback logs are persisted for replay.
     pub fn log_dir(&self) -> &Path {
         &self.log_dir
+    }
+
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
     }
 
     /// Path for the raw PTY output log belonging to a session.
@@ -219,6 +236,20 @@ impl SessionHistory {
             .await
             .map_err(|e| ApiError::Internal(format!("failed to count sessions: {}", e)))?;
         Ok(row.get::<i64, _>("count") as u64)
+    }
+
+    pub async fn storage_stats(&self) -> Result<HistoryStorageStats> {
+        let archived_session_count = self.count_sessions().await?;
+        let db_bytes = std::fs::metadata(&self.db_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let (log_file_count, log_bytes) = summarize_regular_files(&self.log_dir)?;
+        Ok(HistoryStorageStats {
+            archived_session_count,
+            log_file_count: log_file_count as u64,
+            log_bytes,
+            db_bytes,
+        })
     }
 
     /// Search session output
@@ -451,6 +482,29 @@ fn remove_log_file(path: PathBuf) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(ApiError::Internal(format!(
             "failed to remove session log {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
+fn summarize_regular_files(path: &Path) -> Result<(usize, u64)> {
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    match std::fs::read_dir(path) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let meta = entry.metadata()?;
+                if meta.is_file() {
+                    count += 1;
+                    bytes = bytes.saturating_add(meta.len());
+                }
+            }
+            Ok((count, bytes))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((0, 0)),
+        Err(e) => Err(ApiError::Internal(format!(
+            "failed to read history log dir {}: {e}",
             path.display()
         ))),
     }

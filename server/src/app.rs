@@ -136,12 +136,17 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/agent-tasks/{id}/pause", post(agent_tasks::pause))
         .route("/api/agent-tasks/{id}/resume", post(agent_tasks::resume))
         .route("/api/agent-tasks/{id}/run", post(agent_tasks::run_now))
+        .route(
+            "/api/agent-tasks/artifacts/cleanup",
+            post(agent_tasks::cleanup_prompt_artifacts),
+        )
         .route("/api/push/subscribe", post(push_api::subscribe))
         .route("/api/push/unsubscribe", post(push_api::unsubscribe))
         .route("/api/push/list", get(push_api::list))
         .route("/api/push/test", post(push_api::test_dispatch))
         .route("/api/history/sessions", get(history_api::list_sessions))
         .route("/api/history/search", get(history_api::search_sessions))
+        .route("/api/history/cleanup", post(history_api::cleanup_sessions))
         .route("/api/history/{id}/log", get(history_api::get_session_log))
         .route(
             "/api/history/{id}/download",

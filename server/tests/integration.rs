@@ -958,6 +958,211 @@ async fn archived_history_log_preview_and_download_work() {
     assert!(body.contains("third line"));
 }
 
+#[tokio::test]
+async fn archived_history_cleanup_removes_old_sessions_and_logs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "cleanup-me",
+            "command": ["/bin/sh", "-lc", "printf 'cleanup-history\\n'; exit 0"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let session = client
+            .get(format!("{base}/api/history/{id}"))
+            .send()
+            .await
+            .unwrap();
+        if session.status() == StatusCode::OK {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session was not archived in time"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let cleanup: Value = client
+        .post(format!("{base}/api/history/cleanup"))
+        .json(&json!({ "retention_days": 0 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cleanup["ok"], true);
+    assert_eq!(cleanup["removed_sessions"], 1);
+
+    let after = client
+        .get(format!("{base}/api/history/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn task_prompt_artifact_cleanup_prunes_old_runs_and_orphans() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "artifact cleanup",
+            "prompt": "Keep the latest prompt only.",
+            "schedule": { "kind": "manual" },
+            "command": ["/bin/sh", "-lc", "printf 'done\\n'"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap().to_string();
+
+    let mut prompt_files: Vec<String> = Vec::new();
+    for _ in 0..2 {
+        let run_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let detail: Value = client
+                .get(format!("{base}/api/agent-tasks/{task_id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let latest_running = detail["runs"]
+                .as_array()
+                .and_then(|runs| runs.last())
+                .map(|run| run["status"] == "running")
+                .unwrap_or(false);
+            if !latest_running {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < run_deadline,
+                "prior task run did not finish in time"
+            );
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        let run: Value = client
+            .post(format!("{base}/api/agent-tasks/{task_id}/run"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        prompt_files.push(run["prompt_file"].as_str().unwrap().to_string());
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let detail: Value = client
+            .get(format!("{base}/api/agent-tasks/{task_id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let all_finished = detail["runs"]
+            .as_array()
+            .map(|runs| runs.iter().all(|run| run["status"] != "running"))
+            .unwrap_or(false);
+        if all_finished {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "task runs did not finish in time"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let cleanup_runs: Value = client
+        .post(format!("{base}/api/agent-tasks/artifacts/cleanup"))
+        .json(&json!({ "keep_latest_runs_per_task": 1 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cleanup_runs["removed_prompt_file_count"], 1);
+    assert!(!std::path::Path::new(&prompt_files[0]).exists());
+    assert!(std::path::Path::new(&prompt_files[1]).exists());
+
+    let deleted = client
+        .delete(format!("{base}/api/agent-tasks/{task_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+
+    let orphan_dir = tmp
+        .path()
+        .join("state")
+        .join("agent-task-prompts")
+        .join("orphan-task");
+    std::fs::create_dir_all(&orphan_dir).unwrap();
+    std::fs::write(orphan_dir.join("stale.md"), "stale").unwrap();
+
+    let cleanup_orphans: Value = client
+        .post(format!("{base}/api/agent-tasks/artifacts/cleanup"))
+        .json(&json!({ "keep_latest_runs_per_task": 1 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cleanup_orphans["removed_task_dir_count"], 1);
+    let task_dir = tmp
+        .path()
+        .join("state")
+        .join("agent-task-prompts")
+        .join(task_id);
+    assert!(!task_dir.exists());
+    assert!(!orphan_dir.exists());
+}
+
 async fn ws_attach(
     base: &str,
     id: &str,

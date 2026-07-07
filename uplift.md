@@ -46,12 +46,6 @@ backlog.
 2. **Improve mobile ergonomics in the web surface**
    Reconnect flows, tab management, terminal use, and touch-first editing.
 
-3. **Server-side retention cleanup for archived history and agent-task prompts**
-   Browser-local storage budgets and per-session scrollback defaults now exist
-   in the web settings. Remaining work is exposing real cleanup controls for
-   archived session history plus scheduled-task prompt/context artifacts under
-   `state_dir`.
-
 ---
 
 ## Mobile / Android

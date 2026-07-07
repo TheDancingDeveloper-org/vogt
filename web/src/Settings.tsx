@@ -71,6 +71,10 @@ const Settings: Component<Props> = (props) => {
   const [storageMsg, setStorageMsg] = createSignal<string | null>(null);
   const [opsStatus, setOpsStatus] = createSignal<OperationalStatus | null>(null);
   const [opsError, setOpsError] = createSignal<string | null>(null);
+  const [historyRetentionDays, setHistoryRetentionDays] = createSignal(30);
+  const [taskPromptKeepRuns, setTaskPromptKeepRuns] = createSignal(10);
+  const [serverCleanupBusy, setServerCleanupBusy] = createSignal(false);
+  const [serverCleanupMsg, setServerCleanupMsg] = createSignal<string | null>(null);
   const [browserStorage, setBrowserStorage] = createSignal<{
     localStorageBytes: number;
     localStorageEntries: number;
@@ -207,6 +211,7 @@ const Settings: Component<Props> = (props) => {
     setTerminalTheme(getThemeName());
     setStoragePrefsState(getStoragePrefs());
     setStorageMsg(null);
+    setServerCleanupMsg(null);
     refreshLayouts();
     refreshAuthProfiles();
     refreshManagedStorage();
@@ -304,6 +309,40 @@ const Settings: Component<Props> = (props) => {
     refreshManagedStorage();
     void refreshBrowserStorage();
     setStorageMsg("Cleared stored profiles, layouts, recent files, bookmarks, and history pins.");
+  };
+
+  const cleanupArchivedHistory = async () => {
+    setServerCleanupBusy(true);
+    setServerCleanupMsg(null);
+    try {
+      const retentionDays = Math.max(0, Math.round(historyRetentionDays()));
+      const result = await api.cleanupHistorySessions(retentionDays);
+      await refreshOperationalState();
+      setServerCleanupMsg(
+        `Removed ${result.removed_sessions} archived session${result.removed_sessions === 1 ? "" : "s"} older than ${result.retention_days} day${result.retention_days === 1 ? "" : "s"}.`,
+      );
+    } catch (e) {
+      setServerCleanupMsg(`History cleanup failed: ${(e as Error).message}`);
+    } finally {
+      setServerCleanupBusy(false);
+    }
+  };
+
+  const cleanupTaskPromptArtifacts = async () => {
+    setServerCleanupBusy(true);
+    setServerCleanupMsg(null);
+    try {
+      const keepLatestRuns = Math.max(0, Math.round(taskPromptKeepRuns()));
+      const result = await api.cleanupAgentTaskArtifacts(keepLatestRuns);
+      await refreshOperationalState();
+      setServerCleanupMsg(
+        `Removed ${result.removed_prompt_file_count} prompt files, ${result.removed_context_file_count} context files, and ${result.removed_task_dir_count} task directories (${formatBytes(result.removed_bytes)}).`,
+      );
+    } catch (e) {
+      setServerCleanupMsg(`Task artifact cleanup failed: ${(e as Error).message}`);
+    } finally {
+      setServerCleanupBusy(false);
+    }
   };
 
   const storeCurrentProfile = () => {
@@ -806,6 +845,58 @@ const Settings: Component<Props> = (props) => {
 
           <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
+              Server retention cleanup
+            </div>
+            <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
+              Trim archived session history by age and remove stale scheduled-task prompt files from the server state directory.
+            </div>
+            <div
+              style={{
+                display: "grid",
+                "grid-template-columns": "repeat(auto-fit, minmax(180px, 1fr))",
+                gap: "8px",
+              }}
+            >
+              <label>
+                History retention (days)
+                <input
+                  type="number"
+                  min="0"
+                  value={historyRetentionDays()}
+                  onInput={(e) => setHistoryRetentionDays(Math.max(0, Number(e.currentTarget.value || 0)))}
+                />
+              </label>
+              <label>
+                Keep task prompt runs
+                <input
+                  type="number"
+                  min="0"
+                  value={taskPromptKeepRuns()}
+                  onInput={(e) => setTaskPromptKeepRuns(Math.max(0, Number(e.currentTarget.value || 0)))}
+                />
+              </label>
+            </div>
+            <div style={{ display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
+              <button type="button" onClick={() => void cleanupArchivedHistory()} disabled={serverCleanupBusy()}>
+                Clean archived history
+              </button>
+              <button
+                type="button"
+                onClick={() => void cleanupTaskPromptArtifacts()}
+                disabled={serverCleanupBusy()}
+              >
+                Clean task prompt artifacts
+              </button>
+            </div>
+            <Show when={serverCleanupMsg()}>
+              <div style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{serverCleanupMsg()}</div>
+            </Show>
+          </div>
+
+          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+
+          <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
+            <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
               Operational visibility
             </div>
             <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
@@ -862,6 +953,20 @@ const Settings: Component<Props> = (props) => {
                       {status().storage.state_dir}
                     </div>
                   </div>
+                  <div style={opsCardStyle}>
+                    <div style={opsLabelStyle}>History logs</div>
+                    <div style={opsValueStyle}>{status().history.log_file_count ?? 0}</div>
+                    <div style={opsMetaStyle}>
+                      {formatBytes(status().history.log_bytes)} logs • {formatBytes(status().history.db_bytes)} db
+                    </div>
+                  </div>
+                  <div style={opsCardStyle}>
+                    <div style={opsLabelStyle}>Task artifacts</div>
+                    <div style={opsValueStyle}>{status().agent_tasks.prompt_file_count}</div>
+                    <div style={opsMetaStyle}>
+                      {status().agent_tasks.context_file_count} contexts • {status().agent_tasks.orphan_task_dir_count} orphan dirs • {formatBytes(status().agent_tasks.prompt_bytes)}
+                    </div>
+                  </div>
                   <Show when={browserStorage()}>
                     {(storage) => (
                       <div style={opsCardStyle}>
@@ -887,6 +992,7 @@ const Settings: Component<Props> = (props) => {
                 <div style={{ "font-size": "11px", color: "var(--fg-muted)", "line-height": 1.5 }}>
                   <div>Workspace root: <code>{status().storage.workspace_root}</code></div>
                   <div>Version: <code>{status().version}</code></div>
+                  <div>Agent tasks: <code>{status().agent_tasks.task_count}</code></div>
                 </div>
               )}
             </Show>

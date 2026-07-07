@@ -162,10 +162,45 @@ pub struct AgentTaskUpdate {
     pub notify_on_phrase: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PromptArtifactCleanupReq {
+    #[serde(default = "default_prompt_artifact_keep_latest_runs")]
+    pub keep_latest_runs_per_task: usize,
+}
+
+fn default_prompt_artifact_keep_latest_runs() -> usize {
+    10
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct AgentTaskStore {
     #[serde(default)]
     tasks: Vec<AgentTask>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptArtifactStats {
+    pub task_dir_count: u64,
+    pub prompt_file_count: u64,
+    pub context_file_count: u64,
+    pub total_bytes: u64,
+    pub orphan_task_dir_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptArtifactCleanup {
+    pub removed_task_dir_count: u64,
+    pub removed_prompt_file_count: u64,
+    pub removed_context_file_count: u64,
+    pub removed_bytes: u64,
+}
+
+#[derive(Default)]
+struct PromptArtifactRemovalTally {
+    task_dirs: u64,
+    prompt_files: u64,
+    context_files: u64,
+    bytes: u64,
 }
 
 pub struct AgentTaskRegistry {
@@ -362,7 +397,100 @@ impl AgentTaskRegistry {
             return Err(ApiError::NotFound);
         }
         self.save_locked(&tasks)?;
+        remove_path_recursive(&self.task_prompt_dir(id), &mut PromptArtifactRemovalTally::default())?;
         Ok(true)
+    }
+
+    pub fn prompt_artifact_stats(&self) -> Result<PromptArtifactStats> {
+        let tasks = self.tasks.lock().clone();
+        let task_ids: HashSet<Uuid> = tasks.iter().map(|task| task.id).collect();
+        let mut stats = PromptArtifactStats {
+            task_dir_count: 0,
+            prompt_file_count: 0,
+            context_file_count: 0,
+            total_bytes: 0,
+            orphan_task_dir_count: 0,
+        };
+
+        match std::fs::read_dir(&self.prompt_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    if !entry.file_type()?.is_dir() {
+                        continue;
+                    }
+                    stats.task_dir_count += 1;
+                    let name = entry.file_name();
+                    let task_id = name.to_string_lossy();
+                    let is_orphan = Uuid::parse_str(&task_id)
+                        .ok()
+                        .map(|id| !task_ids.contains(&id))
+                        .unwrap_or(true);
+                    if is_orphan {
+                        stats.orphan_task_dir_count += 1;
+                    }
+                    accumulate_prompt_dir_stats(&entry.path(), &mut stats)?;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(ApiError::Internal(format!(
+                    "read prompt artifact dir {}: {e}",
+                    self.prompt_dir.display()
+                )));
+            }
+        }
+
+        Ok(stats)
+    }
+
+    pub fn cleanup_prompt_artifacts(
+        &self,
+        keep_latest_runs_per_task: usize,
+    ) -> Result<PromptArtifactCleanup> {
+        let tasks = self.tasks.lock().clone();
+        let task_ids: HashSet<Uuid> = tasks.iter().map(|task| task.id).collect();
+        let mut tally = PromptArtifactRemovalTally::default();
+
+        match std::fs::read_dir(&self.prompt_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    if !entry.file_type()?.is_dir() {
+                        continue;
+                    }
+                    let path = entry.path();
+                    let task_id = Uuid::parse_str(&entry.file_name().to_string_lossy()).ok();
+                    let Some(task_id) = task_id else {
+                        remove_path_recursive(&path, &mut tally)?;
+                        continue;
+                    };
+                    if !task_ids.contains(&task_id) {
+                        remove_path_recursive(&path, &mut tally)?;
+                        continue;
+                    }
+                    let task = tasks
+                        .iter()
+                        .find(|task| task.id == task_id)
+                        .ok_or_else(|| ApiError::Internal("task disappeared during cleanup".into()))?;
+                    cleanup_task_prompt_dir(&path, task, keep_latest_runs_per_task, &mut tally)?;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(ApiError::Internal(format!(
+                    "read prompt artifact dir {}: {e}",
+                    self.prompt_dir.display()
+                )));
+            }
+        }
+
+        Ok(PromptArtifactCleanup {
+            removed_task_dir_count: tally.task_dirs,
+            removed_prompt_file_count: tally.prompt_files,
+            removed_context_file_count: tally.context_files,
+            removed_bytes: tally.bytes,
+        })
     }
 
     pub async fn run_now(&self, id: Uuid) -> Result<AgentTaskRun> {
@@ -733,6 +861,10 @@ impl AgentTaskRegistry {
         Ok((prompt_file, context_file))
     }
 
+    fn task_prompt_dir(&self, id: Uuid) -> PathBuf {
+        self.prompt_dir.join(id.to_string())
+    }
+
     fn save_locked(&self, tasks: &[AgentTask]) -> Result<()> {
         let tmp = self.path.with_extension("json.tmp");
         let body = serde_json::to_vec_pretty(&AgentTaskStore {
@@ -809,6 +941,17 @@ pub async fn run_now(
     Ok(Json(state.agent_tasks.run_now(id).await?))
 }
 
+pub async fn cleanup_prompt_artifacts(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PromptArtifactCleanupReq>,
+) -> Result<Json<PromptArtifactCleanup>> {
+    Ok(Json(
+        state
+            .agent_tasks
+            .cleanup_prompt_artifacts(req.keep_latest_runs_per_task)?,
+    ))
+}
+
 fn load_tasks(path: &Path) -> Result<Vec<AgentTask>> {
     if !path.exists() {
         return Ok(vec![]);
@@ -825,6 +968,140 @@ fn clean_required(field: &str, value: String) -> Result<String> {
         return Err(ApiError::BadRequest(format!("{field} must not be empty")));
     }
     Ok(value)
+}
+
+fn accumulate_prompt_dir_stats(path: &Path, stats: &mut PromptArtifactStats) -> Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            accumulate_prompt_dir_stats(&entry.path(), stats)?;
+            continue;
+        }
+        if !meta.is_file() {
+            continue;
+        }
+        stats.total_bytes = stats.total_bytes.saturating_add(meta.len());
+        let name = entry.file_name();
+        if name.to_string_lossy() == "context.md" {
+            stats.context_file_count += 1;
+        } else {
+            stats.prompt_file_count += 1;
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_task_prompt_dir(
+    path: &Path,
+    task: &AgentTask,
+    keep_latest_runs_per_task: usize,
+    tally: &mut PromptArtifactRemovalTally,
+) -> Result<()> {
+    let keep: HashSet<String> = task
+        .runs
+        .iter()
+        .rev()
+        .take(keep_latest_runs_per_task)
+        .map(|run| format!("{}.md", run.id))
+        .collect();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let entry_path = entry.path();
+        if file_type.is_dir() {
+            remove_path_recursive(&entry_path, tally)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name.to_string_lossy() == "context.md" {
+            continue;
+        }
+        let name = name.to_string_lossy();
+        if !keep.contains(name.as_ref()) {
+            remove_file_with_tally(&entry_path, &name, tally)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_file_with_tally(
+    path: &Path,
+    file_name: &str,
+    tally: &mut PromptArtifactRemovalTally,
+) -> Result<()> {
+    let bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            tally.bytes = tally.bytes.saturating_add(bytes);
+            if file_name == "context.md" {
+                tally.context_files += 1;
+            } else {
+                tally.prompt_files += 1;
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(ApiError::Internal(format!(
+            "remove artifact {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
+fn remove_path_recursive(path: &Path, tally: &mut PromptArtifactRemovalTally) -> Result<()> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => {
+            for entry in std::fs::read_dir(path)? {
+                let entry = entry?;
+                remove_path_recursive(&entry.path(), tally)?;
+            }
+            match std::fs::remove_dir(path) {
+                Ok(()) => {
+                    tally.task_dirs += 1;
+                    Ok(())
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(ApiError::Internal(format!(
+                    "remove artifact dir {}: {e}",
+                    path.display()
+                ))),
+            }
+        }
+        Ok(meta) if meta.is_file() => {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let bytes = meta.len();
+            match std::fs::remove_file(path) {
+                Ok(()) => {
+                    tally.bytes = tally.bytes.saturating_add(bytes);
+                    if name == "context.md" {
+                        tally.context_files += 1;
+                    } else {
+                        tally.prompt_files += 1;
+                    }
+                    Ok(())
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(ApiError::Internal(format!(
+                    "remove artifact file {}: {e}",
+                    path.display()
+                ))),
+            }
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(ApiError::Internal(format!(
+            "stat artifact path {}: {e}",
+            path.display()
+        ))),
+    }
 }
 
 fn clean_optional(value: Option<String>) -> Option<String> {

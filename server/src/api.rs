@@ -130,6 +130,7 @@ pub struct OperationalStatus {
     pub gui_stream_configured: bool,
     pub fcm_enabled: bool,
     pub history: HistoryStatus,
+    pub agent_tasks: AgentTaskStorageStatus,
     pub auth_broker: AuthBrokerStatus,
     pub storage: ServerStorageStatus,
 }
@@ -138,6 +139,19 @@ pub struct OperationalStatus {
 pub struct HistoryStatus {
     pub enabled: bool,
     pub archived_session_count: Option<u64>,
+    pub log_file_count: Option<u64>,
+    pub log_bytes: Option<u64>,
+    pub db_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentTaskStorageStatus {
+    pub task_count: usize,
+    pub prompt_task_dir_count: u64,
+    pub prompt_file_count: u64,
+    pub context_file_count: u64,
+    pub prompt_bytes: u64,
+    pub orphan_task_dir_count: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,10 +169,11 @@ pub struct ServerStorageStatus {
 pub async fn operational_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<OperationalStatus>> {
-    let archived_session_count = match state.history.as_ref() {
-        Some(history) => Some(history.count_sessions().await?),
+    let history_stats = match state.history.as_ref() {
+        Some(history) => Some(history.storage_stats().await?),
         None => None,
     };
+    let task_artifacts = state.agent_tasks.prompt_artifact_stats()?;
 
     Ok(Json(OperationalStatus {
         version: env!("CARGO_PKG_VERSION"),
@@ -168,8 +183,19 @@ pub async fn operational_status(
         gui_stream_configured: state.config.gui_stream_url.is_some(),
         fcm_enabled: state.config.fcm_service_account_json.is_some(),
         history: HistoryStatus {
-            enabled: state.history.is_some(),
-            archived_session_count,
+            enabled: history_stats.is_some(),
+            archived_session_count: history_stats.as_ref().map(|stats| stats.archived_session_count),
+            log_file_count: history_stats.as_ref().map(|stats| stats.log_file_count),
+            log_bytes: history_stats.as_ref().map(|stats| stats.log_bytes),
+            db_bytes: history_stats.as_ref().map(|stats| stats.db_bytes),
+        },
+        agent_tasks: AgentTaskStorageStatus {
+            task_count: state.agent_tasks.list().len(),
+            prompt_task_dir_count: task_artifacts.task_dir_count,
+            prompt_file_count: task_artifacts.prompt_file_count,
+            context_file_count: task_artifacts.context_file_count,
+            prompt_bytes: task_artifacts.total_bytes,
+            orphan_task_dir_count: task_artifacts.orphan_task_dir_count,
         },
         auth_broker: AuthBrokerStatus {
             auto_agent_auth: state.config.auto_agent_auth,

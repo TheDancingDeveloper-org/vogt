@@ -388,6 +388,15 @@ export const api = {
     req<AgentTask>("POST", `/api/agent-tasks/${id}/resume`),
   runAgentTask: (id: string) =>
     req<AgentTaskRun>("POST", `/api/agent-tasks/${id}/run`),
+  cleanupAgentTaskArtifacts: (keepLatestRunsPerTask: number) =>
+    req<{
+      removed_task_dir_count: number;
+      removed_prompt_file_count: number;
+      removed_context_file_count: number;
+      removed_bytes: number;
+    }>("POST", "/api/agent-tasks/artifacts/cleanup", {
+      keep_latest_runs_per_task: keepLatestRunsPerTask,
+    }),
 
   listHistorySessions: (limit = 50, offset = 0) =>
     req<HistorySessionMetadata[]>(
@@ -408,6 +417,12 @@ export const api = {
     ),
   deleteHistorySession: (id: string) =>
     req<OkResponse>("DELETE", `/api/history/${id}`),
+  cleanupHistorySessions: (retentionDays: number) =>
+    req<{ ok: boolean; removed_sessions: number; retention_days: number }>(
+      "POST",
+      "/api/history/cleanup",
+      { retention_days: retentionDays },
+    ),
   downloadHistorySession: async (id: string): Promise<void> => {
     const url = `${getBase()}/api/history/${id}/download`;
     const tok = getToken();
@@ -494,6 +509,17 @@ export interface OperationalStatus {
   history: {
     enabled: boolean;
     archived_session_count: number | null;
+    log_file_count: number | null;
+    log_bytes: number | null;
+    db_bytes: number | null;
+  };
+  agent_tasks: {
+    task_count: number;
+    prompt_task_dir_count: number;
+    prompt_file_count: number;
+    context_file_count: number;
+    prompt_bytes: number;
+    orphan_task_dir_count: number;
   };
   auth_broker: {
     auto_agent_auth: boolean;
