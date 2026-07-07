@@ -31,6 +31,8 @@ RUN pnpm build
 FROM ${RUST_IMAGE} AS server-build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
+COPY contract/Cargo.toml ./contract/Cargo.toml
+COPY contract/src ./contract/src
 COPY server/Cargo.toml ./server/Cargo.toml
 COPY server/src ./server/src
 COPY --from=web-build /app/web/dist ./web/dist
