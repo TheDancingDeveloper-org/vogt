@@ -535,6 +535,50 @@ async fn session_cwd_must_stay_under_workspace_root() {
 }
 
 #[tokio::test]
+async fn session_activity_becomes_idle_after_quiet_window() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let create: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "idle-watch",
+            "command": ["/bin/sh", "-lc", "printf ready; sleep 1"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = create["id"].as_str().unwrap().to_string();
+
+    let detail: Value = loop {
+        let detail: Value = client
+            .get(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if detail["summary"]["activity"] == "idle" {
+            break detail;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    };
+    assert_eq!(detail["summary"]["activity"], "idle");
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
 async fn get_session_returns_typed_detail_shape() {
     let (base, _h) = boot().await;
     let client = reqwest::Client::builder()

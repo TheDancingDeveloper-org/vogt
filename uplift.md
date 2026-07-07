@@ -39,9 +39,6 @@ backlog.
 
 ## Backend
 
-1. **Replace per-session 500 ms activity tickers with a lower-churn model**
-   (`server/src/pty.rs`)
-
 ---
 
 ## Frontend / PWA

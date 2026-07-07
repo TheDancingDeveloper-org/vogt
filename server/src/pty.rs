@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Instant,
@@ -13,7 +13,7 @@ use bytes::Bytes;
 pub use mydevenv2_contract::{SessionSpec, SessionSummary};
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, PtySize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use uuid::Uuid;
 
 use crate::{
@@ -51,8 +51,11 @@ pub struct Session {
     pid: Option<u32>,
 
     output_tx: broadcast::Sender<OutputChunk>,
+    spawned_at: Instant,
     last_output: Mutex<Option<Instant>>,
     activity: Mutex<ActivityState>,
+    activity_epoch: AtomicU64,
+    activity_notify: Notify,
     exit_code: Mutex<Option<i32>>,
     history_log_path: Option<PathBuf>,
     reader_done: AtomicBool,
@@ -190,7 +193,7 @@ fn shell_escape(arg: &str) -> String {
 }
 
 /// Spawn a PTY-backed session running `spec.command` (or the default shell if
-/// `None`). Starts the reader thread, the exit waiter, and the activity ticker.
+/// `None`). Starts the reader thread, the exit waiter, and the activity watcher.
 pub fn spawn(
     spec: &SessionSpec,
     defaults: SpawnDefaults<'_>,
@@ -281,8 +284,11 @@ pub fn spawn(
         child: Mutex::new(Some(child)),
         pid,
         output_tx: tx.clone(),
+        spawned_at: Instant::now(),
         last_output: Mutex::new(None),
         activity: Mutex::new(ActivityState::Running),
+        activity_epoch: AtomicU64::new(0),
+        activity_notify: Notify::new(),
         exit_code: Mutex::new(None),
         history_log_path,
         reader_done: AtomicBool::new(false),
@@ -299,7 +305,7 @@ pub fn spawn(
         runtime.clone(),
     )?;
     spawn_exit_waiter(Arc::clone(&session), bus.clone(), history.clone(), runtime);
-    spawn_activity_ticker(Arc::clone(&session), bus);
+    spawn_activity_watcher(Arc::clone(&session), bus);
 
     Ok(SpawnedSession { session })
 }
@@ -345,6 +351,7 @@ fn spawn_reader_thread(
 
                         let new_state = compute_activity(&session, false);
                         update_activity_if_changed(&session, new_state, &bus);
+                        wake_activity_watcher(&session);
                     }
                     Err(e) => {
                         tracing::debug!(session = %session.id, error = %e, "pty reader closed");
@@ -385,6 +392,7 @@ fn spawn_exit_waiter(
         *session.exit_code.lock() = Some(code);
         let new_state = compute_activity(&session, code != 0);
         update_activity_if_changed(&session, new_state, &bus);
+        wake_activity_watcher(&session);
         bus.publish(ServerEvent::SessionKilled {
             id: session.id,
             exit_code: Some(code),
@@ -458,20 +466,60 @@ async fn read_history_output(session: &Arc<Session>) -> Vec<u8> {
     session.snapshot().0.to_vec()
 }
 
-fn spawn_activity_ticker(session: Arc<Session>, bus: EventBus) {
+fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
-            ticker.tick().await;
-            let exited = session.exit_code.lock().is_some();
-            let nonzero = session.exit_code().map(|c| c != 0).unwrap_or(false);
-            let new = compute_activity(&session, nonzero);
-            update_activity_if_changed(&session, new, &bus);
-            if exited {
+            if session.exit_code.lock().is_some() {
                 break;
+            }
+
+            if session.activity() != ActivityState::Running {
+                session.activity_notify.notified().await;
+                continue;
+            }
+
+            let reference = (*session.last_output.lock()).unwrap_or(session.spawned_at);
+            let elapsed_ms = reference.elapsed().as_millis() as u64;
+            if elapsed_ms >= session.idle_after_ms {
+                let new_state = if session.last_output.lock().is_some() {
+                    compute_activity(&session, false)
+                } else {
+                    ActivityState::Idle
+                };
+                update_activity_if_changed(&session, new_state, &bus);
+                continue;
+            }
+
+            let epoch = session.activity_epoch.load(Ordering::Acquire);
+            let sleep = tokio::time::sleep(std::time::Duration::from_millis(
+                session.idle_after_ms - elapsed_ms,
+            ));
+            tokio::pin!(sleep);
+
+            tokio::select! {
+                _ = session.activity_notify.notified() => {}
+                _ = &mut sleep => {
+                    if session.activity_epoch.load(Ordering::Acquire) != epoch {
+                        continue;
+                    }
+                    if session.exit_code.lock().is_some() {
+                        break;
+                    }
+                    let new_state = if session.last_output.lock().is_some() {
+                        compute_activity(&session, false)
+                    } else {
+                        ActivityState::Idle
+                    };
+                    update_activity_if_changed(&session, new_state, &bus);
+                }
             }
         }
     });
+}
+
+fn wake_activity_watcher(session: &Session) {
+    session.activity_epoch.fetch_add(1, Ordering::AcqRel);
+    session.activity_notify.notify_one();
 }
 
 fn compute_activity(session: &Arc<Session>, exited_nonzero: bool) -> ActivityState {
