@@ -70,8 +70,10 @@ backlog.
    `mydevenv2_android_key_password` are present in Woodpecker and validating a
    real `apk-latest` upload from `main`.
 
-2. **Regenerate or verify `google-services.json` client selection**
-   Confirm real-device FCM registration for `com.sprooty.mydevenv2`.
+2. **Real-device native FCM verification**
+   `google-services.json` already includes the `com.sprooty.mydevenv2` client;
+   the remaining work is confirming first-launch FCM registration and end-to-end
+   delivery on actual Android hardware.
 
 ---
 
@@ -91,6 +93,6 @@ backlog.
 1. Bearer-token risk boundary
 2. Runtime image reproducibility hardening
 3. Woodpecker Android signing secret provisioning
-4. FCM / `google-services.json` verification
+4. Real-device native FCM verification
 5. Readiness beyond liveness
 6. Production stack exit-node cleanup
