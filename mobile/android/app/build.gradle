@@ -1,5 +1,16 @@
 apply plugin: 'com.android.application'
 
+def releaseKeystorePath = System.getenv('MYDEVENV2_ANDROID_KEYSTORE_PATH')
+def releaseKeystorePassword = System.getenv('MYDEVENV2_ANDROID_KEYSTORE_PASSWORD')
+def releaseKeyAlias = System.getenv('MYDEVENV2_ANDROID_KEY_ALIAS')
+def releaseKeyPassword = System.getenv('MYDEVENV2_ANDROID_KEY_PASSWORD')
+def hasReleaseSigning = [
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+].every { it != null && !it.trim().isEmpty() }
+
 android {
     namespace "com.sprooty.mydevenv2"
     compileSdk rootProject.ext.compileSdkVersion
@@ -16,8 +27,21 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    if (hasReleaseSigning) {
+        signingConfigs {
+            release {
+                storeFile file(releaseKeystorePath)
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'

@@ -101,22 +101,43 @@ steps:
     environment:
       GIT_AUTH_TOKEN:
         from_secret: git_auth_token
+      MYDEVENV2_ANDROID_KEYSTORE_BASE64:
+        from_secret: mydevenv2_android_keystore_base64
+      MYDEVENV2_ANDROID_KEYSTORE_PASSWORD:
+        from_secret: mydevenv2_android_keystore_password
+      MYDEVENV2_ANDROID_KEY_ALIAS:
+        from_secret: mydevenv2_android_key_alias
+      MYDEVENV2_ANDROID_KEY_PASSWORD:
+        from_secret: mydevenv2_android_key_password
     commands:
       # cimg/android runs as circleci (UID 3434); the workspace was cloned by
       # alpine/git as root. Take ownership so pnpm can write node_modules.
       - sudo chown -R circleci:circleci .
+      - |
+        set -eu
+        : "${MYDEVENV2_ANDROID_KEYSTORE_BASE64:?missing mydevenv2_android_keystore_base64 secret}"
+        : "${MYDEVENV2_ANDROID_KEYSTORE_PASSWORD:?missing mydevenv2_android_keystore_password secret}"
+        : "${MYDEVENV2_ANDROID_KEY_ALIAS:?missing mydevenv2_android_key_alias secret}"
+        : "${MYDEVENV2_ANDROID_KEY_PASSWORD:?missing mydevenv2_android_key_password secret}"
+        umask 077
+        export MYDEVENV2_ANDROID_KEYSTORE_PATH=/tmp/mydevenv2-release.keystore
+        printf '%s' "$MYDEVENV2_ANDROID_KEYSTORE_BASE64" | base64 -d > "$MYDEVENV2_ANDROID_KEYSTORE_PATH"
       - cd mobile
       - sudo npm install -g pnpm@10 >/dev/null
       - pnpm install --frozen-lockfile
       - npx cap sync android
-      - cd android && ./gradlew assembleDebug --no-daemon -q && cd ..
-      - ls -lh android/app/build/outputs/apk/debug/app-debug.apk
+      - cd android && ./gradlew assembleRelease --no-daemon -q && cd ..
+      - ls -lh android/app/build/outputs/apk/release/app-release.apk
+      - |
+        set -eu
+        BUILD_TOOLS_DIR=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)
+        "$BUILD_TOOLS_DIR/apksigner" verify --print-certs android/app/build/outputs/apk/release/app-release.apk
       - |
         # cimg/android runs commands with /bin/sh (dash), so no `set -o pipefail`.
         # The forgejo-api wrapper logs status before any pipe, so a failure
         # upstream of a `| python3` still has a clear pipeline-log error line.
         set -eu
-        APK=android/app/build/outputs/apk/debug/app-debug.apk
+        APK=android/app/build/outputs/apk/release/app-release.apk
         REPO=/api/v1/repos/indexarr/MyDevEnv2
 
         # Pull the shared Forgejo API wrapper from ops. Logs status + body on
@@ -138,11 +159,12 @@ steps:
         forgejo-api DELETE "$REPO/tags/apk-latest" --allow 404 >/dev/null
 
         RELEASE_ID=$(forgejo-api POST "$REPO/releases" \
-          --data "{\"tag_name\":\"apk-latest\",\"target_commitish\":\"$CI_COMMIT_SHA\",\"name\":\"Latest APK (debug)\",\"prerelease\":true,\"body\":\"Debug APK — commit $CI_COMMIT_SHA\"}" \
+          --data "{\"tag_name\":\"apk-latest\",\"target_commitish\":\"$CI_COMMIT_SHA\",\"name\":\"Latest APK\",\"prerelease\":true,\"body\":\"Signed release APK — commit $CI_COMMIT_SHA\"}" \
           | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 
-        forgejo-api POST "$REPO/releases/$RELEASE_ID/assets?name=mydevenv2-debug.apk" \
+        forgejo-api POST "$REPO/releases/$RELEASE_ID/assets?name=mydevenv2-release.apk" \
           --form "attachment=@$APK" >/dev/null
+        rm -f "$MYDEVENV2_ANDROID_KEYSTORE_PATH"
         echo "uploaded $APK to release $RELEASE_ID"
     when:
       - event: push

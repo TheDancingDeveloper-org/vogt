@@ -63,8 +63,12 @@ backlog.
 
 ## Mobile / Android
 
-1. **Produce a signed release APK in CI**
-   (`.woodpecker/server.yml`)
+1. **Provision Woodpecker Android signing secrets and verify live release upload**
+   The repo now supports signed release APK builds in CI; the remaining work is
+   ensuring `mydevenv2_android_keystore_base64`,
+   `mydevenv2_android_keystore_password`, `mydevenv2_android_key_alias`, and
+   `mydevenv2_android_key_password` are present in Woodpecker and validating a
+   real `apk-latest` upload from `main`.
 
 2. **Regenerate or verify `google-services.json` client selection**
    Confirm real-device FCM registration for `com.sprooty.mydevenv2`.
@@ -86,7 +90,7 @@ backlog.
 
 1. Bearer-token risk boundary
 2. Runtime image reproducibility hardening
-3. Android release signing in CI
+3. Woodpecker Android signing secret provisioning
 4. FCM / `google-services.json` verification
 5. Readiness beyond liveness
 6. Production stack exit-node cleanup
