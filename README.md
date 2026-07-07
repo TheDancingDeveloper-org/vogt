@@ -2,6 +2,21 @@
 
 From-scratch redesign of [MyDevEnv](../MyDevEnv). Same goal — a centrally-hosted, Tailscale-accessible dev environment driven from any browser — built cleanly without the accumulated surface area of v1 (code-server fork, multiple half-finished native clients).
 
+## Documentation map
+
+Use each project doc for one job:
+
+- `README.md`
+  Product status, local development, smoke tests, and protocol notes.
+- `AGENTS.md`
+  Project-specific workflow rules for coding agents.
+- `TOOLING.md`
+  Source of truth for the runtime/dev-pod toolchain inventory.
+- `deploy/KOMODO.md`
+  Source of truth for production stack shape, environment, rollout, and recovery.
+- `uplift.md`
+  Only open backlog for remaining uplift work.
+
 - **[INTENT.md](INTENT.md)** — what I'm trying to achieve and why a rewrite
 - **[PLAN.md](PLAN.md)** — architecture, components, build order
 - **[TOOLING.md](TOOLING.md)** — required tools/toolchains for the dev pod (derived from v1 Dockerfile)
@@ -10,12 +25,9 @@ From-scratch redesign of [MyDevEnv](../MyDevEnv). Same goal — a centrally-host
 
 ## Current status
 
-MyDevEnv2 is live as the Komodo stack `prod-mydevenv2`, with desired state in
-the `indexarr/ops` repo at `personal/mydevenv2/`. The production image is
-`repo.indexarr.net/indexarr/mydevenv2`, served on port `8910`, with the PWA and
-API at `https://mydevenv2.sprooty.com` through Caddy. The direct Node B health
-endpoint currently returns `{"ok":true}`; the public URL may be Caddy
-basic-auth gated before requests reach the app.
+MyDevEnv2 is live at `https://mydevenv2.sprooty.com`. Production stack details,
+health endpoints, Komodo flow, and required environment now live in
+`deploy/KOMODO.md` rather than being duplicated here.
 
 The repository now has four core repo components and three supported product
 surfaces:
@@ -73,13 +85,9 @@ client release kept in Forgejo for historical reference.
 
 - Server: `POST /api/gui/launch`, `GET /api/gui/processes`, `POST /api/gui/kill?pid=`. Optional `via_sway` prefixes with `swaymsg exec --`. `GET /api/config` (public) returns `gui_stream_url` and build feature flags for the web UI.
 - Client: `gui` tab kind iframing the configured stream URL; toolbar to launch arbitrary GUI commands; running-processes list with kill buttons. Deep-link `/#/gui`.
-- Packaging: `Dockerfile` (multi-stage: web bundle → Rust release → Ubuntu
-  26.04 runtime with `TOOLING.md`, Sway, Selkies-GStreamer, Tailscale
-  userspace, Docker CLI, Infisical, GitHub CLI, and the embedded PWA).
-  `deploy/entrypoint.sh` orchestrates Tailscale → optional Sway → auth
-  validation → server, and the base Komodo compose is socketless by default;
-  trusted personal deployments opt into host Docker access through
-  `deploy/docker-compose.docker-socket.yml`.
+- Packaging: `Dockerfile` builds a single runtime image with the embedded PWA.
+  Tool inventory lives in `TOOLING.md`; production compose/runtime details live
+  in `deploy/KOMODO.md`.
 - Production: the Komodo stack exists and is deployed. `START_SWAY=0` and `GUI_STREAM_URL=""` keep the GUI stream off until Selkies is wired and verified inside the pod.
 
 **Phase 6 (push + Android Capacitor APK) — code-complete; runtime push delivery pending real-device verification.**
@@ -182,10 +190,9 @@ Pass with `--config mydevenv2.toml`. CLI flags > env > config file.
 to capability gates: `sessions`, `filesystem-write`, `git-write`,
 `gui-control`, `agent-tasks-write`, `push-write`, and `history-write`.
 
-The runtime image still includes Docker CLI tooling, but host-daemon access is
-deployment-specific. The base `deploy/docker-compose.yml` does not mount
-`/var/run/docker.sock`; the direct personal-homelab path adds it through
-`deploy/docker-compose.docker-socket.yml`.
+Runtime/deploy details such as Docker socket access, Komodo overlays, agent
+auth bootstrap, and production health endpoints are intentionally documented in
+`deploy/KOMODO.md` and `TOOLING.md` instead of repeated here.
 
 ## Smoke test with curl + websocat
 

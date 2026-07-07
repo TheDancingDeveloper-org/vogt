@@ -79,8 +79,6 @@ backlog.
 2. **Module and product-surface boundary cleanup across server, web, mobile,
    and deprecated client code**
 
-3. **Operator and user documentation consolidation to reduce drift**
-
 ---
 
 ## Suggested Priority

@@ -2,6 +2,10 @@
 
 Captured from review of `MyDevEnv/Dockerfile.server` (v1). The pod provides a neutral development baseline for builds under `~/Working/Active/apps/`. Codex and Claude are optional clients and are not installed during container bootstrap.
 
+This file is the source of truth for what tooling the runtime image is meant to
+carry. Keep deploy shape, Komodo environment, and rollout/recovery steps in
+`deploy/KOMODO.md` instead of repeating them here.
+
 ## Base OS
 
 Ubuntu 26.04 (or newer LTS). Same as v1 — proven to work with all the toolchains below.

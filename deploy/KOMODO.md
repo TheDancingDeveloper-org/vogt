@@ -1,5 +1,9 @@
 # Deploying MyDevEnv2 via Komodo
 
+This file is the source of truth for production stack layout, required
+environment, overlays, rollout, and recovery. Keep product status in
+`README.md` and tool inventory in `TOOLING.md`.
+
 Production currently runs as the Komodo stack **`prod-mydevenv2`**. Desired
 state lives in the `indexarr/ops` repo at **`personal/mydevenv2/`**. The stack
 serves the Rust/Axum API and embedded PWA from port `8910`, with Caddy in

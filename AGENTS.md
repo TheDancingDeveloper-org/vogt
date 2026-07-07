@@ -4,6 +4,14 @@ This file is the canonical project guidance for AI agents working in MyDevEnv2.
 The workspace root guidance is [`/home/sprooty/Working/AGENTS.md`](/home/sprooty/Working/AGENTS.md).
 `CLAUDE.md` is kept only as a compatibility pointer back to this file.
 
+Documentation ownership in this repo:
+
+- `README.md` — product status, local development, smoke tests, protocol notes
+- `AGENTS.md` — coding-agent workflow, guardrails, and project-specific rules
+- `TOOLING.md` — runtime/dev-pod toolchain inventory
+- `deploy/KOMODO.md` — production stack, environment, rollout, and recovery
+- `uplift.md` — only open uplift backlog
+
 Before changing files here:
 
 - Read `/home/sprooty/Working/AGENTS.md` for workspace-wide infrastructure, CI/CD, secrets, commit rules, and service access paths.
@@ -84,7 +92,7 @@ Pipeline non-standard bits:
   legacy reference unless the project explicitly reintroduces a thin desktop
   wrapper.
 
-Runtime container: multi-stage `Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `TOOLING.md` toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server. The base compose is socketless; direct host Docker access is an explicit overlay via `deploy/docker-compose.docker-socket.yml`.
+Runtime container: multi-stage `Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `TOOLING.md` toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server. `TOOLING.md` owns the package/tool inventory; `deploy/KOMODO.md` owns the production compose and overlay details.
 
 Codex and Claude are deliberately not installed by container bootstrap. Optional AI clients are user-managed. Production default-shell sessions are authenticated through `mydevenv2-agent-auth`; explicit-command sessions can invoke the helper directly.
 
