@@ -10,11 +10,10 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use mydevenv2_contract::{ClientControl, ServerControl};
 use serde::Deserialize;
-use subtle::ConstantTimeEq;
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
-use crate::app::AppState;
+use crate::{app::AppState, auth};
 
 #[derive(Debug, Deserialize)]
 pub struct AttachQuery {
@@ -56,9 +55,8 @@ async fn close_with(socket: &mut WebSocket, code: CloseCode, reason: &'static st
         .await;
 }
 
-/// Returns true if `candidate` matches the configured server token (constant time).
 fn token_ok(state: &AppState, candidate: &str) -> bool {
-    bool::from(candidate.as_bytes().ct_eq(state.config.token.as_bytes()))
+    auth::ws_token_allows_session_access(state, candidate)
 }
 
 /// Read the first frame after upgrade. Must be an `auth` control frame OR the

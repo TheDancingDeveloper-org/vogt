@@ -22,7 +22,7 @@ Before changing files here:
 | Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port) |
 | Public URL | `https://mydevenv2.sprooty.com` |
 | DB / state | None (Postgres-less by design). Sessions in-memory; push subscriptions persisted as JSON under `state_dir`. |
-| Secrets used at runtime | `MYDEVENV2_TOKEN` (API bearer), `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` (Tailscale userspace), `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` / `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` (required production agent service auth), optional `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` for native FCM — all in Infisical `apps` and pasted into the Komodo stack `environment`. VAPID keys are generated and persisted under `state_dir`. |
+| Secrets used at runtime | `MYDEVENV2_TOKEN` (primary API bearer), optional `MYDEVENV2_EXTRA_TOKENS_JSON` (scoped JSON token list), `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` (Tailscale userspace), `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` / `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` (required production agent service auth), optional `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` for native FCM — all in Infisical `apps` and pasted into the Komodo stack `environment`. VAPID keys are generated and persisted under `state_dir`. |
 
 From-scratch rewrite of `../MyDevEnv`: same centrally-hosted, Tailscale-accessible dev environment goal, built without the v1 surface area of a code-server fork and multiple half-finished native clients. Active status: Phase 1-6 code-complete and deployed; legacy GPUI desktop client deprecated on July 7, 2026; Phase 7 (KVM-backed Android emulator VM) pending.
 
@@ -170,7 +170,7 @@ The sync mode is `two-way-safe`. VCS metadata, machine-local Claude settings, ge
 
 ## 7. Rules for AI agents
 
-- Bearer token gates everything except `/healthz`, `/readyz`, `/api/push/public-key`, and `/api/config`. Do not add new public routes without thinking about CSRF; the PWA stores the token in `localStorage` and sends it via `Authorization:` header. WebSocket currently falls back to a `?token=` query param.
+- API auth is bearer-token based, but tokens are no longer implicitly equivalent: the primary `MYDEVENV2_TOKEN` has full access, while optional entries from `MYDEVENV2_EXTRA_TOKENS_JSON` can be scoped to `sessions`, `filesystem-write`, `git-write`, `gui-control`, `agent-tasks-write`, `push-write`, and `history-write`. Public routes remain `/healthz`, `/readyz`, `/api/push/public-key`, and `/api/config`. Do not add new public routes without thinking about CSRF; the PWA stores the token in `localStorage` and sends it via `Authorization:` header. WebSocket currently falls back to a `?token=` query param.
 - WebSocket attach protocol is ordered: `snapshot-start` text frame -> <=64 KiB binary scrollback chunks -> `snapshot-done` text -> live binary. Client text frames must be JSON (`{"type":"resize"|"ping"|...}`); binary frames are written verbatim to PTY stdin. Lag causes the server to send `{"type":"lag",...}` and close; the client should reattach.
 - `workspace_root` is the boundary for all file APIs. Path-traversal is strict-component-checked, binary detection runs, and reads cap at 5 MiB. Do not introduce a file endpoint that bypasses these checks.
 - Activity state machine drives push delivery: `idle` / `running` / `waiting-for-input` / `errored`. Push fires on entry to `waiting-for-input`. The heuristic is regex on stripped output tail; adjust with care because false positives become phone notifications.

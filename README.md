@@ -123,6 +123,18 @@ See [client/README.md](client/README.md) for the archived native-client notes.
 ```bash
 # 1. Mint a token (≥16 chars)
 export MYDEVENV2_TOKEN="$(openssl rand -hex 24)"
+# Optional: additional scoped API tokens and a write-rate cap for the
+# primary token. Capability names are:
+# sessions, filesystem-write, git-write, gui-control, agent-tasks-write,
+# push-write, history-write
+export MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE=600
+export MYDEVENV2_EXTRA_TOKENS_JSON='[
+  {
+    "name": "readonly",
+    "token": "replace-with-another-16+-char-secret",
+    "capabilities": []
+  }
+]'
 
 # 2. Run
 cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
@@ -149,9 +161,20 @@ allowed_origins = [
 ]
 auto_agent_auth = false
 agent_auth_helper = "/usr/local/bin/mydevenv2-agent-auth"
+token_mutating_request_limit_per_minute = 600
+
+[[extra_tokens]]
+name = "readonly"
+token = "replace-with-another-16+-char-secret"
+capabilities = []
+mutating_requests_per_minute = 60
 ```
 
 Pass with `--config mydevenv2.toml`. CLI flags > env > config file.
+
+`capabilities = []` means "authenticated read-only token". Mutating routes map
+to capability gates: `sessions`, `filesystem-write`, `git-write`,
+`gui-control`, `agent-tasks-write`, `push-write`, and `history-write`.
 
 ## Smoke test with curl + websocat
 

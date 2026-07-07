@@ -16,6 +16,8 @@ fn test_config() -> Config {
     Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         token: TEST_TOKEN.to_string(),
+        token_mutating_request_limit_per_minute: 600,
+        extra_tokens: vec![],
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
         default_cwd: std::env::temp_dir(),
@@ -49,10 +51,14 @@ async fn boot_with_config(cfg: Config) -> (String, tokio::task::JoinHandle<()>) 
 }
 
 fn auth() -> reqwest::header::HeaderMap {
+    auth_for(TEST_TOKEN)
+}
+
+fn auth_for(token: &str) -> reqwest::header::HeaderMap {
     let mut h = reqwest::header::HeaderMap::new();
     h.insert(
         reqwest::header::AUTHORIZATION,
-        format!("Bearer {TEST_TOKEN}").parse().unwrap(),
+        format!("Bearer {token}").parse().unwrap(),
     );
     h
 }
@@ -224,6 +230,37 @@ async fn push_subscribe_list_unsubscribe() {
         .await
         .unwrap();
     assert_eq!(r["ok"], true);
+}
+
+#[tokio::test]
+async fn mutating_requests_are_rate_limited_per_token() {
+    let mut cfg = test_config();
+    cfg.token_mutating_request_limit_per_minute = 2;
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    for name in ["one", "two"] {
+        let res = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({ "name": name, "command": ["/bin/true"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    let limited = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "three", "command": ["/bin/true"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(limited.headers().get("retry-after").is_some());
 }
 
 #[tokio::test]
@@ -879,11 +916,19 @@ async fn ws_attach(
     base: &str,
     id: &str,
 ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    ws_attach_with_token(base, id, TEST_TOKEN).await
+}
+
+async fn ws_attach_with_token(
+    base: &str,
+    id: &str,
+    token: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let ws_url = base.replace("http://", "ws://");
     let url = format!("{ws_url}/api/sessions/{id}/attach");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(url).await.unwrap();
     // First-frame auth (the legacy ?token= path still works but is deprecated).
-    let auth = serde_json::json!({"type": "auth", "token": TEST_TOKEN}).to_string();
+    let auth = serde_json::json!({"type": "auth", "token": token}).to_string();
     ws.send(Message::Text(auth)).await.unwrap();
     ws
 }
@@ -1056,6 +1101,8 @@ async fn file_api_round_trip() {
     let cfg = Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         token: TEST_TOKEN.to_string(),
+        token_mutating_request_limit_per_minute: 600,
+        extra_tokens: vec![],
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
         default_cwd: tmp.path().to_path_buf(),
@@ -1296,6 +1343,8 @@ async fn git_status_log_branch() {
     let cfg = Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         token: TEST_TOKEN.to_string(),
+        token_mutating_request_limit_per_minute: 600,
+        extra_tokens: vec![],
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
         default_cwd: repo.to_path_buf(),

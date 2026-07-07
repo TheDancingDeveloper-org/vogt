@@ -21,9 +21,11 @@ backlog.
    BuildKit-capable Docker host.
 
 3. **Bearer-token risk boundary** (`server/src/auth.rs`, `deploy/docker-compose.yml`)
-   One token still gates PTY access, file writes, git inspection, GUI launch,
-   and a Docker-socket-mounted pod. Add stronger audit/rate-limit/capability
-   controls.
+   Repo-side audit logging, per-token mutation rate limits, and scoped token
+   capabilities now exist. The remaining work is provisioning real non-admin
+   tokens in production, moving the live clients onto them where appropriate,
+   and deciding whether the primary token should keep full Docker-adjacent
+   access long term.
 
 4. **Promote `/readyz` into the live stack and validate it on Node B**
    Repo-side readiness checks now cover workspace mount health, state-dir

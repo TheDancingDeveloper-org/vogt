@@ -2,9 +2,11 @@ use std::{net::SocketAddr, path::Path};
 
 use serde::{Deserialize, Serialize};
 
+use crate::auth::ScopedTokenConfig;
 use crate::error::{ApiError, Result};
 
 const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_MUTATING_REQUEST_LIMIT_PER_MINUTE: u32 = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionTemplate {
@@ -78,6 +80,8 @@ impl SessionTemplate {
 pub struct Config {
     pub bind: SocketAddr,
     pub token: String,
+    pub token_mutating_request_limit_per_minute: u32,
+    pub extra_tokens: Vec<ScopedTokenConfig>,
     pub scrollback_bytes: usize,
     pub default_shell: String,
     pub default_cwd: std::path::PathBuf,
@@ -116,6 +120,8 @@ pub struct Config {
 struct FileConfig {
     bind: Option<String>,
     token: Option<String>,
+    token_mutating_request_limit_per_minute: Option<u32>,
+    extra_tokens: Option<Vec<ScopedTokenConfig>>,
     scrollback_bytes: Option<usize>,
     default_shell: Option<String>,
     default_cwd: Option<String>,
@@ -161,6 +167,16 @@ pub fn load(
             "token must be at least 16 characters".into(),
         ));
     }
+    let token_mutating_request_limit_per_minute =
+        parse_u32_env("MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE")?
+            .or(from_file.token_mutating_request_limit_per_minute)
+            .unwrap_or(DEFAULT_MUTATING_REQUEST_LIMIT_PER_MINUTE);
+
+    let mut extra_tokens = from_file.extra_tokens.unwrap_or_default();
+    if let Some(env_tokens) = parse_extra_tokens_env("MYDEVENV2_EXTRA_TOKENS_JSON")? {
+        extra_tokens.extend(env_tokens);
+    }
+    validate_extra_tokens(&token, &extra_tokens)?;
 
     let workspace_root_raw = from_file.workspace_root.map(std::path::PathBuf::from);
     let workspace_root = workspace_root_raw
@@ -192,6 +208,8 @@ pub fn load(
     Ok(Config {
         bind,
         token,
+        token_mutating_request_limit_per_minute,
+        extra_tokens,
         scrollback_bytes: parse_usize_env("MYDEVENV2_SCROLLBACK_BYTES")?
             .or(from_file.scrollback_bytes)
             .unwrap_or(DEFAULT_SCROLLBACK_BYTES),
@@ -263,6 +281,62 @@ fn parse_usize_env(name: &str) -> Result<Option<usize>> {
     }
 }
 
+fn parse_u32_env(name: &str) -> Result<Option<u32>> {
+    match std::env::var(name) {
+        Ok(v) => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = trimmed
+                .parse::<u32>()
+                .map_err(|e| ApiError::Config(format!("{name} must be an integer: {e}")))?;
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
+    }
+}
+
+fn parse_extra_tokens_env(name: &str) -> Result<Option<Vec<ScopedTokenConfig>>> {
+    match std::env::var(name) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = serde_json::from_str::<Vec<ScopedTokenConfig>>(trimmed)
+                .map_err(|e| ApiError::Config(format!("parsing {name}: {e}")))?;
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
+    }
+}
+
+fn validate_extra_tokens(primary_token: &str, extra_tokens: &[ScopedTokenConfig]) -> Result<()> {
+    for token in extra_tokens {
+        if token.name.trim().is_empty() {
+            return Err(ApiError::Config(
+                "extra token name must not be empty".into(),
+            ));
+        }
+        if token.token.len() < 16 {
+            return Err(ApiError::Config(format!(
+                "extra token {} must be at least 16 characters",
+                token.name
+            )));
+        }
+        if token.token == primary_token {
+            return Err(ApiError::Config(format!(
+                "extra token {} must not duplicate the primary token",
+                token.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<String> {
     if let Some(list) = file {
         return list
@@ -316,5 +390,19 @@ mod tests {
         std::env::remove_var(NAME);
 
         assert!(err.to_string().contains(NAME));
+    }
+
+    #[test]
+    fn parses_extra_tokens_env_json() {
+        const NAME: &str = "MYDEVENV2_TEST_EXTRA_TOKENS_JSON";
+        std::env::set_var(
+            NAME,
+            r#"[{"name":"readonly","token":"1234567890abcdef","capabilities":["sessions"]}]"#,
+        );
+        let parsed = parse_extra_tokens_env(NAME).unwrap().unwrap();
+        std::env::remove_var(NAME);
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "readonly");
     }
 }

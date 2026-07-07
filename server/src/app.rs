@@ -26,6 +26,7 @@ use crate::{
 
 pub struct AppState {
     pub config: Arc<Config>,
+    pub auth: Arc<auth::AuthRuntime>,
     pub sessions: Arc<SessionRegistry>,
     pub bus: EventBus,
     pub gui: Arc<GuiRegistry>,
@@ -71,6 +72,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
 
     let state = Arc::new(AppState {
         config: cfg,
+        auth: Arc::new(auth::AuthRuntime::default()),
         sessions,
         bus,
         gui,

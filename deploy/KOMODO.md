@@ -46,6 +46,11 @@ git add personal/mydevenv2 && git commit -m "add prod-mydevenv2 stack" && git pu
 openssl rand -hex 32
 # -> store in Infisical as MYDEVENV2_TOKEN (apps project, env prod)
 
+# Optional: scoped API tokens as a JSON array. Capability names:
+# sessions, filesystem-write, git-write, gui-control, agent-tasks-write,
+# push-write, history-write
+# -> store as MYDEVENV2_EXTRA_TOKENS_JSON if you want non-admin tokens
+
 # Tailscale reusable preauth key for the pod, from
 # https://login.tailscale.com/admin/settings/keys
 # -> store as HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY (apps project, env prod)
@@ -124,6 +129,10 @@ EOF
 
 (Server ID lookup: `POST /read` body `{"type":"ListServers"}` — match the
 Node B periphery.)
+
+If you provision scoped API tokens, append `MYDEVENV2_EXTRA_TOKENS_JSON=...`
+and, if needed, `MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE=...` to the stack
+environment as well.
 
 ## 4. First deploy
 

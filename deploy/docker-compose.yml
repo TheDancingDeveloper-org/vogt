@@ -51,6 +51,12 @@ services:
     environment:
       # Server
       MYDEVENV2_TOKEN: ${MYDEVENV2_TOKEN}
+      # Optional scoped tokens. JSON array of objects:
+      # [{"name":"readonly","token":"...","capabilities":[]}]
+      MYDEVENV2_EXTRA_TOKENS_JSON: ${MYDEVENV2_EXTRA_TOKENS_JSON:-}
+      # Per-token mutation rate limit for the primary token. Extra tokens can
+      # override their own limit inside MYDEVENV2_EXTRA_TOKENS_JSON.
+      MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE: ${MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE:-600}
       MYDEVENV2_BIND: 0.0.0.0:8910
       MYDEVENV2_SCROLLBACK_BYTES: ${MYDEVENV2_SCROLLBACK_BYTES:-4194304}
       RUST_LOG: info
