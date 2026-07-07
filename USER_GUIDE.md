@@ -21,7 +21,7 @@
 - **Multiple sessions** - Run many terminals simultaneously
 - **Persistent scrollback** - Scroll back through command history
 - **Session templates** - Pre-configured environments for common tasks
-- **Split panes** - Side-by-side terminals (desktop client only)
+- **IDE splits** - Side-by-side or stacked editor panes in IDE layout mode
 - **Activity indicators** - Visual feedback for running commands
 
 ### ⌨️ Keyboard Shortcuts

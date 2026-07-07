@@ -4,8 +4,8 @@ This file is the source-of-truth summary for MyDevEnv2's shared wire contract.
 
 ## Contract crate
 
-Rust DTOs shared by the server and native client live in `contract/`
-(`mydevenv2-contract`). Those types cover:
+Rust DTOs shared by the server and retained legacy native-client code live in
+`contract/` (`mydevenv2-contract`). Those types cover:
 
 - session lifecycle payloads
 - SSE event payloads
@@ -14,8 +14,9 @@ Rust DTOs shared by the server and native client live in `contract/`
 - common small response shapes like `{"ok": true}`
 
 The browser client still carries TypeScript mirrors in `web/src/api.ts`, but
-those shapes should now follow the shared Rust contract instead of ad hoc
-server-local structs.
+those shapes should follow the shared Rust contract instead of ad hoc
+server-local structs. The browser/PWA is the supported client surface; the old
+native desktop client remains deprecated legacy code.
 
 ## Core rules
 

@@ -122,27 +122,13 @@ match `stat -c %g /var/run/docker.sock` on Node B (currently `984`).
 
 ## Native desktop client tooling
 
-The native client in `client/` depends on the GPUI fork checked out at
-`../../FluentGUI` from the client crate. Linux builds are covered by
-`.woodpecker/client.yml`; production Windows artifacts are built natively on
-the `arbit-win` Woodpecker agent through `.woodpecker/client-windows.yml`.
+The native client in `client/` was deprecated on July 7, 2026. Its old GPUI /
+FluentGUI toolchain notes are retained only so the archived code can still be
+understood locally if needed.
 
-Do not treat a Linux `x86_64-pc-windows-gnu` build/check as a release binary.
-For this GPUI app it is only useful for type/link validation. Runnable Windows
-release artifacts require native Windows MSVC builds on `arbit-win` because
-GPUI precompiles HLSL shaders through `fxc.exe`.
-
-The Windows workflow clones Forgejo itself from
-`client/ci/windows/build-and-publish.ps1`. Tag builds fetch `refs/tags/client-v*`
-and publish assets; manual untagged builds fetch `main` and skip publish. Local
-uncommitted changes are not included. To ship a Windows binary with current
-client changes, commit and push them, then push a `client-v*` tag.
-
-Windows release prerequisites live on that agent, not in the dev pod:
-
-- Rust MSVC target/toolchain
-- Windows SDK shader compiler (`fxc.exe`)
-- NSIS (`makensis.exe`)
-- Git and PowerShell 5.1+
+There is no active CI, release, or supported runtime target for that client.
+Do not plan new work around the old Windows release path or the removed
+`.woodpecker/client*.yml` workflows. The supported product surfaces are the
+server, embedded PWA, and Android shell.
 
 For the Android emulator KVM VM (separate from the pod), tooling is its own concern — Android Studio + SDK + emulator image, installed inside that VM, not the dev pod.

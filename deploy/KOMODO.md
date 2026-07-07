@@ -18,8 +18,9 @@ push to main touching server/web/mobile/deploy paths
 ```
 
 Client-only pushes under `client/**` intentionally do not rebuild or redeploy
-the production server image. They run `.woodpecker/client.yml`; `client-v*`
-tags also run `.woodpecker/client-windows.yml`.
+the production server image. The native client is deprecated and no longer has
+active Woodpecker workflows, so those legacy-only edits do not produce a
+supported release artifact.
 
 Manual redeploy of the currently pinned image is safe when you need Komodo to
 restart/recreate the stack without a new server image. Use the shared
