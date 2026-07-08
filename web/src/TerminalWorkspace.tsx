@@ -293,6 +293,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
   const [busy, setBusy] = createSignal<SplitDirection | "close" | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [draft, setDraft] = createSignal("");
+  let composerRef: HTMLTextAreaElement | undefined;
   const paneSenders = new Map<string, (data: string | ArrayBuffer) => void>();
   const paneActions = new Map<string, TerminalActions>();
 
@@ -361,6 +362,15 @@ const TerminalWorkspace: Component<Props> = (props) => {
     });
   };
 
+  const focusComposer = () => {
+    const el = composerRef;
+    if (!el) return;
+    el.focus();
+    const pos = el.value.length;
+    el.selectionStart = pos;
+    el.selectionEnd = pos;
+  };
+
   const workspaceActions: TerminalActions = {
     copy: async () => {
       const result = await paneActions.get(activePaneId())?.copy();
@@ -372,6 +382,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
     selectAll: () => {
       paneActions.get(activePaneId())?.selectAll();
     },
+    focusComposer,
   };
 
   createEffect(() => {
@@ -577,6 +588,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
         }}
       >
         <textarea
+          ref={composerRef}
           value={draft()}
           onInput={(event) => setDraft(event.currentTarget.value)}
           onKeyDown={(event) => {
@@ -597,6 +609,18 @@ const TerminalWorkspace: Component<Props> = (props) => {
           enterkeyhint="send"
           rows={2}
         />
+        <button
+          type="button"
+          onClick={() => {
+            if (composerRef) {
+              insertDraftNewline(composerRef);
+              focusComposer();
+            }
+          }}
+          title="Insert newline"
+        >
+          Line
+        </button>
         <button
           type="button"
           onClick={() => sendDraft(false)}

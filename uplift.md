@@ -38,14 +38,6 @@ backlog.
 
 ---
 
-## Frontend / PWA
-
-1. **Improve mobile ergonomics in the web surface**
-   Reconnect visibility and mobile tab switching are better; remaining work is
-   deeper terminal-use polish and touch-first editing ergonomics.
-
----
-
 ## Mobile / Android
 
 1. **Provision Woodpecker Android signing secrets and verify live release upload**

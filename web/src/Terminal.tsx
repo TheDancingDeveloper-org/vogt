@@ -21,6 +21,8 @@ export interface TerminalActions {
   paste: () => Promise<void>;
   /** Tell xterm to select everything in the visible buffer. */
   selectAll: () => void;
+  /** Optional higher-level action implemented by TerminalWorkspace. */
+  focusComposer?: () => void;
 }
 
 interface Props {

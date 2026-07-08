@@ -7,6 +7,10 @@ interface Props {
   onCopy?: () => void;
   /** Paste clipboard into the active terminal. */
   onPaste?: () => void;
+  /** Select terminal content. */
+  onSelectAll?: () => void;
+  /** Focus the mobile command composer. */
+  onFocusComposer?: () => void;
 }
 
 /**
@@ -39,6 +43,10 @@ const ModKeyRow: Component<Props> = (props) => {
   const keys: Array<{ label: string; send?: () => void; armed?: () => boolean }> = [
     { label: "Esc", send: () => send("\x1b") },
     { label: "Tab", send: () => send("\t") },
+    { label: "^C", send: () => props.send("\x03") },
+    { label: "^D", send: () => props.send("\x04") },
+    { label: "^L", send: () => props.send("\x0c") },
+    { label: "Bksp", send: () => props.send("\x7f") },
     {
       label: "Ctrl",
       send: () => setCtrlArmed((v) => !v),
@@ -52,6 +60,8 @@ const ModKeyRow: Component<Props> = (props) => {
     { label: "|", send: () => send("|") },
     { label: "~", send: () => send("~") },
     { label: "Enter", send: () => send("\r") },
+    { label: "Type", send: () => props.onFocusComposer?.() },
+    { label: "Sel", send: () => props.onSelectAll?.() },
     { label: "Copy", send: () => props.onCopy?.() },
     { label: "Paste", send: () => props.onPaste?.() },
   ];

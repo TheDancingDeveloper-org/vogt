@@ -780,6 +780,13 @@ textarea {
   .terminal-pane-chip {
     max-width: 100%;
   }
+  .terminal-composer {
+    flex-wrap: wrap;
+  }
+  .terminal-composer textarea {
+    flex-basis: 100%;
+    min-height: 44px;
+  }
 }
 
 @media (max-width: 768px) and (pointer: coarse) {
@@ -800,9 +807,9 @@ textarea {
 }
 .modkey-row button {
   flex: 1 0 auto;
-  min-width: 44px;
+  min-width: 52px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+  font-size: 11px;
 }
 .modkey-row button.armed {
   background: var(--accent);

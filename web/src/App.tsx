@@ -143,6 +143,14 @@ const App: Component = () => {
     const id = tabsStore.active;
     if (id) await actions.get(id)?.paste();
   };
+  const activeSelectAll = () => {
+    const id = tabsStore.active;
+    if (id) actions.get(id)?.selectAll();
+  };
+  const activeFocusComposer = () => {
+    const id = tabsStore.active;
+    if (id) actions.get(id)?.focusComposer?.();
+  };
 
   // Custom prompt / confirm modals — native `prompt()` / `confirm()` are
   // blocked or ignored in some PWA contexts (iOS standalone) and look out of
@@ -904,11 +912,15 @@ const App: Component = () => {
               </div>
             </Show>
           </div>
-          <ModKeyRow
-            send={(d) => activeSend(d)}
-            onCopy={() => void activeCopy()}
-            onPaste={() => void activePaste()}
-          />
+          <Show when={activeKind() === "terminal"}>
+            <ModKeyRow
+              send={(d) => activeSend(d)}
+              onCopy={() => void activeCopy()}
+              onPaste={() => void activePaste()}
+              onSelectAll={() => activeSelectAll()}
+              onFocusComposer={() => activeFocusComposer()}
+            />
+          </Show>
         </main>
       </div>
 
