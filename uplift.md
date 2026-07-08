@@ -9,32 +9,21 @@ backlog.
 
 ## Stack / Ops
 
-1. **Runtime image reproducibility hardening** (`Dockerfile`)
-   The image and Rust CI steps now pin and checksum-verify several downloaded
-   tool archives, pin the ad-hoc `cargo install` tool set, and avoid the old
-   NodeSource / Infisical shell-pipe installers. Remaining work is tightening
-   still-floating third-party apt feeds and validating the full image build on
-   a BuildKit-capable Docker host.
-
-2. **Bearer-token risk boundary** (`server/src/auth.rs`, `deploy/docker-compose.yml`)
+1. **Bearer-token risk boundary** (`server/src/auth.rs`, `deploy/docker-compose.yml`)
    Repo-side audit logging, per-token mutation rate limits, and scoped token
    capabilities now exist. The remaining work is provisioning real non-admin
    tokens in production, moving the live clients onto them where appropriate,
    and deciding whether the primary token should keep full Docker-adjacent
    access long term.
 
-3. **Promote `/readyz` into the live stack and validate it on Node B**
+2. **Promote `/readyz` into the live stack and validate it on Node B**
    Repo-side readiness checks now cover workspace mount health, state-dir
    writability, Tailscale state, and GUI dependencies. The remaining work is
    syncing the compose healthcheck into `ops` and validating the live stack.
 
-4. **Production stack cleanup for exit-node config** (live Komodo stack / ops repo)
+3. **Production stack cleanup for exit-node config** (live Komodo stack / ops repo)
    The live stack still carries a stale `TAILSCALE_EXIT_NODE=hertzde3` setting
    that causes startup warnings before the app continues without an exit node.
-
----
-
-## Backend
 
 ---
 
@@ -64,8 +53,8 @@ backlog.
 ## Suggested Priority
 
 1. Bearer-token risk boundary
-2. Runtime image reproducibility hardening
-3. Woodpecker Android signing secret provisioning
-4. Real-device native FCM verification
-5. Live `/readyz` rollout validation
-6. Production stack exit-node cleanup
+2. Woodpecker Android signing secret provisioning
+3. Real-device native FCM verification
+4. Live `/readyz` rollout validation
+5. Production stack exit-node cleanup
+6. Module and product-surface boundary cleanup

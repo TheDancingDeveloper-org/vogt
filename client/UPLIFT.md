@@ -2,7 +2,8 @@
 
 Deprecated surface note: the native desktop client described here was
 deprecated on July 7, 2026. This document is kept only as historical handoff
-material for the archived `client/` tree.
+material for the archived `client/` tree. It is not an active backlog file;
+any remaining project work belongs only in [`../uplift.md`](../uplift.md).
 
 Handoff notes for the native GPUI desktop client (`client/`). This documents a
 pass over a list of GUI complaints (Windows desktop app). Each item below maps
@@ -119,18 +120,13 @@ debug build links on Linux.
 All three are `#[serde(default)]` — older config files load unchanged
 (tested by `config::tests::config_tolerates_missing_new_fields`).
 
-## Known follow-ups / backlog
+## Historical notes
 
-- **Tooltips**: icon-only buttons would benefit from hover tooltips, but
-  `fluent_primitives::Button` has no `.tooltip()` yet. We own FluentGUI
-  (`AusAgentSmith-org/fluent-gpui`) — adding a `tooltip(impl Into<SharedString>)`
-  builder there and re-pinning the rev is the clean fix. Left out to avoid a
-  cross-repo publish cycle in this pass.
-- **Server-side write_file note**: `content` and `content_base64` are mutually
-  exclusive; `content_base64` wins if both are present.
-- Sidebar drag uses absolute pointer-X as the new width. Correct because the
-  sidebar starts at window-left; revisit if the layout ever gains a left gutter.
-- File preview is still read-only (no in-app edit/save). Editing remains backlog.
+- `content` and `content_base64` were made mutually exclusive on the server;
+  `content_base64` wins if both are present.
+- Sidebar drag used absolute pointer-X as the new width because the sidebar
+  started at window-left.
+- File preview remained read-only in the archived client.
 
 ## Build / release reminder (unchanged constraint)
 

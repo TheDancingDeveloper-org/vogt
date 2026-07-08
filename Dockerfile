@@ -16,8 +16,14 @@ ARG NODE_IMAGE=node:22-bookworm
 ARG RUST_IMAGE=rust:1.95-bookworm
 ARG PNPM_VERSION=10.18.0
 ARG SCCACHE_VERSION=0.10.0
-ARG SELKIES_VERSION=1.6.2
+ARG SELKIES_VERSION=1.6.1
 ARG RUST_TOOLCHAIN=1.95.0
+ARG NODEJS_APT_VERSION=22.23.1-1nodesource1
+ARG DOCKER_CE_CLI_APT_VERSION=5:29.6.1-1~ubuntu.26.04~resolute
+ARG DOCKER_COMPOSE_PLUGIN_APT_VERSION=5.3.1-1~ubuntu.26.04~resolute
+ARG GH_APT_VERSION=2.96.0
+ARG TAILSCALE_APT_VERSION=1.98.8
+ARG INFISICAL_APT_VERSION=0.43.101
 ARG CARGO_DEB_VERSION=3.7.0
 ARG CARGO_ZIGBUILD_VERSION=0.23.0
 ARG CARGO_XWIN_VERSION=0.23.0
@@ -25,7 +31,10 @@ ARG CARGO_WATCH_VERSION=8.5.3
 ARG SCCACHE_SHA256=1fbb35e135660d04a2d5e42b59c7874d39b3deb17de56330b25b713ec59f849b
 ARG STEP_CLI_SHA256=5845c181251ffe43ca2331bc171e0b92324a71be9cf4ef76cd6fbbba4f2a3cc6
 ARG GRADLE_SHA256=7a00d51fb93147819aab76024feece20b6b84e420694101f276be952e08bef03
-ARG ANDROID_CMDLINE_TOOLS_SHA256=04453066b540409d975c676d781da1477479dde3761310f1a7eb92a1dfb15af7
+ARG ANDROID_CMDLINE_TOOLS_VERSION=15641748
+ARG ANDROID_CMDLINE_TOOLS_SHA256=a66d5ef0238fc0162e9c1446602ce0dd41702d4dd7a94d2ce42d12b7f80baf7e
+ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.0
+ARG ANDROID_PLATFORM_TOOLS_SHA256=198ae156ab285fa555987219af237b31102fefe8b9d2bc274708a8d4f2865a07
 ARG RCLONE_VERSION=1.74.3
 ARG RCLONE_SHA256=dbee7ccd7a5d617e4ed4cd4555c16669b511abfe8d31164f61be35ac9e999bd2
 
@@ -87,6 +96,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # User-installed globals go to $NPM_CONFIG_PREFIX (/home/sprooty/.npm-global).
 ARG PNPM_VERSION
 ARG NODE_MAJOR=22
+ARG NODEJS_APT_VERSION
 RUN install -m 0755 -d /usr/share/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
        | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
@@ -99,11 +109,13 @@ RUN install -m 0755 -d /usr/share/keyrings \
     && printf 'Package: nsolid\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' \
        > /etc/apt/preferences.d/nsolid \
     && apt-get update \
-    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get install -y --no-install-recommends "nodejs=${NODEJS_APT_VERSION}" \
     && npm install -g --prefix=/usr/local "pnpm@${PNPM_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI (DooD pattern — docker.sock mounted from host)
+ARG DOCKER_CE_CLI_APT_VERSION
+ARG DOCKER_COMPOSE_PLUGIN_APT_VERSION
 RUN . /etc/os-release \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
@@ -114,26 +126,29 @@ RUN . /etc/os-release \
        > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        docker-ce-cli docker-compose-plugin \
+        "docker-ce-cli=${DOCKER_CE_CLI_APT_VERSION}" \
+        "docker-compose-plugin=${DOCKER_COMPOSE_PLUGIN_APT_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI
+ARG GH_APT_VERSION
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
             https://cli.github.com/packages stable main" \
        > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && apt-get update && apt-get install -y --no-install-recommends "gh=${GH_APT_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # Tailscale (TUN device must be passed in at runtime)
+ARG TAILSCALE_APT_VERSION
 RUN . /etc/os-release \
     && curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${VERSION_CODENAME}.noarmor.gpg" \
        > /usr/share/keyrings/tailscale-archive-keyring.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] \
             https://pkgs.tailscale.com/stable/ubuntu ${VERSION_CODENAME} main" \
        > /etc/apt/sources.list.d/tailscale.list \
-    && apt-get update && apt-get install -y --no-install-recommends tailscale \
+    && apt-get update && apt-get install -y --no-install-recommends "tailscale=${TAILSCALE_APT_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # rclone
@@ -147,6 +162,7 @@ RUN curl -fsSL "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE
     && rm -rf /tmp/rclone /tmp/rclone.zip
 
 # Infisical CLI
+ARG INFISICAL_APT_VERSION
 RUN install -m 0755 -d /usr/share/keyrings \
     && curl -1sLf https://artifacts-cli.infisical.com/infisical.gpg \
        | gpg --dearmor -o /usr/share/keyrings/infisical-archive-keyring.gpg \
@@ -154,7 +170,7 @@ RUN install -m 0755 -d /usr/share/keyrings \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/infisical-archive-keyring.gpg] https://artifacts-cli.infisical.com/deb stable main" \
        > /etc/apt/sources.list.d/infisical.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends infisical \
+    && apt-get install -y --no-install-recommends "infisical=${INFISICAL_APT_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 # Smallstep `step` CLI — used to self-issue short-lived SSH certificates against
@@ -261,10 +277,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Gradle wrapper (mobile/android/gradlew) drives builds; system gradle is only
 # a convenience for ad-hoc use.
 #
-# Package set per the dev-pod spec: cmdline-tools;latest, platform-tools,
+# Package set per the dev-pod spec: pinned command-line tools + platform-tools,
 # platforms;android-35 + android-36, build-tools;35.0.0 + 36.0.0.
-ARG ANDROID_CMDLINE_TOOLS_VERSION=14742923
+ARG ANDROID_CMDLINE_TOOLS_VERSION
 ARG ANDROID_CMDLINE_TOOLS_SHA256
+ARG ANDROID_PLATFORM_TOOLS_VERSION
+ARG ANDROID_PLATFORM_TOOLS_SHA256
 RUN install -d /opt/android-sdk/cmdline-tools \
     && curl -fsSL \
         "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" \
@@ -274,12 +292,16 @@ RUN install -d /opt/android-sdk/cmdline-tools \
     # The zip unpacks to a top-level cmdline-tools/; sdkmanager expects it at
     # cmdline-tools/latest/.
     && mv /tmp/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest \
+    && curl -fsSL \
+        "https://dl.google.com/android/repository/platform-tools_r${ANDROID_PLATFORM_TOOLS_VERSION}-linux.zip" \
+        -o /tmp/platform-tools.zip \
+    && echo "${ANDROID_PLATFORM_TOOLS_SHA256}  /tmp/platform-tools.zip" | sha256sum -c - \
+    && unzip -q /tmp/platform-tools.zip -d /opt/android-sdk \
     && rm -rf /tmp/cmdline-tools.zip /tmp/cmdline-tools \
+        /tmp/platform-tools.zip \
     # Accept licenses first (yes feeds the interactive prompts), then install.
     && yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null \
     && /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --install \
-        "cmdline-tools;latest" \
-        "platform-tools" \
         "platforms;android-35" \
         "platforms;android-36" \
         "build-tools;35.0.0" \
