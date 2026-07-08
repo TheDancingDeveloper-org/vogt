@@ -154,8 +154,7 @@ steps:
         set -eu
         APK=android/app/build/outputs/apk/release/app-release.apk
         APK_VERSION_NAME=$(node -p "const pkg = require('./package.json'); const sha = (process.env.CI_COMMIT_SHA || 'local').slice(0, 7); pkg.version + '+' + sha")
-        APK_ASSET_SUFFIX=$(printf '%s' "$APK_VERSION_NAME" | tr '+/' '--')
-        APK_ASSET_NAME="mydevenv2-${APK_ASSET_SUFFIX}.apk"
+        APK_ASSET_NAME=$(node -p "const pkg = require('./package.json'); const sha = (process.env.CI_COMMIT_SHA || 'local').slice(0, 7); const version = (pkg.version + '+' + sha).replace(/[^A-Za-z0-9._-]/g, '-'); 'mydevenv2-' + version + '.apk'")
         REPO=/api/v1/repos/indexarr/MyDevEnv2
 
         # Pull the shared Forgejo API wrapper from ops. Logs status + body on
