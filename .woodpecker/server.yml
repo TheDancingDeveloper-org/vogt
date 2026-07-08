@@ -138,8 +138,10 @@ steps:
         export MYDEVENV2_ANDROID_VERSION_NAME="$VERSION_NAME"
         export MYDEVENV2_ANDROID_VERSION_CODE="$VERSION_CODE"
         echo "Android release version: $MYDEVENV2_ANDROID_VERSION_NAME ($MYDEVENV2_ANDROID_VERSION_CODE)"
-      - npx cap sync android
-      - cd android && ./gradlew assembleRelease --no-daemon -q && cd ..
+        npx cap sync android
+        cd android
+        ./gradlew assembleRelease --no-daemon -q
+        cd ..
       - ls -lh android/app/build/outputs/apk/release/app-release.apk
       - |
         set -eu
@@ -151,7 +153,7 @@ steps:
         # upstream of a `| python3` still has a clear pipeline-log error line.
         set -eu
         APK=android/app/build/outputs/apk/release/app-release.apk
-        APK_VERSION_NAME=${MYDEVENV2_ANDROID_VERSION_NAME:-unknown}
+        APK_VERSION_NAME=$(node -p "const pkg = require('./package.json'); const sha = (process.env.CI_COMMIT_SHA || 'local').slice(0, 7); pkg.version + '+' + sha")
         APK_ASSET_SUFFIX=$(printf '%s' "$APK_VERSION_NAME" | tr '+/' '--')
         APK_ASSET_NAME="mydevenv2-${APK_ASSET_SUFFIX}.apk"
         REPO=/api/v1/repos/indexarr/MyDevEnv2

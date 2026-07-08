@@ -17,26 +17,21 @@ backlog.
    access long term.
 
 2. **MyDevEnv2 npm registry connectivity for nested app builds**
-   In MyDevEnv2, `Working/Active/apps/rustnzbd` currently falls back to the
+   In MyDevEnv2, `Working/Active/apps/rustnzbd` still falls back to the
    placeholder frontend because `npm ci` repeatedly times out against
-   `https://registry.npmjs.org/`. Follow up by reproducing under the current
-   environment, deciding whether direct npm access is expected to work from the
-   pod, and wiring an internal mirror/cache if that connectivity will stay
-   constrained. Current reference point: `rustnzb` branch
+   `https://registry.npmjs.org/`. This was revalidated on July 8, 2026 in the
+   current MyDevEnv2 pod: package fetches started, then multiple tarball and
+   audit requests hit repeated `ETIMEDOUT` failures before the frontend build
+   completed. Follow up by deciding whether direct npm access is expected to
+   work from the pod and wiring an internal mirror/cache if that connectivity
+   will stay constrained. Current reference point: `rustnzb` branch
    `codex/test-uplift-v124`, commit `b52d65d68a1187f3732139afcc422734cb041052`.
 
 ---
 
 ## Mobile / Android
 
-1. **Fix Android CI release metadata naming**
-   The `mobile-apk` step now signs and uploads a real release APK, but pipeline
-   `108` published it as `Latest APK (unknown)` / `mydevenv2-.apk` because the
-   upload block no longer had the earlier version-name export in scope. Recompute
-   or re-export the version metadata in the upload block so Forgejo release
-   names and asset filenames stay meaningful.
-
-2. **Real-device native FCM verification**
+1. **Real-device native FCM verification**
    `google-services.json` already includes the `com.sprooty.mydevenv2` client;
    the remaining work is confirming first-launch FCM registration and end-to-end
    delivery on actual Android hardware.
@@ -47,5 +42,4 @@ backlog.
 
 1. Bearer-token risk boundary
 2. MyDevEnv2 npm registry connectivity for nested app builds
-3. Android CI release metadata naming
-4. Real-device native FCM verification
+3. Real-device native FCM verification
