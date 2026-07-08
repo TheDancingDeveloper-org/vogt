@@ -56,9 +56,7 @@ backlog.
 
 ## Product / Codebase Hygiene
 
-1. **Packaging and release polish across server/PWA/mobile**
-
-2. **Module and product-surface boundary cleanup across server, web, mobile,
+1. **Module and product-surface boundary cleanup across server, web, mobile,
    and deprecated client code**
 
 ---
