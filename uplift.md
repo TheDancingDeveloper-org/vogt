@@ -16,17 +16,6 @@ backlog.
    and deciding whether the primary token should keep full Docker-adjacent
    access long term.
 
-2. **MyDevEnv2 npm registry connectivity for nested app builds**
-   In MyDevEnv2, `Working/Active/apps/rustnzbd` still falls back to the
-   placeholder frontend because `npm ci` repeatedly times out against
-   `https://registry.npmjs.org/`. This was revalidated on July 8, 2026 in the
-   current MyDevEnv2 pod: package fetches started, then multiple tarball and
-   audit requests hit repeated `ETIMEDOUT` failures before the frontend build
-   completed. Follow up by deciding whether direct npm access is expected to
-   work from the pod and wiring an internal mirror/cache if that connectivity
-   will stay constrained. Current reference point: `rustnzb` branch
-   `codex/test-uplift-v124`, commit `b52d65d68a1187f3732139afcc422734cb041052`.
-
 ---
 
 ## Mobile / Android
@@ -41,5 +30,4 @@ backlog.
 ## Suggested Priority
 
 1. Bearer-token risk boundary
-2. MyDevEnv2 npm registry connectivity for nested app builds
-3. Real-device native FCM verification
+2. Real-device native FCM verification

@@ -50,12 +50,21 @@ if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
     # later boot. --exit-node-allow-lan-access keeps the container's own LAN
     # (10.x, host services) reachable; accepted subnet routes like
     # 192.168.0.0/23 keep working because a /23 beats the exit node's 0.0.0.0/0.
-    # Idempotent, so it's safe to run on every boot (a bare `up` clears it).
+    #
+    # Important: tailscaled state is persisted, so a blank env var does NOT
+    # implicitly clear a previously selected exit node. When the env is empty,
+    # explicitly clear any old RouteAll/exit-node preference to restore direct
+    # egress on boot.
     if [[ -n "${TAILSCALE_EXIT_NODE:-}" ]]; then
         sudo tailscale set \
             --exit-node="${TAILSCALE_EXIT_NODE}" \
             --exit-node-allow-lan-access \
             || echo "tailscale exit-node set failed (continuing without exit node)"
+    else
+        sudo tailscale set \
+            --exit-node= \
+            --exit-node-allow-lan-access=false \
+            || echo "tailscale exit-node clear failed (continuing)"
     fi
 fi
 
