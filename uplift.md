@@ -16,25 +16,25 @@ backlog.
    and deciding whether the primary token should keep full Docker-adjacent
    access long term.
 
-2. **Promote `/readyz` into the live stack and validate it on Node B**
-   Repo-side readiness checks now cover workspace mount health, state-dir
-   writability, Tailscale state, and GUI dependencies. The remaining work is
-   syncing the compose healthcheck into `ops` and validating the live stack.
-
-3. **Production stack cleanup for exit-node config** (live Komodo stack / ops repo)
-   The live stack still carries a stale `TAILSCALE_EXIT_NODE=hertzde3` setting
-   that causes startup warnings before the app continues without an exit node.
+2. **MyDevEnv2 npm registry connectivity for nested app builds**
+   In MyDevEnv2, `Working/Active/apps/rustnzbd` currently falls back to the
+   placeholder frontend because `npm ci` repeatedly times out against
+   `https://registry.npmjs.org/`. Follow up by reproducing under the current
+   environment, deciding whether direct npm access is expected to work from the
+   pod, and wiring an internal mirror/cache if that connectivity will stay
+   constrained. Current reference point: `rustnzb` branch
+   `codex/test-uplift-v124`, commit `b52d65d68a1187f3732139afcc422734cb041052`.
 
 ---
 
 ## Mobile / Android
 
-1. **Provision Woodpecker Android signing secrets and verify live release upload**
-   The repo now supports signed release APK builds in CI; the remaining work is
-   ensuring `mydevenv2_android_keystore_base64`,
-   `mydevenv2_android_keystore_password`, `mydevenv2_android_key_alias`, and
-   `mydevenv2_android_key_password` are present in Woodpecker and validating a
-   real `apk-latest` upload from `main`.
+1. **Fix Android CI release metadata naming**
+   The `mobile-apk` step now signs and uploads a real release APK, but pipeline
+   `108` published it as `Latest APK (unknown)` / `mydevenv2-.apk` because the
+   upload block no longer had the earlier version-name export in scope. Recompute
+   or re-export the version metadata in the upload block so Forgejo release
+   names and asset filenames stay meaningful.
 
 2. **Real-device native FCM verification**
    `google-services.json` already includes the `com.sprooty.mydevenv2` client;
@@ -46,7 +46,6 @@ backlog.
 ## Suggested Priority
 
 1. Bearer-token risk boundary
-2. Woodpecker Android signing secret provisioning
-3. Real-device native FCM verification
-4. Live `/readyz` rollout validation
-5. Production stack exit-node cleanup
+2. MyDevEnv2 npm registry connectivity for nested app builds
+3. Android CI release metadata naming
+4. Real-device native FCM verification
