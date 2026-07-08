@@ -40,10 +40,7 @@ backlog.
 
 ## Frontend / PWA
 
-1. **Richer push-notification controls**
-   Per-session/task rules, quiet hours, and digests.
-
-2. **Improve mobile ergonomics in the web surface**
+1. **Improve mobile ergonomics in the web surface**
    Reconnect visibility and mobile tab switching are better; remaining work is
    deeper terminal-use polish and touch-first editing ergonomics.
 

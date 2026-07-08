@@ -248,6 +248,34 @@ export interface HistoryLogPreview {
   truncated: boolean;
 }
 
+export interface PushQuietHours {
+  enabled: boolean;
+  start_minute: number;
+  end_minute: number;
+  utc_offset_minutes: number;
+  digest: boolean;
+}
+
+export interface PushPreferences {
+  waiting_for_input: boolean;
+  agent_task_started: boolean;
+  agent_task_notify: boolean;
+  quiet_hours: PushQuietHours;
+}
+
+export interface PushSubscriptionEntry {
+  id: string;
+  label: string | null;
+  created_at: string;
+  kind: {
+    kind: "web-push" | "fcm";
+    endpoint_host?: string;
+  };
+  prefs: PushPreferences;
+  pending_digest_count: number;
+  pending_digest_since?: string | null;
+}
+
 export type AgentTaskStatus = "active" | "paused";
 export type AgentTaskRunTrigger = "manual" | "scheduled";
 
@@ -472,8 +500,24 @@ export const api = {
   guiKill: (pid: number) =>
     req<{ ok: boolean }>("POST", `/api/gui/kill?pid=${pid}`),
 
+  listPushSubscriptions: () =>
+    req<PushSubscriptionEntry[]>("GET", "/api/push/list"),
+  updatePushSubscription: (
+    id: string,
+    update: {
+      label?: string | null;
+      clear_label?: boolean;
+      prefs?: PushPreferences;
+    },
+  ) => req<{ ok: boolean; id: string; label: string | null; prefs: PushPreferences }>(
+    "POST",
+    "/api/push/update",
+    { id, ...update },
+  ),
   pushTest: (title = "MyDevEnv2 test", body = "Push notifications are working.") =>
-    req<{ ok: number; fail: number }>("POST", "/api/push/test", { title, body }),
+    req<{ ok: number; fail: number; queued: number }>("POST", "/api/push/test", { title, body }),
+  flushPushDigests: () =>
+    req<{ ok: number; fail: number; queued: number }>("POST", "/api/push/flush-digests"),
 
   getBase: () => getBase(),
   getToken: () => getToken(),

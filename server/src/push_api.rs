@@ -9,7 +9,11 @@ use serde_json::json;
 use tracing::info;
 
 use crate::{
-    activity::ActivityState, app::AppState, error::Result, events::ServerEvent, push::Subscription,
+    activity::ActivityState,
+    app::AppState,
+    error::Result,
+    events::ServerEvent,
+    push::{DispatchCounts, NotificationKind, PushPreferences, Subscription},
 };
 
 #[derive(Debug, Deserialize)]
@@ -31,7 +35,38 @@ pub async fn subscribe(
     Json(req): Json<SubscribeReq>,
 ) -> Result<Json<serde_json::Value>> {
     let stored = state.push.add(req.sub, req.label)?;
-    Ok(Json(json!({ "ok": true, "id": stored.id })))
+    Ok(Json(json!({ "ok": true, "id": stored.id, "prefs": stored.prefs })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateReq {
+    pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub clear_label: bool,
+    #[serde(default)]
+    pub prefs: Option<PushPreferences>,
+}
+
+pub async fn update(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateReq>,
+) -> Result<Json<serde_json::Value>> {
+    let label = if req.clear_label {
+        Some(None)
+    } else if req.label.is_some() {
+        Some(req.label)
+    } else {
+        None
+    };
+    let updated = state.push.update(&req.id, label, req.prefs)?;
+    Ok(Json(json!({
+        "ok": true,
+        "id": updated.id,
+        "label": updated.label,
+        "prefs": updated.prefs,
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +102,9 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Json<Vec<serde_json::Va
                 "label": s.label,
                 "created_at": s.created_at.to_string(),
                 "kind": kind,
+                "prefs": s.prefs,
+                "pending_digest_count": s.pending_digest.as_ref().map(|digest| digest.total_count).unwrap_or(0),
+                "pending_digest_since": s.pending_digest.as_ref().map(|digest| digest.queued_at.to_string()),
             })
         })
         .collect();
@@ -89,11 +127,15 @@ pub async fn test_dispatch(
     let body = req
         .body
         .unwrap_or_else(|| "Push notifications are working.".into());
-    let (ok, fail) = state
+    let counts = state
         .push
-        .notify_all(&title, &body, json!({ "kind": "test" }))
+        .notify(NotificationKind::Test, &title, &body, json!({ "kind": "test" }))
         .await;
-    Json(json!({ "ok": ok, "fail": fail }))
+    Json(json!({ "ok": counts.ok, "fail": counts.fail, "queued": counts.queued }))
+}
+
+pub async fn flush_digests(State(state): State<Arc<AppState>>) -> Json<DispatchCounts> {
+    Json(state.push.flush_ready_digests().await)
 }
 
 /// Spawn the background task that watches the event bus and pushes a
@@ -116,9 +158,24 @@ pub fn spawn_activity_watcher(state: Arc<AppState>) {
                         "session_id": id.to_string(),
                         "url": format!("/#/t/{id}"),
                     });
-                    let (ok, fail) = state.push.notify_all(&title, body, data).await;
-                    info!(session = %id, ok, fail, "push dispatched");
+                    let counts = state
+                        .push
+                        .notify(NotificationKind::WaitingForInput, &title, body, data)
+                        .await;
+                    info!(session = %id, ok = counts.ok, fail = counts.fail, queued = counts.queued, "push dispatched");
                 }
+            }
+        }
+    });
+}
+
+pub fn spawn_digest_flusher(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let counts = state.push.flush_ready_digests().await;
+            if counts.ok > 0 || counts.fail > 0 {
+                info!(ok = counts.ok, fail = counts.fail, "push digests flushed");
             }
         }
     });

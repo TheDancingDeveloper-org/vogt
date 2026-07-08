@@ -1,5 +1,15 @@
 import { Component, Show, For, createEffect, createSignal, onMount } from "solid-js";
-import { api, clearStoredAuth, getBase, getToken, setBase, setToken } from "./api";
+import {
+  api,
+  clearStoredAuth,
+  getBase,
+  getToken,
+  setBase,
+  setToken,
+  type OperationalStatus,
+  type PushPreferences,
+  type PushSubscriptionEntry,
+} from "./api";
 import { getLayoutMode, setLayoutMode, type LayoutMode } from "./layout";
 import TemplateEditor from "./TemplateEditor";
 import { THEMES, getThemeName, setThemeName } from "./terminalThemes";
@@ -12,6 +22,7 @@ import {
 } from "./workspaceLayouts";
 import {
   currentPushEnabled,
+  currentPushSubscriptionId,
   isPushAvailable,
   pushPermission,
   pushSelfTest,
@@ -19,7 +30,6 @@ import {
   unsubscribePushNotifications,
   type PushPermissionState,
 } from "./push";
-import type { OperationalStatus } from "./api";
 import {
   clearAuthProfiles,
   deleteAuthProfile,
@@ -51,6 +61,36 @@ interface Props {
   onDeleteWorkspaceLayout?: (layoutId: string) => Promise<boolean | void>;
 }
 
+function defaultPushPreferences(): PushPreferences {
+  return {
+    waiting_for_input: true,
+    agent_task_started: true,
+    agent_task_notify: true,
+    quiet_hours: {
+      enabled: false,
+      start_minute: 22 * 60,
+      end_minute: 7 * 60,
+      utc_offset_minutes: -new Date().getTimezoneOffset(),
+      digest: true,
+    },
+  };
+}
+
+function formatMinuteOfDay(minute: number): string {
+  const clamped = Math.max(0, Math.min((24 * 60) - 1, Math.round(minute)));
+  const hours = Math.floor(clamped / 60);
+  const minutes = clamped % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function parseMinuteOfDay(value: string): number {
+  const match = value.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return 0;
+  const hours = Math.max(0, Math.min(23, Number(match[1] ?? 0)));
+  const minutes = Math.max(0, Math.min(59, Number(match[2] ?? 0)));
+  return (hours * 60) + minutes;
+}
+
 const Settings: Component<Props> = (props) => {
   const [token, setT] = createSignal(getToken());
   const [base, setB] = createSignal(getBase());
@@ -59,6 +99,12 @@ const Settings: Component<Props> = (props) => {
   const [pushPerm, setPushPerm] = createSignal<PushPermissionState>("default");
   const [pushBusy, setPushBusy] = createSignal(false);
   const [pushMsg, setPushMsg] = createSignal<string | null>(null);
+  const [pushSubscriptions, setPushSubscriptions] = createSignal<PushSubscriptionEntry[]>([]);
+  const [currentPushSubId, setCurrentPushSubId] = createSignal<string | null>(null);
+  const [pushPrefs, setPushPrefs] = createSignal<PushPreferences>(defaultPushPreferences());
+  const [pushLabel, setPushLabel] = createSignal("");
+  const [pushQuietStart, setPushQuietStart] = createSignal("22:00");
+  const [pushQuietEnd, setPushQuietEnd] = createSignal("07:00");
   const [templateEditorOpen, setTemplateEditorOpen] = createSignal(false);
   const [terminalTheme, setTerminalTheme] = createSignal(getThemeName());
   const [workspaceLayouts, setWorkspaceLayouts] = createSignal<SavedWorkspaceLayout[]>(
@@ -152,6 +198,31 @@ const Settings: Component<Props> = (props) => {
   const refreshPushState = async () => {
     setPushPerm(await pushPermission());
     setPushOn(await currentPushEnabled());
+    const currentId = await currentPushSubscriptionId();
+    setCurrentPushSubId(currentId);
+    if (!getToken()) {
+      setPushSubscriptions([]);
+      return;
+    }
+    try {
+      const subs = await api.listPushSubscriptions();
+      setPushSubscriptions(subs);
+      const current = (currentId ? subs.find((sub) => sub.id === currentId) : null) ?? null;
+      if (current) {
+        setPushPrefs(current.prefs);
+        setPushLabel(current.label ?? "");
+        setPushQuietStart(formatMinuteOfDay(current.prefs.quiet_hours.start_minute));
+        setPushQuietEnd(formatMinuteOfDay(current.prefs.quiet_hours.end_minute));
+      } else {
+        const defaults = defaultPushPreferences();
+        setPushPrefs(defaults);
+        setPushLabel("");
+        setPushQuietStart(formatMinuteOfDay(defaults.quiet_hours.start_minute));
+        setPushQuietEnd(formatMinuteOfDay(defaults.quiet_hours.end_minute));
+      }
+    } catch {
+      setPushSubscriptions([]);
+    }
   };
 
   const refreshOperationalState = async () => {
@@ -403,9 +474,60 @@ const Settings: Component<Props> = (props) => {
     setPushMsg(null);
     try {
       const r = await pushSelfTest();
-      setPushMsg(`Test dispatched: ${r.ok} ok / ${r.fail} fail`);
+      setPushMsg(
+        `Test dispatched: ${r.ok} ok / ${r.fail} fail${r.queued ? ` / ${r.queued} queued` : ""}`,
+      );
     } catch (e) {
       setPushMsg(`Test failed: ${(e as Error).message}`);
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const savePushRules = async () => {
+    const currentId = currentPushSubId();
+    if (!currentId) {
+      setPushMsg("Enable push for this device first.");
+      return;
+    }
+    setPushBusy(true);
+    setPushMsg(null);
+    try {
+      const nextPrefs: PushPreferences = {
+        ...pushPrefs(),
+        quiet_hours: {
+          ...pushPrefs().quiet_hours,
+          start_minute: parseMinuteOfDay(pushQuietStart()),
+          end_minute: parseMinuteOfDay(pushQuietEnd()),
+          utc_offset_minutes: -new Date().getTimezoneOffset(),
+        },
+      };
+      const label = pushLabel().trim();
+      await api.updatePushSubscription(currentId, {
+        label: label || undefined,
+        clear_label: !label,
+        prefs: nextPrefs,
+      });
+      await refreshPushState();
+      setPushMsg("Notification rules saved for this device.");
+    } catch (e) {
+      setPushMsg(`Push rules failed: ${(e as Error).message}`);
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const flushPushDigests = async () => {
+    setPushBusy(true);
+    setPushMsg(null);
+    try {
+      const r = await api.flushPushDigests();
+      setPushMsg(
+        `Digest flush: ${r.ok} sent / ${r.fail} failed${r.queued ? ` / ${r.queued} queued` : ""}`,
+      );
+      await refreshPushState();
+    } catch (e) {
+      setPushMsg(`Digest flush failed: ${(e as Error).message}`);
     } finally {
       setPushBusy(false);
     }
@@ -820,10 +942,10 @@ const Settings: Component<Props> = (props) => {
               }
             >
               <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
-                Notify me when a session is waiting for input
+                Device-specific push rules for session waits and agent-task alerts
                 (permission: <code>{pushPerm()}</code>).
               </div>
-              <div style={{ display: "flex", gap: "8px" }}>
+              <div style={{ display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
                 <button onClick={togglePush} disabled={pushBusy()}>
                   {pushOn() ? "Disable" : "Enable"} push
                 </button>
@@ -834,7 +956,179 @@ const Settings: Component<Props> = (props) => {
                 >
                   Send test
                 </button>
+                <button
+                  onClick={savePushRules}
+                  disabled={pushBusy() || !pushOn() || !currentPushSubId()}
+                  title="Save rules for the current device subscription"
+                >
+                  Save rules
+                </button>
+                <button
+                  onClick={flushPushDigests}
+                  disabled={pushBusy()}
+                  title="Try to deliver any queued digest summaries now"
+                >
+                  Flush digests
+                </button>
               </div>
+              <Show when={pushOn()}>
+                <div
+                  style={{
+                    display: "grid",
+                    "grid-template-columns": "repeat(auto-fit, minmax(180px, 1fr))",
+                    gap: "8px",
+                  }}
+                >
+                  <label>
+                    Device label
+                    <input
+                      type="text"
+                      value={pushLabel()}
+                      onInput={(e) => setPushLabel(e.currentTarget.value)}
+                      placeholder="Pixel 9"
+                    />
+                  </label>
+                  <label>
+                    Quiet start
+                    <input
+                      type="time"
+                      value={pushQuietStart()}
+                      onInput={(e) => setPushQuietStart(e.currentTarget.value)}
+                    />
+                  </label>
+                  <label>
+                    Quiet end
+                    <input
+                      type="time"
+                      value={pushQuietEnd()}
+                      onInput={(e) => setPushQuietEnd(e.currentTarget.value)}
+                    />
+                  </label>
+                </div>
+              </Show>
+              <Show when={pushOn()}>
+                <div style={{ display: "flex", gap: "12px", "flex-wrap": "wrap" }}>
+                  <label style={{ display: "flex", gap: "6px", "align-items": "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={pushPrefs().waiting_for_input}
+                      onChange={(e) =>
+                        setPushPrefs((current) => ({
+                          ...current,
+                          waiting_for_input: e.currentTarget.checked,
+                        }))
+                      }
+                    />
+                    <span style={{ "font-size": "12px" }}>Session waiting-for-input</span>
+                  </label>
+                  <label style={{ display: "flex", gap: "6px", "align-items": "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={pushPrefs().agent_task_started}
+                      onChange={(e) =>
+                        setPushPrefs((current) => ({
+                          ...current,
+                          agent_task_started: e.currentTarget.checked,
+                        }))
+                      }
+                    />
+                    <span style={{ "font-size": "12px" }}>Scheduled task started</span>
+                  </label>
+                  <label style={{ display: "flex", gap: "6px", "align-items": "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={pushPrefs().agent_task_notify}
+                      onChange={(e) =>
+                        setPushPrefs((current) => ({
+                          ...current,
+                          agent_task_notify: e.currentTarget.checked,
+                        }))
+                      }
+                    />
+                    <span style={{ "font-size": "12px" }}>Task phrase alerts</span>
+                  </label>
+                </div>
+              </Show>
+              <Show when={pushOn()}>
+                <div style={{ display: "flex", gap: "12px", "flex-wrap": "wrap" }}>
+                  <label style={{ display: "flex", gap: "6px", "align-items": "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={pushPrefs().quiet_hours.enabled}
+                      onChange={(e) =>
+                        setPushPrefs((current) => ({
+                          ...current,
+                          quiet_hours: {
+                            ...current.quiet_hours,
+                            enabled: e.currentTarget.checked,
+                          },
+                        }))
+                      }
+                    />
+                    <span style={{ "font-size": "12px" }}>Quiet hours</span>
+                  </label>
+                  <label style={{ display: "flex", gap: "6px", "align-items": "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={pushPrefs().quiet_hours.digest}
+                      onChange={(e) =>
+                        setPushPrefs((current) => ({
+                          ...current,
+                          quiet_hours: {
+                            ...current.quiet_hours,
+                            digest: e.currentTarget.checked,
+                          },
+                        }))
+                      }
+                    />
+                    <span style={{ "font-size": "12px" }}>Digest during quiet hours</span>
+                  </label>
+                </div>
+              </Show>
+              <Show when={pushSubscriptions().length > 0}>
+                <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+                  <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
+                    Subscribed devices
+                  </div>
+                  <For each={pushSubscriptions()}>
+                    {(sub) => (
+                      <div style={opsCardStyle}>
+                        <div style={{ display: "flex", "justify-content": "space-between", gap: "12px" }}>
+                          <div style={{ display: "flex", "flex-direction": "column", gap: "4px", "min-width": 0 }}>
+                            <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
+                              {sub.label || (sub.id === currentPushSubId() ? "This device" : sub.kind.kind)}
+                            </div>
+                            <div style={opsMetaStyle}>
+                              {sub.kind.kind}
+                              <Show when={sub.kind.endpoint_host}>
+                                {(host) => <span> • {host()}</span>}
+                              </Show>
+                              <span> • {formatDate(sub.created_at)}</span>
+                            </div>
+                          </div>
+                          <div style={{ "font-size": "11px", color: "var(--fg-muted)", "white-space": "nowrap" }}>
+                            {sub.id === currentPushSubId() ? "Current" : ""}
+                          </div>
+                        </div>
+                        <div style={opsMetaStyle}>
+                          Rules: {sub.prefs.waiting_for_input ? "session" : ""}
+                          {sub.prefs.waiting_for_input && (sub.prefs.agent_task_started || sub.prefs.agent_task_notify) ? " • " : ""}
+                          {sub.prefs.agent_task_started ? "task start" : ""}
+                          {sub.prefs.agent_task_started && sub.prefs.agent_task_notify ? " • " : ""}
+                          {sub.prefs.agent_task_notify ? "task alerts" : ""}
+                          {!sub.prefs.waiting_for_input && !sub.prefs.agent_task_started && !sub.prefs.agent_task_notify ? "none" : ""}
+                          <Show when={sub.pending_digest_count > 0}>
+                            <span>
+                              {" "}
+                              • {sub.pending_digest_count} queued
+                            </span>
+                          </Show>
+                        </div>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
               <Show when={pushMsg()}>
                 <div style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{pushMsg()}</div>
               </Show>

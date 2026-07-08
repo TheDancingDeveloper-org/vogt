@@ -84,6 +84,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // Background task: fan out a push notification whenever a session enters
     // `waiting-for-input`. Subscribes to the events bus.
     push_api::spawn_activity_watcher(Arc::clone(&state));
+    push_api::spawn_digest_flusher(Arc::clone(&state));
     state.agent_tasks.spawn_scheduler();
     state.agent_tasks.spawn_run_watcher(state.bus.clone());
 
@@ -141,9 +142,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             post(agent_tasks::cleanup_prompt_artifacts),
         )
         .route("/api/push/subscribe", post(push_api::subscribe))
+        .route("/api/push/update", post(push_api::update))
         .route("/api/push/unsubscribe", post(push_api::unsubscribe))
         .route("/api/push/list", get(push_api::list))
         .route("/api/push/test", post(push_api::test_dispatch))
+        .route("/api/push/flush-digests", post(push_api::flush_digests))
         .route("/api/history/sessions", get(history_api::list_sessions))
         .route("/api/history/search", get(history_api::search_sessions))
         .route("/api/history/cleanup", post(history_api::cleanup_sessions))

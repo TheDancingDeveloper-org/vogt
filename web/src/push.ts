@@ -92,6 +92,7 @@ export async function currentSubscription(): Promise<PushSubscription | null> {
   return reg.pushManager.getSubscription();
 }
 
+const WEB_SUB_ID_KEY = "mydevenv2.push.webSubId";
 const NATIVE_SUB_ID_KEY = "mydevenv2.push.nativeSubId";
 
 export async function currentPushEnabled(): Promise<boolean> {
@@ -99,6 +100,25 @@ export async function currentPushEnabled(): Promise<boolean> {
     return Boolean(localStorage.getItem(NATIVE_SUB_ID_KEY));
   }
   return (await currentSubscription()) !== null;
+}
+
+async function currentWebSubscriptionId(): Promise<string | null> {
+  const sub = await currentSubscription();
+  if (!sub) return null;
+  const idBytes = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(sub.endpoint),
+  );
+  return Array.from(new Uint8Array(idBytes))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+export async function currentPushSubscriptionId(): Promise<string | null> {
+  if (isNativePlatform()) {
+    return localStorage.getItem(NATIVE_SUB_ID_KEY);
+  }
+  return currentWebSubscriptionId();
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
@@ -163,7 +183,9 @@ export async function subscribePush(label?: string): Promise<{
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`subscribe: ${r.status} ${await r.text()}`);
-  return r.json();
+  const registered = (await r.json()) as { id: string };
+  localStorage.setItem(WEB_SUB_ID_KEY, registered.id);
+  return registered;
 }
 
 export async function unsubscribePush(): Promise<void> {
@@ -171,25 +193,21 @@ export async function unsubscribePush(): Promise<void> {
   if (!reg) return;
   const sub = await reg.pushManager.getSubscription();
   if (!sub) return;
-  // Hash the endpoint the same way the server does so we can DELETE by id.
-  const idBytes = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(sub.endpoint),
-  );
-  const id = Array.from(new Uint8Array(idBytes))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  const id = (await currentWebSubscriptionId()) ?? localStorage.getItem(WEB_SUB_ID_KEY);
   await sub.unsubscribe();
 
   const tok = getToken();
-  await fetch(`${getBase()}/api/push/unsubscribe`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
-    },
-    body: JSON.stringify({ id }),
-  });
+  if (id) {
+    await fetch(`${getBase()}/api/push/unsubscribe`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+      },
+      body: JSON.stringify({ id }),
+    });
+  }
+  localStorage.removeItem(WEB_SUB_ID_KEY);
 }
 
 export async function subscribePushNotifications(label?: string): Promise<{ id: string }> {
@@ -204,7 +222,7 @@ export async function unsubscribePushNotifications(): Promise<void> {
   await unsubscribePush();
 }
 
-export async function pushSelfTest(): Promise<{ ok: number; fail: number }> {
+export async function pushSelfTest(): Promise<{ ok: number; fail: number; queued: number }> {
   return api.pushTest();
 }
 
@@ -359,5 +377,6 @@ export async function unsubscribeNativeFcm(): Promise<void> {
       });
     }
     localStorage.removeItem(NATIVE_SUB_ID_KEY);
+    localStorage.removeItem(WEB_SUB_ID_KEY);
   }
 }

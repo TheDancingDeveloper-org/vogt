@@ -20,7 +20,7 @@ use crate::{
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
     pty::{Session, SessionSpec},
-    push::PushManager,
+    push::{NotificationKind, PushManager},
     sessions::SessionRegistry,
 };
 
@@ -643,7 +643,7 @@ impl AgentTaskRegistry {
             let body = format!("Tap to open {}", task.name);
             let _ = self
                 .push
-                .notify_all("Scheduled agent started", &body, data)
+                .notify(NotificationKind::AgentTaskStarted, "Scheduled agent started", &body, data)
                 .await;
         }
 
@@ -1271,7 +1271,9 @@ fn spawn_phrase_watcher(
                     "url": format!("/#/t/{}", session.id),
                 });
                 let title = format!("{task_name} update");
-                let _ = push.notify_all(&title, &body, data).await;
+                let _ = push
+                    .notify(NotificationKind::AgentTaskNotify, &title, &body, data)
+                    .await;
                 break;
             }
         }

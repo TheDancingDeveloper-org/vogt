@@ -316,7 +316,11 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     }
     if matches!(
         path,
-        "/api/push/subscribe" | "/api/push/unsubscribe" | "/api/push/test"
+        "/api/push/subscribe"
+            | "/api/push/update"
+            | "/api/push/unsubscribe"
+            | "/api/push/test"
+            | "/api/push/flush-digests"
     ) && *method == Method::POST
     {
         return Some(TokenCapability::PushWrite);
@@ -422,6 +426,14 @@ mod tests {
         );
         assert_eq!(
             required_capability(&Method::POST, "/api/push/test"),
+            Some(TokenCapability::PushWrite)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/api/push/update"),
+            Some(TokenCapability::PushWrite)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/api/push/flush-digests"),
             Some(TokenCapability::PushWrite)
         );
         assert_eq!(
