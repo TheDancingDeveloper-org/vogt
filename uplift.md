@@ -31,14 +31,7 @@ backlog.
 
 ## Mobile / Android
 
-1. **Fix Android CI release metadata naming**
-   Pipeline `109` fixed the Forgejo release title (`Latest APK (0.1.0+b81c086)`)
-   and target commit, but the uploaded asset still came through as
-   `mydevenv2-.apk`. The remaining work is in the upload block's asset-name
-   derivation: make the filename deterministic from the computed version string
-   and revalidate the next `mobile-apk` publish end to end.
-
-2. **Real-device native FCM verification**
+1. **Real-device native FCM verification**
    `google-services.json` already includes the `com.sprooty.mydevenv2` client;
    the remaining work is confirming first-launch FCM registration and end-to-end
    delivery on actual Android hardware.
@@ -49,5 +42,4 @@ backlog.
 
 1. Bearer-token risk boundary
 2. MyDevEnv2 npm registry connectivity for nested app builds
-3. Android CI release metadata naming
-4. Real-device native FCM verification
+3. Real-device native FCM verification
