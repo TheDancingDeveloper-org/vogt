@@ -131,6 +131,13 @@ steps:
       - cd mobile
       - sudo npm install -g pnpm@10 >/dev/null
       - pnpm install --frozen-lockfile
+      - |
+        set -eu
+        VERSION_NAME=$(node -p "const pkg = require('./package.json'); const sha = (process.env.CI_COMMIT_SHA || 'local').slice(0, 7); pkg.version + '+' + sha")
+        VERSION_CODE=$(git show -s --format=%ct "$CI_COMMIT_SHA")
+        export MYDEVENV2_ANDROID_VERSION_NAME="$VERSION_NAME"
+        export MYDEVENV2_ANDROID_VERSION_CODE="$VERSION_CODE"
+        echo "Android release version: $MYDEVENV2_ANDROID_VERSION_NAME ($MYDEVENV2_ANDROID_VERSION_CODE)"
       - npx cap sync android
       - cd android && ./gradlew assembleRelease --no-daemon -q && cd ..
       - ls -lh android/app/build/outputs/apk/release/app-release.apk
@@ -144,6 +151,9 @@ steps:
         # upstream of a `| python3` still has a clear pipeline-log error line.
         set -eu
         APK=android/app/build/outputs/apk/release/app-release.apk
+        APK_VERSION_NAME=${MYDEVENV2_ANDROID_VERSION_NAME:-unknown}
+        APK_ASSET_SUFFIX=$(printf '%s' "$APK_VERSION_NAME" | tr '+/' '--')
+        APK_ASSET_NAME="mydevenv2-${APK_ASSET_SUFFIX}.apk"
         REPO=/api/v1/repos/indexarr/MyDevEnv2
 
         # Pull the shared Forgejo API wrapper from ops. Logs status + body on
@@ -165,13 +175,13 @@ steps:
         forgejo-api DELETE "$REPO/tags/apk-latest" --allow 404 >/dev/null
 
         RELEASE_ID=$(forgejo-api POST "$REPO/releases" \
-          --data "{\"tag_name\":\"apk-latest\",\"target_commitish\":\"$CI_COMMIT_SHA\",\"name\":\"Latest APK\",\"prerelease\":true,\"body\":\"Signed release APK — commit $CI_COMMIT_SHA\"}" \
+          --data "{\"tag_name\":\"apk-latest\",\"target_commitish\":\"$CI_COMMIT_SHA\",\"name\":\"Latest APK ($APK_VERSION_NAME)\",\"prerelease\":true,\"body\":\"Signed release APK — version $APK_VERSION_NAME, commit $CI_COMMIT_SHA\"}" \
           | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 
-        forgejo-api POST "$REPO/releases/$RELEASE_ID/assets?name=mydevenv2-release.apk" \
+        forgejo-api POST "$REPO/releases/$RELEASE_ID/assets?name=$APK_ASSET_NAME" \
           --form "attachment=@$APK" >/dev/null
         rm -f "$MYDEVENV2_ANDROID_KEYSTORE_PATH"
-        echo "uploaded $APK to release $RELEASE_ID"
+        echo "uploaded $APK as $APK_ASSET_NAME to release $RELEASE_ID"
     when:
       - event: push
         branch: main

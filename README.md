@@ -97,7 +97,7 @@ client release kept in Forgejo for historical reference.
 - Activity watcher: fires push to all subscriptions when any session enters `waiting-for-input`.
 - Web: `/sw.js` + `/manifest.webmanifest` for PWA install + push event handling. Installed PWAs show an explicit offline fallback page instead of pretending to support disconnected use. Settings modal gains "Enable push" / "Send test" with current-permission visibility.
 - Mobile: `mobile/` Capacitor 8 Android wrap (`com.sprooty.mydevenv2`). WebView loads `https://mydevenv2.sprooty.com` directly so UI updates ship without rebuilding the APK. `@capacitor/push-notifications` registers a native FCM token at first launch; the same `/api/push/subscribe` endpoint accepts both transports.
-- CI: `mobile-apk` builds a signed release APK on pushes handled by `.woodpecker/server.yml` and uploads it to the Forgejo release tag `apk-latest` as `mydevenv2-release.apk`.
+- CI: `mobile-apk` builds a signed release APK on pushes handled by `.woodpecker/server.yml`, derives Android `versionName` / `versionCode` from `mobile/package.json` plus the built commit, and uploads it to the Forgejo release tag `apk-latest` under a versioned asset name.
 
 Phase 7 (Android emulator KVM VM) remains.
 

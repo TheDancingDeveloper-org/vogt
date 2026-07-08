@@ -1,4 +1,46 @@
+import groovy.json.JsonSlurper
+
 apply plugin: 'com.android.application'
+
+int semverVersionCode(String version) {
+    def match = (version ?: '').trim() =~ /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/
+    if (!match.matches()) {
+        throw new GradleException("Unsupported package.json version '${version}'. Expected semver like 0.1.0")
+    }
+
+    int major = match[0][1] as int
+    int minor = match[0][2] as int
+    int patch = match[0][3] as int
+    int code = (major * 1_000_000) + (minor * 1_000) + patch
+    if (code <= 0) {
+        throw new GradleException("Computed Android versionCode '${code}' is invalid for version '${version}'")
+    }
+    return code
+}
+
+int parseVersionCodeOverride(String raw, int fallback) {
+    if (raw == null || raw.trim().isEmpty()) {
+        return fallback
+    }
+
+    try {
+        int code = Integer.parseInt(raw.trim())
+        if (code <= 0) {
+            throw new GradleException("MYDEVENV2_ANDROID_VERSION_CODE must be > 0, got '${raw}'")
+        }
+        return code
+    } catch (NumberFormatException ignored) {
+        throw new GradleException("MYDEVENV2_ANDROID_VERSION_CODE must be an integer, got '${raw}'")
+    }
+}
+
+def mobilePackage = new JsonSlurper().parse(file('../../package.json'))
+def packageVersion = (mobilePackage.version ?: '0.1.0').toString().trim()
+def androidVersionName = (System.getenv('MYDEVENV2_ANDROID_VERSION_NAME') ?: packageVersion).trim()
+def androidVersionCode = parseVersionCodeOverride(
+    System.getenv('MYDEVENV2_ANDROID_VERSION_CODE'),
+    semverVersionCode(packageVersion),
+)
 
 def releaseKeystorePath = System.getenv('MYDEVENV2_ANDROID_KEYSTORE_PATH')
 def releaseKeystorePassword = System.getenv('MYDEVENV2_ANDROID_KEYSTORE_PASSWORD')
@@ -18,8 +60,8 @@ android {
         applicationId "com.sprooty.mydevenv2"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode androidVersionCode
+        versionName androidVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
