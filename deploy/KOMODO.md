@@ -208,3 +208,14 @@ Direct Docker socket access is convenient but high-trust:
 - For personal homelab use that may be acceptable; for broader sharing, keep
   the base socketless stack or interpose a purpose-built socket proxy in front
   of the daemon.
+
+Operational token policy for production browsers:
+
+- Treat `MYDEVENV2_TOKEN` as the admin/recovery token, not the default browser
+  token.
+- Store scoped browser tokens in the PWA Settings modal instead; it persists
+  them only in that device's `localStorage`.
+- Prefer one interactive scoped token for day-to-day browser use and a separate
+  read-only token for lower-trust clients.
+- If a browser needs GUI launch/kill regularly, mint a dedicated scoped token
+  with `gui-control` instead of reusing the primary token.

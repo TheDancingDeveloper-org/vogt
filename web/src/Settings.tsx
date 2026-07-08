@@ -91,6 +91,10 @@ function parseMinuteOfDay(value: string): number {
   return (hours * 60) + minutes;
 }
 
+function normalizeBaseValue(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
 const Settings: Component<Props> = (props) => {
   const [token, setT] = createSignal(getToken());
   const [base, setB] = createSignal(getBase());
@@ -311,6 +315,10 @@ const Settings: Component<Props> = (props) => {
     return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
   };
 
+  const profileMatchesStoredAuth = (profile: AuthProfile) =>
+    profile.token.trim() === getToken().trim()
+    && normalizeBaseValue(profile.base) === normalizeBaseValue(getBase());
+
   const save = () => {
     const savedPrefs = saveStoragePrefs(storagePrefs());
     trimAuthProfiles();
@@ -320,7 +328,7 @@ const Settings: Component<Props> = (props) => {
     trimHistoryPins();
     setStoragePrefsState(savedPrefs);
     const newTok = token().trim();
-    const newBase = base().trim();
+    const newBase = normalizeBaseValue(base());
     const newLayout = layoutMode();
     const tokChanged = newTok !== getToken();
     const baseChanged = newBase !== getBase();
@@ -430,17 +438,24 @@ const Settings: Component<Props> = (props) => {
     saveAuthProfile({
       name,
       token: tok,
-      base: base().trim(),
+      base: normalizeBaseValue(base()),
     });
     refreshAuthProfiles();
     setProfileMsg(`Saved profile "${name}"`);
   };
 
-  const loadProfile = (profile: AuthProfile) => {
+  const editProfile = (profile: AuthProfile) => {
     setProfileName(profile.name);
     setT(profile.token);
     setB(profile.base);
     setProfileMsg(`Loaded profile "${profile.name}" into the form.`);
+  };
+
+  const applyProfile = (profile: AuthProfile) => {
+    setToken(profile.token.trim());
+    setBase(normalizeBaseValue(profile.base));
+    props.onClose();
+    location.reload();
   };
 
   const removeProfile = (id: string, name: string) => {
@@ -554,7 +569,7 @@ const Settings: Component<Props> = (props) => {
         <div class="modal" onClick={(e) => e.stopPropagation()}>
           <h2>Settings</h2>
           <label>
-            Bearer token (MYDEVENV2_TOKEN)
+            Bearer token
             <input
               type="password"
               value={token()}
@@ -569,8 +584,10 @@ const Settings: Component<Props> = (props) => {
                 "margin-top": "3px",
               }}
             >
-              Stored in this browser's localStorage. Anyone with access to this
-              browser profile (or able to run JS in it) can read it.
+              Primary and scoped tokens both work here. For browser use, prefer
+              a scoped token and keep the full primary token out of localStorage
+              unless you need admin-only capabilities. Anyone with access to
+              this browser profile (or able to run JS in it) can read it.
             </div>
           </label>
           <label>
@@ -630,6 +647,18 @@ const Settings: Component<Props> = (props) => {
                       <div style={{ display: "flex", "flex-direction": "column", gap: "4px", "min-width": 0 }}>
                         <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
                           {profile.name}
+                          <Show when={profileMatchesStoredAuth(profile)}>
+                            <span
+                              style={{
+                                "margin-left": "8px",
+                                "font-size": "11px",
+                                color: "var(--accent)",
+                                "font-weight": 500,
+                              }}
+                            >
+                              Active
+                            </span>
+                          </Show>
                         </div>
                         <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
                           {profile.base || "Same-origin backend"}
@@ -639,8 +668,11 @@ const Settings: Component<Props> = (props) => {
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: "8px", "align-items": "center", "flex-wrap": "wrap" }}>
-                        <button type="button" onClick={() => loadProfile(profile)}>
-                          Load
+                        <button type="button" onClick={() => applyProfile(profile)}>
+                          Apply
+                        </button>
+                        <button type="button" onClick={() => editProfile(profile)}>
+                          Edit
                         </button>
                         <button type="button" onClick={() => removeProfile(profile.id, profile.name)}>
                           Delete

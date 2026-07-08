@@ -194,6 +194,18 @@ Pass with `--config mydevenv2.toml`. CLI flags > env > config file.
 to capability gates: `sessions`, `filesystem-write`, `git-write`,
 `gui-control`, `agent-tasks-write`, `push-write`, and `history-write`.
 
+For browser/PWA cutover, the Settings modal supports device-local named auth
+profiles. Save one profile per scoped token and switch the active browser token
+there instead of leaving the primary token in `localStorage`.
+
+Recommended production token policy:
+
+- Keep `MYDEVENV2_TOKEN` as the full-access admin/recovery token.
+- Use a scoped interactive token for normal browser/PWA use.
+- Use a scoped read-only token for passive viewers or lower-trust clients.
+- If regular browser use needs GUI launch/kill, provision a separate scoped
+  token with `gui-control` rather than reusing the primary token.
+
 Runtime/deploy details such as Docker socket access, Komodo overlays, agent
 auth bootstrap, and production health endpoints are intentionally documented in
 `deploy/KOMODO.md` and `TOOLING.md` instead of repeated here.
