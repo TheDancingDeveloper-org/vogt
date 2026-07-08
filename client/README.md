@@ -61,11 +61,15 @@ RootView (sidebar + status)  ──▶ ApiClient (reqwest, rustls)
 | `config`   | Persisted server URL + token |
 | `ui`       | GPUI `RootView` + `TerminalView` (behind the `gui` feature) |
 
-## Build / test
+## Build / test (archival only)
 
 The client depends on the GPUI fork checked out as a sibling repo at
 `../../FluentGUI` from this crate. CI pins that checkout to
 `f601e54b4e58e416bc7495a75468b82af9a10545`.
+
+These commands are retained for archaeology and one-off inspection of the
+archived code. They are not part of the active MyDevEnv2 product validation
+path.
 
 ```bash
 # Core logic only — fast, no GPUI graph:
@@ -102,7 +106,7 @@ The token is sent as `Authorization: Bearer` for HTTP/SSE and as the first
 WebSocket text frame (`{"type":"auth","token":"..."}`) before PTY attach
 snapshot replay begins.
 
-## CI / releases
+## Historical CI / releases
 
 Historical note: the CI/release details below describe the last active native
 client setup. They are no longer current as of July 7, 2026.

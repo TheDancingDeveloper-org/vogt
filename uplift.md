@@ -43,13 +43,6 @@ backlog.
 
 ---
 
-## Product / Codebase Hygiene
-
-1. **Module and product-surface boundary cleanup across server, web, mobile,
-   and deprecated client code**
-
----
-
 ## Suggested Priority
 
 1. Bearer-token risk boundary
@@ -57,4 +50,3 @@ backlog.
 3. Real-device native FCM verification
 4. Live `/readyz` rollout validation
 5. Production stack exit-node cleanup
-6. Module and product-surface boundary cleanup

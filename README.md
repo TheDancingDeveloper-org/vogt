@@ -16,7 +16,6 @@ Use each project doc for one job:
   Source of truth for production stack shape, environment, rollout, and recovery.
 - `uplift.md`
   Only open backlog for remaining uplift work.
-
 - **[INTENT.md](INTENT.md)** — what I'm trying to achieve and why a rewrite
 - **[PLAN.md](PLAN.md)** — architecture, components, build order
 - **[TOOLING.md](TOOLING.md)** — required tools/toolchains for the dev pod (derived from v1 Dockerfile)
@@ -29,16 +28,21 @@ MyDevEnv2 is live at `https://mydevenv2.sprooty.com`. Production stack details,
 health endpoints, Komodo flow, and required environment now live in
 `deploy/KOMODO.md` rather than being duplicated here.
 
-The repository now has four core repo components and three supported product
-surfaces:
+The repository now has four active repo components plus one archived codebase,
+and two supported product surfaces:
 
 - `contract/` — shared Rust wire DTOs used by the server and retained legacy
   native client code.
 - `server/` — Rust/Axum server plus embedded Solid PWA.
 - `web/` — Solid/Vite PWA served by the Rust binary.
 - `mobile/` — Capacitor 8 Android shell that loads the deployed PWA.
-- `client/` — deprecated legacy GPUI desktop client source, retained only as
+- `client/` — archived GPUI desktop client source, retained only as legacy
   reference while the supported product remains the PWA and Android shell.
+
+Supported product surfaces:
+
+- Browser / installable PWA
+- Android Capacitor shell over the same deployed web client
 
 CI is split across `.woodpecker/`:
 
