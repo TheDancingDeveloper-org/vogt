@@ -11,10 +11,11 @@ backlog.
 
 1. **Bearer-token risk boundary** (`server/src/auth.rs`, `deploy/docker-compose.yml`)
    Repo-side audit logging, per-token mutation rate limits, and scoped token
-   capabilities now exist. The remaining work is provisioning real non-admin
-   tokens in production, moving the live clients onto them where appropriate,
-   and deciding whether the primary token should keep full Docker-adjacent
-   access long term.
+   capabilities now exist. Production now has provisioned read-only and
+   interactive scoped tokens, and the live stack is running with
+   `MYDEVENV2_EXTRA_TOKENS_JSON` populated. Remaining work is moving the live
+   clients onto those scoped tokens where appropriate and deciding whether the
+   primary token should keep full Docker-adjacent access long term.
 
 ---
 
