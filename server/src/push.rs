@@ -307,7 +307,9 @@ impl PushManager {
         let mut st = self.state.lock();
         let stored = st.subs.get_mut(id).ok_or(ApiError::NotFound)?;
         if let Some(label) = label {
-            stored.label = label.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+            stored.label = label
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
         }
         if let Some(prefs) = prefs {
             stored.prefs = prefs;
@@ -397,7 +399,8 @@ impl PushManager {
                 .values()
                 .filter_map(|stored| {
                     let digest = stored.pending_digest.clone()?;
-                    (!quiet_hours_active(&stored.prefs.quiet_hours, now)).then_some((stored.clone(), digest))
+                    (!quiet_hours_active(&stored.prefs.quiet_hours, now))
+                        .then_some((stored.clone(), digest))
                 })
                 .collect::<Vec<_>>()
         };
@@ -599,16 +602,10 @@ fn digest_notification_payload(digest: &PendingDigest) -> (String, String, serde
         ));
     }
     if digest.agent_task_started_count > 0 {
-        parts.push(format!(
-            "{} task started",
-            digest.agent_task_started_count
-        ));
+        parts.push(format!("{} task started", digest.agent_task_started_count));
     }
     if digest.agent_task_notify_count > 0 {
-        parts.push(format!(
-            "{} task alert",
-            digest.agent_task_notify_count
-        ));
+        parts.push(format!("{} task alert", digest.agent_task_notify_count));
     }
     let summary = if parts.is_empty() {
         format!("{} queued notifications", digest.total_count)

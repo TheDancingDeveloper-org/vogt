@@ -309,7 +309,10 @@ async fn push_preferences_and_quiet_hour_digest_queue_are_exposed() {
         .json()
         .await
         .unwrap();
-    let entry = list.iter().find(|sub| sub["id"] == id).expect("subscription listed");
+    let entry = list
+        .iter()
+        .find(|sub| sub["id"] == id)
+        .expect("subscription listed");
     assert_eq!(entry["pending_digest_count"], 1);
 
     let flush: Value = client

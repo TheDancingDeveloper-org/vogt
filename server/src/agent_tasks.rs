@@ -397,7 +397,10 @@ impl AgentTaskRegistry {
             return Err(ApiError::NotFound);
         }
         self.save_locked(&tasks)?;
-        remove_path_recursive(&self.task_prompt_dir(id), &mut PromptArtifactRemovalTally::default())?;
+        remove_path_recursive(
+            &self.task_prompt_dir(id),
+            &mut PromptArtifactRemovalTally::default(),
+        )?;
         Ok(true)
     }
 
@@ -472,7 +475,9 @@ impl AgentTaskRegistry {
                     let task = tasks
                         .iter()
                         .find(|task| task.id == task_id)
-                        .ok_or_else(|| ApiError::Internal("task disappeared during cleanup".into()))?;
+                        .ok_or_else(|| {
+                            ApiError::Internal("task disappeared during cleanup".into())
+                        })?;
                     cleanup_task_prompt_dir(&path, task, keep_latest_runs_per_task, &mut tally)?;
                 }
             }
@@ -643,7 +648,12 @@ impl AgentTaskRegistry {
             let body = format!("Tap to open {}", task.name);
             let _ = self
                 .push
-                .notify(NotificationKind::AgentTaskStarted, "Scheduled agent started", &body, data)
+                .notify(
+                    NotificationKind::AgentTaskStarted,
+                    "Scheduled agent started",
+                    &body,
+                    data,
+                )
                 .await;
         }
 

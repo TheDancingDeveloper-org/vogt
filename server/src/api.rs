@@ -184,7 +184,9 @@ pub async fn operational_status(
         fcm_enabled: state.config.fcm_service_account_json.is_some(),
         history: HistoryStatus {
             enabled: history_stats.is_some(),
-            archived_session_count: history_stats.as_ref().map(|stats| stats.archived_session_count),
+            archived_session_count: history_stats
+                .as_ref()
+                .map(|stats| stats.archived_session_count),
             log_file_count: history_stats.as_ref().map(|stats| stats.log_file_count),
             log_bytes: history_stats.as_ref().map(|stats| stats.log_bytes),
             db_bytes: history_stats.as_ref().map(|stats| stats.db_bytes),

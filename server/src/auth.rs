@@ -325,8 +325,7 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     {
         return Some(TokenCapability::PushWrite);
     }
-    if path.starts_with("/api/history/") && (*method == Method::DELETE || *method == Method::POST)
-    {
+    if path.starts_with("/api/history/") && (*method == Method::DELETE || *method == Method::POST) {
         return Some(TokenCapability::HistoryWrite);
     }
     None

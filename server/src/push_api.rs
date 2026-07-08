@@ -35,7 +35,9 @@ pub async fn subscribe(
     Json(req): Json<SubscribeReq>,
 ) -> Result<Json<serde_json::Value>> {
     let stored = state.push.add(req.sub, req.label)?;
-    Ok(Json(json!({ "ok": true, "id": stored.id, "prefs": stored.prefs })))
+    Ok(Json(
+        json!({ "ok": true, "id": stored.id, "prefs": stored.prefs }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,7 +131,12 @@ pub async fn test_dispatch(
         .unwrap_or_else(|| "Push notifications are working.".into());
     let counts = state
         .push
-        .notify(NotificationKind::Test, &title, &body, json!({ "kind": "test" }))
+        .notify(
+            NotificationKind::Test,
+            &title,
+            &body,
+            json!({ "kind": "test" }),
+        )
         .await;
     Json(json!({ "ok": counts.ok, "fail": counts.fail, "queued": counts.queued }))
 }
