@@ -1,6 +1,6 @@
 # MyDevEnv2 — Tooling Baseline
 
-Captured from review of `MyDevEnv/Dockerfile.server` (v1). The pod provides a neutral development baseline for builds under `~/Working/Active/apps/`. Codex and Claude are optional clients and are not installed during container bootstrap.
+Captured from review of `MyDevEnv/Dockerfile.server` (v1). The pod provides a neutral development baseline for builds under `~/Working/Active/apps/`. Codex and Claude are not installed during container bootstrap. The `opencode` CLI is bundled in the image; other AI clients remain user-managed.
 
 This file is the source of truth for what tooling the runtime image is meant to
 carry. Keep deploy shape, Komodo environment, and rollout/recovery steps in
@@ -72,6 +72,8 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
 - `step` (Smallstep CLI — self-issues short-lived SSH certs against the Node B
   step-ca via `step ssh certificate ...`; the only host-shell SSH path for
   in-pod agents)
+- `opencode` (installed via the upstream `https://opencode.ai/install` script,
+  pinned in `Dockerfile`, with the binary under `/home/sprooty/.opencode/bin`)
 
 ## Auth keys / secrets needed at pod startup
 

@@ -37,6 +37,7 @@ ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.0
 ARG ANDROID_PLATFORM_TOOLS_SHA256=198ae156ab285fa555987219af237b31102fefe8b9d2bc274708a8d4f2865a07
 ARG RCLONE_VERSION=1.74.3
 ARG RCLONE_SHA256=dbee7ccd7a5d617e4ed4cd4555c16669b511abfe8d31164f61be35ac9e999bd2
+ARG OPENCODE_VERSION=1.17.16
 
 # ─── Stage 1: web bundle ────────────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS web-build
@@ -76,7 +77,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
     ANDROID_HOME=/opt/android-sdk \
     ANDROID_SDK_ROOT=/opt/android-sdk \
-    PATH=/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/home/sprooty/.cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/home/sprooty/.opencode/bin:/home/sprooty/.cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Core system + dev utilities (per TOOLING.md)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -234,6 +235,7 @@ ARG CARGO_DEB_VERSION
 ARG CARGO_ZIGBUILD_VERSION
 ARG CARGO_XWIN_VERSION
 ARG CARGO_WATCH_VERSION
+ARG OPENCODE_VERSION
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
        | sh -s -- -y --default-toolchain ${RUST_TOOLCHAIN} --profile minimal \
            --component rustfmt --component clippy \
@@ -241,7 +243,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && cargo install --locked "cargo-deb@${CARGO_DEB_VERSION}" \
     && cargo install --locked "cargo-zigbuild@${CARGO_ZIGBUILD_VERSION}" \
     && cargo install --locked "cargo-xwin@${CARGO_XWIN_VERSION}" \
-    && cargo install --locked "cargo-watch@${CARGO_WATCH_VERSION}"
+    && cargo install --locked "cargo-watch@${CARGO_WATCH_VERSION}" \
+    && curl -fsSL https://opencode.ai/install \
+       | bash -s -- --version "${OPENCODE_VERSION}" --no-modify-path
 
 # sccache (apt package lacks Redis support; pull from GitHub)
 ARG SCCACHE_VERSION

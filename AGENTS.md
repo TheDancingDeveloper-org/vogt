@@ -94,7 +94,7 @@ Pipeline non-standard bits:
 
 Runtime container: multi-stage `Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `TOOLING.md` toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server. `TOOLING.md` owns the package/tool inventory; `deploy/KOMODO.md` owns the production compose and overlay details.
 
-Codex and Claude are deliberately not installed by container bootstrap. Optional AI clients are user-managed. Production default-shell sessions are authenticated through `mydevenv2-agent-auth`; explicit-command sessions can invoke the helper directly.
+Codex and Claude are deliberately not installed by container bootstrap. The `opencode` CLI is bundled in the image; other AI clients remain user-managed. Production default-shell sessions are authenticated through `mydevenv2-agent-auth`; explicit-command sessions can invoke the helper directly.
 
 Outstanding before the GUI tab is operational in production: set `START_SWAY=1`, set `GUI_STREAM_URL`, and verify Selkies from inside the pod. The stack itself, auth identity, workspace mount, and Komodo deploy path already exist.
 
