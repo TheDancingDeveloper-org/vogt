@@ -28,6 +28,7 @@ ARG CARGO_DEB_VERSION=3.7.0
 ARG CARGO_ZIGBUILD_VERSION=0.23.0
 ARG CARGO_XWIN_VERSION=0.23.0
 ARG CARGO_WATCH_VERSION=8.5.3
+ARG RUST_ANALYZER_MCP_VERSION=0.2.0
 ARG SCCACHE_SHA256=1fbb35e135660d04a2d5e42b59c7874d39b3deb17de56330b25b713ec59f849b
 ARG STEP_CLI_SHA256=5845c181251ffe43ca2331bc171e0b92324a71be9cf4ef76cd6fbbba4f2a3cc6
 ARG GRADLE_SHA256=7a00d51fb93147819aab76024feece20b6b84e420694101f276be952e08bef03
@@ -235,15 +236,18 @@ ARG CARGO_DEB_VERSION
 ARG CARGO_ZIGBUILD_VERSION
 ARG CARGO_XWIN_VERSION
 ARG CARGO_WATCH_VERSION
+ARG RUST_ANALYZER_MCP_VERSION
 ARG OPENCODE_VERSION
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
        | sh -s -- -y --default-toolchain ${RUST_TOOLCHAIN} --profile minimal \
            --component rustfmt --component clippy \
+    && rustup component add rust-analyzer \
     && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-pc-windows-gnu \
     && cargo install --locked "cargo-deb@${CARGO_DEB_VERSION}" \
     && cargo install --locked "cargo-zigbuild@${CARGO_ZIGBUILD_VERSION}" \
     && cargo install --locked "cargo-xwin@${CARGO_XWIN_VERSION}" \
     && cargo install --locked "cargo-watch@${CARGO_WATCH_VERSION}" \
+    && cargo install --locked "rust-analyzer-mcp@${RUST_ANALYZER_MCP_VERSION}" \
     && curl -fsSL https://opencode.ai/install \
        | bash -s -- --version "${OPENCODE_VERSION}" --no-modify-path
 
@@ -336,10 +340,12 @@ RUN chmod +x /usr/local/bin/mydevenv2-server
 COPY deploy/entrypoint.sh /usr/local/bin/mydevenv2-entrypoint
 COPY deploy/agent-auth.sh /usr/local/bin/mydevenv2-agent-auth
 COPY deploy/git-askpass.sh /usr/local/bin/mydevenv2-git-askpass
+COPY deploy/rust-analyzer-mcp.sh /usr/local/bin/mydevenv2-rust-analyzer-mcp
 RUN chmod +x \
     /usr/local/bin/mydevenv2-entrypoint \
     /usr/local/bin/mydevenv2-agent-auth \
-    /usr/local/bin/mydevenv2-git-askpass
+    /usr/local/bin/mydevenv2-git-askpass \
+    /usr/local/bin/mydevenv2-rust-analyzer-mcp
 
 EXPOSE 8910
 VOLUME ["/home/sprooty/Working"]

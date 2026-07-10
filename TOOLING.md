@@ -28,12 +28,13 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
 ### Rust (primary)
 
 - `rustup` stable channel
-- Components: `rustfmt`, `clippy`
+- Components: `rustfmt`, `clippy`, `rust-analyzer`
 - Cross-compile targets:
   - `x86_64-unknown-linux-musl` (static Linux binaries)
   - `aarch64-unknown-linux-gnu` (ARM Linux)
   - `x86_64-pc-windows-gnu` (Windows cross-compile via mingw)
 - Cargo tools: `cargo-deb`, `cargo-zigbuild`, `cargo-xwin`, `cargo-watch`
+- `rust-analyzer-mcp` for agent-facing Rust LSP access over MCP
 - `sccache` v0.10.0+ from GitHub releases (NOT apt — apt package lacks Redis support)
 - `SCCACHE_REDIS=redis://100.92.54.45:6380` (Node B Redis instance)
 
@@ -74,6 +75,8 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
   in-pod agents)
 - `opencode` (installed via the upstream `https://opencode.ai/install` script,
   pinned in `Dockerfile`, with the binary under `/home/sprooty/.opencode/bin`)
+- `mydevenv2-rust-analyzer-mcp` (wrapper around `rust-analyzer-mcp` that picks
+  the nearest Rust workspace root before starting the MCP server)
 
 ## Auth keys / secrets needed at pod startup
 

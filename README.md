@@ -210,6 +210,30 @@ Runtime/deploy details such as Docker socket access, Komodo overlays, agent
 auth bootstrap, and production health endpoints are intentionally documented in
 `deploy/KOMODO.md` and `TOOLING.md` instead of repeated here.
 
+## Rust LSP for agents
+
+The runtime image now bundles `rust-analyzer`, `rust-analyzer-mcp`, and the
+helper wrapper `mydevenv2-rust-analyzer-mcp`. The wrapper starts the MCP server
+from the nearest parent directory containing a `Cargo.toml`, which keeps
+`rust-analyzer` anchored to the active Rust workspace when Codex or Claude
+launch it from a repo subdirectory.
+
+Codex project/user registration:
+
+```bash
+codex mcp add rust-analyzer -- mydevenv2-rust-analyzer-mcp
+```
+
+Claude Code registration for the current project:
+
+```bash
+claude mcp add --scope project rust-analyzer -- mydevenv2-rust-analyzer-mcp
+```
+
+If a client launches the MCP server from a non-Rust directory, set
+`MYDEVENV2_RUST_ANALYZER_WORKSPACE=/path/to/rust/workspace` for that MCP
+server entry.
+
 ## Smoke test with curl + websocat
 
 ```bash
