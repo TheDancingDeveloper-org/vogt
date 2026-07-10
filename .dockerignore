@@ -21,3 +21,4 @@
 !deploy/agent-auth.sh
 !deploy/entrypoint.sh
 !deploy/git-askpass.sh
+!deploy/rust-analyzer-mcp.sh
