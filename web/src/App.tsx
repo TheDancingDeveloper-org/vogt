@@ -33,7 +33,7 @@ import {
   type TemplateContext,
 } from "./customTemplates";
 import { isBookmarked, toggleBookmark, bookmarks } from "./bookmarks";
-import { api as apiModule } from "./api";
+import { api as apiModule, ApiError, getBase, validateCredentials } from "./api";
 import type { PublicConfig, SessionTemplate } from "./api";
 import { subscribeAuthState } from "./api";
 import {
@@ -198,6 +198,7 @@ const App: Component = () => {
       stopEventStream();
       window.location.reload();
     });
+    onCleanup(unsubscribeAuthState);
     apiModule
       .publicConfig()
       .then((c) => setPublicCfg(c))
@@ -209,12 +210,25 @@ const App: Component = () => {
       setSettingsOpen(true);
       return;
     }
-    void refreshSessions();
-    startEventStream();
-
-    onCleanup(() => {
-      unsubscribeAuthState();
-    });
+    void (async () => {
+      try {
+        await validateCredentials(getToken(), getBase());
+        await refreshSessions();
+        startEventStream();
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) {
+          setSettingsOpen(true);
+          showToast("Saved token was rejected. Enter and validate the current token.", {
+            kind: "error",
+          });
+          return;
+        }
+        showToast(
+          `Could not connect to MyDevEnv2: ${error instanceof Error ? error.message : String(error)}`,
+          { kind: "error" },
+        );
+      }
+    })();
   });
 
   onCleanup(() => {

@@ -2,10 +2,12 @@ import { Component, Show, For, createEffect, createSignal, onMount } from "solid
 import {
   api,
   clearStoredAuth,
+  ApiError,
   getBase,
   getToken,
   setBase,
   setToken,
+  validateCredentials,
   type OperationalStatus,
   type PushPreferences,
   type PushSubscriptionEntry,
@@ -98,6 +100,11 @@ function normalizeBaseValue(value: string): string {
 const Settings: Component<Props> = (props) => {
   const [token, setT] = createSignal(getToken());
   const [base, setB] = createSignal(getBase());
+  const [showToken, setShowToken] = createSignal(false);
+  const [authCheck, setAuthCheck] = createSignal<
+    "idle" | "checking" | "valid" | "invalid"
+  >("idle");
+  const [authCheckMsg, setAuthCheckMsg] = createSignal<string | null>(null);
   const [layoutMode, setL] = createSignal<LayoutMode>(getLayoutMode());
   const [pushOn, setPushOn] = createSignal(false);
   const [pushPerm, setPushPerm] = createSignal<PushPermissionState>("default");
@@ -282,6 +289,9 @@ const Settings: Component<Props> = (props) => {
     if (!props.open) return;
     setT(getToken());
     setB(getBase());
+    setShowToken(false);
+    setAuthCheck("idle");
+    setAuthCheckMsg(null);
     setL(getLayoutMode());
     setTerminalTheme(getThemeName());
     setStoragePrefsState(getStoragePrefs());
@@ -297,6 +307,7 @@ const Settings: Component<Props> = (props) => {
     }
     void refreshOperationalState();
     void refreshBrowserStorage();
+    if (getToken()) void validateAuth();
   });
 
   const formatDate = (value: string) => {
@@ -319,7 +330,47 @@ const Settings: Component<Props> = (props) => {
     profile.token.trim() === getToken().trim()
     && normalizeBaseValue(profile.base) === normalizeBaseValue(getBase());
 
-  const save = () => {
+  const authFailureMessage = (error: unknown): string => {
+    if (error instanceof ApiError && error.status === 401) {
+      return "Token rejected (401). Check that you copied the current MyDevEnv2 token exactly.";
+    }
+    if (error instanceof ApiError && error.status === 403) {
+      return "Token accepted, but it does not have permission to access this app (403).";
+    }
+    if (error instanceof ApiError) {
+      return `Server rejected the validation request (HTTP ${error.status}).`;
+    }
+    return `Could not reach the backend: ${error instanceof Error ? error.message : String(error)}`;
+  };
+
+  const validateAuth = async (
+    candidateToken = token().trim(),
+    candidateBase = normalizeBaseValue(base()),
+  ): Promise<boolean> => {
+    setAuthCheck("checking");
+    setAuthCheckMsg("Checking token with the backend…");
+    try {
+      const status = await validateCredentials(candidateToken, candidateBase);
+      // Ignore a stale success if the user edited the fields while the request ran.
+      if (
+        candidateToken !== token().trim()
+        || candidateBase !== normalizeBaseValue(base())
+      ) {
+        setAuthCheck("idle");
+        setAuthCheckMsg("Credentials changed; validate again.");
+        return false;
+      }
+      setAuthCheck("valid");
+      setAuthCheckMsg(`Authenticated successfully with MyDevEnv2 ${status.version}.`);
+      return true;
+    } catch (error) {
+      setAuthCheck("invalid");
+      setAuthCheckMsg(authFailureMessage(error));
+      return false;
+    }
+  };
+
+  const save = async () => {
     const savedPrefs = saveStoragePrefs(storagePrefs());
     trimAuthProfiles();
     trimWorkspaceLayouts();
@@ -333,6 +384,8 @@ const Settings: Component<Props> = (props) => {
     const tokChanged = newTok !== getToken();
     const baseChanged = newBase !== getBase();
     const layoutChanged = newLayout !== getLayoutMode();
+
+    if (!(await validateAuth(newTok, newBase))) return;
 
     setToken(newTok);
     setBase(newBase);
@@ -451,7 +504,13 @@ const Settings: Component<Props> = (props) => {
     setProfileMsg(`Loaded profile "${profile.name}" into the form.`);
   };
 
-  const applyProfile = (profile: AuthProfile) => {
+  const applyProfile = async (profile: AuthProfile) => {
+    setT(profile.token);
+    setB(profile.base);
+    if (!(await validateAuth(profile.token.trim(), normalizeBaseValue(profile.base)))) {
+      setProfileMsg(`Profile "${profile.name}" was not applied because validation failed.`);
+      return;
+    }
     setToken(profile.token.trim());
     setBase(normalizeBaseValue(profile.base));
     props.onClose();
@@ -571,12 +630,26 @@ const Settings: Component<Props> = (props) => {
           <label>
             Bearer token
             <input
-              type="password"
+              type={showToken() ? "text" : "password"}
               value={token()}
-              onInput={(e) => setT(e.currentTarget.value)}
+              onInput={(e) => {
+                setT(e.currentTarget.value);
+                setAuthCheck("idle");
+                setAuthCheckMsg("Token changed; validate before saving.");
+              }}
               autocomplete="off"
               spellcheck={false}
             />
+            <label
+              style={{ display: "flex", "align-items": "center", gap: "6px", "margin-top": "6px" }}
+            >
+              <input
+                type="checkbox"
+                checked={showToken()}
+                onChange={(e) => setShowToken(e.currentTarget.checked)}
+              />
+              Show token
+            </label>
             <div
               style={{
                 "font-size": "11px",
@@ -595,12 +668,40 @@ const Settings: Component<Props> = (props) => {
             <input
               type="text"
               value={base()}
-              onInput={(e) => setB(e.currentTarget.value)}
+              onInput={(e) => {
+                setB(e.currentTarget.value);
+                setAuthCheck("idle");
+                setAuthCheckMsg("Backend changed; validate before saving.");
+              }}
               placeholder="https://mydevenv2.sprooty.com"
               autocomplete="off"
               spellcheck={false}
             />
           </label>
+          <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+            <button
+              type="button"
+              disabled={authCheck() === "checking" || !token().trim()}
+              onClick={() => void validateAuth()}
+            >
+              {authCheck() === "checking" ? "Validating…" : "Validate token"}
+            </button>
+            <Show when={authCheckMsg()}>
+              <div
+                role="status"
+                style={{
+                  "font-size": "12px",
+                  color: authCheck() === "valid"
+                    ? "#3fb950"
+                    : authCheck() === "invalid"
+                      ? "#ff7b72"
+                      : "var(--fg-muted)",
+                }}
+              >
+                {authCheckMsg()}
+              </div>
+            </Show>
+          </div>
           <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
               Device-local profiles
@@ -668,7 +769,7 @@ const Settings: Component<Props> = (props) => {
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: "8px", "align-items": "center", "flex-wrap": "wrap" }}>
-                        <button type="button" onClick={() => applyProfile(profile)}>
+                        <button type="button" onClick={() => void applyProfile(profile)}>
                           Apply
                         </button>
                         <button type="button" onClick={() => editProfile(profile)}>
@@ -1326,7 +1427,12 @@ const Settings: Component<Props> = (props) => {
 
           <div class="modal-actions">
             <button onClick={props.onClose}>Cancel</button>
-            <button onClick={save}>Save & reload</button>
+            <button
+              onClick={() => void save()}
+              disabled={authCheck() === "checking" || !token().trim()}
+            >
+              Validate, save & reload
+            </button>
           </div>
         </div>
       </div>

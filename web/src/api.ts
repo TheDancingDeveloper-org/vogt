@@ -182,6 +182,30 @@ async function req<T>(
   return text ? (JSON.parse(text) as T) : (undefined as T);
 }
 
+/**
+ * Test credentials without changing the active browser session. This is used
+ * by Settings so a bad token or backend URL is never persisted optimistically.
+ */
+export async function validateCredentials(
+  token: string,
+  base: string,
+): Promise<OperationalStatus> {
+  const candidateToken = token.trim();
+  const candidateBase = base.trim().replace(/\/+$/, "");
+  if (!candidateToken) throw new ApiError(401, "Bearer token is required");
+
+  const res = await fetch(`${candidateBase}/api/status`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${candidateToken}`,
+      Accept: "application/json",
+    },
+  });
+  const text = await res.text();
+  if (!res.ok) throw new ApiError(res.status, text);
+  return JSON.parse(text) as OperationalStatus;
+}
+
 export interface FileEntry {
   name: string;
   path: string;
