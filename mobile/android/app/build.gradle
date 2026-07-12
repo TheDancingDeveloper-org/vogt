@@ -84,9 +84,14 @@ android {
             if (hasReleaseSigning) {
                 signingConfig signingConfigs.release
             }
-            minifyEnabled true
-            shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Capacitor discovers and invokes parts of its bridge and plugin surface
+            // dynamically. R8's optimizing pass merged BridgeActivity into our
+            // MainActivity in the published APK, which made the release build exit
+            // during startup on a real device. Keep release builds unoptimized until
+            // the complete native launch path is covered on-device.
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
 }
