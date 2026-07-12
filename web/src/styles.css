@@ -854,6 +854,12 @@ textarea {
   padding: 16px;
   width: 100%;
   max-width: 420px;
+  max-height: calc(var(--app-height) - var(--safe-top) - var(--safe-bottom) - 32px);
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
   gap: 12px;
