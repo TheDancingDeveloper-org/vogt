@@ -48,7 +48,7 @@ clone:
 
 steps:
   - name: fmt
-    image: rust:1.95-bookworm
+    image: rust:1.97-bookworm
     environment:
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: "redis://100.92.54.45:6380"
@@ -64,7 +64,7 @@ steps:
       - cargo fmt --all -- --check
 
   - name: clippy
-    image: rust:1.95-bookworm
+    image: rust:1.97-bookworm
     environment:
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: "redis://100.92.54.45:6380"
@@ -81,7 +81,7 @@ steps:
       - cargo clippy --all-targets -- -D warnings
 
   - name: test
-    image: rust:1.95-bookworm
+    image: rust:1.97-bookworm
     environment:
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: "redis://100.92.54.45:6380"

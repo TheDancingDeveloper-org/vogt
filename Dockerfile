@@ -13,11 +13,11 @@
 # test on the target periphery. Out-of-band pins also live in the woodpecker
 # pipeline so CI builds bit-identical artefacts.
 ARG NODE_IMAGE=node:22-bookworm
-ARG RUST_IMAGE=rust:1.95-bookworm
+ARG RUST_IMAGE=rust:1.97-bookworm
 ARG PNPM_VERSION=10.18.0
 ARG SCCACHE_VERSION=0.10.0
 ARG SELKIES_VERSION=1.6.1
-ARG RUST_TOOLCHAIN=1.95.0
+ARG RUST_TOOLCHAIN=1.97.0
 ARG NODEJS_APT_VERSION=22.23.1-1nodesource1
 ARG DOCKER_CE_CLI_APT_VERSION=5:29.6.1-1~ubuntu.26.04~resolute
 ARG DOCKER_COMPOSE_PLUGIN_APT_VERSION=5.3.1-1~ubuntu.26.04~resolute
