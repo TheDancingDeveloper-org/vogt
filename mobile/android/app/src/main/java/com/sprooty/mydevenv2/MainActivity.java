@@ -37,6 +37,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void publishInsetCssVars(WebView webView, Insets bars) {
+        float density = webView.getResources().getDisplayMetrics().density;
         String script = String.format(
             "(() => {" +
                 "const d = document.documentElement.dataset;" +
@@ -46,10 +47,10 @@ public class MainActivity extends BridgeActivity {
                 "d.nativeInsetLeft='%d';" +
                 "window.dispatchEvent(new CustomEvent('mydevenv2:native-insets'));" +
             "})()",
-            bars.top,
-            bars.right,
-            bars.bottom,
-            bars.left
+            NativeInsets.toCssPixels(bars.top, density),
+            NativeInsets.toCssPixels(bars.right, density),
+            NativeInsets.toCssPixels(bars.bottom, density),
+            NativeInsets.toCssPixels(bars.left, density)
         );
         webView.post(() -> webView.evaluateJavascript(script, null));
     }
