@@ -102,6 +102,7 @@ async fn run_attach(
     // 1. Auth must be the first frame.
     let auth = ClientControl::Auth {
         token: token.to_string(),
+        resume_from: None,
     }
     .to_json();
     sink.send(Message::Text(auth))

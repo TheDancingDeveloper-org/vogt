@@ -200,8 +200,16 @@ pub struct BranchInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ClientControl {
-    Auth { token: String },
-    Resize { cols: u16, rows: u16 },
+    Auth {
+        token: String,
+        /// Absolute PTY output position already rendered by the client.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_from: Option<u64>,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     Ping,
 }
 
@@ -221,6 +229,10 @@ pub enum ServerControl {
         scrollback_bytes: u64,
         #[serde(default)]
         scrollback_pos: u64,
+        /// Whether the client must discard its current terminal buffer before
+        /// applying this snapshot. False means the payload is a resume delta.
+        #[serde(default = "default_true")]
+        reset: bool,
     },
     SnapshotDone,
     Lag {
@@ -262,6 +274,7 @@ mod tests {
     fn auth_control_frame_shape() {
         let f = ClientControl::Auth {
             token: "secret".into(),
+            resume_from: None,
         };
         assert_eq!(f.to_json(), r#"{"type":"auth","token":"secret"}"#);
     }
@@ -279,7 +292,14 @@ mod tests {
     fn parses_server_snapshot_start() {
         let raw = r#"{"type":"snapshot-start","session_id":"00000000-0000-0000-0000-000000000000","scrollback_bytes":10,"scrollback_pos":42}"#;
         match serde_json::from_str::<ServerControl>(raw).unwrap() {
-            ServerControl::SnapshotStart { scrollback_pos, .. } => assert_eq!(scrollback_pos, 42),
+            ServerControl::SnapshotStart {
+                scrollback_pos,
+                reset,
+                ..
+            } => {
+                assert_eq!(scrollback_pos, 42);
+                assert!(reset);
+            }
             other => panic!("wrong variant: {other:?}"),
         }
     }

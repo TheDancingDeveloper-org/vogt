@@ -709,7 +709,7 @@ export function subscribeEvents(
  * can't set Authorization on a WS handshake, and we don't want the token
  * leaking into proxy/access logs via the query string.
  */
-export function openAttach(id: string): WebSocket {
+export function openAttach(id: string, resumeFrom?: number): WebSocket {
   const base = getBase() || `${location.protocol}//${location.host}`;
   const wsBase = base.replace(/^http/, "ws");
   const ws = new WebSocket(`${wsBase}/api/sessions/${id}/attach`);
@@ -718,7 +718,11 @@ export function openAttach(id: string): WebSocket {
   ws.addEventListener(
     "open",
     () => {
-      ws.send(JSON.stringify({ type: "auth", token: tok }));
+      ws.send(JSON.stringify({
+        type: "auth",
+        token: tok,
+        ...(resumeFrom === undefined ? {} : { resume_from: resumeFrom }),
+      }));
     },
     { once: true },
   );

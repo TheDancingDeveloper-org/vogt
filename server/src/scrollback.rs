@@ -44,6 +44,17 @@ impl Scrollback {
         Bytes::copy_from_slice(&self.buf)
     }
 
+    /// Return bytes written after `position` if that absolute cursor is still
+    /// represented by the ring buffer.
+    pub fn snapshot_since(&self, position: u64) -> Option<Bytes> {
+        let retained_start = self.total_written.saturating_sub(self.buf.len() as u64);
+        if position < retained_start || position > self.total_written {
+            return None;
+        }
+        let offset = usize::try_from(position - retained_start).ok()?;
+        Some(Bytes::copy_from_slice(&self.buf[offset..]))
+    }
+
     pub fn len(&self) -> usize {
         self.buf.len()
     }
@@ -102,5 +113,17 @@ mod tests {
         sb.push(b"the quick brown fox");
         assert_eq!(sb.tail(3), b"fox");
         assert_eq!(sb.tail(100), b"the quick brown fox");
+    }
+
+    #[test]
+    fn snapshots_only_bytes_after_a_retained_cursor() {
+        let mut sb = Scrollback::new(8);
+        sb.push(b"abcdefgh");
+        sb.push(b"ij");
+
+        assert_eq!(sb.snapshot_since(6).as_deref(), Some(&b"ghij"[..]));
+        assert_eq!(sb.snapshot_since(10).as_deref(), Some(&b""[..]));
+        assert!(sb.snapshot_since(1).is_none());
+        assert!(sb.snapshot_since(11).is_none());
     }
 }

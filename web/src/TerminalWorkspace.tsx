@@ -17,6 +17,10 @@ import {
   killSession,
   sessionsStore,
 } from "./store";
+import {
+  formatTerminalInputLimit,
+  terminalInputTooLarge,
+} from "./terminalInput";
 
 type SplitDirection = "row" | "column";
 
@@ -345,6 +349,12 @@ const TerminalWorkspace: Component<Props> = (props) => {
   const sendDraft = (submit: boolean) => {
     const text = draft();
     if (!text && !submit) return;
+    if (text && terminalInputTooLarge(text)) {
+      const message = `Input not sent: the terminal limit is ${formatTerminalInputLimit()}. Shorten it or move the content through a file.`;
+      setError(message);
+      props.onError?.(message);
+      return;
+    }
     if (text) sendToActive(text);
     if (submit) sendToActive("\r");
     setDraft("");

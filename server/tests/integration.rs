@@ -1315,11 +1315,25 @@ async fn ws_attach_with_token(
     id: &str,
     token: &str,
 ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    ws_attach_with_token_and_cursor(base, id, token, None).await
+}
+
+async fn ws_attach_with_token_and_cursor(
+    base: &str,
+    id: &str,
+    token: &str,
+    resume_from: Option<u64>,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let ws_url = base.replace("http://", "ws://");
     let url = format!("{ws_url}/api/sessions/{id}/attach");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(url).await.unwrap();
     // First-frame auth (the legacy ?token= path still works but is deprecated).
-    let auth = serde_json::json!({"type": "auth", "token": token}).to_string();
+    let auth = serde_json::json!({
+        "type": "auth",
+        "token": token,
+        "resume_from": resume_from,
+    })
+    .to_string();
     ws.send(Message::Text(auth.into())).await.unwrap();
     ws
 }
@@ -1421,6 +1435,150 @@ async fn ws_attach_echoes_input_and_replays_on_reattach() {
             .any(|w| w == b"hello-mydevenv"),
         "scrollback replay missing previous output; got {:?}",
         String::from_utf8_lossy(&accumulated)
+    );
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn ws_reattach_replays_only_output_after_a_valid_cursor() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "resume",
+            "command": ["/bin/sh", "-c", "stty -echo; exec /bin/cat"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut ws = ws_attach(&base, &id).await;
+    while let Some(Ok(message)) = ws.next().await {
+        if let Message::Text(text) = message {
+            if serde_json::from_str::<Value>(&text).unwrap()["type"] == "snapshot-done" {
+                break;
+            }
+        }
+    }
+    ws.send(Message::Binary(b"before-cursor\n".to_vec().into()))
+        .await
+        .unwrap();
+    let _ = collect_binary_until(&mut ws, b"before-cursor", Duration::from_secs(2)).await;
+
+    let detail: Value = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let cursor = detail["scrollback_pos"].as_u64().unwrap();
+
+    ws.send(Message::Binary(b"after-cursor\n".to_vec().into()))
+        .await
+        .unwrap();
+    let _ = collect_binary_until(&mut ws, b"after-cursor", Duration::from_secs(2)).await;
+    ws.close(None).await.ok();
+
+    let mut resumed = ws_attach_with_token_and_cursor(&base, &id, TEST_TOKEN, Some(cursor)).await;
+    let start = resumed.next().await.unwrap().unwrap();
+    let start = match start {
+        Message::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
+        other => panic!("expected snapshot-start, got {other:?}"),
+    };
+    assert_eq!(start["type"], "snapshot-start");
+    assert_eq!(start["reset"], false);
+
+    let mut delta = Vec::new();
+    loop {
+        match resumed.next().await.unwrap().unwrap() {
+            Message::Binary(bytes) => delta.extend_from_slice(&bytes),
+            Message::Text(text)
+                if serde_json::from_str::<Value>(&text).unwrap()["type"] == "snapshot-done" =>
+            {
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(delta
+        .windows(b"after-cursor".len())
+        .any(|w| w == b"after-cursor"));
+    assert!(!delta
+        .windows(b"before-cursor".len())
+        .any(|w| w == b"before-cursor"));
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn ws_rejects_oversized_input_without_closing_the_session() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "bounded-input",
+            "command": ["/bin/sh", "-c", "stty -echo; exec /bin/cat"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut ws = ws_attach(&base, &id).await;
+    while let Some(Ok(message)) = ws.next().await {
+        if let Message::Text(text) = message {
+            if serde_json::from_str::<Value>(&text).unwrap()["type"] == "snapshot-done" {
+                break;
+            }
+        }
+    }
+
+    ws.send(Message::Binary(vec![b'x'; 64 * 1024 + 1].into()))
+        .await
+        .unwrap();
+    ws.send(Message::Binary(b"still-responsive\n".to_vec().into()))
+        .await
+        .unwrap();
+    let output = collect_binary_until(&mut ws, b"still-responsive", Duration::from_secs(2)).await;
+    assert!(
+        output
+            .windows(b"still-responsive".len())
+            .any(|window| window == b"still-responsive"),
+        "normal input was not accepted after oversized frame"
+    );
+    assert!(
+        !output
+            .windows(128)
+            .any(|window| window.iter().all(|byte| *byte == b'x')),
+        "oversized input reached the PTY"
     );
 
     let _ = client

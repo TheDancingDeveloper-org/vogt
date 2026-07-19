@@ -29,6 +29,10 @@ pub struct AttachQuery {
 /// avoids spikes in browser memory while the buffer parses.
 const SNAPSHOT_CHUNK: usize = 64 * 1024;
 
+/// Maximum input accepted in one frame. This prevents an accidental clipboard
+/// dump from becoming a multi-megabyte editable command line inside the PTY.
+const MAX_INPUT_BYTES: usize = 64 * 1024;
+
 /// How long a freshly-upgraded socket has to send `{"type":"auth",...}` before
 /// we drop it. Keeps unauth clients from hanging on to a socket indefinitely.
 const AUTH_DEADLINE: Duration = Duration::from_secs(5);
@@ -66,10 +70,10 @@ async fn authenticate(
     socket: &mut WebSocket,
     state: &Arc<AppState>,
     legacy_token: Option<&str>,
-) -> Option<()> {
+) -> Option<Option<u64>> {
     if let Some(tok) = legacy_token {
         if token_ok(state, tok) {
-            return Some(());
+            return Some(None);
         }
     }
 
@@ -98,7 +102,7 @@ async fn authenticate(
         }
     };
     match parsed {
-        ClientControl::Auth { token } if token_ok(state, &token) => Some(()),
+        ClientControl::Auth { token, resume_from } if token_ok(state, &token) => Some(resume_from),
         _ => {
             close_with(socket, 4401, "unauthorized").await;
             None
@@ -112,12 +116,9 @@ async fn handle_socket(
     id: Uuid,
     legacy_token: Option<String>,
 ) {
-    if authenticate(&mut socket, &state, legacy_token.as_deref())
-        .await
-        .is_none()
-    {
+    let Some(resume_from) = authenticate(&mut socket, &state, legacy_token.as_deref()).await else {
         return;
-    }
+    };
 
     let session = match state.sessions.get(id) {
         Ok(s) => s,
@@ -131,13 +132,14 @@ async fn handle_socket(
 
     // Subscribe BEFORE snapshotting so no broadcast chunks are missed in the gap.
     let mut rx = session.subscribe();
-    let (snapshot, snap_pos) = session.snapshot();
+    let (snapshot, snap_pos, reset) = session.snapshot_for_attach(resume_from);
 
     // Send a meta JSON header so clients know the session ID and current pos.
     let meta = ServerControl::SnapshotStart {
         session_id: Some(session.id),
         scrollback_bytes: snapshot.len() as u64,
         scrollback_pos: snap_pos,
+        reset,
     };
     if sink
         .send(Message::Text(serde_json::to_string(&meta).unwrap().into()))
@@ -176,6 +178,9 @@ async fn handle_socket(
             let Ok(msg) = msg else { break };
             match msg {
                 Message::Binary(data) => {
+                    if data.len() > MAX_INPUT_BYTES {
+                        continue;
+                    }
                     if writer_session.write_input(&data).is_err() {
                         break;
                     }
@@ -192,6 +197,9 @@ async fn handle_socket(
                         }
                         Err(_) => {
                             // Plain-text input (some tools send text frames).
+                            if s.len() > MAX_INPUT_BYTES {
+                                continue;
+                            }
                             if writer_session.write_input(s.as_bytes()).is_err() {
                                 break;
                             }

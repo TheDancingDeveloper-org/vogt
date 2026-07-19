@@ -58,7 +58,8 @@ native desktop client remains deprecated legacy code.
 
 The attach sequence is ordered:
 
-1. client sends auth control frame
+1. client sends auth control frame, optionally with its last applied cursor:
+   `{"type":"auth","token":"...","resume_from":123}`
 2. server sends `snapshot-start`
 3. server sends zero or more binary scrollback chunks
 4. server sends `snapshot-done`
@@ -74,10 +75,14 @@ Client text control frames:
 Server text control frames:
 
 ```json
-{"type":"snapshot-start","session_id":"uuid","scrollback_bytes":0,"scrollback_pos":0}
+{"type":"snapshot-start","session_id":"uuid","scrollback_bytes":0,"scrollback_pos":0,"reset":true}
 {"type":"snapshot-done"}
 {"type":"lag","note":"client too slow; reattach"}
 ```
+
+When `resume_from` is still retained, `snapshot-start.reset` is false and the
+binary snapshot contains only newer bytes. Otherwise the server returns a full
+snapshot with `reset` true.
 
 ## Response conventions
 

@@ -7,6 +7,15 @@ import { openAttach } from "./api";
 import { readClipboardText, writeClipboardText } from "./clipboard";
 import { sessionsStore } from "./store";
 import { getTheme, TERMINAL_THEME_EVENT } from "./terminalThemes";
+import {
+  formatTerminalInputLimit,
+  terminalInputTooLarge,
+} from "./terminalInput";
+import {
+  loadTerminalCache,
+  MAX_TERMINAL_CACHE_BYTES,
+  saveTerminalCache,
+} from "./terminalCache";
 
 const DEFAULT_FONT_SIZE = 13;
 const MIN_FONT_SIZE = 9;
@@ -92,6 +101,12 @@ const TerminalView: Component<Props> = (props) => {
   let fit: FitAddon | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let inSnapshot = true;
+  let outputPosition: number | undefined;
+  let snapshotEndPosition: number | undefined;
+  let cacheChunks: Uint8Array[] = [];
+  let cacheBytes = 0;
+  let cacheTimer: ReturnType<typeof setTimeout> | null = null;
+  let readyToConnect = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let fitFrame: number | null = null;
   let reconnectDelay = 500;
@@ -129,6 +144,13 @@ const TerminalView: Component<Props> = (props) => {
   };
 
   const sendToPty = (data: string | ArrayBuffer) => {
+    if (terminalInputTooLarge(data)) {
+      props.onNotify?.(
+        `Paste not sent: terminal input is limited to ${formatTerminalInputLimit()}. Use a file upload or split it into smaller chunks.`,
+        "error",
+      );
+      return;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
       if (typeof data === "string") {
         ws.send(new TextEncoder().encode(data));
@@ -136,6 +158,48 @@ const TerminalView: Component<Props> = (props) => {
         ws.send(data);
       }
     }
+  };
+
+  const appendToCache = (data: Uint8Array) => {
+    if (data.byteLength === 0) return;
+    cacheChunks.push(data.slice());
+    cacheBytes += data.byteLength;
+    while (cacheBytes > MAX_TERMINAL_CACHE_BYTES && cacheChunks.length > 0) {
+      const first = cacheChunks[0];
+      if (!first) break;
+      const overflow = cacheBytes - MAX_TERMINAL_CACHE_BYTES;
+      if (first.byteLength <= overflow) {
+        cacheChunks.shift();
+        cacheBytes -= first.byteLength;
+      } else {
+        cacheChunks[0] = first.slice(overflow);
+        cacheBytes -= overflow;
+      }
+    }
+  };
+
+  const cachedBytes = (): Uint8Array => {
+    const combined = new Uint8Array(cacheBytes);
+    let offset = 0;
+    for (const chunk of cacheChunks) {
+      combined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    cacheChunks = combined.byteLength > 0 ? [combined] : [];
+    return combined;
+  };
+
+  const persistCache = () => {
+    if (outputPosition === undefined) return;
+    void saveTerminalCache(props.sessionId, outputPosition, cachedBytes());
+  };
+
+  const scheduleCachePersist = () => {
+    if (cacheTimer !== null) return;
+    cacheTimer = setTimeout(() => {
+      cacheTimer = null;
+      persistCache();
+    }, 1_000);
   };
 
   const dispatchInput = (data: string | ArrayBuffer) => {
@@ -534,6 +598,9 @@ const TerminalView: Component<Props> = (props) => {
     // Reconnect immediately when the page becomes visible again.
     visibilityHandler = () => {
       if (document.visibilityState !== "visible") return;
+      scheduleFit();
+      term?.scrollToBottom();
+      if (!readyToConnect) return;
       if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
         if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         reconnectDelay = 500;
@@ -542,7 +609,25 @@ const TerminalView: Component<Props> = (props) => {
     };
     document.addEventListener("visibilitychange", visibilityHandler);
 
-    connect();
+    void loadTerminalCache(props.sessionId).then((cached) => {
+      if (destroyed) return;
+      if (!cached || cached.data.byteLength === 0) {
+        readyToConnect = true;
+        connect();
+        return;
+      }
+      const bytes = new Uint8Array(cached.data);
+      cacheChunks = [bytes];
+      cacheBytes = bytes.byteLength;
+      setStatusText("Restoring terminal...");
+      term?.write(bytes, () => {
+        if (destroyed) return;
+        outputPosition = cached.outputPosition;
+        term?.scrollToBottom();
+        readyToConnect = true;
+        connect();
+      });
+    });
 
     onCleanup(() => {
       cleanupTouchGestures();
@@ -576,7 +661,7 @@ const TerminalView: Component<Props> = (props) => {
     if (isSessionGone()) { markSessionGone(); return; }
     inSnapshot = true;
     setStatusText("Loading terminal...");
-    ws = openAttach(props.sessionId);
+    ws = openAttach(props.sessionId, outputPosition);
     ws.addEventListener("open", () => {
       reconnectDelay = 500;
       sendResize();
@@ -585,17 +670,37 @@ const TerminalView: Component<Props> = (props) => {
       if (typeof ev.data === "string") {
         try {
           const ctrl = JSON.parse(ev.data) as
-            | { type: "snapshot-start" }
+            | {
+                type: "snapshot-start";
+                scrollback_bytes?: number;
+                scrollback_pos?: number;
+                reset?: boolean;
+              }
             | { type: "snapshot-done" }
             | { type: "lag"; note?: string };
           if (ctrl.type === "snapshot-start") {
-            term?.reset();
+            if (ctrl.reset !== false) {
+              term?.reset();
+              cacheChunks = [];
+              cacheBytes = 0;
+            }
+            if (typeof ctrl.scrollback_pos === "number") {
+              snapshotEndPosition = ctrl.scrollback_pos;
+              outputPosition = Math.max(
+                0,
+                ctrl.scrollback_pos - (ctrl.scrollback_bytes ?? 0),
+              );
+            }
             inSnapshot = true;
             setStatusText("Loading terminal...");
           } else if (ctrl.type === "snapshot-done") {
             inSnapshot = false;
+            outputPosition = snapshotEndPosition ?? outputPosition;
+            snapshotEndPosition = undefined;
             setStatusText(null);
             sendResize();
+            term?.write("", () => term?.scrollToBottom());
+            persistCache();
           } else if (ctrl.type === "lag") {
             term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
             setStatusText("Reattaching terminal...");
@@ -611,6 +716,9 @@ const TerminalView: Component<Props> = (props) => {
         return;
       }
       const buf = new Uint8Array(ev.data as ArrayBuffer);
+      outputPosition = (outputPosition ?? 0) + buf.byteLength;
+      appendToCache(buf);
+      if (!inSnapshot) scheduleCachePersist();
       term?.write(buf);
     });
     ws.addEventListener("close", () => {
@@ -628,6 +736,8 @@ const TerminalView: Component<Props> = (props) => {
   onCleanup(() => {
     destroyed = true;
     if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (cacheTimer !== null) { clearTimeout(cacheTimer); cacheTimer = null; }
+    persistCache();
     if (fitFrame !== null) {
       cancelAnimationFrame(fitFrame);
       fitFrame = null;

@@ -253,8 +253,8 @@ curl -s -H "Authorization: Bearer $TOKEN" $BASE/api/sessions | jq
 
 # Attach over WebSocket. The first frame must authenticate:
 websocat "ws://127.0.0.1:8910/api/sessions/$ID/attach"
-# First paste:
-#   {"type":"auth","token":"'"$TOKEN"'"}
+# First paste (resume_from is optional and is an absolute scrollback_pos):
+#   {"type":"auth","token":"'"$TOKEN"'","resume_from":123}
 # Then type and see the shell respond. JSON control frames also work:
 #   {"type":"resize","cols":120,"rows":40}
 
@@ -272,20 +272,28 @@ curl -s -X DELETE -H "Authorization: Bearer $TOKEN" $BASE/api/sessions/$ID
 
 On attach the server sends:
 
-1. Text frame: `{"type":"snapshot-start","session_id":"...","scrollback_bytes":N,"scrollback_pos":N}`
+1. Text frame: `{"type":"snapshot-start","session_id":"...","scrollback_bytes":N,"scrollback_pos":N,"reset":true|false}`
 2. Zero or more binary frames containing scrollback bytes (chunks ≤ 64 KiB)
 3. Text frame: `{"type":"snapshot-done"}`
 4. Live binary frames from the PTY thereafter
 
 From the client:
 
-- First text frame must be `{"type":"auth","token":"..."}`. Legacy
+- First text frame must be `{"type":"auth","token":"..."}`. A reconnecting
+  client may include `"resume_from":N` with the last applied `scrollback_pos`;
+  the server then sends only retained output after that cursor and returns
+  `"reset":false`. A stale cursor falls back to a full snapshot with
+  `"reset":true`. Legacy
   `?token=...` WebSocket auth still exists only for older clients and should
   not be used for new code because URLs land in proxy/access logs.
 - **Binary frames** → written to PTY stdin
 - **Text frames** parsed as JSON control:
   - `{"type":"resize","cols":120,"rows":40}` — resize PTY
   - `{"type":"ping"}` — keepalive
+
+The web client rejects individual terminal inputs larger than 64 KiB before
+they reach the PTY, preserving the editable composer and live session when a
+clipboard contains an accidentally huge payload.
 
 If the client falls too far behind the broadcast buffer the server sends `{"type":"lag",...}` and closes the socket; client should reattach (the fresh snapshot will catch them up).
 

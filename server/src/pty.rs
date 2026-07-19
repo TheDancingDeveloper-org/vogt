@@ -96,6 +96,19 @@ impl Session {
         (sb.snapshot(), sb.total_written())
     }
 
+    /// Snapshot only output newer than a client cursor. The boolean tells the
+    /// client whether its existing terminal state must be reset.
+    pub fn snapshot_for_attach(&self, resume_from: Option<u64>) -> (Bytes, u64, bool) {
+        let sb = self.scrollback.lock();
+        let pos = sb.total_written();
+        if let Some(cursor) = resume_from {
+            if let Some(delta) = sb.snapshot_since(cursor) {
+                return (delta, pos, false);
+            }
+        }
+        (sb.snapshot(), pos, true)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<OutputChunk> {
         self.output_tx.subscribe()
     }
