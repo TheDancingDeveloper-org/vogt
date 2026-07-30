@@ -30,6 +30,25 @@ static WAITING_PATTERNS: Lazy<RegexSet> = Lazy::new(|| {
     .expect("waiting-for-input regex set compiles")
 });
 
+/// Phrases indicating a transient, retryable failure (rate limiting or
+/// upstream overload) rather than a real error. Matched anywhere in the
+/// scanned tail, not anchored — these show up mid-line in API error bodies.
+static RATE_LIMIT_PATTERNS: Lazy<RegexSet> = Lazy::new(|| {
+    RegexSet::new([
+        r"(?i)\b429\b",
+        r"(?i)rate.?limit",
+        r"(?i)\boverloaded\b",
+        r"(?i)too many requests",
+    ])
+    .expect("rate-limit regex set compiles")
+});
+
+/// True if the (ANSI-stripped) tail contains a transient-failure phrase such
+/// as a 429 / rate-limit / overload message.
+pub fn is_rate_limited(stripped_tail: &[u8]) -> bool {
+    RATE_LIMIT_PATTERNS.is_match(stripped_tail)
+}
+
 /// Cheap ANSI/CSI escape stripper for heuristics. Not a full terminal emulator —
 /// good enough to expose visible prompt text to regex matching.
 pub fn strip_ansi(input: &[u8]) -> Vec<u8> {
@@ -159,6 +178,16 @@ mod tests {
         let t = Instant::now() - std::time::Duration::from_secs(10);
         let s = classify(Some(t), b"hello", 1500, false);
         assert_eq!(s, ActivityState::Idle);
+    }
+
+    #[test]
+    fn detects_rate_limit_phrases() {
+        assert!(is_rate_limited(b"Error: 429 Too Many Requests"));
+        assert!(is_rate_limited(
+            b"upstream error: rate_limited, retry later"
+        ));
+        assert!(is_rate_limited(b"model overloaded, please retry"));
+        assert!(!is_rate_limited(b"hello world"));
     }
 
     #[test]

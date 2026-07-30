@@ -86,6 +86,12 @@ pub struct Config {
     pub default_shell: String,
     pub default_cwd: std::path::PathBuf,
     pub activity_idle_after_ms: u64,
+    /// How long a session may sit continuously `Idle` before the idle-stall
+    /// watcher fires a one-shot push notification. Distinct from
+    /// `activity_idle_after_ms` (which is a short quiet-window before
+    /// `Running` collapses to `Idle`); this is a much longer "nobody has
+    /// looked at this in a while" threshold.
+    pub idle_stall_after_ms: u64,
     /// Root the file API operates inside. Any request path is resolved
     /// against this and rejected if it escapes the root.
     pub workspace_root: std::path::PathBuf,
@@ -126,6 +132,7 @@ struct FileConfig {
     default_shell: Option<String>,
     default_cwd: Option<String>,
     activity_idle_after_ms: Option<u64>,
+    idle_stall_after_ms: Option<u64>,
     workspace_root: Option<String>,
     gui_stream_url: Option<String>,
     state_dir: Option<String>,
@@ -223,6 +230,9 @@ pub fn load(
             .or_else(dirs_home)
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp")),
         activity_idle_after_ms: from_file.activity_idle_after_ms.unwrap_or(1_500),
+        idle_stall_after_ms: parse_u64_env("MYDEVENV2_IDLE_STALL_AFTER_MS")?
+            .or(from_file.idle_stall_after_ms)
+            .unwrap_or(10 * 60 * 1_000),
         workspace_root,
         gui_stream_url: from_file
             .gui_stream_url
@@ -290,6 +300,23 @@ fn parse_u32_env(name: &str) -> Result<Option<u32>> {
             }
             let parsed = trimmed
                 .parse::<u32>()
+                .map_err(|e| ApiError::Config(format!("{name} must be an integer: {e}")))?;
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
+    }
+}
+
+fn parse_u64_env(name: &str) -> Result<Option<u64>> {
+    match std::env::var(name) {
+        Ok(v) => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = trimmed
+                .parse::<u64>()
                 .map_err(|e| ApiError::Config(format!("{name} must be an integer: {e}")))?;
             Ok(Some(parsed))
         }

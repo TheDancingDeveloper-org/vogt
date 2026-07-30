@@ -47,6 +47,12 @@ pub struct AgentTask {
     pub notify_on_start: bool,
     #[serde(default = "default_notify_phrase")]
     pub notify_on_phrase: Option<String>,
+    /// When the session prints a transient-failure phrase (429, rate limit,
+    /// overloaded), write a retry keystroke back into the PTY after a
+    /// backoff instead of just notifying. On by default — it's a safe,
+    /// bounded automation sibling to the phrase watcher above.
+    #[serde(default = "default_true")]
+    pub auto_retry_on_rate_limit: bool,
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub next_run: Option<OffsetDateTime>,
     #[serde(default, with = "time::serde::rfc3339::option")]
@@ -136,6 +142,8 @@ pub struct AgentTaskCreate {
     pub notify_on_start: Option<bool>,
     #[serde(default)]
     pub notify_on_phrase: Option<String>,
+    #[serde(default)]
+    pub auto_retry_on_rate_limit: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,6 +168,8 @@ pub struct AgentTaskUpdate {
     pub notify_on_start: Option<bool>,
     #[serde(default)]
     pub notify_on_phrase: Option<String>,
+    #[serde(default)]
+    pub auto_retry_on_rate_limit: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -315,6 +325,7 @@ impl AgentTaskRegistry {
             context: clean_optional(req.context),
             notify_on_start: req.notify_on_start.unwrap_or(false),
             notify_on_phrase: clean_notify_phrase(req.notify_on_phrase),
+            auto_retry_on_rate_limit: req.auto_retry_on_rate_limit.unwrap_or(true),
             next_run,
             last_run: None,
             run_count: 0,
@@ -368,6 +379,9 @@ impl AgentTaskRegistry {
         }
         if req.notify_on_phrase.is_some() {
             task.notify_on_phrase = clean_notify_phrase(req.notify_on_phrase);
+        }
+        if let Some(v) = req.auto_retry_on_rate_limit {
+            task.auto_retry_on_rate_limit = v;
         }
         let now = OffsetDateTime::now_utc();
         task.next_run = if task.status == AgentTaskStatus::Active {
@@ -670,6 +684,15 @@ impl AgentTaskRegistry {
                 task.id,
                 run.id,
                 phrase,
+                session.subscribe(),
+            );
+        }
+
+        if task.auto_retry_on_rate_limit {
+            spawn_retry_watcher(
+                Arc::clone(&self.push),
+                Arc::clone(&session),
+                task.name.clone(),
                 session.subscribe(),
             );
         }
@@ -1143,6 +1166,10 @@ fn default_notify_phrase() -> Option<String> {
     Some(DEFAULT_NOTIFY_PHRASE.to_string())
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_command() -> Vec<String> {
     vec![
         "/bin/sh".to_string(),
@@ -1286,6 +1313,75 @@ fn spawn_phrase_watcher(
                     .await;
                 break;
             }
+        }
+    });
+}
+
+/// Cap on consecutive auto-retries for a single run — a persistently invalid
+/// key or a genuinely dead upstream shouldn't retry forever.
+const MAX_AUTO_RETRIES: u32 = 5;
+
+/// Sibling to `spawn_phrase_watcher`: tails the same session output and,
+/// on a transient-failure phrase (429 / rate limit / overloaded), writes a
+/// retry keystroke back into the PTY after an exponential backoff instead of
+/// only notifying. Gives up and notifies once after `MAX_AUTO_RETRIES`.
+fn spawn_retry_watcher(
+    push: Arc<PushManager>,
+    session: Arc<Session>,
+    task_name: String,
+    mut rx: tokio::sync::broadcast::Receiver<crate::pty::OutputChunk>,
+) {
+    tokio::spawn(async move {
+        let mut tail = String::new();
+        let mut attempts: u32 = 0;
+        loop {
+            let chunk =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+                    Ok(Ok(chunk)) => chunk,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                    Err(_) if session.exit_code().is_some() => break,
+                    Err(_) => continue,
+                };
+            if session.exit_code().is_some() {
+                break;
+            }
+            let stripped = strip_ansi(&chunk.data);
+            tail.push_str(&String::from_utf8_lossy(&stripped));
+            if tail.len() > 8192 {
+                let keep_from = tail.len().saturating_sub(4096);
+                tail.drain(..keep_from);
+            }
+            if !crate::activity::is_rate_limited(tail.as_bytes()) {
+                continue;
+            }
+            // Consume the matched text so the same message can't re-trigger
+            // a retry on the next chunk.
+            tail.clear();
+
+            if attempts >= MAX_AUTO_RETRIES {
+                let data = json!({
+                    "kind": "agent-task-notify",
+                    "session_id": session.id.to_string(),
+                    "url": format!("/#/t/{}", session.id),
+                });
+                let title = format!("{task_name} auto-retry gave up");
+                let body = format!(
+                    "Still rate-limited/overloaded after {MAX_AUTO_RETRIES} retries. Check the session."
+                );
+                let _ = push
+                    .notify(NotificationKind::AgentTaskNotify, &title, &body, data)
+                    .await;
+                break;
+            }
+
+            let backoff_secs = 5u64.saturating_mul(1u64 << attempts.min(4));
+            attempts += 1;
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            if session.exit_code().is_some() {
+                break;
+            }
+            let _ = session.write_input(b"\r");
         }
     });
 }

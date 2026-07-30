@@ -335,6 +335,7 @@ export interface AgentTask {
   context: string | null;
   notify_on_start: boolean;
   notify_on_phrase: string | null;
+  auto_retry_on_rate_limit: boolean;
   next_run: string | null;
   last_run: string | null;
   run_count: number;
@@ -354,6 +355,7 @@ export interface AgentTaskUpsertRequest {
   enabled?: boolean;
   notify_on_start?: boolean;
   notify_on_phrase?: string | null;
+  auto_retry_on_rate_limit?: boolean;
 }
 
 export const api = {

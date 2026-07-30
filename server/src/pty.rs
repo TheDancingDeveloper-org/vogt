@@ -54,6 +54,9 @@ pub struct Session {
     spawned_at: Instant,
     last_output: Mutex<Option<Instant>>,
     activity: Mutex<ActivityState>,
+    /// When `activity` last changed. Used by the idle-stall watcher to tell
+    /// "just went idle" apart from "has been idle for a long time".
+    activity_since: Mutex<Instant>,
     activity_epoch: AtomicU64,
     activity_notify: Notify,
     exit_code: Mutex<Option<i32>>,
@@ -69,6 +72,12 @@ impl Session {
 
     pub fn activity(&self) -> ActivityState {
         *self.activity.lock()
+    }
+
+    /// How long the session has been continuously in its current activity
+    /// state.
+    pub fn activity_duration(&self) -> std::time::Duration {
+        self.activity_since.lock().elapsed()
     }
 
     pub fn exit_code(&self) -> Option<i32> {
@@ -302,6 +311,7 @@ pub fn spawn(
         spawned_at: Instant::now(),
         last_output: Mutex::new(None),
         activity: Mutex::new(ActivityState::Running),
+        activity_since: Mutex::new(Instant::now()),
         activity_epoch: AtomicU64::new(0),
         activity_notify: Notify::new(),
         exit_code: Mutex::new(None),
@@ -551,6 +561,7 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
     if *a != new {
         *a = new;
         drop(a);
+        *session.activity_since.lock() = Instant::now();
         bus.publish(ServerEvent::Activity {
             id: session.id,
             state: new,

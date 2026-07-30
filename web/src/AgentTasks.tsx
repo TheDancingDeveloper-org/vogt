@@ -25,6 +25,7 @@ interface TaskDraft {
   enabled: boolean;
   notifyOnStart: boolean;
   notifyOnPhrase: string;
+  autoRetryOnRateLimit: boolean;
 }
 
 const EMPTY_DRAFT: TaskDraft = {
@@ -40,6 +41,7 @@ const EMPTY_DRAFT: TaskDraft = {
   enabled: true,
   notifyOnStart: false,
   notifyOnPhrase: "MYDEVENV2_NOTIFY:",
+  autoRetryOnRateLimit: true,
 };
 
 function taskToDraft(task: AgentTask): TaskDraft {
@@ -58,6 +60,7 @@ function taskToDraft(task: AgentTask): TaskDraft {
     enabled: task.status === "active",
     notifyOnStart: task.notify_on_start,
     notifyOnPhrase: task.notify_on_phrase ?? "",
+    autoRetryOnRateLimit: task.auto_retry_on_rate_limit,
   };
 }
 
@@ -151,6 +154,7 @@ function buildRequest(draft: TaskDraft): AgentTaskUpsertRequest {
     enabled: draft.enabled,
     notify_on_start: draft.notifyOnStart,
     notify_on_phrase: draft.notifyOnPhrase.trim() || null,
+    auto_retry_on_rate_limit: draft.autoRetryOnRateLimit,
   };
 }
 
@@ -466,6 +470,21 @@ const AgentTasks = (props: Props) => {
                   }
                 />
                 <span>Notify on start</span>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={draft().autoRetryOnRateLimit}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft(),
+                      autoRetryOnRateLimit: e.currentTarget.checked,
+                    })
+                  }
+                />
+                <span title="Write a retry keystroke back into the session after a backoff when it prints a 429/rate-limit/overloaded message">
+                  Auto-retry on rate limit
+                </span>
               </label>
             </div>
 

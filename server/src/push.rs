@@ -43,6 +43,8 @@ fn default_quiet_digest_keep() -> bool {
 #[serde(rename_all = "kebab-case")]
 pub enum NotificationKind {
     WaitingForInput,
+    Errored,
+    IdleStall,
     AgentTaskStarted,
     AgentTaskNotify,
     Test,
@@ -79,6 +81,10 @@ pub struct PushPreferences {
     #[serde(default = "default_true")]
     pub waiting_for_input: bool,
     #[serde(default = "default_true")]
+    pub errored: bool,
+    #[serde(default = "default_true")]
+    pub idle_stall: bool,
+    #[serde(default = "default_true")]
     pub agent_task_started: bool,
     #[serde(default = "default_true")]
     pub agent_task_notify: bool,
@@ -90,6 +96,8 @@ impl Default for PushPreferences {
     fn default() -> Self {
         Self {
             waiting_for_input: true,
+            errored: true,
+            idle_stall: true,
             agent_task_started: true,
             agent_task_notify: true,
             quiet_hours: QuietHours::default(),
@@ -101,6 +109,8 @@ impl PushPreferences {
     fn allows(&self, kind: NotificationKind) -> bool {
         match kind {
             NotificationKind::WaitingForInput => self.waiting_for_input,
+            NotificationKind::Errored => self.errored,
+            NotificationKind::IdleStall => self.idle_stall,
             NotificationKind::AgentTaskStarted => self.agent_task_started,
             NotificationKind::AgentTaskNotify => self.agent_task_notify,
             NotificationKind::Test => true,
@@ -112,6 +122,8 @@ impl PushPreferences {
 pub struct PendingDigest {
     pub total_count: u32,
     pub waiting_for_input_count: u32,
+    pub errored_count: u32,
+    pub idle_stall_count: u32,
     pub agent_task_started_count: u32,
     pub agent_task_notify_count: u32,
     #[serde(with = "time::serde::rfc3339")]
@@ -566,6 +578,8 @@ fn queue_digest(
     let digest = stored.pending_digest.get_or_insert_with(|| PendingDigest {
         total_count: 0,
         waiting_for_input_count: 0,
+        errored_count: 0,
+        idle_stall_count: 0,
         agent_task_started_count: 0,
         agent_task_notify_count: 0,
         queued_at: now,
@@ -582,6 +596,10 @@ fn queue_digest(
     match kind {
         NotificationKind::WaitingForInput => {
             digest.waiting_for_input_count = digest.waiting_for_input_count.saturating_add(1)
+        }
+        NotificationKind::Errored => digest.errored_count = digest.errored_count.saturating_add(1),
+        NotificationKind::IdleStall => {
+            digest.idle_stall_count = digest.idle_stall_count.saturating_add(1)
         }
         NotificationKind::AgentTaskStarted => {
             digest.agent_task_started_count = digest.agent_task_started_count.saturating_add(1)
@@ -600,6 +618,12 @@ fn digest_notification_payload(digest: &PendingDigest) -> (String, String, serde
             "{} waiting-for-input",
             digest.waiting_for_input_count
         ));
+    }
+    if digest.errored_count > 0 {
+        parts.push(format!("{} errored", digest.errored_count));
+    }
+    if digest.idle_stall_count > 0 {
+        parts.push(format!("{} stalled idle", digest.idle_stall_count));
     }
     if digest.agent_task_started_count > 0 {
         parts.push(format!("{} task started", digest.agent_task_started_count));
@@ -759,6 +783,8 @@ mod tests {
         let digest = PendingDigest {
             total_count: 4,
             waiting_for_input_count: 2,
+            errored_count: 0,
+            idle_stall_count: 0,
             agent_task_started_count: 1,
             agent_task_notify_count: 1,
             queued_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),

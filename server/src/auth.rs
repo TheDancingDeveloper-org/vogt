@@ -381,6 +381,7 @@ mod tests {
             default_shell: "/bin/bash".into(),
             default_cwd: std::env::temp_dir(),
             activity_idle_after_ms: 200,
+            idle_stall_after_ms: 10 * 60 * 1_000,
             workspace_root: std::env::temp_dir(),
             gui_stream_url: None,
             state_dir: tempfile::tempdir().unwrap().keep(),

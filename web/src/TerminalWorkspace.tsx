@@ -187,12 +187,13 @@ function insertPane(
       children: [node, nextPane],
     };
   }
-  return {
-    ...node,
-    children: node.children.map((child) =>
-      insertPane(child, targetPaneId, direction, nextPane),
-    ),
-  };
+  let changed = false;
+  const children = node.children.map((child) => {
+    const next = insertPane(child, targetPaneId, direction, nextPane);
+    if (next !== child) changed = true;
+    return next;
+  });
+  return changed ? { ...node, children } : node;
 }
 
 function removePane(
@@ -200,12 +201,16 @@ function removePane(
   targetPaneId: string,
 ): TerminalLayoutNode | null {
   if (node.type === "pane") return node.id === targetPaneId ? null : node;
-  const children = node.children
-    .map((child) => removePane(child, targetPaneId))
-    .filter((child): child is TerminalLayoutNode => Boolean(child));
+  let changed = false;
+  const children: TerminalLayoutNode[] = [];
+  for (const child of node.children) {
+    const next = removePane(child, targetPaneId);
+    if (next !== child) changed = true;
+    if (next) children.push(next);
+  }
   if (children.length === 0) return null;
   if (children.length === 1) return children[0] ?? null;
-  return { ...node, children };
+  return changed ? { ...node, children } : node;
 }
 
 function pruneMissingSessions(node: TerminalLayoutNode): TerminalLayoutNode | null {
@@ -248,24 +253,27 @@ interface LayoutNodeProps {
 const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
   <Switch>
     <Match when={props.node.type === "pane" ? props.node : null}>
-      {(pane) => (
-        <div
-          class={`terminal-pane ${
-            props.activePaneId === pane().id ? "active" : ""
-          }`}
-          onPointerDown={() => props.onFocusPane(pane().id)}
-        >
-          <Terminal
-            interceptInput={(data) => props.interceptPaneInput(pane().id, data)}
-            sessionId={pane().sessionId}
-            registerSend={(fn) => props.registerPaneSend(pane().id, fn)}
-            registerActions={(actions) =>
-              props.registerPaneActions(pane().id, actions)
-            }
-            onNotify={props.onNotify}
-          />
-        </div>
-      )}
+      {(pane) => {
+        const paneId = props.node.id;
+        return (
+          <div
+            class={`terminal-pane ${
+              props.activePaneId === paneId ? "active" : ""
+            }`}
+            onPointerDown={() => props.onFocusPane(paneId)}
+          >
+            <Terminal
+              interceptInput={(data) => props.interceptPaneInput(paneId, data)}
+              sessionId={pane().sessionId}
+              registerSend={(fn) => props.registerPaneSend(paneId, fn)}
+              registerActions={(actions) =>
+                props.registerPaneActions(paneId, actions)
+              }
+              onNotify={props.onNotify}
+            />
+          </div>
+        );
+      }}
     </Match>
     <Match when={props.node.type === "split" ? props.node : null}>
       {(split) => (

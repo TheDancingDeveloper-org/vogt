@@ -105,6 +105,7 @@ export function updateActivity(id: string, state: ActivityState) {
 let unsubscribeEvents: (() => void) | null = null;
 let reconnectAttempts = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let streamStarted = false;
 
 function nextReconnectDelay(): number {
   // Exponential backoff with jitter, capped at ~30s. Starts at 1s.
@@ -117,6 +118,7 @@ function nextReconnectDelay(): number {
 }
 
 export function startEventStream(): void {
+  streamStarted = true;
   if (unsubscribeEvents) return;
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
@@ -167,6 +169,7 @@ export function startEventStream(): void {
 }
 
 export function stopEventStream(): void {
+  streamStarted = false;
   unsubscribeEvents?.();
   unsubscribeEvents = null;
   if (reconnectTimer !== null) {
@@ -174,4 +177,39 @@ export function stopEventStream(): void {
     reconnectTimer = null;
   }
   reconnectAttempts = 0;
+}
+
+// Android frequently lets the SSE connection go silently dead on
+// backgrounding without ever firing an error, so the stream can look
+// "connected" while stale indefinitely. Force a reconnect whenever the app
+// comes back to the foreground, instead of waiting on error-driven backoff.
+function forceReconnectEventStream(): void {
+  if (!streamStarted) return;
+  reconnectAttempts = 0;
+  if (unsubscribeEvents) {
+    unsubscribeEvents();
+    unsubscribeEvents = null;
+  }
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  startEventStream();
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") forceReconnectEventStream();
+  });
+}
+
+if (typeof window !== "undefined") {
+  void (async () => {
+    try {
+      const { App } = await import("@capacitor/app");
+      App.addListener("resume", () => forceReconnectEventStream());
+    } catch {
+      // Not running under Capacitor (plain web/PWA); visibilitychange covers it.
+    }
+  })();
 }

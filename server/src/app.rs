@@ -82,8 +82,12 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     });
 
     // Background task: fan out a push notification whenever a session enters
-    // `waiting-for-input`. Subscribes to the events bus.
+    // `waiting-for-input` or `errored`. Subscribes to the events bus.
     push_api::spawn_activity_watcher(Arc::clone(&state));
+    // Background task: notify once when a session has sat `Idle` for a long
+    // time without a recognizable prompt (the waiting-for-input heuristic
+    // never fired).
+    push_api::spawn_idle_stall_watcher(Arc::clone(&state));
     push_api::spawn_digest_flusher(Arc::clone(&state));
     state.agent_tasks.spawn_scheduler();
     state.agent_tasks.spawn_run_watcher(state.bus.clone());

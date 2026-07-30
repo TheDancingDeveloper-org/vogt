@@ -16,8 +16,17 @@ when:
   # Skip the server pipeline for edits isolated to the deprecated native
   # desktop client tree. The supported product surfaces are the server, PWA,
   # and Android wrap.
+  #
+  # `dev` auto-deploys to the dev-mydevenv2 stack for pre-prod validation;
+  # `main` remains the only branch that deploys to prod. See uplift.md
+  # "Environment Strategy: Dev vs Prod".
   - event: push
     branch: main
+    path:
+      exclude:
+        - client/**
+  - event: push
+    branch: dev
     path:
       exclude:
         - client/**
@@ -204,6 +213,26 @@ steps:
       - event: push
         branch: main
 
+  # dev counterpart of build-and-push: tags with a distinct `:dev` /
+  # `:dev-<sha>` stream so a dev build can never collide with or become
+  # `:latest`. Only runs on pushes to `dev`.
+  - name: build-and-push-dev
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: repo.indexarr.net/indexarr/mydevenv2
+      registry: repo.indexarr.net
+      username:
+        from_secret: git_auth_token
+      password:
+        from_secret: git_auth_token
+      dockerfile: Dockerfile
+      tags:
+        - dev
+        - dev-${CI_COMMIT_SHA}
+    when:
+      - event: push
+        branch: dev
+
   - name: komodo-deploy
     image: alpine:3.23
     when:
@@ -221,6 +250,31 @@ steps:
       - 'curl -sSf -H "Authorization: token $GIT_AUTH_TOKEN" -o /tmp/komodo-deploy.sh https://repo.indexarr.net/indexarr/ops/raw/branch/main/scripts/komodo-deploy.sh'
       - chmod +x /tmp/komodo-deploy.sh
       - STACK_NAME=prod-mydevenv2 STACK_DIR=personal/mydevenv2 IMAGE_NAME=repo.indexarr.net/indexarr/mydevenv2 IMAGE_TAG=$CI_COMMIT_SHA bash /tmp/komodo-deploy.sh
+
+  # dev counterpart of komodo-deploy: rewrites a *separate* ops-repo compose
+  # path (personal/mydevenv2-dev/) and targets a separate Komodo stack
+  # (dev-mydevenv2). Never touches ops/personal/mydevenv2/ or prod-mydevenv2 —
+  # those stay exclusively on the `main` step above. Requires the
+  # dev-mydevenv2 Komodo stack and personal/mydevenv2-dev/docker-compose.yml
+  # to already exist in the ops repo (see uplift.md); until then this step
+  # will fail loudly rather than fall back to touching prod.
+  - name: komodo-deploy-dev
+    image: alpine:3.23
+    when:
+      - event: push
+        branch: dev
+    environment:
+      GIT_AUTH_TOKEN:
+        from_secret: git_auth_token
+      KOMODO_API_KEY:
+        from_secret: komodo_api_key
+      KOMODO_API_SECRET:
+        from_secret: komodo_api_secret
+    commands:
+      - apk add --no-cache bash git curl python3 >/dev/null
+      - 'curl -sSf -H "Authorization: token $GIT_AUTH_TOKEN" -o /tmp/komodo-deploy.sh https://repo.indexarr.net/indexarr/ops/raw/branch/main/scripts/komodo-deploy.sh'
+      - chmod +x /tmp/komodo-deploy.sh
+      - STACK_NAME=dev-mydevenv2 STACK_DIR=personal/mydevenv2-dev IMAGE_NAME=repo.indexarr.net/indexarr/mydevenv2 IMAGE_TAG=dev-$CI_COMMIT_SHA bash /tmp/komodo-deploy.sh
 
   - name: discord-success
     image: alpine/curl

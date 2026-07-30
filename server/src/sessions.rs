@@ -82,6 +82,15 @@ impl SessionRegistry {
             .ok_or(ApiError::NotFound)
     }
 
+    /// Live session handles, for internal watchers (idle-stall, phrase
+    /// watchers) that need more than the summary snapshot.
+    pub fn live_sessions(&self) -> Vec<Arc<Session>> {
+        self.sessions
+            .iter()
+            .map(|kv| Arc::clone(kv.value()))
+            .collect()
+    }
+
     pub fn list(&self) -> Vec<SessionSummary> {
         let mut out: Vec<_> = self
             .sessions

@@ -146,32 +146,87 @@ pub async fn flush_digests(State(state): State<Arc<AppState>>) -> Json<DispatchC
 }
 
 /// Spawn the background task that watches the event bus and pushes a
-/// notification when any session transitions to `waiting-for-input`.
+/// notification when any session transitions to `waiting-for-input` or
+/// `errored`.
 pub fn spawn_activity_watcher(state: Arc<AppState>) {
     let mut rx = state.bus.subscribe();
     tokio::spawn(async move {
         while let Ok(ev) = rx.recv().await {
             if let ServerEvent::Activity { id, state: act } = ev {
-                if act == ActivityState::WaitingForInput {
-                    let session = state.sessions.get(id).ok();
-                    let name = session
-                        .as_ref()
-                        .map(|s| s.name())
-                        .unwrap_or_else(|| id.to_string());
-                    let title = format!("{name} is waiting for input");
-                    let body = "Tap to open the session in MyDevEnv2.";
-                    let data = json!({
-                        "kind": "waiting-for-input",
-                        "session_id": id.to_string(),
-                        "url": format!("/#/t/{id}"),
-                    });
-                    let counts = state
-                        .push
-                        .notify(NotificationKind::WaitingForInput, &title, body, data)
-                        .await;
-                    info!(session = %id, ok = counts.ok, fail = counts.fail, queued = counts.queued, "push dispatched");
-                }
+                let (kind, verb, data_kind) = match act {
+                    ActivityState::WaitingForInput => (
+                        NotificationKind::WaitingForInput,
+                        "is waiting for input",
+                        "waiting-for-input",
+                    ),
+                    ActivityState::Errored => (NotificationKind::Errored, "errored", "errored"),
+                    _ => continue,
+                };
+                let session = state.sessions.get(id).ok();
+                let name = session
+                    .as_ref()
+                    .map(|s| s.name())
+                    .unwrap_or_else(|| id.to_string());
+                let title = format!("{name} {verb}");
+                let body = "Tap to open the session in MyDevEnv2.";
+                let data = json!({
+                    "kind": data_kind,
+                    "session_id": id.to_string(),
+                    "url": format!("/#/t/{id}"),
+                });
+                let counts = state.push.notify(kind, &title, body, data).await;
+                info!(session = %id, ok = counts.ok, fail = counts.fail, queued = counts.queued, "push dispatched");
             }
+        }
+    });
+}
+
+/// Spawn the background task that periodically scans live sessions and
+/// pushes a one-shot notification when a session has sat continuously
+/// `Idle` (not exited) for longer than `idle_stall_after_ms` — the case
+/// where output just stops without printing a recognizable prompt, so the
+/// `waiting-for-input` heuristic in `activity.rs` never fires.
+pub fn spawn_idle_stall_watcher(state: Arc<AppState>) {
+    use std::collections::HashSet;
+    use uuid::Uuid;
+
+    tokio::spawn(async move {
+        let mut notified: HashSet<Uuid> = HashSet::new();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let threshold = std::time::Duration::from_millis(state.config.idle_stall_after_ms);
+            let mut still_idle: HashSet<Uuid> = HashSet::new();
+            for session in state.sessions.live_sessions() {
+                if session.exit_code().is_some() {
+                    continue;
+                }
+                if session.activity() != ActivityState::Idle {
+                    continue;
+                }
+                if session.activity_duration() < threshold {
+                    continue;
+                }
+                still_idle.insert(session.id);
+                if notified.contains(&session.id) {
+                    continue;
+                }
+                let title = format!("{} has been idle a while", session.name());
+                let body = "No output for a long time. Check whether it's stuck.";
+                let data = json!({
+                    "kind": "idle-stall",
+                    "session_id": session.id.to_string(),
+                    "url": format!("/#/t/{}", session.id),
+                });
+                let counts = state
+                    .push
+                    .notify(NotificationKind::IdleStall, &title, body, data)
+                    .await;
+                info!(session = %session.id, ok = counts.ok, fail = counts.fail, queued = counts.queued, "idle-stall push dispatched");
+                notified.insert(session.id);
+            }
+            // Forget sessions that are no longer stalled (state changed, or
+            // gone) so a future stall on the same id notifies again.
+            notified.retain(|id| still_idle.contains(id));
         }
     });
 }

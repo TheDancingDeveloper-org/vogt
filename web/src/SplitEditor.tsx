@@ -38,16 +38,30 @@ const SplitEditor: Component<Props> = (props) => {
     if (totalSize <= 0) return;
     const startPanes = splitStore.panes.map((pane) => ({ ...pane }));
 
-    const onMove = (moveEvent: MouseEvent) => {
-      const currentPos =
-        splitStore.direction === "horizontal"
-          ? moveEvent.clientY
-          : moveEvent.clientX;
-      const deltaPercent = ((currentPos - startPos) / totalSize) * 100;
+    let pendingFrame: number | null = null;
+    let pendingPos = startPos;
+
+    const applyResize = () => {
+      pendingFrame = null;
+      const deltaPercent = ((pendingPos - startPos) / totalSize) * 100;
       resizePanePair(index, deltaPercent, startPanes);
     };
 
+    const onMove = (moveEvent: MouseEvent) => {
+      pendingPos =
+        splitStore.direction === "horizontal"
+          ? moveEvent.clientY
+          : moveEvent.clientX;
+      if (pendingFrame === null) {
+        pendingFrame = requestAnimationFrame(applyResize);
+      }
+    };
+
     const onUp = () => {
+      if (pendingFrame !== null) {
+        cancelAnimationFrame(pendingFrame);
+        pendingFrame = null;
+      }
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       document.body.classList.remove("is-resizing-split");
