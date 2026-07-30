@@ -219,3 +219,47 @@ Operational token policy for production browsers:
   read-only token for lower-trust clients.
 - If a browser needs GUI launch/kill regularly, mint a dedicated scoped token
   with `gui-control` instead of reusing the primary token.
+
+## 8. Dev stack (dev-mydevenv2)
+
+Pre-prod validation stack, per `uplift.md` "Environment Strategy: Dev vs
+Prod". Runs the same image family, tagged `:dev`/`:dev-<sha>` instead of
+`:latest`/`:<sha>`. Desired state lives in `indexarr/ops` at
+**`personal/mydevenv2-dev/`**, on the ops repo's own **`dev` branch** (not
+`main` — `main`/prod only ever reads `personal/mydevenv2/`). Served at
+`https://mydevenv2-dev.sprooty.com` (Caddy on Node B, `reverse_proxy
+localhost:8911`; prod holds `8910`).
+
+```text
+push to MyDevEnv2 `dev` branch
+  -> .woodpecker/server.yml (build-and-push-dev, komodo-deploy-dev)
+  -> Docker buildx pushes repo.indexarr.net/indexarr/mydevenv2:dev + :dev-<sha>
+  -> ops (dev branch) personal/mydevenv2-dev/docker-compose.yml bumped to :dev-<sha>
+  -> Komodo DeployStack runs dev-mydevenv2
+```
+
+**Disk layout differs from prod on purpose.** Prod's `docker-compose.yml`
+bind-mounts `home` and `tailscale` under `/mnt/2tnvme/docker/volumes/`, and
+does **not** bind-mount the container's `/tmp` at all — that gap is why
+prod's `/tmp` silently accumulated ~184GB of stale build/test scratch
+directories inside the writable layer on the root disk (`nvme0n1p2`),
+contributing to a near-full-root-disk incident. The dev stack instead uses a
+dedicated disk to validate a fix before prod adopts it:
+
+| Path (inside container) | Host path | Disk |
+|---|---|---|
+| `/home/sprooty` (`$MYDEVENV_HOME_CONTAINER_PATH`) | `/mnt/sdg/mydevenv2-dev/home` | `sdg3`, ext4, ~457G (see root `AGENTS.md` "Node B Disk Layout") |
+| `/var/lib/tailscale` | `/mnt/sdg/mydevenv2-dev/tailscale` | same |
+| `/tmp` | `/mnt/sdg/mydevenv2-dev/tmp` | same |
+| `/home/sprooty/Working` (workspace) | `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` | **same disk/path as prod** — intentional, see below |
+
+The workspace bind-mount is deliberately **not** moved to `sdg` in this pass:
+it's the same live `~/Working` data prod uses (two independent PTY-session
+servers against the same files is no different from two terminal windows),
+and migrating a live, actively-edited dataset is a separate, higher-stakes
+step from moving per-stack state and scratch space. If/when prod's own
+`/tmp` and `home`/`tailscale` state move to a dedicated disk (validated here
+first), update this table and the row in root `AGENTS.md`'s disk layout
+accordingly — and note whether prod moves to `sdg` alongside dev or gets its
+own disk, since `sdg` was sized for dev-only validation, not necessarily to
+hold both stacks' full state long-term.

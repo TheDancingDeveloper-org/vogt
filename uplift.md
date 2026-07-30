@@ -59,17 +59,30 @@ cloned from the prod compose with:
   resource contention later argues otherwise.
 - New Caddy site block on Node B: `mydevenv2-dev.sprooty.com -> localhost:8911`.
 
-**Status:** `.woodpecker/server.yml` now has the `dev` push trigger,
+**Status:** done. `.woodpecker/server.yml` has the `dev` push trigger,
 `build-and-push-dev` (`:dev` / `:dev-<sha>` tags), and `komodo-deploy-dev`
-(targets `dev-mydevenv2` / `personal/mydevenv2-dev`) steps described above,
-all gated on `branch: dev` and additive to the existing `main` steps, which
-are unchanged. A draft `personal/mydevenv2-dev/docker-compose.yml` exists
-locally in the `ops` checkout (uncommitted) following the spec below. Still
-outstanding, and requiring manual action outside a coding agent's reach:
-creating the `dev` branch itself, creating the `dev-mydevenv2` Komodo stack,
-minting the dev `MYDEVENV2_TOKEN` and `HOMELAB_MYDEVENV2_DEV_TAILSCALE_AUTH_KEY`,
-adding the Node B Caddy site block, and committing/pushing the ops-repo
-compose file once reviewed.
+(targets `dev-mydevenv2` / `personal/mydevenv2-dev`, ops repo's own `dev`
+branch) steps, all gated on `branch: dev` and additive to the existing
+`main` steps, which are unchanged. The `dev` branch exists in both
+`MyDevEnv2` and `ops`; `personal/mydevenv2-dev/docker-compose.yml` is
+committed and pushed; the `dev-mydevenv2` Komodo stack exists
+(`git_account` set, fetches `ops` cleanly); `MYDEVENV2_DEV_TOKEN` is minted
+and stored in Infisical; the Caddy site block for
+`mydevenv2-dev.sprooty.com -> localhost:8911` is live and issuing certs
+correctly. See MyDevEnv2's `deploy/KOMODO.md` "Dev stack (dev-mydevenv2)"
+for the full picture, including a disk-layout fix folded into this rollout:
+dev's `home`/`tailscale`/`tmp` now live on a dedicated disk (`/mnt/sdg`, see
+root `AGENTS.md` "Node B Disk Layout") instead of prod's root-disk-backed
+`/mnt/2tnvme` — validating a fix for the `/tmp`-never-bind-mounted issue
+that contributed to a Node B root-disk-full incident, before prod adopts
+the same layout. Workspace intentionally still shares prod's existing
+`/mnt/2tnvme` mount — see KOMODO.md for why that's a separate, later step.
+Still outstanding: the Tailscale auth key
+(`HOMELAB_MYDEVENV2_DEV_TAILSCALE_AUTH_KEY`) — optional, the container runs
+without tailnet join if it stays empty — and an actual green CI run all the
+way through `komodo-deploy-dev` (blocked, then unblocked, by an unrelated
+Node B `sccache-redis` OOM-crash-loop; last known state was `test`/`clippy`
+passing cleanly once Node B's memory pressure eased).
 
 **Mobile/Android caveat:** an Android device cannot install two APKs sharing
 the same `applicationId` side by side. To validate mobile-facing uplift work
@@ -184,13 +197,12 @@ coding agent cannot provision Komodo stacks, mint Tailscale/Infisical keys,
 edit Node B's Caddy config, or push/merge branches on its own. Those are the
 manual steps left below.
 
-1. **Manual, external to this repo:** stand up the `dev-mydevenv2` stack —
-   create the `dev` branch, create the Komodo stack, mint the dev token and
-   Tailscale auth key, add the Caddy site block, and review/commit the
-   drafted `ops/personal/mydevenv2-dev/docker-compose.yml`. The CI wiring in
-   `.woodpecker/server.yml` (dev push trigger, `build-and-push-dev`,
-   `komodo-deploy-dev`) is already in place and additive to the unchanged
-   `main`/prod steps. Everything below should be validated on `dev` before
+1. **Done:** the `dev-mydevenv2` stack is stood up — `dev` branches exist in
+   both `MyDevEnv2` and `ops`, the Komodo stack and Caddy site block are
+   live, `MYDEVENV2_DEV_TOKEN` is minted, and dev's state disk layout is
+   fixed (see "Environment Strategy" status above). Still outstanding: the
+   Tailscale auth key (optional) and a fully green CI run through
+   `komodo-deploy-dev`. Everything below should be validated on `dev` before
    promotion to `main`/prod.
 2. Split-pane node-identity fix (`TerminalWorkspace.tsx`) — implemented.
    Validate on dev, then promote.
