@@ -61,15 +61,18 @@ cloned from the prod compose with:
 
 **Status:** done. `.woodpecker/server.yml` has the `dev` push trigger,
 `build-and-push-dev` (`:dev` / `:dev-<sha>` tags), and `komodo-deploy-dev`
-(targets `dev-mydevenv2` / `personal/mydevenv2-dev`, ops repo's own `dev`
-branch) steps, all gated on `branch: dev` and additive to the existing
-`main` steps, which are unchanged. The `dev` branch exists in both
-`MyDevEnv2` and `ops`; `personal/mydevenv2-dev/docker-compose.yml` is
-committed and pushed; the `dev-mydevenv2` Komodo stack exists
-(`git_account` set, fetches `ops` cleanly); `MYDEVENV2_DEV_TOKEN` is minted
-and stored in Infisical; the Caddy site block for
-`mydevenv2-dev.sprooty.com -> localhost:8911` is live and issuing certs
-correctly. See MyDevEnv2's `deploy/KOMODO.md` "Dev stack (dev-mydevenv2)"
+(targets `dev-mydevenv2` / `personal/mydevenv2-dev`) steps, all gated on
+`branch: dev` and additive to the existing `main` steps, which are
+unchanged. `personal/mydevenv2-dev/docker-compose.yml` lives on ops's
+**`main`** branch, not a mirrored `dev` branch — an ops `dev` branch was
+tried first and abandoned because `scripts/komodo-deploy.sh` clones ops's
+default branch unconditionally; see `deploy/KOMODO.md` "Dev stack" for why.
+The `dev` branch exists in `MyDevEnv2` (only); `personal/mydevenv2-dev/docker-compose.yml`
+is committed and pushed to ops `main`; the `dev-mydevenv2` Komodo stack
+exists (`git_account` set, `branch: main`, fetches `ops` cleanly);
+`MYDEVENV2_DEV_TOKEN` is minted and stored in Infisical; the Caddy site
+block for `mydevenv2-dev.sprooty.com -> localhost:8911` is live and issuing
+certs correctly. See MyDevEnv2's `deploy/KOMODO.md` "Dev stack (dev-mydevenv2)"
 for the full picture, including a disk-layout fix folded into this rollout:
 dev's `home`/`tailscale`/`tmp` now live on a dedicated disk (`/mnt/sdg`, see
 root `AGENTS.md` "Node B Disk Layout") instead of prod's root-disk-backed

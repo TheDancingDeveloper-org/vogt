@@ -225,8 +225,16 @@ Operational token policy for production browsers:
 Pre-prod validation stack, per `uplift.md` "Environment Strategy: Dev vs
 Prod". Runs the same image family, tagged `:dev`/`:dev-<sha>` instead of
 `:latest`/`:<sha>`. Desired state lives in `indexarr/ops` at
-**`personal/mydevenv2-dev/`**, on the ops repo's own **`dev` branch** (not
-`main` — `main`/prod only ever reads `personal/mydevenv2/`). Served at
+**`personal/mydevenv2-dev/`**, on ops's **`main` branch** — same branch as
+prod's `personal/mydevenv2/`. This is *not* symmetric with MyDevEnv2's own
+dev/main split: `scripts/komodo-deploy.sh` (the shared CI helper that bumps
+the pinned image tag) clones ops's default branch unconditionally, with no
+branch parameter, so any stack it manages has to live on `main` regardless
+of which environment it represents. (An ops `dev` branch was tried first and
+abandoned for exactly this reason — see git history if reviving it, e.g. to
+add branch support to the shared script instead.) Komodo's own periphery
+pull for this stack is unaffected either way — it reads the stack's own
+`branch` config directly, independent of this script. Served at
 `https://mydevenv2-dev.sprooty.com` (Caddy on Node B, `reverse_proxy
 localhost:8911`; prod holds `8910`).
 
@@ -234,7 +242,7 @@ localhost:8911`; prod holds `8910`).
 push to MyDevEnv2 `dev` branch
   -> .woodpecker/server.yml (build-and-push-dev, komodo-deploy-dev)
   -> Docker buildx pushes repo.indexarr.net/indexarr/mydevenv2:dev + :dev-<sha>
-  -> ops (dev branch) personal/mydevenv2-dev/docker-compose.yml bumped to :dev-<sha>
+  -> ops (main branch) personal/mydevenv2-dev/docker-compose.yml bumped to :dev-<sha>
   -> Komodo DeployStack runs dev-mydevenv2
 ```
 

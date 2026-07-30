@@ -34,7 +34,7 @@ Before changing files here:
 
 From-scratch rewrite of `../MyDevEnv`: same centrally-hosted, Tailscale-accessible dev environment goal, built without the v1 surface area of a code-server fork and multiple half-finished native clients. Active status: Phase 1-6 code-complete and deployed; legacy GPUI desktop client deprecated on July 7, 2026; Phase 7 (KVM-backed Android emulator VM) pending.
 
-A pre-prod validation stack, `dev-mydevenv2`, also exists (`https://mydevenv2-dev.sprooty.com`, Komodo stack, ops repo `dev` branch) — see `deploy/KOMODO.md` "Dev stack (dev-mydevenv2)" for its deploy flow and disk layout, and `uplift.md` "Environment Strategy: Dev vs Prod" for why it exists.
+A pre-prod validation stack, `dev-mydevenv2`, also exists (`https://mydevenv2-dev.sprooty.com`, Komodo stack, desired state in ops's `personal/mydevenv2-dev/` on `main`) — see `deploy/KOMODO.md` "Dev stack (dev-mydevenv2)" for its deploy flow and disk layout, and `uplift.md` "Environment Strategy: Dev vs Prod" for why it exists.
 
 ## 2. Architecture
 
