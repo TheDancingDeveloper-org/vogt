@@ -212,6 +212,16 @@ steps:
     when:
       - event: push
         branch: main
+        path:
+          include:
+            - server/**
+            - contract/**
+            - web/**
+            - Dockerfile
+            - Cargo.toml
+            - Cargo.lock
+            - deploy/**
+            - .woodpecker/server.yml
 
   # dev counterpart of build-and-push: tags with a distinct `:dev` /
   # `:dev-<sha>` stream so a dev build can never collide with or become
@@ -232,12 +242,32 @@ steps:
     when:
       - event: push
         branch: dev
+        path:
+          include:
+            - server/**
+            - contract/**
+            - web/**
+            - Dockerfile
+            - Cargo.toml
+            - Cargo.lock
+            - deploy/**
+            - .woodpecker/server.yml
 
   - name: komodo-deploy
     image: alpine:3.23
     when:
       - event: push
         branch: main
+        path:
+          include:
+            - server/**
+            - contract/**
+            - web/**
+            - Dockerfile
+            - Cargo.toml
+            - Cargo.lock
+            - deploy/**
+            - .woodpecker/server.yml
     environment:
       GIT_AUTH_TOKEN:
         from_secret: git_auth_token
@@ -263,6 +293,16 @@ steps:
     when:
       - event: push
         branch: dev
+        path:
+          include:
+            - server/**
+            - contract/**
+            - web/**
+            - Dockerfile
+            - Cargo.toml
+            - Cargo.lock
+            - deploy/**
+            - .woodpecker/server.yml
     environment:
       GIT_AUTH_TOKEN:
         from_secret: git_auth_token
