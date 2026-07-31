@@ -24,10 +24,12 @@ fn serve(path: &str) -> Response {
             if let Ok(v) = HeaderValue::from_str(mime.as_ref()) {
                 resp.headers_mut().insert(header::CONTENT_TYPE, v);
             }
-            // index.html must stay fresh; hashed asset filenames may be
-            // cached aggressively.
-            let cache = if path == "index.html" || path == "/" || path.is_empty() {
-                "no-cache, must-revalidate"
+            // HTML and the service worker are unversioned entry points and must
+            // be revalidated so a browser can discover each deployment. Vite's
+            // hashed JS/CSS assets can be cached immutably.
+            let cache = if path == "index.html" || path == "/" || path.is_empty() || path == "sw.js"
+            {
+                "no-store, must-revalidate"
             } else {
                 "public, max-age=31536000, immutable"
             };
@@ -50,7 +52,7 @@ fn not_found() -> Response {
         );
         resp.headers_mut().insert(
             header::CACHE_CONTROL,
-            HeaderValue::from_static("no-cache, must-revalidate"),
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
         );
         return resp;
     }

@@ -63,12 +63,108 @@ import {
   type Tab,
 } from "./tabs";
 import type { ActivityState, SessionSummary } from "./api";
-import { getToken } from "./api";
+import { getToken, setBase, setToken } from "./api";
 import {
   deleteWorkspaceLayout,
   getWorkspaceLayout,
   saveWorkspaceLayout,
 } from "./workspaceLayouts";
+
+interface LoginScreenProps {
+  initialToken: string;
+  initialBase: string;
+  error: string | null;
+  onAuthenticated: (token: string, base: string) => Promise<void>;
+}
+
+const LoginScreen: Component<LoginScreenProps> = (props) => {
+  const [token, setTokenDraft] = createSignal(props.initialToken);
+  const [base, setBaseDraft] = createSignal(props.initialBase);
+  const [showToken, setShowToken] = createSignal(false);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(props.error);
+
+  const submit = async (event: SubmitEvent) => {
+    event.preventDefault();
+    const candidateToken = token().trim();
+    const candidateBase = base().trim().replace(/\/+$/, "");
+    if (!candidateToken) {
+      setError("A bearer token is required to continue.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await props.onAuthenticated(candidateToken, candidateBase);
+    } catch (value) {
+      setError(
+        value instanceof ApiError && value.status === 401
+          ? "That token was rejected (401). Check the current MyDevEnv2 token and try again."
+          : value instanceof ApiError
+            ? `The server rejected the login (HTTP ${value.status}).`
+            : `Could not reach the MyDevEnv2 server: ${value instanceof Error ? value.message : String(value)}`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main class="login-screen">
+      <form class="login-card" onSubmit={submit}>
+        <div class="login-eyebrow">MyDevEnv2</div>
+        <h1>Sign in to your development environment</h1>
+        <p class="login-copy">
+          Enter a valid bearer token to continue. The workspace stays locked until
+          the server confirms your credentials.
+        </p>
+        <label>
+          Bearer token
+          <input
+            type={showToken() ? "text" : "password"}
+            value={token()}
+            onInput={(event) => {
+              setTokenDraft(event.currentTarget.value);
+              setError(null);
+            }}
+            autocomplete="off"
+            spellcheck={false}
+            autofocus
+          />
+        </label>
+        <label>
+          Backend URL
+          <input
+            type="url"
+            value={base()}
+            onInput={(event) => setBaseDraft(event.currentTarget.value)}
+            placeholder="https://mydevenv2.sprooty.com (blank = this site)"
+            autocomplete="url"
+            spellcheck={false}
+          />
+        </label>
+        <label class="login-checkbox">
+          <input
+            type="checkbox"
+            checked={showToken()}
+            onChange={(event) => setShowToken(event.currentTarget.checked)}
+          />
+          Show token
+        </label>
+        <Show when={error()}>
+          <div class="login-error" role="alert">{error()}</div>
+        </Show>
+        <button class="login-submit" type="submit" disabled={busy()}>
+          {busy() ? "Signing in…" : "Sign in"}
+        </button>
+        <p class="login-help">
+          Your token is stored only in this browser profile and is sent over the
+          configured HTTPS connection.
+        </p>
+      </form>
+    </main>
+  );
+};
 
 function activityClass(s: SessionSummary): string {
   if (s.exit_code !== null) {
@@ -184,6 +280,8 @@ const App: Component = () => {
   };
 
   const [publicCfg, setPublicCfg] = createSignal<PublicConfig | null>(null);
+  const [authState, setAuthState] = createSignal<"checking" | "unauthenticated" | "authenticated">("checking");
+  const [authError, setAuthError] = createSignal<string | null>(null);
   const layoutMode = getLayoutMode();
   const activeTab = () => tabsStore.tabs.find((tab) => tab.id === tabsStore.active) ?? null;
 
@@ -206,30 +304,39 @@ const App: Component = () => {
         /* server may be down; non-fatal */
       });
 
-    if (!getToken()) {
-      setSettingsOpen(true);
-      return;
-    }
     void (async () => {
+      const token = getToken();
+      if (!token) {
+        setAuthState("unauthenticated");
+        return;
+      }
       try {
-        await validateCredentials(getToken(), getBase());
+        await validateCredentials(token, getBase());
+        setAuthError(null);
+        setAuthState("authenticated");
         await refreshSessions();
         startEventStream();
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) {
-          setSettingsOpen(true);
-          showToast("Saved token was rejected. Enter and validate the current token.", {
-            kind: "error",
-          });
+          setAuthError("Your saved token was rejected. Sign in with the current token to continue.");
+          setAuthState("unauthenticated");
           return;
         }
-        showToast(
-          `Could not connect to MyDevEnv2: ${error instanceof Error ? error.message : String(error)}`,
-          { kind: "error" },
-        );
+        setAuthError(`Could not validate your session: ${error instanceof Error ? error.message : String(error)}`);
+        setAuthState("unauthenticated");
       }
     })();
   });
+
+  const authenticate = async (token: string, base: string) => {
+    await validateCredentials(token, base);
+    setToken(token);
+    setBase(base);
+    await refreshSessions();
+    startEventStream();
+    setAuthError(null);
+    setAuthState("authenticated");
+  };
 
   onCleanup(() => {
     stopEventStream();
@@ -587,6 +694,16 @@ const App: Component = () => {
 
   return (
     <>
+      <Show when={authState() === "authenticated"} fallback={
+        <Show when={authState() === "unauthenticated"} fallback={<main class="login-loading">Checking your session…</main>}>
+          <LoginScreen
+            initialToken={getToken()}
+            initialBase={getBase()}
+            error={authError()}
+            onAuthenticated={authenticate}
+          />
+        </Show>
+      }>
       <div class="app">
         <Show when={drawerOpen()}>
           <div
@@ -1121,6 +1238,7 @@ const App: Component = () => {
         open={shortcutsOpen()}
         onClose={() => setShortcutsOpen(false)}
       />
+      </Show>
     </>
   );
 };

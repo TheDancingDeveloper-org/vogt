@@ -24,7 +24,14 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
 
   if (!("serviceWorker" in navigator)) return null;
   try {
-    const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    // sw.js is intentionally unversioned, so ask the browser to revalidate it
+    // on every page load. This prevents old offline/push behavior surviving a
+    // deployment indefinitely.
+    const reg = await navigator.serviceWorker.register("/sw.js", {
+      scope: "/",
+      updateViaCache: "none",
+    });
+    await reg.update().catch(() => undefined);
     // Click messages from sw.js navigate the foreground tab.
     if (!serviceWorkerMessageHandlerRegistered) {
       serviceWorkerMessageHandlerRegistered = true;
