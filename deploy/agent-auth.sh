@@ -30,6 +30,10 @@ die() {
     exit 1
 }
 
+warn() {
+    printf 'mydevenv2-agent-auth: warning: %s\n' "$*" >&2
+}
+
 require_command() {
     command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
@@ -68,7 +72,7 @@ get_secret() {
 }
 
 load_agent_environment() {
-    local access_token github_token
+    local access_token github_destination_token
 
     require_identity
     require_command infisical
@@ -77,13 +81,17 @@ load_agent_environment() {
     export GIT_AUTH_TOKEN="$(get_secret "$access_token" "$CICD_PROJECT_ID" GIT_AUTH_TOKEN)"
     export FORGEJO_TOKEN="$(get_secret "$access_token" "$CICD_PROJECT_ID" FORGEJO_TOKEN)"
     export WOODPECKER_TOKEN="$(get_secret "$access_token" "$INFRASTRUCTURE_PROJECT_ID" WOODPECKER_TOKEN)"
-    if github_token="$(get_secret "$access_token" "$CICD_PROJECT_ID" GITHUB_PAT 2>/dev/null)"; then
-        :
-    else
-        github_token="$(get_secret "$access_token" "$CICD_PROJECT_ID" GH_RELEASE_TOKEN)"
-    fi
-    export GITHUB_PAT="$github_token"
-    export GH_TOKEN="$github_token"
+    # GITHUB_PAT / GH_RELEASE_TOKEN are retired release-automation names whose
+    # values are revoked. They used to be exported here as GH_TOKEN, so every
+    # `gh` call in an auto-agent-auth shell failed with "Bad credentials" and
+    # agents concluded GitHub auth was unavailable. Clear anything inherited
+    # so a stale value cannot outlive this fix.
+    unset GITHUB_PAT GH_RELEASE_TOKEN
+    github_destination_token="$(get_secret "$access_token" "$CICD_PROJECT_ID" GITHUB_DANCINGDEVELOPER_PAT 2>/dev/null || true)"
+    [[ -n "$github_destination_token" ]] || die \
+        "Infisical secret GITHUB_DANCINGDEVELOPER_PAT is missing or empty; refusing ambiguous GitHub credential fallback"
+    export GITHUB_DANCINGDEVELOPER_PAT="$github_destination_token"
+    export GH_TOKEN="$github_destination_token"
     export HOMELAB_KOMODO_API_KEY="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_KEY)"
     export HOMELAB_KOMODO_API_SECRET="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_SECRET)"
 
@@ -93,7 +101,7 @@ load_agent_environment() {
 }
 
 check_access() {
-    local response_file
+    local response_file gh_login
     require_command curl
     require_command git
     require_command gh
@@ -110,9 +118,22 @@ check_access() {
     curl -fsS -H "Authorization: Bearer $WOODPECKER_TOKEN" \
         https://ci.indexarr.net/api/user >"$response_file"
     printf 'ok: Woodpecker API\n'
-    gh api user --jq .login >"$response_file"
-    gh api orgs/AusAgentSmith-org --jq .login >"$response_file"
-    printf 'ok: GitHub API\n'
+    # GitHub logins are case-insensitive; the API returns canonical casing.
+    gh_login="$(gh api user --jq .login 2>/dev/null || true)"
+    [[ "${gh_login,,}" == "thedancingdeveloper" ]] || die \
+        "GitHub destination token is not authenticated as TheDancingDeveloper (got: ${gh_login:-<none>})"
+    [[ "$(gh api user/memberships/orgs/TheDancingDeveloper-org --jq '.state + ":" + .role')" == "active:admin" ]] || die \
+        "GitHub destination token is not an active TheDancingDeveloper-org admin"
+    printf 'ok: GitHub destination (TheDancingDeveloper-org admin)\n'
+    # The source-org credential is a local `gh auth login` session, which only
+    # exists on the primary dev machine — MyDevEnv2 pods have no gh hosts.yml.
+    # Advisory, not fatal: destination access is what agents actually need, and
+    # a hard failure here would leave `check` red for every containerised agent.
+    if [[ "$(env -u GH_TOKEN -u GITHUB_PAT gh api user/memberships/orgs/AusAgentSmith-org --jq '.state + ":" + .role' 2>/dev/null)" == "active:admin" ]]; then
+        printf 'ok: GitHub source (AusAgentSmith-org admin)\n'
+    else
+        warn "no local AusAgentSmith GitHub CLI session; source-org operations are unavailable here. Run 'gh auth login' if you need them."
+    fi
     curl -fsS http://100.92.54.45:3011/read \
         -H "X-Api-Key: $HOMELAB_KOMODO_API_KEY" \
         -H "X-Api-Secret: $HOMELAB_KOMODO_API_SECRET" \
