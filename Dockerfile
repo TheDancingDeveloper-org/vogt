@@ -67,6 +67,14 @@ FROM ubuntu:26.04
 # Android SDK lives in /opt (NOT ~/Android/Sdk): the runtime bind-mounts the
 # host home over /home/sprooty, so anything under $HOME vanishes at runtime —
 # same reason gradle/uv/pnpm are installed system-wide below.
+#
+# PATH puts /usr/local/{s,}bin ahead of the per-user npm-global/local dirs so
+# pod-provided tools (notably the `codex` full-access wrapper installed below
+# when INSTALL_AI_CLIENTS=true) always win over a same-named binary a user or
+# a tool like theclawbay installs into their persisted $HOME. Confirmed
+# 2026-07-31: a theclawbay-managed ~/.npm-global/bin/codex shadowed the
+# system wrapper under the old ordering, silently running Codex with its
+# nested sandbox/approvals still active instead of the pod-level bypass.
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     NPM_CONFIG_PREFIX=/home/sprooty/.npm-global \
@@ -75,7 +83,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ANDROID_SDK_ROOT=/opt/android-sdk \
     RUSTUP_HOME=/opt/rust/rustup \
     CARGO_HOME=/opt/rust/cargo \
-    PATH=/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/opt/rust/cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/usr/local/sbin:/usr/local/bin:/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/opt/rust/cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Core system + dev utilities (per TOOLING.md)
 RUN apt-get update && apt-get install -y --no-install-recommends \
