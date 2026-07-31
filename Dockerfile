@@ -6,7 +6,7 @@
 #   3. runtime     — Ubuntu 26.04 with the full TOOLING.md toolchain, sway,
 #                    selkies-gstreamer, and the binary copied in
 #
-# Built and pushed by .woodpecker.yml as repo.indexarr.net/indexarr/mydevenv2.
+# Built and pushed by .woodpecker/server.yml as repo.indexarr.net/indexarr/mydevenv2.
 # Deployed via Komodo (see deploy/docker-compose.yml).
 
 # Most tool versions are resolved to "latest at build time" rather than
