@@ -271,3 +271,30 @@ first), update this table and the row in root `AGENTS.md`'s disk layout
 accordingly — and note whether prod moves to `sdg` alongside dev or gets its
 own disk, since `sdg` was sized for dev-only validation, not necessarily to
 hold both stacks' full state long-term.
+
+### Nested Codex sandbox
+
+Codex's Linux workspace sandbox runs commands through Bubblewrap and therefore
+needs to create an unprivileged user namespace. The host enables unprivileged
+user namespaces, but Docker's default seccomp and AppArmor profiles deny the
+nested `unshare` operation: both `unshare -Ur true` and `bwrap` fail with
+`Operation not permitted`. Codex then has to request an out-of-sandbox approval
+for routine workspace commands.
+
+The dev stack sets `security_opt` to `seccomp=unconfined` and
+`apparmor=unconfined` so the inner Codex sandbox can enforce its own workspace
+boundary. It does not use Docker privileged mode and does not add `SYS_ADMIN`.
+Validate after every recreation from a **new** terminal session inside the dev
+container:
+
+```bash
+unshare -Ur true
+bwrap --ro-bind / / true
+```
+
+Both commands must exit zero. Then start a new Codex chat in workspace mode and
+confirm a harmless command such as `pwd` runs without an escalation prompt.
+Existing Codex chats retain the permission policy they were started with, so
+they are not a valid post-deploy test. Promote these settings to prod only after
+the dev validation succeeds; relaxing the outer container profiles increases
+the importance of retaining Codex's inner sandbox for untrusted commands.
