@@ -1,6 +1,6 @@
 # MyDevEnv2 — Tooling Baseline
 
-Captured from review of `MyDevEnv/Dockerfile.server` (v1). The pod provides a neutral development baseline for builds under `~/Working/Active/apps/`. Codex and Claude are not installed during prod container bootstrap; the dev image (`INSTALL_AI_CLIENTS=true`, see `deploy/KOMODO.md` "Dev stack") bakes both in for pre-prod trial. The `opencode` CLI is bundled in every image; other AI clients remain user-managed on prod.
+Captured from review of `MyDevEnv/Dockerfile.server` (v1). The pod provides a neutral development baseline for builds under `~/Working/Active/apps/`. Codex and Claude are not installed during prod container bootstrap; the dev image (`INSTALL_AI_CLIENTS=true`, see `deploy/KOMODO.md` "Dev stack") bakes both in for pre-prod trial. In that trusted dev pod, the system `codex` command always uses `--dangerously-bypass-approvals-and-sandbox`, giving it normal container-user access across all of `/home/sprooty/Working` rather than restricting writes to the repository it was launched from. The `opencode` CLI is bundled in every image; other AI clients remain user-managed on prod.
 
 This file is the source of truth for what tooling the runtime image is meant to
 carry. Keep deploy shape, Komodo environment, and rollout/recovery steps in

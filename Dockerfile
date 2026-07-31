@@ -272,9 +272,17 @@ ARG INSTALL_AI_CLIENTS
 # --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
 # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
 # mount — same reasoning as the system pnpm install above. sudo because
-# /usr/local isn't sprooty-writable.
+# /usr/local isn't sprooty-writable. The dev pod is the trusted isolation
+# boundary, so install the real Codex entry point under libexec and expose the
+# codex-full-access wrapper as `codex`. This overrides persisted per-user
+# workspace-write/network restrictions for every repo under ~/Working.
+COPY --chmod=755 deploy/codex-full-access.sh /usr/local/bin/codex-full-access
 RUN if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        sudo npm install -g --prefix=/usr/local @openai/codex @anthropic-ai/claude-code ; \
+        sudo npm install -g --prefix=/usr/local @openai/codex @anthropic-ai/claude-code \
+        && sudo install -d /usr/local/libexec \
+        && codex_target="$(readlink -f /usr/local/bin/codex)" \
+        && sudo ln -s "$codex_target" /usr/local/libexec/codex-real \
+        && sudo ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex ; \
     fi
 
 # sccache (apt package lacks Redis support; pull from GitHub). Resolve latest

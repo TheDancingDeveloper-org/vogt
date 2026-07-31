@@ -272,55 +272,22 @@ accordingly — and note whether prod moves to `sdg` alongside dev or gets its
 own disk, since `sdg` was sized for dev-only validation, not necessarily to
 hold both stacks' full state long-term.
 
-### Nested Codex sandbox
+### Codex full-access mode
 
-Codex's Linux workspace sandbox runs commands through Bubblewrap and therefore
-needs to create an unprivileged user namespace. Getting this working inside a
-container needs **two independent fixes together** — either one alone is not
-sufficient, confirmed empirically 2026-07-31:
+The dev pod is the trusted isolation boundary. Its image exposes `codex`
+through `deploy/codex-full-access.sh`, which always starts the real Codex CLI
+with `--dangerously-bypass-approvals-and-sandbox`. This deliberately gives
+Codex the same filesystem and network access as the `sprooty` process in the
+container, including every repository under `/home/sprooty/Working`; a
+persisted user config cannot silently narrow it back to one launch directory.
 
-1. **Per-container**: `security_opt: [seccomp=unconfined, apparmor=unconfined]`
-   on the stack (already set on `dev-mydevenv2`). Without this, `bwrap` fails
-   immediately with "No permissions to create a new namespace" regardless of
-   the host sysctl below.
-2. **Host-level, on Node B**: `kernel.apparmor_restrict_unprivileged_userns`
-   must be `0`. Ubuntu 24.04+ layers this AppArmor-integrated gate on top of
-   the classic `kernel.unprivileged_userns_clone` sysctl, and it specifically
-   blocks **non-root** processes (i.e. the container's `sprooty` user, which
-   is what Codex runs as) from creating user namespaces — no per-container
-   `security_opt`, `cap_add: SYS_ADMIN`, or even Docker `--privileged` bypasses
-   it for a non-root caller; only running as root does. This is a host-wide
-   setting, not scoped to one container — it affects every container on Node B.
-   Set persistently via `/etc/sysctl.d/99-mydevenv2-bwrap.conf` on Node B
-   (`root@winrarhost` over Tailscale SSH) and applied with `sysctl --system`:
-   ```
-   kernel.apparmor_restrict_unprivileged_userns = 0
-   ```
+Do not add repository-specific `--add-dir` entries or rely on Codex project
+trust entries for this deployment. They do not solve cross-repository release
+and deployment work. Existing Codex chats keep the policy they started with,
+so validate using a new chat after each image deployment.
 
-A previous version of this doc claimed step 1 alone was sufficient and asked
-you to validate with `unshare -Ur true` / `bwrap --ro-bind / / true` after
-every recreation — that validation step, if it had actually been run, would
-have failed with `bwrap: setting up uid map: Permission denied` (or, with only
-step 2 missing, "No permissions to create a new namespace"). It appears to
-have never actually been executed before this note was written.
-
-Validate after every Node B reboot (the sysctl file is persistent, but confirm
-it survived) and after every dev-stack recreation, from a **new** terminal
-session inside the dev container:
-
-```bash
-bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net -- echo ok
-```
-
-Must print `ok` and exit zero. Then start a new Codex chat/exec and confirm a
-workspace-write command runs without a bwrap warning in its trace log (look
-for the absence of `bwrap: ... Operation not permitted` around the tool-call
-event). Existing Codex chats retain the permission policy they were started
-with, so they are not a valid post-deploy test.
-
-Promoting to prod requires adding the same `security_opt` to
-`personal/mydevenv2/docker-compose.yml` — the host sysctl already applies
-tailnet-wide on Node B, since it's a host-level setting, so it needs no
-separate prod-side change. Codex is not installed on prod by container
-bootstrap today (see root `AGENTS.md`), so this is only relevant if that
-changes.
+The previous nested-Bubblewrap configuration is no longer required. Remove
+`seccomp=unconfined` and `apparmor=unconfined` from the dev stack when this
+image is deployed; Codex no longer creates the nested sandbox those settings
+supported. The Node B user-namespace sysctl may be restored to the host
+default once no other workload depends on it.
