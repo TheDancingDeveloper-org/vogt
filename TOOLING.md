@@ -85,6 +85,10 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
   latest at build time, with the binary under `/home/sprooty/.opencode/bin`)
 - `mydevenv2-rust-analyzer-mcp` (wrapper around `rust-analyzer-mcp` that picks
   the nearest Rust workspace root before starting the MCP server)
+- `github-mcp-server` (official GitHub MCP server binary, latest at build time
+  from GitHub releases, installed to `/usr/local/bin`; needs
+  `GITHUB_PERSONAL_ACCESS_TOKEN` set when a client registers it — see
+  README.md "GitHub MCP server for agents")
 
 ## Auth keys / secrets needed at pod startup
 

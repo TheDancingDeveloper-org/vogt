@@ -134,6 +134,20 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
+# GitHub MCP server — agent-facing MCP access to the GitHub API (issues, PRs,
+# repos, actions, ...). No apt repo; resolve the latest release via the API
+# and verify the Linux amd64 tarball against the sha256 digest that same API
+# response publishes, same pattern as the step CLI and sccache installs above.
+RUN api="https://api.github.com/repos/github/github-mcp-server/releases/latest" \
+    && curl -fsSL "$api" -o /tmp/github-mcp-server-release.json \
+    && asset_url=$(jq -r '.assets[] | select(.name == "github-mcp-server_Linux_x86_64.tar.gz") | .browser_download_url' /tmp/github-mcp-server-release.json) \
+    && asset_digest=$(jq -r '.assets[] | select(.name == "github-mcp-server_Linux_x86_64.tar.gz") | .digest | ltrimstr("sha256:")' /tmp/github-mcp-server-release.json) \
+    && curl -fsSL "$asset_url" -o /tmp/github-mcp-server.tar.gz \
+    && echo "${asset_digest}  /tmp/github-mcp-server.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/github-mcp-server.tar.gz -C /tmp \
+    && install -m 755 /tmp/github-mcp-server /usr/local/bin/github-mcp-server \
+    && rm -f /tmp/github-mcp-server-release.json /tmp/github-mcp-server.tar.gz /tmp/github-mcp-server
+
 # Tailscale (TUN device must be passed in at runtime)
 RUN . /etc/os-release \
     && curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${VERSION_CODENAME}.noarmor.gpg" \

@@ -234,6 +234,30 @@ If a client launches the MCP server from a non-Rust directory, set
 `MYDEVENV2_RUST_ANALYZER_WORKSPACE=/path/to/rust/workspace` for that MCP
 server entry.
 
+## GitHub MCP server for agents
+
+The runtime image bundles the official `github-mcp-server` binary
+(`/usr/local/bin/github-mcp-server`, resolved to latest at image build time
+from the upstream GitHub releases). It needs `GITHUB_PERSONAL_ACCESS_TOKEN` set
+when a client registers it; inside an `mydevenv2-agent-auth` shell that token
+is already available as `$GH_TOKEN`.
+
+Codex project/user registration:
+
+```bash
+codex mcp add github -- env GITHUB_PERSONAL_ACCESS_TOKEN=$GH_TOKEN github-mcp-server stdio
+```
+
+Claude Code registration for the current project:
+
+```bash
+claude mcp add --scope project github -e GITHUB_PERSONAL_ACCESS_TOKEN=$GH_TOKEN -- github-mcp-server stdio
+```
+
+Use `GITHUB_AUSAGENTSMITH_PAT` instead of `GH_TOKEN` to register a second
+instance scoped to the AusAgentSmith-org identity if source-org GitHub access
+is needed alongside the main-org one.
+
 ## Smoke test with curl + websocat
 
 ```bash
