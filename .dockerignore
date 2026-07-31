@@ -19,6 +19,7 @@
 !web/src/**
 
 !deploy/agent-auth.sh
+!deploy/codex-full-access.sh
 !deploy/entrypoint.sh
 !deploy/git-askpass.sh
 !deploy/rust-analyzer-mcp.sh
