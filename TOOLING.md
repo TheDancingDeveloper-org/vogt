@@ -37,6 +37,14 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
 - `rust-analyzer-mcp` for agent-facing Rust LSP access over MCP
 - `sccache` v0.10.0+ from GitHub releases (NOT apt — apt package lacks Redis support)
 - `SCCACHE_REDIS=redis://100.92.54.45:6380` (Node B Redis instance)
+- Installed to `/opt/rust` via `RUSTUP_HOME=/opt/rust/rustup` and
+  `CARGO_HOME=/opt/rust/cargo` (NOT `~/.rustup` + `~/.cargo` — the home bind
+  mount would shadow them at runtime, exactly as with the Android SDK above).
+  Until 2026-07-31 they were installed under `$HOME`, so at runtime the pod
+  silently had none of the cargo tools, none of the cross-compile targets, and
+  no `sccache` — only whatever the home volume happened to contain.
+  Consequence: the crate registry cache lives in the image, not on the
+  persisted home volume, so crates re-download after an image redeploy.
 
 ### Python
 

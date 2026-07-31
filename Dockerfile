@@ -73,7 +73,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
     ANDROID_HOME=/opt/android-sdk \
     ANDROID_SDK_ROOT=/opt/android-sdk \
-    PATH=/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/home/sprooty/.opencode/bin:/home/sprooty/.cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    RUSTUP_HOME=/opt/rust/rustup \
+    CARGO_HOME=/opt/rust/cargo \
+    PATH=/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/opt/rust/cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Core system + dev utilities (per TOOLING.md)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -215,10 +217,25 @@ RUN userdel -r ubuntu 2>/dev/null || true \
     && usermod -aG sudo sprooty \
     && echo 'sprooty ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-sprooty
 
+# Rust lives in /opt/rust, NOT ~/.rustup + ~/.cargo — same rule as the Android
+# SDK above: the runtime bind-mounts the host home over /home/sprooty, so a
+# toolchain installed under $HOME is invisible at runtime. It was installed
+# under $HOME until 2026-07-31, which silently cost the pod every cargo-installed
+# tool (cargo-deb, cargo-zigbuild, cargo-xwin, cargo-watch, rust-analyzer-mcp,
+# sccache) and every cross-compile target; only whatever rustup the home volume
+# happened to hold was actually reachable.
+#
+# Consequence to keep in mind: the crate registry cache now lives at
+# /opt/rust/cargo/registry inside the image rather than on the persisted home
+# volume, so crates re-download after an image redeploy. sccache -> Redis on
+# Node B still covers recompilation.
+RUN mkdir -p /opt/rust && chown -R sprooty:sprooty /opt/rust
+
 USER sprooty
 WORKDIR /home/sprooty
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
        | sh -s -- -y --default-toolchain stable --profile minimal \
+           --no-modify-path \
            --component rustfmt --component clippy \
     && rustup component add rust-analyzer \
     && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-pc-windows-gnu \
@@ -227,7 +244,15 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && cargo install --locked cargo-xwin \
     && cargo install --locked cargo-watch \
     && cargo install --locked rust-analyzer-mcp \
-    && curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
+    && test -x /opt/rust/cargo/bin/cargo-zigbuild \
+    && test -x /opt/rust/cargo/bin/rust-analyzer-mcp
+
+# opencode's installer hardcodes $HOME/.opencode/bin with no override, so
+# relocate the binary to /usr/local/bin afterwards — otherwise the runtime
+# /home/sprooty bind mount hides it, same as the Rust tools above.
+RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
+    && sudo install -m 755 /home/sprooty/.opencode/bin/opencode /usr/local/bin/opencode \
+    && rm -rf /home/sprooty/.opencode
 
 ARG INSTALL_AI_CLIENTS
 # --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
@@ -250,8 +275,8 @@ RUN api="https://api.github.com/repos/mozilla/sccache/releases/latest" \
     && curl -fsSL "$asset_url" -o /tmp/sccache.tar.gz \
     && echo "${asset_digest}  /tmp/sccache.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/sccache.tar.gz -C /tmp \
-    && mv "/tmp/sccache-v${sccache_version}-x86_64-unknown-linux-musl/sccache" /home/sprooty/.cargo/bin/sccache \
-    && chmod +x /home/sprooty/.cargo/bin/sccache \
+    && mv "/tmp/sccache-v${sccache_version}-x86_64-unknown-linux-musl/sccache" /opt/rust/cargo/bin/sccache \
+    && chmod +x /opt/rust/cargo/bin/sccache \
     && rm -f /tmp/sccache-release.json /tmp/sccache.tar.gz
 
 USER root
