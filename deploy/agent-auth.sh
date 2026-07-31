@@ -30,10 +30,6 @@ die() {
     exit 1
 }
 
-warn() {
-    printf 'mydevenv2-agent-auth: warning: %s\n' "$*" >&2
-}
-
 require_command() {
     command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
@@ -72,7 +68,7 @@ get_secret() {
 }
 
 load_agent_environment() {
-    local access_token github_destination_token
+    local access_token github_destination_token github_source_token
 
     require_identity
     require_command infisical
@@ -91,7 +87,17 @@ load_agent_environment() {
     [[ -n "$github_destination_token" ]] || die \
         "Infisical secret GITHUB_DANCINGDEVELOPER_PAT is missing or empty; refusing ambiguous GitHub credential fallback"
     export GITHUB_DANCINGDEVELOPER_PAT="$github_destination_token"
+    # TheDancingDeveloper-org is the main org, so it owns the default GH_TOKEN.
     export GH_TOKEN="$github_destination_token"
+
+    # AusAgentSmith-org is still live and holds its own distinct repo set
+    # (AiFw, lindirstat-rs, email-rs, fluent-gpui, ...), so the pod needs both
+    # identities. Source-org work runs as:
+    #   GH_TOKEN="$GITHUB_AUSAGENTSMITH_PAT" gh ...
+    github_source_token="$(get_secret "$access_token" "$CICD_PROJECT_ID" GITHUB_AUSAGENTSMITH_PAT 2>/dev/null || true)"
+    [[ -n "$github_source_token" ]] || die \
+        "Infisical secret GITHUB_AUSAGENTSMITH_PAT is missing or empty"
+    export GITHUB_AUSAGENTSMITH_PAT="$github_source_token"
     export HOMELAB_KOMODO_API_KEY="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_KEY)"
     export HOMELAB_KOMODO_API_SECRET="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_SECRET)"
 
@@ -124,16 +130,16 @@ check_access() {
         "GitHub destination token is not authenticated as TheDancingDeveloper (got: ${gh_login:-<none>})"
     [[ "$(gh api user/memberships/orgs/TheDancingDeveloper-org --jq '.state + ":" + .role')" == "active:admin" ]] || die \
         "GitHub destination token is not an active TheDancingDeveloper-org admin"
-    printf 'ok: GitHub destination (TheDancingDeveloper-org admin)\n'
-    # The source-org credential is a local `gh auth login` session, which only
-    # exists on the primary dev machine — MyDevEnv2 pods have no gh hosts.yml.
-    # Advisory, not fatal: destination access is what agents actually need, and
-    # a hard failure here would leave `check` red for every containerised agent.
-    if [[ "$(env -u GH_TOKEN -u GITHUB_PAT gh api user/memberships/orgs/AusAgentSmith-org --jq '.state + ":" + .role' 2>/dev/null)" == "active:admin" ]]; then
-        printf 'ok: GitHub source (AusAgentSmith-org admin)\n'
-    else
-        warn "no local AusAgentSmith GitHub CLI session; source-org operations are unavailable here. Run 'gh auth login' if you need them."
-    fi
+    printf 'ok: GitHub main org (TheDancingDeveloper-org admin)\n'
+    # Source org is validated with its own PAT from Infisical, not a local
+    # `gh auth login` session — pods have no gh hosts.yml, so a session-based
+    # check could never pass there.
+    gh_login="$(GH_TOKEN="$GITHUB_AUSAGENTSMITH_PAT" gh api user --jq .login 2>/dev/null || true)"
+    [[ "${gh_login,,}" == "ausagentsmith" ]] || die \
+        "GITHUB_AUSAGENTSMITH_PAT is not authenticated as AusAgentSmith (got: ${gh_login:-<none>})"
+    [[ "$(GH_TOKEN="$GITHUB_AUSAGENTSMITH_PAT" gh api user/memberships/orgs/AusAgentSmith-org --jq '.state + ":" + .role' 2>/dev/null)" == "active:admin" ]] || die \
+        "GITHUB_AUSAGENTSMITH_PAT is not an active AusAgentSmith-org admin"
+    printf 'ok: GitHub source org (AusAgentSmith-org admin)\n'
     curl -fsS http://100.92.54.45:3011/read \
         -H "X-Api-Key: $HOMELAB_KOMODO_API_KEY" \
         -H "X-Api-Secret: $HOMELAB_KOMODO_API_SECRET" \
