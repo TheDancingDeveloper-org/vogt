@@ -57,12 +57,10 @@ clone:
 
 steps:
   - name: fmt
-    image: rust:1.97-bookworm
+    image: rust:1-bookworm
     environment:
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: "redis://100.92.54.45:6380"
-      SCCACHE_VERSION: "0.10.0"
-      SCCACHE_SHA256: "1fbb35e135660d04a2d5e42b59c7874d39b3deb17de56330b25b713ec59f849b"
     commands:
       - bash .woodpecker/install-sccache.sh
       # sccache Redis is a best-effort shared cache. If it's unreachable, build
@@ -73,12 +71,10 @@ steps:
       - cargo fmt --all -- --check
 
   - name: clippy
-    image: rust:1.97-bookworm
+    image: rust:1-bookworm
     environment:
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: "redis://100.92.54.45:6380"
-      SCCACHE_VERSION: "0.10.0"
-      SCCACHE_SHA256: "1fbb35e135660d04a2d5e42b59c7874d39b3deb17de56330b25b713ec59f849b"
     commands:
       - bash .woodpecker/install-sccache.sh
       # See fmt step: fall back to no-cache if the sccache Redis is down.
@@ -90,12 +86,10 @@ steps:
       - cargo clippy --all-targets -- -D warnings
 
   - name: test
-    image: rust:1.97-bookworm
+    image: rust:1-bookworm
     environment:
       RUSTC_WRAPPER: sccache
       SCCACHE_REDIS: "redis://100.92.54.45:6380"
-      SCCACHE_VERSION: "0.10.0"
-      SCCACHE_SHA256: "1fbb35e135660d04a2d5e42b59c7874d39b3deb17de56330b25b713ec59f849b"
     commands:
       - bash .woodpecker/install-sccache.sh
       # See fmt step: fall back to no-cache if the sccache Redis is down.
@@ -108,7 +102,7 @@ steps:
   - name: web-typecheck
     image: node:22-bookworm
     commands:
-      - npm install -g pnpm@10 >/dev/null
+      - npm install -g pnpm >/dev/null
       - cd web && pnpm install --frozen-lockfile >/dev/null && pnpm typecheck
 
   - name: mobile-apk
@@ -138,7 +132,7 @@ steps:
         export MYDEVENV2_ANDROID_KEYSTORE_PATH=/tmp/mydevenv2-release.keystore
         printf '%s' "$MYDEVENV2_ANDROID_KEYSTORE_BASE64" | base64 -d > "$MYDEVENV2_ANDROID_KEYSTORE_PATH"
       - cd mobile
-      - sudo npm install -g pnpm@10 >/dev/null
+      - sudo npm install -g pnpm >/dev/null
       - pnpm install --frozen-lockfile
       - |
         set -eu
@@ -196,6 +190,97 @@ steps:
       - event: push
         branch: main
 
+  # dev counterpart of mobile-apk: distinct applicationId (com.sprooty.mydevenv2.dev)
+  # so it installs side by side with the prod APK on one device, pointed at
+  # mydevenv2-dev.sprooty.com, uploaded to a separate Forgejo release tag
+  # (apk-dev-latest) so it can never collide with prod's apk-latest. Reuses
+  # the same signing secrets — same keystore/alias works for both
+  # applicationIds. Requires the Firebase console dev client (already added
+  # to mobile/android/app/google-services.json) to exist before FCM works
+  # on this build.
+  - name: mobile-apk-dev
+    image: cimg/android:2025.04.1-node
+    environment:
+      GIT_AUTH_TOKEN:
+        from_secret: git_auth_token
+      MYDEVENV2_ANDROID_KEYSTORE_BASE64:
+        from_secret: mydevenv2_android_keystore_base64
+      MYDEVENV2_ANDROID_KEYSTORE_PASSWORD:
+        from_secret: mydevenv2_android_keystore_password
+      MYDEVENV2_ANDROID_KEY_ALIAS:
+        from_secret: mydevenv2_android_key_alias
+      MYDEVENV2_ANDROID_KEY_PASSWORD:
+        from_secret: mydevenv2_android_key_password
+    commands:
+      - sudo chown -R circleci:circleci .
+      - |
+        set -eu
+        : "${MYDEVENV2_ANDROID_KEYSTORE_BASE64:?missing mydevenv2_android_keystore_base64 secret}"
+        : "${MYDEVENV2_ANDROID_KEYSTORE_PASSWORD:?missing mydevenv2_android_keystore_password secret}"
+        : "${MYDEVENV2_ANDROID_KEY_ALIAS:?missing mydevenv2_android_key_alias secret}"
+        : "${MYDEVENV2_ANDROID_KEY_PASSWORD:?missing mydevenv2_android_key_password secret}"
+        umask 077
+        export MYDEVENV2_ANDROID_KEYSTORE_PATH=/tmp/mydevenv2-release.keystore
+        printf '%s' "$MYDEVENV2_ANDROID_KEYSTORE_BASE64" | base64 -d > "$MYDEVENV2_ANDROID_KEYSTORE_PATH"
+      - cd mobile
+      - sudo npm install -g pnpm >/dev/null
+      - pnpm install --frozen-lockfile
+      - |
+        set -eu
+        VERSION_NAME=$(node -p "const pkg = require('./package.json'); const sha = (process.env.CI_COMMIT_SHA || 'local').slice(0, 7); pkg.version + '+dev.' + sha")
+        VERSION_CODE=$(git show -s --format=%ct "$CI_COMMIT_SHA")
+        export MYDEVENV2_ANDROID_VERSION_NAME="$VERSION_NAME"
+        export MYDEVENV2_ANDROID_VERSION_CODE="$VERSION_CODE"
+        export MYDEVENV2_ANDROID_APP_ID="com.sprooty.mydevenv2.dev"
+        export MYDEVENV2_ANDROID_APP_NAME="MyDevEnv2 Dev"
+        export MYDEVENV2_ANDROID_SERVER_URL="https://mydevenv2-dev.sprooty.com"
+        echo "Android dev version: $MYDEVENV2_ANDROID_VERSION_NAME ($MYDEVENV2_ANDROID_VERSION_CODE), appId=$MYDEVENV2_ANDROID_APP_ID"
+        npx cap sync android
+        cd android
+        ./gradlew assembleRelease --no-daemon -q
+        cd ..
+      - ls -lh android/app/build/outputs/apk/release/app-release.apk
+      - |
+        set -eu
+        BUILD_TOOLS_DIR=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)
+        "$BUILD_TOOLS_DIR/apksigner" verify --print-certs android/app/build/outputs/apk/release/app-release.apk
+      - |
+        set -eu
+        APK=android/app/build/outputs/apk/release/app-release.apk
+        APK_VERSION_NAME=$(node -p "const pkg = require('./package.json'); const sha = (process.env.CI_COMMIT_SHA || 'local').slice(0, 7); pkg.version + '+dev.' + sha")
+        APK_ASSET_NAME=$(node -p "const pkg = require('./package.json'); const sha = (process.env.CI_COMMIT_SHA || 'local').slice(0, 7); const version = (pkg.version + '+dev.' + sha).replace(/[^A-Za-z0-9._-]/g, '-'); 'mydevenv2-dev-' + version + '.apk'")
+        REPO=/api/v1/repos/indexarr/MyDevEnv2
+
+        sudo curl -sSf -H "Authorization: token $GIT_AUTH_TOKEN" \
+          -o /usr/local/bin/forgejo-api \
+          https://repo.indexarr.net/indexarr/ops/raw/branch/main/scripts/forgejo-api.sh
+        sudo chmod +x /usr/local/bin/forgejo-api
+        export FORGEJO_TOKEN="$GIT_AUTH_TOKEN"
+
+        EXISTING_ID=$(forgejo-api GET "$REPO/releases/tags/apk-dev-latest" --allow 404 \
+          | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+        if [ -n "$EXISTING_ID" ]; then
+          forgejo-api DELETE "$REPO/releases/$EXISTING_ID" --allow 404 >/dev/null
+        fi
+        forgejo-api DELETE "$REPO/tags/apk-dev-latest" --allow 404 >/dev/null
+
+        RELEASE_ID=$(forgejo-api POST "$REPO/releases" \
+          --data "{\"tag_name\":\"apk-dev-latest\",\"target_commitish\":\"$CI_COMMIT_SHA\",\"name\":\"Latest dev APK ($APK_VERSION_NAME)\",\"prerelease\":true,\"body\":\"Signed dev APK (com.sprooty.mydevenv2.dev, points at mydevenv2-dev.sprooty.com) — version $APK_VERSION_NAME, commit $CI_COMMIT_SHA\"}" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+        forgejo-api POST "$REPO/releases/$RELEASE_ID/assets?name=$APK_ASSET_NAME" \
+          --form "attachment=@$APK" >/dev/null
+        rm -f "$MYDEVENV2_ANDROID_KEYSTORE_PATH"
+        echo "uploaded $APK as $APK_ASSET_NAME to release $RELEASE_ID"
+    when:
+      - event: push
+        branch: dev
+        path:
+          include:
+            - mobile/**
+            - web/**
+            - .woodpecker/server.yml
+
   - name: build-and-push
     image: woodpeckerci/plugin-docker-buildx
     settings:
@@ -236,6 +321,8 @@ steps:
       password:
         from_secret: git_auth_token
       dockerfile: Dockerfile
+      build_args:
+        - INSTALL_AI_CLIENTS=true
       tags:
         - dev
         - dev-${CI_COMMIT_SHA}

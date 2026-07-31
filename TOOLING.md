@@ -1,6 +1,6 @@
 # MyDevEnv2 — Tooling Baseline
 
-Captured from review of `MyDevEnv/Dockerfile.server` (v1). The pod provides a neutral development baseline for builds under `~/Working/Active/apps/`. Codex and Claude are not installed during container bootstrap. The `opencode` CLI is bundled in the image; other AI clients remain user-managed.
+Captured from review of `MyDevEnv/Dockerfile.server` (v1). The pod provides a neutral development baseline for builds under `~/Working/Active/apps/`. Codex and Claude are not installed during prod container bootstrap; the dev image (`INSTALL_AI_CLIENTS=true`, see `deploy/KOMODO.md` "Dev stack") bakes both in for pre-prod trial. The `opencode` CLI is bundled in every image; other AI clients remain user-managed on prod.
 
 This file is the source of truth for what tooling the runtime image is meant to
 carry. Keep deploy shape, Komodo environment, and rollout/recovery steps in
@@ -74,7 +74,7 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
   step-ca via `step ssh certificate ...`; the only host-shell SSH path for
   in-pod agents)
 - `opencode` (installed via the upstream `https://opencode.ai/install` script,
-  pinned in `Dockerfile`, with the binary under `/home/sprooty/.opencode/bin`)
+  latest at build time, with the binary under `/home/sprooty/.opencode/bin`)
 - `mydevenv2-rust-analyzer-mcp` (wrapper around `rust-analyzer-mcp` that picks
   the nearest Rust workspace root before starting the MCP server)
 

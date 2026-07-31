@@ -9,43 +9,38 @@
 # Built and pushed by .woodpecker.yml as repo.indexarr.net/indexarr/mydevenv2.
 # Deployed via Komodo (see deploy/docker-compose.yml).
 
-# Pinned tool versions. Bump deliberately, alongside a fresh rebuild + smoke
-# test on the target periphery. Out-of-band pins also live in the woodpecker
-# pipeline so CI builds bit-identical artefacts.
+# Most tool versions are resolved to "latest at build time" rather than
+# pinned — each RUN block below queries the tool's own release API/index and
+# verifies whatever it gets against that same source's published checksum
+# (still integrity-checked, just not reproducible byte-for-byte build to
+# build). Two categories stay pinned deliberately:
+#   - NODE_IMAGE/RUST_IMAGE: major-version base image tags. These already
+#     float at the patch level; the major version is a stability choice, not
+#     staleness.
+#   - Android SDK cmdline-tools/platform-tools: Google doesn't publish a
+#     "latest" download URL for these (would need parsing their repository
+#     XML), so they stay pinned. Bumped to current as of the last audit.
 ARG NODE_IMAGE=node:22-bookworm
-ARG RUST_IMAGE=rust:1.97-bookworm
-ARG PNPM_VERSION=10.18.0
-ARG SCCACHE_VERSION=0.10.0
-ARG SELKIES_VERSION=1.6.1
-ARG RUST_TOOLCHAIN=1.97.0
-ARG NODEJS_APT_VERSION=22.23.1-1nodesource1
-ARG DOCKER_CE_CLI_APT_VERSION=5:29.6.1-1~ubuntu.26.04~resolute
-ARG DOCKER_COMPOSE_PLUGIN_APT_VERSION=5.3.1-1~ubuntu.26.04~resolute
-ARG GH_APT_VERSION=2.96.0
-ARG TAILSCALE_APT_VERSION=1.98.8
-ARG INFISICAL_APT_VERSION=0.43.101
-ARG CARGO_DEB_VERSION=3.7.0
-ARG CARGO_ZIGBUILD_VERSION=0.23.0
-ARG CARGO_XWIN_VERSION=0.23.0
-ARG CARGO_WATCH_VERSION=8.5.3
-ARG RUST_ANALYZER_MCP_VERSION=0.2.0
-ARG SCCACHE_SHA256=1fbb35e135660d04a2d5e42b59c7874d39b3deb17de56330b25b713ec59f849b
-ARG STEP_CLI_SHA256=5845c181251ffe43ca2331bc171e0b92324a71be9cf4ef76cd6fbbba4f2a3cc6
-ARG GRADLE_SHA256=7a00d51fb93147819aab76024feece20b6b84e420694101f276be952e08bef03
-ARG ANDROID_CMDLINE_TOOLS_VERSION=15641748
-ARG ANDROID_CMDLINE_TOOLS_SHA256=a66d5ef0238fc0162e9c1446602ce0dd41702d4dd7a94d2ce42d12b7f80baf7e
-ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.0
-ARG ANDROID_PLATFORM_TOOLS_SHA256=198ae156ab285fa555987219af237b31102fefe8b9d2bc274708a8d4f2865a07
-ARG RCLONE_VERSION=1.74.3
-ARG RCLONE_SHA256=dbee7ccd7a5d617e4ed4cd4555c16669b511abfe8d31164f61be35ac9e999bd2
-ARG OPENCODE_VERSION=1.17.16
+ARG RUST_IMAGE=rust:1-bookworm
+ARG ANDROID_CMDLINE_TOOLS_VERSION=15859902
+ARG ANDROID_CMDLINE_TOOLS_SHA256=4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
+ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.1
+ARG ANDROID_PLATFORM_TOOLS_SHA256=d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
+# Off by default (prod). The dev image build passes --build-arg
+# INSTALL_AI_CLIENTS=true (.woodpecker/server.yml build-and-push-dev) to
+# bake in codex + claude for pre-prod trial — see AGENTS.md "Codex and
+# Claude are deliberately not installed by container bootstrap" for why
+# prod stays opt-in/user-managed for these two specifically. Intentionally
+# unpinned (always latest at build time) per user direction — unlike every
+# other tool in this file, these two are expected to move fast and dev is
+# where that churn should be absorbed first.
+ARG INSTALL_AI_CLIENTS=false
 
 # ─── Stage 1: web bundle ────────────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS web-build
 WORKDIR /app/web
-ARG PNPM_VERSION
 COPY web/package.json web/pnpm-lock.yaml ./
-RUN npm install -g pnpm@${PNPM_VERSION} && pnpm install --frozen-lockfile
+RUN npm install -g pnpm && pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm build
 
@@ -96,9 +91,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Node 22 + pnpm. Override NPM_CONFIG_PREFIX for this one install so pnpm
 # lands in /usr/local (survives the runtime /home/sprooty bind mount).
 # User-installed globals go to $NPM_CONFIG_PREFIX (/home/sprooty/.npm-global).
-ARG PNPM_VERSION
 ARG NODE_MAJOR=22
-ARG NODEJS_APT_VERSION
 RUN install -m 0755 -d /usr/share/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
        | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
@@ -111,13 +104,11 @@ RUN install -m 0755 -d /usr/share/keyrings \
     && printf 'Package: nsolid\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' \
        > /etc/apt/preferences.d/nsolid \
     && apt-get update \
-    && apt-get install -y --no-install-recommends "nodejs=${NODEJS_APT_VERSION}" \
-    && npm install -g --prefix=/usr/local "pnpm@${PNPM_VERSION}" \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g --prefix=/usr/local pnpm \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI (DooD pattern — docker.sock mounted from host)
-ARG DOCKER_CE_CLI_APT_VERSION
-ARG DOCKER_COMPOSE_PLUGIN_APT_VERSION
 RUN . /etc/os-release \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
@@ -128,43 +119,33 @@ RUN . /etc/os-release \
        > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        "docker-ce-cli=${DOCKER_CE_CLI_APT_VERSION}" \
-        "docker-compose-plugin=${DOCKER_COMPOSE_PLUGIN_APT_VERSION}" \
+        docker-ce-cli \
+        docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI
-ARG GH_APT_VERSION
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
             https://cli.github.com/packages stable main" \
        > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends "gh=${GH_APT_VERSION}" \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
 # Tailscale (TUN device must be passed in at runtime)
-ARG TAILSCALE_APT_VERSION
 RUN . /etc/os-release \
     && curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${VERSION_CODENAME}.noarmor.gpg" \
        > /usr/share/keyrings/tailscale-archive-keyring.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] \
             https://pkgs.tailscale.com/stable/ubuntu ${VERSION_CODENAME} main" \
        > /etc/apt/sources.list.d/tailscale.list \
-    && apt-get update && apt-get install -y --no-install-recommends "tailscale=${TAILSCALE_APT_VERSION}" \
+    && apt-get update && apt-get install -y --no-install-recommends tailscale \
     && rm -rf /var/lib/apt/lists/*
 
-# rclone
-ARG RCLONE_VERSION
-ARG RCLONE_SHA256
-RUN curl -fsSL "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip" \
-       -o /tmp/rclone.zip \
-    && echo "${RCLONE_SHA256}  /tmp/rclone.zip" | sha256sum -c - \
-    && unzip -q /tmp/rclone.zip -d /tmp/rclone \
-    && install -m 0755 "/tmp/rclone/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone \
-    && rm -rf /tmp/rclone /tmp/rclone.zip
+# rclone — official installer resolves + verifies latest itself.
+RUN curl -fsSL https://rclone.org/install.sh | bash
 
 # Infisical CLI
-ARG INFISICAL_APT_VERSION
 RUN install -m 0755 -d /usr/share/keyrings \
     && curl -1sLf https://artifacts-cli.infisical.com/infisical.gpg \
        | gpg --dearmor -o /usr/share/keyrings/infisical-archive-keyring.gpg \
@@ -172,20 +153,24 @@ RUN install -m 0755 -d /usr/share/keyrings \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/infisical-archive-keyring.gpg] https://artifacts-cli.infisical.com/deb stable main" \
        > /etc/apt/sources.list.d/infisical.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends "infisical=${INFISICAL_APT_VERSION}" \
+    && apt-get install -y --no-install-recommends infisical \
     && rm -rf /var/lib/apt/lists/*
 
 # Smallstep `step` CLI — used to self-issue short-lived SSH certificates against
 # the step-ca on Node B (`step ssh certificate ...`), the only path to host-shell
 # SSH for in-pod agents. Installed from the official .deb (lands at /usr/bin/step).
-ARG STEP_CLI_VERSION=0.30.6
-ARG STEP_CLI_SHA256
-RUN curl -fsSL \
-        "https://github.com/smallstep/cli/releases/download/v${STEP_CLI_VERSION}/step-cli_${STEP_CLI_VERSION}-1_amd64.deb" \
-        -o /tmp/step-cli.deb \
-    && echo "${STEP_CLI_SHA256}  /tmp/step-cli.deb" | sha256sum -c - \
+# No apt repo for this one, and GitHub doesn't offer a stable "latest" download
+# URL — resolve the latest release tag via the API, then verify the asset
+# against the sha256 digest that same API response publishes.
+RUN api="https://api.github.com/repos/smallstep/cli/releases/latest" \
+    && curl -fsSL "$api" -o /tmp/step-release.json \
+    && step_version=$(jq -r '.tag_name | ltrimstr("v")' /tmp/step-release.json) \
+    && asset_url=$(jq -r --arg v "$step_version" '.assets[] | select(.name == "step-cli_" + $v + "-1_amd64.deb") | .browser_download_url' /tmp/step-release.json) \
+    && asset_digest=$(jq -r --arg v "$step_version" '.assets[] | select(.name == "step-cli_" + $v + "-1_amd64.deb") | .digest | ltrimstr("sha256:")' /tmp/step-release.json) \
+    && curl -fsSL "$asset_url" -o /tmp/step-cli.deb \
+    && echo "${asset_digest}  /tmp/step-cli.deb" | sha256sum -c - \
     && apt-get install -y --no-install-recommends /tmp/step-cli.deb \
-    && rm -f /tmp/step-cli.deb \
+    && rm -f /tmp/step-cli.deb /tmp/step-release.json \
     && rm -rf /var/lib/apt/lists/*
 
 # Sway (headless Wayland compositor) + minimal apps for in-pod GUI testing
@@ -197,9 +182,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # GStreamer + WebRTC bits for in-pod GUI streaming.
 #
 # Selkies-GStreamer was previously installed best-effort because the PyPI name
-# was unstable. We now pin a known-good version and record the result in
-# /etc/mydevenv2/features.json so the server can expose accurate "what's
-# available" state via /api/config without misleading users about GUI support.
+# was unstable. Installs latest and records the resolved version (via `pip3
+# show`) in /etc/mydevenv2/features.json so the server can expose accurate
+# "what's available" state via /api/config without misleading users about GUI
+# support.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
         gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
@@ -207,12 +193,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip libgstreamer1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-ARG SELKIES_VERSION
 RUN install -d /etc/mydevenv2 \
-    && if pip3 install --break-system-packages --no-cache-dir "selkies==${SELKIES_VERSION}"; then \
-        echo "{\"selkies\":\"${SELKIES_VERSION}\"}" > /etc/mydevenv2/features.json; \
+    && if pip3 install --break-system-packages --no-cache-dir selkies; then \
+        resolved="$(pip3 show selkies 2>/dev/null | sed -n 's/^Version: //p')"; \
+        echo "{\"selkies\":\"${resolved}\"}" > /etc/mydevenv2/features.json; \
     else \
-        echo "selkies==${SELKIES_VERSION} unavailable — GUI streaming disabled in this image" >&2; \
+        echo "selkies unavailable — GUI streaming disabled in this image" >&2; \
         echo "{\"selkies\":null}" > /etc/mydevenv2/features.json; \
     fi
 
@@ -231,52 +217,61 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 
 USER sprooty
 WORKDIR /home/sprooty
-ARG RUST_TOOLCHAIN
-ARG CARGO_DEB_VERSION
-ARG CARGO_ZIGBUILD_VERSION
-ARG CARGO_XWIN_VERSION
-ARG CARGO_WATCH_VERSION
-ARG RUST_ANALYZER_MCP_VERSION
-ARG OPENCODE_VERSION
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-       | sh -s -- -y --default-toolchain ${RUST_TOOLCHAIN} --profile minimal \
+       | sh -s -- -y --default-toolchain stable --profile minimal \
            --component rustfmt --component clippy \
     && rustup component add rust-analyzer \
     && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-pc-windows-gnu \
-    && cargo install --locked "cargo-deb@${CARGO_DEB_VERSION}" \
-    && cargo install --locked "cargo-zigbuild@${CARGO_ZIGBUILD_VERSION}" \
-    && cargo install --locked "cargo-xwin@${CARGO_XWIN_VERSION}" \
-    && cargo install --locked "cargo-watch@${CARGO_WATCH_VERSION}" \
-    && cargo install --locked "rust-analyzer-mcp@${RUST_ANALYZER_MCP_VERSION}" \
-    && curl -fsSL https://opencode.ai/install \
-       | bash -s -- --version "${OPENCODE_VERSION}" --no-modify-path
+    && cargo install --locked cargo-deb \
+    && cargo install --locked cargo-zigbuild \
+    && cargo install --locked cargo-xwin \
+    && cargo install --locked cargo-watch \
+    && cargo install --locked rust-analyzer-mcp \
+    && curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
 
-# sccache (apt package lacks Redis support; pull from GitHub)
-ARG SCCACHE_VERSION
-ARG SCCACHE_SHA256
-RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-       -o /tmp/sccache.tar.gz \
-    && echo "${SCCACHE_SHA256}  /tmp/sccache.tar.gz" | sha256sum -c - \
+ARG INSTALL_AI_CLIENTS
+RUN if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
+        npm install -g @openai/codex @anthropic-ai/claude-code ; \
+    fi
+
+# sccache (apt package lacks Redis support; pull from GitHub). Resolve latest
+# release via the API and verify against the sha256 digest that same
+# response publishes for the asset — no hardcoded checksum to keep in sync.
+RUN api="https://api.github.com/repos/mozilla/sccache/releases/latest" \
+    && curl -fsSL "$api" -o /tmp/sccache-release.json \
+    && sccache_version=$(jq -r '.tag_name | ltrimstr("v")' /tmp/sccache-release.json) \
+    && asset_name="sccache-v${sccache_version}-x86_64-unknown-linux-musl.tar.gz" \
+    && asset_url=$(jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .browser_download_url' /tmp/sccache-release.json) \
+    && asset_digest=$(jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .digest | ltrimstr("sha256:")' /tmp/sccache-release.json) \
+    && curl -fsSL "$asset_url" -o /tmp/sccache.tar.gz \
+    && echo "${asset_digest}  /tmp/sccache.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/sccache.tar.gz -C /tmp \
-    && mv "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /home/sprooty/.cargo/bin/sccache \
-    && chmod +x /home/sprooty/.cargo/bin/sccache
+    && mv "/tmp/sccache-v${sccache_version}-x86_64-unknown-linux-musl/sccache" /home/sprooty/.cargo/bin/sccache \
+    && chmod +x /home/sprooty/.cargo/bin/sccache \
+    && rm -f /tmp/sccache-release.json /tmp/sccache.tar.gz
 
 USER root
 
 # Java + Gradle. Installed globally (/opt + a /usr/local/bin symlink) so they
 # survive the /home/sprooty bind mount at runtime. gradle finds the JDK via
-# `java` on PATH, so no JAVA_HOME juggling needed.
-ARG GRADLE_VERSION=8.12
-ARG GRADLE_SHA256
+# `java` on PATH, so no JAVA_HOME juggling needed. This system gradle is only
+# a convenience for ad-hoc use — the actual mobile build is driven by the
+# committed wrapper (mobile/android/gradlew), which pins its own version
+# independently, so unpinning this one doesn't affect build reproducibility.
+# services.gradle.org publishes a "current" endpoint with the download URL
+# and checksum together, so no separate lookup needed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openjdk-21-jdk-headless \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+    && curl -fsSL https://services.gradle.org/versions/current -o /tmp/gradle-current.json \
+    && gradle_version=$(jq -r '.version' /tmp/gradle-current.json) \
+    && gradle_checksum=$(jq -r '.checksum' /tmp/gradle-current.json) \
+    && curl -fsSL "https://services.gradle.org/distributions/gradle-${gradle_version}-bin.zip" \
        -o /tmp/gradle.zip \
-    && echo "${GRADLE_SHA256}  /tmp/gradle.zip" | sha256sum -c - \
+    && echo "${gradle_checksum}  /tmp/gradle.zip" | sha256sum -c - \
     && unzip -q /tmp/gradle.zip -d /opt \
-    && ln -s "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle \
-    && rm /tmp/gradle.zip
+    && ln -s "/opt/gradle-${gradle_version}/bin/gradle" /usr/local/bin/gradle \
+    && rm /tmp/gradle.zip /tmp/gradle-current.json
 
 # Android SDK (for the Capacitor android project under mobile/). Installed to
 # /opt/android-sdk so it survives the /home/sprooty bind mount at runtime — a
@@ -324,11 +319,7 @@ RUN install -d /opt/android-sdk/cmdline-tools \
 # /home/sprooty bind mount — a --user install would be shadowed at runtime.
 # Fail the build if they don't install — silent fallback would leave the pod
 # with broken Python tooling that surfaces as cryptic command-not-found errors.
-ARG UV_VERSION=0.5.20
-ARG RUFF_VERSION=0.7.4
-ARG PYTEST_VERSION=8.3.4
-RUN pip3 install --break-system-packages --no-cache-dir \
-        "uv==${UV_VERSION}" "ruff==${RUFF_VERSION}" "pytest==${PYTEST_VERSION}"
+RUN pip3 install --break-system-packages --no-cache-dir uv ruff pytest
 
 # The server binary (built in stage 2 with the web bundle embedded; cache
 # mounts in stage 2 mean we have to copy out of /usr/local/bin, not /app).
