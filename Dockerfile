@@ -230,8 +230,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
 
 ARG INSTALL_AI_CLIENTS
+# --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
+# /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
+# mount — same reasoning as the system pnpm install above. sudo because
+# /usr/local isn't sprooty-writable.
 RUN if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        npm install -g @openai/codex @anthropic-ai/claude-code ; \
+        sudo npm install -g --prefix=/usr/local @openai/codex @anthropic-ai/claude-code ; \
     fi
 
 # sccache (apt package lacks Redis support; pull from GitHub). Resolve latest

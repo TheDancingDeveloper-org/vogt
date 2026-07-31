@@ -313,6 +313,8 @@ steps:
   # `:latest`. Only runs on pushes to `dev`.
   - name: build-and-push-dev
     image: woodpeckerci/plugin-docker-buildx
+    environment:
+      INSTALL_AI_CLIENTS: "true"
     settings:
       repo: repo.indexarr.net/indexarr/mydevenv2
       registry: repo.indexarr.net
@@ -321,8 +323,8 @@ steps:
       password:
         from_secret: git_auth_token
       dockerfile: Dockerfile
-      build_args:
-        - INSTALL_AI_CLIENTS=true
+      build_args_from_env:
+        - INSTALL_AI_CLIENTS
       tags:
         - dev
         - dev-${CI_COMMIT_SHA}
