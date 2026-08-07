@@ -291,3 +291,21 @@ The previous nested-Bubblewrap configuration is no longer required. Remove
 image is deployed; Codex no longer creates the nested sandbox those settings
 supported. The Node B user-namespace sysctl may be restored to the host
 default once no other workload depends on it.
+
+### PID-1 zombie reaper (`init: true`)
+
+`mydevenv2-server` execs as PID 1 (`entrypoint.sh`) and only `wait()`s on
+children it spawns directly — one-shot `git` calls (`server/src/git.rs`) and
+PTY session children (`server/src/pty.rs`). It has no `SIGCHLD` reaper for
+orphans reparented to PID 1. Agent sessions (Codex/Claude, run with sandbox
+bypassed in this stack) fork many short-lived subprocesses; whenever one's
+immediate parent exits first, the orphan reparents to PID 1 and is never
+reaped, becoming a permanent zombie that holds a pids-cgroup slot. This
+exhausted `mydevenv2-dev`'s pids limit on 2026-08-07 (~106k pids, container
+unable to fork anything, including its own diagnostic `ps`).
+
+Both `docker-compose.yml` (prod template) and ops's
+`personal/mydevenv2-dev/docker-compose.yml` now set `init: true`, so Docker's
+built-in `tini` takes the PID 1 slot instead and reaps orphans for free.
+Prod's `personal/mydevenv2/docker-compose.yml` in the ops repo still needs the
+same line added — apply it there too when convenient.
