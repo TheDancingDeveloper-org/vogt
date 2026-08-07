@@ -14,6 +14,16 @@ services:
     restart: unless-stopped
     hostname: mydevenv2
 
+    # `mydevenv2-server` execs as PID 1 (see entrypoint.sh). It only wait()s
+    # on the children it spawns directly (one-shot `git` calls, PTY session
+    # children); it has no SIGCHLD reaper for orphans reparented to PID 1.
+    # Terminal sessions running agents (Codex/Claude) fork lots of short-lived
+    # subprocesses (git, etc.) whose immediate parent can exit first, leaving
+    # an orphan that reparents to PID 1 and is never reaped — a permanent
+    # zombie that holds a PID slot. Docker's `init: true` inserts tini as the
+    # real PID 1, which reaps all of these, so mydevenv2-server never needs to.
+    init: true
+
     # Bridge networking + an explicit port. Tailscale runs in KERNEL mode
     # inside the container (see entrypoint.sh) so an optional exit node can
     # transparently route egress; that needs the TUN device + NET_ADMIN below.
