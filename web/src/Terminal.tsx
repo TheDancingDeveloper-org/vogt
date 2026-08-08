@@ -9,6 +9,7 @@ import { sessionsStore } from "./store";
 import { getTheme, TERMINAL_THEME_EVENT } from "./terminalThemes";
 import {
   formatTerminalInputLimit,
+  MAX_TERMINAL_INPUT_BYTES,
   terminalInputTooLarge,
 } from "./terminalInput";
 import {
@@ -75,8 +76,18 @@ function writeTerminalFontSize(fontSize: number) {
   );
 }
 
+// Upper bound on input buffered while the WS is reconnecting. Generous enough
+// for anything typed or pasted by hand; anything bigger belongs in a file.
+const MAX_PENDING_INPUT_BYTES = 4 * MAX_TERMINAL_INPUT_BYTES;
+
 function configureTerminalTextarea(textarea: HTMLTextAreaElement | undefined) {
   if (!textarea) return;
+  // Touch devices only: soft keyboards are unusable for prose without
+  // autocorrect/suggestions. On desktop, keep xterm's defaults (everything
+  // off) — enabling them routes hardware-keyboard input and paste through
+  // IME composition, which xterm can garble into duplicated/"corrected"
+  // characters.
+  if (!(window.matchMedia?.("(pointer: coarse)").matches ?? false)) return;
   textarea.setAttribute("autocorrect", "on");
   textarea.setAttribute("autocapitalize", "none");
   textarea.setAttribute("autocomplete", "on");
@@ -117,6 +128,8 @@ const TerminalView: Component<Props> = (props) => {
   let fontSizeHandler: ((event: Event) => void) | null = null;
   let themeHandler: (() => void) | null = null;
   let terminalDomCleanup: (() => void) | null = null;
+  let pendingInput: Uint8Array<ArrayBuffer>[] = [];
+  let pendingInputBytes = 0;
   let pasteTextareaRef: HTMLTextAreaElement | undefined;
   const [showPasteModal, setShowPasteModal] = createSignal(false);
   const [statusText, setStatusText] = createSignal<string | null>("Connecting...");
@@ -151,13 +164,39 @@ const TerminalView: Component<Props> = (props) => {
       );
       return;
     }
+    const bytes: Uint8Array<ArrayBuffer> =
+      typeof data === "string"
+        ? new TextEncoder().encode(data)
+        : new Uint8Array(data);
     if (ws && ws.readyState === WebSocket.OPEN) {
-      if (typeof data === "string") {
-        ws.send(new TextEncoder().encode(data));
-      } else {
-        ws.send(data);
-      }
+      ws.send(bytes);
+      return;
     }
+    // Reconnects are routine (mobile background/foreground, redeploys), so
+    // input typed or pasted in that window must not vanish — queue it and
+    // flush when the socket reopens.
+    if (destroyed || sessionGone) return;
+    if (pendingInputBytes + bytes.byteLength > MAX_PENDING_INPUT_BYTES) {
+      props.onNotify?.("Terminal disconnected — input dropped", "error");
+      return;
+    }
+    pendingInput.push(bytes);
+    pendingInputBytes += bytes.byteLength;
+  };
+
+  const flushPendingInput = () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    for (const chunk of pendingInput) ws.send(chunk);
+    pendingInput = [];
+    pendingInputBytes = 0;
+  };
+
+  const dropPendingInput = () => {
+    if (pendingInputBytes > 0) {
+      props.onNotify?.("Terminal reconnect failed — pending input dropped", "error");
+    }
+    pendingInput = [];
+    pendingInputBytes = 0;
   };
 
   const appendToCache = (data: Uint8Array) => {
@@ -403,21 +442,15 @@ const TerminalView: Component<Props> = (props) => {
     // Wire input: user keystrokes → PTY stdin.
     term.onData((data) => dispatchInput(data));
 
-    // Intercept browser paste events (Ctrl+V / Edit→Paste) in the capture phase,
-    // before xterm.js wraps them in bracketed-paste sequences (\x1b[200~...\x1b[201~).
-    // Programs like infisical that don't implement bracketed-paste mode receive the
-    // escape sequences as literal input, corrupting base64 tokens.
-    const onPasteCapture = (e: ClipboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const text = e.clipboardData?.getData("text/plain") ?? "";
-      if (text) dispatchInput(text);
-    };
-    term.textarea?.addEventListener(
-      "paste",
-      onPasteCapture,
-      true, // capture phase — runs before xterm's bubble-phase listener
-    );
+    // Paste MUST go through term.paste(): it emits the bracketed-paste markers
+    // (\x1b[200~...\x1b[201~) only when the foreground program enabled DECSET
+    // 2004, and normalizes newlines to \r. Injecting clipboard text straight
+    // into the PTY breaks every bracketed-paste-aware program — multi-line
+    // pastes execute line-by-line in shells and submit early in TUIs (Claude
+    // Code, opencode), and vim mangles indentation. A program that reads stdin
+    // while a stale 2004 mode is left enabled (the old infisical token bug)
+    // is a terminal-state leak recoverable with `reset`; don't fix it here by
+    // stripping bracketing for everyone.
 
     // Clipboard plumbing.
     const copySelection = async (): Promise<boolean> => {
@@ -472,17 +505,21 @@ const TerminalView: Component<Props> = (props) => {
         if (v == null) return;
         text = v;
       }
-      if (text) dispatchInput(text);
+      if (text) term?.paste(text);
     };
 
     // Custom key handler for Ctrl+Shift+C/V and Cmd+C/V semantics.
-    // Returning false stops xterm from forwarding the keystroke to the PTY.
+    // Returning false stops xterm from forwarding the keystroke to the PTY —
+    // but it does NOT cancel the browser default. Every combo handled here
+    // must also preventDefault(), or the browser's own copy/paste fires on
+    // top of ours (Ctrl+Shift+V pasted twice before this was added).
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
       const meta = e.ctrlKey && e.shiftKey;
       const mac = navigator.platform.toLowerCase().includes("mac") && e.metaKey;
       if ((meta || mac) && (e.key === "c" || e.key === "C")) {
         if (term?.hasSelection()) {
+          e.preventDefault();
           copySelection().then((success) => {
             if (success) {
               props.onNotify?.("Copied to clipboard", "info");
@@ -506,6 +543,7 @@ const TerminalView: Component<Props> = (props) => {
         (e.key === "c" || e.key === "C") &&
         term?.hasSelection()
       ) {
+        e.preventDefault();
         copySelection().then((success) => {
           if (success) {
             props.onNotify?.("Copied to clipboard", "info");
@@ -515,10 +553,12 @@ const TerminalView: Component<Props> = (props) => {
         return false;
       }
       if ((meta || mac) && (e.key === "v" || e.key === "V")) {
+        e.preventDefault();
         void pasteFromClipboard();
         return false;
       }
       if ((meta || mac) && (e.key === "a" || e.key === "A")) {
+        e.preventDefault();
         term?.selectAll();
         return false;
       }
@@ -553,7 +593,6 @@ const TerminalView: Component<Props> = (props) => {
     };
     hostRef.addEventListener("contextmenu", onContextMenu);
     terminalDomCleanup = () => {
-      term?.textarea?.removeEventListener("paste", onPasteCapture, true);
       hostRef?.removeEventListener("auxclick", onAuxClick);
       hostRef?.removeEventListener("contextmenu", onContextMenu);
       terminalDomCleanup = null;
@@ -637,6 +676,7 @@ const TerminalView: Component<Props> = (props) => {
   function markSessionGone() {
     if (!sessionGone) {
       sessionGone = true;
+      dropPendingInput();
       setStatusText("Session unavailable");
       term?.write("\r\n\x1b[31m[session not found — server may have restarted]\x1b[0m\r\n");
     }
@@ -665,6 +705,7 @@ const TerminalView: Component<Props> = (props) => {
     ws.addEventListener("open", () => {
       reconnectDelay = 500;
       sendResize();
+      flushPendingInput();
     });
     ws.addEventListener("message", (ev) => {
       if (typeof ev.data === "string") {
@@ -735,6 +776,8 @@ const TerminalView: Component<Props> = (props) => {
 
   onCleanup(() => {
     destroyed = true;
+    pendingInput = [];
+    pendingInputBytes = 0;
     if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (cacheTimer !== null) { clearTimeout(cacheTimer); cacheTimer = null; }
     persistCache();
