@@ -220,7 +220,9 @@ impl AssistantRuntime {
         if convo.pending.is_some() {
             self.deny_pending_locked(&mut convo, "superseded by a new user message");
         }
-        convo.messages.push(json!({"role": "user", "content": text}));
+        convo
+            .messages
+            .push(json!({"role": "user", "content": text}));
         convo.transcript.push(TranscriptEntry {
             role: "user".into(),
             text,
@@ -300,7 +302,8 @@ impl AssistantRuntime {
             // A backend that keeps emitting tool calls despite
             // `tool_choice: "none"` must not spin us forever.
             if forced_rounds > 2 {
-                let text = "I hit my tool budget before finishing — ask again to continue.".to_string();
+                let text =
+                    "I hit my tool budget before finishing — ask again to continue.".to_string();
                 convo.transcript.push(TranscriptEntry {
                     role: "assistant".into(),
                     text: text.clone(),
@@ -313,7 +316,10 @@ impl AssistantRuntime {
                     tool_trace,
                 });
             }
-            let response = self.backend.complete(self.request_body(convo, force_final)).await;
+            let response = self
+                .backend
+                .complete(self.request_body(convo, force_final))
+                .await;
             let response = match response {
                 Ok(r) => r,
                 Err(e) => {
@@ -337,7 +343,9 @@ impl AssistantRuntime {
             let message = response
                 .pointer("/choices/0/message")
                 .cloned()
-                .ok_or_else(|| ApiError::Internal("assistant backend: malformed response".into()))?;
+                .ok_or_else(|| {
+                    ApiError::Internal("assistant backend: malformed response".into())
+                })?;
             let tool_calls = message
                 .get("tool_calls")
                 .and_then(Value::as_array)
@@ -409,10 +417,8 @@ impl AssistantRuntime {
                             // Sibling calls after this one in the same message
                             // get a deferred notice so the protocol stays valid.
                             for later in tool_calls.iter().skip(idx + 1) {
-                                let later_id = later
-                                    .get("id")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default();
+                                let later_id =
+                                    later.get("id").and_then(Value::as_str).unwrap_or_default();
                                 results.push(json!({
                                     "role": "tool",
                                     "tool_call_id": later_id,
@@ -767,7 +773,10 @@ mod tests {
             false,
         );
         let out = rt.handle_message("what's going on?".into()).await.unwrap();
-        assert_eq!(out.reply.as_deref(), Some("your cat session shows marker-xyz"));
+        assert_eq!(
+            out.reply.as_deref(),
+            Some("your cat session shows marker-xyz")
+        );
         assert_eq!(out.tool_trace.len(), 2);
         // The tool result fed to the model must carry the delimited output.
         let convo = rt.conversation.lock().await;
@@ -808,13 +817,19 @@ mod tests {
         // Nothing reached the PTY yet.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let tail = String::from_utf8_lossy(&session.tail(4096)).into_owned();
-        assert!(!tail.contains("approved-input"), "unexpected early write: {tail}");
+        assert!(
+            !tail.contains("approved-input"),
+            "unexpected early write: {tail}"
+        );
 
         let out = rt.resolve_action(action.id, true).await.unwrap();
         assert_eq!(out.reply.as_deref(), Some("done, I typed it"));
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let tail = String::from_utf8_lossy(&session.tail(4096)).into_owned();
-        assert!(tail.contains("approved-input"), "input never arrived: {tail}");
+        assert!(
+            tail.contains("approved-input"),
+            "input never arrived: {tail}"
+        );
         // Kill the child or the runtime's shutdown blocks forever on the
         // spawn_blocking exit-waiter (`cat` never exits on its own).
         sessions.remove(session.id).unwrap();

@@ -185,10 +185,7 @@ pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicCon
         features: load_features(),
         session_templates: state.config.session_templates.clone(),
         assistant_enabled: state.assistant.is_some(),
-        assistant_model: state
-            .assistant
-            .as_ref()
-            .map(|a| a.model().to_string()),
+        assistant_model: state.assistant.as_ref().map(|a| a.model().to_string()),
     })
 }
 

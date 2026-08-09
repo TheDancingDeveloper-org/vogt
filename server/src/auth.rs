@@ -472,6 +472,9 @@ mod tests {
             required_capability(&Method::POST, "/api/assistant/reset"),
             Some(TokenCapability::Assistant)
         );
-        assert_eq!(required_capability(&Method::GET, "/api/assistant/history"), None);
+        assert_eq!(
+            required_capability(&Method::GET, "/api/assistant/history"),
+            None
+        );
     }
 }
