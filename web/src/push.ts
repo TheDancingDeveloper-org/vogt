@@ -262,6 +262,23 @@ function navigateFromPushUrl(url: string) {
 }
 
 let nativeHandlersRegistered = false;
+let nativeChannelCreated = false;
+
+async function ensureNativeNotificationChannel() {
+  if (nativeChannelCreated) return;
+  const { PushNotifications } = await import("@capacitor/push-notifications");
+  await PushNotifications.createChannel({
+    id: "mydevenv2-alerts",
+    name: "MyDevEnv2 alerts",
+    description: "Session and assistant alerts from MyDevEnv2",
+    importance: 5,
+    visibility: 1,
+    sound: "default",
+    lights: true,
+    vibration: true,
+  });
+  nativeChannelCreated = true;
+}
 
 async function registerNativePushHandlers() {
   if (nativeHandlersRegistered) return;
@@ -269,6 +286,10 @@ async function registerNativePushHandlers() {
 
   try {
     const { PushNotifications } = await import("@capacitor/push-notifications");
+    // Create the channel on every native boot as well as during subscription.
+    // This covers APKs that already have a stored FCM token from before the
+    // channel was introduced.
+    await ensureNativeNotificationChannel();
     await PushNotifications.addListener("pushNotificationActionPerformed", (action) => {
       const url = action.notification.data?.url;
       if (typeof url === "string" && url.length > 0) {
@@ -295,6 +316,7 @@ export async function subscribeNativeFcm(label?: string): Promise<{ id: string }
   if (perm.receive !== "granted") {
     throw new Error(`native notification permission ${perm.receive}`);
   }
+  await ensureNativeNotificationChannel();
 
   // Wait once for the `registration` event to fire with our FCM token. Attach
   // listeners before register() so a fast native callback cannot be missed.

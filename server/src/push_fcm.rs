@@ -158,7 +158,10 @@ impl FcmSender {
                 "token": device_token,
                 "notification": { "title": title, "body": body },
                 "data": data_map,
-                "android": { "priority": "HIGH" }
+                "android": {
+                    "priority": "HIGH",
+                    "notification": { "channel_id": "mydevenv2-alerts" }
+                }
             }
         });
 

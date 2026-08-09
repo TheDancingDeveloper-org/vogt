@@ -368,7 +368,7 @@ const App: Component = () => {
       openHistoryTab();
     } else if (path === "/tasks") {
       openTasksTab();
-    } else if (path === "/assistant") {
+    } else if (path === "/assistant" || path.startsWith("/assistant/")) {
       openAssistantTab();
     }
   });
@@ -590,7 +590,8 @@ const App: Component = () => {
       (location.pathname === "/gui" && tabId === "gui") ||
       (location.pathname === "/history" && tabId === "history") ||
       (location.pathname === "/tasks" && tabId === "tasks") ||
-      (location.pathname === "/assistant" && tabId === "assistant");
+      ((location.pathname === "/assistant" || location.pathname.startsWith("/assistant/")) &&
+        tabId === "assistant");
 
     // Drop any per-tab registrations so we don't leak references.
     senders.delete(tabId);

@@ -1,4 +1,4 @@
-import { render } from "solid-js/web";
+import { ErrorBoundary, render } from "solid-js/web";
 import { HashRouter, Route } from "@solidjs/router";
 import App from "./App";
 import { registerServiceWorker } from "./push";
@@ -66,17 +66,30 @@ installNativeInsetsFallback();
 // Rust server: every navigation stays under index.html.
 render(
   () => (
-    <HashRouter>
-      <Route path="/" component={App} />
-      <Route path="/t/:id" component={App} />
-      <Route path="/e/*path" component={App} />
-      <Route path="/g" component={App} />
-      <Route path="/g/*path" component={App} />
-      <Route path="/gui" component={App} />
-      <Route path="/history" component={App} />
-      <Route path="/tasks" component={App} />
-      <Route path="/assistant" component={App} />
-    </HashRouter>
+    <ErrorBoundary
+      fallback={(error) => (
+        <main class="app-error" role="alert">
+          <h1>MyDevEnv2 could not render this view</h1>
+          <p>{error instanceof Error ? error.message : String(error)}</p>
+          <button type="button" onClick={() => window.location.reload()}>
+            Reload
+          </button>
+        </main>
+      )}
+    >
+      <HashRouter>
+        <Route path="/" component={App} />
+        <Route path="/t/:id" component={App} />
+        <Route path="/e/*path" component={App} />
+        <Route path="/g" component={App} />
+        <Route path="/g/*path" component={App} />
+        <Route path="/gui" component={App} />
+        <Route path="/history" component={App} />
+        <Route path="/tasks" component={App} />
+        <Route path="/assistant" component={App} />
+        <Route path="/assistant/*path" component={App} />
+      </HashRouter>
+    </ErrorBoundary>
   ),
   document.getElementById("root")!,
 );

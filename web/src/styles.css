@@ -27,6 +27,28 @@
   --keyboard-inset: 0px;
 }
 
+.app-error {
+  box-sizing: border-box;
+  min-height: 100vh;
+  padding: 32px 20px;
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  gap: 12px;
+  color: var(--fg, #f0f6fc);
+  background: var(--bg, #0d1117);
+}
+
+.app-error h1,
+.app-error p {
+  margin: 0;
+}
+
+.app-error p {
+  color: var(--fg-muted, #8b949e);
+  white-space: pre-wrap;
+}
+
 * {
   box-sizing: border-box;
 }
