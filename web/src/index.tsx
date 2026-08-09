@@ -75,6 +75,7 @@ render(
       <Route path="/gui" component={App} />
       <Route path="/history" component={App} />
       <Route path="/tasks" component={App} />
+      <Route path="/assistant" component={App} />
     </HashRouter>
   ),
   document.getElementById("root")!,
