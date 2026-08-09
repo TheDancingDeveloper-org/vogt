@@ -315,6 +315,7 @@ steps:
     image: woodpeckerci/plugin-docker-buildx
     environment:
       INSTALL_AI_CLIENTS: "true"
+      INSTALL_FLUTTER: "true"
     settings:
       repo: repo.indexarr.net/indexarr/mydevenv2
       registry: repo.indexarr.net
@@ -325,6 +326,7 @@ steps:
       dockerfile: Dockerfile
       build_args_from_env:
         - INSTALL_AI_CLIENTS
+        - INSTALL_FLUTTER
       tags:
         - dev
         - dev-${CI_COMMIT_SHA}

@@ -26,6 +26,8 @@ ARG ANDROID_CMDLINE_TOOLS_VERSION=15859902
 ARG ANDROID_CMDLINE_TOOLS_SHA256=4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
 ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.1
 ARG ANDROID_PLATFORM_TOOLS_SHA256=d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
+ARG FLUTTER_VERSION=3.44.9
+ARG FLUTTER_SHA256=a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4efcb
 # Off by default (prod). The dev image build passes --build-arg
 # INSTALL_AI_CLIENTS=true (.woodpecker/server.yml build-and-push-dev) to
 # bake in codex + claude for pre-prod trial — see AGENTS.md "Codex and
@@ -35,6 +37,9 @@ ARG ANDROID_PLATFORM_TOOLS_SHA256=d230f13842f60f782a8645f9c813f8f845bf36089ea728
 # other tool in this file, these two are expected to move fast and dev is
 # where that churn should be absorbed first.
 ARG INSTALL_AI_CLIENTS=false
+# Flutter is also dev-only: app CI pins this exact stable release, while the
+# production MyDevEnv2 runtime has no reason to carry the large mobile SDK.
+ARG INSTALL_FLUTTER=false
 
 # ─── Stage 1: web bundle ────────────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS web-build
@@ -81,9 +86,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
     ANDROID_HOME=/opt/android-sdk \
     ANDROID_SDK_ROOT=/opt/android-sdk \
+    FLUTTER_ROOT=/opt/flutter \
     RUSTUP_HOME=/opt/rust/rustup \
     CARGO_HOME=/opt/rust/cargo \
-    PATH=/usr/local/sbin:/usr/local/bin:/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/opt/rust/cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/usr/local/sbin:/usr/local/bin:/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/opt/flutter/bin:/opt/flutter/bin/cache/dart-sdk/bin:/opt/rust/cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Core system + dev utilities (per TOOLING.md)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -372,6 +378,30 @@ RUN install -d /opt/android-sdk/cmdline-tools \
     # auto-managed SDK components at runtime (the SDK lives in /opt, which is
     # not bind-mounted, so this ownership persists from the image).
     && chown -R ${SPROOTY_UID}:${SPROOTY_GID} /opt/android-sdk
+
+# Flutter + its bundled Dart SDK are installed only in the dev image. Keep the
+# SDK under /opt so the runtime /home/sprooty bind mount cannot hide it. The
+# archive and checksum are pinned to the official stable Linux release entry;
+# leave the tree sprooty-owned because Flutter manages its artifact cache there.
+ARG INSTALL_FLUTTER
+ARG FLUTTER_VERSION
+ARG FLUTTER_SHA256
+RUN if [ "$INSTALL_FLUTTER" = "true" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends xz-utils libglu1-mesa \
+        && rm -rf /var/lib/apt/lists/* \
+        && curl -fsSL \
+          "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
+          -o /tmp/flutter.tar.xz \
+        && echo "${FLUTTER_SHA256}  /tmp/flutter.tar.xz" | sha256sum -c - \
+        && tar -xJf /tmp/flutter.tar.xz -C /opt \
+        && rm /tmp/flutter.tar.xz \
+        && chown -R ${SPROOTY_UID}:${SPROOTY_GID} /opt/flutter \
+        && command -v flutter \
+        && command -v dart \
+        && sudo -H -u sprooty env "PATH=${PATH}" flutter --version \
+        && sudo -H -u sprooty env "PATH=${PATH}" dart --version ; \
+    fi
 
 # Python tools the user expects (uv, ruff, pytest). Installed globally into
 # /usr/local (system pip lands scripts in /usr/local/bin) so they survive the

@@ -69,6 +69,14 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
   system gradle. The Capacitor project currently targets compile/target SDK 35
   (`mobile/android/variables.gradle`); SDK 36 is installed ahead of the bump.
 
+### Flutter (dev image only)
+
+- Flutter 3.44.9 stable, including its bundled Dart 3.12.2 SDK.
+- Installed to `/opt/flutter` so the runtime home bind mount cannot hide it.
+  Both `flutter` and `dart` are on `PATH`.
+- Enabled only for the `dev` image with `INSTALL_FLUTTER=true`; production does
+  not carry the large Flutter SDK.
+
 ## Container + cloud tools
 
 - Docker CLI + compose plugin (installed in the image, but daemon access is
