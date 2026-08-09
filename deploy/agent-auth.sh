@@ -9,6 +9,16 @@ readonly CICD_PROJECT_ID="6d6caff5-7aaf-42f8-a135-2455d7629af8"
 readonly INFRASTRUCTURE_PROJECT_ID="5b7e75de-e874-484d-9595-873acd6bfd07"
 readonly APPS_PROJECT_ID="76b1ebe1-3656-4cef-952c-30d5d489c6e7"
 readonly INFISICAL_ENV="prod"
+readonly CADASTRE_SECRET_NAME="${MYDEVENV2_CADASTRE_SECRET_NAME:-HOMELAB_CADASTRE_HTTP_TOKEN}"
+readonly DEFAULT_CADASTRE_MCP_URL="https://winrarhost.tailc7d3c.ts.net:18081/mcp"
+readonly DEFAULT_CADASTRE_MCP_RESOLVE="${MYDEVENV2_CADASTRE_MCP_RESOLVE:-}"
+AUTH_TMP_DIR=""
+
+cleanup_auth_artifacts() {
+    if [[ -n "$AUTH_TMP_DIR" && -d "$AUTH_TMP_DIR" ]]; then
+        rm -rf "$AUTH_TMP_DIR"
+    fi
+}
 
 usage() {
     cat <<'EOF'
@@ -19,7 +29,7 @@ Usage:
 
 Commands:
   check  Fetch credentials and validate Infisical, Forgejo, Woodpecker,
-         GitHub, and Komodo access.
+         GitHub, Komodo, and Cadastre MCP access.
   run    Execute one command with service credentials on demand in memory.
   shell  Start a login shell with service credentials on demand in memory.
 EOF
@@ -100,6 +110,19 @@ load_agent_environment() {
     export GITHUB_AUSAGENTSMITH_PAT="$github_source_token"
     export HOMELAB_KOMODO_API_KEY="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_KEY)"
     export HOMELAB_KOMODO_API_SECRET="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_SECRET)"
+    # Cadastre is an agent-side dependency, not a container/server setting.
+    # Keep the bearer in the child environment only; never persist or print it.
+    export CADASTRE_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$CADASTRE_SECRET_NAME")"
+    [[ -n "$CADASTRE_HTTP_TOKEN" ]] || die \
+        "Infisical secret $CADASTRE_SECRET_NAME is missing or empty"
+    umask 077
+    AUTH_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mydevenv2-agent-auth.XXXXXXXX")"
+    printf '%s' "$CADASTRE_HTTP_TOKEN" >"$AUTH_TMP_DIR/cadastre-http-token"
+    export CADASTRE_HTTP_TOKEN_FILE="$AUTH_TMP_DIR/cadastre-http-token"
+
+    if [[ "${MYDEVENV2_AUTO_CADASTRE_MCP:-1}" == "1" ]]; then
+        /usr/local/bin/mydevenv2-mcp-bootstrap
+    fi
 
     export INFISICAL_API_URL="${INFISICAL_API_URL:-$DEFAULT_INFISICAL_API_URL}"
     export GIT_ASKPASS=/usr/local/bin/mydevenv2-git-askpass
@@ -107,7 +130,7 @@ load_agent_environment() {
 }
 
 check_access() {
-    local response_file gh_login
+    local response_file gh_login mcp_url
     require_command curl
     require_command git
     require_command gh
@@ -146,6 +169,18 @@ check_access() {
         -H 'Content-Type: application/json' \
         --data '{"type":"ListServers","params":{}}' >"$response_file"
     printf 'ok: Komodo API\n'
+    mcp_url="${CADASTRE_MCP_URL:-$DEFAULT_CADASTRE_MCP_URL}"
+    mcp_curl_args=()
+    if [[ -n "${MYDEVENV2_CADASTRE_MCP_RESOLVE:-$DEFAULT_CADASTRE_MCP_RESOLVE}" ]]; then
+        mcp_curl_args+=(--resolve "${MYDEVENV2_CADASTRE_MCP_RESOLVE}")
+    fi
+    curl -fsS --max-time 15 "${mcp_curl_args[@]}" \
+        -H "Authorization: Bearer $CADASTRE_HTTP_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"mydevenv2-agent-auth","version":"1"}}}' \
+        "$mcp_url" >"$response_file"
+    printf 'ok: Cadastre MCP (%s)\n' "$mcp_url"
 }
 
 case "${1:-}" in
@@ -156,12 +191,14 @@ case "${1:-}" in
         shift
         [[ "${1:-}" == "--" ]] && shift
         [[ $# -gt 0 ]] || die "run requires a command"
-        load_agent_environment
-        exec "$@"
+    load_agent_environment
+        trap cleanup_auth_artifacts EXIT
+        "$@"
         ;;
     shell)
         load_agent_environment
-        exec "${SHELL:-/bin/bash}" -l
+        trap cleanup_auth_artifacts EXIT
+        "${SHELL:-/bin/bash}" -l
         ;;
     -h|--help|help)
         usage

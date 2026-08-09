@@ -106,6 +106,7 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
 | `MYDEVENV2_TOKEN` | `apps` project, env `prod` | Bearer token for MyDevEnv2 server API auth |
 | `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` | `apps` project, env `prod` | Read-only Universal Auth identity required by the production agent shells |
 | `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` | `apps` project, env `prod` | Secret for the production agent identity |
+| `HOMELAB_CADASTRE_HTTP_TOKEN` | `apps` project, env `prod` | Child-process bearer for the private Cadastre MCP endpoint |
 | `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` | `apps` project, env `prod` | Optional Firebase service-account JSON for native Android FCM push |
 | Other app-specific secrets | Infisical `apps` / `cicd` / `infrastructure` | Fetched on demand by `mydevenv2-agent-auth` |
 
@@ -124,6 +125,40 @@ mydevenv2-agent-auth check
 mydevenv2-agent-auth run -- gh api user
 mydevenv2-agent-auth shell
 ```
+
+The helper also fetches `HOMELAB_CADASTRE_HTTP_TOKEN` on demand and exports it
+only inside the command or shell child. It validates the private Streamable HTTP
+MCP endpoint during `check`; the bearer is never placed in the Dockerfile,
+Compose environment, command line, logs, or persisted home.
+
+On the first authenticated session, the helper automatically performs an
+idempotent client bootstrap when `MYDEVENV2_AUTO_CADASTRE_MCP=1` (the default).
+It registers Codex's native HTTP transport and registers Claude Code/OpenCode
+through `/usr/local/bin/mydevenv2-cadastre-mcp`, which obtains a fresh token for
+each bridge process. Existing client registrations are preserved. Set the
+variable to `0` to disable automatic registration.
+
+The default endpoint is `https://winrarhost.tailc7d3c.ts.net:18081/mcp` and may
+be overridden for a controlled test with `CADASTRE_MCP_URL`. Register clients
+inside an authenticated shell using native environment-variable token support,
+for example:
+
+```bash
+mydevenv2-agent-auth run -- codex mcp add cadastre \
+  --url https://winrarhost.tailc7d3c.ts.net:18081/mcp \
+  --bearer-token-env-var CADASTRE_HTTP_TOKEN
+```
+
+The same automatic bootstrap registers Claude Code and OpenCode through the
+ephemeral bridge. To run those clients explicitly while still obtaining the
+token on demand:
+
+```bash
+mydevenv2-agent-auth run -- claude
+mydevenv2-agent-auth run -- opencode
+```
+
+No manual MCP command is needed unless automatic registration was disabled.
 
 The machine identity must have read-only access to the `cicd`, `infrastructure`,
 and `apps` Infisical projects. The helper uses the direct tailnet endpoint
