@@ -19,7 +19,9 @@
 !web/src/**
 
 !deploy/agent-auth.sh
+!deploy/cadastre-mcp-auth.sh
 !deploy/codex-full-access.sh
 !deploy/entrypoint.sh
 !deploy/git-askpass.sh
+!deploy/mcp-bootstrap.sh
 !deploy/rust-analyzer-mcp.sh
