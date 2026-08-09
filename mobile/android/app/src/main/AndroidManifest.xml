@@ -41,4 +41,6 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Assistant voice input (speech-recognition plugin) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 </manifest>

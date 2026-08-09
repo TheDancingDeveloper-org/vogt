@@ -12,7 +12,9 @@ use crate::gui as gui_handlers;
 use crate::push_api;
 use crate::{
     agent_tasks::{self, AgentTaskRegistry},
-    api, assets, auth,
+    api, assets,
+    assistant::AssistantRuntime,
+    assistant_api, auth,
     config::Config,
     events::EventBus,
     files, git,
@@ -33,6 +35,8 @@ pub struct AppState {
     pub push: Arc<PushManager>,
     pub agent_tasks: Arc<AgentTaskRegistry>,
     pub history: Option<Arc<SessionHistory>>,
+    /// None when `assistant_api_key` is not configured; routes 404.
+    pub assistant: Option<Arc<AssistantRuntime>>,
 }
 
 pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
@@ -70,6 +74,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             .expect("agent task registry init"),
     );
 
+    let assistant = AssistantRuntime::from_config(&cfg, Arc::clone(&sessions));
+    if assistant.is_some() {
+        tracing::info!(model = %cfg.assistant_model, "assistant enabled");
+    }
+
     let state = Arc::new(AppState {
         config: cfg,
         auth: Arc::new(auth::AuthRuntime::default()),
@@ -79,6 +88,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         push,
         agent_tasks,
         history,
+        assistant,
     });
 
     // Background task: fan out a push notification whenever a session enters
@@ -111,6 +121,14 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
                 .delete(api::delete_session),
         )
         .route("/api/sessions/{id}/kill", post(api::kill_session))
+        .route("/api/sessions/{id}/input", post(api::session_input))
+        .route("/api/assistant/message", post(assistant_api::message))
+        .route(
+            "/api/assistant/actions/{id}",
+            post(assistant_api::resolve_action),
+        )
+        .route("/api/assistant/history", get(assistant_api::history))
+        .route("/api/assistant/reset", post(assistant_api::reset))
         .route("/api/events", get(api::events_stream))
         .route("/api/status", get(api::operational_status))
         .route("/api/files", get(files::read_file).put(files::write_file))

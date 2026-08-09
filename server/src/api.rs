@@ -70,6 +70,40 @@ pub async fn kill_session(
     Ok(Json(OkResponse::new(true)))
 }
 
+/// Mirrors the WebSocket input cap (`ws::MAX_INPUT_BYTES`).
+const MAX_HTTP_INPUT_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Deserialize)]
+pub struct SessionInputReq {
+    /// Text written verbatim to the PTY. Control sequences are allowed —
+    /// this is the same raw path as WebSocket binary frames.
+    pub text: String,
+    /// Append a carriage return after `text` (i.e. "press Enter").
+    #[serde(default)]
+    pub submit: bool,
+}
+
+pub async fn session_input(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SessionInputReq>,
+) -> Result<Json<OkResponse>> {
+    if req.text.len() > MAX_HTTP_INPUT_BYTES {
+        return Err(crate::error::ApiError::BadRequest(format!(
+            "input exceeds {MAX_HTTP_INPUT_BYTES} bytes"
+        )));
+    }
+    let session = state.sessions.get(id)?;
+    let mut bytes = req.text.into_bytes();
+    if req.submit {
+        bytes.push(b'\r');
+    }
+    session
+        .write_input(&bytes)
+        .map_err(|e| crate::error::ApiError::Pty(format!("write input: {e}")))?;
+    Ok(Json(OkResponse::new(true)))
+}
+
 pub async fn events_stream(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {

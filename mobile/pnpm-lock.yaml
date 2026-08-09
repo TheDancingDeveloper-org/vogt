@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@capacitor-community/speech-recognition':
+        specifier: ^7.0.1
+        version: 7.0.1(@capacitor/core@8.3.4)
       '@capacitor/android':
         specifier: ^8.3.4
         version: 8.3.4(@capacitor/core@8.3.4)
@@ -29,6 +32,11 @@ importers:
         version: 6.0.3
 
 packages:
+
+  '@capacitor-community/speech-recognition@7.0.1':
+    resolution: {integrity: sha512-ykpBZziR575X0eURO5vXaD9gVrXXC/7Ra2qql/2KP6/jxWOqAFuw4eKjSPjwdAgGE6a/Z+v8FJm4SVh57MVwDA==}
+    peerDependencies:
+      '@capacitor/core': '>=7.0.0'
 
   '@capacitor/android@8.3.4':
     resolution: {integrity: sha512-7gJjrG3X32Am1QMLqgMztWTYMLMVNE+VZwhekNxhvYizH4mOV05vH+rC9B+f17bCkYZfyu/qXQX6hoY7kLeVZw==}
@@ -404,6 +412,10 @@ packages:
     resolution: {integrity: sha512-p4a9I6X6nu6IhoGmBqAcbJy1mlC4j27vEPZX9F4L4/vZT3Lyq1VkFHw/V/PUcB9Buo+DG3iHkT0x3Qya58zc3g==}
 
 snapshots:
+
+  '@capacitor-community/speech-recognition@7.0.1(@capacitor/core@8.3.4)':
+    dependencies:
+      '@capacitor/core': 8.3.4
 
   '@capacitor/android@8.3.4(@capacitor/core@8.3.4)':
     dependencies:

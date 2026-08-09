@@ -66,6 +66,8 @@ interface Props {
 function defaultPushPreferences(): PushPreferences {
   return {
     waiting_for_input: true,
+    errored: true,
+    idle_stall: true,
     agent_task_started: true,
     agent_task_notify: true,
     quiet_hours: {
@@ -1153,6 +1155,32 @@ const Settings: Component<Props> = (props) => {
                       }
                     />
                     <span style={{ "font-size": "12px" }}>Session waiting-for-input</span>
+                  </label>
+                  <label style={{ display: "flex", gap: "6px", "align-items": "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={pushPrefs().errored}
+                      onChange={(e) =>
+                        setPushPrefs((current) => ({
+                          ...current,
+                          errored: e.currentTarget.checked,
+                        }))
+                      }
+                    />
+                    <span style={{ "font-size": "12px" }}>Session errored</span>
+                  </label>
+                  <label style={{ display: "flex", gap: "6px", "align-items": "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={pushPrefs().idle_stall}
+                      onChange={(e) =>
+                        setPushPrefs((current) => ({
+                          ...current,
+                          idle_stall: e.currentTarget.checked,
+                        }))
+                      }
+                    />
+                    <span style={{ "font-size": "12px" }}>Idle stall</span>
                   </label>
                   <label style={{ display: "flex", gap: "6px", "align-items": "center" }}>
                     <input

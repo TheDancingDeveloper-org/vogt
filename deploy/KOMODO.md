@@ -98,6 +98,11 @@ Current production environment also expects:
   JSON for FCM HTTP v1. Empty disables native FCM while web-push still works.
 - `DOCKER_SOCKET_GID` — optional override for the host docker socket group
   added by `docker-compose.docker-socket.yml`. Node B currently uses `984`.
+- `MYDEVENV2_ASSISTANT_API_KEY` — optional bearer key for the conversational
+  assistant backend (The Claw Bay proxy). Empty/unset disables the assistant
+  routes and hides the PWA tab. `MYDEVENV2_ASSISTANT_MODEL` and
+  `MYDEVENV2_ASSISTANT_BASE_URL` override the defaults (`gpt-5.4-mini`,
+  `https://api.theclawbay.com/v1`). See `docs/ASSISTANT.md`.
 
 Codex and Claude are not installed by this bootstrap. They are optional clients;
 default interactive sessions are authenticated through the neutral

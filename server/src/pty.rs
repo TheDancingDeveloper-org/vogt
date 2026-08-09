@@ -84,6 +84,15 @@ impl Session {
         *self.exit_code.lock()
     }
 
+    pub fn command(&self) -> Option<String> {
+        self.command.clone()
+    }
+
+    /// Last `n` bytes of scrollback (or fewer if the buffer holds less).
+    pub fn tail(&self, n: usize) -> Bytes {
+        Bytes::copy_from_slice(self.scrollback.lock().tail(n))
+    }
+
     pub fn summary(&self) -> SessionSummary {
         let sb = self.scrollback.lock();
         SessionSummary {
@@ -93,6 +102,7 @@ impl Session {
             exit_code: *self.exit_code.lock(),
             scrollback_bytes: sb.total_written(),
             cwd: self.cwd.clone(),
+            command: self.command.clone(),
             created_at: format_rfc3339(self.created_at),
         }
     }

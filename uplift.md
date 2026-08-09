@@ -128,17 +128,20 @@ the dev stack, before relying on side-by-side dev/prod APKs for testing.
    Android hardware — needs the dev stack + dev-APK `applicationId` split
    above.
 
-3. **Voice conversational interaction (new surface)**
-   Nothing exists today: no STT/TTS Capacitor plugins, no `RECORD_AUDIO`
-   permission, no audio code in `web/src`. TTS (agent -> verbal update) is
-   low effort via the Web Speech API (`speechSynthesis`) inside the WebView.
-   STT (user -> spoken input) needs a native plugin (e.g.
-   `@capacitor-community/speech-recognition`) plus the manifest permission —
-   Web Speech `SpeechRecognition` is unreliable/absent on Android WebViews.
-   The open design question is the agent-side "when to speak" hook: naturally
-   piggybacks on the same activity/phrase-watcher events proposed below
-   rather than being built from scratch. Scope as a follow-up after the
-   multi-agent signal work lands, not before.
+3. **Voice conversational interaction (new surface)** — **implemented, not
+   yet validated live**
+   Landed as the conversational assistant (see `docs/ASSISTANT.md`):
+   `server/src/assistant.rs` + `assistant_api.rs` (OpenAI-compatible tool-use
+   loop against The Claw Bay proxy, `MYDEVENV2_ASSISTANT_*` config keys, new
+   `assistant` token capability, confirmation-gated `send_input`),
+   `web/src/Assistant.tsx` tab (transcript, TTS via `speechSynthesis`,
+   approve/deny cards), `@capacitor-community/speech-recognition` plugin +
+   `RECORD_AUDIO` in the APK for push-to-talk STT, and a generic
+   `POST /api/sessions/:id/input` endpoint. Validation needs: the dev stack
+   env to carry `MYDEVENV2_ASSISTANT_API_KEY` (Infisical -> Komodo), a
+   browser end-to-end pass, and the dev APK for the mic flow. Model note:
+   `claude-*` via The Claw Bay hung during validation (Aug 2026); default is
+   `gpt-5.4-mini`.
 
 ---
 
@@ -169,7 +172,9 @@ groundwork already exists than a from-scratch design would assume.
    `MYDEVENV2_IDLE_STALL_AFTER_MS`, default 10 minutes) — the case where
    output just stops without a recognizable prompt. `PushPreferences` gained
    `errored`/`idle_stall` toggles and digest-count fields. Not yet validated
-   live.
+   live. The web UI initially omitted the `errored`/`idle_stall` toggles
+   (undiscoverable, and a save from defaults would silently reset them to
+   server-default `true`); `web/src/api.ts` + `Settings.tsx` now carry both.
 
 2. **Auto-retry on transient failures (e.g. 429 / rate limit)** — **done**
    `activity::is_rate_limited` matches `429` / `rate limit` / `overloaded` /
@@ -223,8 +228,10 @@ manual steps left below.
    primarily to prod. Still a judgment call for the user: whether to move
    live clients onto scoped tokens and whether the primary token keeps full
    Docker-adjacent access long term.
-8. Voice conversational interaction (scope after 5-6) — not started; new
-   surface, no code exists yet.
+8. Voice conversational interaction — implemented (assistant tab + voice, see
+   Mobile item 3 and `docs/ASSISTANT.md`); needs `MYDEVENV2_ASSISTANT_API_KEY`
+   provisioned on the dev stack and live validation (browser first, then dev
+   APK mic flow).
 9. Cross-agent orchestration (scope after 5-6, separate design pass) — not
    started; needs real design work once 5-6 have run in production for a
    while.

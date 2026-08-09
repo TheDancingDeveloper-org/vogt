@@ -49,6 +49,10 @@ pub struct SessionSummary {
     pub scrollback_bytes: u64,
     #[serde(default)]
     pub cwd: String,
+    /// Explicit command the session was created with, if any (None for
+    /// default-shell sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     #[serde(default)]
     pub created_at: String,
 }

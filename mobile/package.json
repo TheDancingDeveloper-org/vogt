@@ -11,6 +11,7 @@
     "build:apk:release": "cap sync android && cd android && ./gradlew assembleRelease"
   },
   "dependencies": {
+    "@capacitor-community/speech-recognition": "^7.0.1",
     "@capacitor/android": "^8.3.4",
     "@capacitor/app": "^8.0.5",
     "@capacitor/core": "^8.3.4",

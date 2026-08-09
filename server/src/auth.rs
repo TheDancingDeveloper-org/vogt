@@ -40,9 +40,10 @@ pub enum TokenCapability {
     AgentTasksWrite,
     PushWrite,
     HistoryWrite,
+    Assistant,
 }
 
-const ALL_CAPABILITIES: [TokenCapability; 7] = [
+const ALL_CAPABILITIES: [TokenCapability; 8] = [
     TokenCapability::Sessions,
     TokenCapability::FilesystemWrite,
     TokenCapability::GitWrite,
@@ -50,6 +51,7 @@ const ALL_CAPABILITIES: [TokenCapability; 7] = [
     TokenCapability::AgentTasksWrite,
     TokenCapability::PushWrite,
     TokenCapability::HistoryWrite,
+    TokenCapability::Assistant,
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,9 +295,12 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
         if *method == Method::PATCH || *method == Method::DELETE {
             return Some(TokenCapability::Sessions);
         }
-        if *method == Method::POST && path.ends_with("/kill") {
+        if *method == Method::POST && (path.ends_with("/kill") || path.ends_with("/input")) {
             return Some(TokenCapability::Sessions);
         }
+    }
+    if path.starts_with("/api/assistant") && *method != Method::GET {
+        return Some(TokenCapability::Assistant);
     }
     if (path == "/api/files" && *method == Method::PUT)
         || (path == "/api/files/op" && *method == Method::POST)
@@ -391,6 +396,12 @@ mod tests {
             auto_agent_auth: false,
             agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
             session_templates: vec![],
+            assistant_api_key: None,
+            assistant_base_url: "https://api.theclawbay.com/v1".into(),
+            assistant_model: "gpt-5.4-mini".into(),
+            assistant_auto_type: false,
+            assistant_max_tool_calls: 8,
+            assistant_reasoning_effort: None,
         }
     }
 
@@ -445,5 +456,22 @@ mod tests {
             Some(TokenCapability::AgentTasksWrite)
         );
         assert_eq!(required_capability(&Method::GET, "/api/sessions"), None);
+        assert_eq!(
+            required_capability(&Method::POST, "/api/sessions/abc123/input"),
+            Some(TokenCapability::Sessions)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/api/assistant/message"),
+            Some(TokenCapability::Assistant)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/api/assistant/actions/xyz"),
+            Some(TokenCapability::Assistant)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/api/assistant/reset"),
+            Some(TokenCapability::Assistant)
+        );
+        assert_eq!(required_capability(&Method::GET, "/api/assistant/history"), None);
     }
 }

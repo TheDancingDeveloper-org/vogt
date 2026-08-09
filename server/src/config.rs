@@ -120,6 +120,22 @@ pub struct Config {
     pub agent_auth_helper: std::path::PathBuf,
     /// Session templates available for quick session creation.
     pub session_templates: Vec<SessionTemplate>,
+    /// Bearer key for the assistant's LLM backend. Sourced from
+    /// `MYDEVENV2_ASSISTANT_API_KEY` env or config file. Empty disables the
+    /// assistant surface entirely (routes 404, PWA hides the tab).
+    pub assistant_api_key: Option<String>,
+    /// OpenAI-compatible base URL for the assistant backend.
+    pub assistant_base_url: String,
+    /// Model id sent to the assistant backend.
+    pub assistant_model: String,
+    /// When false (default), assistant `send_input` tool calls pause as a
+    /// pending action requiring explicit user approval before any bytes reach
+    /// a PTY. True bypasses confirmation — only for trusted setups.
+    pub assistant_auto_type: bool,
+    /// Upper bound on tool-call rounds per user message.
+    pub assistant_max_tool_calls: u32,
+    /// Optional `reasoning_effort` forwarded to the backend (e.g. "minimal").
+    pub assistant_reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -142,6 +158,12 @@ struct FileConfig {
     auto_agent_auth: Option<bool>,
     agent_auth_helper: Option<String>,
     session_templates: Option<Vec<SessionTemplate>>,
+    assistant_api_key: Option<String>,
+    assistant_base_url: Option<String>,
+    assistant_model: Option<String>,
+    assistant_auto_type: Option<bool>,
+    assistant_max_tool_calls: Option<u32>,
+    assistant_reasoning_effort: Option<String>,
 }
 
 pub fn load(
@@ -261,6 +283,33 @@ pub fn load(
         session_templates: from_file
             .session_templates
             .unwrap_or_else(SessionTemplate::default_templates),
+        assistant_api_key: from_file
+            .assistant_api_key
+            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_API_KEY").ok())
+            .filter(|s| !s.trim().is_empty()),
+        assistant_base_url: from_file
+            .assistant_base_url
+            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_BASE_URL").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "https://api.theclawbay.com/v1".to_string()),
+        assistant_model: from_file
+            .assistant_model
+            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_MODEL").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+        assistant_auto_type: match std::env::var("MYDEVENV2_ASSISTANT_AUTO_TYPE") {
+            Ok(v) => Some(parse_bool_env("MYDEVENV2_ASSISTANT_AUTO_TYPE", &v)?),
+            Err(_) => None,
+        }
+        .or(from_file.assistant_auto_type)
+        .unwrap_or(false),
+        assistant_max_tool_calls: parse_u32_env("MYDEVENV2_ASSISTANT_MAX_TOOL_CALLS")?
+            .or(from_file.assistant_max_tool_calls)
+            .unwrap_or(8),
+        assistant_reasoning_effort: from_file
+            .assistant_reasoning_effort
+            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_REASONING_EFFORT").ok())
+            .filter(|s| !s.trim().is_empty()),
     })
 }
 

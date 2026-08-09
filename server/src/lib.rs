@@ -3,6 +3,8 @@ pub mod agent_tasks;
 pub mod api;
 pub mod app;
 pub mod assets;
+pub mod assistant;
+pub mod assistant_api;
 pub mod auth;
 pub mod config;
 pub mod error;

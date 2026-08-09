@@ -13,6 +13,8 @@ export interface SessionSummary {
   exit_code: number | null;
   scrollback_bytes: number;
   cwd: string;
+  /** Explicit command the session was created with (absent for default-shell sessions). */
+  command?: string | null;
   created_at: string;
 }
 
@@ -282,6 +284,8 @@ export interface PushQuietHours {
 
 export interface PushPreferences {
   waiting_for_input: boolean;
+  errored: boolean;
+  idle_stall: boolean;
   agent_task_started: boolean;
   agent_task_notify: boolean;
   quiet_hours: PushQuietHours;
@@ -545,6 +549,15 @@ export const api = {
   flushPushDigests: () =>
     req<{ ok: number; fail: number; queued: number }>("POST", "/api/push/flush-digests"),
 
+  assistantMessage: (text: string) =>
+    req<AssistantReply>("POST", "/api/assistant/message", { text }),
+  assistantAction: (id: string, approve: boolean) =>
+    req<AssistantReply>("POST", `/api/assistant/actions/${id}`, { approve }),
+  assistantHistory: () => req<AssistantHistory>("GET", "/api/assistant/history"),
+  assistantReset: () => req<OkResponse>("POST", "/api/assistant/reset"),
+  sessionInput: (id: string, text: string, submit = false) =>
+    req<OkResponse>("POST", `/api/sessions/${id}/input`, { text, submit }),
+
   getBase: () => getBase(),
   getToken: () => getToken(),
 };
@@ -567,6 +580,34 @@ export interface PublicConfig {
   /** Build-time feature availability, e.g. `{ selkies: "1.6.2" | null }`. */
   features?: Record<string, string | null | undefined>;
   session_templates?: SessionTemplate[];
+  /** True when the server has an assistant backend key provisioned. */
+  assistant_enabled?: boolean;
+  assistant_model?: string | null;
+}
+
+export interface AssistantTranscriptEntry {
+  role: "user" | "assistant";
+  text: string;
+  tool_trace?: string[];
+}
+
+export interface AssistantPendingAction {
+  id: string;
+  session_id: string;
+  session_name: string;
+  text: string;
+  submit: boolean;
+}
+
+export interface AssistantReply {
+  reply: string | null;
+  pending_action?: AssistantPendingAction;
+  tool_trace?: string[];
+}
+
+export interface AssistantHistory {
+  transcript: AssistantTranscriptEntry[];
+  pending_action?: AssistantPendingAction;
 }
 
 export interface OperationalStatus {

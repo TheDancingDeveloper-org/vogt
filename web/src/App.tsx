@@ -14,6 +14,7 @@ import TerminalWorkspace from "./TerminalWorkspace";
 import Editor from "./Editor";
 import EditorWorkspace from "./EditorWorkspace";
 import AgentTasks from "./AgentTasks";
+import Assistant from "./Assistant";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
 import History from "./History";
@@ -51,6 +52,7 @@ import {
 import {
   closeTab,
   focusTab,
+  openAssistantTab,
   openEditorTab,
   openGitTab,
   openGuiTab,
@@ -195,6 +197,7 @@ function pathFor(tab: Tab): string {
   if (tab.kind === "git") return `/g/${encodeURIComponent(tab.repo)}`;
   if (tab.kind === "gui") return "/gui";
   if (tab.kind === "history") return "/history";
+  if (tab.kind === "assistant") return "/assistant";
   return "/tasks";
 }
 
@@ -365,6 +368,8 @@ const App: Component = () => {
       openHistoryTab();
     } else if (path === "/tasks") {
       openTasksTab();
+    } else if (path === "/assistant") {
+      openAssistantTab();
     }
   });
 
@@ -584,7 +589,8 @@ const App: Component = () => {
         `git:${decodeURIComponent(params.path ?? "")}` === tabId) ||
       (location.pathname === "/gui" && tabId === "gui") ||
       (location.pathname === "/history" && tabId === "history") ||
-      (location.pathname === "/tasks" && tabId === "tasks");
+      (location.pathname === "/tasks" && tabId === "tasks") ||
+      (location.pathname === "/assistant" && tabId === "assistant");
 
     // Drop any per-tab registrations so we don't leak references.
     senders.delete(tabId);
@@ -747,6 +753,18 @@ const App: Component = () => {
             >
               Tasks
             </button>
+            <Show when={publicCfg()?.assistant_enabled}>
+              <button
+                onClick={() => {
+                  openAssistantTab();
+                  navigate("/assistant");
+                  setDrawerOpen(false);
+                }}
+                title="Talk to the assistant about your sessions"
+              >
+                🎙 Assistant
+              </button>
+            </Show>
             <button
               onClick={() => {
                 openGuiTab();
@@ -908,6 +926,8 @@ const App: Component = () => {
                           ? "🖥 "
                           : t.kind === "tasks"
                             ? "≡ "
+                            : t.kind === "assistant"
+                              ? "🎙 "
                           : ""}
                     {t.label}
                   </span>
@@ -1021,6 +1041,11 @@ const App: Component = () => {
                   </Show>
                   <Show when={t.kind === "history"}>
                     <History
+                      onError={(msg) => showToast(msg, { kind: "error" })}
+                    />
+                  </Show>
+                  <Show when={t.kind === "assistant"}>
+                    <Assistant
                       onError={(msg) => showToast(msg, { kind: "error" })}
                     />
                   </Show>

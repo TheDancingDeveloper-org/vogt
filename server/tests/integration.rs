@@ -34,6 +34,12 @@ fn test_config() -> Config {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
         session_templates: vec![],
+        assistant_api_key: None,
+        assistant_base_url: "https://api.theclawbay.com/v1".into(),
+        assistant_model: "gpt-5.4-mini".into(),
+        assistant_auto_type: false,
+        assistant_max_tool_calls: 8,
+        assistant_reasoning_effort: None,
     }
 }
 
@@ -1649,24 +1655,9 @@ async fn file_api_round_trip() {
     std::fs::write(tmp.path().join("sub/nested.md"), "# nested").unwrap();
 
     let cfg = Config {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        token: TEST_TOKEN.to_string(),
-        token_mutating_request_limit_per_minute: 600,
-        extra_tokens: vec![],
-        scrollback_bytes: 64 * 1024,
-        default_shell: "/bin/bash".to_string(),
         default_cwd: tmp.path().to_path_buf(),
-        activity_idle_after_ms: 200,
-        idle_stall_after_ms: 10 * 60 * 1_000,
         workspace_root: tmp.path().canonicalize().unwrap(),
-        gui_stream_url: None,
-        state_dir: tempfile::tempdir().unwrap().keep(),
-        fcm_service_account_json: None,
-        vapid_subject: "mailto:test@example.invalid".to_string(),
-        allowed_origins: vec![],
-        auto_agent_auth: false,
-        agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
-        session_templates: vec![],
+        ..test_config()
     };
     let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1925,24 +1916,9 @@ async fn git_status_log_branch() {
     std::fs::write(repo.join("b.txt"), "untracked\n").unwrap();
 
     let cfg = Config {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        token: TEST_TOKEN.to_string(),
-        token_mutating_request_limit_per_minute: 600,
-        extra_tokens: vec![],
-        scrollback_bytes: 64 * 1024,
-        default_shell: "/bin/bash".to_string(),
         default_cwd: repo.to_path_buf(),
-        activity_idle_after_ms: 200,
-        idle_stall_after_ms: 10 * 60 * 1_000,
         workspace_root: repo.canonicalize().unwrap(),
-        gui_stream_url: None,
-        state_dir: tempfile::tempdir().unwrap().keep(),
-        fcm_service_account_json: None,
-        vapid_subject: "mailto:test@example.invalid".to_string(),
-        allowed_origins: vec![],
-        auto_agent_auth: false,
-        agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
-        session_templates: vec![],
+        ..test_config()
     };
     let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -44,6 +44,12 @@ Supported product surfaces:
 - Browser / installable PWA
 - Android Capacitor shell over the same deployed web client
 
+August 2026: a conversational assistant landed on `dev` — a server-side
+tool-use loop with read access to all sessions and confirmation-gated
+keystroke injection, surfaced as an Assistant tab with push-to-talk STT (APK)
+and spoken replies. Disabled unless `MYDEVENV2_ASSISTANT_API_KEY` is set; see
+`docs/ASSISTANT.md`.
+
 CI is split across `.woodpecker/`:
 
 - `.woodpecker/server.yml` runs server fmt/clippy/test, web typecheck, debug
@@ -144,7 +150,7 @@ export MYDEVENV2_TOKEN="$(openssl rand -hex 24)"
 # Optional: additional scoped API tokens and a write-rate cap for the
 # primary token. Capability names are:
 # sessions, filesystem-write, git-write, gui-control, agent-tasks-write,
-# push-write, history-write
+# push-write, history-write, assistant
 export MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE=600
 export MYDEVENV2_EXTRA_TOKENS_JSON='[
   {

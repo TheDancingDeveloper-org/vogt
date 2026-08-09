@@ -170,6 +170,12 @@ pub struct PublicConfig {
     pub features: serde_json::Value,
     /// Session templates for quick session creation.
     pub session_templates: Vec<crate::config::SessionTemplate>,
+    /// Whether the conversational assistant is provisioned (key present).
+    /// Presence only — never the key itself.
+    pub assistant_enabled: bool,
+    /// Model id the assistant uses, for display. None when disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_model: Option<String>,
 }
 
 pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicConfig> {
@@ -178,6 +184,11 @@ pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicCon
         version: env!("CARGO_PKG_VERSION"),
         features: load_features(),
         session_templates: state.config.session_templates.clone(),
+        assistant_enabled: state.assistant.is_some(),
+        assistant_model: state
+            .assistant
+            .as_ref()
+            .map(|a| a.model().to_string()),
     })
 }
 

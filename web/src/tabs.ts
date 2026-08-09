@@ -6,7 +6,8 @@ export type Tab =
   | { id: string; kind: "git"; repo: string; label: string }
   | { id: string; kind: "gui"; label: string }
   | { id: string; kind: "history"; label: string }
-  | { id: string; kind: "tasks"; label: string };
+  | { id: string; kind: "tasks"; label: string }
+  | { id: string; kind: "assistant"; label: string };
 
 export interface TabsStateSnapshot {
   tabs: Tab[];
@@ -54,6 +55,7 @@ function normalizeTab(value: unknown): Tab | null {
     case "gui":
     case "history":
     case "tasks":
+    case "assistant":
       if (typeof raw.label !== "string") return null;
       return {
         id: raw.id,
@@ -242,6 +244,25 @@ export function openTasksTab(): Tab {
     return existing;
   }
   const tab: Tab = { id, kind: "tasks", label: "Tasks" };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+export function openAssistantTab(): Tab {
+  const id = "assistant";
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind: "assistant", label: "Assistant" };
   setStore(
     produce((s) => {
       s.tabs.push(tab);

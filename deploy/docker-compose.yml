@@ -81,6 +81,11 @@ services:
       # Phase 6: FCM service-account JSON (single-line). Empty disables FCM
       # transport; web-push still works for any browser subscription.
       MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON: ${MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON}
+      # Conversational assistant (docs/ASSISTANT.md). Empty key disables the
+      # feature entirely — routes 404 and the PWA hides the tab.
+      MYDEVENV2_ASSISTANT_API_KEY: ${MYDEVENV2_ASSISTANT_API_KEY:-}
+      MYDEVENV2_ASSISTANT_MODEL: ${MYDEVENV2_ASSISTANT_MODEL:-gpt-5.4-mini}
+      MYDEVENV2_ASSISTANT_BASE_URL: ${MYDEVENV2_ASSISTANT_BASE_URL:-https://api.theclawbay.com/v1}
       # The cargo cache is on the host bind-mount; sccache hits Redis on Node B.
       SCCACHE_REDIS: redis://100.92.54.45:6380
 
