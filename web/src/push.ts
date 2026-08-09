@@ -9,6 +9,7 @@
 // endpoint — see mobile/ when scaffolded.
 
 import { api, getBase, getToken } from "./api";
+import { Capacitor } from "@capacitor/core";
 
 export interface PushPublicKey {
   vapid_public_key: string;
@@ -266,6 +267,10 @@ let nativeChannelCreated = false;
 
 async function ensureNativeNotificationChannel() {
   if (nativeChannelCreated) return;
+  if (Capacitor.getPlatform() !== "android") {
+    nativeChannelCreated = true;
+    return;
+  }
   const { PushNotifications } = await import("@capacitor/push-notifications");
   await PushNotifications.createChannel({
     id: "mydevenv2-alerts",
