@@ -14,6 +14,8 @@
 #   TAILSCALE_EXIT_NODE          if set, routes all egress via this exit node
 #                                (kernel mode; requires /dev/net/tun + NET_ADMIN
 #                                from the compose). LAN + tailnet stay direct.
+#   MYDEVENV2_TAILSCALE_ACCEPT_DNS  "1" (default) enables Tailscale MagicDNS.
+#                                Set to "0" only with an equivalent resolver.
 #   START_SWAY                   "1" → spawn sway in background with WAYLAND_DISPLAY=wayland-1
 #   GUI_STREAM_URL               passed through to the server; web UI iframes it
 
@@ -38,11 +40,21 @@ if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
     # Join the tailnet WITHOUT the exit node. This always establishes the
     # tailnet + accepted subnet routes (e.g. 192.168.0.0/23), which is the
     # lockout-proof control path — so a down exit node can never sever access.
+    # Private service names (including the Cadastre MCP endpoint) are resolved
+    # through tailnet DNS. Keep this enabled by default; disabling it without
+    # an equivalent resolver makes native MCP clients fail before auth.
+    tailscale_accept_dns="${MYDEVENV2_TAILSCALE_ACCEPT_DNS:-1}"
     sudo tailscale up \
         --authkey="${TAILSCALE_AUTH_KEY}" \
         --hostname="${TAILSCALE_HOSTNAME:-mydevenv2}" \
         --accept-routes \
-        --accept-dns=false || echo "tailscale up failed (continuing)"
+        --accept-dns="${tailscale_accept_dns}" || echo "tailscale up failed (continuing)"
+
+    # `tailscale up` may retain state from an earlier boot. Apply the setting
+    # explicitly so a restarted container converges on the configured policy.
+    sudo tailscale set \
+        --accept-dns="${tailscale_accept_dns}" \
+        || echo "tailscale accept-dns set failed (continuing)"
 
     # Apply the exit node as a separate, best-effort step. Split from `up` on
     # purpose: `up --exit-node=<down node>` fails the whole join, but `set`

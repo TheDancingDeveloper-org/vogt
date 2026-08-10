@@ -71,6 +71,9 @@ services:
       # Tailscale auto-join. Issue a one-shot reusable key from the admin UI.
       TAILSCALE_AUTH_KEY: ${HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY}
       TAILSCALE_HOSTNAME: mydevenv2
+      # Keep tailnet DNS available for private service names used by native
+      # MCP/API clients. Override only when an equivalent resolver is present.
+      MYDEVENV2_TAILSCALE_ACCEPT_DNS: ${MYDEVENV2_TAILSCALE_ACCEPT_DNS:-1}
       # Route all public egress via this exit node when explicitly set
       # (kernel mode, see above). Blank by default: LAN + tailnet + accepted
       # subnet routes stay direct, and public egress does too until opted in.
