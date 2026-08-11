@@ -408,7 +408,16 @@ RUN if [ "$INSTALL_FLUTTER" = "true" ]; then \
 # /home/sprooty bind mount — a --user install would be shadowed at runtime.
 # Fail the build if they don't install — silent fallback would leave the pod
 # with broken Python tooling that surfaces as cryptic command-not-found errors.
-RUN pip3 install --break-system-packages --no-cache-dir uv ruff pytest
+#
+# cadastre[mcp-client] lands the cadastre-mcp-remote console script the
+# mydevenv2-cadastre-mcp wrapper execs. Now installable at build time because
+# cadastre publishes to PyPI as of v0.1.0 — previously this had to happen at
+# runtime (deploy/mcp-bootstrap.sh's install_bridge) from the mounted
+# workspace checkout, since the package wasn't available to the build
+# context at all. That runtime install is left in place as a no-op fallback
+# (it checks `command -v cadastre-mcp-remote` first) for a workspace with a
+# newer cadastre than this image shipped.
+RUN pip3 install --break-system-packages --no-cache-dir uv ruff pytest "cadastre[mcp-client]"
 
 # The server binary (built in stage 2 with the web bundle embedded; cache
 # mounts in stage 2 mean we have to copy out of /usr/local/bin, not /app).
