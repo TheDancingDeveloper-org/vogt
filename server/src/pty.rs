@@ -243,6 +243,9 @@ pub fn spawn(
         .openpty(size)
         .map_err(|e| ApiError::Pty(format!("openpty: {e}")))?;
 
+    // Allocated before the child is spawned so it can be exported to the child.
+    let id = Uuid::new_v4();
+
     let mut cmd = match spec.command.as_ref() {
         Some(argv) if !argv.is_empty() => {
             let mut c = CommandBuilder::new(&argv[0]);
@@ -267,6 +270,10 @@ pub fn spawn(
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");
     cmd.env("MYDEVENV2_SESSION", &spec.name);
+    // The session id is allocated before the spawn so the child can be told
+    // which session it is. `MYDEVENV2_SESSION` is the display name and is not
+    // unique, so it cannot be used to identify a session.
+    cmd.env("MYDEVENV2_SESSION_ID", id.to_string());
     if let Some(env) = spec.env.as_ref() {
         for (k, v) in env {
             cmd.env(k, v);
@@ -290,7 +297,6 @@ pub fn spawn(
         .map_err(|e| ApiError::Pty(format!("take_writer: {e}")))?;
 
     let (tx, _rx) = broadcast::channel::<OutputChunk>(1024);
-    let id = Uuid::new_v4();
     let command = Some(command_display(spec, &defaults));
     let runtime = tokio::runtime::Handle::current();
     let history_log_path = history.as_ref().map(|h| h.log_path(id));

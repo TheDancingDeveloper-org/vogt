@@ -927,6 +927,56 @@ async fn create_session_accepts_scrollback_override() {
 }
 
 #[tokio::test]
+async fn session_child_receives_its_own_session_id() {
+    // The session id is allocated before the spawn so the child can be told
+    // which session it is: `MYDEVENV2_SESSION` is only the display name, which
+    // is not unique and cannot identify a session.
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "session-id-env",
+            "command": ["/bin/sh", "-lc", "printf %s \"$MYDEVENV2_SESSION_ID\""],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let detail: SessionDetail = loop {
+        let detail: SessionDetail = client
+            .get(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if detail.summary.exit_code.is_some() {
+            break detail;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    };
+
+    let snapshot = base64::engine::general_purpose::STANDARD
+        .decode(detail.scrollback_base64.as_bytes())
+        .unwrap();
+    let printed = String::from_utf8_lossy(&snapshot);
+    assert!(
+        printed.contains(&id),
+        "child should see its own session id; got {printed:?}"
+    );
+}
+
+#[tokio::test]
 async fn exited_sessions_are_archived_searchable_and_deletable() {
     let tmp = tempfile::tempdir().unwrap();
     let mut cfg = test_config();
