@@ -10,7 +10,7 @@ readonly INFRASTRUCTURE_PROJECT_ID="5b7e75de-e874-484d-9595-873acd6bfd07"
 readonly APPS_PROJECT_ID="76b1ebe1-3656-4cef-952c-30d5d489c6e7"
 readonly INFISICAL_ENV="prod"
 readonly CADASTRE_SECRET_NAME="${MYDEVENV2_CADASTRE_SECRET_NAME:-HOMELAB_CADASTRE_HTTP_TOKEN}"
-readonly DEFAULT_CADASTRE_MCP_URL="https://winrarhost.tailc7d3c.ts.net:18081/mcp"
+readonly DEFAULT_CADASTRE_MCP_URL="https://winrarhost.tailc7d3c.ts.net:18092/mcp"
 readonly DEFAULT_CADASTRE_MCP_RESOLVE="${MYDEVENV2_CADASTRE_MCP_RESOLVE:-}"
 AUTH_TMP_DIR=""
 
@@ -178,7 +178,7 @@ check_access() {
         -H "Authorization: Bearer $CADASTRE_HTTP_TOKEN" \
         -H 'Content-Type: application/json' \
         -H 'Accept: application/json, text/event-stream' \
-        --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"mydevenv2-agent-auth","version":"1"}}}' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mydevenv2-agent-auth","version":"1"}}}' \
         "$mcp_url" >"$response_file"
     printf 'ok: Cadastre MCP (%s)\n' "$mcp_url"
 }

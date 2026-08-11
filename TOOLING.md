@@ -138,14 +138,14 @@ through `/usr/local/bin/mydevenv2-cadastre-mcp`, which obtains a fresh token for
 each bridge process. Existing client registrations are preserved. Set the
 variable to `0` to disable automatic registration.
 
-The default endpoint is `https://winrarhost.tailc7d3c.ts.net:18081/mcp` and may
+The default endpoint is `https://winrarhost.tailc7d3c.ts.net:18092/mcp` and may
 be overridden for a controlled test with `CADASTRE_MCP_URL`. Register clients
 inside an authenticated shell using native environment-variable token support,
 for example:
 
 ```bash
 mydevenv2-agent-auth run -- codex mcp add cadastre \
-  --url https://winrarhost.tailc7d3c.ts.net:18081/mcp \
+  --url https://winrarhost.tailc7d3c.ts.net:18092/mcp \
   --bearer-token-env-var CADASTRE_HTTP_TOKEN
 ```
 

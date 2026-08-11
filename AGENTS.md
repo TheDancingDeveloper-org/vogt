@@ -119,7 +119,7 @@ These commands require the read-only Infisical Universal Auth credentials `INFIS
 - `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID`
 - `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET`
 
-The helper fetches Forgejo, Woodpecker, GitHub, Komodo, and Cadastre credentials into the child-process environment only. Do not persist fetched tokens in the workspace, shell profiles, local Git config, or logs. Cadastre uses the `HOMELAB_CADASTRE_HTTP_TOKEN` secret and the private endpoint `https://winrarhost.tailc7d3c.ts.net:18081/mcp`.
+The helper fetches Forgejo, Woodpecker, GitHub, Komodo, and Cadastre credentials into the child-process environment only. Do not persist fetched tokens in the workspace, shell profiles, local Git config, or logs. Cadastre uses the `HOMELAB_CADASTRE_HTTP_TOKEN` secret and the private endpoint `https://winrarhost.tailc7d3c.ts.net:18092/mcp`.
 
 Use `mydevenv2-agent-auth check` to prove authenticated access to:
 
@@ -128,7 +128,7 @@ Use `mydevenv2-agent-auth check` to prove authenticated access to:
 - Woodpecker API: `https://ci.indexarr.net/api/user`
 - GitHub org API: `gh api orgs/AusAgentSmith-org`
 - Komodo API: `http://100.92.54.45:3011/read`
-- Cadastre MCP: `https://winrarhost.tailc7d3c.ts.net:18081/mcp`
+- Cadastre MCP: `https://winrarhost.tailc7d3c.ts.net:18092/mcp`
 
 The production compose requires both identity values and validates the broker
 at startup. If either is missing or invalid, deployment must fail rather than

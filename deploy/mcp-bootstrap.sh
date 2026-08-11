@@ -4,7 +4,7 @@
 # Registration stores only the endpoint and wrapper command; no bearer value.
 set -euo pipefail
 
-readonly CADASTRE_URL="${CADASTRE_MCP_URL:-https://winrarhost.tailc7d3c.ts.net:18081/mcp}"
+readonly CADASTRE_URL="${CADASTRE_MCP_URL:-https://winrarhost.tailc7d3c.ts.net:18092/mcp}"
 readonly CADASTRE_WRAPPER="/usr/local/bin/mydevenv2-cadastre-mcp"
 readonly CADASTRE_SRC="${MYDEVENV2_CADASTRE_SRC:-$HOME/Working/Active/cadastre}"
 
@@ -33,8 +33,18 @@ install_bridge() {
 
 install_codex() {
     command -v codex >/dev/null 2>&1 || return 0
+    # Codex stores the ENDPOINT in its own config, unlike the Claude Code and
+    # OpenCode registrations which point at the wrapper and pick the URL up at
+    # spawn. A presence-only check therefore pins whatever URL was current when
+    # the client was first registered: when the stack moved from :18081 to
+    # :18092 every already-registered Codex kept failing to hand-shake, and
+    # re-running this script changed nothing. Reconcile the value, don't just
+    # check that a key exists.
     if codex mcp get cadastre >/dev/null 2>&1; then
-        return 0
+        if codex mcp get cadastre 2>/dev/null | grep -qF "$CADASTRE_URL"; then
+            return 0
+        fi
+        codex mcp remove cadastre >/dev/null 2>&1 || return 0
     fi
     codex mcp add cadastre --url "$CADASTRE_URL" \
         --bearer-token-env-var CADASTRE_HTTP_TOKEN >/dev/null
