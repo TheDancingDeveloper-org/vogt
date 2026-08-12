@@ -117,6 +117,34 @@ another item, transition it, ask `backlog` and `why` — then show the same
 state from the CLI and `curl`, with identical answers, and the audit trail
 and event feed of everything the agent just did.
 
+### M1 as built — four notes
+
+1. **27 operations, one definition each.** The registry now carries the
+   whole write plane plus the views, and the parity harness drives every one
+   of them through CLI, REST and MCP as a single ordered script against three
+   isolated instances — ordered, because you cannot relate two work items
+   before creating them, and a `why` that never ran against a real ranked
+   item proves nothing.
+2. **`mcp.stdio` joins `init` in `LOCAL_ONLY`.** A transport that takes over
+   the process's stdout has no remote semantics; offering it as a REST route
+   would mean a server hijacking its own framing channel. It is also a bare
+   `vogt-mcp` console script, because an MCP client config wants a command
+   rather than an argument list.
+3. **Workflows are stored, not hard-coded.** `workflow_defs` holds one
+   machine per kind, seeded from the shipped defaults by `migrate` — not by
+   bootstrap, because an instance created before the table existed never
+   bootstraps again, and not by the migration SQL, because the defaults would
+   then be spelled twice and drift. `workflow.list` publishes them, so an
+   agent can pick a legal next state instead of guessing and handling a
+   rejection.
+4. **Ranking rounds before it answers.** An unrounded staleness contribution
+   carries float noise like `1.157e-05`, which is not information, reads as
+   spurious precision in `why`, and makes two reads of one item look
+   different. Four decimal places is far below any ordering the weights can
+   express. `ci_red_boost` is listed in `why` as an input that *cannot fire
+   yet* rather than omitted, so the explanation is honest about what it is
+   not considering.
+
 ## M2 — Eyes (MVP complete)
 
 **Objective**: the tool sees work you didn't type in — including the work

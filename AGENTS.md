@@ -10,12 +10,17 @@ implementation language.
   domain model, and roadmap. Update it when decisions change; don't fork
   competing design docs.
 - `design/` — diagrams, mockups, exploratory notes (may be messy).
-- `src/vogt/` — the implementation (M0 landed). Layer order is strict:
-  `core` (entities, ids, time, digests) → `storage` (interface + the SQLite
-  backend, the only place SQL lives) → `application` (use-cases, the
-  transactional write path) → `registry` (one definition per operation) →
-  `adapters/{cli,http,mcp}` (thin, generated from the registry). An adapter
-  that decides anything is the bug.
+- `src/vogt/` — the implementation (M0 and M1 landed). Layer order is
+  strict: `core` (entities, ids, time, digests, the workflow engine, the
+  ranking function, the contract) → `storage` (interface + the SQLite
+  backend, the only place SQL lives) → `application` (use-cases in
+  `services/`, the transactional write path) → `registry` (one definition
+  per operation) → `adapters/{cli,http,mcp}` (thin, generated from the
+  registry). An adapter that decides anything is the bug.
+  - `core/workflow.py` and `core/ranking.py` are pure: no storage, no
+    context, no clock of their own. That is what makes both of them
+    testable against a table of cases and `why` an explanation rather than
+    a summary.
 - `docs/CONFIG.md` and `config.example.toml` are **generated** from
   `src/vogt/config.py` by `scripts/gen_config_docs.py`. Edit the schema, run
   the script; CI fails on drift (NFR-Q4).
@@ -30,10 +35,22 @@ uv run ruff check . && uv run ruff format --check .
 uv run python scripts/check_docs.py
 ```
 
-Adding an operation means adding it to `registry/operations.py` — that alone
-gives it a CLI command, a REST route and an MCP tool. Then add a scenario to
-`SCENARIOS` in `tests/test_parity.py`; the harness fails if you don't, and
-fails again if you exclude it from a surface without saying why.
+Adding an operation means writing the handler in `application/services/`,
+its parameter and result models in `application/models.py`, and one entry in
+`registry/operations.py` — that alone gives it a CLI command, a REST route
+with request and response schemas, and an MCP tool. Then add a step to
+`SCRIPT` in `tests/test_parity.py`; the harness fails if you don't, and fails
+again if you exclude it from a surface without saying why.
+
+Three rules the code enforces so review does not have to:
+
+- A **mutating** operation whose parameters lack a required `reason` fails at
+  registry construction, not at runtime (FR-S1).
+- Every declared write goes through `audited_write`, which lands the entity
+  change, the audit row and the event row in one transaction (NFR-I1).
+- Callers name things the way people do — `WI-7`, a project slug, an actor's
+  `identity_ref`. Resolution lives in `services/_resolve.py`, so a typo
+  fails as "no work item WI-70" rather than as a foreign-key error.
 
 ## Ground rules
 

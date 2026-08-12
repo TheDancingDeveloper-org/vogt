@@ -18,6 +18,13 @@ LifecycleState = Literal["incubating", "active", "maintenance", "archived"]
 ComplianceStatus = Literal["compliant", "non_compliant", "not_checked"]
 TrustState = Literal["verified", "stale", "unverified", "disputed"]
 
+WorkKind = Literal["feature", "bug", "chore", "question"]
+Priority = Literal["p0", "p1", "p2", "p3", "p4"]
+Effort = Literal["xs", "s", "m", "l", "xl"]
+Origin = Literal["created", "adopted", "observed"]
+RelationKind = Literal["depends_on", "relates_to", "duplicate_of", "parent_of"]
+InitiativeState = Literal["open", "closed"]
+
 #: A reason is required on every audited write and may not be blank.
 #: Whitespace-only reasons are a way of technically complying while
 #: explaining nothing, so they are stripped and then rejected.
@@ -59,6 +66,77 @@ class Project(Entity):
     compliance_checked_at: datetime | None = None
     exclusions: list[str] = []
     trust_state: TrustState = "unverified"
+    created_at: datetime
+    updated_at: datetime
+
+
+class Label(Entity):
+    """A free-form tag, shared per instance and GitHub-label aligned (FR-W9)."""
+
+    id: str
+    name: str
+    color: str | None = None
+    created_at: datetime
+
+
+class Initiative(Entity):
+    """A cross-project epic, carrying weight that feeds ranking (FR-W3)."""
+
+    id: str
+    slug: str
+    title: str
+    body: str = ""
+    state: InitiativeState = "open"
+    weight: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class Relation(Entity):
+    """One typed edge out of a work item (FR-W8)."""
+
+    kind: RelationKind
+    related_id: str
+    related_ref: str
+    related_title: str
+    related_state: str
+
+
+class Comment(Entity):
+    """A remark on a work item, attributed to an actor (FR-W6)."""
+
+    id: str
+    work_item_id: str
+    actor_id: str
+    actor_display_name: str
+    body: str
+    created_at: datetime
+
+
+class WorkItem(Entity):
+    """The unit of work.
+
+    `ref` is the short human- and agent-facing handle (`WI-7`). Ids are
+    ULID-shaped and stable; refs are what somebody actually types.
+    """
+
+    id: str
+    ref: str
+    kind: WorkKind
+    title: str
+    body: str = ""
+    state: str
+    priority: Priority = "p2"
+    effort: Effort | None = None
+    project_id: str | None = None
+    project_slug: str | None = None
+    initiative_id: str | None = None
+    origin: Origin = "created"
+    trust_state: TrustState = "unverified"
+    assignee_actor_id: str | None = None
+    assignee_identity_ref: str | None = None
+    labels: list[str] = []
+    relations: list[Relation] = []
     created_at: datetime
     updated_at: datetime
 

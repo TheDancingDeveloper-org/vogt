@@ -1,23 +1,28 @@
 """The transport-parity harness (FR-A3).
 
-For every registered operation this drives the CLI, the REST surface and the
-MCP surface against three identical instances and asserts that they return
-the same answer and leave the same audit trail. Parity is *tested*, not
-intended (DESIGN §2).
+This drives one ordered script of every registered operation through the
+CLI, the REST surface and the MCP surface — against three identical, isolated
+instances — and asserts that all three return the same answers and leave the
+same audit trail. Parity is *tested*, not intended (DESIGN §2).
 
-Three staleness checks run alongside it, all of which fail in **both**
-directions:
+The script is ordered rather than per-operation-independent because the write
+plane is stateful: you cannot relate two work items before creating them, and
+a `why` that never ran against a real ranked item proves nothing. Running the
+identical sequence on each transport is what makes the comparison meaningful.
 
-1. An operation must appear on exactly the surfaces `transports_for` claims —
-   present where expected, absent where excluded.
+Four staleness checks run alongside it, all failing in **both** directions:
+
+1. An operation must appear on exactly the surfaces `transports_for` claims.
 2. Every exclusion must name a registered operation.
-3. Every non-excluded operation must have a scenario here, so a new operation
-   cannot be added without being driven on all three surfaces.
+3. Every exclusion must say why it exists.
+4. Every operation on all three surfaces must appear in the script, so a new
+   operation cannot be added without being driven on all three.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -35,19 +40,94 @@ from vogt.registry.operation import Operation
 
 from tests.conftest import TEST_PRINCIPAL, SequentialIds, StepClock
 
-#: One invocation per operation. Ordered by the registry, so all three
-#: transports see the same instance history.
-SCENARIOS: dict[str, dict[str, Any]] = {
-    "status": {},
-    "project.register": {
-        "name": "Parity Project",
-        "root_path": "/srv/parity",
-        "reason": "parity harness: exercise the write path on every transport",
-    },
-    "project.list": {},
-    "events.list": {},
-    "audit.list": {},
-}
+WHY = "parity harness"
+
+#: `{root}` is replaced with a per-instance directory, so the one operation
+#: that touches the filesystem can run on all three transports without them
+#: writing over each other.
+SCRIPT: list[tuple[str, dict[str, Any]]] = [
+    ("status", {}),
+    ("workflow.list", {}),
+    (
+        "actor.create",
+        {
+            "identity_ref": "agent:parity",
+            "kind": "agent",
+            "display_name": "Parity Agent",
+            "reason": WHY,
+        },
+    ),
+    ("actor.list", {}),
+    ("label.create", {"name": "parity", "color": "#d73a4a", "reason": WHY}),
+    ("label.list", {}),
+    (
+        "initiative.create",
+        {"title": "Parity Initiative", "weight": 40, "reason": WHY},
+    ),
+    ("initiative.list", {}),
+    (
+        "project.register",
+        {"name": "Parity Project", "root_path": "/srv/parity", "reason": WHY},
+    ),
+    ("project.get", {"slug": "parity-project"}),
+    ("project.list", {}),
+    (
+        "project.transition",
+        {"slug": "parity-project", "to_state": "maintenance", "reason": WHY},
+    ),
+    (
+        "project.create",
+        {
+            "name": "Parity Scaffold",
+            "root_path": "{root}/scaffold",
+            "owner": "parity",
+            "reason": WHY,
+        },
+    ),
+    (
+        "work.create",
+        {
+            "kind": "bug",
+            "title": "Ranked bug",
+            "body": "raised by the parity harness",
+            "priority": "p1",
+            "effort": "s",
+            "project": "parity-project",
+            "initiative": "parity-initiative",
+            "assignee": "agent:parity",
+            "labels": ["parity"],
+            "reason": WHY,
+        },
+    ),
+    (
+        "work.create",
+        {
+            "kind": "feature",
+            "title": "Blocking feature",
+            "project": "parity-project",
+            "reason": WHY,
+        },
+    ),
+    ("work.get", {"ref": "WI-1"}),
+    ("work.list", {"project": "parity-project"}),
+    ("work.update", {"ref": "WI-1", "priority": "p0", "reason": WHY}),
+    (
+        "work.relate",
+        {"ref": "WI-1", "kind": "depends_on", "target": "WI-2", "reason": WHY},
+    ),
+    ("work.transition", {"ref": "WI-2", "to_state": "in_progress", "reason": WHY}),
+    ("work.comment", {"ref": "WI-1", "body": "seen by the harness", "reason": WHY}),
+    ("backlog", {}),
+    ("bugs", {}),
+    ("why", {"ref": "WI-1"}),
+    (
+        "work.unrelate",
+        {"ref": "WI-1", "kind": "depends_on", "target": "WI-2", "reason": WHY},
+    ),
+    ("project.brief", {"slug": "parity-project"}),
+    ("events.list", {}),
+    ("audit.list", {}),
+]
 
 #: Values that legitimately differ between two runs of the same sequence.
 VOLATILE_KEYS = frozenset(
@@ -58,6 +138,11 @@ VOLATILE_KEYS = frozenset(
         "actor_id",
         "audit_id",
         "txn_id",
+        "assignee_actor_id",
+        "initiative_id",
+        "project_id",
+        "related_id",
+        "work_item_id",
         "created_at",
         "updated_at",
         "compliance_checked_at",
@@ -68,28 +153,47 @@ VOLATILE_KEYS = frozenset(
 )
 
 
-def normalise(value: Any) -> Any:
-    """Blank out values that cannot match across independent instances."""
+def normalise(value: Any, replacements: dict[str, str]) -> Any:
+    """Blank out what cannot match across independent instances."""
     if isinstance(value, dict):
         return {
-            key: "<volatile>" if key in VOLATILE_KEYS else normalise(item)
+            key: (
+                "<volatile>" if key in VOLATILE_KEYS else normalise(item, replacements)
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [normalise(item) for item in value]
+        return [normalise(item, replacements) for item in value]
+    if isinstance(value, str):
+        for needle, token in replacements.items():
+            value = value.replace(needle, token)
+        return value
+    if isinstance(value, float):
+        # Staleness is a function of wall-clock age; the injected clock makes
+        # it deterministic, but rounding keeps the comparison about ordering.
+        return round(value, 3)
     return value
 
 
-def _fresh_context(tmp_path_factory: pytest.TempPathFactory, label: str) -> AppContext:
-    directory = tmp_path_factory.mktemp(label)
+def _fresh(
+    tmp_path_factory: pytest.TempPathFactory, label: str
+) -> tuple[AppContext, Path]:
+    root = tmp_path_factory.mktemp(label)
     context = build_context(
-        config=VogtConfig(data_dir=directory / "instance"),
+        config=VogtConfig(data_dir=root / "instance"),
         principal=TEST_PRINCIPAL,
         clock=StepClock(),
         id_factory=SequentialIds(),
     )
     init_instance(context, InitParams())
-    return context
+    return context, root
+
+
+def _resolved(params: dict[str, Any], root: Path) -> dict[str, Any]:
+    return {
+        key: (value.replace("{root}", str(root)) if isinstance(value, str) else value)
+        for key, value in params.items()
+    }
 
 
 def _argv_for(operation: Operation[Any, Any], params: dict[str, Any]) -> list[str]:
@@ -98,6 +202,9 @@ def _argv_for(operation: Operation[Any, Any], params: dict[str, Any]) -> list[st
         flag = f"--{key.replace('_', '-')}"
         if isinstance(value, bool):
             argv.append(flag if value else f"--no-{key.replace('_', '-')}")
+        elif isinstance(value, list):
+            for entry in value:
+                argv += [flag, str(entry)]
         else:
             argv += [flag, str(value)]
     return argv
@@ -105,13 +212,12 @@ def _argv_for(operation: Operation[Any, Any], params: dict[str, Any]) -> list[st
 
 def _via_cli(context: AppContext, name: str, params: dict[str, Any]) -> Any:
     registry = default_registry()
-    operation = registry.get(name)
     result = run(
-        ["--json", *_argv_for(operation, params)],
+        ["--json", *_argv_for(registry.get(name), params)],
         registry=registry,
         context=context,
     )
-    assert result.exit_code == EXIT_OK, result.stderr
+    assert result.exit_code == EXIT_OK, f"{name}: {result.stderr}"
     return json.loads(result.stdout)
 
 
@@ -124,7 +230,7 @@ def _via_http(context: AppContext, name: str, params: dict[str, Any]) -> Any:
         response = client.get(url, params=params)
     else:
         response = client.post(url, json=params)
-    assert response.status_code == 200, response.text
+    assert response.status_code == 200, f"{name}: {response.text}"
     return response.json()
 
 
@@ -134,64 +240,66 @@ def _via_mcp(context: AppContext, name: str, params: dict[str, Any]) -> Any:
     return surface.call_tool(registry.get(name).mcp_tool_name, params)
 
 
-def _audit_trail(context: AppContext) -> list[dict[str, Any]]:
-    with context.declared.read() as view:
-        return [
-            normalise(record.model_dump(mode="json"))
-            for record in view.list_audit(limit=100)
-        ]
+DRIVERS = {"cli": _via_cli, "http": _via_http, "mcp": _via_mcp}
 
 
 @pytest.fixture(scope="module")
-def parity_results(
+def parity_run(
     tmp_path_factory: pytest.TempPathFactory,
-) -> dict[str, dict[str, Any]]:
-    """Run every scenario on every transport, against three fresh instances."""
-    registry = default_registry()
-    contexts = {
-        "cli": _fresh_context(tmp_path_factory, "cli"),
-        "http": _fresh_context(tmp_path_factory, "http"),
-        "mcp": _fresh_context(tmp_path_factory, "mcp"),
+) -> dict[str, Any]:
+    """Run the whole script on every transport, against three fresh instances."""
+    instances = {
+        transport: _fresh(tmp_path_factory, transport) for transport in DRIVERS
     }
-    drivers = {"cli": _via_cli, "http": _via_http, "mcp": _via_mcp}
-    results: dict[str, dict[str, Any]] = {name: {} for name in SCENARIOS}
+    replacements = {
+        transport: {
+            str(root): "<root>",
+            str(context.config.resolved_data_dir): "<data>",
+        }
+        for transport, (context, root) in instances.items()
+    }
 
-    for operation in registry:
-        if operation.name not in SCENARIOS:
-            continue
-        params = SCENARIOS[operation.name]
-        for transport, context in contexts.items():
-            results[operation.name][transport] = drivers[transport](
-                context, operation.name, dict(params)
-            )
-    results["__audit__"] = {
-        transport: _audit_trail(context) for transport, context in contexts.items()
-    }
-    return results
+    answers: list[dict[str, Any]] = []
+    for name, params in SCRIPT:
+        step: dict[str, Any] = {"operation": name}
+        for transport, (context, root) in instances.items():
+            raw = DRIVERS[transport](context, name, _resolved(params, root))
+            step[transport] = normalise(raw, replacements[transport])
+        answers.append(step)
+
+    trails: dict[str, Any] = {}
+    for transport, (context, _) in instances.items():
+        with context.declared.read() as view:
+            trails[transport] = [
+                normalise(record.model_dump(mode="json"), replacements[transport])
+                for record in view.list_audit(limit=200)
+            ]
+    return {"steps": answers, "trails": trails}
 
 
 # -- the matrix ------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", sorted(SCENARIOS))
+@pytest.mark.parametrize("index", range(len(SCRIPT)))
 def test_transports_return_the_same_answer(
-    name: str, parity_results: dict[str, dict[str, Any]]
+    index: int, parity_run: dict[str, Any]
 ) -> None:
-    answers = parity_results[name]
-    cli = normalise(answers["cli"])
-    assert cli == normalise(answers["http"]), f"{name}: CLI and REST disagree"
-    assert cli == normalise(answers["mcp"]), f"{name}: CLI and MCP disagree"
+    step = parity_run["steps"][index]
+    name = step["operation"]
+    assert step["cli"] == step["http"], f"{name}: CLI and REST disagree"
+    assert step["cli"] == step["mcp"], f"{name}: CLI and MCP disagree"
 
 
-def test_transports_leave_the_same_audit_trail(
-    parity_results: dict[str, dict[str, Any]],
-) -> None:
-    trails = parity_results["__audit__"]
+def test_transports_leave_the_same_audit_trail(parity_run: dict[str, Any]) -> None:
+    trails = parity_run["trails"]
     assert trails["cli"] == trails["http"]
     assert trails["cli"] == trails["mcp"]
-    operations = [record["operation"] for record in trails["cli"]]
-    assert "project.register" in operations
+
+    operations = {record["operation"] for record in trails["cli"]}
     assert "instance.init" in operations
+    assert "work.create" in operations
+    assert "work.transition" in operations
+    assert all(record["reason"] for record in trails["cli"])
 
 
 # -- staleness, in both directions ----------------------------------------
@@ -218,8 +326,6 @@ def test_every_operation_appears_on_exactly_its_expected_surfaces() -> None:
         assert (operation.mcp_tool_name in mcp_tools) is ("mcp" in expected), (
             f"{operation.name}: MCP presence does not match its exclusion state"
         )
-        # argparse renders top-level commands in the help text; nested ones
-        # are reached through their group, which is enough to show presence.
         assert (operation.cli.path[0] in parser_text) is ("cli" in expected), (
             f"{operation.name}: CLI presence does not match its exclusion state"
         )
@@ -236,15 +342,15 @@ def test_exclusions_carry_a_justification() -> None:
         assert reason.strip(), f"{name} is excluded without saying why"
 
 
-def test_every_shared_operation_has_a_parity_scenario() -> None:
+def test_every_shared_operation_is_driven_by_the_script() -> None:
     registry = default_registry()
     shared = {
         operation.name
         for operation in registry
         if registry.transports_for(operation.name) >= frozenset({"cli", "http", "mcp"})
     }
-    assert shared == set(SCENARIOS), (
-        "every operation on all three surfaces needs a parity scenario; "
-        f"missing: {sorted(shared - set(SCENARIOS))}, "
-        f"stale: {sorted(set(SCENARIOS) - shared)}"
+    covered = {name for name, _ in SCRIPT}
+    assert shared == covered, (
+        "every operation on all three surfaces must appear in the parity script; "
+        f"missing: {sorted(shared - covered)}, stale: {sorted(covered - shared)}"
     )

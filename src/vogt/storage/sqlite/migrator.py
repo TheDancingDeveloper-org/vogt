@@ -101,7 +101,7 @@ class Migrator:
 
     def applied_version(self, conn: sqlite3.Connection) -> int:
         """Highest applied migration number, or 0 on an empty database."""
-        if not _table_exists(conn, "migrations"):
+        if not table_exists(conn, "migrations"):
             return 0
         row = conn.execute("SELECT id FROM migrations ORDER BY id DESC").fetchone()
         return 0 if row is None else int(str(row["id"]).split("_", 1)[0])
@@ -219,7 +219,8 @@ class Migrator:
             raise
 
 
-def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+def table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """Whether a table exists in this database."""
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
         (name,),

@@ -4,18 +4,25 @@ Routes are not written here — they are derived, one per registered operation,
 which is what makes "nothing is GUI-only" (FR-A1) structurally true rather
 than a review convention. The GUI at M6 consumes exactly this surface.
 
-At M0 this adapter exists to be driven by the parity harness; `serve` and the
-health endpoints (FR-A7) arrive with the service stage at M4.
+Each endpoint is built with a real signature (`params: TheModel`), so FastAPI
+documents request bodies and query parameters, validates repeated query
+values into lists, and emits a complete OpenAPI document (FR-A4) — rather
+than the registry having to describe itself twice.
+
+`serve` and the health endpoints (FR-A7) arrive with the service stage at M4;
+this adapter is the application it will serve.
 """
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from vogt import __version__
 from vogt.application.context import AppContext, build_context
@@ -67,42 +74,73 @@ def build_app(
             content={"error": {"code": exc.code, "message": str(exc)}},
         )
 
+    @app.exception_handler(RequestValidationError)
+    async def _invalid_arguments(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """Keep the error envelope identical to every other failure.
+
+        FastAPI's default 422 body is shaped differently from the errors this
+        application raises. One envelope means a client — or a parity test —
+        handles failures the same way whatever produced them.
+        """
+        del request
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "invalid_arguments",
+                    "message": "request does not match the operation's parameters",
+                    "detail": _jsonable_errors(exc),
+                }
+            },
+        )
+
     return app
+
+
+def _jsonable_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    for error in exc.errors():
+        errors.append(
+            {
+                "loc": [str(part) for part in error.get("loc", ())],
+                "msg": str(error.get("msg", "")),
+                "type": str(error.get("type", "")),
+            }
+        )
+    return errors
 
 
 def _endpoint_for(
     operation: Operation[Any, Any], factory: ContextFactory
-) -> Callable[[Request], Any]:
-    """Build one route handler.
+) -> Callable[..., Any]:
+    """Build one route handler with the signature FastAPI needs.
 
-    Arguments are read from the query string for reads and the JSON body for
-    writes, then validated by the operation's own parameter model — the same
-    model the CLI builds its flags from.
+    The signature is assembled rather than written because the parameter type
+    differs per operation. Reads take their model as query parameters, writes
+    take it as a JSON body — the same model either way, so the CLI flag, the
+    query key and the body field always share a name.
     """
+    params_model = operation.params_model
+    is_read = operation.route.method == "GET"
+    annotation: Any = Annotated[params_model, Query()] if is_read else params_model
 
-    async def endpoint(request: Request) -> BaseModel:
-        raw: dict[str, Any]
-        if operation.route.method == "GET":
-            raw = dict(request.query_params)
-        else:
-            body = await request.body()
-            raw = {} if not body else await request.json()
-        try:
-            params = operation.params_model.model_validate(raw)
-        except ValidationError as exc:
-            raise RequestInvalid(exc) from exc
+    async def endpoint(params: BaseModel) -> BaseModel:
         result: BaseModel = operation.run(factory(), params)
         return result
 
     endpoint.__name__ = operation.name.replace(".", "_")
+    endpoint.__doc__ = operation.summary
+    endpoint.__annotations__ = {"params": annotation, "return": operation.result_model}
+    endpoint.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+        [
+            inspect.Parameter(
+                "params",
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation=annotation,
+            )
+        ],
+        return_annotation=operation.result_model,
+    )
     return endpoint
-
-
-class RequestInvalid(VogtError):
-    """The request body or query string did not match the parameter model."""
-
-    code = "invalid_arguments"
-    http_status = 422
-
-    def __init__(self, error: ValidationError) -> None:
-        super().__init__(str(error))

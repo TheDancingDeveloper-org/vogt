@@ -25,6 +25,13 @@ LOCAL_ONLY: Mapping[str, str] = {
         "already has one, so there is no meaningful remote semantics; "
         "`backup`, `restore` and `serve` join this list at M4."
     ),
+    "mcp.stdio": (
+        "Takes over this process's stdin and stdout to speak MCP. That is "
+        "meaningful only where the data directory is; a remote client uses "
+        "the streamable-HTTP transport at /mcp, which arrives at M4. "
+        "Offering it as a REST route would mean a server hijacking its own "
+        "stdout."
+    ),
 }
 
 #: Operations that exist only over HTTP. Empty at M0, and live: an entry

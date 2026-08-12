@@ -9,9 +9,12 @@ import pytest
 
 from vogt.errors import MigrationError, MigrationLocked
 from vogt.storage.sqlite.connection import connect, split_statements
+from vogt.storage.sqlite.declared import MIGRATIONS_DIR as DECLARED_MIGRATIONS
 from vogt.storage.sqlite.declared import SqliteDeclaredStore
 from vogt.storage.sqlite.migrator import Migrator, load_migrations
 from vogt.storage.sqlite.observed import SqliteObservedStore
+
+from tests.conftest import TEST_PRINCIPAL, StepClock
 
 NOW = datetime(2026, 8, 12, 5, 0, 0, tzinfo=UTC)
 
@@ -158,9 +161,49 @@ def test_shipped_migrations_bring_both_stores_up(tmp_path: Path) -> None:
     assert declared.schema_version() == 0
     assert observed.schema_version() == 0
 
-    assert declared.migrate().applied == ("0001_foundation",)
-    assert observed.migrate().applied == ("0001_foundation",)
-    assert declared.schema_version() == 1
-    assert observed.schema_version() == 1
+    # Deliberately not asserting a fixed list: this test is about the
+    # framework applying whatever ships, and re-editing it on every migration
+    # would train the next person to edit it without reading it.
+    declared_report = declared.migrate()
+    observed_report = observed.migrate()
+
+    assert declared_report.applied[0] == "0001_foundation"
+    assert declared_report.applied == tuple(sorted(declared_report.applied))
+    assert observed_report.applied[0] == "0001_foundation"
+
+    assert declared.schema_version() == len(declared_report.applied)
+    assert observed.schema_version() == len(observed_report.applied)
     assert not declared.is_initialized()
     assert not observed.is_initialized()
+
+
+def test_an_m0_instance_migrates_forward_with_its_data(tmp_path: Path) -> None:
+    """An instance created before 0002 must survive gaining the work plane.
+
+    Built by applying only migration 0001 from a copy of the shipped
+    directory, so this exercises the real upgrade path rather than a
+    hand-written approximation of an old schema.
+    """
+    old_migrations = tmp_path / "only-0001"
+    old_migrations.mkdir()
+    first = next(m for m in load_migrations(DECLARED_MIGRATIONS) if m.number == 1)
+    (old_migrations / f"{first.id}.sql").write_text(first.sql, encoding="utf-8")
+
+    path = tmp_path / "declared.sqlite3"
+    conn = connect(path, create=True)
+    Migrator(store="declared", directory=old_migrations, holder="old/1").migrate(
+        conn, now=NOW
+    )
+    conn.close()
+
+    store = SqliteDeclaredStore(path, clock=StepClock())
+    bootstrapped = store.bootstrap(TEST_PRINCIPAL)
+
+    report = store.migrate()
+    assert "0002_work" in report.applied
+
+    with store.read() as view:
+        assert view.instance_id() == bootstrapped.instance_id
+        assert view.counts().work_items == 0
+        # No workflow_defs rows exist on this path; the defaults still answer.
+        assert view.workflow_for("bug").initial_state == "open"
