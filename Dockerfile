@@ -56,12 +56,25 @@ LABEL org.opencontainers.image.title="vogt" \
       org.opencontainers.image.source="https://github.com/TheDancingDeveloper-org/vogt" \
       org.opencontainers.image.licenses="MIT"
 
-# A fixed uid so the compose file's `user:` and the bind-mounted token file's
-# mode (0750 root:10001) agree with each other (`DEPLOYMENT.md` §2.2).
-RUN groupadd --gid 10001 vogt \
-    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin vogt \
+# uid 1000, matching the human who owns the estate Vogt observes.
+#
+# This was 10001 — a service uid picked so a compromised container could not
+# touch anything the operator owns. That is the better instinct in general,
+# and it is the wrong one here: Vogt's whole job is to read the working tree
+# a developer edits, and a tree written with umask 077 is mode 700/600. A
+# separate uid can only reach it if every file in the estate is opened up to
+# a group, which is a far wider and more permanent change than sharing one
+# uid with the environment that already owns those files.
+#
+# So the uid is fixed at 1000 rather than merely non-root. It must match the
+# bind-mounted TLS key's group (`0640 root:1000`, FR-S7) and the data
+# volume's owner — a fresh named volume is seeded from this directory's
+# ownership, so getting it wrong here breaks every volume recreation, not
+# just the first deploy.
+RUN groupadd --gid 1000 vogt \
+    && useradd --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin vogt \
     && mkdir -p /var/lib/vogt \
-    && chown 10001:10001 /var/lib/vogt
+    && chown 1000:1000 /var/lib/vogt
 
 COPY --from=build --chown=root:root /opt/vogt/.venv /opt/vogt/.venv
 
@@ -71,7 +84,7 @@ ENV PATH="/opt/vogt/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1
 
 VOLUME ["/var/lib/vogt"]
-USER 10001:10001
+USER 1000:1000
 
 # No default host or port anywhere, including here (NFR-D2): those encode
 # exposure, and the compose file is what is allowed to know the answer for a
