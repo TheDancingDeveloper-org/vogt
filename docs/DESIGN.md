@@ -1,6 +1,9 @@
 # Vogt — Design Outline
 
-Status: **draft v0.3 (revision r4)** · 2026-08-12
+Status: **v0.3 (revision r4), built** · design 2026-08-12, reconciled
+against the delivered v1 on 2026-08-12. Sections that describe something
+the build decided differently are marked *as built* in place; the
+requirement-by-requirement verification is `REQUIREMENTS.md` §5.
 Scope: standalone product. Cadastre is prior art and a lessons source, not a
 dependency — see §11.
 
@@ -322,7 +325,9 @@ adapters/
 collectors/    plugin registry — core (no network): git-local,
                source-markers, contract-checker, dep-refs; optional
                (network): gh-issues, gh-prs, gh-actions, gh-releases
-gui/           React SPA consuming the HTTP adapter only
+gui/           static ES modules consuming the HTTP adapter only (M6 chose
+               buildless over React — see `ROADMAP.md` M6; a wheel that
+               needs npm to build is the cost that decided it)
 storage/       SQLite x2 (declared.sqlite3, observed.sqlite3), migrations
 ```
 
@@ -411,9 +416,15 @@ REST/CLI/GUI are peers over the same operations.
 - `GET /audit`
 - `actors/`, `auth` (token issue/rotate; scopes: `read`, `work.write`,
   `project.write`, `admin`, `writeback`)
-- MCP tools: `brief`, `backlog`, `next`, `why`, `create_work`, `transition`,
-  `adopt`, `suppress`, `contract_check`, `drift`, `deps`, `annotate` — same
-  names/semantics as CLI verbs.
+- MCP tools: one per registry operation, named for the operation
+  (`project.brief`, `backlog`, `why`, `work.create`, `work.transition`,
+  `work.adopt`, `suppress`, `contract.check`, `drift.list`, `deps`, …) —
+  the same names and semantics as the CLI verbs, because both are generated
+  from the same registry. *As built*: the sketch above named `next` and
+  `annotate`; neither survived. `backlog` already answers "what next" in
+  ranked order, and a second operation returning its first row would have
+  been a view with no view behind it; `annotate` was `work.comment` under
+  another name.
 
 ---
 
@@ -511,7 +522,11 @@ Deployment and network topologies: [`DEPLOYMENT.md`](DEPLOYMENT.md).
   migrations tables; observed store is append-only with a retention policy
   that never prunes the latest observation per subject, nor any observation
   a drift proposal references.
-- `vogt init | status | migrate | backup | restore | export | import`.
+- `vogt init | status | backup | restore | export | import`. *As built*:
+  there is no separate `migrate` verb — `init` is idempotent and brings an
+  existing instance forward, and `serve` migrates before it reports ready.
+  FR-L1 names `migrate` explicitly, so this is a gap recorded in
+  `REQUIREMENTS.md` §5, not a decision.
 - Config: pydantic settings schema is the single source of truth; example
   config and docs are generated from it in CI (drift between docs and
   defaults fails the build).

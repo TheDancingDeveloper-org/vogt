@@ -13,8 +13,32 @@ from pathlib import Path
 
 BUSY_TIMEOUT_MS = 5_000
 
+#: Durability of a commit, as a WAL-mode `synchronous` setting.
+#:
+#: `NORMAL` rather than SQLite's default `FULL`, which is the conventional
+#: pairing for WAL. Be clear about what it buys here, which is *not much*:
+#: measured against the deployed data volume on Node B, a write costs 28.7ms
+#: at `FULL` and 24.7ms at `NORMAL`, against 0.1ms with fsync off entirely.
+#:
+#: The reason the setting hardly matters is above this line — connections are
+#: opened per transaction and closed, and closing the last connection to a WAL
+#: database checkpoints it, which fsyncs whatever `synchronous` says about
+#: commits. The ~25ms is the checkpoint, not the commit. Fixing that means
+#: changing connection lifetime, not this pragma.
+#:
+#: What `NORMAL` does trade: a power loss or OS crash can lose the last few
+#: committed transactions. The database is never corrupted, and an application
+#: crash loses nothing, because the WAL is already handed to the kernel.
+#: `FULL` is available for anyone who wants the stronger guarantee.
+#:
+#: The test suite sets `off`, where nothing outlives the run. That is where
+#: this knob earns its keep today: it took the suite from 197s to 16s.
+DEFAULT_SYNCHRONOUS = "normal"
 
-def connect(path: Path, *, create: bool) -> sqlite3.Connection:
+
+def connect(
+    path: Path, *, create: bool, synchronous: str = DEFAULT_SYNCHRONOUS
+) -> sqlite3.Connection:
     """Open a connection with Vogt's pragmas applied.
 
     `isolation_level=None` puts the driver in autocommit mode so that this
@@ -31,6 +55,12 @@ def connect(path: Path, *, create: bool) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode = WAL")
+    # Validated against a fixed set rather than interpolated blindly: this
+    # lands in a PRAGMA, which takes no bound parameters.
+    if synchronous.lower() not in ("off", "normal", "full", "extra"):
+        msg = f"unknown synchronous setting: {synchronous!r}"
+        raise ValueError(msg)
+    conn.execute(f"PRAGMA synchronous = {synchronous.upper()}")
     return conn
 
 

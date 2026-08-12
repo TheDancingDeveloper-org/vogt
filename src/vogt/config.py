@@ -170,6 +170,19 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    sqlite_synchronous: Literal["off", "normal", "full", "extra"] = Field(
+        default="normal",
+        description=(
+            "How hard SQLite works to survive a power cut. `normal` is the "
+            "standard pairing for WAL and the default here; `full` fsyncs the "
+            "write-ahead log on every commit, which on a contended disk costs "
+            "tens of milliseconds per write. Under `normal` a power loss or "
+            "OS crash can lose the last few committed transactions — the "
+            "database is never corrupted, and an application crash loses "
+            "nothing. Set `full` if you would rather pay that cost per write."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     sweep_interval_seconds: int = Field(
         default=900,
         ge=0,

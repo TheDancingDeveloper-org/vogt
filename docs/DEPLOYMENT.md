@@ -1,8 +1,13 @@
 # Vogt — Deployment & Network Topologies (draft v0.2, revision r4)
 
-Status: **draft, pre-implementation**. Companion to `DESIGN.md` §7 and
-`SCHEMA.md`. Shaped heavily by cadastre's deployment history — see §4 for
-the specific lessons encoded here.
+Status: **built** (M4; reconciled against the delivered v1 on 2026-08-12).
+Companion to `DESIGN.md` §7 and `SCHEMA.md`. Shaped heavily by cadastre's
+deployment history — see §4 for the specific lessons encoded here.
+
+The compose file this document describes is committed at
+`deploy/personal-vogt.compose.yml` and copied to `indexarr/ops` at
+`personal/vogt/docker-compose.yml`. §4.2 and §4.3 describe client-side
+tooling that is **not built** — see the note in each.
 
 **r4 (2026-08-12): the target deployment state is named.** Vogt runs as a
 **Docker Compose stack on Node B (`winrarhost`), deployed by Komodo** from
@@ -181,10 +186,10 @@ fronting Caddy or `tailscale serve`. `serve` therefore needs `--tls-cert`
 **Port allocation.** One port, allocated when the stack is created and
 **verified free on Node B at that moment** — not inherited from this
 document. Cadastre holds `18090` (HTTP API) and `18092` (MCP) in the same
-block; `18094` is the natural next candidate but is *unverified* here and
-must be checked before the compose file is committed. Once allocated, the
-value is a **default in the compose file**, overridable from the Komodo
-stack environment — see §4.1, which is the rule this replaces.
+block. **Allocated: `18094`**, verified free on Node B before the compose
+file was committed (`18095` was already in use). It is a **default in the
+compose file**, overridable from the Komodo stack environment — see §4.1,
+which is the rule this replaces.
 
 **Container shape** (following the cadastre stack, which is the hardened
 precedent on this host):
@@ -218,7 +223,8 @@ beyond the tailnet.
 ```text
 tag v* ──> GitHub Actions `release.yml`
              runs-on: [self-hosted, node-b, linux, x64, docker, publish]
-             build → SBOM (syft) → keyless cosign sign + attest → push GHCR
+             build → run the image → push GHCR (buildx SBOM + provenance
+             attestations) → keyless cosign sign over the digest
   ──> ops repo: pin the new digest in personal/vogt/docker-compose.yml
   ──> Komodo POST /execute/DeployStack {"stack":"personal-vogt"}
              └── periphery clones ops, compose pull/up on Node B
@@ -242,7 +248,17 @@ Rules this flow obeys:
   language runtimes preinstalled — `astral-sh/setup-uv` is explicit.
 - **Signing is keyless** (`id-token: write` → cosign via Fulcio/Rekor), so
   there is no signing key to store or rotate and the signature binds to
-  this repository and workflow.
+  this repository and workflow. *As built*: the SBOM and provenance are
+  buildkit attestations (`sbom: true`, `provenance: true` on
+  `docker/build-push-action`) rather than a separate syft run plus `cosign
+  attest`. Cosign signs the digest and nothing else; one attestation
+  producer is enough, and a second would need a reason for disagreeing with
+  the first.
+- **The image is run before it is pushed.** v0.1.0 published an image whose
+  entrypoint did not exist — the build was green, the signature valid, and
+  the artefact had never been executed. The publish gate now runs
+  `--version` and asserts `serve` still refuses to invent a listen address
+  (NFR-D2).
 - **Pin the digest, not the alias.** `:latest` and even `:sha-…` are
   lookup conveniences; the ops compose carries the digest so a deploy is
   reproducible and a rollback is a one-line revert.
@@ -318,12 +334,28 @@ the answer for Node B.
 Any client-setup script compares the configured endpoint against the
 intended one and rewrites on mismatch; "key present" is never success.
 
+**Not built (v1).** Vogt ships no client-setup script, so NFR-D3 currently
+constrains nothing: `vogt-mcp-remote` reads `VOGT_URL` and
+`VOGT_TOKEN_FILE` from its own environment, and the one client config in
+this repository's README is hand-written. The rule stands as the
+requirement on any such script the moment one exists — which is the
+condition under which the `:18081` incident happened at all.
+
 ### 4.3 One connection document
 
 A single generated `CONNECTING.md` (from the running server: `GET
 /connection-info`) states the canonical URL, `/mcp` path, and supported MCP
 protocol versions. Client configs are derived from it, never hand-copied
 per client.
+
+**Half built (v1).** The server side exists and is tested:
+`GET /connection-info` is served on every port that serves MCP (FR-A7), and
+the bridge already discovers the remote's URL, `/mcp` path and protocol
+versions from it at startup rather than being told them. What does not
+exist is the generator that turns that response into a committed
+`CONNECTING.md`. For a single-instance tailnet deployment the endpoint is
+the document; the file matters when there is more than one instance or more
+than one person copying values out of it.
 
 ### 4.4 Health checks are protocol-version-agnostic
 
@@ -353,9 +385,11 @@ artifact, not a hand-maintained parallel truth.
 - `vogt backup` produces a consistent snapshot (SQLite backup API,
   both stores + a manifest with schema versions); `restore` verifies the
   manifest before touching anything.
-- Upgrade path: bump the pinned digest in ops → `DeployStack` → `migrate`
-  runs forward-only migrations under `migration_lock` at startup →
-  `/health/ready` gates traffic until migration completes.
+- Upgrade path: bump the pinned digest in ops → `DeployStack` → the new
+  container runs forward-only migrations under `migration_lock` at startup
+  → `/health/ready` gates traffic until migration completes. (Migration is
+  a startup step and an effect of the idempotent `init`; there is no
+  `vogt migrate` verb to run by hand — an FR-L1 gap, `REQUIREMENTS.md` §5.)
 - Rollback is a revert of the digest line in ops plus a `DeployStack`.
   Forward-only migrations mean a rollback across a schema change needs a
   restore, not just an older image — check `SCHEMA.md` before assuming the
@@ -395,3 +429,36 @@ Komodo API shape (2.2.0): each request is its own path — `POST
 /read/GetStack`, `POST /write/UpdateStack`, `POST /execute/DeployStack` —
 with bare JSON params. A `400` with an empty body means the request shape
 is wrong; bad credentials return `401`.
+
+## 8. Known: every write costs a WAL checkpoint
+
+Measured against the deployed data volume on Node B, one declared write
+takes **~25ms**, almost all of it fsync:
+
+| `synchronous` | ms per write |
+|---|---|
+| `full` | 28.7 |
+| `normal` | 24.7 |
+| `off` | 0.1 |
+
+The pragma barely moves it, which is the tell. `connection.py` opens a
+connection per transaction and closes it, and closing the last connection to
+a WAL database checkpoints the log — and a checkpoint fsyncs whatever
+`synchronous` says about commits. The cost is the checkpoint, not the commit.
+
+Per-transaction connections were chosen deliberately, so that a CLI process,
+a server process and a stdio MCP process can share one data directory
+(§2.1). That requirement is real; closing after every transaction is not the
+only way to meet it. A connection held per store instance, or per thread,
+would keep multi-process safety while letting the WAL checkpoint on SQLite's
+own schedule instead of hundreds of times a sweep.
+
+Not fixed here because it is a storage-layer change and wants its own
+testing. Recorded because 25ms per write is invisible on a laptop and
+obvious on a sweep that records thousands of observations — and because the
+number will otherwise be rediscovered by whoever next wonders why a large
+estate sweeps slowly.
+
+**Do not "fix" this with `VOGT_SQLITE_SYNCHRONOUS=off` in production.** That
+trades durability for speed in a product whose declared store is an audit
+log. The knob exists for test runs, where nothing outlives the process.

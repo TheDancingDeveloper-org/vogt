@@ -49,7 +49,7 @@ from vogt.storage.interface import (
     WorkFilter,
     WorkItemUpdate,
 )
-from vogt.storage.sqlite.connection import connect
+from vogt.storage.sqlite.connection import DEFAULT_SYNCHRONOUS, connect
 from vogt.storage.sqlite.migrator import (
     DEFAULT_STALE_AFTER,
     Migrator,
@@ -99,8 +99,10 @@ class SqliteDeclaredStore:
         clock: Clock = utc_now,
         id_factory: IdFactory = new_id,
         lock_stale_after: timedelta = DEFAULT_STALE_AFTER,
+        synchronous: str = DEFAULT_SYNCHRONOUS,
     ) -> None:
         self._path = path
+        self._synchronous = synchronous
         self._clock = clock
         self._id_factory = id_factory
         self._migrator = Migrator(
@@ -126,7 +128,7 @@ class SqliteDeclaredStore:
         Both steps are idempotent, so `migrate` stays safe to run on every
         start (`DEPLOYMENT.md` §5).
         """
-        conn = connect(self._path, create=True)
+        conn = connect(self._path, create=True, synchronous=self._synchronous)
         try:
             now = self._clock()
             report = self._migrator.migrate(conn, now=now)
@@ -156,7 +158,7 @@ class SqliteDeclaredStore:
     def schema_version(self) -> int:
         if not self._path.exists():
             return 0
-        conn = connect(self._path, create=False)
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
         try:
             return self._migrator.applied_version(conn)
         finally:
@@ -165,7 +167,7 @@ class SqliteDeclaredStore:
     def is_initialized(self) -> bool:
         if not self._path.exists():
             return False
-        conn = connect(self._path, create=False)
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
         try:
             return _meta_get(conn, META_INSTANCE_ID) is not None
         except sqlite3.OperationalError:
@@ -181,7 +183,7 @@ class SqliteDeclaredStore:
         feed rather than an instance-creation event it cannot act on.
         """
         now = self._clock()
-        conn = connect(self._path, create=True)
+        conn = connect(self._path, create=True, synchronous=self._synchronous)
         try:
             conn.execute("BEGIN IMMEDIATE")
             if _meta_get(conn, META_INSTANCE_ID) is not None:
@@ -358,7 +360,7 @@ class SqliteDeclaredStore:
     def _open_initialized(self) -> sqlite3.Connection:
         if not self._path.exists():
             raise NotInitialized(self._not_initialized_message())
-        conn = connect(self._path, create=False)
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
         try:
             if _meta_get(conn, META_INSTANCE_ID) is None:
                 raise NotInitialized(self._not_initialized_message())

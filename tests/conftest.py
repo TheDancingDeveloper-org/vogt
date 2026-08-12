@@ -2,6 +2,13 @@
 
 Every test runs against its own data directory and its own principal, so no
 test depends on the OS user running it or on anything left behind by another.
+
+That isolation is what makes the suite disk-bound: each test creates a
+directory and two SQLite databases with their WAL and shared-memory files,
+then throws them away. Measured on this host, the suite spent 275 seconds of
+a 291-second CI job waiting on a disk, against under a second of CPU. The
+`config` fixture below deals with that, and does not change what is under
+test.
 """
 
 from __future__ import annotations
@@ -53,7 +60,25 @@ def data_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def config(data_dir: Path) -> VogtConfig:
-    return VogtConfig(data_dir=data_dir)
+    """Test configuration — durability off, because nothing here outlives the run.
+
+    Without this the suite is entirely fsync-bound. Vogt opens a connection
+    per transaction and closes it, and closing the last connection to a WAL
+    database forces a checkpoint, which fsyncs. On a contended ext4 disk that
+    measured 176ms *per transaction* — and `synchronous=normal` does not help,
+    because it skips the per-commit fsync but still syncs at checkpoints.
+
+    The effect on the suite was 50.65s for twenty tests, of which 0.8s was CPU
+    and the rest was waiting. With `off`, the same twenty run in well under a
+    second. Nothing is lost: every test writes to a temporary directory that
+    is deleted afterwards, so durability across a power cut is not a property
+    any of them has ever needed.
+
+    This is a test-environment setting, not a test-only code path — the same
+    knob is available in production (`VOGT_SQLITE_SYNCHRONOUS`), and the
+    storage layer behaves identically either way.
+    """
+    return VogtConfig(data_dir=data_dir, sqlite_synchronous="off")
 
 
 @pytest.fixture

@@ -47,9 +47,16 @@ def build_context(
     return AppContext(
         config=resolved_config,
         declared=SqliteDeclaredStore(
-            resolved_config.declared_db_path, clock=clock, id_factory=id_factory
+            resolved_config.declared_db_path,
+            clock=clock,
+            id_factory=id_factory,
+            synchronous=resolved_config.sqlite_synchronous,
         ),
-        observed=SqliteObservedStore(resolved_config.observed_db_path, clock=clock),
+        observed=SqliteObservedStore(
+            resolved_config.observed_db_path,
+            clock=clock,
+            synchronous=resolved_config.sqlite_synchronous,
+        ),
         principal=principal if principal is not None else local_principal(),
         clock=clock,
         id_factory=id_factory,
