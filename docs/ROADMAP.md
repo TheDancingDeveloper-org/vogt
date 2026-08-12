@@ -387,7 +387,7 @@ port.
 **Demo**: every M2/M3/M5 demo step repeated through the browser, and
 nothing the GUI does is absent from the API (parity rule holds).
 
-### M6 as built — one deviation and three findings
+### M6 as built — one deviation and four findings
 
 **Deviation: buildless ES modules, not a React SPA.** `DESIGN.md` §10 named
 React. The reason for not using it is packaging rather than taste: Vogt
@@ -423,6 +423,21 @@ quietly reversed.
    source-reading assertion in `test_gui.py` now goes through one
    comment-stripping helper.
 
+4. **FR-L3 had never been built.** Found by walking every must-have
+   requirement ID and asking which are cited nowhere in `src/` or `tests/`.
+   FR-L3 has two halves — collectors run "on an in-process schedule" *and*
+   are triggerable on demand — and only the second existed. `DEPLOYMENT.md`
+   §1 has listed "collector scheduler (in-process background sweeps)" in the
+   `serve` process diagram since M4, so the deployment document described
+   something that did not run. Built at M6 and covered by
+   `tests/test_scheduler.py`; the requirement belonged to M2.
+
 The GUI is read-only. Resolving drift, transitioning work and setting a
 write-back policy all require a reason its author typed, and a button cannot
 type one — "accepted via GUI" is not a reason (FR-W1).
+
+The schedule is on by default, at fifteen minutes. That is the one place a
+default was chosen rather than required, and the reason is that an instance
+which never looks cannot tell stale evidence from none — the failure this
+product exists to prevent. `--no-schedule` and `sweep_interval_seconds: 0`
+both turn it off.

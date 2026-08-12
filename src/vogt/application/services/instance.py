@@ -114,6 +114,7 @@ def serve(ctx: AppContext, params: ServeParams) -> ServeResult:
         tls_key=None if params.tls_key is None else Path(params.tls_key),
         require_auth=not params.no_auth,
         writes_enabled=not params.read_only,
+        schedule_collectors=not params.no_schedule,
     )
     options.validate()
     run(options, config=ctx.config)
@@ -123,4 +124,5 @@ def serve(ctx: AppContext, params: ServeParams) -> ServeResult:
         mcp_path=MCP_PATH,
         auth_required=options.require_auth,
         writes_enabled=options.writes_enabled,
+        collecting=options.schedule_collectors,
     )

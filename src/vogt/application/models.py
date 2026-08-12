@@ -931,6 +931,14 @@ class ServeParams(Params):
         default=False,
         description="Refuse every write, whatever scope a token holds (FR-S4).",
     )
+    no_schedule: bool = Field(
+        default=False,
+        description=(
+            "Do not collect in the background (FR-L3). The schedule is on by "
+            "default because an instance that never looks cannot tell stale "
+            "evidence from none; this is the switch for a diagnostic run."
+        ),
+    )
 
 
 class ServeResult(Result):
@@ -938,6 +946,10 @@ class ServeResult(Result):
     api_path: str
     mcp_path: str
     auth_required: bool
+    #: Whether background collection is running. Reported rather than
+    #: assumed: "the server is up" and "the server is looking" are different
+    #: facts, and only one of them keeps freshness small.
+    collecting: bool = True
     writes_enabled: bool
 
 
