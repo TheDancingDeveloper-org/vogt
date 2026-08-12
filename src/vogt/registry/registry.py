@@ -22,8 +22,25 @@ ALL_TRANSPORTS: frozenset[Transport] = frozenset({"cli", "http", "mcp"})
 LOCAL_ONLY: Mapping[str, str] = {
     "init": (
         "Creates the instance in a local data directory. A running server "
-        "already has one, so there is no meaningful remote semantics; "
-        "`backup`, `restore` and `serve` join this list at M4."
+        "already has one, so there is no meaningful remote semantics."
+    ),
+    "serve": (
+        "Takes over this process to listen on a port. A running server being "
+        "asked over its own API to start another one is not a meaningful "
+        "request; restarting a service is the supervisor's job."
+    ),
+    "backup": (
+        "Writes to a path on the machine holding the data directory. Over "
+        "HTTP the path would name a filesystem the caller cannot see."
+    ),
+    "restore": (
+        "Replaces the live stores from a path on the server's filesystem, "
+        "and every client's view of the instance changes underneath them. "
+        "That is an operator action taken at the machine, not a request."
+    ),
+    "import": (
+        "Reads a file from the machine holding the data directory, for the "
+        "same reason as backup."
     ),
     "mcp.stdio": (
         "Takes over this process's stdin and stdout to speak MCP. That is "

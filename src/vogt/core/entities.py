@@ -178,6 +178,46 @@ class WorkLink(Entity):
     created_at: datetime
 
 
+class Token(Entity):
+    """A scoped credential bound to an actor (FR-S3).
+
+    Never carries the secret: only the hash is stored, and the secret is
+    shown once at issue time. A model that could round-trip the credential
+    is a model that leaks it into logs and API responses.
+    """
+
+    id: str
+    actor_id: str
+    actor_identity_ref: str | None = None
+    name: str
+    scopes: list[str]
+    created_at: datetime
+    expires_at: datetime | None = None
+    last_used_at: datetime | None = None
+    revoked_at: datetime | None = None
+    revoked_reason: str | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.revoked_at is None
+
+
+class AuthDecision(Entity):
+    """One allow or deny, recorded (FR-S5)."""
+
+    id: str
+    at: datetime
+    decision: Literal["allow", "deny"]
+    reason_code: str
+    operation: str
+    scope: str | None = None
+    actor_id: str | None = None
+    token_id: str | None = None
+    identity_ref: str | None = None
+    transport: str
+    detail: str | None = None
+
+
 class DriftProposal(Entity):
     """A machine-raised question, resolved by a human or an agent (FR-R1)."""
 

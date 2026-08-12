@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from vogt import __version__
 from vogt.application.context import AppContext, build_context
+from vogt.application.services.auth import Authenticated, authorize
 from vogt.errors import VogtError
 from vogt.registry import OperationRegistry, default_registry
 from vogt.registry.operation import Operation
@@ -33,14 +34,26 @@ from vogt.registry.operation import Operation
 API_PREFIX = "/api"
 
 ContextFactory = Callable[[], AppContext]
+#: Resolves a request to a context and an authenticated caller. Injected
+#: by `serve`; absent on the unauthenticated loopback surface.
+RequestResolver = Callable[[Request], "tuple[AppContext, Authenticated]"]
 
 
 def build_app(
     *,
     registry: OperationRegistry | None = None,
     context_factory: ContextFactory | None = None,
+    authorize_request: RequestResolver | None = None,
+    writes_enabled: bool = True,
 ) -> FastAPI:
-    """Build the FastAPI application for one instance."""
+    """Build the FastAPI application for one instance.
+
+    `authorize_request` is how `serve` injects authentication. When it is
+    absent the surface is unauthenticated — the loopback topology, where the
+    caller already has the data directory (`DEPLOYMENT.md` §3). When it is
+    present, every route resolves a principal and checks its scope before
+    the handler runs, and the decision is recorded either way (FR-S5).
+    """
     active_registry = registry if registry is not None else default_registry()
     factory: ContextFactory = (
         context_factory if context_factory is not None else build_context
@@ -58,7 +71,12 @@ def build_app(
     for operation in active_registry.for_transport("http"):
         app.add_api_route(
             f"{API_PREFIX}{operation.route.path}",
-            _endpoint_for(operation, factory),
+            _endpoint_for(
+                operation,
+                factory,
+                authorize_request=authorize_request,
+                writes_enabled=writes_enabled,
+            ),
             methods=[operation.route.method],
             name=operation.name,
             summary=operation.summary,
@@ -113,7 +131,11 @@ def _jsonable_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
 
 
 def _endpoint_for(
-    operation: Operation[Any, Any], factory: ContextFactory
+    operation: Operation[Any, Any],
+    factory: ContextFactory,
+    *,
+    authorize_request: RequestResolver | None = None,
+    writes_enabled: bool = True,
 ) -> Callable[..., Any]:
     """Build one route handler with the signature FastAPI needs.
 
@@ -121,25 +143,47 @@ def _endpoint_for(
     differs per operation. Reads take their model as query parameters, writes
     take it as a JSON body — the same model either way, so the CLI flag, the
     query key and the body field always share a name.
+
+    `Request` is always in the signature, even unauthenticated: one shape is
+    easier to reason about than two, and FastAPI injects it for free.
     """
+    del writes_enabled  # the grant carries it; kept for call-site clarity
     params_model = operation.params_model
     is_read = operation.route.method == "GET"
     annotation: Any = Annotated[params_model, Query()] if is_read else params_model
 
-    async def endpoint(params: BaseModel) -> BaseModel:
-        result: BaseModel = operation.run(factory(), params)
+    async def endpoint(params: BaseModel, request: Request) -> BaseModel:
+        if authorize_request is None:
+            ctx = factory()
+        else:
+            ctx, caller = authorize_request(request)
+            # The second gate, recorded either way (FR-S4, FR-S5).
+            authorize(
+                ctx,
+                caller,
+                operation=operation.name,
+                scope=operation.scope,
+                mutating=operation.mutating,
+                transport="http",
+            )
+        result: BaseModel = operation.run(ctx, params)
         return result
 
     endpoint.__name__ = operation.name.replace(".", "_")
     endpoint.__doc__ = operation.summary
-    endpoint.__annotations__ = {"params": annotation, "return": operation.result_model}
+    endpoint.__annotations__ = {
+        "params": annotation,
+        "request": Request,
+        "return": operation.result_model,
+    }
     endpoint.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
         [
             inspect.Parameter(
-                "params",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=annotation,
-            )
+                "params", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=annotation
+            ),
+            inspect.Parameter(
+                "request", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Request
+            ),
         ],
         return_annotation=operation.result_model,
     )

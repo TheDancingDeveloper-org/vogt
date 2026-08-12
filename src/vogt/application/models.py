@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from vogt.core.entities import (
     Actor,
     AuditRecord,
+    AuthDecision,
     Comment,
     DepRef,
     DriftProposal,
@@ -42,6 +43,7 @@ from vogt.core.entities import (
     Reason,
     RelationKind,
     Suppression,
+    Token,
     TrustState,
     WorkItem,
     WorkKind,
@@ -819,3 +821,155 @@ class DriftResolveParams(Params):
 class DriftResult(Result):
     proposal: DriftProposal
     change_applied: bool
+
+
+# -- auth ------------------------------------------------------------------
+
+
+class IssueTokenParams(Params):
+    actor: Name = Field(description="Actor identity_ref the token is bound to.")
+    name: Name = Field(description="What this token is for, e.g. 'claude-code'.")
+    scopes: Name = Field(
+        default="read",
+        description=(
+            "Comma-separated: read, work.write, project.write, admin, writeback."
+        ),
+    )
+    expires_in_days: int | None = Field(
+        default=None,
+        ge=1,
+        le=3650,
+        description="Omit for a token that does not expire.",
+    )
+    reason: Reason
+
+
+class IssueTokenResult(Result):
+    token: Token
+    secret: str = Field(
+        description="Shown once. Not stored, not recoverable — rotate if lost."
+    )
+    warning: str
+
+
+class TokenResult(Result):
+    token: Token
+
+
+class ListTokensParams(Params):
+    include_revoked: bool = False
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class TokenListResult(Result):
+    tokens: list[Token]
+
+
+class RevokeTokenParams(Params):
+    id: str
+    reason: Reason
+
+
+class AuthDecisionListParams(Params):
+    decision: Literal["allow", "deny"] | None = Field(
+        default=None, description="Filter to allows or denials."
+    )
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class AuthDecisionListResult(Result):
+    decisions: list[AuthDecision]
+
+
+# -- lifecycle -------------------------------------------------------------
+
+
+class ServeParams(Params):
+    host: str = Field(
+        description=(
+            "Listen address. No default anywhere — it encodes exposure "
+            "(NFR-D2). The compose file supplies it."
+        )
+    )
+    port: int = Field(
+        ge=1,
+        le=65535,
+        description="Listen port. No default, for the same reason as host.",
+    )
+    tls_cert: str | None = Field(
+        default=None, description="Operator-owned certificate, mounted read-only."
+    )
+    tls_key: str | None = None
+    no_auth: bool = Field(
+        default=False,
+        description="Serve without authentication. Only sane on loopback.",
+    )
+    read_only: bool = Field(
+        default=False,
+        description="Refuse every write, whatever scope a token holds (FR-S4).",
+    )
+
+
+class ServeResult(Result):
+    url: str
+    api_path: str
+    mcp_path: str
+    auth_required: bool
+    writes_enabled: bool
+
+
+class BackupParams(Params):
+    destination: str | None = Field(
+        default=None, description="Defaults to <data-dir>/backups/<timestamp>."
+    )
+    label: str | None = None
+    reason: Reason
+
+
+class BackupResult(Result):
+    path: str
+    instance_id: str
+    declared_schema_version: int
+    observed_schema_version: int
+    taken_at: datetime
+
+
+class RestoreParams(Params):
+    source: str = Field(description="A backup directory containing manifest.json.")
+    confirm: bool = Field(
+        default=False, description="Required: this replaces the live stores."
+    )
+    reason: Reason
+
+
+class RestoreResult(Result):
+    source: str
+    instance_id: str
+    restored_from: datetime
+    migrations_applied: list[str]
+    declared_schema_version: int
+
+
+class ExportParams(Params):
+    destination: str
+    reason: Reason
+
+
+class ExportResult(Result):
+    path: str
+    projects: int
+    work_items: int
+
+
+class ImportParams(Params):
+    source: str
+    reason: Reason
+
+
+class ImportResult(Result):
+    source: str
+    instance_id: str
+    projects: int
+    work_items: int
+    applied: bool
+    detail: str

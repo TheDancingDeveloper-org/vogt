@@ -6,6 +6,12 @@ transports are generated and there is only one of each use-case.
 
 from __future__ import annotations
 
+from vogt.application.services.auth import (
+    issue_token,
+    list_auth_decisions,
+    list_tokens,
+    revoke_token,
+)
 from vogt.application.services.collect import coverage, deps, observations, sweep
 from vogt.application.services.contracts import compliance, contract_check
 from vogt.application.services.drift_service import (
@@ -16,8 +22,15 @@ from vogt.application.services.drift_service import (
 from vogt.application.services.history import list_audit, list_events
 from vogt.application.services.instance import (
     init_instance,
+    serve,
     serve_mcp_stdio,
     status,
+)
+from vogt.application.services.lifecycle import (
+    backup,
+    export_instance,
+    import_instance,
+    restore,
 )
 from vogt.application.services.observed_first import (
     adopt,
@@ -58,6 +71,7 @@ from vogt.application.services.work import (
 __all__ = [
     "adopt",
     "backlog",
+    "backup",
     "brief_project",
     "bugs",
     "comment_work",
@@ -71,17 +85,22 @@ __all__ = [
     "create_work",
     "deps",
     "detect_drift",
+    "export_instance",
     "get_project",
     "get_work",
+    "import_instance",
     "init_instance",
+    "issue_token",
     "list_actors",
     "list_audit",
+    "list_auth_decisions",
     "list_drift",
     "list_events",
     "list_initiatives",
     "list_labels",
     "list_projects",
     "list_suppressions",
+    "list_tokens",
     "list_work",
     "list_workflows",
     "observations",
@@ -89,7 +108,10 @@ __all__ = [
     "register_project",
     "relate_work",
     "resolve_drift",
+    "restore",
     "revoke_suppression",
+    "revoke_token",
+    "serve",
     "serve_mcp_stdio",
     "status",
     "suppress",

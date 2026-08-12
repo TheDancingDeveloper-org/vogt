@@ -20,6 +20,7 @@ from vogt.core.clock import Clock, from_iso, to_iso, utc_now
 from vogt.core.entities import (
     Actor,
     AuditRecord,
+    AuthDecision,
     Comment,
     DriftProposal,
     Event,
@@ -29,6 +30,7 @@ from vogt.core.entities import (
     Relation,
     RelationKind,
     Suppression,
+    Token,
     WorkItem,
     WorkKind,
     WorkLink,
@@ -259,6 +261,57 @@ class SqliteDeclaredStore:
             )
             conn.execute("COMMIT")
             return event
+        except BaseException:
+            _rollback_quietly(conn)
+            raise
+        finally:
+            conn.close()
+
+    def record_auth_decision(self, decision: AuthDecision) -> None:
+        """Append an authorization decision (FR-S5).
+
+        Like `publish_event`, this is not a declared write: nothing changed,
+        nobody supplied a reason, and it happens on reads too. Recording it
+        in `audit` would make "every audit row is a change" false.
+        """
+        conn = self._open_initialized()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT INTO auth_decisions (id, at, decision, reason_code, "
+                "operation, scope, actor_id, token_id, identity_ref, transport, "
+                "detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    decision.id,
+                    to_iso(decision.at),
+                    decision.decision,
+                    decision.reason_code,
+                    decision.operation,
+                    decision.scope,
+                    decision.actor_id,
+                    decision.token_id,
+                    decision.identity_ref,
+                    decision.transport,
+                    decision.detail,
+                ),
+            )
+            conn.execute("COMMIT")
+        except BaseException:
+            _rollback_quietly(conn)
+            raise
+        finally:
+            conn.close()
+
+    def touch_token(self, token_id: str, *, at: datetime) -> None:
+        """Record that a token was used, for the operator's benefit."""
+        conn = self._open_initialized()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE tokens SET last_used_at = ? WHERE id = ?",
+                (to_iso(at), token_id),
+            )
+            conn.execute("COMMIT")
         except BaseException:
             _rollback_quietly(conn)
             raise
@@ -539,6 +592,49 @@ class SqliteReadView:
             tuple(subject_keys),
         ).fetchall()
         return {str(row["subject_key"]): str(row["ref"]) for row in rows}
+
+    # -- tokens ------------------------------------------------------------
+
+    def token_by_hash(self, token_hash: str) -> Token | None:
+        row = self._conn.execute(
+            "SELECT t.*, a.identity_ref AS actor_identity_ref FROM tokens t "
+            "JOIN actors a ON a.id = t.actor_id WHERE t.token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        return None if row is None else _row_to_token(row)
+
+    def token_by_id(self, token_id: str) -> Token | None:
+        row = self._conn.execute(
+            "SELECT t.*, a.identity_ref AS actor_identity_ref FROM tokens t "
+            "JOIN actors a ON a.id = t.actor_id WHERE t.id = ?",
+            (token_id,),
+        ).fetchone()
+        return None if row is None else _row_to_token(row)
+
+    def list_tokens(
+        self, *, include_revoked: bool = False, limit: int = 100
+    ) -> list[Token]:
+        clause = "" if include_revoked else "WHERE t.revoked_at IS NULL"
+        rows = self._conn.execute(
+            "SELECT t.*, a.identity_ref AS actor_identity_ref FROM tokens t "
+            f"JOIN actors a ON a.id = t.actor_id {clause} "
+            "ORDER BY t.created_at DESC, t.id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_token(row) for row in rows]
+
+    def list_auth_decisions(
+        self, *, decision: str | None = None, limit: int = 100
+    ) -> list[AuthDecision]:
+        clause = "WHERE decision = ?" if decision else ""
+        params: tuple[object, ...] = (decision, limit) if decision else (limit,)
+        rows = self._conn.execute(
+            f"SELECT * FROM auth_decisions {clause} ORDER BY at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [_row_to_auth_decision(row) for row in rows]
+
+    # -- drift -------------------------------------------------------------
 
     def list_drift(
         self,
@@ -965,6 +1061,29 @@ class SqliteWriteTxn(SqliteReadView):
         )
         return cursor.rowcount > 0
 
+    def insert_token(self, token: Token, *, token_hash: str) -> None:
+        self._conn.execute(
+            "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, "
+            "created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                token.id,
+                token.actor_id,
+                token.name,
+                token_hash,
+                json.dumps(token.scopes),
+                to_iso(token.created_at),
+                None if token.expires_at is None else to_iso(token.expires_at),
+            ),
+        )
+
+    def revoke_token(self, token_id: str, *, reason: str, at: datetime) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE tokens SET revoked_at = ?, revoked_reason = ? "
+            "WHERE id = ? AND revoked_at IS NULL",
+            (to_iso(at), reason, token_id),
+        )
+        return cursor.rowcount > 0
+
     def insert_drift(self, proposal: DriftProposal) -> None:
         self._conn.execute(
             "INSERT INTO drift_proposals (id, kind, subject_kind, subject_id, "
@@ -1241,6 +1360,45 @@ def _upsert_workflow(
             "INSERT INTO workflow_defs (kind, definition, updated_at) VALUES (?, ?, ?)",
             (workflow.kind, definition, to_iso(at)),
         )
+
+
+def _row_to_token(row: sqlite3.Row) -> Token:
+    def _at(column: str) -> datetime | None:
+        value = row[column]
+        return None if value is None else from_iso(str(value))
+
+    return Token(
+        id=str(row["id"]),
+        actor_id=str(row["actor_id"]),
+        actor_identity_ref=str(row["actor_identity_ref"]),
+        name=str(row["name"]),
+        scopes=json.loads(str(row["scopes"])),
+        created_at=from_iso(str(row["created_at"])),
+        expires_at=_at("expires_at"),
+        last_used_at=_at("last_used_at"),
+        revoked_at=_at("revoked_at"),
+        revoked_reason=(
+            None if row["revoked_reason"] is None else str(row["revoked_reason"])
+        ),
+    )
+
+
+def _row_to_auth_decision(row: sqlite3.Row) -> AuthDecision:
+    return AuthDecision(
+        id=str(row["id"]),
+        at=from_iso(str(row["at"])),
+        decision=row["decision"],
+        reason_code=str(row["reason_code"]),
+        operation=str(row["operation"]),
+        scope=None if row["scope"] is None else str(row["scope"]),
+        actor_id=None if row["actor_id"] is None else str(row["actor_id"]),
+        token_id=None if row["token_id"] is None else str(row["token_id"]),
+        identity_ref=(
+            None if row["identity_ref"] is None else str(row["identity_ref"])
+        ),
+        transport=str(row["transport"]),
+        detail=None if row["detail"] is None else str(row["detail"]),
+    )
 
 
 def _row_to_drift(row: sqlite3.Row) -> DriftProposal:

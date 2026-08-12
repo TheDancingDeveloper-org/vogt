@@ -16,6 +16,7 @@ from typing import Protocol
 from vogt.core.entities import (
     Actor,
     AuditRecord,
+    AuthDecision,
     Comment,
     DepRef,
     DriftProposal,
@@ -28,6 +29,7 @@ from vogt.core.entities import (
     Suppression,
     Sweep,
     SweepOutcome,
+    Token,
     WorkItem,
     WorkLink,
 )
@@ -209,6 +211,20 @@ class ReadView(Protocol):
 
     def work_item_by_subject(self, subject_key: str) -> WorkItem | None: ...
 
+    # -- tokens ------------------------------------------------------------
+
+    def token_by_hash(self, token_hash: str) -> Token | None: ...
+
+    def token_by_id(self, token_id: str) -> Token | None: ...
+
+    def list_tokens(
+        self, *, include_revoked: bool = False, limit: int = 100
+    ) -> list[Token]: ...
+
+    def list_auth_decisions(
+        self, *, decision: str | None = None, limit: int = 100
+    ) -> list[AuthDecision]: ...
+
     # -- drift -------------------------------------------------------------
 
     def list_drift(
@@ -303,6 +319,10 @@ class WriteTxn(ReadView, Protocol):
 
     def insert_work_link(self, link: WorkLink) -> None: ...
 
+    def insert_token(self, token: Token, *, token_hash: str) -> None: ...
+
+    def revoke_token(self, token_id: str, *, reason: str, at: datetime) -> bool: ...
+
     def insert_drift(self, proposal: DriftProposal) -> None: ...
 
     def resolve_drift(
@@ -352,6 +372,16 @@ class DeclaredStore(Protocol):
     def schema_version(self) -> int: ...
 
     def bootstrap(self, principal: Principal) -> BootstrapResult: ...
+
+    def record_auth_decision(self, decision: AuthDecision) -> None:
+        """Append an authorization decision (FR-S5).
+
+        Not a declared write: nothing changed, nobody supplied a reason, and
+        it happens on reads too.
+        """
+        ...
+
+    def touch_token(self, token_id: str, *, at: datetime) -> None: ...
 
     def publish_event(
         self,

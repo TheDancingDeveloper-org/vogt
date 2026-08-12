@@ -1,0 +1,114 @@
+# The Node B stack (NFR-D7–D10). Deployed to `indexarr/ops` at
+# `personal/vogt/docker-compose.yml`; kept here so it is reviewed alongside
+# the code it deploys (`DEPLOYMENT.md` §4.6).
+#
+# Four rules this file obeys, each of which cost cadastre something:
+#
+# 1. **Allocation values carry defaults; exposure values do not**
+#    (NFR-D2, revised r4). The port, the certificate path and the token path
+#    are `${X:-default}` — `${X:?}`-gating them is what broke every cadastre
+#    deploy after `cadastre#42`, because `verify` and `publish` went green
+#    and the deploy step went red on three values nobody had set. The bind
+#    address is likewise defaulted *to a Tailscale address*: choosing a port
+#    on a tailnet interface is an allocation, not an exposure decision.
+# 2. **Never a `./relative` bind mount for state.** Komodo clones stack
+#    directories to a fresh path on every deploy, so a relative mount
+#    silently points at a new empty directory. State is a named volume;
+#    operator-owned material is an absolute bind mount, read-only.
+# 3. **The image is digest-pinned**, not alias-tracking (NFR-PO4). A tag is
+#    a lookup convenience; the digest is what makes a deploy reproducible
+#    and a rollback a one-line revert.
+# 4. **The healthcheck speaks plain HTTP** (`DEPLOYMENT.md` §4.4). Nothing
+#    outside a real MCP client sends `initialize`, and nothing pins a
+#    protocol version.
+#
+# Port 18094 was verified free on Node B before this file was written —
+# cadastre holds 18090 and 18092, and 18095 was already in use. It is not
+# inherited from a document.
+
+services:
+  vogt:
+    # TODO: replace with the digest published by the tag-triggered release
+    # workflow. Production moves on this line changing plus DeployStack —
+    # publishing an image moves nothing (NFR-D10).
+    image: ghcr.io/thedancingdeveloper-org/vogt@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    container_name: vogt
+    restart: unless-stopped
+
+    command:
+      # `0.0.0.0` here is the *container's* namespace, not the host's, and it
+      # is explicit rather than a default — NFR-D2 forbids defaults that
+      # encode exposure, and this is the compose file, which is allowed to
+      # know the answer for Node B. Host exposure is decided one block down,
+      # by publishing the port on the Tailscale address only. Binding the
+      # Tailscale IP directly here would simply fail: that address does not
+      # exist inside the container.
+      - serve
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --tls-cert
+      - /etc/vogt/tls/cert.pem
+      - --tls-key
+      - /etc/vogt/tls/key.pem
+
+    environment:
+      VOGT_DATA_DIR: /var/lib/vogt
+      VOGT_LOG_LEVEL: "${VOGT_LOG_LEVEL:-info}"
+      # Absent by default: no forge adapter, and forge subjects read as
+      # "not collected" rather than absent (NFR-PO1).
+      VOGT_GITHUB_TOKEN_FILE: "${VOGT_GITHUB_TOKEN_FILE:-}"
+
+    ports:
+      # Bound to Node B's Tailscale address, never 0.0.0.0: this publishes
+      # nothing to the LAN or the internet. There is no public DNS record,
+      # no Cloudflare entry, and no block in Node B's Caddyfile — that Caddy
+      # is host infra, and a tailnet-only service has no reason to couple to
+      # it (NFR-D6, revised r4).
+      - "${VOGT_BIND_IP:-100.92.54.45}:${VOGT_PORT:-18094}:8000"
+
+    volumes:
+      - vogt-komodo-data:/var/lib/vogt
+      # Operator-owned material: absolute paths, read-only. The token file is
+      # mode 0750 root:10001 so only this container's uid can read it (FR-S7).
+      - "${VOGT_TLS_DIR:-/mnt/2tnvme/docker/volumes/vogt/tls}:/etc/vogt/tls:ro"
+      - "${VOGT_AUTH_DIR:-/mnt/2tnvme/docker/volumes/vogt/auth}:/etc/vogt/auth:ro"
+
+    user: "10001:10001"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      # The root filesystem is read-only, so scratch has to come from
+      # somewhere. noexec/nosuid because nothing here should ever be run.
+      - /tmp:rw,noexec,nosuid,size=64m
+
+    healthcheck:
+      # Plain HTTP, no MCP protocol version, no bearer token: a probe that
+      # needs a credential is a probe that fails for the wrong reasons.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import ssl, urllib.request
+          ctx = ssl._create_unverified_context()
+          with urllib.request.urlopen("https://127.0.0.1:8000/health/ready", context=ctx, timeout=5) as r:
+              raise SystemExit(0 if r.status == 200 else 1)
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  vogt-komodo-data:
+    name: vogt-komodo-data

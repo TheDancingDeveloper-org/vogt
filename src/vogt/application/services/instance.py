@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from vogt import __version__
 from vogt.adapters.mcp.stdio import SUPPORTED_PROTOCOL_VERSIONS, StdioServer
 from vogt.adapters.mcp.surface import McpSurface
@@ -11,6 +13,8 @@ from vogt.application.models import (
     InitResult,
     McpStdioParams,
     McpStdioResult,
+    ServeParams,
+    ServeResult,
     StatusParams,
     StatusResult,
     StoreCounts,
@@ -89,4 +93,34 @@ def serve_mcp_stdio(ctx: AppContext, params: McpStdioParams) -> McpStdioResult:
         protocol_version=report.protocol_version,
         messages_handled=report.messages_handled,
         supported_protocol_versions=list(SUPPORTED_PROTOCOL_VERSIONS),
+    )
+
+
+def serve(ctx: AppContext, params: ServeParams) -> ServeResult:
+    """Start the one server that answers everything (NFR-D1).
+
+    Local-only, like `init`: it takes over this process, and a running
+    server being asked over HTTP to start another one is not a meaningful
+    request.
+    """
+    from vogt.adapters.http.app import API_PREFIX
+    from vogt.adapters.http.server import ServeOptions, run
+    from vogt.adapters.mcp.http import MCP_PATH
+
+    options = ServeOptions(
+        host=params.host,
+        port=params.port,
+        tls_cert=None if params.tls_cert is None else Path(params.tls_cert),
+        tls_key=None if params.tls_key is None else Path(params.tls_key),
+        require_auth=not params.no_auth,
+        writes_enabled=not params.read_only,
+    )
+    options.validate()
+    run(options, config=ctx.config)
+    return ServeResult(
+        url=f"{options.scheme}://{options.host}:{options.port}",
+        api_path=API_PREFIX,
+        mcp_path=MCP_PATH,
+        auth_required=options.require_auth,
+        writes_enabled=options.writes_enabled,
     )

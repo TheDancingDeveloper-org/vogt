@@ -38,8 +38,15 @@ acceptance test, including the one that unplugs GitHub entirely.
 on demand and reported with its age, and disagreements between declared
 state and observation become drift proposals carrying their own evidence.
 
-**M4 (Service) is next**: `serve`, token auth, remote MCP, and the Node B
-Compose stack.
+**M4 (Service) is implemented**: one process serving `/api`, `/mcp` and
+plain-HTTP health on a single port, in-process TLS, scoped bearer tokens
+bound to actors with double-gated writes, backup/restore, a hardened image
+and a tag-triggered signing pipeline. The Node B stack is written and its
+port allocated; publishing an image and moving production remain separate,
+deliberate acts (NFR-D10).
+
+**M5 (GitHub module) is next**: consolidation, forge drift, and opt-in
+write-back.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the outline,
 [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered baseline and
@@ -86,8 +93,13 @@ uses, so no server is needed:
 }
 ```
 
+For a remote instance, `vogt-mcp-remote` bridges stdio to `/mcp` over
+HTTPS, configured with `VOGT_URL` and `VOGT_TOKEN_FILE` — a file, never an
+argument, so the token never reaches a process listing.
+
 Every write an agent makes requires a `reason`, and lands an audit row and an
-event carrying it.
+event carrying it. An agent's tool list is exactly what its token may do:
+ungranted tools are absent rather than present-and-refusing.
 
 ## Principles (short form)
 
