@@ -1,0 +1,47 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended"],
+
+  // NFR-Q5: Vogt's own dependencies practice what the product preaches.
+  // The three things Vogt will report on for other projects (FR-D6) are
+  // three *independent* toggles, never one boolean — so all three are
+  // enabled here explicitly, by name.
+  //
+  //   1. version updates          — the scheduled PRs below
+  //   2. vulnerability alerts     — osvVulnerabilityAlerts
+  //   3. automated security fixes — vulnerabilityAlerts.enabled
+
+  timezone: "Etc/UTC",
+  schedule: ["before 5am on monday"],
+  labels: ["dependencies"],
+  semanticCommits: "disabled",
+
+  // 2. Alerts: OSV advisories raise a PR regardless of the weekly window.
+  osvVulnerabilityAlerts: true,
+
+  // 3. Fixes: security updates are not held for the schedule.
+  vulnerabilityAlerts: {
+    enabled: true,
+    labels: ["dependencies", "security"],
+    schedule: null,
+  },
+
+  // Keep uv.lock fresh even when no manifest range moved; CI fails on a
+  // manifest/lockfile mismatch, so the lockfile is not optional here.
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["before 5am on monday"],
+  },
+
+  packageRules: [
+    {
+      matchManagers: ["github-actions"],
+      groupName: "github actions",
+    },
+    {
+      // The dev toolchain moves together and is not shipped to anyone.
+      matchDepTypes: ["dev"],
+      groupName: "dev dependencies",
+    },
+  ],
+}

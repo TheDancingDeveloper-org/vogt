@@ -1,0 +1,118 @@
+[project]
+name = "vogt"
+version = "0.1.0"
+description = "A product development environment for the AI era"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "TheDancingDeveloper" }]
+keywords = ["backlog", "mcp", "agents", "project-management"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
+dependencies = [
+  "pydantic>=2.7",
+  "pydantic-settings>=2.2",
+  "fastapi>=0.111",
+]
+
+[project.urls]
+Homepage = "https://github.com/TheDancingDeveloper-org/vogt"
+Source = "https://github.com/TheDancingDeveloper-org/vogt"
+
+[project.scripts]
+vogt = "vogt.adapters.cli.main:main"
+
+[dependency-groups]
+dev = [
+  "httpx>=0.27",
+  "mypy>=1.10",
+  "pytest>=8.2",
+  "pytest-cov>=5.0",
+  "ruff>=0.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vogt"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = [
+  "ANN", # flake8-annotations
+  "B",   # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "I",   # isort
+  "N",   # pep8-naming
+  "PTH", # flake8-use-pathlib
+  "RUF", # ruff-specific
+  "SIM", # flake8-simplify
+  "UP",  # pyupgrade
+  "W",   # pycodestyle warnings
+]
+
+ignore = [
+  # Vogt's error taxonomy reads as domain vocabulary at the call site
+  # (`raise Conflict(...)`, `except NotInitialized`), and every class already
+  # descends from VogtError. An `Error` suffix on each would add noise, not
+  # information.
+  "N818",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vogt"]
+known-local-folder = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may assert on private helpers and pass loosely-typed fixtures.
+"tests/*" = ["ANN401"]
+# These four handle arbitrary JSON-shaped data by design: a digest over any
+# payload, a renderer over any result, argparse specs over any field
+# annotation, and settings overrides. `Any` is the honest annotation.
+"src/vogt/core/digest.py" = ["ANN401"]
+"src/vogt/adapters/cli/render.py" = ["ANN401"]
+"src/vogt/adapters/cli/args.py" = ["ANN401"]
+"src/vogt/config.py" = ["ANN401"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests", "scripts"]
+warn_unreachable = true
+enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+  "--strict-markers",
+  "--strict-config",
+  "--cov=vogt",
+  "--cov-report=term-missing",
+  "--cov-fail-under=80",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/vogt"]
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "\\.\\.\\.$",
+]

@@ -24,11 +24,29 @@ Vogt gives you:
 
 ## Status
 
-Design phase, revision r4. See [`docs/DESIGN.md`](docs/DESIGN.md) for the
-outline, [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered
-baseline and what has been deliberately deferred,
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for the stages (MVP = M0–M2), and
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the topologies.
+**M0 (Foundation) is implemented**; design revision r4. The storage spine,
+audit and event tables, the transactional write path, the operation registry
+and the transport-parity harness exist, and the M0 demo runs as an acceptance
+test. M1 (the core tracker) is next.
+
+See [`docs/DESIGN.md`](docs/DESIGN.md) for the outline,
+[`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered baseline and
+what has been deliberately deferred, [`docs/ROADMAP.md`](docs/ROADMAP.md) for
+the stages (MVP = M0–M2) and what M0 actually shipped,
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the topologies, and
+[`docs/CONFIG.md`](docs/CONFIG.md) for the (generated) configuration
+reference.
+
+```console
+$ uv run vogt init
+$ uv run vogt project register --name Vogt --root-path . \
+    --reason "the tracker's first project is itself"
+$ uv run vogt status
+$ uv run vogt events list
+```
+
+Every one of those is also a REST route and an MCP tool, generated from the
+same registry — that is what the parity tests assert.
 
 ## Principles (short form)
 

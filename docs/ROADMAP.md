@@ -56,13 +56,39 @@ Deliverables:
 - Storage behind an interface that avoids SQLite-only semantics, so a
   Postgres backend stays possible without a redesign (NFR-S3).
 - The transport-neutral **operation registry** and the parity-test harness
-  with both exclusion lists (`HTTP_ONLY`, `LOCAL_ONLY`) empty-but-live.
+  with both exclusion lists (`HTTP_ONLY`, `LOCAL_ONLY`) live.
 - CLI: `init`, `status`.
 
 **Demo**: `vogt init`, register a project record from the CLI with a
 reason, `status` shows revision 1, the audit row carries actor + reason,
 and `/events` returns exactly one row at `seq=1`. `mypy --strict` and the
 parity harness pass in CI; a docs-only commit runs only `docs.yml`.
+
+### M0 as built — three notes
+
+Recorded because each one differs slightly from the sketch above, and the
+absences and additions should read as decisions.
+
+1. **Six operations, not two.** The demo requires registering a project and
+   reading the event and audit rows it produced, so M0 ships
+   `project.register`, `project.list`, `events.list` and `audit.list`
+   alongside `init` and `status` — each on all three surfaces. This is the
+   demo's own surface area, not an M1 pull-forward: FR-P1's lifecycle
+   transitions, FR-P2's brief, FR-S6's full audit query and FR-N1's complete
+   feed semantics all remain M1 work.
+2. **`LOCAL_ONLY` is not empty; it names `init`.** DESIGN §4 already lists
+   `init` among the operations with no meaningful remote semantics, so
+   starting the list empty would have meant either an exclusion that lies or
+   an `init` route that a running server cannot honour. The list is live and
+   checked for staleness in both directions, which is what FR-A3 asks for;
+   `backup`, `restore` and `serve` join it at M4.
+3. **`init` is a bootstrap, not a declared write.** It creates the instance
+   rather than changing anything inside one, so it lands an audit row at
+   revision 0 and emits **no event** — which is what makes the demo's
+   "exactly one row at `seq=1`" true, and means a client attaching to
+   `/events` sees changes it can act on rather than the instance's own
+   birth. Every other write, including the auto-registration of a
+   previously unseen principal, lands both rows (`SCHEMA.md` §2.5).
 
 ## M1 — Core tracker (first daily-usable build)
 

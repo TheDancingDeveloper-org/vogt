@@ -10,7 +10,30 @@ implementation language.
   domain model, and roadmap. Update it when decisions change; don't fork
   competing design docs.
 - `design/` — diagrams, mockups, exploratory notes (may be messy).
-- `src/` — implementation (empty until M0 starts).
+- `src/vogt/` — the implementation (M0 landed). Layer order is strict:
+  `core` (entities, ids, time, digests) → `storage` (interface + the SQLite
+  backend, the only place SQL lives) → `application` (use-cases, the
+  transactional write path) → `registry` (one definition per operation) →
+  `adapters/{cli,http,mcp}` (thin, generated from the registry). An adapter
+  that decides anything is the bug.
+- `docs/CONFIG.md` and `config.example.toml` are **generated** from
+  `src/vogt/config.py` by `scripts/gen_config_docs.py`. Edit the schema, run
+  the script; CI fails on drift (NFR-Q4).
+
+## Working on the code
+
+```bash
+uv sync                       # dev environment
+uv run pytest                 # tests + coverage gate (>=80%)
+uv run mypy                   # strict, over src/, tests/ and scripts/
+uv run ruff check . && uv run ruff format --check .
+uv run python scripts/check_docs.py
+```
+
+Adding an operation means adding it to `registry/operations.py` — that alone
+gives it a CLI command, a REST route and an MCP tool. Then add a scenario to
+`SCENARIOS` in `tests/test_parity.py`; the harness fails if you don't, and
+fails again if you exclude it from a surface without saying why.
 
 ## Ground rules
 

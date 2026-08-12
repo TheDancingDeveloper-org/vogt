@@ -142,6 +142,14 @@ is reported as the `mirrored_source` observation instead (FR-D8).
 
 `events.seq` **is** the `/events` cursor. Two producers, one table:
 
+*Implementation note (M0)*: instance creation is the one audited write that
+emits **no** event. `vogt init` creates the instance rather than changing
+anything inside one, so it writes `meta`, the initiating actor, and an audit
+row at revision 0 — and the feed therefore starts at the first change a
+client could act on. Everything else, including the auto-registration of a
+principal seen for the first time, lands its event in the same transaction as
+its entity change and audit row.
+
 1. Declared writes insert their event row inside the same transaction as
    the entity change and audit row (`audit_id` set), so a write is never
    visible without its event and never emits an event it did not commit.

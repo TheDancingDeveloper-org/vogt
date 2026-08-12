@@ -1,0 +1,59 @@
+name: release
+
+# Tag-triggered only (NFR-C3): a push to main can never publish. And
+# publishing is not deploying (NFR-D10) — this workflow produces artefacts;
+# production moves only when the pinned digest in `indexarr/ops` changes and
+# `DeployStack` runs.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  distribution:
+    name: build distribution
+    runs-on: [self-hosted, node-b, linux, x64]
+    steps:
+      - uses: actions/checkout@v7
+
+      # Exact pin: setup-uv stopped publishing major tags at v8, so
+      # `@v9` does not resolve. Renovate bumps this line.
+      - uses: astral-sh/setup-uv@v9.0.0
+
+      - run: uv sync --locked
+
+      - name: version matches the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(uv run --no-sync python -c 'import vogt; print(vogt.__version__)')"
+          if [ "$TAG" != "v$version" ]; then
+            echo "tag $TAG does not match vogt.__version__ ($version)"
+            exit 1
+          fi
+
+      - run: uv build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vogt-dist-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error
+
+  # The OCI half of this workflow lands at M4 (ROADMAP "M4 — Service"),
+  # where it gains a second job:
+  #
+  #   runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+  #     - buildx build and push to ghcr.io/thedancingdeveloper-org/vogt
+  #     - syft SBOM (NFR-O2)
+  #     - keyless cosign sign + attest via workflow OIDC (NFR-C5), which
+  #       needs `permissions: id-token: write` on that job only
+  #
+  # It is absent rather than stubbed because a job that pretends to sign is
+  # worse than one that does not exist: `docker`/`publish` is advertised by
+  # only two workers, and a red release job would be tolerated as "expected".
