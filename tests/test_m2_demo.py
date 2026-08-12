@@ -126,8 +126,10 @@ def _estate(root: Path) -> list[tuple[str, Path]]:
 
 
 def _github(routes: dict[str, list[dict[str, Any]]]) -> Transport:
-    def transport(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
-        del headers
+    def transport(
+        url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
+    ) -> tuple[int, bytes]:
+        del headers, body, method
         if "/issues" in url:
             for repo, issues in routes.items():
                 if f"/{repo}/" in url:
@@ -135,6 +137,8 @@ def _github(routes: dict[str, list[dict[str, Any]]]) -> Transport:
             return 200, b"[]"
         if "/actions/runs" in url:
             return 200, json.dumps({"workflow_runs": []}).encode("utf-8")
+        if "/vulnerability-alerts" in url or "/automated-security-fixes" in url:
+            return 404, b""
         return 200, b"[]"
 
     return transport

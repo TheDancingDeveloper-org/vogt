@@ -403,6 +403,13 @@ class CommentParams(Params):
 
 class CommentResult(Result):
     comment: Comment
+    write_back: str = Field(
+        default="skipped",
+        description=(
+            "What happened upstream: skipped (the usual case), succeeded, "
+            "or failed. A failure never fails the local write."
+        ),
+    )
 
 
 # -- taxonomy --------------------------------------------------------------
@@ -973,3 +980,73 @@ class ImportResult(Result):
     work_items: int
     applied: bool
     detail: str
+
+
+# -- forge module (M5) -----------------------------------------------------
+
+
+class SetWriteBackParams(Params):
+    project: str
+    policy: Literal["none", "comment_only", "full"] = Field(
+        description=(
+            "none: observe and never speak. comment_only: post comments "
+            "authored here. full: also create, label, and close/reopen. "
+            "Never deletion, history rewriting or force (FR-B4)."
+        )
+    )
+    reason: Reason
+
+
+class WriteBackActionView(Result):
+    id: str
+    at: datetime
+    action: str
+    subject_key: str | None
+    policy: str
+    outcome: str
+    reason: str
+    detail: str | None = None
+    source_url: str | None = None
+
+
+class WriteBackListParams(Params):
+    outcome: Literal["attempted", "succeeded", "failed", "skipped"] | None = None
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class WriteBackListResult(Result):
+    actions: list[WriteBackActionView]
+
+
+class OnboardParams(Params):
+    project: str = Field(description="Project slug to consolidate.")
+    max_pages: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "How far back to walk. Bounded so a busy repository cannot turn "
+            "onboarding into an unbounded run; coverage reports what was "
+            "actually swept."
+        ),
+    )
+    reason: Reason
+
+
+class OnboardResult(Result):
+    project: str
+    repo: str | None
+    issues: int
+    pull_requests: int
+    labels: int
+    releases: int
+    new: int
+    unchanged: int
+    mutations: int = Field(
+        default=0,
+        description=(
+            "Always zero. Onboarding is read-only (FR-B3); the field exists "
+            "so the claim is asserted rather than assumed."
+        ),
+    )
+    detail: str | None = None

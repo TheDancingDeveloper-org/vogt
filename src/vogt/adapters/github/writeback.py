@@ -1,0 +1,163 @@
+"""Write-back: additive, forward-only, and opt-in (FR-B1–B5).
+
+The rule that shapes this module is what it *cannot* do. There is no
+deletion, no history rewriting, and no force operation anywhere in it — not
+disabled, not gated, absent. A tool that holds a token for somebody's issue
+tracker should not have the capability to destroy things in it, and the most
+reliable way to guarantee that is not to write the code.
+
+What it can do, by policy level:
+
+- `none` (default) — nothing. Vogt observes and never speaks.
+- `comment_only` — post comments authored in Vogt to the linked object.
+- `full` — the above, plus create, label, and close/reopen.
+
+Comments flow **outbound only** (FR-B5). A comment authored here posts
+upstream; a comment authored on GitHub stays an observation shown against
+the linked item and is never copied into `comments`. That keeps `comments`
+unambiguously ours — every row has a Vogt actor and an audit trail — and
+avoids needing forge-author identity mapping and loop suppression to tell
+our own echo from somebody else's remark.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any, Literal
+
+from vogt.adapters.github.client import GitHubClient, GitHubUnavailable, repo_of
+
+WriteBackPolicy = Literal["none", "comment_only", "full"]
+WriteBackAction = Literal["create", "comment", "label", "close", "reopen"]
+
+#: Which actions each policy level permits. `none` is deliberately an empty
+#: set rather than a missing key: "this project has no policy" and "this
+#: project's policy allows nothing" should not be different code paths.
+PERMITTED: dict[str, frozenset[str]] = {
+    "none": frozenset(),
+    "comment_only": frozenset({"comment"}),
+    "full": frozenset({"create", "comment", "label", "close", "reopen"}),
+}
+
+
+def permits(policy: str, action: str) -> bool:
+    return action in PERMITTED.get(policy, frozenset())
+
+
+@dataclass(frozen=True)
+class WriteBackResult:
+    """What happened upstream, for the ledger."""
+
+    outcome: Literal["succeeded", "failed", "skipped"]
+    detail: str | None = None
+    source_url: str | None = None
+    subject_key: str | None = None
+
+
+class ForgeWriter:
+    """The only thing in Vogt that changes anything on GitHub."""
+
+    def __init__(self, client: GitHubClient) -> None:
+        self._client = client
+
+    # -- the four verbs ----------------------------------------------------
+
+    def comment(
+        self, *, repo_url: str | None, number: int, body: str
+    ) -> WriteBackResult:
+        """Post a comment on a linked issue or pull request."""
+        return self._post(
+            repo_url,
+            path="/repos/{owner}/{repo}/issues/{number}/comments",
+            number=number,
+            payload={"body": body},
+        )
+
+    def create_issue(
+        self,
+        *,
+        repo_url: str | None,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+    ) -> WriteBackResult:
+        """Open a new issue. Never edits or replaces an existing one."""
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = labels
+        return self._post(
+            repo_url, path="/repos/{owner}/{repo}/issues", payload=payload
+        )
+
+    def add_labels(
+        self, *, repo_url: str | None, number: int, labels: list[str]
+    ) -> WriteBackResult:
+        """Add labels. Adds only — it never replaces the existing set.
+
+        GitHub's `PUT .../labels` replaces; `POST` appends. Using POST means
+        a label somebody added upstream cannot be removed by a Vogt sync,
+        which is the additive rule applied to the one endpoint where getting
+        it wrong is silent.
+        """
+        return self._post(
+            repo_url,
+            path="/repos/{owner}/{repo}/issues/{number}/labels",
+            number=number,
+            payload={"labels": labels},
+        )
+
+    def set_state(
+        self, *, repo_url: str | None, number: int, state: Literal["closed", "open"]
+    ) -> WriteBackResult:
+        """Close or reopen. Both directions are recoverable by the other."""
+        return self._post(
+            repo_url,
+            path="/repos/{owner}/{repo}/issues/{number}",
+            number=number,
+            payload={"state": state},
+            method="PATCH",
+        )
+
+    # -- transport ---------------------------------------------------------
+
+    def _post(
+        self,
+        repo_url: str | None,
+        *,
+        path: str,
+        payload: dict[str, Any],
+        number: int | None = None,
+        method: str = "POST",
+    ) -> WriteBackResult:
+        repo = repo_of(repo_url)
+        if repo is None:
+            return WriteBackResult(
+                outcome="skipped",
+                detail="this project has no GitHub repository to write to",
+            )
+        owner, name = repo
+        endpoint = path.format(owner=owner, repo=name, number=number)
+        try:
+            response = self._client.send(endpoint, payload, method=method)
+        except GitHubUnavailable as exc:
+            # Never fatal to the declared write: the local change stands and
+            # the ledger records that the upstream half did not land.
+            return WriteBackResult(outcome="failed", detail=str(exc))
+
+        if response is None:
+            return WriteBackResult(
+                outcome="failed", detail=f"{endpoint} returned nothing (404?)"
+            )
+        html_url = response.get("html_url")
+        upstream_number = response.get("number", number)
+        return WriteBackResult(
+            outcome="succeeded",
+            source_url=None if html_url is None else str(html_url),
+            subject_key=(
+                None
+                if upstream_number is None
+                else f"gh:{owner}/{name}#{upstream_number}"
+            ),
+            detail=json.dumps({"method": method, "endpoint": endpoint}),
+        )

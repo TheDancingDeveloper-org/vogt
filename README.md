@@ -45,8 +45,13 @@ and a tag-triggered signing pipeline. The Node B stack is written and its
 port allocated; publishing an image and moving production remain separate,
 deliberate acts (NFR-D10).
 
-**M5 (GitHub module) is next**: consolidation, forge drift, and opt-in
-write-back.
+**M5 (GitHub module) is implemented**: read-only consolidation of a
+repository's existing issues, PRs, labels and releases; forge drift
+(`forge_state_mismatch`, `vanished_upstream`, `ci_red_vs_healthy`,
+`update_automation_gap`); and opt-in write-back that is additive and
+forward-only — create, comment, label, close/reopen, and nothing else.
+
+**M6 (GUI) is next** — the last stage of v1.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the outline,
 [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered baseline and

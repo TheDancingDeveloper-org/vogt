@@ -21,17 +21,23 @@ from vogt.application.services import _resolve
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.drift import (
     AUTO_ACCEPTABLE_KINDS,
+    FORGE_STATE_MISMATCH,
     HUMAN_GATED_REASON,
     UNRESOLVED_DEPENDENCY,
     VERSION_MISMATCH,
     DriftFinding,
     EvidenceSnapshot,
+    ci_red_vs_healthy,
+    forge_state_mismatch,
     unresolved_dependency,
+    update_automation_gap,
+    vanished_upstream,
     version_mismatch,
 )
 from vogt.core.entities import Actor, DriftProposal, Observation
+from vogt.core.workflow import TERMINAL_STATES
 from vogt.errors import Conflict, InvalidRequest, NotFound
-from vogt.storage.interface import ProjectUpdate, WriteTxn
+from vogt.storage.interface import ProjectUpdate, WorkFilter, WorkItemUpdate, WriteTxn
 
 DRIFT_DETECT = "drift.detect"
 DRIFT_RESOLVE = "drift.resolve"
@@ -111,6 +117,112 @@ def _dependency_findings(ctx: AppContext) -> list[DriftFinding]:
     return findings
 
 
+def _forge_findings(ctx: AppContext) -> list[DriftFinding]:
+    """The M5 kinds: state mismatch, vanished upstream, red CI, posture."""
+    findings: list[DriftFinding] = []
+    with ctx.declared.read() as view:
+        projects = {p.id: p for p in view.list_projects(limit=10_000, offset=0)}
+        items = view.list_work_items(WorkFilter(limit=10_000))
+        links = {
+            item.id: view.work_links_for_subjects_by_item(item.id) for item in items
+        }
+    coverage = ctx.observed.coverage()
+
+    # forge_state_mismatch and vanished_upstream, per linked item.
+    for item in items:
+        for subject_key in links.get(item.id, {}):
+            if not subject_key.startswith("gh:"):
+                continue
+            seen = ctx.observed.list_observations(subject_key=subject_key, limit=1)
+            if not seen:
+                # Absence is only meaningful inside provably swept scope
+                # (FR-O4). Without a completed forge sweep this is "not
+                # collected", and raising it would be the exact mistake that
+                # made most of cadastre's "missing" drift an artefact.
+                swept = coverage.get("gh-issues")
+                if swept is None or swept.finished_at is None:
+                    continue
+                findings.append(
+                    vanished_upstream(
+                        work_item_id=item.id,
+                        work_ref=item.ref,
+                        subject_key=subject_key,
+                        project_id=item.project_id,
+                        swept_at=swept.finished_at,
+                    )
+                )
+                continue
+
+            observation = seen[0]
+            upstream = str(observation.payload.get("state", "open"))
+            finished = item.state in TERMINAL_STATES
+            if (upstream == "closed") != finished:
+                findings.append(
+                    forge_state_mismatch(
+                        work_item_id=item.id,
+                        work_ref=item.ref,
+                        declared_state=item.state,
+                        upstream_state=upstream,
+                        subject_key=subject_key,
+                        project_id=item.project_id,
+                        evidence=_snapshot(observation),
+                        evidence_observation_id=observation.id,
+                    )
+                )
+
+    # ci_red_vs_healthy and update_automation_gap, per project.
+    for project in projects.values():
+        checks = ctx.observed.latest(
+            kinds=("ci.check",), project_id=project.id, limit=200
+        )
+        failing = [
+            (str(c.payload.get("check", "?")), c)
+            for c in checks
+            if c.payload.get("conclusion") not in (None, "success", "skipped")
+        ]
+        if failing and project.lifecycle_state in ("active", "maintenance"):
+            newest = max((c for _, c in failing), key=lambda c: c.observed_at)
+            findings.append(
+                ci_red_vs_healthy(
+                    project_id=project.id,
+                    project_slug=project.slug,
+                    lifecycle_state=project.lifecycle_state,
+                    failing=[name for name, _ in failing],
+                    revision=str(newest.payload.get("revision", "")),
+                    evidence=_snapshot(newest),
+                    evidence_observation_id=newest.id,
+                )
+            )
+
+        posture = ctx.observed.latest(
+            kinds=("forge.posture",), project_id=project.id, limit=1
+        )
+        if posture:
+            payload = posture[0].payload
+            # Three independent facts, named individually (FR-D6). `None`
+            # means "could not tell" and is not a gap.
+            missing = [
+                label
+                for label, key in (
+                    ("version updates", "version_updates"),
+                    ("vulnerability alerts", "vulnerability_alerts"),
+                    ("automated security fixes", "automated_security_fixes"),
+                )
+                if payload.get(key) is False
+            ]
+            if missing:
+                findings.append(
+                    update_automation_gap(
+                        project_id=project.id,
+                        project_slug=project.slug,
+                        missing=missing,
+                        evidence=_snapshot(posture[0]),
+                        evidence_observation_id=posture[0].id,
+                    )
+                )
+    return findings
+
+
 def detect_drift(ctx: AppContext, params: DriftDetectParams) -> DriftDetectResult:
     """Compare declared state against observation and raise proposals (FR-R1).
 
@@ -128,7 +240,7 @@ def detect_drift(ctx: AppContext, params: DriftDetectParams) -> DriftDetectResul
         )
         raise InvalidRequest(msg)
 
-    findings = _version_findings(ctx) + _dependency_findings(ctx)
+    findings = _version_findings(ctx) + _dependency_findings(ctx) + _forge_findings(ctx)
     raised: list[DriftProposal] = []
     auto_accepted: list[str] = []
 
@@ -262,6 +374,15 @@ def _apply(txn: WriteTxn, proposal: DriftProposal, *, ctx: AppContext) -> bool:
     proposes nothing to write — accepting it records the judgement that the
     reference is fine as it stands.
     """
+    if proposal.kind == FORGE_STATE_MISMATCH:
+        # The upstream change already happened; accepting syncs our copy.
+        ref = str(proposal.proposed_change.get("work_ref", ""))
+        target = str(proposal.proposed_change.get("to", ""))
+        item = txn.work_item_by_ref(ref)
+        if item is None or not target:
+            return False
+        txn.update_work_item(item.id, WorkItemUpdate(state=target), at=ctx.clock())
+        return True
     if proposal.kind != VERSION_MISMATCH:
         return False
     change = proposal.proposed_change

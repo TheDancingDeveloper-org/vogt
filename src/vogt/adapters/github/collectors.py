@@ -5,7 +5,9 @@ same store and the same shape as everything the offline collectors find. CI
 is modelled as a generic per-revision check (FR-O6): GitHub Actions is one
 producer of those, not the model.
 
-No writes, no backfill, no update-automation posture. Those are M5.
+No writes here. Consolidation lives in `consolidate.py`, update-automation
+posture in `posture.py`, and write-back in `writeback.py` — separate files
+because "reads the forge" and "changes the forge" should not share one.
 """
 
 from __future__ import annotations
@@ -256,11 +258,14 @@ def github_collectors(
     client = GitHubClient.from_token_file(config.github_token_file, transport=transport)
     if client is None:
         return []
+    from vogt.adapters.github.posture import GitHubPostureCollector
+
     return [
         GitHubIssueCollector(client),
         GitHubPullRequestCollector(client),
         GitHubActionsCollector(client),
         GitHubReleaseCollector(client),
+        GitHubPostureCollector(client),
     ]
 
 
