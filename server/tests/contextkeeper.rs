@@ -185,7 +185,10 @@ async fn create_terminal(base: &str) -> String {
     let created: Value = client()
         .post(format!("{base}/api/sessions"))
         .bearer_auth(TEST_TOKEN)
-        .json(&json!({"name": "term"}))
+        // `/bin/true` rather than the default interactive shell: this suite is
+        // about continuity, and a long-lived bash in a test PTY is a hang
+        // waiting to happen (the repo's other integration tests do the same).
+        .json(&json!({"name": "term", "command": ["/bin/true"]}))
         .send()
         .await
         .unwrap()
@@ -197,8 +200,12 @@ async fn create_terminal(base: &str) -> String {
 
 /// Wait for the background refresher to publish a snapshot, rather than
 /// sleeping for a fixed interval and hoping.
+///
+/// The window has to exceed one full refresh interval: the terminal is created
+/// after the server booted, so the first poll ran before there was anything to
+/// find and the binding only appears on the next one.
 async fn wait_for_continuity(base: &str) -> Value {
-    for _ in 0..60 {
+    for _ in 0..300 {
         let rows: Value = client()
             .get(format!("{base}/api/sessions"))
             .bearer_auth(TEST_TOKEN)
