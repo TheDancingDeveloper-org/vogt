@@ -1,0 +1,28 @@
+# The org runner-policy gate, called from `github-policy`.
+#
+# All logic lives in the reusable workflow so the rule changes in one place;
+# this file exists only to invoke it. Reusable workflows run with the CALLER's
+# context, so the audit applies to this repository's workflows — it fails if
+# any job here ever names a GitHub-hosted runner or a dynamic `runs-on`
+# (NFR-C4, `~/Working/docs/CI-RUNNER-GATES.md`).
+#
+# The visibility blocker recorded in that document — a *public* repository
+# cannot call a reusable workflow stored in a private one — does not apply:
+# vogt is private (NFR-O1), `github-policy` is private, and it shares its
+# Actions at organization level. If vogt goes public at the milestone NFR-O1
+# describes, this stub stops resolving and must be revisited in the same
+# change.
+#
+# Reporting is not blocking: `runner-policy` must also be a required status
+# check on `main`, or this reports a red X that anyone can merge past.
+
+name: Runner policy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  runner-policy:
+    uses: TheDancingDeveloper-org/github-policy/.github/workflows/runner-policy-reusable.yml@main

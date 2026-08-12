@@ -1,0 +1,50 @@
+name: docs
+
+# The cheap path for documentation changes (NFR-C1): link checking and the
+# config-docs drift check, and nothing else. A mixed code+docs commit runs
+# this *and* the full pipeline in ci.yml — this is a subset, never a bypass
+# (NFR-C2).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "design/**"
+      - "**/*.md"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "design/**"
+      - "**/*.md"
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: lint documentation
+    runs-on: [self-hosted, node-b, linux, x64]
+    steps:
+      - uses: actions/checkout@v7
+
+      # Exact pin: setup-uv stopped publishing major tags at v8, so
+      # `@v9` does not resolve. Renovate bumps this line.
+      - uses: astral-sh/setup-uv@v9.0.0
+
+      - run: uv sync --locked
+
+      - name: check markdown links
+        run: uv run --no-sync python scripts/check_docs.py
+
+      # NFR-Q4: the config schema is the single source of truth. Regenerating
+      # must be a no-op; if it is not, the committed docs have drifted.
+      - name: check generated config docs
+        run: |
+          set -euo pipefail
+          uv run --no-sync python scripts/gen_config_docs.py
+          git diff --exit-code -- docs/CONFIG.md config.example.toml
