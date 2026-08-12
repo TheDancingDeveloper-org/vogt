@@ -10,7 +10,9 @@ values into lists, and emits a complete OpenAPI document (FR-A4) — rather
 than the registry having to describe itself twice.
 
 `serve` and the health endpoints (FR-A7) arrive with the service stage at M4;
-this adapter is the application it will serve.
+this adapter is the application it will serve. The GUI (M6) is mounted on the
+same application as static files — it adds no route that answers a question,
+which is why "nothing is GUI-only" stays structurally true.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from vogt import __version__
+from vogt.adapters.http.gui import mount_gui
 from vogt.application.context import AppContext, build_context
 from vogt.application.services.auth import Authenticated, authorize
 from vogt.errors import VogtError
@@ -45,6 +48,7 @@ def build_app(
     context_factory: ContextFactory | None = None,
     authorize_request: RequestResolver | None = None,
     writes_enabled: bool = True,
+    gui: bool = True,
 ) -> FastAPI:
     """Build the FastAPI application for one instance.
 
@@ -113,6 +117,11 @@ def build_app(
                 }
             },
         )
+
+    # Last, so the GUI mount cannot shadow an operation route: every route is
+    # already registered by the time `/ui` and `/` are added.
+    if gui:
+        mount_gui(app)
 
     return app
 

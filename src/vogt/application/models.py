@@ -655,10 +655,18 @@ class DepsParams(Params):
 
 
 class DepsResult(Result):
+    """The dependency graph around one project.
+
+    Carries `freshness` because a graph is an aggregate over sweeps, and an
+    empty graph with no sweep behind it means "not collected", not "this
+    project depends on nothing" (FR-O4, FR-U2).
+    """
+
     project: str
     references_out: list[DepRef]
     referenced_by: list[DepRef]
     unresolved: int = 0
+    freshness: Freshness = Freshness()
 
 
 class PruneParams(Params):
@@ -812,11 +820,19 @@ class DriftListParams(Params):
 
 
 class DriftListResult(Result):
+    """The drift inbox.
+
+    `freshness` is load-bearing here rather than decorative: an empty inbox
+    is reassuring only if something has looked recently. Without it, a
+    collector that stopped running reads as "no drift" (FR-U2).
+    """
+
     proposals: list[DriftProposal]
     human_gated: dict[str, str] = Field(
         default={},
         description="Kinds the default policy never auto-accepts, and why.",
     )
+    freshness: Freshness = Freshness()
 
 
 class DriftResolveParams(Params):

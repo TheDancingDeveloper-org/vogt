@@ -51,7 +51,11 @@ repository's existing issues, PRs, labels and releases; forge drift
 `update_automation_gap`); and opt-in write-back that is additive and
 forward-only — create, comment, label, close/reopen, and nothing else.
 
-**M6 (GUI) is next** — the last stage of v1.
+**M6 (GUI) is implemented**, which completes v1: per-project view, global
+backlog and bugs, drift inbox, dependency graph and audit browser, with trust
+and freshness on every aggregate. Served at `/ui` from the same single port,
+consuming only the public REST API — asserted by reading the shipped
+JavaScript and resolving every URL in it against the operation registry.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the outline,
 [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered baseline and

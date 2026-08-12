@@ -18,6 +18,7 @@ from vogt.application.models import (
     DriftResult,
 )
 from vogt.application.services import _resolve
+from vogt.application.services.views import freshness_of
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.drift import (
     AUTO_ACCEPTABLE_KINDS,
@@ -314,6 +315,7 @@ def list_drift(ctx: AppContext, params: DriftListParams) -> DriftListResult:
                 limit=params.limit,
             ),
             human_gated=dict(HUMAN_GATED_REASON),
+            freshness=freshness_of(ctx),
         )
 
 
