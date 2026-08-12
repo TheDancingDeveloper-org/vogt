@@ -25,13 +25,25 @@ def test_tools_are_generated_from_the_registry(surface: McpSurface) -> None:
     assert "reason" in register.input_schema["required"]
 
 
-def test_identity_is_never_a_tool_argument(surface: McpSurface) -> None:
-    """FR-S2: a caller-supplied principal would let any token forge provenance."""
+#: Parameter names that would mean "act as somebody else". Naming a
+#: *subject* is fine and necessary — assigning work to an actor, issuing a
+#: token bound to one, filtering an audit query by one. What FR-S2 forbids is
+#: a parameter that changes who the *acting* principal is, because that would
+#: let any caller forge the provenance on every audit row it writes.
+IMPERSONATION_PARAMS = frozenset(
+    {"principal", "as_actor", "acting_actor", "on_behalf_of", "caller", "identity"}
+)
+
+
+def test_no_tool_lets_a_caller_choose_who_it_is(surface: McpSurface) -> None:
+    """FR-S2: the acting principal comes from authentication, never a field."""
     for tool in surface.list_tools():
-        properties = tool.input_schema.get("properties", {})
-        assert "actor" not in properties
-        assert "actor_id" not in properties or tool.name == "audit_list"
-        assert "principal" not in properties
+        properties = set(tool.input_schema.get("properties", {}))
+        forbidden = properties & IMPERSONATION_PARAMS
+        assert not forbidden, (
+            f"{tool.name} takes {sorted(forbidden)}, which would let a caller "
+            "claim to be somebody else"
+        )
 
 
 def test_the_wire_shape_is_an_mcp_tool(surface: McpSurface) -> None:

@@ -20,6 +20,7 @@ dependencies = [
   "pydantic>=2.7",
   "pydantic-settings>=2.2",
   "fastapi>=0.111",
+  "uvicorn>=0.52.1",
 ]
 
 [project.urls]
@@ -31,6 +32,9 @@ vogt = "vogt.adapters.cli.main:main"
 # The command an MCP client is configured to spawn. Same server as
 # `vogt mcp stdio`; a bare binary keeps client configs to one word.
 vogt-mcp = "vogt.adapters.mcp.stdio:main"
+# For agent products that can only spawn a local process but need to
+# reach a remote instance. Configured by VOGT_URL and VOGT_TOKEN_FILE.
+vogt-mcp-remote = "vogt.adapters.mcp.bridge:main"
 
 [dependency-groups]
 dev = [

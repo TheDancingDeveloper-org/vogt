@@ -180,6 +180,26 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     ("observations.prune", {"reason": WHY}),
+    # -- identity and portability -------------------------------------------
+    (
+        "token.issue",
+        {
+            "actor": "agent:parity",
+            "name": "harness",
+            "scopes": "read,work.write",
+            "reason": WHY,
+        },
+    ),
+    ("token.list", {}),
+    (
+        "token.revoke",
+        lambda seen: {
+            "id": seen["token.issue"]["token"]["id"],
+            "reason": "the harness is finished with it",
+        },
+    ),
+    ("auth.decisions", {}),
+    ("export", {"destination": "{root}/export.json", "reason": WHY}),
     ("events.list", {}),
     ("audit.list", {}),
 ]
@@ -204,6 +224,11 @@ VOLATILE_KEYS = frozenset(
         "evidence_observation_id",
         "subject_id",
         "path",
+        "secret",
+        "last_used_at",
+        "expires_at",
+        "token_id",
+        "revoked_at",
         "instance_id",
         "entity_id",
         "actor_id",

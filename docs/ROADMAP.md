@@ -301,6 +301,29 @@ address (and confirm nothing answers on the LAN address). Backup, destroy
 the stack, redeploy, restore — state intact. Then revert the digest and
 redeploy to prove rollback.
 
+### M4 as built — four notes
+
+1. **Port 18094 is allocated, and was verified free** rather than
+   inherited from `DEPLOYMENT.md`. Cadastre holds 18090 and 18092; 18095
+   was already in use. The compose file carries it as a *default*, not a
+   `${X:?}` gate — gating allocation values is what cost cadastre every
+   deploy after `cadastre#42`.
+2. **The served context carries the authenticated principal.** The first
+   version resolved the token correctly and then ran the operation under a
+   context built from the OS user, so every audited write through the
+   server would have been stamped with the server operator's name. A test
+   that asserted attribution caught it. Authentication that resolves the
+   right identity and then does not use it is worse than none: it looks
+   correct in the audit trail.
+3. **A 401 is answered before an empty body is.** The bridge treated an
+   empty response as "notification, no reply", so a rejected token left the
+   client waiting forever instead of learning its credential was refused.
+4. **Import is read-only, and says so.** Merging two instances needs an
+   identity-conflict policy — same slug, different project; same ref,
+   different item — and inventing one silently is how an import destroys
+   what it was meant to restore. `restore` is the supported way to move an
+   instance; `import` reads a file and reports what is in it.
+
 ## M5 — GitHub module (the adapter earns its keep)
 
 **Objective**: the forge side stops being read-only observation and starts
