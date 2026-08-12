@@ -1,4 +1,4 @@
-# Vogt — Deliverable Stages (v0.3, revision r4)
+# Vogt — Deliverable Stages (v0.3, revision r5)
 
 Status: **M0–M6 delivered — v1 is built** (2026-08-12). Requirement IDs
 refer to `REQUIREMENTS.md`; per its §4, scope changes here must update that
@@ -7,9 +7,10 @@ document in the same change.
 Each stage below carries an "as built" note recording where the delivery
 differed from the sketch. What those notes cannot say is whether the set of
 them adds up to the requirements baseline — that is `REQUIREMENTS.md` §5,
-written after v1 by checking the build against every ID. It found four
-requirements short of their text (FR-L1, NFR-I3, FR-S6, NFR-S4) and one CI
-gate that does not fire on the paths most likely to trip it (NFR-Q4).
+written after v1 by checking the build against every ID. It found seven
+requirements short of their text (FR-G1, FR-D2, FR-L1, FR-S3, FR-S6,
+NFR-I3, NFR-S4) and one CI gate that does not fire on the paths most likely
+to trip it (NFR-Q4).
 **Nothing in this document should be read as delivered until §5 agrees.**
 
 ## The cut lines
@@ -55,7 +56,8 @@ Deliverables:
 - `pyproject.toml`, committed `uv.lock`, Renovate config (all three
   toggles), mypy strict + ruff + coverage gate wired.
 - GitHub Actions: `docs.yml` / `ci.yml` / tag-only `release.yml` with the
-  docs-skip path filtering and gate-job pattern.
+  docs-skip path filtering and gate-job pattern. (`build.yml` joins them at
+  r5, publishing commit images from main — it is not an M0 deliverable.)
 - `declared.sqlite3` + `observed.sqlite3` with migration framework, lock,
   meta/revision; `audit` and `events` tables and the transactional write
   path — entity + audit row + event row + revision bump, atomically
@@ -292,9 +294,13 @@ Deliverables:
 - `backup` / `restore` / `export` / `import`; generated example configs;
   the NFR-D2 default-policy split enforced (exposure values ungated,
   allocation values defaulted).
-- `release.yml` completes: buildx image, syft SBOM, keyless cosign sign +
-  attest, push to `ghcr.io/thedancingdeveloper-org/vogt`, tag-triggered
-  only, on `[self-hosted, node-b, linux, x64, docker, publish]`.
+- `release.yml` completes: buildx image, SBOM and provenance attestations,
+  keyless cosign sign over the digest, push to
+  `ghcr.io/thedancingdeveloper-org/vogt`, tag-triggered only, on
+  `[self-hosted, node-b, linux, x64, docker, publish]`. *(As built: the
+  attestations are buildkit's rather than a separate syft run, and cosign
+  signs without a separate `attest` step. `build.yml` joins it at r5 —
+  see `REQUIREMENTS.md`.)*
 - The ops-repo stack: `indexarr/ops` → `personal/vogt/docker-compose.yml`,
   digest-pinned, tailnet-bound, hardened per NFR-D9, healthchecked on
   `/health/ready`. **Allocate the port here** and verify it free on Node B

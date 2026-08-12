@@ -1,6 +1,6 @@
 # Vogt — Design Outline
 
-Status: **v0.3 (revision r4), built** · design 2026-08-12, reconciled
+Status: **v0.3 (revision r5), built** · design 2026-08-12, reconciled
 against the delivered v1 on 2026-08-12. Sections that describe something
 the build decided differently are marked *as built* in place; the
 requirement-by-requirement verification is `REQUIREMENTS.md` §5.
@@ -257,6 +257,12 @@ Model:
 - **Edges also may be declared.** `project link A depends_on B` records an
   edge no manifest expresses (a service calling another, a doc pipeline
   consuming a schema). Reference kind is `path | git | declared`.
+  ***Not built.*** No `project.link` operation exists and no table backs
+  one, so every delivered edge is observed and `declared` is a `RefKind`
+  member nothing produces. The consequence is narrow but real: a dependency
+  that lives only in a deploy script or someone's head is invisible to
+  `deps` and to the reverse lookup. See `REQUIREMENTS.md` §5.1 and
+  `SCHEMA.md` §2.2.
 - **Resolution is by path or repo URL** to a registered project. Internal
   edges are exactly the ones expressed as paths and git URLs, which is why
   package identity is not needed. Unresolved internal-looking references
@@ -382,7 +388,15 @@ REST/CLI/GUI are peers over the same operations.
   honest limitation: scopes are instance-wide in v1, so an agent with
   `work.write` can write to every project (deferred, `REQUIREMENTS.md` §3),
   and in the loopback topology there is no authentication at all.
-- **Both allow and deny decisions are audited.**
+- **Both allow and deny decisions are audited** — into `auth_decisions`
+  (`SCHEMA.md` §2.1), separately from the declared-write audit, because a
+  denial changes nothing and so has no entity or revision to hang from.
+- *As built*: the five scopes all exist, parse and imply correctly, but
+  **`writeback` gates no operation**. `forge.writeback` sets a project's
+  policy and requires `project.write`; the upstream write is a consequence
+  of commenting or transitioning, which are `work.write`. A token issued
+  with `writeback` alone can do nothing but read — a trap for whoever
+  issues one in good faith. See `REQUIREMENTS.md` §5.1.
 - **Transports**: stdio (local, same data-dir, no server required) and
   streamable HTTP at `/mcp` on the same port as REST/GUI/health (see
   `DEPLOYMENT.md` §1). A `vogt-mcp-remote` stdio bridge serves agent
@@ -395,6 +409,18 @@ REST/CLI/GUI are peers over the same operations.
 - **No default endpoint** ships anywhere — see `DEPLOYMENT.md` §4.
 
 ### 4.2 API surface sketch (v1)
+
+*As built, one shape difference runs through all of it: **there are no path
+parameters**.* `HttpRoute` is a method and a literal path, and each
+operation's arguments are one pydantic model shared by all three transports
+— so an identifier travels as a query or body field, never in the URL. The
+sketch's `GET /projects/{id}/brief` is `GET /api/projects/brief?project=…`,
+`POST /work/{id}/transition` is `POST /api/work/transition`, and
+`POST /drift/{id}/accept|reject|contest` is one `POST /api/drift/resolve`
+carrying the resolution. Nothing uses `DELETE`: `DELETE /suppressions/{id}`
+is `POST /api/suppressions/revoke`, because a revocation is an audited write
+that needs a reason, and a reason does not fit a `DELETE`. All 55 routes sit
+under `/api`; the paths below name the operation, not the URL.
 
 - `projects/` CRUD + `GET /projects/{id}/brief` (per-repo view)
 - `work/` CRUD, `POST /work/{id}/transition`, `POST /work/{id}/adopt`
@@ -430,9 +456,15 @@ REST/CLI/GUI are peers over the same operations.
 
 ## 5. The project contract and compliance status
 
-A **Contract** states what a compliant project looks like. It is
-configuration, carrying a version identifier so a status can name which
-contract it was evaluated against. Default v1 contract:
+A **Contract** states what a compliant project looks like. It carries a
+version identifier so a status can name which contract it was evaluated
+against. *As built*: it is a versioned constant in `core/contract.py`, **not
+configuration** — `VogtConfig` has no contract keys and `evaluate()` is
+always called with the default. The declarative shape, the version
+identifier and the named failing criteria are all delivered; what is not is
+a self-hoster's ability to state a different contract without editing
+Python. FR-G1 says "sourced from configuration", so this is a gap
+(`REQUIREMENTS.md` §5.1), not a decision. The v1 contract:
 
 ```
 required_files:  [AGENTS.md, README.md, LICENSE]
@@ -567,14 +599,21 @@ Deployment and network topologies: [`DEPLOYMENT.md`](DEPLOYMENT.md).
     `**/*.md`: markdown lint, link check, config-docs-drift check only.
   - `ci.yml` — runs on `src/**`, `tests/**`, `pyproject.toml`, lockfile,
     migration files: lint, mypy strict, tests, coverage gate.
-  - `release.yml` — tag-triggered only: image build, SBOM, keyless cosign
-    signing, publish to GHCR. It publishes; it does not deploy.
+  - `release.yml` — tag-triggered only: semver image tags, `latest`, the
+    wheel, SBOM and provenance attestations, keyless cosign signing,
+    publish to GHCR. It publishes; it does not deploy.
+  - `build.yml` *(r5)* — a push to main, docs paths ignored: the same
+    image, tagged `sha-<commit>` only, signed, with no semver and `latest`
+    unmoved. A build is not a release.
   - A mixed commit (code + docs) runs the full pipeline; the docs job is a
     subset, never a bypass — branch protection requires `ci.yml` only when
     code paths changed, handled with a single gate job that succeeds
     trivially on docs-only diffs rather than by marking checks optional.
-- Release workflows stay tag-driven so doc pushes to main can never publish
-  an image.
+- **Releases stay tag-driven** so a merge can never cut one, and no push
+  can deploy one (NFR-D10). What r5 changed is that obtaining a *deployable
+  artefact* no longer requires inventing a version number for it —
+  `REQUIREMENTS.md` r5 records why three versions in one afternoon was the
+  symptom.
 - **Every job names a self-hosted runner** (`runs-on: [self-hosted, node-b,
   linux, x64, …]`); GitHub-hosted runners are prohibited estate-wide and
   the repository joins the `public-node-b` runner group before its first
