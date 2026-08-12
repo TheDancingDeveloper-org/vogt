@@ -26,7 +26,7 @@ operation the stage added.
 | M2 | Eyes *(MVP)* | Collectors incl. read-only GitHub, observed-first, suppression, trust & freshness | FR-O1–O4, FR-O5a, FR-O6, FR-O7, FR-W4, FR-W5, FR-W10, FR-W11, FR-G12, FR-G15, FR-V4, FR-D1–D4, FR-P3, FR-R4, FR-L3, NFR-I2, NFR-I4, NFR-I5, NFR-S1, NFR-S2, NFR-S4, NFR-PO1, NFR-PO2 |
 | M3 | Contract & drift | On-demand contract checks; the drift proposal lifecycle | FR-G1, FR-G3, FR-G4, FR-G13, FR-G14, FR-R1–R3, FR-R5, FR-D5, FR-D8 |
 | M4 | Service | Tailnet server, auth, remote MCP, ops | FR-A5(full), FR-A6, FR-A7, FR-S3–S5, FR-S7, FR-L1(full), FR-L2, NFR-D1–D6, NFR-PO4, NFR-O2 |
-| M5 | GitHub module | Consolidation, forge drift, write-back | FR-O5b, FR-B1–B4, FR-D6 |
+| M5 | GitHub module | Consolidation, forge drift, write-back | FR-O5b, FR-B1–B5, FR-D6 |
 | M6 | GUI | The visual surface over the same API | FR-U1, FR-U2 |
 
 Deferred and withdrawn requirement IDs (FR-G2, FR-G5–G10, FR-D7) appear in
@@ -83,8 +83,8 @@ Deliverables:
   `bugs` views with filters.
 - REST (FastAPI + OpenAPI) and MCP stdio, both generated from the
   registry; CLI verbs for everything; audit browsing.
-- Decide `rank_order` (`DESIGN.md` §9.2): manual override with a `why`
-  contribution, or drop the column.
+- No manual ranking override: ordering is computed, `why` explains all of
+  it, and `priority` / initiative weight are the hand-set inputs.
 
 **Demo**: from Claude Code via stdio MCP: create a bug, block it on
 another item, transition it, ask `backlog` and `why` — then show the same
@@ -195,7 +195,9 @@ Deliverables:
   vulnerability alerts, automated security fixes — three facts, three
   answers, never one boolean. `update_automation_gap` drift.
 - Write-back module: `none / comment_only / full`, additive/forward-only,
-  audited, re-observed on the next sweep.
+  audited, re-observed on the next sweep. Comments go **outbound only**
+  (FR-B5) — inbound forge comments stay observations against the linked
+  item.
 
 **Demo**: enable the module for the rustnzb org and verify — via the
 GitHub audit log and `updated_at` timestamps — that onboarding changed

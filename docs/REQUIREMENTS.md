@@ -159,7 +159,7 @@ by path or repository URL, and stops there.*
 | FR-R1 | The drift engine shall compare declared state against observations and raise typed drift proposals with linked evidence. | M | SCHEMA §2.4 |
 | FR-R2 | Drift shall never silently mutate declared data; proposals require explicit accept / reject / contest by an authorized actor. | M | DESIGN §3.2 |
 | FR-R3 | Auto-accept rules shall be configurable per project and per drift kind; the shipped default is low-risk auto-accept (state-sync kinds agent-acceptable; destructive/structural kinds always human-gated). | M | DESIGN §3.2 |
-| FR-R4 | Every declared entity shall carry a computed trust state: `verified / stale / unverified / contested` — derived from observation freshness and agreement, never hand-set. | M | SCHEMA §4 |
+| FR-R4 | Every declared entity shall carry a computed trust state: `verified / stale / unverified / disputed` — derived from observation freshness and agreement, never hand-set. `disputed` is distinct from the drift *resolution* status `contested`, which is chosen by an actor. | M | SCHEMA §4 |
 | FR-R5 | *(r2)* A drift proposal shall embed a self-contained evidence snapshot at raise time, and observations referenced by a proposal shall be exempt from retention pruning while that reference exists. Evidence shall never become unreachable through retention. | M | SCHEMA §2.4, §5 |
 
 ### FR-A — API surfaces & parity
@@ -194,6 +194,7 @@ by path or repository URL, and stops there.*
 | FR-B2 | Every write-back action shall be audited locally and re-observed on the next sweep (the system observes its own writes like anyone else's). | M* | DESIGN §4 |
 | FR-B3 | Onboarding a repo with existing GitHub state shall be a read-only consolidation: full backfill of issues, PRs, labels, releases, and CI history as observations. No GitHub mutation shall occur during onboarding; existing GitHub objects are authoritative for themselves, and disagreement raises drift proposals rather than upstream corrections. | M* | DESIGN §4 |
 | FR-B4 | Write-back shall be additive/forward-only under every policy level: create, comment, label, close/reopen. Deletion, history rewriting, and force operations against GitHub shall not exist as capabilities. | M* | DESIGN §4 |
+| FR-B5 | *(decided 2026-08-12)* Comment write-back shall be **outbound only**: comments authored in Vogt post to the linked forge object under `comment_only` and `full`. Inbound forge comments shall remain observations, visible against the linked item, and shall never be copied into the `comments` table. Bidirectional conversation mirroring is deferred (§3). | M* | DESIGN §4 |
 
 ### FR-L — Lifecycle & administration
 
@@ -316,6 +317,11 @@ Deferred by revision r2:
   `vendored_divergence`).
 - **Advisory / vulnerability enrichment** (was FR-D7) — requires
   resolved versions.
+- **Bidirectional comment mirroring** (FR-B5) — copying forge comments
+  into Vogt's own `comments` table. It needs identity mapping for forge
+  authors and loop suppression for Vogt's own outbound comments, and the
+  observation view already answers "what was said upstream" without
+  either.
 - **Per-project authorization scopes** — v1 scopes are instance-wide; an
   agent holding `work.write` can write to every project. Noted as a
   known limitation, not an oversight.

@@ -84,7 +84,7 @@ Carried from cadastre (proven there):
 | Principle | What it means here |
 |---|---|
 | Declared/observed split | Authoritative store (what we assert) is separate from the observation store (what collectors found). A drift engine joins them. Collector failure can corrupt nothing. |
-| Trust + provenance | Every entity/answer carries `verified / stale / unverified / contested` plus source and timestamp. |
+| Trust + provenance | Every entity/answer carries `verified / stale / unverified / disputed` plus source and timestamp. |
 | Transport parity | `core → application → adapters(cli, http, mcp, gui-api)`. Parity is *tested*, not intended. |
 | Audit as a table | Every write: principal, operation, reason, transaction id, monotonic revision. `reason` is required — essential for agent-driven writes. |
 | Explainable ranking | The global backlog ranking can always answer `why <item>` with per-contribution scores. |
@@ -336,6 +336,12 @@ storage/       SQLite x2 (declared.sqlite3, observed.sqlite3), migrations
   `write_back: none | comment_only | full` policy. Every write-back action
   is itself audited and produces an Observation on the next sweep (closing
   the loop: we observe our own writes like anyone else's).
+- **Comments flow outbound only** (FR-B5). A comment authored in Vogt
+  posts upstream; a comment authored on GitHub stays an observation shown
+  against the linked item and is never copied into `comments`. This keeps
+  `comments` unambiguously ours — every row has a Vogt Actor and an audit
+  trail — and avoids needing forge-author identity mapping and
+  loop suppression to tell our own echo from someone else's remark.
 - **GitHub onboarding is non-destructive consolidation.** Enabling the
   adapter for a repo performs a read-only backfill (issues, PRs, labels,
   releases, CI history) into observations; **no GitHub mutation ever occurs
@@ -484,8 +490,10 @@ behind your back.
 
 - Trust states on declared entities: `verified` (recently confirmed against
   observation), `stale` (confirmation aged out), `unverified` (never
-  confirmed), `contested` (declaration and observation disagree,
-  unresolved).
+  confirmed), `disputed` (declaration and observation disagree,
+  unresolved). Note the deliberate split of vocabulary: a *trust state* is
+  computed and is `disputed`; a *drift resolution* is chosen by a human or
+  agent and may be `contested`. One word never means both things.
 - Every API answer that aggregates (brief, backlog, bugs) carries the oldest
   relevant sweep timestamp: "global bug view; GitHub swept 6 min ago,
   contract check 2 h ago."
@@ -592,16 +600,22 @@ Resolved 2026-08-12 (r3):
   **non-committed stretch goal** (`REQUIREMENTS.md` §3) — the reason the
   scheduler stays small, and something no v1 requirement may lean on.
 
-Still open:
+Resolved 2026-08-12 (the last of the open questions):
 
-1. Comment/activity write-back to GitHub issues (mirroring conversations) —
-   v1 or later?
-2. `work_items.rank_order` (SCHEMA §2.3) implies a manual ordering override
-   alongside the computed ranking of §3.4. Decide whether manual override
-   exists; if it does, `why` must explain it, and if it doesn't, drop the
-   column.
-3. `contested` names both a computed trust state and a drift resolution
-   status. Two meanings, one word — rename one.
+- **Comment write-back is outbound only** (FR-B5). Comments authored in
+  Vogt post upstream under `comment_only`/`full`; inbound forge comments
+  stay observations against the linked item. Mirroring both ways would
+  need forge-author identity mapping and loop suppression for our own
+  writes, and buys little the observation view doesn't already give.
+- **No manual ranking override.** `rank_order` is dropped from
+  `work_items`; ordering is computed from documented weights and stays
+  fully explainable, with `priority` and initiative weight as the
+  hand-set inputs that already feed the score (§3.4).
+- **Trust is `disputed`, drift resolution is `contested`** (§6). The
+  computed vocabulary and the chosen vocabulary no longer collide.
+- **Cadastre: accept the duplication for v1** (§11).
+
+Nothing is open. New questions get appended here as they arise.
 
 ---
 
@@ -629,8 +643,8 @@ computation, the audit spine, the operation registry, the transport-parity
 harness and the MCP stdio bridge are all being written a second time, and
 will drift apart under two maintenance loads.
 
-**Draft position (owner to confirm):** accept the duplication for v1 and
-re-converge afterwards. Building Vogt against a shared kernel now would
+**Decision (2026-08-12):** accept the duplication for v1 and re-converge
+afterwards. Building Vogt against a shared kernel now would
 couple two designs while one of them is still being learned, and the r2
 review of this proposal is itself evidence that Vogt's requirements are
 still moving. Instead: keep the shared concepts *named* identically across

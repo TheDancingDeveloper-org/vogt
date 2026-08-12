@@ -88,7 +88,7 @@ package identity is no longer needed to build the internal graph.
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `work_items` | the unit of work | `id, kind(feature\|bug\|chore\|question), title, body, state, priority(p0..p4), effort, project_id, initiative_id, origin(created\|adopted\|observed), trust_state, assignee_actor_id, rank_order, created_at, updated_at` |
+| `work_items` | the unit of work | `id, kind(feature\|bug\|chore\|question), title, body, state, priority(p0..p4), effort, project_id, initiative_id, origin(created\|adopted\|observed), trust_state, assignee_actor_id, created_at, updated_at` |
 | `work_relations` | typed DAG edges, cross-project | `work_item_id, related_id, kind(depends_on\|relates_to\|duplicate_of\|parent_of)` |
 | `labels` | instance-wide tag definitions (GitHub-label aligned) | `id, name, color` |
 | `work_item_labels` | tag assignments | `work_item_id, label_id` |
@@ -96,8 +96,11 @@ package identity is no longer needed to build the internal graph.
 | `comments` | collaboration | `id, work_item_id, actor_id, body, created_at` |
 | `workflow_defs` | state machine per work-item kind | `kind, definition(json)` |
 
-`rank_order` is retained pending the open question in `DESIGN.md` §9.2 —
-if manual ordering is not a feature, this column is dropped at M1.
+There is deliberately **no `rank_order` column** (decided 2026-08-12).
+Ordering is computed from documented weights and is fully explainable by
+`why`; manual influence is expressed through `priority` and initiative
+weight, which are themselves scored inputs. No hand-set position competes
+with the score.
 
 ### 2.4 Drift
 
@@ -199,9 +202,10 @@ and no version is resolved.
 - **Trust computation**: `verified` = declared row's linked subjects were
   seen in a sweep newer than `verify_horizon` and agree; `stale` = last
   agreeing observation older than horizon; `unverified` = no linked
-  observation ever; `contested` = open drift proposal. Computed, never
-  hand-set. (`contested` collides with the drift resolution status of the
-  same name — see `DESIGN.md` §9.3.)
+  observation ever; `disputed` = open drift proposal. Computed, never
+  hand-set. The trust state is `disputed`, not `contested` (decided
+  2026-08-12): `contested` is reserved for the drift *resolution* status,
+  where it names something a human deliberately chose.
 - **Coverage-gated absence**: "issue vanished upstream" may only be asserted
   when a completed sweep's `scope` provably included that subject and the
   observation is absent. Otherwise the answer is "not collected", surfaced
