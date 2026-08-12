@@ -51,7 +51,14 @@ def test_m0_demo(context: AppContext) -> None:
     # status shows revision 1
     status = _cli(context, "status")
     assert status["revision"] == 1
-    assert status["counts"] == {"projects": 1, "actors": 1, "events": 1, "audit": 2}
+    assert status["counts"] == {
+        "projects": 1,
+        "actors": 1,
+        "events": 1,
+        "audit": 2,
+        "work_items": 0,
+        "initiatives": 0,
+    }
 
     # the audit row carries actor + reason
     audit = _cli(context, "audit", "list")["records"]

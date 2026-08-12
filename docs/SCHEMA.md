@@ -74,7 +74,7 @@ Rules:
 | Table | Purpose | Key columns |
 |---|---|---|
 | `projects` | unit of the per-repo view; one explicitly registered repo or folder (FR-P5, FR-G15) | `id, slug, name, root_path, repo_url, lifecycle_state, current_version, contract_version, compliance_status(compliant\|non_compliant\|not_checked), compliance_checked_at, exclusions(json), trust_state, created_at, updated_at` |
-| `initiatives` | cross-project epics | `id, title, state, weight` |
+| `initiatives` | cross-project epics | `id, slug, title, body, state(open\|closed), weight, created_at, updated_at` |
 | `project_dependencies` | **declared** edges between projects (FR-D1/D2) | `id, from_project_id, to_project_id, ref_kind(declared), note, created_at` |
 
 *r2 removals*: `contracts` — the contract is configuration carrying a
@@ -88,13 +88,19 @@ package identity is no longer needed to build the internal graph.
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `work_items` | the unit of work | `id, kind(feature\|bug\|chore\|question), title, body, state, priority(p0..p4), effort, project_id, initiative_id, origin(created\|adopted\|observed), trust_state, assignee_actor_id, created_at, updated_at` |
+| `work_items` | the unit of work | `id, ref, kind(feature\|bug\|chore\|question), title, body, state, priority(p0..p4), effort, project_id, initiative_id, origin(created\|adopted\|observed), trust_state, assignee_actor_id, created_at, updated_at` |
 | `work_relations` | typed DAG edges, cross-project | `work_item_id, related_id, kind(depends_on\|relates_to\|duplicate_of\|parent_of)` |
 | `labels` | instance-wide tag definitions (GitHub-label aligned) | `id, name, color` |
 | `work_item_labels` | tag assignments | `work_item_id, label_id` |
 | `work_links` | link to observed forge objects | `work_item_id, forge_kind(issue\|pr), repo, number, relation(completion\|reference), created_at` |
 | `comments` | collaboration | `id, work_item_id, actor_id, body, created_at` |
 | `workflow_defs` | state machine per work-item kind | `kind, definition(json)` |
+
+*Added at M1*: `work_items.ref` is the short handle (`WI-7`) allocated from a
+counter in `meta`, inside the creating transaction so a rolled-back creation
+leaves no gap. Ids stay ULID-shaped and stable; refs are what a human or an
+agent actually types, and every parameter that names a work item takes one.
+`initiatives` likewise gained a slug for the same reason.
 
 There is deliberately **no `rank_order` column** (decided 2026-08-12).
 Ordering is computed from documented weights and is fully explainable by

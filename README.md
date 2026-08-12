@@ -24,10 +24,13 @@ Vogt gives you:
 
 ## Status
 
-**M0 (Foundation) is implemented**; design revision r4. The storage spine,
-audit and event tables, the transactional write path, the operation registry
-and the transport-parity harness exist, and the M0 demo runs as an acceptance
-test. M1 (the core tracker) is next.
+**M0 (Foundation) and M1 (Core tracker) are implemented**; design revision
+r4. The write plane works — projects, work items, typed cross-project
+relations, labels, initiatives, comments, a per-kind workflow engine, and a
+deterministic ranking that can explain itself — reachable identically from
+the CLI, the REST API and MCP over stdio. Both stage demos run as acceptance
+tests. **M2 (Eyes) is next**: collectors, observed-first views, and the MVP
+cut line.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the outline,
 [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered baseline and
@@ -41,12 +44,33 @@ reference.
 $ uv run vogt init
 $ uv run vogt project register --name Vogt --root-path . \
     --reason "the tracker's first project is itself"
-$ uv run vogt status
-$ uv run vogt events list
+$ uv run vogt work create --kind bug --title "why() rounds oddly" \
+    --project vogt --priority p1 --reason "spotted in review"
+$ uv run vogt backlog
+$ uv run vogt why --ref WI-1
 ```
 
 Every one of those is also a REST route and an MCP tool, generated from the
 same registry — that is what the parity tests assert.
+
+### Wiring an agent to it
+
+`vogt-mcp` speaks MCP over stdio against the same data directory the CLI
+uses, so no server is needed:
+
+```json
+{
+  "mcpServers": {
+    "vogt": {
+      "command": "vogt-mcp",
+      "env": { "VOGT_DATA_DIR": "/path/to/your/vogt" }
+    }
+  }
+}
+```
+
+Every write an agent makes requires a `reason`, and lands an audit row and an
+event carrying it.
 
 ## Principles (short form)
 

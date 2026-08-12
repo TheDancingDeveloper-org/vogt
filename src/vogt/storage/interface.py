@@ -9,12 +9,23 @@ anywhere outside a backend package.
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
-from vogt.core.entities import Actor, AuditRecord, Event, Project
+from vogt.core.entities import (
+    Actor,
+    AuditRecord,
+    Comment,
+    Event,
+    Initiative,
+    Label,
+    Project,
+    RelationKind,
+    WorkItem,
+)
 from vogt.core.principal import Principal
+from vogt.core.workflow import Workflow
 
 
 @dataclass(frozen=True)
@@ -34,6 +45,8 @@ class Counts:
     actors: int
     events: int
     audit: int
+    work_items: int
+    initiatives: int
 
 
 @dataclass(frozen=True)
@@ -42,6 +55,72 @@ class BootstrapResult:
 
     instance_id: str
     actor: Actor
+
+
+@dataclass(frozen=True)
+class WorkFilter:
+    """How the views narrow the work set.
+
+    One object rather than a dozen keyword arguments because every ranked
+    view, the per-project brief and the bug view all filter the same way, and
+    they must keep filtering the same way as filters are added.
+    """
+
+    project_id: str | None = None
+    kinds: tuple[str, ...] = ()
+    states: tuple[str, ...] = ()
+    priorities: tuple[str, ...] = ()
+    assignee_actor_id: str | None = None
+    initiative_id: str | None = None
+    label: str | None = None
+    trust_states: tuple[str, ...] = ()
+    exclude_terminal: bool = False
+    limit: int = 100
+    offset: int = 0
+
+
+@dataclass(frozen=True)
+class Blocker:
+    """An unfinished `depends_on` target, named so a rejection can list it."""
+
+    ref: str
+    state: str
+
+
+@dataclass(frozen=True)
+class ProjectUpdate:
+    """Fields of a project a write may change. Unset fields are untouched."""
+
+    lifecycle_state: str | None = None
+    repo_url: str | None = None
+    current_version: str | None = None
+    compliance_status: str | None = None
+    compliance_checked_at: datetime | None = None
+    exclusions: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class WorkItemUpdate:
+    """Fields of a work item a write may change. Unset fields are untouched.
+
+    `None` means "leave alone"; clearing a nullable field is expressed by the
+    matching `clear_*` flag, because otherwise unassigning somebody and not
+    mentioning the assignee are the same request.
+    """
+
+    title: str | None = None
+    body: str | None = None
+    state: str | None = None
+    priority: str | None = None
+    effort: str | None = None
+    assignee_actor_id: str | None = None
+    initiative_id: str | None = None
+    project_id: str | None = None
+    clear_effort: bool = False
+    clear_assignee: bool = False
+    clear_initiative: bool = False
+    add_labels: tuple[str, ...] = field(default=())
+    remove_labels: tuple[str, ...] = field(default=())
 
 
 class ReadView(Protocol):
@@ -53,13 +132,57 @@ class ReadView(Protocol):
 
     def counts(self) -> Counts: ...
 
+    # -- identity ----------------------------------------------------------
+
     def actor_by_identity(self, identity_ref: str) -> Actor | None: ...
 
     def actor_by_id(self, actor_id: str) -> Actor | None: ...
 
+    def list_actors(self, *, limit: int, offset: int) -> list[Actor]: ...
+
+    # -- projects ----------------------------------------------------------
+
     def project_by_slug(self, slug: str) -> Project | None: ...
 
+    def project_by_id(self, project_id: str) -> Project | None: ...
+
     def list_projects(self, *, limit: int, offset: int) -> list[Project]: ...
+
+    # -- work --------------------------------------------------------------
+
+    def work_item_by_id(self, work_item_id: str) -> WorkItem | None: ...
+
+    def work_item_by_ref(self, ref: str) -> WorkItem | None: ...
+
+    def list_work_items(self, work_filter: WorkFilter) -> list[WorkItem]: ...
+
+    def count_work_items(self, work_filter: WorkFilter) -> int: ...
+
+    def blocking_fan_out(self, work_item_ids: list[str]) -> dict[str, int]:
+        """How many items declare `depends_on` each of these."""
+        ...
+
+    def unfinished_blockers(
+        self, work_item_id: str, *, terminal_states: tuple[str, ...]
+    ) -> list[Blocker]: ...
+
+    def comments_for(self, work_item_id: str, *, limit: int) -> list[Comment]: ...
+
+    # -- taxonomy ----------------------------------------------------------
+
+    def label_by_name(self, name: str) -> Label | None: ...
+
+    def list_labels(self, *, limit: int, offset: int) -> list[Label]: ...
+
+    def initiative_by_id(self, initiative_id: str) -> Initiative | None: ...
+
+    def initiative_by_slug(self, slug: str) -> Initiative | None: ...
+
+    def list_initiatives(self, *, limit: int, offset: int) -> list[Initiative]: ...
+
+    def workflow_for(self, kind: str) -> Workflow: ...
+
+    # -- history -----------------------------------------------------------
 
     def list_events(self, *, after: int, limit: int) -> list[Event]: ...
 
@@ -90,6 +213,39 @@ class WriteTxn(ReadView, Protocol):
     def insert_actor(self, actor: Actor) -> None: ...
 
     def insert_project(self, project: Project) -> None: ...
+
+    def update_project(
+        self, project_id: str, update: ProjectUpdate, *, at: datetime
+    ) -> None: ...
+
+    def next_work_ref(self) -> str: ...
+
+    def insert_work_item(self, item: WorkItem) -> None: ...
+
+    def update_work_item(
+        self, work_item_id: str, update: WorkItemUpdate, *, at: datetime
+    ) -> None: ...
+
+    def insert_relation(
+        self,
+        *,
+        work_item_id: str,
+        related_id: str,
+        kind: RelationKind,
+        at: datetime,
+    ) -> None: ...
+
+    def delete_relation(
+        self, *, work_item_id: str, related_id: str, kind: RelationKind
+    ) -> bool: ...
+
+    def insert_label(self, label: Label) -> None: ...
+
+    def insert_initiative(self, initiative: Initiative) -> None: ...
+
+    def insert_comment(self, comment: Comment) -> None: ...
+
+    def upsert_workflow(self, workflow: Workflow, *, at: datetime) -> None: ...
 
     def append_audit(
         self,
@@ -153,11 +309,15 @@ class ObservedStore(Protocol):
 
 
 __all__ = [
+    "Blocker",
     "BootstrapResult",
     "Counts",
     "DeclaredStore",
     "MigrationReport",
     "ObservedStore",
+    "ProjectUpdate",
     "ReadView",
+    "WorkFilter",
+    "WorkItemUpdate",
     "WriteTxn",
 ]

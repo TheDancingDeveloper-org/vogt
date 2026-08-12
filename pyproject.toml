@@ -28,6 +28,9 @@ Source = "https://github.com/TheDancingDeveloper-org/vogt"
 
 [project.scripts]
 vogt = "vogt.adapters.cli.main:main"
+# The command an MCP client is configured to spawn. Same server as
+# `vogt mcp stdio`; a bare binary keeps client configs to one word.
+vogt-mcp = "vogt.adapters.mcp.stdio:main"
 
 [dependency-groups]
 dev = [
@@ -67,6 +70,11 @@ select = [
 ]
 
 ignore = [
+  # The design documents and this code use en dashes in prose. Flagging them
+  # as "ambiguous unicode" would trade readable writing for a rule aimed at
+  # homoglyph attacks in identifiers, which is not what a docstring is.
+  "RUF002",
+  "RUF003",
   # Vogt's error taxonomy reads as domain vocabulary at the call site
   # (`raise Conflict(...)`, `except NotInitialized`), and every class already
   # descends from VogtError. An `Error` suffix on each would add noise, not
