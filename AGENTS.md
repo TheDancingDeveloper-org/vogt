@@ -17,10 +17,13 @@ implementation language.
   `services/`, the transactional write path) → `registry` (one definition
   per operation) → `adapters/{cli,http,mcp}` (thin, generated from the
   registry). An adapter that decides anything is the bug.
-  - `core/workflow.py` and `core/ranking.py` are pure: no storage, no
-    context, no clock of their own. That is what makes both of them
+  - `core/workflow.py`, `core/ranking.py` and `core/observed.py` are pure:
+    no storage, no context, no clock of their own. That is what makes them
     testable against a table of cases and `why` an explanation rather than
     a summary.
+  - `collectors/` return findings and write nothing (FR-O2). The sweeper
+    appends them and writes the coverage record; the worst a broken
+    collector can do is produce stale evidence, visible as such.
 - `docs/CONFIG.md` and `config.example.toml` are **generated** from
   `src/vogt/config.py` by `scripts/gen_config_docs.py`. Edit the schema, run
   the script; CI fails on drift (NFR-Q4).
@@ -104,6 +107,20 @@ Actions. Four things are easy to get wrong here:
 Workspace-level Komodo/Infisical/runner rules live in `~/Working/AGENTS.md`
 and are not restated here; `docs/DEPLOYMENT.md` §6 records only the Node B
 failure modes that specifically bite this stack.
+
+### If this repository ever goes public
+
+`runner-policy.yml` calls a reusable workflow in the **private**
+`github-policy` repo, and GitHub does not let a public repository resolve
+that. Going public (NFR-O1 says it will, at a milestone of the owner's
+choosing) therefore breaks the gate and must be handled in the same change.
+
+Cadastre also moved its PR CI to GitHub-hosted runners when it went public,
+because `pull_request` builds untrusted fork code and the self-hosted pool
+sits inside the tailnet — see the header of
+`~/Working/Active/cadastre/.github/workflows/ci.yaml`. Vogt is private, so
+its self-hosted PR CI is fine today; the moment it is not, that reasoning
+applies here too.
 
 ### CI prerequisites — done, do not redo (2026-08-12)
 

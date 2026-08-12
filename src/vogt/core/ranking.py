@@ -15,7 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from vogt.core.entities import Priority, TrustState, WorkItem
+from vogt.core.entities import Priority, TrustState
+from vogt.core.observed import Rankable
 
 #: Points per priority band. The gap between p0 and p1 is deliberately larger
 #: than between the rest: p0 should outrank a large amount of accumulated
@@ -97,7 +98,7 @@ class Contribution:
 class Score:
     """A work item's score and the full derivation of it."""
 
-    work_item_id: str
+    subject_id: str
     ref: str
     total: float
     contributions: tuple[Contribution, ...]
@@ -117,8 +118,14 @@ class RankingInputs:
     is_terminal: bool = False
 
 
-def score_item(item: WorkItem, inputs: RankingInputs) -> Score:
-    """Score one item and record how each input contributed."""
+def score_item(item: Rankable, inputs: RankingInputs) -> Score:
+    """Score one subject and record how each input contributed.
+
+    Takes a `Rankable` rather than a `WorkItem` so that declared work and
+    observed subjects go through the same weights. Two scoring paths would
+    drift, and the two halves of an observed-first backlog have to be
+    comparable or the ordering means nothing.
+    """
     contributions: list[Contribution] = []
 
     priority_points = PRIORITY_POINTS[item.priority]
@@ -169,7 +176,7 @@ def score_item(item: WorkItem, inputs: RankingInputs) -> Score:
             input="initiative_weight",
             detail=(
                 f"initiative weight {inputs.initiative_weight}"
-                if item.initiative_id
+                if item.has_initiative
                 else "no initiative"
             ),
             value=float(inputs.initiative_weight),
@@ -202,7 +209,7 @@ def score_item(item: WorkItem, inputs: RankingInputs) -> Score:
 
     total = sum(entry.contribution for entry in contributions)
     return Score(
-        work_item_id=item.id,
+        subject_id=item.id,
         ref=item.ref,
         total=round(total, SCORE_PRECISION),
         contributions=tuple(contributions),

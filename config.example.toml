@@ -11,3 +11,23 @@
 # Verbosity of Vogt's own diagnostics.
 # default policy: behaviour
 # log_level = "info"
+
+# Source markers containing one of these enter backlog and bug views (FR-W11). Every other marker is still observed, still queryable and still counted; it just does not claim to be work. Widening this is how you drown the ranked view.
+# default policy: behaviour
+# marker_promotion_patterns = ["TODO(vogt)", "FIXME(vogt)"]
+
+# File types the marker collector reads. Configuration rather than a hard-coded list, because which extensions hold source is an estate's business, not Vogt's (FR-W11).
+# default policy: behaviour
+# marker_file_extensions = [".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".rb", ".sh", ".sql", ".toml", ".yaml", ".yml", ".md"]
+
+# How long observation *history* is kept (NFR-I5). The newest observation per subject is kept indefinitely regardless, and so is anything a drift proposal references.
+# default policy: behaviour
+# retention_days = 180
+
+# Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing (FR-S7).
+# default policy: behaviour
+# github_token_file = null
+
+# How recently a subject must have been observed for a linked declared entity to count as `verified` rather than `stale` (FR-R4). Trust is computed from this, never hand-set.
+# default policy: behaviour
+# verify_horizon_hours = 24

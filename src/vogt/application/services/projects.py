@@ -7,11 +7,12 @@ from pathlib import Path
 from vogt.application.context import AppContext
 from vogt.application.models import (
     DEFAULT_EXCLUSIONS,
+    CiSummary,
     CreateProjectParams,
     CreateProjectResult,
+    DependencySummary,
     GetProjectParams,
     ListProjectsParams,
-    NotCollected,
     ProjectBriefParams,
     ProjectBriefResult,
     ProjectListResult,
@@ -20,7 +21,7 @@ from vogt.application.models import (
     TransitionProjectParams,
 )
 from vogt.application.services import _resolve
-from vogt.application.services.views import rank_items
+from vogt.application.services.views import freshness_of, rank_items
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.contract import DEFAULT_CONTRACT, default_scaffold
 from vogt.core.entities import Actor, Project
@@ -184,29 +185,88 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
 
         live = [item for item in items if item.state not in TERMINAL_STATES]
         ranked = rank_items(view, live, now=ctx.clock())
+        observed_version = _observed_version(ctx, project)
 
-        return ProjectBriefResult(
-            project=project,
-            open_work=len(live),
-            open_bugs=sum(1 for item in live if item.kind == "bug"),
-            by_state=dict(sorted(by_state.items())),
-            by_kind=dict(sorted(by_kind.items())),
-            top_backlog=ranked[: params.backlog_limit],
-            current_version=project.current_version,
-            compliance_status=project.compliance_status,
-            compliance_checked_at=project.compliance_checked_at,
-            ci_status=NotCollected(
-                detail="CI check observations arrive with the collectors at M2 (FR-O6)."
-            ),
-            dependencies=NotCollected(
-                detail="Dependency references arrive with the dep-refs collector "
-                "at M2 (FR-D1)."
-            ),
-            freshness=NotCollected(
-                detail="No collector has swept this project; sweeps and their "
-                "coverage records arrive at M2 (FR-O3, FR-V4)."
+    return ProjectBriefResult(
+        project=project,
+        open_work=len(live),
+        open_bugs=sum(1 for item in live if item.kind == "bug"),
+        by_state=dict(sorted(by_state.items())),
+        by_kind=dict(sorted(by_kind.items())),
+        top_backlog=ranked[: params.backlog_limit],
+        current_version=project.current_version,
+        declared_version=project.current_version,
+        observed_version=observed_version,
+        version_matches=(
+            None
+            if observed_version is None or project.current_version is None
+            else observed_version.lstrip("v") == project.current_version.lstrip("v")
+        ),
+        compliance_status=project.compliance_status,
+        compliance_checked_at=project.compliance_checked_at,
+        ci_status=_ci_summary(ctx, project),
+        dependencies=_dependency_summary(ctx, project),
+        freshness=freshness_of(ctx),
+    )
+
+
+def _observed_version(ctx: AppContext, project: Project) -> str | None:
+    """The newest tag or release a collector has seen (FR-P3).
+
+    Reported next to the declared version rather than instead of it. The two
+    disagreeing is `version_mismatch` drift, which becomes a proposal at M3;
+    here it is simply a fact the brief states.
+    """
+    if not ctx.observed.has_evidence_tables():
+        return None
+    seen = ctx.observed.latest(
+        kinds=("git.tag", "release"), project_id=project.id, limit=100
+    )
+    tags = [str(o.payload.get("tag", "")) for o in seen if o.payload.get("tag")]
+    return max(tags, default=None) or None
+
+
+def _ci_summary(ctx: AppContext, project: Project) -> CiSummary:
+    """The CI story, or an honest statement that nobody has looked (FR-O6)."""
+    if not ctx.observed.has_evidence_tables():
+        return CiSummary(detail="no sweep has run; CI status is not collected")
+    checks = ctx.observed.latest(kinds=("ci.check",), project_id=project.id, limit=200)
+    if not checks:
+        return CiSummary(
+            status="no_checks",
+            detail=(
+                "swept, but no CI checks were observed — either this project "
+                "has none, or the optional forge adapter is not configured"
             ),
         )
+    failing = [
+        str(check.payload.get("check", "?"))
+        for check in checks
+        if check.payload.get("conclusion") not in (None, "success", "skipped")
+    ]
+    newest = max(checks, key=lambda check: check.observed_at)
+    return CiSummary(
+        status="failing" if failing else "passing",
+        checks=len(checks),
+        failing=sorted(set(failing)),
+        revision=str(newest.payload.get("revision") or "") or None,
+    )
+
+
+def _dependency_summary(ctx: AppContext, project: Project) -> DependencySummary:
+    """What this project references, and what references it (FR-D1–D4)."""
+    if not ctx.observed.has_evidence_tables():
+        return DependencySummary(
+            detail="no sweep has run; dependency references are not collected"
+        )
+    out = ctx.observed.dep_refs(from_project_id=project.id)
+    incoming = ctx.observed.dep_refs(to_project_id=project.id)
+    return DependencySummary(
+        status="collected",
+        references_out=len(out),
+        referenced_by=len(incoming),
+        unresolved=sum(1 for ref in out if ref.to_project_id is None),
+    )
 
 
 def transition_project(

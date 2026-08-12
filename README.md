@@ -24,13 +24,18 @@ Vogt gives you:
 
 ## Status
 
-**M0 (Foundation) and M1 (Core tracker) are implemented**; design revision
-r4. The write plane works — projects, work items, typed cross-project
-relations, labels, initiatives, comments, a per-kind workflow engine, and a
-deterministic ranking that can explain itself — reachable identically from
-the CLI, the REST API and MCP over stdio. Both stage demos run as acceptance
-tests. **M2 (Eyes) is next**: collectors, observed-first views, and the MVP
-cut line.
+**MVP complete: M0–M2 are implemented**, design revision r4.
+
+Vogt now sees work you did not type in. Collectors sweep your registered
+projects for git state, source markers and dependency references — plus
+GitHub issues, PRs, Actions runs and releases when you configure the
+optional adapter — and the ranked backlog shows collected subjects alongside
+declared work, ordered by the same weights, each stamped with how fresh the
+evidence is and how much it is trusted. Every stage demo runs as an
+acceptance test, including the one that unplugs GitHub entirely.
+
+**M3 (Contract & drift) is next**: on-demand contract checks and the drift
+proposal lifecycle.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the outline,
 [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered baseline and
@@ -44,11 +49,18 @@ reference.
 $ uv run vogt init
 $ uv run vogt project register --name Vogt --root-path . \
     --reason "the tracker's first project is itself"
-$ uv run vogt work create --kind bug --title "why() rounds oddly" \
-    --project vogt --priority p1 --reason "spotted in review"
+$ uv run vogt sweep --reason "see what is already there"
 $ uv run vogt backlog
 $ uv run vogt why --ref WI-1
+$ uv run vogt deps --project vogt
 ```
+
+Nothing crawls your filesystem: collection scope is the projects you
+registered, and only those. Only markers matching a configured pattern
+(`TODO(vogt):` by default) claim to be work — every other marker is still
+observed and still queryable, it just does not fill your backlog. And a
+noisy subject can be suppressed with a reason, which survives the next
+sweep finding it again.
 
 Every one of those is also a REST route and an MCP tool, generated from the
 same registry — that is what the parity tests assert.

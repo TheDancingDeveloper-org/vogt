@@ -27,8 +27,10 @@ from vogt.core.entities import (
     Project,
     Relation,
     RelationKind,
+    Suppression,
     WorkItem,
     WorkKind,
+    WorkLink,
 )
 from vogt.core.ids import IdFactory, new_id
 from vogt.core.principal import Principal
@@ -214,6 +216,48 @@ class SqliteDeclaredStore:
             )
             conn.execute("COMMIT")
             return BootstrapResult(instance_id=instance_id, actor=actor)
+        except BaseException:
+            _rollback_quietly(conn)
+            raise
+        finally:
+            conn.close()
+
+    def publish_event(
+        self,
+        *,
+        kind: str,
+        entity_kind: str,
+        entity_id: str,
+        summary: dict[str, object],
+        at: datetime,
+    ) -> Event:
+        """Append an observed-side event (FR-N1, `SCHEMA.md` §2.5).
+
+        No audit row and no revision bump: nobody declared anything and the
+        authoritative state did not change. This is the application layer
+        publishing on the collectors' behalf, which is what lets collectors
+        keep their promise never to write the declared store (FR-O2).
+        """
+        conn = self._open_initialized()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            txn = SqliteWriteTxn(
+                conn,
+                txn_id=self._id_factory("txn"),
+                revision=_read_revision(conn),
+                id_factory=self._id_factory,
+            )
+            event = txn.append_event(
+                kind=kind,
+                entity_kind=entity_kind,
+                entity_id=entity_id,
+                actor_id=None,
+                audit_id=None,
+                summary=summary,
+                at=at,
+            )
+            conn.execute("COMMIT")
+            return event
         except BaseException:
             _rollback_quietly(conn)
             raise
@@ -455,6 +499,56 @@ class SqliteReadView:
             return default_workflow(kind)  # type: ignore[arg-type]
         definition: dict[str, object] = json.loads(str(row["definition"]))
         return Workflow.from_definition(kind, definition)  # type: ignore[arg-type]
+
+    # -- observed-first ----------------------------------------------------
+
+    def list_suppressions(
+        self, *, include_revoked: bool = False, limit: int = 100
+    ) -> list[Suppression]:
+        clause = "" if include_revoked else "WHERE s.revoked_at IS NULL"
+        rows = self._conn.execute(
+            "SELECT s.*, a.identity_ref AS actor_identity_ref, "
+            "p.slug AS scope_project_slug FROM suppressions s "
+            "JOIN actors a ON a.id = s.actor_id "
+            "LEFT JOIN projects p ON p.id = s.scope_project_id "
+            f"{clause} ORDER BY s.created_at DESC, s.id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_suppression(row) for row in rows]
+
+    def suppression_by_id(self, suppression_id: str) -> Suppression | None:
+        row = self._conn.execute(
+            "SELECT s.*, a.identity_ref AS actor_identity_ref, "
+            "p.slug AS scope_project_slug FROM suppressions s "
+            "JOIN actors a ON a.id = s.actor_id "
+            "LEFT JOIN projects p ON p.id = s.scope_project_id "
+            "WHERE s.id = ?",
+            (suppression_id,),
+        ).fetchone()
+        return None if row is None else _row_to_suppression(row)
+
+    def work_links_for_subjects(self, subject_keys: list[str]) -> dict[str, str]:
+        if not subject_keys:
+            return {}
+        placeholders = ", ".join("?" for _ in subject_keys)
+        rows = self._conn.execute(
+            "SELECT l.subject_key AS subject_key, w.ref AS ref FROM work_links l "
+            "JOIN work_items w ON w.id = l.work_item_id "
+            f"WHERE l.subject_key IN ({placeholders})",
+            tuple(subject_keys),
+        ).fetchall()
+        return {str(row["subject_key"]): str(row["ref"]) for row in rows}
+
+    def work_item_by_subject(self, subject_key: str) -> WorkItem | None:
+        row = self._conn.execute(
+            f"SELECT {_WORK_COLUMNS} {_WORK_JOINS} "
+            "JOIN work_links l ON l.work_item_id = w.id WHERE l.subject_key = ? "
+            "LIMIT 1",
+            (subject_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._hydrate([row])[0]
 
     # -- hydration ---------------------------------------------------------
 
@@ -785,6 +879,46 @@ class SqliteWriteTxn(SqliteReadView):
             (work_item_id, str(row["id"]), work_item_id, str(row["id"])),
         )
 
+    def insert_suppression(self, suppression: Suppression) -> None:
+        self._conn.execute(
+            "INSERT INTO suppressions (id, match_kind, subject_key_or_pattern, "
+            "scope_project_id, actor_id, reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                suppression.id,
+                suppression.match_kind,
+                suppression.subject_key_or_pattern,
+                suppression.scope_project_id,
+                suppression.actor_id,
+                suppression.reason,
+                to_iso(suppression.created_at),
+            ),
+        )
+
+    def revoke_suppression(
+        self, suppression_id: str, *, actor_id: str, reason: str, at: datetime
+    ) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE suppressions SET revoked_at = ?, revoked_by_actor_id = ?, "
+            "revoked_reason = ? WHERE id = ? AND revoked_at IS NULL",
+            (to_iso(at), actor_id, reason, suppression_id),
+        )
+        return cursor.rowcount > 0
+
+    def insert_work_link(self, link: WorkLink) -> None:
+        self._conn.execute(
+            "INSERT INTO work_links (work_item_id, subject_key, origin_kind, "
+            "source_url, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                link.work_item_id,
+                link.subject_key,
+                link.origin_kind,
+                link.source_url,
+                link.relation,
+                to_iso(link.created_at),
+            ),
+        )
+
     def append_audit(
         self,
         *,
@@ -1011,6 +1145,31 @@ def _upsert_workflow(
         )
 
 
+def _row_to_suppression(row: sqlite3.Row) -> Suppression:
+    revoked = row["revoked_at"]
+    return Suppression(
+        id=str(row["id"]),
+        match_kind=row["match_kind"],
+        subject_key_or_pattern=str(row["subject_key_or_pattern"]),
+        scope_project_id=(
+            None if row["scope_project_id"] is None else str(row["scope_project_id"])
+        ),
+        scope_project_slug=(
+            None
+            if row["scope_project_slug"] is None
+            else str(row["scope_project_slug"])
+        ),
+        actor_id=str(row["actor_id"]),
+        actor_identity_ref=str(row["actor_identity_ref"]),
+        reason=str(row["reason"]),
+        created_at=from_iso(str(row["created_at"])),
+        revoked_at=None if revoked is None else from_iso(str(revoked)),
+        revoked_reason=(
+            None if row["revoked_reason"] is None else str(row["revoked_reason"])
+        ),
+    )
+
+
 def _row_to_audit(row: sqlite3.Row) -> AuditRecord:
     return AuditRecord(
         id=str(row["id"]),
@@ -1090,6 +1249,11 @@ def _meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
     ).rowcount
     if updated == 0:
         conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, value))
+
+
+def _read_revision(conn: sqlite3.Connection) -> int:
+    current = _meta_get(conn, META_REVISION)
+    return 0 if current is None else int(current)
 
 
 def _bump_revision(conn: sqlite3.Connection) -> int:
