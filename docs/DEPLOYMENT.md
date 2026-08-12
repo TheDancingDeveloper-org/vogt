@@ -131,11 +131,30 @@ double-gated (FR-S4), `serve --read-only` refuses every write whatever scope
 a token holds, and each one lands in the audit log with the reason its
 author gave.
 
-The container runs as uid `10001` (§2.2), so that uid needs read *and*
-write on the workspace directory. MyDevEnv2 owns it, so this is the one
-mount whose ownership is not Vogt's to arrange — the directory needs to be
-group-writable by a group `10001` belongs to, or the two services need to
-agree on a shared uid.
+**Ownership is reconciled with a supplementary group, not a shared uid.**
+MyDevEnv2 runs as uid `1000` and owns the workspace; Vogt's container runs
+as uid `10001`, which reaches that directory only through "other" — read at
+best, never write, and nothing at all if a directory is mode `0700`.
+
+The fix is `group_add: ["1000"]`, not `user: "1000:1000"`. The image bakes
+`10001` into two places that changing the uid would break: `/var/lib/vogt`
+is chowned `10001` at build time, and the token file's `0750 root:10001` is
+what stops any other uid on the host reading a GitHub credential (FR-S7).
+Changing the uid to fix a mount would quietly widen both — a filesystem
+problem solved by loosening a credential boundary.
+
+The host side has two prerequisites, and they belong to MyDevEnv2 rather
+than to Vogt:
+
+```
+chgrp -R 1000 /mnt/2tnvme/docker/volumes/mydevenv2/workspace
+chmod -R g+rwX /mnt/2tnvme/docker/volumes/mydevenv2/workspace
+find /mnt/2tnvme/docker/volumes/mydevenv2/workspace -type d -exec chmod g+s {} +
+```
+
+The setgid bit is the part that is easy to miss: without it, a directory
+Vogt scaffolds (FR-G11) is group-owned by `10001` and MyDevEnv2 cannot edit
+what Vogt just created — the same split, mirrored.
 
 **Exposure is a tailnet allocation, not an ingress decision.** The
 published port binds `100.92.54.45`, so it publishes nothing to the LAN or

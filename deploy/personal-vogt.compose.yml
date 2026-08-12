@@ -104,6 +104,21 @@ services:
       - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working"
 
     user: "10001:10001"
+    # MyDevEnv2 runs as uid 1000 and owns the workspace, so uid 10001 reaches
+    # it only through "other" — read at best, never write, and nothing at all
+    # if a directory is mode 0700.
+    #
+    # A supplementary group rather than `user: "1000:1000"`, because the image
+    # bakes 10001 into two places that would then break: /var/lib/vogt is
+    # chowned 10001 at build time, and the token file's 0750 root:10001 is
+    # what stops any other uid on the host reading a GitHub credential
+    # (FR-S7). Changing the uid to fix a mount would quietly widen both.
+    #
+    # Requires the workspace to be group-writable by gid 1000, with the setgid
+    # bit on its directories so anything Vogt scaffolds (FR-G11) stays in that
+    # group and MyDevEnv2 can still edit it. See DEPLOYMENT.md §2.1a.
+    group_add:
+      - "${VOGT_WORKSPACE_GID:-1000}"
     read_only: true
     security_opt:
       - no-new-privileges:true
