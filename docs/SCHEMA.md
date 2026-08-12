@@ -1,4 +1,4 @@
-# Vogt — Data Schema & Topology (draft v0.3, revision r3)
+# Vogt — Data Schema & Topology (v0.3, revision r3)
 
 Status: **built** (reconciled against the delivered v1 on 2026-08-12; the
 as-built shape of §3.2 is the note at the end of that section, and the
@@ -70,7 +70,16 @@ Rules:
 | `migration_lock` | single-writer migration guard | |
 | `actors` | humans **and** agents | `id, kind(human\|agent), display_name, identity_ref, disabled` |
 | `tokens` | API credentials bound to actors | `id, actor_id, scopes, token_hash, expires_at, revoked_at` |
+| `auth_decisions` | *(M4)* every allow **and** deny, at both `tools/list` and invocation (FR-S5) | `id, at, actor_id, operation, decision(allow\|deny), reason_code, transport` |
 | `audit` | every declared write | `id, txn_id, revision, actor_id, operation, entity_kind, entity_id, reason, payload_digest, at` |
+
+Authorization decisions are their own table rather than audit rows: a denial
+changes nothing, so it has no entity and no revision to hang from.
+
+`audit` is indexed on `actor_id`, `(entity_kind, entity_id)` and `at`. The
+time index exists and is unused — the audit query exposes actor, operation
+and entity filters but no time bound (the FR-S6 gap, `REQUIREMENTS.md`
+§5.1), so closing that gap is a parameter, not a schema change.
 
 ### 2.2 Project
 
@@ -78,12 +87,25 @@ Rules:
 |---|---|---|
 | `projects` | unit of the per-repo view; one explicitly registered repo or folder (FR-P5, FR-G15) | `id, slug, name, root_path, repo_url, lifecycle_state, current_version, contract_version, compliance_status(compliant\|non_compliant\|not_checked), compliance_checked_at, exclusions(json), trust_state, created_at, updated_at` |
 | `initiatives` | cross-project epics | `id, slug, title, body, state(open\|closed), weight, created_at, updated_at` |
-| `project_dependencies` | **declared** edges between projects (FR-D1/D2) | `id, from_project_id, to_project_id, ref_kind(declared), note, created_at` |
+| ~~`project_dependencies`~~ | **Not built** — see below | — |
 
-*r2 removals*: `contracts` — the contract is configuration carrying a
-version string (`DESIGN.md` §5), so a table of versioned contract bodies
-bought nothing at one contract per instance; the evaluated result lives in
-`latest_contract_checks` (§3.2) and `projects.compliance_status`.
+**`project_dependencies` does not exist, and `ref_kind = declared` is
+therefore unreachable.** Every dependency edge in the delivered system is
+*observed*: `dep-refs` reads manifests and emits `path` and `git` references
+into `latest_dep_refs` (§3.2). The third kind survives in the `RefKind` type
+and in FR-D2's text, but nothing can produce one — `DESIGN.md` §3.5's
+`project link A depends_on B` was never given an operation, and the registry
+has no `project.link`. An edge no manifest expresses cannot be recorded.
+Tracked in `REQUIREMENTS.md` §5.1.
+
+*r2 removals*: `contracts` — the contract carries a version string
+(`DESIGN.md` §5), so a table of versioned contract bodies bought nothing at
+one contract per instance; the evaluated result lives in
+`projects.compliance_status` with its `compliance_checked_at`. *As built*,
+the contract is a versioned constant in `core/contract.py` rather than
+configuration, so there is no per-instance contract body anywhere — which is
+why removing the table cost nothing, and is also the FR-G1 gap
+(`REQUIREMENTS.md` §5.1).
 `packages` — with dependency edges resolved by path and repo URL, published
 package identity is no longer needed to build the internal graph.
 
@@ -98,6 +120,13 @@ package identity is no longer needed to build the internal graph.
 | `work_links` | link to observed forge objects | `work_item_id, forge_kind(issue\|pr), repo, number, relation(completion\|reference), created_at` |
 | `comments` | collaboration | `id, work_item_id, actor_id, body, created_at` |
 | `workflow_defs` | state machine per work-item kind | `kind, definition(json)` |
+| `writeback_actions` | *(M5)* one row per attempted forge write (FR-B2) | `id, at, actor_id, work_item_id, project_id, policy, action(create\|comment\|label\|close\|reopen), outcome(attempted\|succeeded\|failed\|skipped), detail` |
+
+`writeback_actions` records the *attempt*, not only the success — including
+`skipped`, which is what a policy refusal looks like. Write-back is never a
+separate operation (`ROADMAP.md` M5): a comment authored here posts upstream
+as part of commenting, so this table is the only place the upstream half of
+a declared write is visible before the next sweep re-observes it.
 
 *Added at M1*: `work_items.ref` is the short handle (`WI-7`) allocated from a
 counter in `meta`, inside the creating transaction so a rolled-back creation
@@ -243,7 +272,8 @@ and no version is resolved.
   when a completed sweep's `scope` provably included that subject and the
   observation is absent. Otherwise the answer is "not collected", surfaced
   as such in API responses.
-- **Observed-first work**: `latest_forge_items` and *promoted* markers
+- **Observed-first work**: forge items (`latest_observations` filtered to
+  the issue and PR kinds) and *promoted* markers
   appear in backlog/bug views immediately (trust `unverified→verified` via
   sweeps). `adopt` promotes one into `work_items` with `origin=adopted` and
   a `work_links` row; drift then keeps the pair honest.
@@ -252,9 +282,10 @@ and no version is resolved.
   before scoring. Suppressed subjects remain returnable by explicit
   observation queries — the decision hides them from views, it does not
   delete evidence.
-- **Compliance**: `projects.compliance_status` is a projection of
-  `latest_contract_checks`, written when an on-demand contract check runs
-  against a registered project (r3 — nothing refreshes it on a timer). It
+- **Compliance**: `projects.compliance_status` is written directly when an
+  on-demand contract check runs against a registered project (r3 — nothing
+  refreshes it on a timer); the same check lands a `contract:<slug>`
+  observation, so the evidence outlives the column. It
   is always read together with `compliance_checked_at`, and no code path
   treats it as a precondition (`DESIGN.md` §2.1, FR-G13/FR-G14).
 - **Scope**: every collector's `scope` is a set of registered project ids.
@@ -264,8 +295,12 @@ and no version is resolved.
 ## 5. Scale envelope & retention (v1 targets)
 
 Single node, SQLite WAL mode: ≤ ~500 projects, ≤ ~100k work items. A seeded
-fixture at this envelope exists from M2 and asserts the sub-second
-interactive-query target in CI (NFR-S4).
+fixture exists from M2 and asserts the interactive-query target in CI
+(NFR-S4) — *as built*, at 500 projects and **5,000** work items rather than
+100k, because seeding 100k rows per run costs minutes and proves nothing
+about the query shape. It is a tripwire for an accidental per-item query
+inside a ranked view; it is not evidence of the envelope
+(`REQUIREMENTS.md` §5.1).
 
 Retention (NFR-I5), in precedence order — a row is pruned only if no rule
 protects it:

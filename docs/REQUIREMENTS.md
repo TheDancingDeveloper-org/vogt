@@ -1,6 +1,6 @@
-# Vogt — Requirements (draft v0.3)
+# Vogt — Requirements (v0.3)
 
-Status: **baseline, revision r4** (2026-08-12), distilled from `DESIGN.md`,
+Status: **baseline, revision r5** (2026-08-12), distilled from `DESIGN.md`,
 `SCHEMA.md`, `DEPLOYMENT.md` and the originating product discussion.
 **v1 (M0–M6) is built**; §5 is the requirement-by-requirement verification
 of the delivered system against this document, including the four
@@ -88,6 +88,35 @@ This changes no functional requirement, no stage boundary, and nothing
 about the forge-optional core: NFR-PO1–PO3 are untouched, and the product
 still self-hosts anywhere Docker runs. Node B is *this estate's*
 deployment, specified so that M4 has a target instead of a shape.
+
+### Revision r5 — a build is not a release
+
+One requirement changes: **NFR-C3**, revised in place. It had said a push to
+main shall never publish an image, so the only way to obtain a deployable
+artefact was to tag a version — which produced v0.1.0, v0.1.1 and v0.1.2 in
+one afternoon, none of them marking a release. Two were repairs to an image
+that had never been executed; the third was a uid change concerning one
+deployment and no user of this software. The version number had become a
+build counter, which is the failure where a number that should mean "this is
+what changed for you" comes to mean "the pipeline ran again".
+
+The requirement was conflating two acts that only look alike. A **release**
+is tag-triggered and says *use this*: semver image tags, `latest`, the
+wheel, the SBOM attestation. A **build** is a push to main and says nothing:
+`sha-<commit>` only, no semver, `latest` unmoved, no wheel. Both are signed
+— commit images are the artefacts that actually reach production between
+releases, so signing only releases would put the strongest guarantee on the
+thing that ships least often.
+
+What NFR-C3 protected is intact and asserted by tests in `test_deploy.py`:
+merging cannot cut a release, and merging cannot deploy (NFR-D10 —
+production moves when a digest is pinned in `indexarr/ops` and `DeployStack`
+runs). What it loses is the accidental coupling that made a version bump the
+price of a hotfix. `.github/workflows/build.yml` implements the build half;
+`release.yml` keeps the release half unchanged.
+
+*(This summary is required by §4 and was missing when NFR-C3 was marked
+`revised r5` — added during the delivery verification in §5.)*
 
 ---
 
@@ -415,17 +444,25 @@ Named stretch goal, **not committed and not designed for**:
 
 ## 5. Delivery verification (v1, 2026-08-12)
 
-M0–M6 are built; 480 tests pass at 88% coverage. This section is the audit
+M0–M6 are built; 482 tests pass at 92% coverage. This section is the audit
 of the *delivered* system against every requirement above — read against
 the source and the tests, not against the roadmap's claims. It exists
 because a requirements document that is never checked back against the
 build is a wish list, and because §4 makes each milestone name the IDs it
 delivers, which is a promise nobody had yet verified.
 
-**Delivered in full: 68 of 72 live functional requirements, and 30 of 34
+**Delivered in full: 65 of 72 live functional requirements, and 30 of 34
 non-functional ones.** The exceptions are below, each with what is actually
 missing rather than a score. Withdrawn and deferred IDs (FR-G2, FR-G5–G10,
 FR-D7) are not counted; they are absences by decision (§3).
+
+Three of the gaps (FR-G1, FR-D2, FR-S3) are the same failure mode: a
+capability whose *type* exists and whose *producer* does not. A `RefKind`
+member no operation emits, a `Scope` no operation requires, a `Contract` no
+configuration can replace. Each reads as delivered from inside the code and
+is unreachable from outside it — the class of gap a citation-grep cannot
+find and a parity test does not cover, because all three are consistent
+across CLI, REST and MCP by being consistently absent from every one.
 
 ### 5.1 Not fully delivered
 
@@ -434,6 +471,9 @@ FR-D7) are not counted; they are absences by decision (§3).
 | FR-L1 | M | The CLI provides `init`, `status`, `serve`, `backup`, `restore`, `export`, `import` — **not `migrate`**. Migrations are applied by `init`, which is idempotent and brings an existing instance forward, so the capability exists under another name and no data is at risk locally. What is missing is the verb an operator would reach for, and the one the deployed stack needs (below). | Low alone; compounds NFR-I3 |
 | NFR-I3 | M | Migrations are forward-only ✅ and run under `migration_lock` ✅. They do **not gate readiness**: `/health/ready` reports the *applied* schema version without comparing it to the version the running image expects, and `serve` does not migrate. In the Node B topology (`command: serve`) an image carrying a new migration comes up, passes its healthcheck, and fails later on a missing table — as a SQL error at whatever touched it first, not as a red probe. See `DEPLOYMENT.md` §5. | **Highest of these** — it is the deploy path |
 | FR-S6 | M | The audit log is queryable by actor, operation and entity, but **not by time**: `ListAuditParams` carries `limit`, `actor_id`, `operation`, `entity_id` and no time bound. "What happened between Tuesday and Thursday" is the query an audit log exists to answer, and it is answerable today only by paging. | Medium |
+| FR-G1 | M | The contract is declarative ✅, carries a version identifier ✅, and names every failing criterion ✅ — but it is **not sourced from configuration**. It is the constant `DEFAULT_CONTRACT` in `core/contract.py`; `VogtConfig` has no contract keys, `CONFIG.md` lists none, and `evaluate()` is only ever called with the default. Nobody self-hosting Vogt can state a contract other than this repository's own without editing Python. | Medium — it is the requirement's entire "sourced from configuration" clause, in a product meant for others to run |
+| FR-D2 | M | Edges record `path` and `git` ✅ with the manifest they came from ✅. The third reference kind, `declared`, **cannot be produced**: `DESIGN.md` §3.5's `project link A depends_on B` was never given an operation, no `project_dependencies` table exists, and `RefKind`'s third member is unreachable. A dependency no manifest expresses — a service calling another, a deploy script's assumption — cannot be recorded, so it is absent from `deps` and from the reverse lookup FR-D4 promises. | Medium |
+| FR-S3 | M | All five scopes exist, parse, imply correctly and are issuable ✅. **`writeback` gates no operation.** `forge.writeback` sets a project's policy and requires `project.write`; the upstream write is a consequence of `work.write` operations. A token issued with `writeback` alone can read and nothing else. | Medium — a control that grants nothing is worse than one that does not exist, because it is issued in good faith |
 | NFR-S4 | S | The benchmark fixture asserts the NFR-S1 interactive target at **500 projects and 5,000 work items**, not the ~100k items NFR-S1 names. The reduction is deliberate and argued in `tests/test_benchmark.py` — seeding 100k rows per run would cost minutes and prove nothing about the *query* — but the requirement says "at the NFR-S1 envelope" and the fixture is an order of magnitude below it on one axis. It catches an accidental N+1; it does not evidence the envelope. | Low, and honestly documented in the test |
 
 Two further items are **vacuously satisfied** — nothing violates them
@@ -462,9 +502,30 @@ built" notes carry the reasoning.
 | FR-A5, `DESIGN.md` §4.2 | MCP tools `next`, `annotate` | Neither exists. `backlog` already answers "what next" in ranked order; `annotate` was `work.comment` under another name. |
 | NFR-O2 | "SBOM (syft) → cosign sign + attest" | Buildkit attestations (`sbom: true`, `provenance: true`) plus `cosign sign` over the digest. One attestation producer; a second would need a reason to disagree with the first. |
 | FR-U1 | Six views | Six views, five in the nav — the dependency graph is reached from a project page (`#/deps/<slug>`) rather than being a global entry, because a reference graph with no project selected has nothing to draw. |
+| FR-A1/A4, `DESIGN.md` §4.2 | REST with path parameters (`/projects/{id}/brief`, `POST /drift/{id}/accept`) | **No path parameters anywhere.** One pydantic model per operation serves all three transports, so an identifier travels as a query or body field. `DELETE` is unused: revoking a suppression is `POST /suppressions/revoke`, because it is an audited write needing a reason, and a reason does not fit a `DELETE`. Three verbs collapse into one `drift.resolve` carrying the resolution. |
 | FR-L3 | Delivered at M2 | Built at M6. The on-demand half existed from M2; the in-process schedule did not, and `DEPLOYMENT.md` §1 had described it since M4. Found by walking the must-have IDs for ones cited nowhere in `src/` — which is the check this section now institutionalises. |
 
-### 5.3 One process gap worth more than any single requirement
+### 5.3 Where the schema document had drifted
+
+`SCHEMA.md` was written before M0 and described the store as intended.
+Three corrections, all made in place:
+
+- **`project_dependencies` was listed and never built** — the table behind
+  FR-D2's `declared` reference kind (§5.1).
+- **`auth_decisions` (M4) and `writeback_actions` (M5) were built and never
+  documented.** Two tables holding, respectively, every authorization
+  decision and every attempted forge write — the stored evidence for FR-S5
+  and FR-B2 — were absent from the only document that claims to describe
+  the schema.
+- **§3.2 listed seven derived tables where two exist**, and §2.4/§4 read
+  answers off `latest_contract_checks` and `latest_forge_items`, which are
+  `kind` filters over `latest_observations` rather than tables.
+
+The direction is consistent and worth naming: the document tracked what
+each revision *removed* with care, and never recorded what implementation
+*added*. Nothing in CI reads this file.
+
+### 5.4 One process gap worth more than any single requirement
 
 **NFR-Q4's drift gate can be bypassed by a code-only change.** The
 regenerate-and-`git diff --exit-code` check that keeps `config.example.toml`
@@ -480,12 +541,20 @@ The fix is one step in `ci.yml`, in the job that already runs when
 gate failure, not a stage deliverable: NFR-Q4 says CI fails on drift, and
 for the paths most likely to cause drift, it does not.
 
-### 5.4 What was verified, and how
+### 5.5 What was verified, and how
 
 - Every FR/NFR ID was searched for across `src/` and `tests/`; IDs cited
   nowhere were then checked by hand against the delivered behaviour, since
   an uncited requirement is either unbuilt (FR-L3's failure mode at M6) or
   built without a thread back to why.
+- That pass alone was not enough, and a second one is what found FR-G1,
+  FR-D2 and FR-S3. Each of those is *heavily* cited, because the type it
+  names is real and well-commented; what is missing is the producer. So the
+  design documents were then read in the other direction — every table in
+  `SCHEMA.md` looked up in the DDL, every route in `DESIGN.md` §4.2 looked
+  up in the registry, every enum member traced to something that can emit
+  it. **A requirement that names a value is met only when something can
+  produce that value**, which is not a property citation-counting can see.
 - Claims that could be checked by running something were: the suite,
   the coverage gate, the CLI's verb list, the operation registry's 55
   operations, the generated OpenAPI document, the config generator.

@@ -1,4 +1,4 @@
-# Vogt — Deployment & Network Topologies (v0.2, revision r4)
+# Vogt — Deployment & Network Topologies (v0.2, revision r5)
 
 Status: **built** (M4; reconciled against the delivered v1 on 2026-08-12).
 Companion to `DESIGN.md` §7 and `SCHEMA.md`. Shaped heavily by cadastre's
@@ -221,7 +221,8 @@ beyond the tailnet.
 ### 2.3 From commit to running container
 
 ```text
-tag v* ──> GitHub Actions `release.yml`
+push to main ──> `build.yml`     → image tagged sha-<commit>, signed  (r5)
+tag v*       ──> `release.yml`   → semver + latest + wheel, signed
              runs-on: [self-hosted, node-b, linux, x64, docker, publish]
              build → run the image → push GHCR (buildx SBOM + provenance
              attestations) → keyless cosign sign over the digest
@@ -230,16 +231,23 @@ tag v* ──> GitHub Actions `release.yml`
              └── periphery clones ops, compose pull/up on Node B
 ```
 
+Either path produces a signed, digest-addressable image; **neither
+deploys**. The digest a release publishes and the digest a merge publishes
+are pinned the same way, which is the point of r5 — a fix reaches production
+without a version number being invented to carry it.
+
 Rules this flow obeys:
 
 - **Never `ssh … docker compose up -d`.** Desired state is the ops compose;
   Komodo is the only thing that applies it. Deployed containers are never
   hand-edited.
-- **Publish is automatic on a tag; deploy is a separate, deliberate act.**
-  A push to `main` can never publish an image (NFR-C3), and publishing an
-  image does not move production. Cadastre works this way, and the digest
-  bump in ops is the human-or-agent decision point. Automating the bump
-  via `ops/scripts/komodo-deploy.sh` stays available and is not v1 scope.
+- **Publishing is automatic; deploying is a separate, deliberate act.**
+  *(revised r5)* A push to `main` publishes a commit image and a tag
+  publishes a release; **neither moves production**. What a merge still
+  cannot do is cut a release — no semver tag, no `latest`, no wheel — and
+  what nothing in CI can do is deploy (NFR-D10). The digest bump in ops
+  stays the human-or-agent decision point. Automating it via
+  `ops/scripts/komodo-deploy.sh` remains available and is not v1 scope.
 - **Runners are self-hosted, always.** `runs-on: ubuntu-latest` is
   prohibited estate-wide; the repository must be added to the
   `public-node-b` runner group **before** its first workflow exists, or CI
