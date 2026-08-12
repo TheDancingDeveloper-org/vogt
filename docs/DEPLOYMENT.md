@@ -89,7 +89,7 @@ GitHub  <───outbound only─── collectors (optional adapter; no inboun
 | TLS name | `winrarhost.tailc7d3c.ts.net` (Tailscale-issued Let's Encrypt) |
 | App data | named volume `vogt-komodo-data` → `/var/lib/vogt` |
 | Operator material | `/mnt/2tnvme/docker/volumes/vogt/{tls,auth}`, mounted `:ro` |
-| Estate | `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` → `/home/sprooty/Working`, writable, as uid 1000 |
+| Estate | `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` → `/home/sprooty/Working`, writable, as `VOGT_UID` (1000) |
 
 `personal/` rather than `prod/` because this is home-homelab infrastructure
 on Node B, matching `personal/cadastre` — the ops repo's top-level
@@ -131,41 +131,41 @@ double-gated (FR-S4), `serve --read-only` refuses every write whatever scope
 a token holds, and each one lands in the audit log with the reason its
 author gave.
 
-**The container runs as uid 1000 — the uid that owns the estate.**
+**The container runs as uid 1000 — and the uid is a deploy-time value.**
 
-This was uid `10001` with `group_add: [1000]`, on the reasoning that a
-service should not run as a human's uid. That reasoning did not survive the
-first sweep. The workspace is written with umask 077, so it is mode 700/600
-throughout, and a supplementary group buys nothing against `rwx------`:
-`git-local` failed outright with `Permission denied` on `.git`, and every
-other collector returned nothing — which renders as an empty view, not as
-"could not look" (FR-O4, arriving through the filesystem).
+Which uid is right depends on who owns the estate being observed, which only
+the host knows. So it lives in the compose file as `${VOGT_UID:-1000}`, and
+changing it must never require a release. That matters more the moment
+anyone else self-hosts this: their uid is not ours, and an image that has
+decided the answer is an image they cannot run.
 
-The alternative was `chmod -R g+rX` across the whole estate. That is a wider
-and far more permanent change to a developer's tree, made to preserve a uid
-boundary that the shared bind mount had already dissolved: a container that
-can read every file you own is not meaningfully contained by running under a
-different number.
+The obstacle is Docker rather than policy. A fresh named volume is seeded
+from the ownership of `/var/lib/vogt` *in the image*, so a data directory
+owned by one specific uid is unwritable by any other — and it fails on
+volume *recreation*, which usually means during a restore. The image
+therefore owns that directory `root:0` and makes it group-writable, and runs
+with gid 0. Deployers set `user: "<their-uid>:0"` and rebuild nothing. The
+gid is plumbing; the uid is the only part that has to match the host.
 
-What actually does the containing is unchanged, and none of it is the uid:
-a `read_only` root filesystem, `cap_drop: [ALL]`, `no-new-privileges`,
+On Node B that uid is 1000, because MyDevEnv2 owns the workspace as 1000.
+
+It began as `10001` with `group_add: [1000]`, on the reasoning that a service
+should not run as a human's uid. The first sweep settled it. The workspace is
+written with umask 077 — mode 700/600 throughout — and a supplementary group
+buys nothing against `rwx------`: `git-local` failed with `Permission denied`
+on `.git`, and every other collector returned nothing. Nothing is what an
+empty view looks like, so the instance would have reported a clean estate it
+had never read (FR-O4, arriving through the filesystem).
+
+The alternative was `chmod -R g+rX` across the whole estate — a wider and far
+more permanent change to a developer's tree, made to preserve a uid boundary
+the shared bind mount had already dissolved. A container that can read every
+file you own is not contained by running under a different number.
+
+What actually does the containing is unchanged, and none of it is the uid: a
+`read_only` root filesystem, `cap_drop: [ALL]`, `no-new-privileges`,
 tailnet-only exposure, scoped bearer tokens, double-gated writes, and an
 audit row carrying a reason for every one.
-
-The uid has to agree in three places, and a mismatch does not fail loudly —
-it fails as a permission error inside a collector, reported as an empty
-result:
-
-| Where | Value |
-|---|---|
-| Image (`USER`, and `/var/lib/vogt` ownership) | `1000:1000` |
-| Compose `user:` | `1000:1000` |
-| TLS key mode | `0640 root:1000` |
-
-The image side matters beyond the first deploy: Docker seeds a fresh named
-volume from the image directory's ownership, so an image built at one uid
-and run at another survives until the volume is recreated — which is
-typically during a restore, the worst moment to discover it.
 
 **Exposure is a tailnet allocation, not an ingress decision.** The
 published port binds `100.92.54.45`, so it publishes nothing to the LAN or
@@ -189,7 +189,7 @@ stack environment — see §4.1, which is the rule this replaces.
 **Container shape** (following the cadastre stack, which is the hardened
 precedent on this host):
 
-- non-root (`user: "1000:1000"`), `read_only: true` root filesystem,
+- non-root (`user: "${VOGT_UID:-1000}:0"`), `read_only: true` root filesystem,
   `tmpfs` for `/tmp`, `security_opt: [no-new-privileges:true]`,
   `cap_drop: [ALL]`.
 - Stateful data on a **named volume**; operator-owned material (TLS key
@@ -197,7 +197,7 @@ precedent on this host):
   `./relative` bind mount for state — Komodo clones stack directories to
   fresh paths on every deploy, so a relative mount silently points at a
   new empty directory.
-- TLS key mode `0640 root:1000`, so only this container's uid can read
+- TLS key mode `0640 root:0`, so only this container can read
   it (FR-S7: tokens by file reference, never argv or URL).
 - `healthcheck` hits `/health/ready` over plain HTTP (§4.4).
 

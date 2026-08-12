@@ -59,6 +59,11 @@ services:
       # Absent by default: no forge adapter, and forge subjects read as
       # "not collected" rather than absent (NFR-PO1).
       VOGT_GITHUB_TOKEN_FILE: "${VOGT_GITHUB_TOKEN_FILE:-}"
+      # Keeps the local principal readable when `user:` is overridden to a uid
+      # with no passwd entry in the image. Cosmetic: provenance for anything
+      # arriving over the network comes from the token, never from this
+      # (FR-S2).
+      USER: vogt
 
     ports:
       # Bound to Node B's Tailscale address, never 0.0.0.0: this publishes
@@ -71,7 +76,9 @@ services:
     volumes:
       - vogt-komodo-data:/var/lib/vogt
       # Operator-owned material: absolute paths, read-only. The TLS key is
-      # mode 0640 root:1000 so only this container's uid can read it (FR-S7).
+      # mode 0640 root:0 so only this container can read it (FR-S7) — group
+      # 0, matching the gid the container runs with, so it stays correct when
+      # the uid above changes.
       - "${VOGT_TLS_DIR:-/mnt/2tnvme/docker/volumes/vogt/tls}:/etc/vogt/tls:ro"
       - "${VOGT_AUTH_DIR:-/mnt/2tnvme/docker/volumes/vogt/auth}:/etc/vogt/auth:ro"
       # The estate Vogt observes: the same host directory MyDevEnv2 develops
@@ -103,26 +110,30 @@ services:
       # reason its author gave.
       - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working"
 
-    # uid 1000 — the same uid that owns the estate on the host.
+    # The uid is a *deployment* value, not an image value (NFR-D2 in spirit:
+    # the image must not decide something only the host knows). Which uid is
+    # right depends on who owns the estate being observed, so it belongs here
+    # and changing it must never require a release.
     #
-    # This was 10001 with `group_add: [1000]`, on the reasoning that a service
-    # should not run as a human's uid. That reasoning did not survive contact
-    # with the filesystem: the workspace is written with umask 077, so it is
-    # mode 700/600 throughout, and a supplementary group buys nothing against
-    # `rwx------`. The first sweep proved it — `git-local` failed outright
-    # with `Permission denied` on `.git`, and every other collector returned
-    # nothing, which renders as an empty view rather than as "could not look".
+    # gid 0 is fixed rather than matched: the image's data directory is
+    # `root:0` and group-writable precisely so any uid can run it without a
+    # rebuild. The uid is what needs to match the host; the gid is plumbing.
+    #
+    # On Node B that uid is 1000, because MyDevEnv2 owns the workspace as
+    # 1000. This started as 10001 with `group_add: [1000]`, on the reasoning
+    # that a service should not run as a human's uid. The first sweep settled
+    # it: the workspace is written with umask 077, so it is mode 700/600
+    # throughout, and a supplementary group buys nothing against `rwx------`.
+    # `git-local` failed with `Permission denied` on `.git` and every other
+    # collector returned nothing — which renders as an empty view, not as
+    # "could not look".
     #
     # The alternative was `chmod -R g+rX` across the whole estate: a wider and
     # more permanent change to a developer's tree, made to preserve a uid
-    # boundary that the shared bind mount had already dissolved. A container
-    # that can read every file you own is not meaningfully contained by
-    # running under a different number.
-    #
-    # What still does the containing is unchanged and is where it belongs:
-    # `read_only` rootfs, `cap_drop: [ALL]`, `no-new-privileges`, tailnet-only
-    # exposure, scoped tokens, double-gated writes, and an audit row per write.
-    user: "1000:1000"
+    # boundary the shared bind mount had already dissolved. A container that
+    # can read every file you own is not contained by running under a
+    # different number. What does contain it is below and unchanged.
+    user: "${VOGT_UID:-1000}:0"
     read_only: true
     security_opt:
       - no-new-privileges:true
