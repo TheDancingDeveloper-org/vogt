@@ -33,6 +33,12 @@
     schedule: ["before 5am on monday"],
   },
 
+  // Base images move by digest, not by tag. A pinned digest is the only
+  // form of "which image is this" that a rebuild cannot silently change —
+  // and Vogt reports exactly this gap on other repositories (FR-D6), so
+  // leaving its own base floating would be hard to defend.
+  pinDigests: true,
+
   packageRules: [
     {
       matchManagers: ["github-actions"],
@@ -42,6 +48,13 @@
       // The dev toolchain moves together and is not shipped to anyone.
       matchDepTypes: ["dev"],
       groupName: "dev dependencies",
+    },
+    {
+      // Both stages of the Dockerfile use the same base, so a digest bump
+      // that lands on one and not the other would build the runtime from a
+      // different image than the build. One PR, both lines.
+      matchManagers: ["dockerfile"],
+      groupName: "container base image",
     },
   ],
 }

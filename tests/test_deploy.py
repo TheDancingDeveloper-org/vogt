@@ -172,3 +172,35 @@ def test_the_workspace_path_matches_where_projects_are_registered(
         "the estate must appear at the same absolute path it was registered "
         "under, or collectors silently report nothing"
     )
+
+
+def test_the_base_image_is_pinned_by_digest() -> None:
+    """A floating base tag makes the pinned image a pin of nothing.
+
+    `DEPLOYMENT.md` §2.2 requires Vogt's published image to be digest-pinned
+    in the ops repo. If the base it is assembled from can change under a tag,
+    that pin describes a build input that is not fixed. It is also the
+    `update_automation_gap` Vogt reports on other people's repositories
+    (FR-D6) — hard to justify raising for others and not for itself.
+    """
+    dockerfile = _without_comments(
+        (COMPOSE.parent.parent / "Dockerfile").read_text(encoding="utf-8")
+    )
+    froms = [
+        line.strip() for line in dockerfile.splitlines() if line.startswith("FROM ")
+    ]
+    assert froms, "the Dockerfile builds from something"
+    for line in froms:
+        assert "@sha256:" in line, f"base image is not digest-pinned: {line}"
+
+
+def test_both_build_stages_use_the_same_base() -> None:
+    """A digest bump that lands on one stage and not the other would build
+    the runtime from a different image than the one the venv was resolved
+    against — the kind of skew that only shows up at runtime."""
+    dockerfile = _without_comments(
+        (COMPOSE.parent.parent / "Dockerfile").read_text(encoding="utf-8")
+    )
+    digests = re.findall(r"FROM \S+@(sha256:[0-9a-f]{64})", dockerfile)
+    assert len(digests) >= 2
+    assert len(set(digests)) == 1, f"stages disagree on the base image: {set(digests)}"

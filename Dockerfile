@@ -8,7 +8,16 @@
 # `read_only`, `cap_drop: [ALL]` and `no-new-privileges`; this side makes
 # those settings survivable.
 
-FROM python:3.13-slim AS build
+# Pinned by digest, not by tag. `DEPLOYMENT.md` §2.2 requires Vogt's own
+# published image to be digest-pinned in the ops repo; a floating base tag
+# would mean the thing that gets pinned is assembled from something that
+# is not. It is also the `update_automation_gap` this product reports on
+# other people's repositories (FR-D6) — hard to justify raising for others
+# while leaving it here.
+#
+# This is the multi-arch index digest for `python:3.13-slim`, so it still
+# resolves per-platform. Renovate keeps it current (`pinDigests: true`).
+FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS build
 
 # uv resolves and installs from the committed lockfile, so the image contains
 # exactly what CI tested (NFR-Q5).
@@ -30,7 +39,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
 
-FROM python:3.13-slim AS runtime
+FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS runtime
 
 LABEL org.opencontainers.image.title="vogt" \
       org.opencontainers.image.description="A product development environment for the AI era" \
