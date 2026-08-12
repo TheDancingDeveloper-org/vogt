@@ -7,6 +7,8 @@ pub mod assistant;
 pub mod assistant_api;
 pub mod auth;
 pub mod config;
+pub mod contextkeeper;
+pub mod contextkeeper_api;
 pub mod error;
 pub mod events;
 pub mod files;

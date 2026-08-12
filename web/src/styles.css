@@ -3245,3 +3245,104 @@ textarea {
   cursor: col-resize;
   user-select: none;
 }
+
+/* ContextKeeper continuity: protection state on a row, and the recovery panel.
+   The dot is deliberately quiet — protection is the normal state, and only a
+   pending recovery earns attention. */
+.continuity-dot {
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--activity-idle);
+}
+.continuity-dot.protected {
+  color: var(--activity-done);
+}
+.continuity-dot.recovering {
+  color: var(--activity-running);
+}
+.continuity-dot.unprotected {
+  color: var(--activity-idle);
+  opacity: 0.5;
+}
+
+.continuity-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--bd);
+  background: var(--bg-elev);
+  max-height: 55%;
+  overflow-y: auto;
+}
+.continuity-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.continuity-badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  border: 1px solid var(--bd-strong);
+  color: var(--fg-muted);
+}
+.continuity-badge.protected {
+  color: var(--activity-done);
+  border-color: var(--activity-done);
+}
+.continuity-badge.recovering {
+  color: var(--activity-running);
+  border-color: var(--activity-running);
+}
+.continuity-meta,
+.continuity-empty,
+.continuity-work-title {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.continuity-error {
+  color: var(--activity-errored);
+  font-size: 13px;
+  margin: 0;
+}
+.continuity-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.continuity-actions button.primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.continuity-rung {
+  color: var(--fg-muted);
+}
+.continuity-preview-title {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.continuity-bundle,
+.continuity-manual pre {
+  max-height: 240px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.continuity-work {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.continuity-attempt {
+  text-align: left;
+  font-size: 12px;
+}

@@ -61,6 +61,60 @@ impl SessionTemplate {
                 match_path_prefixes: vec![],
                 tags: vec!["rust".to_string()],
             },
+            // Agent CLIs, wrapped in the credential broker explicitly.
+            // Automatic agent-auth wraps only sessions created *without* a
+            // command, so a template that supplies one must opt in itself or
+            // the provider starts with no brokered credentials.
+            SessionTemplate {
+                name: "Claude Code (protected)".to_string(),
+                description: "Claude Code through agent-auth, captured by ContextKeeper"
+                    .to_string(),
+                command: Some(vec![
+                    "mydevenv2-agent-auth".to_string(),
+                    "run".to_string(),
+                    "--".to_string(),
+                    "claude".to_string(),
+                ]),
+                cwd: None,
+                env: vec![],
+                default_name: Some("{repo_name}-claude-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["agent".to_string(), "claude".to_string()],
+            },
+            SessionTemplate {
+                name: "Codex (protected)".to_string(),
+                description: "Codex CLI through agent-auth, captured by ContextKeeper".to_string(),
+                command: Some(vec![
+                    "mydevenv2-agent-auth".to_string(),
+                    "run".to_string(),
+                    "--".to_string(),
+                    "codex".to_string(),
+                ]),
+                cwd: None,
+                env: vec![],
+                default_name: Some("{repo_name}-codex-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["agent".to_string(), "codex".to_string()],
+            },
+            SessionTemplate {
+                name: "OpenCode (protected)".to_string(),
+                description: "OpenCode through agent-auth; capture is the sanitized export"
+                    .to_string(),
+                command: Some(vec![
+                    "mydevenv2-agent-auth".to_string(),
+                    "run".to_string(),
+                    "--".to_string(),
+                    "opencode".to_string(),
+                ]),
+                cwd: None,
+                env: vec![],
+                default_name: Some("{repo_name}-opencode-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["agent".to_string(), "opencode".to_string()],
+            },
             SessionTemplate {
                 name: "Python Env".to_string(),
                 description: "Python development environment".to_string(),
@@ -136,6 +190,12 @@ pub struct Config {
     pub assistant_max_tool_calls: u32,
     /// Optional `reasoning_effort` forwarded to the backend (e.g. "minimal").
     pub assistant_reasoning_effort: Option<String>,
+    /// Base URL of the ContextKeeper sidecar. None disables every continuity
+    /// surface: terminals still work and simply read as unprotected.
+    pub contextkeeper_url: Option<String>,
+    /// ContextKeeper's control token. Server-side only — the browser talks to
+    /// same-origin MyDevEnv2 routes and never holds this.
+    pub contextkeeper_token: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -164,6 +224,8 @@ struct FileConfig {
     assistant_auto_type: Option<bool>,
     assistant_max_tool_calls: Option<u32>,
     assistant_reasoning_effort: Option<String>,
+    contextkeeper_url: Option<String>,
+    contextkeeper_token: Option<String>,
 }
 
 pub fn load(
@@ -309,6 +371,17 @@ pub fn load(
         assistant_reasoning_effort: from_file
             .assistant_reasoning_effort
             .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_REASONING_EFFORT").ok())
+            .filter(|s| !s.trim().is_empty()),
+        // Unprefixed on purpose: these are ContextKeeper's own variable names,
+        // and the same two values configure its CLI and hooks inside the
+        // container. One name for one credential.
+        contextkeeper_url: from_file
+            .contextkeeper_url
+            .or_else(|| std::env::var("CONTEXTKEEPER_URL").ok())
+            .filter(|s| !s.trim().is_empty()),
+        contextkeeper_token: from_file
+            .contextkeeper_token
+            .or_else(|| std::env::var("CONTEXTKEEPER_API_TOKEN").ok())
             .filter(|s| !s.trim().is_empty()),
     })
 }
