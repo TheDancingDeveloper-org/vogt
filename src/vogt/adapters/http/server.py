@@ -14,6 +14,8 @@ certificate gains nothing from being fronted.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,10 +23,11 @@ from fastapi import FastAPI, Request
 
 from vogt.adapters.http.app import API_PREFIX, build_app
 from vogt.adapters.http.health import ServerInfo, add_health_routes
+from vogt.adapters.http.scheduler import CollectorSchedule
 from vogt.adapters.mcp.http import MCP_PATH, add_mcp_route
 from vogt.application.context import AppContext, build_context
 from vogt.application.services.auth import Authenticated, authenticate, local
-from vogt.config import VogtConfig
+from vogt.config import VogtConfig, load_config
 from vogt.core.principal import Principal
 from vogt.errors import InvalidRequest
 from vogt.registry import OperationRegistry, default_registry
@@ -46,6 +49,10 @@ class ServeOptions:
     tls_key: Path | None = None
     require_auth: bool = True
     writes_enabled: bool = True
+    #: Collect in the background while serving (FR-L3). The interval itself
+    #: is configuration; this is the switch, so `--no-schedule` can turn it
+    #: off for a read-only or diagnostic run without editing config.
+    schedule_collectors: bool = True
 
     def validate(self) -> None:
         if not self.host.strip():
@@ -73,10 +80,37 @@ def build_server(
     """Assemble the one application that serves everything."""
     options.validate()
     active_registry = registry if registry is not None else default_registry()
-    resolved_config = config
+    # Resolved here rather than left to each `build_context` call, because the
+    # schedule needs to read its interval before any request arrives.
+    resolved_config = config if config is not None else load_config()
 
     def context(principal: Principal | None = None) -> AppContext:
         return build_context(config=resolved_config, principal=principal)
+
+    #: A scheduled sweep has no human behind it. Attributing it to whoever
+    #: started the process would put that person's name on evidence they
+    #: never asked for, and provenance that says something untrue is worse
+    #: than provenance that says "a machine did this".
+    scheduler_principal = Principal(
+        identity_ref="service:vogt-scheduler",
+        kind="agent",
+        display_name="collector schedule",
+    )
+    schedule = CollectorSchedule(
+        lambda: context(scheduler_principal),
+        interval_seconds=(
+            resolved_config.sweep_interval_seconds if options.schedule_collectors else 0
+        ),
+    )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        del app
+        await schedule.start()
+        try:
+            yield
+        finally:
+            await schedule.stop()
 
     def resolve(request: Request) -> tuple[AppContext, Authenticated]:
         """Derive the principal from authentication only (FR-S2).
@@ -110,7 +144,11 @@ def build_server(
         context_factory=context,
         authorize_request=None if not options.require_auth else resolve,
         writes_enabled=options.writes_enabled,
+        lifespan=lifespan,
     )
+    # Reachable for tests and for a future readiness field, without making
+    # the schedule a global.
+    app.state.collector_schedule = schedule
     add_health_routes(
         app,
         context_factory=context,

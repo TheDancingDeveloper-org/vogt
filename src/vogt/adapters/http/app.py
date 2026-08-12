@@ -25,6 +25,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.types import Lifespan
 
 from vogt import __version__
 from vogt.adapters.http.gui import mount_gui
@@ -49,6 +50,7 @@ def build_app(
     authorize_request: RequestResolver | None = None,
     writes_enabled: bool = True,
     gui: bool = True,
+    lifespan: Lifespan[Any] | None = None,
 ) -> FastAPI:
     """Build the FastAPI application for one instance.
 
@@ -66,6 +68,11 @@ def build_app(
     app = FastAPI(
         title="Vogt",
         version=__version__,
+        # `serve` passes one, to run the collector schedule (FR-L3) for
+        # exactly as long as the listener is up. Absent everywhere else: a
+        # library caller building the app should not acquire a background
+        # writer by doing so.
+        lifespan=lifespan,
         description=(
             "Every capability is available here, on the CLI, and over MCP — "
             "all three generated from one operation registry."

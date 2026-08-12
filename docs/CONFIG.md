@@ -17,6 +17,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
+| `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
 
 ## What each setting decides
@@ -44,6 +45,10 @@ How long observation *history* is kept (NFR-I5). The newest observation per subj
 ### `github_token_file`
 
 Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing (FR-S7).
+
+### `sweep_interval_seconds`
+
+How often `serve` runs collectors in the background (FR-L3). Zero disables the schedule, leaving sweeps on-demand only. A default rather than a required value because an instance that never looks is the failure this product exists to prevent: stale evidence and no evidence are indistinguishable from the outside, so the safe default is to keep looking.
 
 ### `verify_horizon_hours`
 

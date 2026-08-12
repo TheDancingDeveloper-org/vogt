@@ -170,6 +170,19 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    sweep_interval_seconds: int = Field(
+        default=900,
+        ge=0,
+        description=(
+            "How often `serve` runs collectors in the background (FR-L3). "
+            "Zero disables the schedule, leaving sweeps on-demand only. A "
+            "default rather than a required value because an instance that "
+            "never looks is the failure this product exists to prevent: "
+            "stale evidence and no evidence are indistinguishable from the "
+            "outside, so the safe default is to keep looking."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     verify_horizon_hours: int = Field(
         default=24,
         ge=1,
