@@ -17,7 +17,8 @@ One server process serves **everything on one port**:
 
 ```
 vogt serve
-  ├── /            GUI (static SPA)
+  ├── /            redirect to /ui/
+  ├── /ui/...      GUI (static assets; every answer comes from /api)
   ├── /api/...     REST (FastAPI, OpenAPI at /api/docs)
   ├── /mcp         MCP streamable HTTP transport
   ├── /health/live, /health/ready, /version

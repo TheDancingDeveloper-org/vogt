@@ -27,6 +27,7 @@ from vogt.application.models import (
     SweepResult,
 )
 from vogt.application.services import _resolve
+from vogt.application.services.views import freshness_of
 from vogt.collectors import CollectorContext, CollectorRegistry, Sweeper
 from vogt.collectors.dep_refs import KIND_DEP_REF
 from vogt.core.entities import DepRef, Project
@@ -314,7 +315,12 @@ def observations(ctx: AppContext, params: ObservationsParams) -> ObservationsRes
 def deps(ctx: AppContext, params: DepsParams) -> DepsResult:
     """References out of a project, and — reversed — into it (FR-D4)."""
     if not ctx.observed.has_evidence_tables():
-        return DepsResult(project=params.project, references_out=[], referenced_by=[])
+        return DepsResult(
+            project=params.project,
+            references_out=[],
+            referenced_by=[],
+            freshness=freshness_of(ctx),
+        )
 
     with ctx.declared.read() as view:
         project = _resolve.project(view, params.project)
@@ -325,6 +331,7 @@ def deps(ctx: AppContext, params: DepsParams) -> DepsResult:
             references_out=[_named(view, ref) for ref in out],
             referenced_by=[_named(view, ref) for ref in incoming],
             unresolved=sum(1 for ref in out if ref.to_project_id is None),
+            freshness=freshness_of(ctx),
         )
 
 

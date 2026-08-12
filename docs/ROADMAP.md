@@ -386,3 +386,43 @@ port.
 
 **Demo**: every M2/M3/M5 demo step repeated through the browser, and
 nothing the GUI does is absent from the API (parity rule holds).
+
+### M6 as built — one deviation and three findings
+
+**Deviation: buildless ES modules, not a React SPA.** `DESIGN.md` §10 named
+React. The reason for not using it is packaging rather than taste: Vogt
+installs as a Python wheel, so a framework build means either a Node
+toolchain present at wheel-build time — `pip install vogt` requiring npm —
+or committed bundler output, which is a generated artefact in version
+control that nothing verifies. Neither is worth it for six views over an API
+that already exists. What the design actually required is unchanged: the GUI
+consumes only the public REST surface, adds no capability of its own, and is
+served from the same single port. `test_the_gui_needs_no_build_step` fails if
+a build step ever appears, so the deviation has to be re-argued rather than
+quietly reversed.
+
+1. **FR-U2 was unsatisfiable as specified.** "Trust and freshness on every
+   aggregated view" could not be met for the drift inbox or the dependency
+   graph, because `DriftListResult` and `DepsResult` carried no freshness.
+   The GUI could have computed it client-side — which would have broken the
+   parity rule from the other direction, the GUI doing something the API
+   cannot. Fixed in the API. The inbox is where it matters most: an empty
+   inbox is reassuring only if something has looked recently, and without
+   freshness a collector that stopped running reads as "no drift".
+2. **The parity rule is checked against the shipped source, not the
+   intent.** A test extracts every `/api/...` literal from `app.js` and
+   resolves it against the operation registry, asserts there is exactly one
+   `fetch(` in the file, and asserts every operation the GUI names is
+   non-mutating. A view that grows its own endpoint fails at the moment it
+   is written.
+3. **The comment-reading bug appeared for the fourth time.** The check that
+   the GUI uses `sessionStorage` rather than `localStorage` failed on the
+   comment explaining why. Same shape as the marker collector matching prose
+   about markers and the deploy test reading its own comment: a comment
+   explaining a rule contains the words the rule forbids. Every
+   source-reading assertion in `test_gui.py` now goes through one
+   comment-stripping helper.
+
+The GUI is read-only. Resolving drift, transitioning work and setting a
+write-back policy all require a reason its author typed, and a button cannot
+type one — "accepted via GUI" is not a reason (FR-W1).

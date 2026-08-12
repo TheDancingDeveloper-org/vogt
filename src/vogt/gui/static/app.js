@@ -1,0 +1,453 @@
+// The GUI, consuming only the public REST API (FR-U1, FR-U2).
+//
+// Every request in this file goes through `call()`, and `call()` builds its
+// URL from `API_BASE` and one entry in `ROUTES`. That is not a style rule: it
+// is what makes "nothing the GUI does is absent from the API" checkable. A
+// test reads this file and asserts every `/api/...` literal in it resolves to
+// a registered operation, so a view that quietly grew its own endpoint fails
+// the build rather than the review.
+//
+// Buildless on purpose — see the package docstring in `vogt/gui/__init__.py`.
+
+const API_BASE = "/api";
+
+// One entry per operation this GUI reads. Names match the operation registry.
+const ROUTES = {
+  status: "/api/status",
+  "project.list": "/api/projects",
+  "project.brief": "/api/projects/brief",
+  backlog: "/api/backlog",
+  bugs: "/api/bugs",
+  "drift.list": "/api/drift",
+  deps: "/api/deps",
+  "audit.list": "/api/audit",
+};
+
+const TOKEN_KEY = "vogt.token";
+
+// -- transport --------------------------------------------------------------
+
+/** Call one registered operation. The only way this GUI reaches the server. */
+async function call(operation, params = {}) {
+  const path = ROUTES[operation];
+  if (!path) throw new Error(`no route for ${operation}`);
+  if (!path.startsWith(API_BASE)) throw new Error(`${path} is not under the API`);
+
+  const url = new URL(path, window.location.origin);
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") continue;
+    for (const one of Array.isArray(value) ? value : [value]) {
+      url.searchParams.append(key, one);
+    }
+  }
+
+  const headers = { accept: "application/json" };
+  const token = sessionStorage.getItem(TOKEN_KEY);
+  // Sent as a header, never in the URL: a token in a query string ends up in
+  // logs, proxies and browser history (FR-S7).
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  const response = await fetch(url, { headers });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = body && body.error ? body.error : {};
+    throw new ApiError(
+      error.message || `${operation} failed (${response.status})`,
+      response.status,
+      error.code,
+    );
+  }
+  return body;
+}
+
+class ApiError extends Error {
+  constructor(message, status, code) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+// -- rendering helpers ------------------------------------------------------
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value === undefined || value === null || value === false) continue;
+    if (key === "class") node.className = value;
+    else if (key === "text") node.textContent = value;
+    else node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child === null || child === undefined || child === false) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(child));
+  }
+  return node;
+}
+
+/**
+ * Freshness, on every aggregating view (FR-U2, FR-V4).
+ *
+ * Rendered even when everything is fine, because the value of the line is
+ * that an empty answer and a stale answer stop looking alike. An inbox with
+ * no drift in it is reassuring only if something has looked recently.
+ */
+function freshness(state) {
+  if (!state) return el("p", { class: "freshness unknown" }, "freshness: not reported");
+  const status = state.status || "never_swept";
+  const parts = [];
+  if (status === "never_swept") {
+    parts.push("nothing has been swept yet — this is 'not collected', not 'nothing found'");
+  } else {
+    parts.push(`evidence is ${describeAge(state.age_seconds)} old at its oldest`);
+    if (status === "partial") parts.push("at least one collector did not complete");
+  }
+  if (state.detail) parts.push(state.detail);
+
+  const banner = el("p", { class: `freshness ${status}` }, parts.join(" · "));
+  const collectors = Object.entries(state.collectors || {});
+  if (collectors.length) {
+    banner.append(
+      el(
+        "span",
+        { class: "collectors" },
+        collectors.map(([name, age]) => el("span", { class: "collector" }, `${name}: ${age}`)),
+      ),
+    );
+  }
+  return banner;
+}
+
+function describeAge(seconds) {
+  if (seconds === null || seconds === undefined) return "an unknown time";
+  if (seconds < 90) return `${seconds}s`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 172800) return `${Math.round(seconds / 3600)}h`;
+  return `${Math.round(seconds / 86400)}d`;
+}
+
+/** Trust state, on every item that has one (FR-U2, FR-D1). */
+function trust(state) {
+  const value = state || "unverified";
+  return el("span", { class: `trust trust-${value}`, title: `trust: ${value}` }, value);
+}
+
+function table(headings, rows) {
+  return el(
+    "table",
+    {},
+    el("thead", {}, el("tr", {}, headings.map((h) => el("th", { text: h })))),
+    el("tbody", {}, rows.length ? rows : el("tr", {}, el("td", { colspan: headings.length }, "nothing here"))),
+  );
+}
+
+function link(hash, label) {
+  return el("a", { href: `#${hash}` }, label);
+}
+
+function when(value) {
+  if (!value) return "—";
+  const at = new Date(value);
+  return Number.isNaN(at.valueOf()) ? String(value) : at.toISOString().replace("T", " ").slice(0, 19);
+}
+
+function counts(map) {
+  const entries = Object.entries(map || {});
+  if (!entries.length) return "—";
+  return entries.map(([key, n]) => `${key}: ${n}`).join(", ");
+}
+
+// -- views ------------------------------------------------------------------
+
+async function projectsView() {
+  const [listed, status] = await Promise.all([call("project.list", { limit: 200 }), call("status")]);
+  const projects = listed.projects || [];
+  return el(
+    "section",
+    {},
+    el("h2", {}, "Projects"),
+    el(
+      "p",
+      { class: "muted" },
+      `instance ${status.instance_id} · revision ${status.revision} · ${projects.length} project(s)`,
+    ),
+    table(
+      ["Project", "Slug", "Repo", "Write-back"],
+      projects.map((project) =>
+        el(
+          "tr",
+          {},
+          el("td", {}, link(`/project/${project.slug}`, project.name)),
+          el("td", { class: "mono" }, project.slug),
+          el("td", {}, project.repo_url ? el("a", { href: project.repo_url }, project.repo_url) : "—"),
+          el("td", {}, project.write_back || "none"),
+        ),
+      ),
+    ),
+  );
+}
+
+async function projectView(slug) {
+  const brief = await call("project.brief", { slug });
+  const project = brief.project || {};
+  return el(
+    "section",
+    {},
+    el("h2", {}, project.name || slug),
+    freshness(brief.freshness),
+    el(
+      "dl",
+      { class: "facts" },
+      fact("Open work", String(brief.open_work)),
+      fact("Open bugs", String(brief.open_bugs)),
+      fact("By state", counts(brief.by_state)),
+      fact("By kind", counts(brief.by_kind)),
+      fact("Declared version", brief.declared_version || "not declared"),
+      fact("Observed version", brief.observed_version || "not collected"),
+      fact("Versions agree", brief.version_matches === null ? "not collected" : String(brief.version_matches)),
+      fact("Compliance", `${brief.compliance_status} (checked ${when(brief.compliance_checked_at)})`),
+      fact("CI", (brief.ci_status && brief.ci_status.status) || "not collected"),
+    ),
+    el("h3", {}, "Top backlog"),
+    itemsTable(brief.top_backlog || []),
+    el("p", {}, link(`/deps/${slug}`, "dependency graph →"), " ", link(`/drift?project=${slug}`, "drift →")),
+  );
+}
+
+function fact(term, value) {
+  return el("div", { class: "fact" }, el("dt", { text: term }), el("dd", { text: value }));
+}
+
+function itemsTable(items) {
+  return table(
+    ["Ref", "Title", "Kind", "State", "Pri", "Trust", "Project", "Updated"],
+    items.map((item) =>
+      el(
+        "tr",
+        {},
+        el("td", { class: "mono" }, item.source_url ? el("a", { href: item.source_url }, item.ref) : item.ref),
+        el("td", {}, item.title),
+        el("td", {}, item.kind),
+        el("td", {}, item.state),
+        el("td", {}, item.priority),
+        el("td", {}, trust(item.trust_state)),
+        el("td", {}, item.project_slug ? link(`/project/${item.project_slug}`, item.project_slug) : "—"),
+        el("td", {}, when(item.updated_at)),
+      ),
+    ),
+  );
+}
+
+async function rankedView(operation, heading, query) {
+  const result = await call(operation, { limit: 100, ...query });
+  return el(
+    "section",
+    {},
+    el("h2", {}, heading),
+    freshness(result.freshness),
+    el(
+      "p",
+      { class: "muted" },
+      `${result.items.length} shown of ${result.total_considered} considered · ` +
+        `${result.declared} declared, ${result.observed} observed, ${result.suppressed} suppressed`,
+    ),
+    itemsTable(result.items || []),
+  );
+}
+
+async function driftView(query) {
+  const result = await call("drift.list", { limit: 100, status: "open", ...query });
+  const gated = result.human_gated || {};
+  return el(
+    "section",
+    {},
+    el("h2", {}, "Drift inbox"),
+    freshness(result.freshness),
+    table(
+      ["Kind", "Subject", "Status", "Proposed", "Raised", "Gate"],
+      (result.proposals || []).map((proposal) =>
+        el(
+          "tr",
+          {},
+          el("td", { class: "mono" }, proposal.kind),
+          el("td", {}, proposal.subject_key || proposal.entity_id || "—"),
+          el("td", {}, proposal.status),
+          el("td", { class: "mono small" }, JSON.stringify(proposal.proposed_change || {})),
+          el("td", {}, when(proposal.raised_at)),
+          // Why a human must answer this one, quoted from the API rather than
+          // restated here — two copies of a policy is one copy too many.
+          el("td", { class: "small" }, gated[proposal.kind] || "auto-acceptable"),
+        ),
+      ),
+    ),
+    // Read-only by design: resolving a proposal is a write, and every write
+    // carries a reason its author typed. A one-click "accept" in a browser is
+    // how reasons become "accepted via GUI", which is not a reason.
+    el(
+      "p",
+      { class: "muted" },
+      "Resolving a proposal is a write and needs a reason: ",
+      el("code", { text: "vogt drift resolve <id> --resolution accepted --reason '…'" }),
+    ),
+  );
+}
+
+async function depsView(slug) {
+  const result = await call("deps", { project: slug });
+  return el(
+    "section",
+    {},
+    el("h2", {}, `Dependencies · ${result.project}`),
+    freshness(result.freshness),
+    el("p", { class: "muted" }, `${result.unresolved} reference(s) point outside the estate`),
+    el("h3", {}, "References out"),
+    depsTable(result.references_out || []),
+    el("h3", {}, "Referenced by"),
+    depsTable(result.referenced_by || []),
+  );
+}
+
+function depsTable(refs) {
+  return table(
+    ["From", "To", "Ecosystem", "Constraint", "Resolved"],
+    refs.map((ref) =>
+      el(
+        "tr",
+        {},
+        el("td", {}, ref.from_slug ? link(`/project/${ref.from_slug}`, ref.from_slug) : "—"),
+        el("td", {}, ref.to_slug ? link(`/project/${ref.to_slug}`, ref.to_slug) : ref.name || "—"),
+        el("td", {}, ref.ecosystem || "—"),
+        el("td", { class: "mono" }, ref.constraint || "—"),
+        // An unresolved reference is a real answer: the thing is depended on
+        // and is not in the estate. Blank would read as a missing field.
+        el("td", {}, ref.to_project_id ? "in estate" : "outside the estate"),
+      ),
+    ),
+  );
+}
+
+async function auditView() {
+  const result = await call("audit.list", { limit: 200 });
+  return el(
+    "section",
+    {},
+    el("h2", {}, "Audit"),
+    el("p", { class: "muted" }, "Every write, with the reason its author gave."),
+    table(
+      ["At", "Operation", "Entity", "Actor", "Reason"],
+      (result.records || []).map((record) =>
+        el(
+          "tr",
+          {},
+          el("td", {}, when(record.at)),
+          el("td", { class: "mono" }, record.operation),
+          el("td", { class: "mono" }, `${record.entity_kind}:${record.entity_id}`),
+          el("td", {}, record.actor_id),
+          el("td", {}, record.reason),
+        ),
+      ),
+    ),
+  );
+}
+
+// -- routing ----------------------------------------------------------------
+
+const NAV = [
+  ["/projects", "Projects"],
+  ["/backlog", "Backlog"],
+  ["/bugs", "Bugs"],
+  ["/drift", "Drift"],
+  ["/audit", "Audit"],
+];
+
+function parse(hash) {
+  const [path, search] = (hash.replace(/^#/, "") || "/projects").split("?");
+  const parts = path.split("/").filter(Boolean);
+  return { parts, query: Object.fromEntries(new URLSearchParams(search || "")) };
+}
+
+async function render() {
+  const view = document.getElementById("view");
+  const { parts, query } = parse(window.location.hash);
+  view.replaceChildren(el("p", { class: "loading" }, "Loading…"));
+
+  try {
+    let section;
+    switch (parts[0]) {
+      case "project":
+        section = await projectView(parts[1]);
+        break;
+      case "backlog":
+        section = await rankedView("backlog", "Backlog", query);
+        break;
+      case "bugs":
+        section = await rankedView("bugs", "Bugs", query);
+        break;
+      case "drift":
+        section = await driftView(query);
+        break;
+      case "deps":
+        section = await depsView(parts[1]);
+        break;
+      case "audit":
+        section = await auditView();
+        break;
+      default:
+        section = await projectsView();
+    }
+    view.replaceChildren(section);
+  } catch (error) {
+    view.replaceChildren(errorView(error));
+  }
+
+  for (const anchor of document.querySelectorAll("#nav a")) {
+    anchor.classList.toggle("current", anchor.getAttribute("href") === `#/${parts[0] || "projects"}`);
+  }
+}
+
+function errorView(error) {
+  const needsToken = error instanceof ApiError && (error.status === 401 || error.status === 403);
+  return el(
+    "section",
+    { class: "error" },
+    el("h2", {}, needsToken ? "Not authorised" : "Something went wrong"),
+    el("p", {}, error.message),
+    needsToken
+      ? el("p", {}, "Set a bearer token with the ", el("b", {}, "token"), " button, then reload.")
+      : null,
+  );
+}
+
+function promptForToken() {
+  const current = sessionStorage.getItem(TOKEN_KEY) ? "(a token is set)" : "(none set)";
+  const entered = window.prompt(`Bearer token ${current}. Leave blank to clear.`, "");
+  if (entered === null) return;
+  // sessionStorage, not localStorage: the token goes away with the tab. A
+  // credential that outlives the session by default is a credential somebody
+  // forgets they granted.
+  if (entered) sessionStorage.setItem(TOKEN_KEY, entered);
+  else sessionStorage.removeItem(TOKEN_KEY);
+  render();
+}
+
+function start() {
+  const nav = document.getElementById("nav");
+  nav.replaceChildren(...NAV.map(([hash, label]) => link(hash, label)));
+  document.getElementById("token-button").addEventListener("click", promptForToken);
+  window.addEventListener("hashchange", render);
+
+  call("status")
+    .then((status) => {
+      document.getElementById("footer").replaceChildren(
+        el("span", {}, `vogt ${status.vogt_version} · schema ${status.declared_schema_version}`),
+        el("span", {}, `as ${status.principal}`),
+      );
+    })
+    .catch(() => {
+      document.getElementById("footer").replaceChildren(el("span", {}, "not connected"));
+    });
+
+  render();
+}
+
+start();
