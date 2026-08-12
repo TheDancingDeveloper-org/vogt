@@ -23,9 +23,15 @@ FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b
 # exactly what CI tested (NFR-Q5).
 COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
 
+# The venv is built at the path it will be *used* at, not at `/src/.venv`
+# and copied. A venv is not relocatable: its console scripts carry an
+# absolute shebang, so a venv built at /src/.venv and copied to /opt gives
+# `exec /opt/vogt/.venv/bin/vogt: no such file or directory` — an error that
+# names the script while actually meaning its interpreter is missing.
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=never
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/opt/vogt/.venv
 
 WORKDIR /src
 
@@ -53,7 +59,7 @@ RUN groupadd --gid 10001 vogt \
     && mkdir -p /var/lib/vogt \
     && chown 10001:10001 /var/lib/vogt
 
-COPY --from=build --chown=root:root /src/.venv /opt/vogt/.venv
+COPY --from=build --chown=root:root /opt/vogt/.venv /opt/vogt/.venv
 
 ENV PATH="/opt/vogt/.venv/bin:$PATH" \
     VOGT_DATA_DIR=/var/lib/vogt \

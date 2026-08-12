@@ -82,6 +82,34 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
 
+      # Built and *run* before it is pushed. v0.1.0 shipped an image whose
+      # entrypoint did not exist — the venv was built at one path and copied
+      # to another, so every container exited 255 in a restart loop. The
+      # build was green, the signature was valid, and the artefact had never
+      # been executed. A publish gate that only proves an image assembles
+      # proves the wrong thing.
+      - uses: docker/build-push-action@v6
+        id: candidate
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}:smoke-test
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: the image runs
+        env:
+          CANDIDATE: ${{ env.IMAGE }}:smoke-test
+        run: |
+          set -euo pipefail
+          # The entrypoint resolves and the interpreter behind it exists.
+          docker run --rm "$CANDIDATE" --version
+          # `serve` still refuses to invent a listen address (NFR-D2).
+          if docker run --rm "$CANDIDATE" serve 2>/dev/null; then
+            echo "serve started without being told where to listen" >&2
+            exit 1
+          fi
+          echo "image runs, and still refuses to guess an address"
+
       - uses: docker/build-push-action@v6
         id: push
         with:
