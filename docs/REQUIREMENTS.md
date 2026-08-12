@@ -1,8 +1,10 @@
 # Vogt — Requirements (draft v0.3)
 
-Status: **draft baseline, revision r4** (2026-08-12), distilled from
-`DESIGN.md`, `SCHEMA.md`, `DEPLOYMENT.md` and the originating product
-discussion.
+Status: **baseline, revision r4** (2026-08-12), distilled from `DESIGN.md`,
+`SCHEMA.md`, `DEPLOYMENT.md` and the originating product discussion.
+**v1 (M0–M6) is built**; §5 is the requirement-by-requirement verification
+of the delivered system against this document, including the four
+requirements that are not fully met.
 
 Priority key (MoSCoW): **M** = must have (v1 is not shippable without it) ·
 **S** = should have (v1 target, degradable) · **C** = could have (explicitly
@@ -311,7 +313,7 @@ by path or repository URL, and stops there.*
 |---|---|---|
 | NFR-C1 | Docs-only changes (`docs/**`, `design/**`, `**/*.md`) shall not trigger the full pipeline — docs lint/link/config-drift checks only. | M |
 | NFR-C2 | Mixed code+docs changes shall run the full pipeline; the docs path is never a bypass (trivially-succeeding gate job pattern for required checks). | M |
-| NFR-C3 | Releases (image build, SBOM, signing, publish) shall be tag-triggered only; a push to main shall never publish an image. | M |
+| NFR-C3 | *(revised r5)* **Releases** — a semver-tagged image, `latest`, the wheel, the SBOM attestation — shall be tag-triggered only; a push to main shall never cut a release. A push to main **may** publish a **commit-identified** image (`sha-<commit>`, signed, carrying no semver and never moving `latest`), because deploying a fix must not require inventing a version number for it. Deploying remains a separate act (NFR-D10). | M |
 | NFR-C4 | *(r4)* Every workflow job shall select a self-hosted runner explicitly (`runs-on: [self-hosted, node-b, linux, x64, …]`); GitHub-hosted runners and dynamic `runs-on` expressions shall not appear. The repository shall be added to the `public-node-b` runner group before its first workflow exists. Jobs needing a Docker daemon shall additionally request the `docker, publish` labels. | M |
 | NFR-C5 | *(r4)* Image signing shall be keyless (workflow OIDC identity via Fulcio/Rekor), so that no signing key exists to store or rotate and the signature binds to this repository and workflow. | M |
 
@@ -408,3 +410,88 @@ Named stretch goal, **not committed and not designed for**:
   change.
 - Revisions are numbered (r1, r2, …) and summarised at the head of this
   document.
+
+---
+
+## 5. Delivery verification (v1, 2026-08-12)
+
+M0–M6 are built; 480 tests pass at 88% coverage. This section is the audit
+of the *delivered* system against every requirement above — read against
+the source and the tests, not against the roadmap's claims. It exists
+because a requirements document that is never checked back against the
+build is a wish list, and because §4 makes each milestone name the IDs it
+delivers, which is a promise nobody had yet verified.
+
+**Delivered in full: 68 of 72 live functional requirements, and 30 of 34
+non-functional ones.** The exceptions are below, each with what is actually
+missing rather than a score. Withdrawn and deferred IDs (FR-G2, FR-G5–G10,
+FR-D7) are not counted; they are absences by decision (§3).
+
+### 5.1 Not fully delivered
+
+| ID | Pri | What is missing | Severity |
+|---|---|---|---|
+| FR-L1 | M | The CLI provides `init`, `status`, `serve`, `backup`, `restore`, `export`, `import` — **not `migrate`**. Migrations are applied by `init`, which is idempotent and brings an existing instance forward, so the capability exists under another name and no data is at risk locally. What is missing is the verb an operator would reach for, and the one the deployed stack needs (below). | Low alone; compounds NFR-I3 |
+| NFR-I3 | M | Migrations are forward-only ✅ and run under `migration_lock` ✅. They do **not gate readiness**: `/health/ready` reports the *applied* schema version without comparing it to the version the running image expects, and `serve` does not migrate. In the Node B topology (`command: serve`) an image carrying a new migration comes up, passes its healthcheck, and fails later on a missing table — as a SQL error at whatever touched it first, not as a red probe. See `DEPLOYMENT.md` §5. | **Highest of these** — it is the deploy path |
+| FR-S6 | M | The audit log is queryable by actor, operation and entity, but **not by time**: `ListAuditParams` carries `limit`, `actor_id`, `operation`, `entity_id` and no time bound. "What happened between Tuesday and Thursday" is the query an audit log exists to answer, and it is answerable today only by paging. | Medium |
+| NFR-S4 | S | The benchmark fixture asserts the NFR-S1 interactive target at **500 projects and 5,000 work items**, not the ~100k items NFR-S1 names. The reduction is deliberate and argued in `tests/test_benchmark.py` — seeding 100k rows per run would cost minutes and prove nothing about the *query* — but the requirement says "at the NFR-S1 envelope" and the fixture is an order of magnitude below it on one axis. It catches an accidental N+1; it does not evidence the envelope. | Low, and honestly documented in the test |
+
+Two further items are **vacuously satisfied** — nothing violates them
+because the thing they constrain was never built:
+
+- **NFR-D3** (client bootstrap reconciles endpoint *values*, not key
+  existence). Vogt ships no client-setup script. The rule binds the first
+  one written; `DEPLOYMENT.md` §4.2 carries the note.
+- **`DEPLOYMENT.md` §4.3's generated `CONNECTING.md`.** The server half
+  exists and is tested (`GET /connection-info`, and the bridge discovers
+  URL, path and protocol versions from it at startup); the generator that
+  writes the file does not. Not a numbered requirement — recorded so the
+  absence is visible.
+
+### 5.2 Delivered differently from the specification
+
+Each of these satisfies its requirement by a different mechanism than the
+design named. They are listed so that a reader comparing document to code
+does not mistake a decision for a defect; `ROADMAP.md`'s per-stage "as
+built" notes carry the reasoning.
+
+| Where | Specified | Built |
+|---|---|---|
+| FR-U1/U2, `DESIGN.md` §4 | React SPA | Buildless ES modules. A wheel that needs npm to build, or committed bundler output nothing verifies, was the cost; `test_the_gui_needs_no_build_step` fails if a build step appears. |
+| FR-D6, `SCHEMA.md` §3.2 | `latest_autoupdate_posture` and five other typed `latest_*` tables | `latest_observations` (generic) + `latest_dep_refs`. Posture is observation kind `posture` carrying three independent facts. Seven rebuild paths would have been seven places to drift. |
+| FR-A5, `DESIGN.md` §4.2 | MCP tools `next`, `annotate` | Neither exists. `backlog` already answers "what next" in ranked order; `annotate` was `work.comment` under another name. |
+| NFR-O2 | "SBOM (syft) → cosign sign + attest" | Buildkit attestations (`sbom: true`, `provenance: true`) plus `cosign sign` over the digest. One attestation producer; a second would need a reason to disagree with the first. |
+| FR-U1 | Six views | Six views, five in the nav — the dependency graph is reached from a project page (`#/deps/<slug>`) rather than being a global entry, because a reference graph with no project selected has nothing to draw. |
+| FR-L3 | Delivered at M2 | Built at M6. The on-demand half existed from M2; the in-process schedule did not, and `DEPLOYMENT.md` §1 had described it since M4. Found by walking the must-have IDs for ones cited nowhere in `src/` — which is the check this section now institutionalises. |
+
+### 5.3 One process gap worth more than any single requirement
+
+**NFR-Q4's drift gate can be bypassed by a code-only change.** The
+regenerate-and-`git diff --exit-code` check that keeps `config.example.toml`
+and `docs/CONFIG.md` honest lives only in `docs.yml`, which triggers on
+`docs/**`, `design/**` and `**/*.md`. A commit that adds a field to
+`src/vogt/config.py` and nothing else runs `ci.yml` alone — where the check
+does not exist — and lands with the generated artefacts stale. This was not
+found by reading the workflow: it was found by running the generator during
+this audit and watching it rewrite two committed files.
+
+The fix is one step in `ci.yml`, in the job that already runs when
+`src/**` changes. Recorded here rather than in `ROADMAP.md` because it is a
+gate failure, not a stage deliverable: NFR-Q4 says CI fails on drift, and
+for the paths most likely to cause drift, it does not.
+
+### 5.4 What was verified, and how
+
+- Every FR/NFR ID was searched for across `src/` and `tests/`; IDs cited
+  nowhere were then checked by hand against the delivered behaviour, since
+  an uncited requirement is either unbuilt (FR-L3's failure mode at M6) or
+  built without a thread back to why.
+- Claims that could be checked by running something were: the suite,
+  the coverage gate, the CLI's verb list, the operation registry's 55
+  operations, the generated OpenAPI document, the config generator.
+- Requirements whose subject is a *deployment* (NFR-D7–D10) are verified
+  against `deploy/personal-vogt.compose.yml` and `release.yml`, which is
+  where they are expressible. The stack is written, hardened and
+  port-allocated; its image reference is still a placeholder digest, so
+  nothing has been deployed from it — which is NFR-D10 working as intended,
+  not an omission.

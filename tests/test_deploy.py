@@ -162,15 +162,51 @@ def test_every_workflow_job_names_a_self_hosted_runner() -> None:
 
 
 def test_the_release_workflow_is_tag_only_and_signs_a_digest() -> None:
-    """NFR-C3, NFR-C5, NFR-D10."""
+    """NFR-C3 (r5), NFR-C5, NFR-D10.
+
+    A *release* is tag-triggered: merging must never assign a version, move
+    `latest`, or ship a wheel. Commit images are a different act and live in
+    `build.yml`.
+    """
     raw = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
     text = _without_comments(raw)
     assert "tags:" in text
-    assert "branches:" not in text, "a push to main must never publish"
+    assert "branches:" not in text, "a push to main must never cut a release"
     assert "id-token: write" in raw, "keyless signing needs the OIDC identity"
     assert 'cosign sign --yes "${IMAGE}@${DIGEST}"' in raw, (
         "sign the digest, never a tag: a tag can be moved after signing"
     )
+
+
+def test_commit_images_carry_no_version_and_do_not_move_latest() -> None:
+    """NFR-C3 (r5): a build is deployable without being a release.
+
+    The rule this replaces made a version bump the price of a hotfix, and
+    produced three semver releases in one afternoon that marked nothing. What
+    it protected is asserted here instead: a commit image is identified by its
+    sha alone, so merging cannot claim a version or move an alias that other
+    people follow.
+    """
+    raw = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
+    text = _without_comments(raw)
+    assert "branches:" in text and "main" in text
+
+    assert "type=sha" in text, "commit images are identified by their commit"
+    assert "type=semver" not in text, "a build must not assign a version"
+    assert "latest=false" in text, "a build must not move `latest`"
+    assert "uv build" not in text, "the wheel belongs to a release"
+
+
+def test_a_commit_image_is_signed_like_a_release() -> None:
+    """An unsigned artefact that can reach production is the wider hole.
+
+    Commit images are the ones that actually get deployed between releases,
+    so relaxing signing for them would invert the guarantee: strongest on the
+    artefact that ships least often.
+    """
+    raw = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
+    assert "id-token: write" in raw
+    assert 'cosign sign --yes "${IMAGE}@${DIGEST}"' in raw
 
 
 def test_the_workspace_is_writable(compose: str) -> None:

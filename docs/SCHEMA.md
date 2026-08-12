@@ -1,6 +1,9 @@
 # Vogt — Data Schema & Topology (draft v0.3, revision r3)
 
-Status: **draft, pre-implementation**. Types are indicative; DDL is written
+Status: **built** (reconciled against the delivered v1 on 2026-08-12; the
+as-built shape of §3.2 is the note at the end of that section, and the
+requirement-by-requirement verification is `REQUIREMENTS.md` §5).
+Types are indicative; DDL is written
 at M0. Companion to `DESIGN.md` §3 (domain model) and §7 (storage).
 
 r2 changes: `contracts` and `packages` tables removed; `events` and
@@ -193,28 +196,35 @@ backlog views.
 
 ### 3.2 Derived (rebuilt, not source of truth)
 
+**As built — two tables:**
+
 | Table | Purpose |
 |---|---|
-| `latest_forge_items` | newest observation per issue/PR subject — what queries join against |
-| `latest_ci_runs` | newest CI conclusion per repo/branch/workflow |
-| `latest_contract_checks` | newest contract result per project: status + failing criteria + contract version + checked-at (written by on-demand checks only) |
-| `latest_releases` | newest tag/release per repo |
+| `latest_observations` | newest observation per `subject_key`, generic: kind, project, payload, `promoted`. Every typed read below is a query over `kind` against this. |
 | `latest_dep_refs` | one row per (project, target): `ref_kind(path\|git\|declared)`, raw target, manifest file it was read from, resolved `to_project_id` or null (FR-D1–D4) |
-| `latest_markers` | newest marker per source location, with `promoted` |
-| `latest_autoupdate_posture` | *(M5)* per project: version-updates config present / vulnerability alerts / security fixes — three columns, never one boolean |
 
 Derived tables are rebuilt transactionally at sweep completion from
 `observations`; they can always be dropped and regenerated, bounded by the
 retention horizon (§5).
 
-*Implementation note (M2)*: two of these shipped, not seven. The evidence
-store holds `latest_observations` — generic, keyed by `subject_key`, carrying
-kind, project, payload and the `promoted` flag — plus `latest_dep_refs`,
-which is the only projection that adds anything the observation does not
-already state (resolution to a registered project, FR-D3). The typed reads
-the other five described are queries over `kind`. Five rebuild paths would
-have been five places for a collector and its projection to drift apart;
-`latest_autoupdate_posture` still arrives with the forge module at M5.
+*Originally specified, and why they are queries instead of tables (M2)*:
+`latest_forge_items`, `latest_ci_runs`, `latest_contract_checks`,
+`latest_releases`, `latest_markers` and — from M5 —
+`latest_autoupdate_posture` were each named as their own typed projection.
+Only `latest_dep_refs` carries anything the observation does not already
+state (resolution to a registered project, FR-D3); the rest differed in
+payload shape and not in behaviour. Seven rebuild paths would have been
+seven places for a collector and its projection to drift apart, so the
+others are `kind` filters over `latest_observations`. Update-automation
+posture arrived at M5 the same way — observation kind `posture`, subject
+`posture:<owner>/<repo>`, three independent facts in the payload (FR-D6) —
+rather than as the table named here. Recorded in the migration.
+
+Where the rest of this document names one of those tables (§2.4 compliance,
+§4 trust and observed-first), read it as "the newest observation of that
+kind". `projects.compliance_status` is a real column and is written by the
+on-demand contract check; what does not exist is a `latest_contract_checks`
+table behind it.
 
 *r2*: `latest_dependencies` (requested spec, locked version,
 direct/transitive) is replaced by `latest_dep_refs`. No lockfile is parsed

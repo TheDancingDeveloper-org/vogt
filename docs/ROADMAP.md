@@ -1,7 +1,16 @@
-# Vogt — Deliverable Stages (draft v0.3, revision r4)
+# Vogt — Deliverable Stages (v0.3, revision r4)
 
-Status: **draft**. Requirement IDs refer to `REQUIREMENTS.md`; per its §4,
-scope changes here must update that document in the same change.
+Status: **M0–M6 delivered — v1 is built** (2026-08-12). Requirement IDs
+refer to `REQUIREMENTS.md`; per its §4, scope changes here must update that
+document in the same change.
+
+Each stage below carries an "as built" note recording where the delivery
+differed from the sketch. What those notes cannot say is whether the set of
+them adds up to the requirements baseline — that is `REQUIREMENTS.md` §5,
+written after v1 by checking the build against every ID. It found four
+requirements short of their text (FR-L1, NFR-I3, FR-S6, NFR-S4) and one CI
+gate that does not fire on the paths most likely to trip it (NFR-Q4).
+**Nothing in this document should be read as delivered until §5 agrees.**
 
 ## The cut lines
 
@@ -389,8 +398,8 @@ nothing the GUI does is absent from the API (parity rule holds).
 
 ### M6 as built — one deviation and four findings
 
-**Deviation: buildless ES modules, not a React SPA.** `DESIGN.md` §10 named
-React. The reason for not using it is packaging rather than taste: Vogt
+**Deviation: buildless ES modules, not a React SPA.** `DESIGN.md` §4's
+architecture sketch named React (since corrected in place). The reason for not using it is packaging rather than taste: Vogt
 installs as a Python wheel, so a framework build means either a Node
 toolchain present at wheel-build time — `pip install vogt` requiring npm —
 or committed bundler output, which is a generated artefact in version
@@ -441,3 +450,36 @@ default was chosen rather than required, and the reason is that an instance
 which never looks cannot tell stale evidence from none — the failure this
 product exists to prevent. `--no-schedule` and `sweep_interval_seconds: 0`
 both turn it off.
+
+---
+
+## Revision r5 — a build is not a release
+
+NFR-C3 said a push to main shall never publish an image, so the only way to
+obtain a deployable artefact was to tag a version. Within one afternoon that
+produced v0.1.0, v0.1.1 and v0.1.2 — none of which marked a release. Two were
+repairs to an image that had never been executed, and the third was a uid
+change that concerns one deployment and no user of this software.
+
+Version numbers had become a build counter, which is the failure mode where a
+number that should mean "this is what changed for you" comes to mean "the
+pipeline ran again".
+
+The requirement was conflating two acts that only look alike:
+
+| | Release | Build |
+|---|---|---|
+| Trigger | `v*` tag | push to main |
+| Image tags | `0.1.2`, `0.1`, `latest` | `sha-<commit>` |
+| Wheel, SBOM attestation | yes | image SBOM only |
+| Signed | yes | yes |
+| Says "use this" | yes | no |
+
+What NFR-C3 was protecting is intact. Merging still cannot cut a release: no
+semver tag, no `latest`, no wheel. Merging still cannot deploy: production
+moves only when a digest is pinned in `indexarr/ops` and `DeployStack` runs
+(NFR-D10). What it loses is the accidental coupling that made a version bump
+the price of a hotfix.
+
+Commit builds are signed like releases. An unsigned artefact that can reach
+production would be a wider hole than the one this closes.

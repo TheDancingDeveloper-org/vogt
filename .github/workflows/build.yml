@@ -1,0 +1,141 @@
+name: build
+
+# A *build*, which is not a release.
+#
+# `release.yml` owns releases: a `v*` tag, a semver-tagged image, `latest`, a
+# wheel, an SBOM. This owns the other thing — an image for a commit on main,
+# identified only by its sha, so deploying a fix does not require inventing a
+# version number for it.
+#
+# NFR-C3 originally said a push to main shall never publish an image, and the
+# effect was that every fix needed a version bump to become deployable: three
+# of them in one afternoon, none marking a release. The requirement was
+# revised (see `REQUIREMENTS.md`) once the two acts were told apart. What it
+# was protecting is intact:
+#
+#   * merging still cannot cut a release — no semver tag, no `latest`, no
+#     wheel, and nothing here writes a GitHub Release
+#   * merging still cannot deploy anything (NFR-D10) — production moves when
+#     the digest pinned in `indexarr/ops` changes and `DeployStack` runs
+#
+# Images are signed here as they are in a release. A build that reaches
+# production unsigned would be a worse hole than the one this closes.
+
+on:
+  push:
+    branches:
+      - main
+    # Documentation cannot change what an image contains.
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/thedancingdeveloper-org/vogt
+
+concurrency:
+  # Only the newest commit on main is worth an image; older ones in flight
+  # are already superseded.
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: build and publish a commit image
+    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          # `sha-<commit>` and nothing else. No semver, and explicitly no
+          # `latest`: a moving alias is what makes "which build is that?"
+          # unanswerable, and deployed references are digest-pinned anyway
+          # (NFR-PO4).
+          tags: |
+            type=sha
+          flavor: |
+            latest=false
+
+      # Built and run before it is pushed. v0.1.0 shipped an image whose
+      # entrypoint did not exist and v0.1.1 one that imported no application;
+      # both builds were green and both artefacts had never been started.
+      - uses: docker/build-push-action@v6
+        id: candidate
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}:smoke-test
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: the image runs
+        env:
+          CANDIDATE: ${{ env.IMAGE }}:smoke-test
+        run: |
+          set -euo pipefail
+          docker run --rm "$CANDIDATE" --version
+          if docker run --rm "$CANDIDATE" serve 2>/dev/null; then
+            echo "serve started without being told where to listen" >&2
+            exit 1
+          fi
+          echo "image runs, and still refuses to guess an address"
+
+      - uses: docker/build-push-action@v6
+        id: push
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: sign the image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # The digest, never a tag: a tag can be moved after signing, so a
+          # signature over a tag says nothing about what gets pulled.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Built from \`${GITHUB_SHA:0:7}\`"
+            echo
+            echo "Nothing has been deployed. To move production, pin this in"
+            echo "\`indexarr/ops\` at \`personal/vogt/docker-compose.yml\` and run"
+            echo "\`DeployStack\`:"
+            echo
+            echo '```yaml'
+            echo "    image: ${IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "This is a build, not a release: no version was assigned, no"
+            echo "semver tag was created, and \`latest\` did not move."
+          } >> "$GITHUB_STEP_SUMMARY"
