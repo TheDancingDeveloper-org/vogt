@@ -6,10 +6,33 @@ export type ActivityState =
   | "waiting-for-input"
   | "errored";
 
+/** ContextKeeper's protection state for a terminal's agent session. */
+export type ProtectionState = "protected" | "unprotected" | "recovering";
+
+/**
+ * ContextKeeper's view of the agent session in a terminal. Absent when
+ * ContextKeeper is not configured, is unreachable, or has nothing bound to
+ * this PTY — all three mean "unprotected", never an error.
+ */
+export interface SessionContinuity {
+  state: ProtectionState;
+  /** ContextKeeper's registry id: every continuity call is keyed by it. */
+  session_id: string;
+  provider: string;
+  native_session_id: string;
+  work_id?: string | null;
+  lifecycle: string;
+  event_count: number;
+  failure_count: number;
+  capture_lag_seconds?: number | null;
+  capture_status?: string | null;
+}
+
 export interface SessionSummary {
   id: string;
   name: string;
   activity: ActivityState;
+  continuity?: SessionContinuity | null;
   exit_code: number | null;
   scrollback_bytes: number;
   cwd: string;
@@ -362,6 +385,72 @@ export interface AgentTaskUpsertRequest {
   auto_retry_on_rate_limit?: boolean;
 }
 
+/** One rung of the continuation ladder. ContextKeeper picks; MyDevEnv2 runs. */
+export interface ContinuationRecipe {
+  kind: "reattach" | "resume" | "fork" | "bundle" | string;
+  provider: string;
+  reason: string;
+  requires_approval: boolean;
+  native_session_id?: string | null;
+  bundle_id?: string | null;
+  mydevenv2?: CreateSessionRequest | null;
+  copyable_command: string;
+}
+
+export interface ContinuationPlan {
+  session_id: string;
+  work_id?: string | null;
+  provider: string;
+  lifecycle: string;
+  attempt_id: string;
+  primary: ContinuationRecipe;
+  alternatives: ContinuationRecipe[];
+}
+
+export interface ContinuityHealth {
+  configured: boolean;
+  reachable: boolean;
+  capture_status?: string | null;
+  capture_lag_seconds?: number | null;
+  protected_sessions?: number;
+}
+
+export interface BundlePreview {
+  session_id: string;
+  bundle_id: string;
+  checksum: string;
+  bundle: string;
+}
+
+export interface RecoveryLaunch {
+  status: "launched" | "manual";
+  session_id: string;
+  bundle_id: string;
+  child_session_id?: string;
+  mydevenv2_session?: { id: string };
+  copyable_command?: string;
+}
+
+export interface WorkAttempt {
+  id: string;
+  provider: string;
+  native_session_id: string;
+  lifecycle: string;
+  mydevenv2_session_id?: string | null;
+  event_count?: number;
+  failure_count?: number;
+  created_at?: string;
+}
+
+export interface WorkSession {
+  work_id: string;
+  provider: string;
+  workspace?: string | null;
+  attempts: WorkAttempt[];
+  latest_attempt: string;
+  lifecycle: string;
+}
+
 export const api = {
   listSessions: () => req<SessionSummary[]>("GET", "/api/sessions"),
   createSession: (s: CreateSessionRequest) =>
@@ -374,6 +463,38 @@ export const api = {
   deleteSession: (id: string) =>
     req<OkResponse>("DELETE", `/api/sessions/${id}`),
   health: () => req<OkResponse>("GET", "/healthz"),
+
+  // ContextKeeper continuity. Every call is proxied server-side: the browser
+  // never holds ContextKeeper's control token.
+  continuityHealth: () =>
+    req<ContinuityHealth>("GET", "/api/contextkeeper/health"),
+  continuation: (sessionId: string) =>
+    req<ContinuationPlan>(
+      "GET",
+      `/api/contextkeeper/sessions/${encodeURIComponent(sessionId)}/continuation`,
+    ),
+  previewBundle: (sessionId: string) =>
+    req<BundlePreview>(
+      "GET",
+      `/api/contextkeeper/sessions/${encodeURIComponent(sessionId)}/preview`,
+    ),
+  approveBundle: (sessionId: string, bundleId: string, requestId: string) =>
+    req<{ bundle_id: string; approved_at: string }>(
+      "POST",
+      `/api/contextkeeper/sessions/${encodeURIComponent(sessionId)}/approve`,
+      { bundle_id: bundleId, request_id: requestId },
+    ),
+  launchRecovery: (sessionId: string, bundleId: string, requestId: string) =>
+    req<RecoveryLaunch>(
+      "POST",
+      `/api/contextkeeper/sessions/${encodeURIComponent(sessionId)}/launch`,
+      { bundle_id: bundleId, request_id: requestId },
+    ),
+  workSession: (workId: string) =>
+    req<WorkSession>(
+      "GET",
+      `/api/contextkeeper/work/${encodeURIComponent(workId)}`,
+    ),
 
   listDir: (path = "") =>
     req<FileEntry[]>("GET", `/api/dir?path=${encodeURIComponent(path)}`),

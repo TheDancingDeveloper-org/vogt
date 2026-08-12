@@ -402,6 +402,8 @@ mod tests {
             assistant_auto_type: false,
             assistant_max_tool_calls: 8,
             assistant_reasoning_effort: None,
+            contextkeeper_url: None,
+            contextkeeper_token: None,
         }
     }
 
