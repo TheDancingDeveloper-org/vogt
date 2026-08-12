@@ -122,3 +122,33 @@ def test_generated_files_match_the_schema(relative: Path) -> None:
     assert path.read_text(encoding="utf-8") == artifacts[path], (
         f"{relative} is stale — run scripts/gen_config_docs.py"
     )
+
+
+def test_type_labels_never_leak_the_interpreter(clean_env: None) -> None:
+    """The generated docs must not depend on which Python rendered them.
+
+    `Path | None` stringifies as `pathlib.Path | None` on 3.11, as
+    `pathlib._local.Path | None` on 3.13, and as `Union` under a third
+    path — so the drift check passed locally and failed on two different CI
+    jobs for two different reasons. Documentation should describe the
+    setting, not where the standard library keeps a class.
+    """
+    del clean_env
+    for field in describe_fields():
+        label = field.type_label
+        assert "pathlib" not in label, f"{field.name}: leaks a module path"
+        assert "Union" not in label, f"{field.name}: leaks a typing construct"
+        assert "typing." not in label, f"{field.name}: leaks a typing construct"
+        assert "<" not in label, f"{field.name}: leaks a repr"
+
+
+def test_generated_docs_are_byte_identical_across_interpreters() -> None:
+    """A weaker but broader guard than the label check above.
+
+    Any future renderer that reaches for `str(annotation)` reintroduces the
+    same class of bug; this catches the symptom wherever it comes from.
+    """
+    rendered = config_artifacts(REPO_ROOT)
+    for content in rendered.values():
+        assert "pathlib" not in content
+        assert "| Union |" not in content

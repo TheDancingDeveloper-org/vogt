@@ -16,7 +16,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `marker_promotion_patterns` | `VOGT_MARKER_PROMOTION_PATTERNS` | list of strings | `TODO(vogt)`, `FIXME(vogt)` | behaviour |
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
-| `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | pathlib.Path | None | *(no default — must be set)* | behaviour |
+| `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
 
 ## What each setting decides

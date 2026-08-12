@@ -34,7 +34,8 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, get_args, get_origin
+from types import UnionType
+from typing import Any, Literal, Union, get_args, get_origin
 
 from pydantic import Field
 from pydantic.fields import FieldInfo
@@ -233,15 +234,15 @@ class FieldDoc:
 _SCALAR_NAMES = {str: "string", int: "integer", float: "number", bool: "boolean"}
 
 
-def _type_label(field: FieldInfo) -> str:
-    """Describe a field's type in prose that survives a Markdown table.
+def _label_for(annotation: Any) -> str:
+    """Name one type in prose, never by its module path.
 
-    Deliberately not `repr(annotation)`: a `Literal` renders as
-    `'debug' | 'info' | ...`, and those pipes silently split the generated
-    table into extra columns. The generated docs are the only description of
-    these settings there is, so they have to be right.
+    `str(annotation)` is not usable here: it renders `Path` as
+    `pathlib.Path` on Python 3.11 and `pathlib._local.Path` on 3.13, so the
+    generated documentation differed by interpreter and the drift check
+    failed on one version of the CI matrix and not the other. Documentation
+    should not leak where the standard library happens to keep a class.
     """
-    annotation = field.annotation
     if annotation is Path:
         return "path"
     if annotation in _SCALAR_NAMES:
@@ -251,10 +252,25 @@ def _type_label(field: FieldInfo) -> str:
     args = get_args(annotation)
     if origin is Literal:
         return "one of " + ", ".join(f"`{arg}`" for arg in args)
-    if origin in (tuple, list, set):
+    if origin in (tuple, list, set, frozenset):
         inner = args[0] if args else str
         return f"list of {_SCALAR_NAMES.get(inner, 'values')}s"
-    return getattr(annotation, "__name__", str(annotation))
+    if origin in (Union, UnionType):
+        present = [arg for arg in args if arg is not type(None)]
+        rendered = " or ".join(_label_for(arg) for arg in present)
+        return f"{rendered}, optional" if len(present) < len(args) else rendered
+    return getattr(annotation, "__name__", "value")
+
+
+def _type_label(field: FieldInfo) -> str:
+    """Describe a field's type in prose that survives a Markdown table.
+
+    Deliberately not `repr(annotation)`: a `Literal` renders as
+    `'debug' | 'info' | ...`, and those pipes silently split the generated
+    table into extra columns. The generated docs are the only description of
+    these settings there is, so they have to be right.
+    """
+    return _label_for(field.annotation)
 
 
 def _default_label(name: str, field: FieldInfo) -> str:
