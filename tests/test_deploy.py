@@ -75,7 +75,7 @@ def test_state_is_a_named_volume_and_never_a_relative_bind(compose: str) -> None
 def test_the_container_is_hardened(compose: str) -> None:
     """NFR-D9."""
     for required in (
-        'user: "1000:1000"',
+        'user: "${VOGT_UID:-1000}:0"',
         "read_only: true",
         "no-new-privileges:true",
         "cap_drop",
@@ -99,34 +99,47 @@ def test_the_healthcheck_is_plain_http(compose: str) -> None:
 
 
 def test_the_image_runs_unprivileged() -> None:
-    """Non-root, and at the uid that owns the estate.
-
-    1000 rather than a service uid, and the two have to agree: a fresh named
-    volume is seeded from the image directory's ownership, so an image built
-    at one uid and run at another breaks on every volume recreation rather
-    than on the first deploy — the kind of fault that surfaces during a
-    restore, which is the worst moment to find it.
-    """
     text = _without_comments(DOCKERFILE.read_text(encoding="utf-8"))
-    assert "USER 1000:1000" in text
-    assert "useradd --uid 1000" in text
+    user = re.search(r"USER (\d+):(\d+)", text)
+    assert user, "the image must declare a numeric USER"
+    assert user.group(1) != "0", "never root"
     assert "USER root" not in text
 
 
-def test_the_image_and_the_compose_agree_on_the_uid(compose: str) -> None:
-    """The one number that must match in three places.
+def test_the_image_runs_as_any_uid_without_a_rebuild() -> None:
+    """The uid is a deployment value; the image must not decide it.
 
-    The image's `USER`, the compose `user:`, and the mode on the operator's
-    TLS key. Checked here because a mismatch does not fail loudly — it fails
-    as a permission error inside a collector, reported as an empty result.
+    Which uid is right depends on who owns the files being observed, which
+    only the host knows. Needing a release to change it would be a defect —
+    a fatal one for anyone self-hosting this, who is not us.
+
+    The obstacle is Docker rather than policy: a fresh named volume is seeded
+    from the ownership of the data directory *in the image*, so a directory
+    owned by one specific uid is unwritable by every deployer who is not that
+    uid. It breaks on volume recreation, which usually means during a
+    restore. Group 0 plus group-write is what makes an arbitrary `user:` work.
     """
     text = _without_comments(DOCKERFILE.read_text(encoding="utf-8"))
-    image_uid = re.search(r"USER (\d+):(\d+)", text)
-    compose_uid = re.search(r'user: "(\d+):(\d+)"', compose)
-    assert image_uid and compose_uid
-    assert image_uid.groups() == compose_uid.groups(), (
-        f"image runs as {image_uid.group(0)}, compose asks for {compose_uid.group(0)}"
+    assert "chown root:0 /var/lib/vogt" in text, (
+        "the data directory must be group-0 owned, or a fresh named volume is "
+        "unwritable by any uid but the one baked in"
     )
+    assert re.search(r"chmod 0?77[07] /var/lib/vogt", text), (
+        "the data directory must be group-writable"
+    )
+    assert re.search(r"USER \d+:0", text), "the image runs with gid 0"
+
+
+def test_the_compose_owns_the_uid(compose: str) -> None:
+    """Overridable at deploy time, with a working default (NFR-D2 revised).
+
+    Defaulted rather than `:?`-gated: gating allocation values is what broke
+    every cadastre deploy after #42. A uid that is wrong shows up the first
+    time a collector reads nothing; a uid that is unset stops the deploy.
+    """
+    user = re.search(r'user: "\$\{(\w+):-(\d+)\}:(\d+)"', compose)
+    assert user, "the compose must set `user:` from an overridable variable"
+    assert user.group(3) == "0", "gid stays 0; only the uid varies by host"
 
 
 def test_the_image_has_no_default_listen_address() -> None:
