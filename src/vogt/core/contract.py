@@ -14,6 +14,7 @@ barrier you pass (FR-G13, DESIGN §2.1, §5).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 #: Bumped when the required set changes, so a recorded status can say which
 #: contract produced it.
@@ -84,4 +85,107 @@ def default_scaffold(*, name: str, owner: str, lifecycle_state: str) -> Scaffold
             ScaffoldFile("AGENTS.md", agents),
             ScaffoldFile("LICENSE", licence),
         ),
+    )
+
+
+# -- evaluation (M3) -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CriterionResult:
+    """One rule, evaluated, with its answer.
+
+    FR-G3: a contract check returns the specific rules evaluated and the
+    specific criteria that failed — never a bare pass/fail. A boolean tells
+    you that something is wrong; this tells you what to do.
+    """
+
+    rule: str
+    target: str
+    satisfied: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class ContractResult:
+    """The outcome of evaluating a contract against a path."""
+
+    contract_version: str
+    path: str
+    status: str
+    criteria: tuple[CriterionResult, ...]
+
+    @property
+    def failing(self) -> tuple[CriterionResult, ...]:
+        return tuple(c for c in self.criteria if not c.satisfied)
+
+
+#: The three answers a compliance status can take. `not_checked` is
+#: first-class and unembarrassing: nobody has looked, and saying so is more
+#: honest than a silently refreshed `compliant` (DESIGN §5).
+COMPLIANT = "compliant"
+NON_COMPLIANT = "non_compliant"
+NOT_CHECKED = "not_checked"
+
+
+def evaluate(path: Path, contract: Contract = DEFAULT_CONTRACT) -> ContractResult:
+    """Check a folder or repository against a contract.
+
+    Works on any path, registered or not (FR-G4), and blocks nothing
+    (FR-G13). The result is a value to read.
+    """
+    root = Path(path).expanduser()
+    criteria: list[CriterionResult] = []
+
+    if not root.is_dir():
+        criteria.append(
+            CriterionResult(
+                rule="path.exists",
+                target=str(root),
+                satisfied=False,
+                detail="the path does not exist or is not a directory",
+            )
+        )
+        return ContractResult(
+            contract_version=contract.version,
+            path=str(root),
+            status=NON_COMPLIANT,
+            criteria=tuple(criteria),
+        )
+
+    criteria.append(
+        CriterionResult(
+            rule="path.exists",
+            target=str(root),
+            satisfied=True,
+            detail="directory exists",
+        )
+    )
+    for name in contract.required_files:
+        present = (root / name).is_file()
+        criteria.append(
+            CriterionResult(
+                rule="required_file",
+                target=name,
+                satisfied=present,
+                detail="present" if present else f"{name} is missing",
+            )
+        )
+    for name in contract.required_dirs:
+        present = (root / name).is_dir()
+        criteria.append(
+            CriterionResult(
+                rule="required_dir",
+                target=name,
+                satisfied=present,
+                detail="present" if present else f"{name}/ is missing",
+            )
+        )
+
+    failing = [c for c in criteria if not c.satisfied]
+    return ContractResult(
+        contract_version=contract.version,
+        path=str(root),
+        status=NON_COMPLIANT if failing else COMPLIANT,
+        criteria=tuple(criteria),
     )

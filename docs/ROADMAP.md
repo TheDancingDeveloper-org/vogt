@@ -243,6 +243,28 @@ evidence; accept it, and the audit trail shows who accepted it and why.
 Delete the observation's history window and confirm the proposal still
 renders its evidence.
 
+### M3 as built — three notes
+
+1. **FR-G13 is asserted structurally, not just behaviourally.** One test
+   registers work against a non-compliant project and transitions it, to
+   show nothing refuses. A second greps the source: only the modules that
+   *compute or report* compliance may mention `compliant` /
+   `non_compliant` at all. A service that starts comparing against those
+   values fails the suite, which is the only version of this rule that
+   survives people who have not read the requirement.
+2. **`contract-checker` is a collector that opts out of sweeps.** It
+   carries `on_demand_only`, and `CollectorRegistry.select` skips such
+   collectors unless they are named. Without that flag, adding the M4
+   scheduler would quietly reintroduce the continuous re-checking r3
+   deleted — the requirement would have been enforced by nothing but
+   memory.
+3. **Evidence is protected twice, deliberately.** A proposal carries a
+   self-contained snapshot *and* pins the observation it points at against
+   retention. Either alone would do in the happy path; both are needed
+   because the two stores are pruned, backed up and restored
+   independently. The test deletes `observed.sqlite3` outright and the
+   proposal still renders its evidence.
+
 ## M4 — Service (the Node B stack)
 
 **Objective**: from local tool to always-on service with real identity,

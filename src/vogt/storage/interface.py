@@ -18,6 +18,7 @@ from vogt.core.entities import (
     AuditRecord,
     Comment,
     DepRef,
+    DriftProposal,
     Event,
     Initiative,
     Label,
@@ -208,6 +209,29 @@ class ReadView(Protocol):
 
     def work_item_by_subject(self, subject_key: str) -> WorkItem | None: ...
 
+    # -- drift -------------------------------------------------------------
+
+    def list_drift(
+        self,
+        *,
+        status: str | None = "open",
+        kind: str | None = None,
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> list[DriftProposal]: ...
+
+    def drift_by_id(self, proposal_id: str) -> DriftProposal | None: ...
+
+    def open_drift_subjects(self) -> set[tuple[str, str, str]]: ...
+
+    def drift_evidence_ids(self) -> frozenset[str]:
+        """Observation ids any proposal references (FR-R5).
+
+        Read by retention, which refuses to prune them. Evidence must never
+        become unreachable through retention.
+        """
+        ...
+
     # -- history -----------------------------------------------------------
 
     def list_events(self, *, after: int, limit: int) -> list[Event]: ...
@@ -278,6 +302,18 @@ class WriteTxn(ReadView, Protocol):
     ) -> bool: ...
 
     def insert_work_link(self, link: WorkLink) -> None: ...
+
+    def insert_drift(self, proposal: DriftProposal) -> None: ...
+
+    def resolve_drift(
+        self,
+        proposal_id: str,
+        *,
+        status: str,
+        actor_id: str,
+        reason: str,
+        at: datetime,
+    ) -> bool: ...
 
     def upsert_workflow(self, workflow: Workflow, *, at: datetime) -> None: ...
 

@@ -34,8 +34,12 @@ declared work, ordered by the same weights, each stamped with how fresh the
 evidence is and how much it is trusted. Every stage demo runs as an
 acceptance test, including the one that unplugs GitHub entirely.
 
-**M3 (Contract & drift) is next**: on-demand contract checks and the drift
-proposal lifecycle.
+**M3 (Contract & drift) is also implemented**: the contract is checkable
+on demand and reported with its age, and disagreements between declared
+state and observation become drift proposals carrying their own evidence.
+
+**M4 (Service) is next**: `serve`, token auth, remote MCP, and the Node B
+Compose stack.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the outline,
 [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered baseline and
@@ -52,7 +56,8 @@ $ uv run vogt project register --name Vogt --root-path . \
 $ uv run vogt sweep --reason "see what is already there"
 $ uv run vogt backlog
 $ uv run vogt why --ref WI-1
-$ uv run vogt deps --project vogt
+$ uv run vogt contract check --project vogt --reason "before release"
+$ uv run vogt drift detect --reason "keep declared state honest"
 ```
 
 Nothing crawls your filesystem: collection scope is the projects you

@@ -178,6 +178,27 @@ class WorkLink(Entity):
     created_at: datetime
 
 
+class DriftProposal(Entity):
+    """A machine-raised question, resolved by a human or an agent (FR-R1)."""
+
+    id: str
+    kind: str
+    subject_kind: str
+    subject_id: str
+    project_id: str | None = None
+    project_slug: str | None = None
+    summary: str
+    evidence_observation_id: str | None = None
+    evidence_snapshot: dict[str, object] = {}
+    proposed_change: dict[str, object] = {}
+    status: Literal["open", "accepted", "rejected", "contested"] = "open"
+    opened_at: datetime
+    resolved_by_actor_id: str | None = None
+    resolved_by_identity_ref: str | None = None
+    resolved_at: datetime | None = None
+    resolution_reason: str | None = None
+
+
 SweepOutcome = Literal["running", "ok", "partial", "failed"]
 RefKind = Literal["path", "git", "declared"]
 
