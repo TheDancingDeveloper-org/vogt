@@ -44,8 +44,10 @@ WHY = "github adapter test"
 
 
 def _fake_transport(routes: dict[str, Any], *, status: int = 200) -> Transport:
-    def transport(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
-        del headers
+    def transport(
+        url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
+    ) -> tuple[int, bytes]:
+        del headers, body, method
         for fragment, payload in routes.items():
             if fragment in url:
                 return status, json.dumps(payload).encode("utf-8")
@@ -100,7 +102,7 @@ def test_an_empty_token_file_is_not_configured(
     assert github_collectors(config) == []
 
 
-def test_a_token_file_enables_the_four_collectors(
+def test_a_token_file_enables_the_forge_collectors(
     instance: AppContext, tmp_path: Path
 ) -> None:
     token = tmp_path / "token"
@@ -111,6 +113,7 @@ def test_a_token_file_enables_the_four_collectors(
         "gh-prs",
         "gh-actions",
         "gh-releases",
+        "gh-posture",
     }
 
 
@@ -123,19 +126,21 @@ def test_the_token_is_read_from_the_file_not_an_argument(tmp_path: Path) -> None
     assert client.token == "ghp_secret"
 
 
-def test_forge_collectors_declare_that_they_need_the_network() -> None:
+def test_forge_collectors_declare_that_they_need_the_network(
+    instance: AppContext, tmp_path: Path
+) -> None:
     """NFR-PO2: this is what makes the forge-less test layer selectable."""
-    client = GitHubClient(token="x")
-    for collector in (
-        GitHubIssueCollector(client),
-        GitHubPullRequestCollector(client),
-        GitHubActionsCollector(client),
-        GitHubReleaseCollector(client),
-    ):
-        assert collector.requires_network is True
+    token = tmp_path / "token"
+    token.write_text("ghp_example\n", encoding="utf-8")
+    config = instance.config.model_copy(update={"github_token_file": token})
+
+    collectors = github_collectors(config)
+    assert collectors, "the adapter is configured"
+    for collector in collectors:
+        assert collector.requires_network is True, collector.name
 
     registry = CollectorRegistry()
-    registry.add(GitHubIssueCollector(client))
+    registry.add(GitHubIssueCollector(GitHubClient(token="x")))
     assert "gh-issues" not in {c.name for c in registry.offline()}
 
 

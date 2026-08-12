@@ -74,6 +74,8 @@ from vogt.application.models import (
     McpStdioResult,
     ObservationsParams,
     ObservationsResult,
+    OnboardParams,
+    OnboardResult,
     ProjectBriefParams,
     ProjectBriefResult,
     ProjectListResult,
@@ -88,6 +90,7 @@ from vogt.application.models import (
     RevokeTokenParams,
     ServeParams,
     ServeResult,
+    SetWriteBackParams,
     StatusParams,
     StatusResult,
     SuppressionListResult,
@@ -107,6 +110,8 @@ from vogt.application.models import (
     WorkflowListResult,
     WorkListResult,
     WorkResult,
+    WriteBackListParams,
+    WriteBackListResult,
 )
 from vogt.registry.operation import CliBinding, HttpRoute, Operation
 
@@ -673,6 +678,41 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.import_instance,
             route=HttpRoute("POST", "/instance/import"),
             cli=CliBinding(("import",)),
+        ),
+        # -- the forge module (M5) -----------------------------------------
+        Operation(
+            name="forge.onboard",
+            summary="Read a repository's existing issues, PRs, labels and "
+            "releases into observations. Changes nothing upstream.",
+            scope="project.write",
+            mutating=True,
+            params_model=OnboardParams,
+            result_model=OnboardResult,
+            handler=services.onboard,
+            route=HttpRoute("POST", "/forge/onboard"),
+            cli=CliBinding(("forge", "onboard")),
+        ),
+        Operation(
+            name="forge.writeback",
+            summary="Set a project's write-back policy: none, comment_only, full.",
+            scope="project.write",
+            mutating=True,
+            params_model=SetWriteBackParams,
+            result_model=ProjectResult,
+            handler=services.set_write_back,
+            route=HttpRoute("POST", "/forge/writeback"),
+            cli=CliBinding(("forge", "writeback")),
+        ),
+        Operation(
+            name="forge.actions",
+            summary="The ledger of what Vogt has said upstream, and what landed.",
+            scope="read",
+            mutating=False,
+            params_model=WriteBackListParams,
+            result_model=WriteBackListResult,
+            handler=services.list_write_backs,
+            route=HttpRoute("GET", "/forge/actions"),
+            cli=CliBinding(("forge", "actions")),
         ),
         # -- history -------------------------------------------------------
         Operation(

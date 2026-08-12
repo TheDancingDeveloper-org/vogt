@@ -32,6 +32,7 @@ from vogt.core.entities import (
     Token,
     WorkItem,
     WorkLink,
+    WriteBackRecord,
 )
 from vogt.core.principal import Principal
 from vogt.core.workflow import Workflow
@@ -111,6 +112,7 @@ class ProjectUpdate:
     current_version: str | None = None
     compliance_status: str | None = None
     compliance_checked_at: datetime | None = None
+    write_back: str | None = None
     exclusions: tuple[str, ...] | None = None
 
 
@@ -209,6 +211,8 @@ class ReadView(Protocol):
         """Map subject key to the work item ref that adopted it."""
         ...
 
+    def work_links_for_subjects_by_item(self, work_item_id: str) -> dict[str, str]: ...
+
     def work_item_by_subject(self, subject_key: str) -> WorkItem | None: ...
 
     # -- tokens ------------------------------------------------------------
@@ -239,6 +243,10 @@ class ReadView(Protocol):
     def drift_by_id(self, proposal_id: str) -> DriftProposal | None: ...
 
     def open_drift_subjects(self) -> set[tuple[str, str, str]]: ...
+
+    def list_writeback_actions(
+        self, *, outcome: str | None = None, limit: int = 100
+    ) -> list[WriteBackRecord]: ...
 
     def drift_evidence_ids(self) -> frozenset[str]:
         """Observation ids any proposal references (FR-R5).
@@ -322,6 +330,8 @@ class WriteTxn(ReadView, Protocol):
     def insert_token(self, token: Token, *, token_hash: str) -> None: ...
 
     def revoke_token(self, token_id: str, *, reason: str, at: datetime) -> bool: ...
+
+    def insert_writeback(self, record: WriteBackRecord) -> None: ...
 
     def insert_drift(self, proposal: DriftProposal) -> None: ...
 

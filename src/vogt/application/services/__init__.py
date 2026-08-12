@@ -67,6 +67,11 @@ from vogt.application.services.work import (
     unrelate_work,
     update_work,
 )
+from vogt.application.services.writeback import (
+    list_write_backs,
+    onboard,
+    set_write_back,
+)
 
 __all__ = [
     "adopt",
@@ -103,7 +108,9 @@ __all__ = [
     "list_tokens",
     "list_work",
     "list_workflows",
+    "list_write_backs",
     "observations",
+    "onboard",
     "prune",
     "register_project",
     "relate_work",
@@ -113,6 +120,7 @@ __all__ = [
     "revoke_token",
     "serve",
     "serve_mcp_stdio",
+    "set_write_back",
     "status",
     "suppress",
     "sweep",
