@@ -325,12 +325,15 @@ def test_a_sweep_records_coverage_and_publishes_an_event(
         "git-local",
         "source-markers",
         "dep-refs",
-    }
+    }, "contract-checker is on demand only and is not in an unnamed sweep"
     assert all(report.outcome == "ok" for report in result.reports)
 
     covered = coverage(instance, CoverageParams())
-    assert {entry.collector for entry in covered.collectors} >= {"source-markers"}
-    assert all(entry.status == "ok" for entry in covered.collectors)
+    by_collector = {entry.collector: entry.status for entry in covered.collectors}
+    assert by_collector["source-markers"] == "ok"
+    assert by_collector["contract-checker"] == "never_run", (
+        "nothing re-checks the contract on a timer; an unnamed sweep skips it"
+    )
 
     with instance.declared.read() as view:
         kinds = [event.kind for event in view.list_events(after=0, limit=50)]

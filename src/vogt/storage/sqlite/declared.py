@@ -21,6 +21,7 @@ from vogt.core.entities import (
     Actor,
     AuditRecord,
     Comment,
+    DriftProposal,
     Event,
     Initiative,
     Label,
@@ -539,6 +540,65 @@ class SqliteReadView:
         ).fetchall()
         return {str(row["subject_key"]): str(row["ref"]) for row in rows}
 
+    def list_drift(
+        self,
+        *,
+        status: str | None = "open",
+        kind: str | None = None,
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> list[DriftProposal]:
+        clauses: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("d.status", status),
+            ("d.kind", kind),
+            ("d.project_id", project_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = self._conn.execute(
+            "SELECT d.*, p.slug AS project_slug, a.identity_ref AS resolved_by "
+            "FROM drift_proposals d "
+            "LEFT JOIN projects p ON p.id = d.project_id "
+            "LEFT JOIN actors a ON a.id = d.resolved_by_actor_id "
+            f"{where} ORDER BY d.opened_at DESC, d.id DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
+        return [_row_to_drift(row) for row in rows]
+
+    def drift_by_id(self, proposal_id: str) -> DriftProposal | None:
+        row = self._conn.execute(
+            "SELECT d.*, p.slug AS project_slug, a.identity_ref AS resolved_by "
+            "FROM drift_proposals d "
+            "LEFT JOIN projects p ON p.id = d.project_id "
+            "LEFT JOIN actors a ON a.id = d.resolved_by_actor_id "
+            "WHERE d.id = ?",
+            (proposal_id,),
+        ).fetchone()
+        return None if row is None else _row_to_drift(row)
+
+    def open_drift_subjects(self) -> set[tuple[str, str, str]]:
+        """(kind, subject_kind, subject_id) for every open proposal."""
+        rows = self._conn.execute(
+            "SELECT kind, subject_kind, subject_id FROM drift_proposals "
+            "WHERE status = 'open'"
+        ).fetchall()
+        return {
+            (str(r["kind"]), str(r["subject_kind"]), str(r["subject_id"])) for r in rows
+        }
+
+    def drift_evidence_ids(self) -> frozenset[str]:
+        """Observation ids any proposal references, of any status (FR-R5)."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT evidence_observation_id FROM drift_proposals "
+            "WHERE evidence_observation_id IS NOT NULL"
+        ).fetchall()
+        return frozenset(str(row["evidence_observation_id"]) for row in rows)
+
     def work_item_by_subject(self, subject_key: str) -> WorkItem | None:
         row = self._conn.execute(
             f"SELECT {_WORK_COLUMNS} {_WORK_JOINS} "
@@ -905,6 +965,44 @@ class SqliteWriteTxn(SqliteReadView):
         )
         return cursor.rowcount > 0
 
+    def insert_drift(self, proposal: DriftProposal) -> None:
+        self._conn.execute(
+            "INSERT INTO drift_proposals (id, kind, subject_kind, subject_id, "
+            "project_id, summary, evidence_observation_id, evidence_snapshot, "
+            "proposed_change, status, opened_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                proposal.id,
+                proposal.kind,
+                proposal.subject_kind,
+                proposal.subject_id,
+                proposal.project_id,
+                proposal.summary,
+                proposal.evidence_observation_id,
+                json.dumps(proposal.evidence_snapshot, default=str),
+                json.dumps(proposal.proposed_change, default=str),
+                proposal.status,
+                to_iso(proposal.opened_at),
+            ),
+        )
+
+    def resolve_drift(
+        self,
+        proposal_id: str,
+        *,
+        status: str,
+        actor_id: str,
+        reason: str,
+        at: datetime,
+    ) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE drift_proposals SET status = ?, resolved_by_actor_id = ?, "
+            "resolution_reason = ?, resolved_at = ? "
+            "WHERE id = ? AND status = 'open'",
+            (status, actor_id, reason, to_iso(at), proposal_id),
+        )
+        return cursor.rowcount > 0
+
     def insert_work_link(self, link: WorkLink) -> None:
         self._conn.execute(
             "INSERT INTO work_links (work_item_id, subject_key, origin_kind, "
@@ -1143,6 +1241,42 @@ def _upsert_workflow(
             "INSERT INTO workflow_defs (kind, definition, updated_at) VALUES (?, ?, ?)",
             (workflow.kind, definition, to_iso(at)),
         )
+
+
+def _row_to_drift(row: sqlite3.Row) -> DriftProposal:
+    resolved = row["resolved_at"]
+    return DriftProposal(
+        id=str(row["id"]),
+        kind=str(row["kind"]),
+        subject_kind=str(row["subject_kind"]),
+        subject_id=str(row["subject_id"]),
+        project_id=None if row["project_id"] is None else str(row["project_id"]),
+        project_slug=(
+            None if row["project_slug"] is None else str(row["project_slug"])
+        ),
+        summary=str(row["summary"]),
+        evidence_observation_id=(
+            None
+            if row["evidence_observation_id"] is None
+            else str(row["evidence_observation_id"])
+        ),
+        evidence_snapshot=json.loads(str(row["evidence_snapshot"])),
+        proposed_change=json.loads(str(row["proposed_change"])),
+        status=row["status"],
+        opened_at=from_iso(str(row["opened_at"])),
+        resolved_by_actor_id=(
+            None
+            if row["resolved_by_actor_id"] is None
+            else str(row["resolved_by_actor_id"])
+        ),
+        resolved_by_identity_ref=(
+            None if row["resolved_by"] is None else str(row["resolved_by"])
+        ),
+        resolved_at=None if resolved is None else from_iso(str(resolved)),
+        resolution_reason=(
+            None if row["resolution_reason"] is None else str(row["resolution_reason"])
+        ),
+    )
 
 
 def _row_to_suppression(row: sqlite3.Row) -> Suppression:

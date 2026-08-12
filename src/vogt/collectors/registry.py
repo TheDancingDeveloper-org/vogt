@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from vogt.collectors.base import Collector
+from vogt.collectors.contract_checker import ContractCheckerCollector
 from vogt.collectors.dep_refs import DepRefCollector
 from vogt.collectors.git_local import GitLocalCollector
 from vogt.collectors.source_markers import SourceMarkerCollector
@@ -19,10 +20,21 @@ from vogt.errors import NotFound
 def core_collectors() -> list[Collector]:
     """The offline collectors every instance has.
 
-    `contract-checker` joins this list at M3, and it runs on demand only —
-    nothing re-checks compliance on a timer (FR-G5, deferred by r3).
+    `contract-checker` is here but marked `on_demand_only`, so a plain
+    `sweep` does not run it: nothing re-checks compliance on a timer (r3,
+    FR-G5 deferred). Naming it explicitly runs it.
     """
-    return [GitLocalCollector(), SourceMarkerCollector(), DepRefCollector()]
+    return [
+        GitLocalCollector(),
+        SourceMarkerCollector(),
+        DepRefCollector(),
+        ContractCheckerCollector(),
+    ]
+
+
+def is_on_demand(collector: Collector) -> bool:
+    """Whether this collector opts out of unnamed sweeps."""
+    return bool(getattr(collector, "on_demand_only", False))
 
 
 class CollectorRegistry:
@@ -71,8 +83,22 @@ class CollectorRegistry:
             raise NotFound(msg) from exc
 
     def select(self, names: tuple[str, ...], *, offline_only: bool) -> list[Collector]:
-        """Resolve a caller's choice of collectors."""
-        chosen = [self.get(name) for name in names] if names else self.all()
-        if offline_only:
-            chosen = [c for c in chosen if not c.requires_network]
-        return chosen
+        """Resolve a caller's choice of collectors.
+
+        An unnamed sweep skips on-demand-only collectors. That is the
+        mechanism behind "the contract is evaluated when someone asks":
+        without it, adding a scheduler at M4 would quietly reintroduce the
+        continuous re-checking r3 deleted.
+        """
+        if names:
+            return [
+                collector
+                for collector in (self.get(name) for name in names)
+                if not (offline_only and collector.requires_network)
+            ]
+        return [
+            collector
+            for collector in self.all()
+            if not is_on_demand(collector)
+            and not (offline_only and collector.requires_network)
+        ]

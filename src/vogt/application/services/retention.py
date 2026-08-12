@@ -28,14 +28,13 @@ PRUNED_EVENT = "observations.pruned"
 def _protected_observation_ids(ctx: AppContext) -> frozenset[str]:
     """Observations pinned by a drift proposal (FR-R5).
 
-    Empty until M3 introduces `drift_proposals`. It is a function rather
-    than a constant so that the call site reads correctly now and keeps
-    working when the table appears — the alternative is remembering to add
-    the exemption later, which is exactly the kind of thing nobody
-    remembers.
+    Every proposal, of any status — including resolved ones. A resolved
+    proposal still has to be able to show what it was resolved *on*, and an
+    accepted change whose evidence has vanished is indistinguishable from an
+    unexplained one.
     """
-    del ctx
-    return frozenset()
+    with ctx.declared.read() as view:
+        return view.drift_evidence_ids()
 
 
 def prune(ctx: AppContext, params: PruneParams) -> PruneResult:

@@ -24,7 +24,11 @@ from vogt.collectors.base import (
     Finding,
     finding,
 )
-from vogt.collectors.registry import CollectorRegistry, core_collectors
+from vogt.collectors.registry import (
+    CollectorRegistry,
+    core_collectors,
+    is_on_demand,
+)
 from vogt.collectors.sweeper import Sweeper
 
 __all__ = [
@@ -36,4 +40,5 @@ __all__ = [
     "Sweeper",
     "core_collectors",
     "finding",
+    "is_on_demand",
 ]

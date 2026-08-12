@@ -28,6 +28,7 @@ from vogt.core.entities import (
     AuditRecord,
     Comment,
     DepRef,
+    DriftProposal,
     Effort,
     Event,
     Initiative,
@@ -716,3 +717,105 @@ class AdoptResult(Result):
     subject_key: str
     inferred_kind: WorkKind
     inferred_priority: Priority
+
+
+# -- contract and compliance ----------------------------------------------
+
+
+class CriterionView(Result):
+    rule: str
+    target: str
+    satisfied: bool
+    detail: str
+
+
+class ContractCheckParams(Params):
+    path: str | None = Field(
+        default=None,
+        description="Any folder or repository, registered or not. Stores nothing.",
+    )
+    project: str | None = Field(
+        default=None,
+        description="A registered project slug. Records the result with its age.",
+    )
+    reason: Reason
+
+
+class ContractCheckResult(Result):
+    path: str
+    project: str | None
+    contract_version: str
+    status: str
+    criteria: list[CriterionView] = Field(
+        description="Every rule evaluated — not only the failures (FR-G3)."
+    )
+    failing: list[CriterionView]
+    recorded: bool
+    checked_at: datetime | None
+
+
+class ComplianceParams(Params):
+    project: str
+
+
+class ComplianceResult(Result):
+    project: str
+    status: str
+    contract_version: str
+    checked_at: datetime | None
+    age_seconds: int | None = Field(
+        description="How old this answer is. Never refreshed implicitly."
+    )
+    failing: list[CriterionView] = []
+    detail: str | None = None
+
+
+# -- drift -----------------------------------------------------------------
+
+
+class DriftDetectParams(Params):
+    auto_accept: bool = Field(
+        default=True,
+        description=(
+            "Apply the shipped low-risk policy: state-sync kinds are accepted "
+            "automatically, destructive or structural ones never are (FR-R3)."
+        ),
+    )
+    reason: Reason
+
+
+class DriftDetectResult(Result):
+    raised: list[DriftProposal]
+    auto_accepted: list[str]
+    already_open: int = Field(
+        description="Findings that already had an open proposal, so were not re-raised."
+    )
+    auto_acceptable_kinds: list[str]
+
+
+class DriftListParams(Params):
+    status: str | None = Field(
+        default="open", description="open / accepted / rejected / contested."
+    )
+    kind: str | None = None
+    project: str | None = None
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class DriftListResult(Result):
+    proposals: list[DriftProposal]
+    human_gated: dict[str, str] = Field(
+        default={},
+        description="Kinds the default policy never auto-accepts, and why.",
+    )
+
+
+class DriftResolveParams(Params):
+    id: str
+    resolution: Literal["accepted", "rejected", "contested"]
+    reason: Reason
+
+
+class DriftResult(Result):
+    proposal: DriftProposal
+    change_applied: bool

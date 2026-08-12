@@ -152,6 +152,19 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     ("suppression.list", {}),
+    # -- contract and drift -------------------------------------------------
+    ("contract.check", {"project": "parity-fixture", "reason": WHY}),
+    ("compliance", {"project": "parity-fixture"}),
+    ("drift.detect", {"reason": WHY}),
+    ("drift.list", {"status": "open"}),
+    (
+        "drift.resolve",
+        lambda seen: {
+            "id": seen["drift.list"]["proposals"][0]["id"],
+            "resolution": "contested",
+            "reason": "the target is a project nobody has registered yet",
+        },
+    ),
     # Adopting needs a subject that survived suppression, so the marker in
     # the scaffolded AGENTS.md is the one the script reaches for. Its key is
     # deterministic: same scaffold, same file, same line, on every transport.
@@ -184,6 +197,13 @@ VOLATILE_KEYS = frozenset(
         "oldest_relevant_sweep",
         "collectors",
         "suppression",
+        "opened_at",
+        "resolved_at",
+        "checked_at",
+        "evidence_snapshot",
+        "evidence_observation_id",
+        "subject_id",
+        "path",
         "instance_id",
         "entity_id",
         "actor_id",
