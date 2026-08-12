@@ -28,6 +28,10 @@
 # default policy: behaviour
 # github_token_file = null
 
+# How hard SQLite works to survive a power cut. `normal` is the standard pairing for WAL and the default here; `full` fsyncs the write-ahead log on every commit, which on a contended disk costs tens of milliseconds per write. Under `normal` a power loss or OS crash can lose the last few committed transactions — the database is never corrupted, and an application crash loses nothing. Set `full` if you would rather pay that cost per write.
+# default policy: behaviour
+# sqlite_synchronous = "normal"
+
 # How often `serve` runs collectors in the background (FR-L3). Zero disables the schedule, leaving sweeps on-demand only. A default rather than a required value because an instance that never looks is the failure this product exists to prevent: stale evidence and no evidence are indistinguishable from the outside, so the safe default is to keep looking.
 # default policy: behaviour
 # sweep_interval_seconds = 900

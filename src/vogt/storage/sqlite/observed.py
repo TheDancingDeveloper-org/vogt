@@ -30,7 +30,7 @@ from vogt.storage.observed_types import (
     PendingObservation,
     PruneReport,
 )
-from vogt.storage.sqlite.connection import connect
+from vogt.storage.sqlite.connection import DEFAULT_SYNCHRONOUS, connect
 from vogt.storage.sqlite.migrator import DEFAULT_STALE_AFTER, Migrator, table_exists
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations" / "observed"
@@ -49,8 +49,10 @@ class SqliteObservedStore:
         clock: Clock = utc_now,
         id_factory: IdFactory = new_id,
         lock_stale_after: timedelta = DEFAULT_STALE_AFTER,
+        synchronous: str = DEFAULT_SYNCHRONOUS,
     ) -> None:
         self._path = path
+        self._synchronous = synchronous
         self._clock = clock
         self._id_factory = id_factory
         self._migrator = Migrator(
@@ -67,7 +69,7 @@ class SqliteObservedStore:
     # -- lifecycle ---------------------------------------------------------
 
     def migrate(self) -> MigrationReport:
-        conn = connect(self._path, create=True)
+        conn = connect(self._path, create=True, synchronous=self._synchronous)
         try:
             return self._migrator.migrate(conn, now=self._clock())
         finally:
@@ -76,7 +78,7 @@ class SqliteObservedStore:
     def schema_version(self) -> int:
         if not self._path.exists():
             return 0
-        conn = connect(self._path, create=False)
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
         try:
             return self._migrator.applied_version(conn)
         finally:
@@ -85,7 +87,7 @@ class SqliteObservedStore:
     def is_initialized(self) -> bool:
         if not self._path.exists():
             return False
-        conn = connect(self._path, create=False)
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
         try:
             row = conn.execute(
                 "SELECT value FROM meta WHERE key = ?", (META_INSTANCE_ID,)
@@ -103,7 +105,7 @@ class SqliteObservedStore:
         carries the instance id; a restore that pairs mismatched files is
         then a detectable error rather than a silent one (FR-L2, at M4).
         """
-        conn = connect(self._path, create=True)
+        conn = connect(self._path, create=True, synchronous=self._synchronous)
         try:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -125,7 +127,7 @@ class SqliteObservedStore:
     def instance_id(self) -> str | None:
         if not self._path.exists():
             return None
-        conn = connect(self._path, create=False)
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
         try:
             row = conn.execute(
                 "SELECT value FROM meta WHERE key = ?", (META_INSTANCE_ID,)
@@ -460,7 +462,7 @@ class SqliteObservedStore:
         """Whether this store has been migrated to hold evidence yet."""
         if not self._path.exists():
             return False
-        conn = connect(self._path, create=False)
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
         try:
             return table_exists(conn, "observations")
         finally:
@@ -490,10 +492,15 @@ class SqliteObservedStore:
                 self._conn.close()
 
     def _write(self) -> SqliteObservedStore._Ctx:
-        return self._Ctx(connect(self._path, create=True), write=True)
+        return self._Ctx(
+            connect(self._path, create=True, synchronous=self._synchronous), write=True
+        )
 
     def _read(self) -> SqliteObservedStore._Ctx:
-        return self._Ctx(connect(self._path, create=False), write=False)
+        return self._Ctx(
+            connect(self._path, create=False, synchronous=self._synchronous),
+            write=False,
+        )
 
 
 # -- row mapping -----------------------------------------------------------

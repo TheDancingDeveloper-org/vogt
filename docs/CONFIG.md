@@ -17,6 +17,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
+| `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
 
@@ -45,6 +46,10 @@ How long observation *history* is kept (NFR-I5). The newest observation per subj
 ### `github_token_file`
 
 Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing (FR-S7).
+
+### `sqlite_synchronous`
+
+How hard SQLite works to survive a power cut. `normal` is the standard pairing for WAL and the default here; `full` fsyncs the write-ahead log on every commit, which on a contended disk costs tens of milliseconds per write. Under `normal` a power loss or OS crash can lose the last few committed transactions — the database is never corrupted, and an application crash loses nothing. Set `full` if you would rather pay that cost per write.
 
 ### `sweep_interval_seconds`
 

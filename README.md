@@ -24,7 +24,10 @@ Vogt gives you:
 
 ## Status
 
-**MVP complete: M0–M2 are implemented**, design revision r4.
+**v1 complete: M0–M6 are implemented**, design revision r4. Every stage
+demo runs as an acceptance test. Two must-have requirements are delivered
+only in part and are named as such in `REQUIREMENTS.md` §5 — the `migrate`
+CLI verb (FR-L1) and the audit log's time filter (FR-S6).
 
 Vogt now sees work you did not type in. Collectors sweep your registered
 projects for git state, source markers and dependency references — plus
@@ -140,8 +143,10 @@ ungranted tools are absent rather than present-and-refusing.
 ## Stack
 
 Python 3.11+ · SQLite (single-node, zero-dependency self-hosting) · FastAPI ·
-MCP (stdio + streamable HTTP) · React GUI · optional GitHub + GitHub Actions
-integration (the only forge targeted in v1). Self-hosted, open source.
+MCP (stdio + streamable HTTP) · a buildless ES-module GUI (no Node
+toolchain, no bundler output in version control — see `ROADMAP.md` M6) ·
+optional GitHub + GitHub Actions integration (the only forge targeted in
+v1). Self-hosted, open source.
 
 Vogt self-hosts anywhere Docker runs. *This* estate's deployment (from M4)
 is a Compose stack on Node B, deployed by Komodo from `indexarr/ops`, from
