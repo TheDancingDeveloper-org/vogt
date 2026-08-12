@@ -41,8 +41,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev
 
 COPY src/ ./src/
+# `--no-editable` because uv.lock records the project as an editable source.
+# An editable install is a `.pth` file pointing back at /src, which does not
+# exist in the runtime stage — the venv would import every dependency and
+# then fail on `No module named 'vogt'`.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
+    uv sync --locked --no-dev --no-editable
 
 
 FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS runtime
