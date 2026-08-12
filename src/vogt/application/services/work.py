@@ -16,9 +16,9 @@ from vogt.application.models import (
     WorkListResult,
     WorkResult,
 )
-from vogt.application.services import _resolve
+from vogt.application.services import _resolve, writeback
 from vogt.application.writes import WriteOutcome, audited_write
-from vogt.core.entities import Actor, Comment, WorkItem
+from vogt.core.entities import Actor, Comment, Project, WorkItem
 from vogt.core.workflow import (
     TERMINAL_STATES,
     check_completion_allowed,
@@ -198,7 +198,6 @@ def transition_work(ctx: AppContext, params: TransitionWorkParams) -> WorkResult
     """
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[WorkResult]:
-        del actor
         item = _resolve.work_item(txn, params.ref)
         workflow = txn.workflow_for(item.kind)
         workflow.check(from_state=item.state, to_state=params.to_state)
@@ -214,6 +213,28 @@ def transition_work(ctx: AppContext, params: TransitionWorkParams) -> WorkResult
         )
         updated = txn.work_item_by_id(item.id)
         assert updated is not None  # written in this transaction
+
+        # Additive and forward-only, both directions recoverable by the
+        # other (FR-B4). Reaching a terminal state closes upstream; leaving
+        # one reopens. Nothing else is ever sent.
+        action = (
+            "close"
+            if params.to_state in TERMINAL_STATES
+            else ("reopen" if item.state in TERMINAL_STATES else None)
+        )
+        if action is not None:
+            txn.insert_writeback(
+                writeback.attempt(
+                    ctx,
+                    actor=actor,
+                    action=action,
+                    project=_project_of(txn, item),
+                    item=updated,
+                    subject_key=_linked_subject(txn, item),
+                    reason=params.reason,
+                )
+            )
+
         return WriteOutcome(
             result=WorkResult(item=updated),
             entity_kind="work_item",
@@ -310,8 +331,24 @@ def comment_work(ctx: AppContext, params: CommentParams) -> CommentResult:
             created_at=ctx.clock(),
         )
         txn.insert_comment(comment)
+
+        # Outbound only (FR-B5): a comment authored here posts upstream; a
+        # comment authored on GitHub stays an observation and is never
+        # copied into `comments`. That keeps this table unambiguously ours.
+        pushed = writeback.attempt(
+            ctx,
+            actor=actor,
+            action="comment",
+            project=_project_of(txn, item),
+            item=item,
+            subject_key=_linked_subject(txn, item),
+            reason=params.reason,
+            body=f"{params.body}\n\n— posted from Vogt as {item.ref}",
+        )
+        txn.insert_writeback(pushed)
+
         return WriteOutcome(
-            result=CommentResult(comment=comment),
+            result=CommentResult(comment=comment, write_back=pushed.outcome),
             entity_kind="comment",
             entity_id=comment.id,
             payload=comment.model_dump(mode="json"),
@@ -320,3 +357,21 @@ def comment_work(ctx: AppContext, params: CommentParams) -> CommentResult:
         )
 
     return audited_write(ctx, operation=WORK_COMMENT, reason=params.reason, body=body)
+
+
+def _project_of(txn: WriteTxn, item: WorkItem) -> Project | None:
+    """The project a work item belongs to, if any."""
+    return None if item.project_id is None else txn.project_by_id(item.project_id)
+
+
+def _linked_subject(txn: WriteTxn, item: WorkItem) -> str | None:
+    """The forge object this item was adopted from, if it was.
+
+    Write-back speaks only to objects a work item is *linked* to. An item
+    nobody adopted has nowhere upstream to speak to, and inventing one would
+    be a `create`, which is a different decision.
+    """
+    for subject, ref in txn.work_links_for_subjects_by_item(item.id).items():
+        del ref
+        return subject
+    return None

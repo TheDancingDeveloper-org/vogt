@@ -350,6 +350,31 @@ nothing upstream, while every existing issue and PR appears in the global
 views with labels intact. Then close an issue on GitHub that a declared
 item links → drift proposal; accept → the item closes with provenance.
 
+### M5 as built — four notes
+
+1. **"Changed nothing upstream" is asserted, not inspected.** The demo
+   proposed checking GitHub's audit log after the fact. The test instead
+   records every HTTP request the adapter makes and fails on any method
+   that is not a GET — which cannot pass by accident, and fails at the
+   moment somebody adds a mutation rather than the next time a human reads
+   a log.
+2. **Write-back is a consequence of a declared write, never a separate
+   act.** There is no "push this upstream" operation: a comment authored
+   here posts upstream *as part of commenting*, and finishing an item
+   closes the linked issue *as part of transitioning*. A separate push
+   command would let the declared change and its upstream half drift
+   apart, which is the thing this product exists to notice.
+3. **FR-B4 is enforced by absence.** There is no deletion, force or
+   history-rewrite capability — not disabled, not gated, not present. The
+   client refuses any method other than POST and PATCH, and a test asserts
+   the union of every policy's permitted actions is exactly
+   `{create, comment, label, close, reopen}`.
+4. **Consolidation does not flood the backlog.** A backfill reads closed
+   history too — that is the whole point — but only *open* issues are
+   promoted. Otherwise onboarding a ten-year-old repository would put a
+   decade of finished work into the ranked view on day one, which is the
+   observed-first hazard (DESIGN §3.6) arriving through a different door.
+
 ## M6 — GUI
 
 **Objective**: the visual surface, consuming only the public REST API.

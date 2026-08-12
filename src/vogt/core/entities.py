@@ -64,6 +64,7 @@ class Project(Entity):
     contract_version: str | None = None
     compliance_status: ComplianceStatus = "not_checked"
     compliance_checked_at: datetime | None = None
+    write_back: Literal["none", "comment_only", "full"] = "none"
     exclusions: list[str] = []
     trust_state: TrustState = "unverified"
     created_at: datetime
@@ -216,6 +217,28 @@ class AuthDecision(Entity):
     identity_ref: str | None = None
     transport: str
     detail: str | None = None
+
+
+class WriteBackRecord(Entity):
+    """One thing Vogt said to a forge, and what came back (FR-B2).
+
+    Recorded even when it was skipped, because "we did not speak" is the
+    answer for almost every project and should be visible as a decision
+    rather than as an absence.
+    """
+
+    id: str
+    at: datetime
+    project_id: str | None = None
+    work_item_id: str | None = None
+    actor_id: str
+    action: Literal["create", "comment", "label", "close", "reopen"]
+    subject_key: str | None = None
+    policy: str
+    outcome: Literal["attempted", "succeeded", "failed", "skipped"]
+    reason: str
+    detail: str | None = None
+    source_url: str | None = None
 
 
 class DriftProposal(Entity):

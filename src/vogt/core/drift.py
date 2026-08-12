@@ -38,7 +38,9 @@ UNRESOLVED_DEPENDENCY = "unresolved_dependency"
 #: State-sync kinds may be accepted by an agent without a human; anything
 #: destructive or structural is always human-gated. The distinction is what
 #: the acceptance *does*, not how confident the engine is.
-AUTO_ACCEPTABLE_KINDS: frozenset[str] = frozenset({VERSION_MISMATCH})
+AUTO_ACCEPTABLE_KINDS: frozenset[str] = frozenset(
+    {VERSION_MISMATCH, "forge_state_mismatch"}
+)
 
 #: An unresolved reference is not auto-acceptable, and it is worth saying why:
 #: accepting one means asserting that a project nobody registered does not
@@ -47,6 +49,18 @@ HUMAN_GATED_REASON: dict[str, str] = {
     UNRESOLVED_DEPENDENCY: (
         "accepting this asserts the target is not a project; usually it is a "
         "project nobody has registered yet"
+    ),
+    "vanished_upstream": (
+        "accepting this asserts an upstream object is gone for good; a repo "
+        "transfer or a permissions change looks identical from here"
+    ),
+    "ci_red_vs_healthy": (
+        "a red build is a fact about the build, not a decision about the "
+        "project's lifecycle state — somebody has to say which is wrong"
+    ),
+    "update_automation_gap": (
+        "turning on a security toggle is a change to the repository's "
+        "settings, not to Vogt's data; accepting only records the judgement"
     ),
 }
 
@@ -164,6 +178,163 @@ def unresolved_dependency(
             "action": "register_or_ignore",
             "raw_target": raw_target,
             "manifest": manifest,
+        },
+        evidence=evidence,
+        evidence_observation_id=evidence_observation_id,
+    )
+
+
+# -- forge drift kinds (M5) ------------------------------------------------
+
+FORGE_STATE_MISMATCH = "forge_state_mismatch"
+VANISHED_UPSTREAM = "vanished_upstream"
+CI_RED_VS_HEALTHY = "ci_red_vs_healthy"
+UPDATE_AUTOMATION_GAP = "update_automation_gap"
+
+#: `forge_state_mismatch` joins the auto-acceptable set: it is state-sync,
+#: and the change it proposes is one somebody already made upstream.
+#: The other three are not.
+FORGE_AUTO_ACCEPTABLE: frozenset[str] = frozenset({FORGE_STATE_MISMATCH})
+
+#: The forge kinds that are always human-gated, already listed in
+#: HUMAN_GATED_REASON above. Kept as a set for the engine to check against.
+FORGE_HUMAN_GATED: frozenset[str] = frozenset(
+    {VANISHED_UPSTREAM, CI_RED_VS_HEALTHY, UPDATE_AUTOMATION_GAP}
+)
+
+
+def forge_state_mismatch(
+    *,
+    work_item_id: str,
+    work_ref: str,
+    declared_state: str,
+    upstream_state: str,
+    subject_key: str,
+    project_id: str | None,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: str | None,
+) -> DriftFinding:
+    """A linked issue's state disagrees with the item's (DESIGN §3.2)."""
+    return DriftFinding(
+        kind=FORGE_STATE_MISMATCH,
+        subject_kind="work_item",
+        subject_id=work_item_id,
+        project_id=project_id,
+        summary=(
+            f"{subject_key} is {upstream_state} upstream, but {work_ref} is "
+            f"{declared_state!r} here"
+        ),
+        proposed_change={
+            "entity": "work_item",
+            "field": "state",
+            "from": declared_state,
+            "to": "done" if upstream_state == "closed" else "open",
+            "work_ref": work_ref,
+        },
+        evidence=evidence,
+        evidence_observation_id=evidence_observation_id,
+    )
+
+
+def vanished_upstream(
+    *,
+    work_item_id: str,
+    work_ref: str,
+    subject_key: str,
+    project_id: str | None,
+    swept_at: datetime,
+) -> DriftFinding:
+    """A linked forge object is absent *within provably swept scope*.
+
+    Coverage-gated on purpose (FR-O4). Absence outside a completed sweep is
+    "not collected", and most of cadastre's "missing" drift turned out to be
+    exactly that mistake.
+    """
+    return DriftFinding(
+        kind=VANISHED_UPSTREAM,
+        subject_kind="work_item",
+        subject_id=work_item_id,
+        project_id=project_id,
+        summary=(
+            f"{work_ref} links {subject_key}, which a completed sweep at "
+            f"{swept_at.isoformat()} did not find"
+        ),
+        proposed_change={
+            "entity": "work_link",
+            "action": "review",
+            "subject_key": subject_key,
+            "work_ref": work_ref,
+        },
+        # No observation to point at: the finding *is* the absence. The
+        # snapshot instead records the sweep that establishes coverage.
+        evidence=EvidenceSnapshot(
+            subject_key=subject_key,
+            content_digest="",
+            observed_at=swept_at,
+            collector="gh-issues",
+            payload={"absent_in_completed_sweep": True},
+        ),
+        evidence_observation_id=None,
+    )
+
+
+def ci_red_vs_healthy(
+    *,
+    project_id: str,
+    project_slug: str,
+    lifecycle_state: str,
+    failing: list[str],
+    revision: str,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: str | None,
+) -> DriftFinding:
+    """CI is red on the default branch while the project claims to be fine."""
+    return DriftFinding(
+        kind=CI_RED_VS_HEALTHY,
+        subject_kind="project",
+        subject_id=project_id,
+        project_id=project_id,
+        summary=(
+            f"{project_slug} is {lifecycle_state!r} but {len(failing)} check(s) "
+            f"failed on {revision[:12]}: {', '.join(sorted(failing))}"
+        ),
+        proposed_change={
+            "entity": "project",
+            "action": "review",
+            "failing": sorted(failing),
+            "revision": revision,
+        },
+        evidence=evidence,
+        evidence_observation_id=evidence_observation_id,
+    )
+
+
+def update_automation_gap(
+    *,
+    project_id: str,
+    project_slug: str,
+    missing: list[str],
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: str | None,
+) -> DriftFinding:
+    """One of the three automation facts is off (FR-D6).
+
+    Names *which*, because "automation is incomplete" is not actionable and
+    the three toggles are set in three different places.
+    """
+    return DriftFinding(
+        kind=UPDATE_AUTOMATION_GAP,
+        subject_kind="project",
+        subject_id=project_id,
+        project_id=project_id,
+        summary=(
+            f"{project_slug} is missing {len(missing)} of the three update "
+            f"automation facts: {', '.join(sorted(missing))}"
+        ),
+        proposed_change={
+            "entity": "repository_settings",
+            "action": "enable",
+            "missing": sorted(missing),
         },
         evidence=evidence,
         evidence_observation_id=evidence_observation_id,

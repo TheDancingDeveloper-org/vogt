@@ -199,6 +199,13 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     ("auth.decisions", {}),
+    # -- the forge module ---------------------------------------------------
+    (
+        "forge.writeback",
+        {"project": "parity-project", "policy": "comment_only", "reason": WHY},
+    ),
+    ("forge.onboard", {"project": "parity-project", "reason": WHY}),
+    ("forge.actions", {}),
     ("export", {"destination": "{root}/export.json", "reason": WHY}),
     ("events.list", {}),
     ("audit.list", {}),

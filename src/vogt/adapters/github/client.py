@@ -14,10 +14,9 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from vogt.errors import VogtError
 
@@ -29,8 +28,23 @@ DEFAULT_TIMEOUT_SECONDS = 20
 #: into a stalled estate sweep.
 DEFAULT_PER_PAGE = 100
 
-#: A transport takes (url, headers) and returns (status, body).
-Transport = Callable[[str, dict[str, str]], tuple[int, bytes]]
+
+class Transport(Protocol):
+    """How this client actually talks, so tests never need a network.
+
+    Carries the body and method as well as the URL: write-back has to be
+    assertable, and a transport that cannot see what is being sent upstream
+    cannot verify the one thing that matters — that onboarding mutates
+    nothing (FR-B3).
+    """
+
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        body: bytes = b"",
+        method: str = "GET",
+    ) -> tuple[int, bytes]: ...
 
 
 class GitHubUnavailable(VogtError):
@@ -97,10 +111,47 @@ class GitHubClient:
             raise GitHubUnavailable(msg)
         return json.loads(body.decode("utf-8"))
 
-    def _fetch(self, url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+    def send(self, path: str, payload: dict[str, Any], *, method: str = "POST") -> Any:
+        """Make a change upstream. The only mutating method on this client.
+
+        Deliberately one method, and deliberately not called `request`: every
+        call site that changes somebody else's data is greppable, and there
+        is no DELETE anywhere in the product (FR-B4).
+        """
+        if method not in ("POST", "PATCH"):
+            msg = f"{method} is not an additive operation; write-back is forward-only"
+            raise GitHubUnavailable(msg)
+
+        url = f"{self.api_root}{path}"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": USER_AGENT,
+            "Content-Type": "application/json",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        body = json.dumps(payload).encode("utf-8")
+        status, response = self._fetch(url, headers, body=body, method=method)
+        if status == 404:
+            return None
+        if status >= 400:
+            msg = f"GitHub returned {status} for {method} {path}"
+            raise GitHubUnavailable(msg)
+        return json.loads(response.decode("utf-8")) if response.strip() else {}
+
+    def _fetch(
+        self,
+        url: str,
+        headers: dict[str, str],
+        *,
+        body: bytes | None = None,
+        method: str = "GET",
+    ) -> tuple[int, bytes]:
         if self.transport is not None:
-            return self.transport(url, headers)
-        request = urllib.request.Request(url, headers=headers)
+            return self.transport(url, headers, body or b"", method)
+        request = urllib.request.Request(url, headers=headers, data=body, method=method)
         try:
             with urllib.request.urlopen(  # https only; api_root is not caller-set
                 request, timeout=self.timeout

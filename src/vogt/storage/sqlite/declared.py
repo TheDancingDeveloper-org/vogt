@@ -34,6 +34,7 @@ from vogt.core.entities import (
     WorkItem,
     WorkKind,
     WorkLink,
+    WriteBackRecord,
 )
 from vogt.core.ids import IdFactory, new_id
 from vogt.core.principal import Principal
@@ -687,6 +688,18 @@ class SqliteReadView:
             (str(r["kind"]), str(r["subject_kind"]), str(r["subject_id"])) for r in rows
         }
 
+    def list_writeback_actions(
+        self, *, outcome: str | None = None, limit: int = 100
+    ) -> list[WriteBackRecord]:
+        clause = "WHERE outcome = ?" if outcome else ""
+        params: tuple[object, ...] = (outcome, limit) if outcome else (limit,)
+        rows = self._conn.execute(
+            f"SELECT * FROM writeback_actions {clause} "
+            "ORDER BY at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [_row_to_writeback(row) for row in rows]
+
     def drift_evidence_ids(self) -> frozenset[str]:
         """Observation ids any proposal references, of any status (FR-R5)."""
         rows = self._conn.execute(
@@ -694,6 +707,14 @@ class SqliteReadView:
             "WHERE evidence_observation_id IS NOT NULL"
         ).fetchall()
         return frozenset(str(row["evidence_observation_id"]) for row in rows)
+
+    def work_links_for_subjects_by_item(self, work_item_id: str) -> dict[str, str]:
+        """Subject key to origin kind, for one work item."""
+        rows = self._conn.execute(
+            "SELECT subject_key, origin_kind FROM work_links WHERE work_item_id = ?",
+            (work_item_id,),
+        ).fetchall()
+        return {str(r["subject_key"]): str(r["origin_kind"]) for r in rows}
 
     def work_item_by_subject(self, subject_key: str) -> WorkItem | None:
         row = self._conn.execute(
@@ -818,9 +839,9 @@ class SqliteWriteTxn(SqliteReadView):
         self._conn.execute(
             "INSERT INTO projects (id, slug, name, root_path, repo_url, "
             "lifecycle_state, current_version, contract_version, "
-            "compliance_status, compliance_checked_at, exclusions, trust_state, "
-            "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "compliance_status, compliance_checked_at, write_back, exclusions, "
+            "trust_state, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project.id,
                 project.slug,
@@ -834,6 +855,7 @@ class SqliteWriteTxn(SqliteReadView):
                 None
                 if project.compliance_checked_at is None
                 else to_iso(project.compliance_checked_at),
+                project.write_back,
                 json.dumps(project.exclusions),
                 project.trust_state,
                 to_iso(project.created_at),
@@ -851,6 +873,7 @@ class SqliteWriteTxn(SqliteReadView):
             ("repo_url", update.repo_url),
             ("current_version", update.current_version),
             ("compliance_status", update.compliance_status),
+            ("write_back", update.write_back),
         ):
             if value is not None:
                 assignments.append(f"{column} = ?")
@@ -1084,6 +1107,27 @@ class SqliteWriteTxn(SqliteReadView):
         )
         return cursor.rowcount > 0
 
+    def insert_writeback(self, record: WriteBackRecord) -> None:
+        self._conn.execute(
+            "INSERT INTO writeback_actions (id, at, project_id, work_item_id, "
+            "actor_id, action, subject_key, policy, outcome, reason, detail, "
+            "source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                record.id,
+                to_iso(record.at),
+                record.project_id,
+                record.work_item_id,
+                record.actor_id,
+                record.action,
+                record.subject_key,
+                record.policy,
+                record.outcome,
+                record.reason,
+                record.detail,
+                record.source_url,
+            ),
+        )
+
     def insert_drift(self, proposal: DriftProposal) -> None:
         self._conn.execute(
             "INSERT INTO drift_proposals (id, kind, subject_kind, subject_id, "
@@ -1230,6 +1274,7 @@ def _row_to_project(row: sqlite3.Row) -> Project:
             "current_version": row["current_version"],
             "contract_version": row["contract_version"],
             "compliance_status": row["compliance_status"],
+            "write_back": row["write_back"],
             "compliance_checked_at": (
                 None if checked_at is None else from_iso(str(checked_at))
             ),
@@ -1398,6 +1443,25 @@ def _row_to_auth_decision(row: sqlite3.Row) -> AuthDecision:
         ),
         transport=str(row["transport"]),
         detail=None if row["detail"] is None else str(row["detail"]),
+    )
+
+
+def _row_to_writeback(row: sqlite3.Row) -> WriteBackRecord:
+    return WriteBackRecord(
+        id=str(row["id"]),
+        at=from_iso(str(row["at"])),
+        project_id=None if row["project_id"] is None else str(row["project_id"]),
+        work_item_id=(
+            None if row["work_item_id"] is None else str(row["work_item_id"])
+        ),
+        actor_id=str(row["actor_id"]),
+        action=row["action"],
+        subject_key=None if row["subject_key"] is None else str(row["subject_key"]),
+        policy=str(row["policy"]),
+        outcome=row["outcome"],
+        reason=str(row["reason"]),
+        detail=None if row["detail"] is None else str(row["detail"]),
+        source_url=None if row["source_url"] is None else str(row["source_url"]),
     )
 
 

@@ -235,7 +235,10 @@ def test_resolving_something_absent_says_so(released: AppContext) -> None:
 def test_the_low_risk_policy_accepts_state_sync_only(released: AppContext) -> None:
     """FR-R3: the shipped default, and what it deliberately will not touch."""
     result = detect_drift(released, DriftDetectParams(auto_accept=True, reason=WHY))
-    assert result.auto_acceptable_kinds == [VERSION_MISMATCH]
+    assert VERSION_MISMATCH in result.auto_acceptable_kinds
+    assert UNRESOLVED_DEPENDENCY not in result.auto_acceptable_kinds, (
+        "structural kinds are never auto-accepted"
+    )
     assert len(result.auto_accepted) == 1
 
     with released.declared.read() as view:
