@@ -1,4 +1,4 @@
-# Vogt — Deployment & Network Topologies (draft v0.2, revision r4)
+# Vogt — Deployment & Network Topologies (v0.2, revision r4)
 
 Status: **built** (M4; reconciled against the delivered v1 on 2026-08-12).
 Companion to `DESIGN.md` §7 and `SCHEMA.md`. Shaped heavily by cadastre's
@@ -24,7 +24,7 @@ One server process serves **everything on one port**:
 vogt serve
   ├── /            redirect to /ui/
   ├── /ui/...      GUI (static assets; every answer comes from /api)
-  ├── /api/...     REST (FastAPI, OpenAPI at /api/docs)
+  ├── /api/...     REST (FastAPI; OpenAPI at /openapi.json, UI at /docs)
   ├── /mcp         MCP streamable HTTP transport
   ├── /health/live, /health/ready, /version
   └── collector scheduler (in-process background sweeps)
@@ -385,11 +385,24 @@ artifact, not a hand-maintained parallel truth.
 - `vogt backup` produces a consistent snapshot (SQLite backup API,
   both stores + a manifest with schema versions); `restore` verifies the
   manifest before touching anything.
-- Upgrade path: bump the pinned digest in ops → `DeployStack` → the new
-  container runs forward-only migrations under `migration_lock` at startup
-  → `/health/ready` gates traffic until migration completes. (Migration is
-  a startup step and an effect of the idempotent `init`; there is no
-  `vogt migrate` verb to run by hand — an FR-L1 gap, `REQUIREMENTS.md` §5.)
+- Upgrade path *(intended)*: bump the pinned digest in ops → `DeployStack`
+  → forward-only migrations run under `migration_lock` at startup →
+  `/health/ready` gates traffic until migration completes.
+
+  **As built, this does not happen, and it is the one deployment gap in
+  v1.** Migrations are applied by `init` — which is idempotent and brings an
+  existing instance forward — and by nothing else. `serve` does not migrate,
+  there is no `vogt migrate` verb (FR-L1), and `/health/ready` reports the
+  *applied* schema version without comparing it to the version the running
+  image expects, so it answers `ready` against a store that is behind
+  (NFR-I3's third clause). The compose `command:` is `serve`, so an image
+  carrying a new migration would come up, pass its healthcheck, and fail
+  later on a missing table — as a SQL error, at whatever operation touched
+  it first.
+
+  Until that is closed: after a digest bump that crosses a migration, run
+  `vogt init` in the container before trusting the stack. Both halves are
+  recorded in `REQUIREMENTS.md` §5.
 - Rollback is a revert of the digest line in ops plus a `DeployStack`.
   Forward-only migrations mean a rollback across a schema change needs a
   restore, not just an older image — check `SCHEMA.md` before assuming the
