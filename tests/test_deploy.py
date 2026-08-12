@@ -75,7 +75,7 @@ def test_state_is_a_named_volume_and_never_a_relative_bind(compose: str) -> None
 def test_the_container_is_hardened(compose: str) -> None:
     """NFR-D9."""
     for required in (
-        'user: "10001:10001"',
+        'user: "1000:1000"',
         "read_only: true",
         "no-new-privileges:true",
         "cap_drop",
@@ -99,9 +99,34 @@ def test_the_healthcheck_is_plain_http(compose: str) -> None:
 
 
 def test_the_image_runs_unprivileged() -> None:
-    text = DOCKERFILE.read_text(encoding="utf-8")
-    assert "USER 10001:10001" in text
-    assert "useradd --uid 10001" in text
+    """Non-root, and at the uid that owns the estate.
+
+    1000 rather than a service uid, and the two have to agree: a fresh named
+    volume is seeded from the image directory's ownership, so an image built
+    at one uid and run at another breaks on every volume recreation rather
+    than on the first deploy — the kind of fault that surfaces during a
+    restore, which is the worst moment to find it.
+    """
+    text = _without_comments(DOCKERFILE.read_text(encoding="utf-8"))
+    assert "USER 1000:1000" in text
+    assert "useradd --uid 1000" in text
+    assert "USER root" not in text
+
+
+def test_the_image_and_the_compose_agree_on_the_uid(compose: str) -> None:
+    """The one number that must match in three places.
+
+    The image's `USER`, the compose `user:`, and the mode on the operator's
+    TLS key. Checked here because a mismatch does not fail loudly — it fails
+    as a permission error inside a collector, reported as an empty result.
+    """
+    text = _without_comments(DOCKERFILE.read_text(encoding="utf-8"))
+    image_uid = re.search(r"USER (\d+):(\d+)", text)
+    compose_uid = re.search(r'user: "(\d+):(\d+)"', compose)
+    assert image_uid and compose_uid
+    assert image_uid.groups() == compose_uid.groups(), (
+        f"image runs as {image_uid.group(0)}, compose asks for {compose_uid.group(0)}"
+    )
 
 
 def test_the_image_has_no_default_listen_address() -> None:

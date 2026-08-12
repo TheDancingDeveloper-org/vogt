@@ -89,7 +89,7 @@ GitHub  <───outbound only─── collectors (optional adapter; no inboun
 | TLS name | `winrarhost.tailc7d3c.ts.net` (Tailscale-issued Let's Encrypt) |
 | App data | named volume `vogt-komodo-data` → `/var/lib/vogt` |
 | Operator material | `/mnt/2tnvme/docker/volumes/vogt/{tls,auth}`, mounted `:ro` |
-| Estate | `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` → `/home/sprooty/Working`, writable |
+| Estate | `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` → `/home/sprooty/Working`, writable, as uid 1000 |
 
 `personal/` rather than `prod/` because this is home-homelab infrastructure
 on Node B, matching `personal/cadastre` — the ops repo's top-level
@@ -131,30 +131,41 @@ double-gated (FR-S4), `serve --read-only` refuses every write whatever scope
 a token holds, and each one lands in the audit log with the reason its
 author gave.
 
-**Ownership is reconciled with a supplementary group, not a shared uid.**
-MyDevEnv2 runs as uid `1000` and owns the workspace; Vogt's container runs
-as uid `10001`, which reaches that directory only through "other" — read at
-best, never write, and nothing at all if a directory is mode `0700`.
+**The container runs as uid 1000 — the uid that owns the estate.**
 
-The fix is `group_add: ["1000"]`, not `user: "1000:1000"`. The image bakes
-`10001` into two places that changing the uid would break: `/var/lib/vogt`
-is chowned `10001` at build time, and the token file's `0750 root:10001` is
-what stops any other uid on the host reading a GitHub credential (FR-S7).
-Changing the uid to fix a mount would quietly widen both — a filesystem
-problem solved by loosening a credential boundary.
+This was uid `10001` with `group_add: [1000]`, on the reasoning that a
+service should not run as a human's uid. That reasoning did not survive the
+first sweep. The workspace is written with umask 077, so it is mode 700/600
+throughout, and a supplementary group buys nothing against `rwx------`:
+`git-local` failed outright with `Permission denied` on `.git`, and every
+other collector returned nothing — which renders as an empty view, not as
+"could not look" (FR-O4, arriving through the filesystem).
 
-The host side has two prerequisites, and they belong to MyDevEnv2 rather
-than to Vogt:
+The alternative was `chmod -R g+rX` across the whole estate. That is a wider
+and far more permanent change to a developer's tree, made to preserve a uid
+boundary that the shared bind mount had already dissolved: a container that
+can read every file you own is not meaningfully contained by running under a
+different number.
 
-```
-chgrp -R 1000 /mnt/2tnvme/docker/volumes/mydevenv2/workspace
-chmod -R g+rwX /mnt/2tnvme/docker/volumes/mydevenv2/workspace
-find /mnt/2tnvme/docker/volumes/mydevenv2/workspace -type d -exec chmod g+s {} +
-```
+What actually does the containing is unchanged, and none of it is the uid:
+a `read_only` root filesystem, `cap_drop: [ALL]`, `no-new-privileges`,
+tailnet-only exposure, scoped bearer tokens, double-gated writes, and an
+audit row carrying a reason for every one.
 
-The setgid bit is the part that is easy to miss: without it, a directory
-Vogt scaffolds (FR-G11) is group-owned by `10001` and MyDevEnv2 cannot edit
-what Vogt just created — the same split, mirrored.
+The uid has to agree in three places, and a mismatch does not fail loudly —
+it fails as a permission error inside a collector, reported as an empty
+result:
+
+| Where | Value |
+|---|---|
+| Image (`USER`, and `/var/lib/vogt` ownership) | `1000:1000` |
+| Compose `user:` | `1000:1000` |
+| TLS key mode | `0640 root:1000` |
+
+The image side matters beyond the first deploy: Docker seeds a fresh named
+volume from the image directory's ownership, so an image built at one uid
+and run at another survives until the volume is recreated — which is
+typically during a restore, the worst moment to discover it.
 
 **Exposure is a tailnet allocation, not an ingress decision.** The
 published port binds `100.92.54.45`, so it publishes nothing to the LAN or
@@ -178,7 +189,7 @@ stack environment — see §4.1, which is the rule this replaces.
 **Container shape** (following the cadastre stack, which is the hardened
 precedent on this host):
 
-- non-root (`user: "10001:10001"`), `read_only: true` root filesystem,
+- non-root (`user: "1000:1000"`), `read_only: true` root filesystem,
   `tmpfs` for `/tmp`, `security_opt: [no-new-privileges:true]`,
   `cap_drop: [ALL]`.
 - Stateful data on a **named volume**; operator-owned material (TLS key
@@ -186,7 +197,7 @@ precedent on this host):
   `./relative` bind mount for state — Komodo clones stack directories to
   fresh paths on every deploy, so a relative mount silently points at a
   new empty directory.
-- Token file mode `0750 root:10001`, so only this container's uid can read
+- TLS key mode `0640 root:1000`, so only this container's uid can read
   it (FR-S7: tokens by file reference, never argv or URL).
 - `healthcheck` hits `/health/ready` over plain HTTP (§4.4).
 
