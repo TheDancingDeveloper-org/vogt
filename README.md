@@ -24,10 +24,11 @@ Vogt gives you:
 
 ## Status
 
-Design phase, revision r3. See [`docs/DESIGN.md`](docs/DESIGN.md) for the
+Design phase, revision r4. See [`docs/DESIGN.md`](docs/DESIGN.md) for the
 outline, [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered
-baseline and what has been deliberately deferred, and
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for the stages (MVP = M0–M2).
+baseline and what has been deliberately deferred,
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for the stages (MVP = M0–M2), and
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the topologies.
 
 ## Principles (short form)
 
@@ -61,6 +62,11 @@ baseline and what has been deliberately deferred, and
 Python 3.11+ · SQLite (single-node, zero-dependency self-hosting) · FastAPI ·
 MCP (stdio + streamable HTTP) · React GUI · optional GitHub + GitHub Actions
 integration (the only forge targeted in v1). Self-hosted, open source.
+
+Vogt self-hosts anywhere Docker runs. *This* estate's deployment (from M4)
+is a Compose stack on Node B, deployed by Komodo from `indexarr/ops`, from
+a signed GHCR image, reachable on the tailnet only — see
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §2.2.
 
 ## Licence
 

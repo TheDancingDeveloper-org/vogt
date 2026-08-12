@@ -1,6 +1,6 @@
 # Vogt — Design Outline
 
-Status: **draft v0.3 (revision r3)** · 2026-08-12
+Status: **draft v0.3 (revision r4)** · 2026-08-12
 Scope: standalone product. Cadastre is prior art and a lessons source, not a
 dependency — see §11.
 
@@ -515,8 +515,14 @@ Deployment and network topologies: [`DEPLOYMENT.md`](DEPLOYMENT.md).
 - Config: pydantic settings schema is the single source of truth; example
   config and docs are generated from it in CI (drift between docs and
   defaults fails the build).
-- Packaging: `uv tool install`, OCI image with SBOM + signature, compose
-  file for server mode. GUI ships in the image.
+- Packaging: `uv tool install`, or an OCI image on GHCR with SBOM +
+  keyless signature. GUI ships in the image.
+- **Deployment target (r4)**: a Docker Compose stack on Node B, deployed by
+  Komodo from the `indexarr/ops` GitOps repository, tailnet-bound, with TLS
+  terminated in-process from the host's Tailscale certificate. The image is
+  digest-pinned in ops; publishing (a tag) and deploying (a digest bump)
+  are separate acts. Full topology, hardening, and the Node B failure modes
+  worth knowing in advance: [`DEPLOYMENT.md`](DEPLOYMENT.md) §2.2–§2.3, §6.
 
 ---
 
@@ -546,13 +552,20 @@ Deployment and network topologies: [`DEPLOYMENT.md`](DEPLOYMENT.md).
     `**/*.md`: markdown lint, link check, config-docs-drift check only.
   - `ci.yml` — runs on `src/**`, `tests/**`, `pyproject.toml`, lockfile,
     migration files: lint, mypy strict, tests, coverage gate.
-  - `release.yml` — tag-triggered only: image build, SBOM, signing, publish.
+  - `release.yml` — tag-triggered only: image build, SBOM, keyless cosign
+    signing, publish to GHCR. It publishes; it does not deploy.
   - A mixed commit (code + docs) runs the full pipeline; the docs job is a
     subset, never a bypass — branch protection requires `ci.yml` only when
     code paths changed, handled with a single gate job that succeeds
     trivially on docs-only diffs rather than by marking checks optional.
 - Release workflows stay tag-driven so doc pushes to main can never publish
   an image.
+- **Every job names a self-hosted runner** (`runs-on: [self-hosted, node-b,
+  linux, x64, …]`); GitHub-hosted runners are prohibited estate-wide and
+  the repository joins the `public-node-b` runner group before its first
+  workflow exists. The self-hosted image preinstalls no language runtime,
+  so `setup-uv` is explicit, and only the two Docker-in-Docker workers
+  advertise `docker`/`publish`.
 
 ---
 
@@ -614,6 +627,28 @@ Resolved 2026-08-12 (the last of the open questions):
 - **Trust is `disputed`, drift resolution is `contested`** (§6). The
   computed vocabulary and the chosen vocabulary no longer collide.
 - **Cadastre: accept the duplication for v1** (§11).
+
+Resolved 2026-08-12 (r4):
+
+- **Deployment target: a Node B Compose stack deployed by Komodo**
+  (`DEPLOYMENT.md` §2.2). Desired state in `indexarr/ops` at
+  `personal/vogt/`, image from GHCR digest-pinned, exposure bound to the
+  Tailscale address with no public DNS and no Caddyfile entry. `personal/`
+  rather than `prod/` because this is homelab infrastructure, matching
+  `personal/cadastre`.
+- **TLS terminates in-process, not behind a proxy** (NFR-D6 revised). Node
+  B's Caddy is host infrastructure rather than a Komodo stack, and a
+  tailnet-only listener that already holds a Tailscale-issued certificate
+  gains nothing from fronting it.
+- **"No default port anywhere" was too broad** (NFR-D2 revised). Defaults
+  that encode exposure or identity stay forbidden; defaults that are pure
+  host allocation are now *required*, because gating them is what broke
+  every cadastre deploy after `cadastre#42`. The distinction is what the
+  value decides, not whether it is a number.
+- **Publish and deploy are separate acts** (NFR-D10). A tag publishes a
+  signed image; production moves only when a human or agent bumps the
+  pinned digest in ops and runs `DeployStack`. Automating that bump via
+  `ops/scripts/komodo-deploy.sh` stays available and is not v1 scope.
 
 Nothing is open. New questions get appended here as they arise.
 

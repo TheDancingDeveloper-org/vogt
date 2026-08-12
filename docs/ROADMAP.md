@@ -1,4 +1,4 @@
-# Vogt — Deliverable Stages (draft v0.3, revision r3)
+# Vogt — Deliverable Stages (draft v0.3, revision r4)
 
 Status: **draft**. Requirement IDs refer to `REQUIREMENTS.md`; per its §4,
 scope changes here must update that document in the same change.
@@ -21,11 +21,11 @@ operation the stage added.
 
 | Stage | Name | One-liner | Requirements delivered |
 |---|---|---|---|
-| M0 | Foundation | Storage, audit + events spine, operation registry, CI skeleton | FR-L1(part), FR-S1, FR-S2(local), FR-A2(part), FR-A3(harness), FR-N1(store), NFR-Q1–Q5, NFR-C1–C3, NFR-I1, NFR-I3, NFR-S3, NFR-O1, NFR-O3, NFR-PO3 |
+| M0 | Foundation | Storage, audit + events spine, operation registry, CI skeleton | FR-L1(part), FR-S1, FR-S2(local), FR-A2(part), FR-A3(harness), FR-N1(store), NFR-Q1–Q5, NFR-C1–C4, NFR-I1, NFR-I3, NFR-S3, NFR-O1, NFR-O3, NFR-PO3 |
 | M1 | Core tracker | Local work tracking over CLI + REST + MCP stdio | FR-P1, FR-P2, FR-P4, FR-P5, FR-G11, FR-W1–W3, FR-W6–W9, FR-V1–V3, FR-A1–A4, FR-A5(stdio), FR-S6, FR-N1, FR-N2, NFR-Q3 |
 | M2 | Eyes *(MVP)* | Collectors incl. read-only GitHub, observed-first, suppression, trust & freshness | FR-O1–O4, FR-O5a, FR-O6, FR-O7, FR-W4, FR-W5, FR-W10, FR-W11, FR-G12, FR-G15, FR-V4, FR-D1–D4, FR-P3, FR-R4, FR-L3, NFR-I2, NFR-I4, NFR-I5, NFR-S1, NFR-S2, NFR-S4, NFR-PO1, NFR-PO2 |
 | M3 | Contract & drift | On-demand contract checks; the drift proposal lifecycle | FR-G1, FR-G3, FR-G4, FR-G13, FR-G14, FR-R1–R3, FR-R5, FR-D5, FR-D8 |
-| M4 | Service | Tailnet server, auth, remote MCP, ops | FR-A5(full), FR-A6, FR-A7, FR-S3–S5, FR-S7, FR-L1(full), FR-L2, NFR-D1–D6, NFR-PO4, NFR-O2 |
+| M4 | Service | Node B stack via Komodo, auth, remote MCP, ops | FR-A5(full), FR-A6, FR-A7, FR-S3–S5, FR-S7, FR-L1(full), FR-L2, NFR-D1–D10, NFR-C5, NFR-PO4, NFR-O2 |
 | M5 | GitHub module | Consolidation, forge drift, write-back | FR-O5b, FR-B1–B5, FR-D6 |
 | M6 | GUI | The visual surface over the same API | FR-U1, FR-U2 |
 
@@ -159,25 +159,41 @@ evidence; accept it, and the audit trail shows who accepted it and why.
 Delete the observation's history window and confirm the proposal still
 renders its evidence.
 
-## M4 — Service (self-hosted on the tailnet)
+## M4 — Service (the Node B stack)
 
-**Objective**: from local tool to always-on service with real identity.
+**Objective**: from local tool to always-on service with real identity,
+running where it will actually live — `DEPLOYMENT.md` §2.2 is the target,
+not a shape to be decided at this stage.
 
 Deliverables:
 - `serve`: one port, path-routed GUI-placeholder / `/api` / `/mcp` /
   health; streamable HTTP MCP with protocol-version negotiation;
-  `/connection-info`.
+  `/connection-info`; in-process TLS from a mounted certificate
+  (`--tls-cert` / `--tls-key`, NFR-D6).
 - Token auth bound to actors; scopes; double-gated writes; scope-filtered
   `tools/list`; allow+deny audit; token-file config only.
 - `vogt-mcp-remote` bridge with startup tool discovery and stderr skew
   warning.
-- `backup` / `restore` / `export` / `import`; signed OCI image + compose;
-  no-default-port enforcement; generated example configs.
+- `backup` / `restore` / `export` / `import`; generated example configs;
+  the NFR-D2 default-policy split enforced (exposure values ungated,
+  allocation values defaulted).
+- `release.yml` completes: buildx image, syft SBOM, keyless cosign sign +
+  attest, push to `ghcr.io/thedancingdeveloper-org/vogt`, tag-triggered
+  only, on `[self-hosted, node-b, linux, x64, docker, publish]`.
+- The ops-repo stack: `indexarr/ops` → `personal/vogt/docker-compose.yml`,
+  digest-pinned, tailnet-bound, hardened per NFR-D9, healthchecked on
+  `/health/ready`. **Allocate the port here** and verify it free on Node B
+  before committing (see `DEPLOYMENT.md` §2.2).
 
-**Demo**: compose up on the tailnet host; from a dev box, Claude Code
-connects via the bridge with a read-only token — write tools are absent
-from its tool list; swap to a `work.write` token — they appear; probe
-`/health/ready` with plain curl; backup, destroy, restore, state intact.
+**Demo**: tag a release → GitHub Actions publishes a signed image and
+nothing deploys; pin the digest in `indexarr/ops`, `DeployStack`
+`personal-vogt`, and the stack comes up on Node B. From a dev box on the
+tailnet, Claude Code connects via the bridge with a read-only token —
+write tools are absent from its tool list; swap to a `work.write` token —
+they appear. Probe `/health/ready` with plain curl over the Tailscale
+address (and confirm nothing answers on the LAN address). Backup, destroy
+the stack, redeploy, restore — state intact. Then revert the digest and
+redeploy to prove rollback.
 
 ## M5 — GitHub module (the adapter earns its keep)
 

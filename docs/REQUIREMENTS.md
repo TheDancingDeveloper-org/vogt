@@ -1,6 +1,6 @@
 # Vogt — Requirements (draft v0.3)
 
-Status: **draft baseline, revision r3** (2026-08-12), distilled from
+Status: **draft baseline, revision r4** (2026-08-12), distilled from
 `DESIGN.md`, `SCHEMA.md`, `DEPLOYMENT.md` and the originating product
 discussion.
 
@@ -56,6 +56,36 @@ it, and no v1 requirement may be justified by it.
 Per §4, IDs are never renumbered or reused: withdrawn and deferred
 requirements stay in place marked with the revision that moved them, and
 replacements append.
+
+### Revision r4 — the target deployment state is named
+
+The deployment target was previously abstract ("a tailnet server"). It is
+now concrete, and the requirements say so: **Vogt runs as a Docker Compose
+stack on Node B (`winrarhost`), deployed by Komodo from the `indexarr/ops`
+GitOps repository, from a signed image published to GHCR by tag-triggered
+GitHub Actions on self-hosted runners** (NFR-D7–D10, NFR-C4).
+
+Three existing requirements change as a consequence, revised in place:
+
+1. **NFR-D2 splits.** "No default host/port anywhere" was one rule doing
+   two jobs. Values that encode *exposure or identity* still have no
+   defaults; values that are pure *host allocation* (a tailnet-bound port,
+   an operator-owned certificate path) now require concrete defaults. The
+   literal rule cost cadastre every deploy from `cadastre#42` on —
+   `DEPLOYMENT.md` §4.1 records the incident.
+2. **NFR-D6 changes mechanism.** TLS is terminated **in-process** from the
+   host's Tailscale-issued certificate. No fronting Caddy, no
+   `tailscale serve`, no entry in Node B's Caddyfile — that Caddy is host
+   infrastructure rather than a Komodo stack, and a tailnet-only service
+   has no reason to couple to it.
+3. **NFR-PO4 gains the real distribution path.** The OCI image is GHCR,
+   signed keylessly, and consumed by a Komodo stack — not a generic
+   "signed OCI image with compose file".
+
+This changes no functional requirement, no stage boundary, and nothing
+about the forge-optional core: NFR-PO1–PO3 are untouched, and the product
+still self-hosts anywhere Docker runs. Node B is *this estate's*
+deployment, specified so that M4 has a target instead of a shape.
 
 ---
 
@@ -229,18 +259,22 @@ by path or repository URL, and stops there.*
 | NFR-PO1 | The product shall be fully functional with no GitHub and no forge — no network at all: projects, work, backlog, ranking, contracts, compliance status, dependency references, drift, audit. Forge and advisory integrations are optional plugins that only ever *add*. | M |
 | NFR-PO2 | The full test suite shall run forge-less; forge-dependent tests are a separately marked layer. | M |
 | NFR-PO3 | Self-hosting shall require zero external services: SQLite storage, single process, single volume. | M |
-| NFR-PO4 | Supported install paths: `uv tool install` and signed OCI image with compose file. | M |
+| NFR-PO4 | *(revised r4)* Supported install paths: `uv tool install`, and an OCI image published to `ghcr.io/thedancingdeveloper-org/vogt` with SBOM and keyless cosign signature, consumed by a Docker Compose stack. Image references in deployed compose files shall be **digest-pinned**, not alias-tracking. | M |
 
 ### NFR-D — Deployment & network
 
 | ID | Requirement | Pri |
 |---|---|---|
 | NFR-D1 | One server process, one port: GUI, `/api`, `/mcp`, and health endpoints path-routed together. Split-mode is not a v1 topology. | M |
-| NFR-D2 | No default host/port shall exist in code, images, docs, or examples; the listen port is required configuration. | M |
+| NFR-D2 | *(revised r4)* No default shall encode **exposure or identity** — a public hostname, a `0.0.0.0` bind, a published LAN port, or a client-trusted URL — in code, images, docs, or examples. Values that are pure **host allocation** (a tailnet-bound port, an operator-owned certificate or token path) shall instead carry concrete defaults in the deployment's compose file, overridable from the stack environment, commented with the host they describe. Required-value gates (`${X:?}`) shall not be used for allocation values. | M |
 | NFR-D3 | Client bootstrap tooling shall reconcile configured endpoint *values*, not key existence. | M |
 | NFR-D4 | Health probes shall be plain HTTP and MCP-protocol-version-agnostic. | M |
 | NFR-D5 | Default exposure is loopback (local) or tailnet/LAN; no public ingress in v1. Server functions behind NAT with outbound-only network use. | M |
-| NFR-D6 | TLS shall be terminated by a fronting component (Caddy / `tailscale serve`) in server topology; loopback may be plaintext. | S |
+| NFR-D6 | *(revised r4)* TLS shall be terminated **in-process** by `serve` (`--tls-cert` / `--tls-key`) from an operator-owned certificate mounted read-only; loopback may be plaintext. No fronting proxy, no public DNS record, and no entry in the host's shared reverse proxy shall be required to reach the service. | S |
+| NFR-D7 | *(r4)* The target deployment shall be a single Docker Compose stack on Node B (`winrarhost`), whose desired state lives in the `indexarr/ops` repository at `personal/vogt/docker-compose.yml` and is applied only by Komodo (`DeployStack`, stack `personal-vogt`, server `Local`). Deployed containers shall never be hand-edited, and no deploy step shall SSH to the host to run compose directly. | M |
+| NFR-D8 | *(r4)* In the NFR-D7 deployment, the published listener shall bind the host's Tailscale address, never `0.0.0.0`; stateful data shall use a named volume, and operator-owned material shall use absolute bind mounts (never `./relative` paths, which Komodo's per-deploy stack clone silently redirects). NFR-D5 continues to govern what the *product* permits an operator to bind. | M |
+| NFR-D9 | *(r4)* The shipped image and the NFR-D7 compose stack shall run non-root with a read-only root filesystem, `no-new-privileges`, all capabilities dropped, and writable scratch supplied as `tmpfs`. Token files shall be mode-restricted to the container's uid. | M |
+| NFR-D10 | *(r4)* Publishing an image and deploying it shall be distinct acts: a tag publishes, and production moves only when the pinned digest in `indexarr/ops` is changed and a deploy is executed. Rollback shall be a revert of that digest plus a redeploy, subject to the forward-only migration constraint (NFR-I3). | M |
 
 ### NFR-I — Integrity & reliability
 
@@ -278,6 +312,8 @@ by path or repository URL, and stops there.*
 | NFR-C1 | Docs-only changes (`docs/**`, `design/**`, `**/*.md`) shall not trigger the full pipeline — docs lint/link/config-drift checks only. | M |
 | NFR-C2 | Mixed code+docs changes shall run the full pipeline; the docs path is never a bypass (trivially-succeeding gate job pattern for required checks). | M |
 | NFR-C3 | Releases (image build, SBOM, signing, publish) shall be tag-triggered only; a push to main shall never publish an image. | M |
+| NFR-C4 | *(r4)* Every workflow job shall select a self-hosted runner explicitly (`runs-on: [self-hosted, node-b, linux, x64, …]`); GitHub-hosted runners and dynamic `runs-on` expressions shall not appear. The repository shall be added to the `public-node-b` runner group before its first workflow exists. Jobs needing a Docker daemon shall additionally request the `docker, publish` labels. | M |
+| NFR-C5 | *(r4)* Image signing shall be keyless (workflow OIDC identity via Fulcio/Rekor), so that no signing key exists to store or rotate and the signature binds to this repository and workflow. | M |
 
 ### NFR-O — Open source & product
 
@@ -334,6 +370,19 @@ Deferred by revision r3:
   looking.
 - **Continuous contract re-checking** (was FR-G5, FR-G7) — the contract is
   evaluated when asked, and the answer carries its age.
+
+Deferred by revision r4:
+
+- **Automated deploy on release.** The estate has a `komodo-deploy.sh`
+  pattern that rewrites the image tag in ops, commits, and POSTs
+  `DeployStack` from CI. Vogt does not use it in v1: a tag publishes a
+  signed image, and moving production stays a separate act (NFR-D10).
+  Reintroducing it is a small change and an explicit decision, not an
+  oversight.
+- **Public ingress for the Node B stack** — no DNS record, no Cloudflare
+  entry, no reverse-proxy block. Consistent with NFR-D5, restated here
+  because a tailnet-only stack is the one shape where someone is most
+  likely to "just add a Caddy block".
 
 Named stretch goal, **not committed and not designed for**:
 

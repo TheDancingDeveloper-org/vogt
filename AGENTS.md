@@ -38,3 +38,29 @@ implementation language.
   the GUI consumes the same HTTP adapter.
 - Every write requires a principal and a reason (audit table).
 - mypy strict + ruff from the first commit; no unmigrated schema changes.
+
+## Deployment target (r4)
+
+`docs/DEPLOYMENT.md` §2.2 is the target and is concrete: a Compose stack on
+**Node B**, deployed by **Komodo** from `indexarr/ops` at `personal/vogt/`,
+from a digest-pinned **GHCR** image published by tag-triggered GitHub
+Actions. Four things are easy to get wrong here:
+
+- **Never write an `ssh … docker compose up -d` deploy step**, and never
+  hand-edit a deployed container. Komodo applies the ops compose; that is
+  the only path (NFR-D7).
+- **Don't gate allocation values.** `${PORT:?}`-style required values on a
+  tailnet-bound port or an operator-owned cert path broke every cadastre
+  deploy after `cadastre#42`. Defaults are *required* for these and
+  forbidden for anything encoding exposure or identity (NFR-D2, revised —
+  read §4.1 before "fixing" a default you find in a compose file).
+- **No fronting proxy.** TLS terminates in-process from the host's
+  Tailscale certificate; there is no Caddyfile entry and no public DNS
+  record, by decision (NFR-D6, revised).
+- **Publishing ≠ deploying.** A tag publishes a signed image and moves
+  nothing. Production moves on a digest bump in ops plus `DeployStack`
+  (NFR-D10).
+
+Workspace-level Komodo/Infisical/runner rules live in `~/Working/AGENTS.md`
+and are not restated here; `docs/DEPLOYMENT.md` §6 records only the Node B
+failure modes that specifically bite this stack.

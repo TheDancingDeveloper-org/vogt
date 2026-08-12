@@ -1,8 +1,15 @@
-# Vogt — Deployment & Network Topologies (draft v0.1)
+# Vogt — Deployment & Network Topologies (draft v0.2, revision r4)
 
 Status: **draft, pre-implementation**. Companion to `DESIGN.md` §7 and
 `SCHEMA.md`. Shaped heavily by cadastre's deployment history — see §4 for
 the specific lessons encoded here.
+
+**r4 (2026-08-12): the target deployment state is named.** Vogt runs as a
+**Docker Compose stack on Node B (`winrarhost`), deployed by Komodo** from
+the `indexarr/ops` GitOps repository, from an image published to GHCR by
+tag-triggered GitHub Actions. This replaces the abstract "tailnet server"
+of r1 with the concrete estate it actually deploys into. §2.2 is the
+target; §2.1 remains the local development shape.
 
 ## 1. Process model
 
@@ -24,6 +31,11 @@ require an MCP client. Here, **any port that serves MCP also serves plain
 HTTP health and version**, so curl, compose healthchecks, and uptime
 monitors work unmodified.
 
+It is also one *container* and one published port, where cadastre's stack
+runs `cadastre` and `cadastre-mcp` as two services on two ports. One
+process is the whole reason a compose healthcheck can speak for the MCP
+surface too.
+
 Split-mode (separate MCP process/port) is not a v1 topology. The door stays
 open — transports are thin adapters — but it is not built, documented, or
 defaulted.
@@ -38,7 +50,7 @@ browser ──────────http────> 127.0.0.1:<port>  (serve
 vogt CLI ───────────> data-dir directly (no server needed)
 ```
 
-- `serve` binds loopback by default; no TLS, no auth required for loopback
+- `serve` binds loopback; no TLS, no auth required for loopback
   (still audited — principal `local:<os-user>`).
 - Local stdio MCP talks to the same data directory the CLI uses; the server
   does not need to be running for stdio or CLI use (SQLite + WAL, single
@@ -48,31 +60,120 @@ vogt CLI ───────────> data-dir directly (no server needed)
   run only over registered projects. Outbound to `api.github.com` occurs
   only if the optional GitHub adapter is configured.
 
-### 2.2 Topology B — tailnet server (primary self-hosted target)
+This is the M0–M3 working shape, and it stays supported after M4 — it is
+how the product runs for anyone who is not this estate.
+
+### 2.2 Topology B — Node B compose stack via Komodo (**the target**)
 
 ```
                     tailnet (WireGuard)
-agents / browsers ────https────> host:PORT ──> [ caddy or tailscale serve: TLS ]
-                                                └──> vogt serve :PORT
-                                                       └── volume: /var/lib/vogt
+agents / browsers ──https──> 100.92.54.45:<port>   (Tailscale address only)
+                                    │
+                                    └──> vogt (single container, single port)
+                                           ├── TLS terminated in-process
+                                           │   (host Tailscale LE cert, ro)
+                                           └── volume: /var/lib/vogt
 GitHub  <───outbound only─── collectors (optional adapter; no inbound
                                           webhooks required)
 ```
 
-- Single compose stack: the app container + a TLS front (Caddy sidecar or
-  `tailscale serve`); one published port, path-routed as in §1.
-- Exposure default: **tailnet/LAN only**. No public ingress in v1.
-- Clients connect one of two ways (mirroring cadastre's proven pair):
-  1. **Native streamable HTTP** to `https://<host>:<port>/mcp` with a
-     bearer token — preferred wherever the agent product supports it.
-  2. **`vogt-mcp-remote` stdio bridge** for agent products that can
-     only spawn local processes. Config via `VOGT_URL` and
-     `VOGT_TOKEN_FILE` (token in a file, never argv or URL).
-- Webhooks are an optional later enhancement; the baseline is outbound
-  polling sweeps, so the server works behind NAT with zero inbound rules
-  beyond the tailnet.
+| Fact | Value |
+|---|---|
+| Host | Node B, `winrarhost` — TS `100.92.54.45`, LAN `192.168.1.75` |
+| Komodo server (periphery) | `Local` |
+| Komodo stack | `personal-vogt` |
+| Desired state | `indexarr/ops` → `personal/vogt/docker-compose.yml` |
+| Image | `ghcr.io/thedancingdeveloper-org/vogt`, digest-pinned |
+| Exposure | tailnet only — bound to the Tailscale address, never `0.0.0.0` |
+| TLS name | `winrarhost.tailc7d3c.ts.net` (Tailscale-issued Let's Encrypt) |
+| App data | named volume `vogt-komodo-data` → `/var/lib/vogt` |
+| Operator material | `/mnt/2tnvme/docker/volumes/vogt/{tls,auth}`, mounted `:ro` |
 
-### 2.3 Topology C — deferred (explicit non-goals for v1)
+`personal/` rather than `prod/` because this is home-homelab infrastructure
+on Node B, matching `personal/cadastre` — the ops repo's top-level
+directory *is* the Komodo stack-name prefix.
+
+**Exposure is a tailnet allocation, not an ingress decision.** The
+published port binds `100.92.54.45`, so it publishes nothing to the LAN or
+the internet. There is no public DNS record, no Cloudflare entry, and **no
+block in Node B's Caddyfile** — Node B's Caddy is host infra (a plain
+compose project at `/mnt/2tnvme/docker/volumes/caddyv2/`, not a Komodo
+stack), and a tailnet-only service has no reason to couple to it. This
+revises NFR-D6: TLS is terminated **in-process** from the host's
+Tailscale-issued certificate, bind-mounted read-only, rather than by a
+fronting Caddy or `tailscale serve`. `serve` therefore needs `--tls-cert`
+/ `--tls-key` at M4.
+
+**Port allocation.** One port, allocated when the stack is created and
+**verified free on Node B at that moment** — not inherited from this
+document. Cadastre holds `18090` (HTTP API) and `18092` (MCP) in the same
+block; `18094` is the natural next candidate but is *unverified* here and
+must be checked before the compose file is committed. Once allocated, the
+value is a **default in the compose file**, overridable from the Komodo
+stack environment — see §4.1, which is the rule this replaces.
+
+**Container shape** (following the cadastre stack, which is the hardened
+precedent on this host):
+
+- non-root (`user: "10001:10001"`), `read_only: true` root filesystem,
+  `tmpfs` for `/tmp`, `security_opt: [no-new-privileges:true]`,
+  `cap_drop: [ALL]`.
+- Stateful data on a **named volume**; operator-owned material (TLS key
+  pair, token file) as **absolute** bind mounts, read-only. Never a
+  `./relative` bind mount for state — Komodo clones stack directories to
+  fresh paths on every deploy, so a relative mount silently points at a
+  new empty directory.
+- Token file mode `0750 root:10001`, so only this container's uid can read
+  it (FR-S7: tokens by file reference, never argv or URL).
+- `healthcheck` hits `/health/ready` over plain HTTP (§4.4).
+
+**Clients** connect one of two ways (mirroring cadastre's proven pair):
+
+1. **Native streamable HTTP** to `https://<host>:<port>/mcp` with a bearer
+   token — preferred wherever the agent product supports it.
+2. **`vogt-mcp-remote` stdio bridge** for agent products that can only
+   spawn local processes. Config via `VOGT_URL` and `VOGT_TOKEN_FILE`
+   (token in a file, never argv or URL).
+
+Webhooks are an optional later enhancement; the baseline is outbound
+polling sweeps, so the server works behind NAT with zero inbound rules
+beyond the tailnet.
+
+### 2.3 From commit to running container
+
+```text
+tag v* ──> GitHub Actions `release.yml`
+             runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+             build → SBOM (syft) → keyless cosign sign + attest → push GHCR
+  ──> ops repo: pin the new digest in personal/vogt/docker-compose.yml
+  ──> Komodo POST /execute/DeployStack {"stack":"personal-vogt"}
+             └── periphery clones ops, compose pull/up on Node B
+```
+
+Rules this flow obeys:
+
+- **Never `ssh … docker compose up -d`.** Desired state is the ops compose;
+  Komodo is the only thing that applies it. Deployed containers are never
+  hand-edited.
+- **Publish is automatic on a tag; deploy is a separate, deliberate act.**
+  A push to `main` can never publish an image (NFR-C3), and publishing an
+  image does not move production. Cadastre works this way, and the digest
+  bump in ops is the human-or-agent decision point. Automating the bump
+  via `ops/scripts/komodo-deploy.sh` stays available and is not v1 scope.
+- **Runners are self-hosted, always.** `runs-on: ubuntu-latest` is
+  prohibited estate-wide; the repository must be added to the
+  `public-node-b` runner group **before** its first workflow exists, or CI
+  is red with no reachable runner. `docker`/`publish` is advertised only by
+  the two Docker-in-Docker-backed workers. The self-hosted image has no
+  language runtimes preinstalled — `astral-sh/setup-uv` is explicit.
+- **Signing is keyless** (`id-token: write` → cosign via Fulcio/Rekor), so
+  there is no signing key to store or rotate and the signature binds to
+  this repository and workflow.
+- **Pin the digest, not the alias.** `:latest` and even `:sha-…` are
+  lookup conveniences; the ops compose carries the digest so a deploy is
+  reproducible and a rollback is a one-line revert.
+
+### 2.4 Topology C — deferred (explicit non-goals for v1)
 
 Public internet exposure, multi-node/HA, hosted multi-tenant SaaS, and
 split MCP/API processes. Listed so their absence is a decision, not an
@@ -93,6 +194,14 @@ Scopes ride on the token (`read`, `work.write`, `project.write`,
 scopes; write tools additionally require the server to be started with
 writes enabled. Both allow and deny decisions are audited.
 
+Runtime secrets live in Infisical `apps` under `HOMELAB_VOGT_*` names and
+are **copied** into the Komodo stack environment — Komodo has no external
+secret-manager connector and interpolates its own values as `[[NAME]]`.
+That copy is a standing drift risk: a credential rotated or revoked
+upstream keeps working in Komodo until something notices. Alert on the
+*symptom* (auth failures at the consumer), never on the freshness of the
+copy.
+
 ## 4. Configuration & bootstrap rules (lessons encoded)
 
 Cadastre's `:18081` incident: a retired default port shipped in a
@@ -101,33 +210,114 @@ config key *existed* rather than that its *value* was right, so clients
 kept a dead URL forever. Additionally a health check pinned an MCP
 protocol version the server refused. Therefore:
 
-1. **No default host/port anywhere.** Not in code, docs, images, or
-   examples. `serve` requires `--port` (or config); docs use `<port>`
-   placeholders. A default can rot in a downstream image; a required value
-   cannot.
-2. **Bootstrap reconciles values, not key existence.** Any client-setup
-   script compares the configured endpoint against the intended one and
-   rewrites on mismatch; "key present" is never success.
-3. **One connection document.** A single generated `CONNECTING.md` (from
-   the running server: `GET /connection-info`) states the canonical URL,
-   `/mcp` path, and supported MCP protocol versions. Client configs are
-   derived from it, never hand-copied per client.
-4. **Health checks are protocol-version-agnostic.** Probes hit
-   `/health/ready` (plain HTTP). Nothing outside a real MCP client sends
-   `initialize`, and nothing pins a protocol version.
-5. **Version skew warns, never blocks.** Bridge↔server version mismatch is
-   one stderr line (stdout is MCP framing), startup always proceeds.
-6. Config schema (pydantic) is the single source of truth; compose files,
-   example configs, and docs are generated from it, and CI fails on drift.
+### 4.1 Defaults: forbidden for exposure, required for allocation *(revised r4)*
+
+r1 stated this as "**no default host/port anywhere** — not in code, docs,
+images, or examples". That rule, applied literally to a compose file, cost
+cadastre every deploy from `cadastre#42` onward: the port, TLS path, and
+token path were `:?`-gated required values, `verify` and `publish` went
+green, and the deploy step went red because three values were never set.
+The gate was protecting against nothing — the ports bind a Tailscale
+address, so choosing them is an allocation inside the tailnet, not an
+exposure decision, and the certificate and token file are real paths that
+already exist on the host.
+
+The rule that survives, split by what the value actually decides:
+
+- **No default may encode exposure or identity.** Public hostnames, a
+  `0.0.0.0` bind, a published LAN port, or a URL a client will trust: these
+  have no defaults in code, images, docs, or examples, and `<port>`
+  placeholders stay placeholders. A wrong default here is the `:18081`
+  incident.
+- **Values that are pure host allocation carry concrete defaults**, in the
+  compose file, overridable from the Komodo stack environment, with a
+  comment naming *which host they describe*. A tailnet-bound port, an
+  operator-owned certificate path, a token path: gating these produces
+  broken deploys, not safety.
+
+`vogt serve` still requires its listen address to be configured — the
+compose file is what supplies it, and the compose file is allowed to know
+the answer for Node B.
+
+### 4.2 Bootstrap reconciles values, not key existence
+
+Any client-setup script compares the configured endpoint against the
+intended one and rewrites on mismatch; "key present" is never success.
+
+### 4.3 One connection document
+
+A single generated `CONNECTING.md` (from the running server: `GET
+/connection-info`) states the canonical URL, `/mcp` path, and supported MCP
+protocol versions. Client configs are derived from it, never hand-copied
+per client.
+
+### 4.4 Health checks are protocol-version-agnostic
+
+Probes hit `/health/ready` (plain HTTP). Nothing outside a real MCP client
+sends `initialize`, and nothing pins a protocol version. This is what makes
+the compose healthcheck in §2.2 possible at all.
+
+### 4.5 Version skew warns, never blocks
+
+Bridge↔server version mismatch is one stderr line (stdout is MCP framing);
+startup always proceeds.
+
+### 4.6 The config schema is the single source of truth
+
+Pydantic; compose files, example configs, and docs are generated from it,
+and CI fails on drift (NFR-Q4). The committed `personal/vogt/` compose in
+the ops repo is a *consumer* of that schema — a generated-then-reviewed
+artifact, not a hand-maintained parallel truth.
 
 ## 5. Storage, backup, upgrade
 
-- One named volume: `/var/lib/vogt` (both SQLite files + backups).
+- One named volume mounted at `/var/lib/vogt` (both SQLite files +
+  backups), on Node B's root NVMe (`/mnt/2tnvme`) unless capacity says
+  otherwise — `/mnt/4tnvme` is the same speed class and is where bulkier
+  stacks live, so moving later is a capacity decision, not a performance
+  one.
 - `vogt backup` produces a consistent snapshot (SQLite backup API,
   both stores + a manifest with schema versions); `restore` verifies the
   manifest before touching anything.
-- Upgrade path: pull new image → `migrate` runs forward-only migrations
-  under `migration_lock` at startup → `/health/ready` gates traffic until
-  migration completes.
-- Images: `ghcr.io`, SBOM + signed, tag-triggered releases only
-  (`DESIGN.md` §8.1 — docs pushes can never publish an image).
+- Upgrade path: bump the pinned digest in ops → `DeployStack` → `migrate`
+  runs forward-only migrations under `migration_lock` at startup →
+  `/health/ready` gates traffic until migration completes.
+- Rollback is a revert of the digest line in ops plus a `DeployStack`.
+  Forward-only migrations mean a rollback across a schema change needs a
+  restore, not just an older image — check `SCHEMA.md` before assuming the
+  digest revert is sufficient.
+- Images: GHCR, SBOM + signed, tag-triggered releases only (`DESIGN.md`
+  §8.1 — docs pushes can never publish an image).
+
+## 6. Operating the stack (Node B specifics)
+
+Known failure modes on this host, recorded before they cost a session:
+
+- **GHCR `denied: denied` on compose pull.** Node B's periphery holds a
+  stored `ghcr.io` credential, and Docker sends it on *every* ghcr.io pull
+  — so a stale token turns even a public image into a permission error.
+  Diagnose by testing the stored `auths["ghcr.io"]` entry against the ghcr
+  token endpoint (`403` = stale), then update Komodo's `ghcr.io` registry
+  account. This is the single most likely first-deploy failure for a
+  GHCR-hosted stack here.
+- **`DeployStack` git-pull conflicts.** Komodo keeps its own disposable
+  clone per stack at
+  `/mnt/2tnvme/docker/volumes/komodo/periphery/stacks/personal-vogt/`. It
+  is deploy-time scratch space — never `cd` into it to edit or store
+  anything. An untracked-file conflict there aborts the deploy mid-pull;
+  the fix is to delete the offending junk so it re-clones cleanly.
+- **`Missing git token` for `git account sprooty`.** The ops stacks
+  reference `git_account: sprooty`; the Komodo Git provider account
+  username must stay `sprooty` even though Forgejo git remotes use
+  `https://git:$TOKEN@…`.
+- **A successful deploy can still report null state.** Verify the deployed
+  digest *and* an actual `/health/ready` response — not merely that the
+  container started.
+- **No SSH is not a blocker.** Komodo's `/execute/RunStackService` and the
+  `Local`-server terminal API are both remote-exec paths into this host
+  when Tailscale SSH is unavailable.
+
+Komodo API shape (2.2.0): each request is its own path — `POST
+/read/GetStack`, `POST /write/UpdateStack`, `POST /execute/DeployStack` —
+with bare JSON params. A `400` with an empty body means the request shape
+is wrong; bad credentials return `401`.
