@@ -1,0 +1,216 @@
+# Vogt — Deliverable Stages (draft v0.3, revision r3)
+
+Status: **draft**. Requirement IDs refer to `REQUIREMENTS.md`; per its §4,
+scope changes here must update that document in the same change.
+
+## The cut lines
+
+- **MVP = M0–M2** (r2): a tracker that is daily-usable by you and your
+  agents — the write plane, observed-first views over your registered
+  projects, and read-only GitHub so the views cover work that actually
+  exists. Everything after is enrichment.
+- **M3** adds contract checking and the drift lifecycle; **M4** makes it a
+  self-hosted service; **M5** adds forge consolidation and write-back;
+  **M6** adds the GUI. **v1 = M0–M6.**
+- M5 precedes M6 and the order is fixed: build the GUI once, against
+  complete data.
+
+Each stage ends with a **demo** — the stage is done when the demo runs,
+its requirements' tests pass, and transport parity is green for every
+operation the stage added.
+
+| Stage | Name | One-liner | Requirements delivered |
+|---|---|---|---|
+| M0 | Foundation | Storage, audit + events spine, operation registry, CI skeleton | FR-L1(part), FR-S1, FR-S2(local), FR-A2(part), FR-A3(harness), FR-N1(store), NFR-Q1–Q5, NFR-C1–C3, NFR-I1, NFR-I3, NFR-S3, NFR-O1, NFR-O3, NFR-PO3 |
+| M1 | Core tracker | Local work tracking over CLI + REST + MCP stdio | FR-P1, FR-P2, FR-P4, FR-P5, FR-G11, FR-W1–W3, FR-W6–W9, FR-V1–V3, FR-A1–A4, FR-A5(stdio), FR-S6, FR-N1, FR-N2, NFR-Q3 |
+| M2 | Eyes *(MVP)* | Collectors incl. read-only GitHub, observed-first, suppression, trust & freshness | FR-O1–O4, FR-O5a, FR-O6, FR-O7, FR-W4, FR-W5, FR-W10, FR-W11, FR-G12, FR-G15, FR-V4, FR-D1–D4, FR-P3, FR-R4, FR-L3, NFR-I2, NFR-I4, NFR-I5, NFR-S1, NFR-S2, NFR-S4, NFR-PO1, NFR-PO2 |
+| M3 | Contract & drift | On-demand contract checks; the drift proposal lifecycle | FR-G1, FR-G3, FR-G4, FR-G13, FR-G14, FR-R1–R3, FR-R5, FR-D5, FR-D8 |
+| M4 | Service | Tailnet server, auth, remote MCP, ops | FR-A5(full), FR-A6, FR-A7, FR-S3–S5, FR-S7, FR-L1(full), FR-L2, NFR-D1–D6, NFR-PO4, NFR-O2 |
+| M5 | GitHub module | Consolidation, forge drift, write-back | FR-O5b, FR-B1–B4, FR-D6 |
+| M6 | GUI | The visual surface over the same API | FR-U1, FR-U2 |
+
+Deferred and withdrawn requirement IDs (FR-G2, FR-G5–G10, FR-D7) appear in
+no stage by design — see `REQUIREMENTS.md` §3.
+
+---
+
+## M0 — Foundation
+
+**Objective**: the skeleton everything else bolts onto, with the quality
+gates and CI shape locked in before any feature exists.
+
+Deliverables:
+- Repo scaffold satisfying its own default contract — including the
+  `LICENSE`, which makes licence selection an **M0 decision**, not a
+  pre-publication one (NFR-O1/O3).
+- `pyproject.toml`, committed `uv.lock`, Renovate config (all three
+  toggles), mypy strict + ruff + coverage gate wired.
+- GitHub Actions: `docs.yml` / `ci.yml` / tag-only `release.yml` with the
+  docs-skip path filtering and gate-job pattern.
+- `declared.sqlite3` + `observed.sqlite3` with migration framework, lock,
+  meta/revision; `audit` and `events` tables and the transactional write
+  path — entity + audit row + event row + revision bump, atomically
+  (NFR-I1, FR-N1).
+- Actor model with `local:<os-user>` principal derivation; `reason`
+  required and non-empty on every write.
+- Storage behind an interface that avoids SQLite-only semantics, so a
+  Postgres backend stays possible without a redesign (NFR-S3).
+- The transport-neutral **operation registry** and the parity-test harness
+  with both exclusion lists (`HTTP_ONLY`, `LOCAL_ONLY`) empty-but-live.
+- CLI: `init`, `status`.
+
+**Demo**: `vogt init`, register a project record from the CLI with a
+reason, `status` shows revision 1, the audit row carries actor + reason,
+and `/events` returns exactly one row at `seq=1`. `mypy --strict` and the
+parity harness pass in CI; a docs-only commit runs only `docs.yml`.
+
+## M1 — Core tracker (first daily-usable build)
+
+**Objective**: a working local tracker — the write plane — reachable from
+all three surfaces.
+
+Deliverables:
+- `project register` / `project create` (scaffolds a compliant skeleton;
+  registration is never refused, FR-G11); lifecycle states; the
+  one-repo-one-project granularity rule (FR-P5).
+- Work items (4 kinds, p0–p4, effort, assignee); typed cross-project
+  relations (`depends_on`, `relates_to`, `duplicate_of`, `parent_of`);
+  labels (GitHub-aligned); initiatives; comments.
+- Cursor-based `/events` feed over the M0 events table.
+- Workflow engine with per-kind state machines; rejected transitions name
+  the violated rule.
+- Deterministic ranking with `why` explanations; `brief`, `backlog`,
+  `bugs` views with filters.
+- REST (FastAPI + OpenAPI) and MCP stdio, both generated from the
+  registry; CLI verbs for everything; audit browsing.
+- Decide `rank_order` (`DESIGN.md` §9.2): manual override with a `why`
+  contribution, or drop the column.
+
+**Demo**: from Claude Code via stdio MCP: create a bug, block it on
+another item, transition it, ask `backlog` and `why` — then show the same
+state from the CLI and `curl`, with identical answers, and the audit trail
+and event feed of everything the agent just did.
+
+## M2 — Eyes (MVP complete)
+
+**Objective**: the tool sees work you didn't type in — including the work
+that lives on GitHub, which is where most of it actually is.
+
+Deliverables:
+- Collector framework: plugin registry, in-process scheduler, on-demand
+  `sweep`, sweep/coverage records, digest dedup, append-only store +
+  rebuildable `latest_*` tables. **Scope is always the registered project
+  list** (FR-G15) — no crawling, no candidates.
+- Core collectors: `git-local` (branch, dirty state, tags → version),
+  `source-markers`, `dep-refs` (path/git/workspace references from
+  `Cargo.toml`, `package.json`, `pyproject.toml` — manifests only, no
+  lockfiles, no versions).
+- **Read-only GitHub collectors** (FR-O5a): issues, PRs, Actions runs,
+  releases/tags. No writes, no backfill, no posture — those are M5.
+- Noise control before observed-first is switched on: promotion by
+  convention (`TODO(vogt):`), audited `suppress`, per-project exclusions.
+- Observed-first backlog/bugs; `adopt` promotion with maintained links.
+- Cross-project dependency references: resolution to registered projects,
+  reverse lookup, unresolved targets retained.
+- Computed trust states; freshness stamps on every aggregated answer;
+  "not collected" semantics for unswept scope.
+- Retention policy over the observed store (NFR-I5): latest observation
+  per subject kept indefinitely, history pruned on a configurable window.
+  The drift-proposal exemption arrives with FR-R5 at M3.
+- The NFR-S4 benchmark fixture at the ~500-project / ~100k-item envelope,
+  asserting the sub-second interactive target of NFR-S1 in CI.
+
+**Demo**: register a dozen real projects; sweep. The global bugs view
+shows GitHub issues *and* promoted markers from rustnzb and rustTorrent
+with freshness stamps and trust states; suppress a noisy marker and watch
+it leave the ranked view but stay in `observations`; `deps --project
+nzb-core` lists the projects referencing it; adopt one item into a ranked
+work item. Then re-run the whole suite with the network unplugged and the
+GitHub adapter disabled — everything except forge observations still works
+(NFR-PO1/PO2). **This demo is the MVP acceptance test.**
+
+## M3 — Contract & drift
+
+**Objective**: the contract is checkable and disagreements between
+declared state and observation become resolvable proposals.
+
+Deliverables:
+- The default contract (config, versioned identifier); `contract check`
+  against any path, returning every rule evaluated and every failing
+  criterion (FR-G3/G4).
+- Recording the result as a registered project's compliance status with a
+  checked-at timestamp, surfaced with its age on the brief and the global
+  view (FR-G14). Nothing re-checks on a timer.
+- The FR-G13 assertion tested: no code path consumes compliance, trust, or
+  drift status as a precondition.
+- Drift proposal lifecycle: raise with evidence, accept / reject /
+  contest, all audited, with the default low-risk auto-accept policy;
+  evidence snapshot at raise time and retention pinning (FR-R5).
+- Local drift kinds: `version_mismatch`, `unresolved_dependency`.
+- `mirrored_source` reporting (FR-D8) where a path member is also a
+  registered project.
+
+**Demo**: `contract check` a project missing `AGENTS.md` → the result names
+exactly that criterion, and the project's brief shows `non_compliant`
+alongside "checked 4 seconds ago"; check nothing for a week and the same
+brief says so rather than quietly refreshing. Tag a release without
+updating the declared version, sweep → `version_mismatch` proposal with
+evidence; accept it, and the audit trail shows who accepted it and why.
+Delete the observation's history window and confirm the proposal still
+renders its evidence.
+
+## M4 — Service (self-hosted on the tailnet)
+
+**Objective**: from local tool to always-on service with real identity.
+
+Deliverables:
+- `serve`: one port, path-routed GUI-placeholder / `/api` / `/mcp` /
+  health; streamable HTTP MCP with protocol-version negotiation;
+  `/connection-info`.
+- Token auth bound to actors; scopes; double-gated writes; scope-filtered
+  `tools/list`; allow+deny audit; token-file config only.
+- `vogt-mcp-remote` bridge with startup tool discovery and stderr skew
+  warning.
+- `backup` / `restore` / `export` / `import`; signed OCI image + compose;
+  no-default-port enforcement; generated example configs.
+
+**Demo**: compose up on the tailnet host; from a dev box, Claude Code
+connects via the bridge with a read-only token — write tools are absent
+from its tool list; swap to a `work.write` token — they appear; probe
+`/health/ready` with plain curl; backup, destroy, restore, state intact.
+
+## M5 — GitHub module (the adapter earns its keep)
+
+**Objective**: the forge side stops being read-only observation and starts
+keeping declared work honest — in both directions, carefully.
+
+Deliverables:
+- **Onboarding = non-destructive consolidation** (FR-B3): a read-only
+  backfill of all *existing* issues, PRs, labels, releases, and CI history
+  into observations. Zero GitHub mutations during onboarding; existing
+  state is incumbent and preserved.
+- Forge drift kinds: `forge_state_mismatch`, `vanished_upstream`,
+  `ci_red_vs_healthy`; per-project/per-kind auto-accept policy.
+- Per-toggle update-automation posture (FR-D6): version-updates config,
+  vulnerability alerts, automated security fixes — three facts, three
+  answers, never one boolean. `update_automation_gap` drift.
+- Write-back module: `none / comment_only / full`, additive/forward-only,
+  audited, re-observed on the next sweep.
+
+**Demo**: enable the module for the rustnzb org and verify — via the
+GitHub audit log and `updated_at` timestamps — that onboarding changed
+nothing upstream, while every existing issue and PR appears in the global
+views with labels intact. Then close an issue on GitHub that a declared
+item links → drift proposal; accept → the item closes with provenance.
+
+## M6 — GUI
+
+**Objective**: the visual surface, consuming only the public REST API.
+
+Deliverables: per-project view; global backlog + bugs; drift inbox;
+dependency reference graph; audit browser; trust, freshness and
+compliance-age rendered on every aggregate. Served from the same single
+port.
+
+**Demo**: every M2/M3/M5 demo step repeated through the browser, and
+nothing the GUI does is absent from the API (parity rule holds).
