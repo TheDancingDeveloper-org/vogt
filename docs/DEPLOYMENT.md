@@ -89,10 +89,53 @@ GitHub  <───outbound only─── collectors (optional adapter; no inboun
 | TLS name | `winrarhost.tailc7d3c.ts.net` (Tailscale-issued Let's Encrypt) |
 | App data | named volume `vogt-komodo-data` → `/var/lib/vogt` |
 | Operator material | `/mnt/2tnvme/docker/volumes/vogt/{tls,auth}`, mounted `:ro` |
+| Estate | `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` → `/home/sprooty/Working`, writable |
 
 `personal/` rather than `prod/` because this is home-homelab infrastructure
 on Node B, matching `personal/cadastre` — the ops repo's top-level
 directory *is* the Komodo stack-name prefix.
+
+### 2.1a The estate mount
+
+Vogt shares MyDevEnv2's workspace directory rather than getting a copy of
+it. A copy would mean every drift proposal is about a tree nobody edits,
+which is worse than not looking: the answers would be confidently wrong
+instead of visibly absent.
+
+Two properties of that mount are load-bearing.
+
+**The in-container path is identical to the host-side development path.**
+A project's `root_path` is stored absolute (FR-P5) and collectors read it
+verbatim — there is no path translation, and adding one would be a second
+source of truth about where a project lives. Register
+`/home/sprooty/Working/Active/apps/vogt` from inside MyDevEnv2 and this
+container must find it at exactly that path. If it does not, every source
+collector reports nothing, and *nothing found renders as an empty view, not
+as "could not look"* — the FR-O4 failure arriving through the filesystem.
+
+**It is writable.** Collectors only ever read, so `:ro` is tempting — and
+wrong, because `project create` scaffolds a contract-compliant skeleton on
+disk (FR-G11). A read-only mount removes exactly one operation, and removes
+it as a runtime permission error rather than a clear refusal.
+
+That matters more than the one operation. Splitting capability by topology
+is what this product is built not to do: one operation registry, the same
+answers over CLI, REST and MCP, on every deployment. A mount that makes
+`project create` work from a laptop and fail on the server is the parity
+rule (FR-A1) broken by infrastructure instead of by code, where no parity
+test can see it.
+
+Write access is bounded by the mechanisms designed for it rather than by the
+filesystem: `project.write` is its own token scope (FR-S3), writes are
+double-gated (FR-S4), `serve --read-only` refuses every write whatever scope
+a token holds, and each one lands in the audit log with the reason its
+author gave.
+
+The container runs as uid `10001` (§2.2), so that uid needs read *and*
+write on the workspace directory. MyDevEnv2 owns it, so this is the one
+mount whose ownership is not Vogt's to arrange — the directory needs to be
+group-writable by a group `10001` belongs to, or the two services need to
+agree on a shared uid.
 
 **Exposure is a tailnet allocation, not an ingress decision.** The
 published port binds `100.92.54.45`, so it publishes nothing to the LAN or

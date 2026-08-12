@@ -74,6 +74,34 @@ services:
       # mode 0750 root:10001 so only this container's uid can read it (FR-S7).
       - "${VOGT_TLS_DIR:-/mnt/2tnvme/docker/volumes/vogt/tls}:/etc/vogt/tls:ro"
       - "${VOGT_AUTH_DIR:-/mnt/2tnvme/docker/volumes/vogt/auth}:/etc/vogt/auth:ro"
+      # The estate Vogt observes: the same host directory MyDevEnv2 develops
+      # in, not a copy. A second copy would mean every drift proposal is about
+      # a tree nobody edits, which is worse than not looking at all.
+      #
+      # Mounted at the *identical* in-container path, because a project's
+      # `root_path` is stored absolute (FR-P5) and collectors read it
+      # verbatim. Register a project from MyDevEnv2 as
+      # /home/sprooty/Working/Active/apps/vogt and this container has to find
+      # it at that exact path or every source collector reports nothing —
+      # which renders as "no markers", not as "could not look".
+      #
+      # Writable, because `project create` scaffolds a contract-compliant
+      # skeleton on disk (FR-G11). Collectors only ever read, so `:ro` looks
+      # right until you notice it removes exactly one operation — and removes
+      # it as a runtime permission error, not as a clear refusal.
+      #
+      # Splitting capability by topology is the thing this product is built
+      # not to do: one operation registry, the same answers over CLI, REST
+      # and MCP, on every deployment. A mount that quietly makes `project
+      # create` work from a laptop and fail on the server is the parity rule
+      # broken by infrastructure.
+      #
+      # Write access is bounded by the mechanisms designed for it rather than
+      # by the mount: `project.write` is its own token scope (FR-S3), writes
+      # are double-gated (FR-S4), `serve --read-only` refuses all of them
+      # whatever a token holds, and every one lands in the audit log with the
+      # reason its author gave.
+      - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working"
 
     user: "10001:10001"
     read_only: true

@@ -41,7 +41,13 @@ def compose() -> str:
 
 def test_allocation_values_carry_defaults(compose: str) -> None:
     """NFR-D2 revised: gating these produces broken deploys, not safety."""
-    for variable in ("VOGT_PORT", "VOGT_BIND_IP", "VOGT_TLS_DIR", "VOGT_AUTH_DIR"):
+    for variable in (
+        "VOGT_PORT",
+        "VOGT_BIND_IP",
+        "VOGT_TLS_DIR",
+        "VOGT_AUTH_DIR",
+        "VOGT_WORKSPACE_DIR",
+    ):
         assert f"${{{variable}:-" in compose, (
             f"{variable} must carry a concrete default; `${{{variable}:?}}` is "
             "what cost cadastre every deploy after #42"
@@ -126,4 +132,43 @@ def test_the_release_workflow_is_tag_only_and_signs_a_digest() -> None:
     assert "id-token: write" in raw, "keyless signing needs the OIDC identity"
     assert 'cosign sign --yes "${IMAGE}@${DIGEST}"' in raw, (
         "sign the digest, never a tag: a tag can be moved after signing"
+    )
+
+
+def test_the_workspace_is_writable(compose: str) -> None:
+    """`project create` scaffolds a skeleton on disk (FR-G11).
+
+    Collectors only read, so `:ro` looks right — until you notice it removes
+    exactly one operation, as a runtime permission error rather than a clear
+    refusal. Splitting capability by topology is what this product is built
+    not to do: a mount that makes `project create` work from a laptop and
+    fail on the server is the parity rule broken by infrastructure.
+
+    Write access is bounded by the mechanisms meant for it — the
+    `project.write` scope, double-gated writes, `serve --read-only`, and the
+    audit log — not by the filesystem.
+    """
+    mounts = [
+        line.strip() for line in compose.splitlines() if "VOGT_WORKSPACE_DIR" in line
+    ]
+    assert mounts, "the estate has to be mounted or no source collector sees it"
+    for mount in mounts:
+        assert not mount.endswith(':ro"'), (
+            f"the estate mount is read-only, which breaks FR-G11: {mount}"
+        )
+
+
+def test_the_workspace_path_matches_where_projects_are_registered(
+    compose: str,
+) -> None:
+    """A project's `root_path` is stored absolute and read verbatim (FR-P5).
+
+    If this container sees the tree anywhere other than the path a project was
+    registered under, every source collector finds nothing — and "nothing
+    found" renders as an empty view, not as "could not look". Mounting at the
+    identical path is what keeps that from being silent.
+    """
+    assert ":/home/sprooty/Working" in compose, (
+        "the estate must appear at the same absolute path it was registered "
+        "under, or collectors silently report nothing"
     )
