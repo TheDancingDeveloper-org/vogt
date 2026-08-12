@@ -27,7 +27,7 @@ from vogt.application.services import (
     update_work,
     why,
 )
-from vogt.core.entities import WorkItem
+from vogt.core.observed import Rankable
 from vogt.core.ranking import (
     PRIORITY_POINTS,
     RankingInputs,
@@ -39,20 +39,23 @@ WHY = "ranking test"
 NOW = datetime(2026, 8, 12, 12, 0, 0, tzinfo=UTC)
 
 
-def _item(**overrides: object) -> WorkItem:
+def _item(**overrides: object) -> Rankable:
+    """A rankable subject.
+
+    The scorer takes `Rankable` rather than `WorkItem` so that declared work
+    and observed subjects go through the same weights — which is the whole
+    point of an observed-first backlog.
+    """
     base: dict[str, object] = {
         "id": "wrk_1",
         "ref": "WI-1",
-        "kind": "bug",
-        "title": "Something",
-        "state": "open",
         "priority": "p2",
+        "state": "open",
         "trust_state": "verified",
-        "created_at": NOW,
         "updated_at": NOW,
     }
     base.update(overrides)
-    return WorkItem.model_validate(base)
+    return Rankable(**base)  # type: ignore[arg-type]
 
 
 # -- the scoring function --------------------------------------------------
@@ -91,7 +94,7 @@ def test_blocking_other_work_lifts_an_item() -> None:
 def test_initiative_weight_lifts_its_items() -> None:
     plain = score_item(_item(), RankingInputs(now=NOW))
     weighted = score_item(
-        _item(initiative_id="ini_1"), RankingInputs(now=NOW, initiative_weight=100)
+        _item(has_initiative=True), RankingInputs(now=NOW, initiative_weight=100)
     )
     assert weighted.total > plain.total
 
@@ -141,9 +144,12 @@ def test_the_backlog_ranks_by_priority(instance: AppContext) -> None:
         CreateWorkParams(kind="bug", title="Urgent", priority="p0", reason=WHY),
     )
     result = backlog(instance, BacklogParams())
-    assert [entry.item.title for entry in result.items] == ["Urgent", "Low"]
+    assert [entry.title for entry in result.items] == ["Urgent", "Low"]
     assert result.scope == "global"
-    assert result.freshness.status == "not_collected"
+    assert result.freshness.status == "never_swept", (
+        "nothing has been swept, and the answer says so rather than "
+        "implying the evidence is current"
+    )
 
 
 def test_finished_work_leaves_the_backlog(instance: AppContext) -> None:
@@ -163,7 +169,7 @@ def test_the_bug_view_shows_only_bugs(instance: AppContext) -> None:
         instance, CreateWorkParams(kind="feature", title="A feature", reason=WHY)
     )
     result = bugs(instance, BugsParams())
-    assert [entry.item.kind for entry in result.items] == ["bug"]
+    assert [entry.kind for entry in result.items] == ["bug"]
 
 
 def test_an_initiative_lifts_its_work(instance: AppContext) -> None:
@@ -181,7 +187,7 @@ def test_an_initiative_lifts_its_work(instance: AppContext) -> None:
         ),
     )
     result = backlog(instance, BacklogParams())
-    assert result.items[0].item.title == "In the push"
+    assert result.items[0].title == "In the push"
 
 
 def test_why_explains_every_input(instance: AppContext) -> None:
@@ -211,8 +217,13 @@ def test_why_matches_the_backlog_score(instance: AppContext) -> None:
         instance, CreateWorkParams(kind="bug", title="Consistent", reason=WHY)
     ).item.ref
     ranked = backlog(instance, BacklogParams()).items[0]
-    assert ranked.item.ref == ref
-    assert why(instance, WhyParams(ref=ref)).total == pytest.approx(ranked.score)
+    assert ranked.ref == ref
+    # Staleness is a function of wall-clock age, so two calls a moment
+    # apart differ in the fourth decimal place. The tolerance is about
+    # the clock, not about the score being approximate.
+    assert why(instance, WhyParams(ref=ref)).total == pytest.approx(
+        ranked.score, abs=0.01
+    )
 
 
 def test_why_answers_for_finished_work_too(instance: AppContext) -> None:
@@ -246,8 +257,7 @@ def test_blocking_fan_out_reaches_the_view(instance: AppContext) -> None:
             ),
         )
     scores = {
-        entry.item.ref: entry.score
-        for entry in backlog(instance, BacklogParams()).items
+        entry.ref: entry.score for entry in backlog(instance, BacklogParams()).items
     }
     assert scores[blocker] > scores[plain]
 
@@ -260,5 +270,5 @@ def test_priority_changes_reorder_the_backlog(instance: AppContext) -> None:
         instance, CreateWorkParams(kind="chore", title="Second", reason=WHY)
     ).item.ref
     update_work(instance, UpdateWorkParams(ref=second, priority="p0", reason=WHY))
-    order = [entry.item.ref for entry in backlog(instance, BacklogParams()).items]
+    order = [entry.ref for entry in backlog(instance, BacklogParams()).items]
     assert order == [second, first]

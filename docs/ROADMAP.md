@@ -183,6 +183,36 @@ work item. Then re-run the whole suite with the network unplugged and the
 GitHub adapter disabled — everything except forge observations still works
 (NFR-PO1/PO2). **This demo is the MVP acceptance test.**
 
+### M2 as built — four notes
+
+1. **Two derived tables, not five.** `SCHEMA.md` §3.2 named five typed
+   `latest_*` projections. Only the dependency one carries anything the
+   observation does not already say, so this ships `latest_observations`
+   (generic, keyed by subject) plus `latest_dep_refs`. The other four
+   differed in payload shape and not in behaviour, and five rebuild paths
+   would have been five places for a collector and its projection to drift
+   apart. Recorded in the migration.
+2. **A marker is a leading annotation, not a mention.** The first sweep of
+   this repository promoted 21 "markers" — every one of them documentation
+   *about* the promotion pattern: `DESIGN.md` explaining that `TODO(vogt):`
+   enters the backlog, the generated `config.example.toml` listing the
+   defaults, a table cell naming them. Vogt read its own description of
+   markers and filed it as work. The pattern is now anchored to the start of
+   a line, after comment leaders and list bullets only, which took that
+   repository from 283 observed markers to 57 and from 21 promoted to 0 —
+   the right answer, since neither project uses the convention yet. Any
+   project that documents its conventions would have hit this.
+3. **Suppression and adoption live in the declared store.** Both are audited
+   decisions, not observations, which is exactly why a suppression survives
+   re-observation of the same subject — a dismissal recorded in the evidence
+   store could never have worked. Adopted subjects are folded into their
+   work item rather than listed twice.
+4. **The benchmark is a tripwire, not a benchmark suite.** It seeds 500
+   projects and asserts the ranked views stay interactive. The threshold is
+   generous because a wall-clock number on a shared runner is not a metric;
+   what it actually catches is an accidental per-item query inside a ranked
+   view, which would otherwise be invisible until M6.
+
 ## M3 — Contract & drift
 
 **Objective**: the contract is checkable and disagreements between

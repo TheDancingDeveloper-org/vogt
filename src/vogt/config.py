@@ -28,12 +28,13 @@ so the policy is enforced before there is an exposure field to get wrong.
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args, get_origin
 
 from pydantic import Field
 from pydantic.fields import FieldInfo
@@ -111,6 +112,73 @@ class VogtConfig(BaseSettings):
         description="Verbosity of Vogt's own diagnostics.",
         json_schema_extra={"default_policy": "behaviour"},
     )
+    marker_promotion_patterns: tuple[str, ...] = Field(
+        default=("TODO(vogt)", "FIXME(vogt)"),
+        description=(
+            "Source markers containing one of these enter backlog and bug "
+            "views (FR-W11). Every other marker is still observed, still "
+            "queryable and still counted; it just does not claim to be work. "
+            "Widening this is how you drown the ranked view."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    marker_file_extensions: tuple[str, ...] = Field(
+        default=(
+            ".py",
+            ".rs",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".go",
+            ".java",
+            ".rb",
+            ".sh",
+            ".sql",
+            ".toml",
+            ".yaml",
+            ".yml",
+            ".md",
+        ),
+        description=(
+            "File types the marker collector reads. Configuration rather "
+            "than a hard-coded list, because which extensions hold source "
+            "is an estate's business, not Vogt's (FR-W11)."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    retention_days: int = Field(
+        default=180,
+        ge=1,
+        description=(
+            "How long observation *history* is kept (NFR-I5). The newest "
+            "observation per subject is kept indefinitely regardless, and so "
+            "is anything a drift proposal references."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    github_token_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file containing a GitHub token. Its absence is what "
+            "switches the optional forge adapter off, so there is no default: "
+            "not configured is the ordinary case, and it means forge subjects "
+            "are 'not collected' rather than absent. A file rather than an "
+            "environment variable or an argument, so the token never appears "
+            "in a process listing (FR-S7)."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    verify_horizon_hours: int = Field(
+        default=24,
+        ge=1,
+        description=(
+            "How recently a subject must have been observed for a linked "
+            "declared entity to count as `verified` rather than `stale` "
+            "(FR-R4). Trust is computed from this, never hand-set."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
 
     @classmethod
     def settings_customise_sources(
@@ -162,13 +230,30 @@ class FieldDoc:
     description: str
 
 
+_SCALAR_NAMES = {str: "string", int: "integer", float: "number", bool: "boolean"}
+
+
 def _type_label(field: FieldInfo) -> str:
+    """Describe a field's type in prose that survives a Markdown table.
+
+    Deliberately not `repr(annotation)`: a `Literal` renders as
+    `'debug' | 'info' | ...`, and those pipes silently split the generated
+    table into extra columns. The generated docs are the only description of
+    these settings there is, so they have to be right.
+    """
     annotation = field.annotation
     if annotation is Path:
         return "path"
-    origin = getattr(annotation, "__args__", None)
-    if origin:
-        return " | ".join(repr(arg) for arg in origin)
+    if annotation in _SCALAR_NAMES:
+        return _SCALAR_NAMES[annotation]
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal:
+        return "one of " + ", ".join(f"`{arg}`" for arg in args)
+    if origin in (tuple, list, set):
+        inner = args[0] if args else str
+        return f"list of {_SCALAR_NAMES.get(inner, 'values')}s"
     return getattr(annotation, "__name__", str(annotation))
 
 
@@ -179,6 +264,10 @@ def _default_label(name: str, field: FieldInfo) -> str:
         return "computed"  # pragma: no cover - no other factory fields yet
     if field.default is None:
         return "*(no default — must be set)*"
+    if isinstance(field.default, tuple):
+        if not field.default:
+            return "*(empty)*"
+        return ", ".join(f"`{entry}`" for entry in field.default)
     return f"`{field.default}`"
 
 
@@ -279,11 +368,18 @@ def render_example_config() -> str:
 
 
 def _example_value(field: FieldDoc) -> str:
+    """Render a field's default the way a TOML file would spell it."""
+    default = VogtConfig.model_fields[field.name].default
     if field.name == "data_dir":
         return '"/var/lib/vogt"'
-    if field.name == "log_level":
-        return '"info"'
-    return '""'  # pragma: no cover - no other fields yet
+    if isinstance(default, tuple):
+        rendered = ", ".join(json.dumps(entry) for entry in default)
+        return f"[{rendered}]"
+    if isinstance(default, bool):
+        return "true" if default else "false"
+    if isinstance(default, int):
+        return str(default)
+    return json.dumps(default)
 
 
 def config_artifacts(root: Path) -> Mapping[Path, str]:

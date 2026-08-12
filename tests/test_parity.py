@@ -22,6 +22,7 @@ Four staleness checks run alongside it, all failing in **both** directions:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +46,12 @@ WHY = "parity harness"
 #: `{root}` is replaced with a per-instance directory, so the one operation
 #: that touches the filesystem can run on all three transports without them
 #: writing over each other.
-SCRIPT: list[tuple[str, dict[str, Any]]] = [
+#: A step's params may be a callable taking the results so far, for the
+#: cases where an argument is an id only the previous step knows — the
+#: alternative is not driving those operations at all.
+StepParams = dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]]
+
+SCRIPT: list[tuple[str, StepParams]] = [
     ("status", {}),
     ("workflow.list", {}),
     (
@@ -125,6 +131,42 @@ SCRIPT: list[tuple[str, dict[str, Any]]] = [
         {"ref": "WI-1", "kind": "depends_on", "target": "WI-2", "reason": WHY},
     ),
     ("project.brief", {"slug": "parity-project"}),
+    # -- collection ---------------------------------------------------------
+    (
+        "project.register",
+        {"name": "Parity Fixture", "root_path": "{root}/fixture", "reason": WHY},
+    ),
+    (
+        "sweep",
+        {"project": "parity-fixture", "offline_only": True, "reason": WHY},
+    ),
+    ("coverage", {}),
+    ("observations.list", {"project": "parity-fixture"}),
+    ("deps", {"project": "parity-fixture"}),
+    ("backlog", {"limit": 50}),
+    (
+        "suppress",
+        {
+            "subject": "mark:parity-fixture/notes.md#L2",
+            "reason": WHY,
+        },
+    ),
+    ("suppression.list", {}),
+    # Adopting needs a subject that survived suppression, so the marker in
+    # the scaffolded AGENTS.md is the one the script reaches for. Its key is
+    # deterministic: same scaffold, same file, same line, on every transport.
+    (
+        "work.adopt",
+        {"subject": "mark:parity-fixture/notes.md#L1", "reason": WHY},
+    ),
+    (
+        "suppression.revoke",
+        lambda seen: {
+            "id": seen["suppress"]["suppression"]["id"],
+            "reason": "the marker turned out to be real work after all",
+        },
+    ),
+    ("observations.prune", {"reason": WHY}),
     ("events.list", {}),
     ("audit.list", {}),
 ]
@@ -133,6 +175,15 @@ SCRIPT: list[tuple[str, dict[str, Any]]] = [
 VOLATILE_KEYS = frozenset(
     {
         "id",
+        "sweep_id",
+        "observation_id",
+        "content_digest",
+        "observed_at",
+        "last_swept_at",
+        "age_seconds",
+        "oldest_relevant_sweep",
+        "collectors",
+        "suppression",
         "instance_id",
         "entity_id",
         "actor_id",
@@ -175,10 +226,32 @@ def normalise(value: Any, replacements: dict[str, str]) -> Any:
     return value
 
 
+def _write_fixture_tree(root: Path) -> None:
+    """A tiny project the offline collectors have something to say about.
+
+    Deterministic on purpose: the same files, the same line numbers, and so
+    the same subject keys on every transport — which is what lets the script
+    adopt a specific marker by key and compare the results.
+    """
+    project = root / "fixture"
+    (project / "src").mkdir(parents=True)
+    (project / "notes.md").write_text(
+        "TODO(vogt): the parity harness adopts this one\n"
+        "TODO: this one is not promoted and must stay out of ranked views\n",
+        encoding="utf-8",
+    )
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\n\n'
+        '[tool.uv.sources]\nsibling = { path = "../sibling" }\n',
+        encoding="utf-8",
+    )
+
+
 def _fresh(
     tmp_path_factory: pytest.TempPathFactory, label: str
 ) -> tuple[AppContext, Path]:
     root = tmp_path_factory.mktemp(label)
+    _write_fixture_tree(root)
     context = build_context(
         config=VogtConfig(data_dir=root / "instance"),
         principal=TEST_PRINCIPAL,
@@ -260,10 +333,13 @@ def parity_run(
     }
 
     answers: list[dict[str, Any]] = []
+    seen: dict[str, dict[str, Any]] = {transport: {} for transport in DRIVERS}
     for name, params in SCRIPT:
         step: dict[str, Any] = {"operation": name}
         for transport, (context, root) in instances.items():
-            raw = DRIVERS[transport](context, name, _resolved(params, root))
+            resolved = params(seen[transport]) if callable(params) else params
+            raw = DRIVERS[transport](context, name, _resolved(resolved, root))
+            seen[transport][name] = raw
             step[transport] = normalise(raw, replacements[transport])
         answers.append(step)
 

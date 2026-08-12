@@ -207,6 +207,15 @@ Derived tables are rebuilt transactionally at sweep completion from
 `observations`; they can always be dropped and regenerated, bounded by the
 retention horizon (§5).
 
+*Implementation note (M2)*: two of these shipped, not seven. The evidence
+store holds `latest_observations` — generic, keyed by `subject_key`, carrying
+kind, project, payload and the `promoted` flag — plus `latest_dep_refs`,
+which is the only projection that adds anything the observation does not
+already state (resolution to a registered project, FR-D3). The typed reads
+the other five described are queries over `kind`. Five rebuild paths would
+have been five places for a collector and its projection to drift apart;
+`latest_autoupdate_posture` still arrives with the forge module at M5.
+
 *r2*: `latest_dependencies` (requested spec, locked version,
 direct/transitive) is replaced by `latest_dep_refs`. No lockfile is parsed
 and no version is resolved.

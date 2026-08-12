@@ -141,6 +141,100 @@ class WorkItem(Entity):
     updated_at: datetime
 
 
+class Suppression(Entity):
+    """An audited decision that an observed subject is not work (FR-W10).
+
+    Lives in the declared store because it is a decision, not an
+    observation — which is exactly why it survives re-observation of the same
+    subject, and why a dismissal recorded in the evidence store could never
+    have worked.
+    """
+
+    id: str
+    match_kind: Literal["exact", "pattern"]
+    subject_key_or_pattern: str
+    scope_project_id: str | None = None
+    scope_project_slug: str | None = None
+    actor_id: str
+    actor_identity_ref: str | None = None
+    reason: str
+    created_at: datetime
+    revoked_at: datetime | None = None
+    revoked_reason: str | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.revoked_at is None
+
+
+class WorkLink(Entity):
+    """The maintained link from adopted work back to what was observed."""
+
+    work_item_id: str
+    subject_key: str
+    origin_kind: str
+    source_url: str | None = None
+    relation: Literal["completion", "reference"] = "completion"
+    created_at: datetime
+
+
+SweepOutcome = Literal["running", "ok", "partial", "failed"]
+RefKind = Literal["path", "git", "declared"]
+
+
+class Sweep(Entity):
+    """A coverage record: which collector looked at what, when, and how it went.
+
+    The thing that makes "absent" different from "not collected" (FR-O3,
+    FR-O4). Absence may only be asserted inside a scope a completed sweep
+    provably covered.
+    """
+
+    id: str
+    collector: str
+    scope: list[str]
+    started_at: datetime
+    finished_at: datetime | None = None
+    outcome: SweepOutcome = "running"
+    stats: dict[str, int] = {}
+    detail: str | None = None
+
+
+class Observation(Entity):
+    """One immutable thing a collector found (FR-O2)."""
+
+    id: str
+    sweep_id: str
+    collector: str
+    kind: str
+    project_id: str | None = None
+    subject_key: str
+    payload: dict[str, object] = {}
+    content_digest: str
+    source_url: str | None = None
+    promoted: bool = False
+    observed_at: datetime
+
+
+class DepRef(Entity):
+    """One reference from a project to another project (FR-D1–D4).
+
+    Records *which projects reference which*, by filesystem path or
+    repository URL, and stops there: no lockfile is parsed and no package
+    version is resolved (r2 decision, DESIGN §3.5).
+    """
+
+    subject_key: str
+    from_project_id: str
+    from_project_slug: str | None = None
+    ref_kind: RefKind
+    raw_target: str
+    manifest: str | None = None
+    to_project_id: str | None = None
+    to_project_slug: str | None = None
+    observed_at: datetime
+
+
 class AuditRecord(Entity):
     """One declared write, explained (FR-S1)."""
 

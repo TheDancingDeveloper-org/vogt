@@ -12,7 +12,12 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | Setting | Env var | Type | Default | Default policy |
 |---|---|---|---|---|
 | `data_dir` | `VOGT_DATA_DIR` | path | `$XDG_DATA_HOME/vogt`, else `~/.local/share/vogt` | allocation |
-| `log_level` | `VOGT_LOG_LEVEL` | 'debug' | 'info' | 'warning' | 'error' | `info` | behaviour |
+| `log_level` | `VOGT_LOG_LEVEL` | one of `debug`, `info`, `warning`, `error` | `info` | behaviour |
+| `marker_promotion_patterns` | `VOGT_MARKER_PROMOTION_PATTERNS` | list of strings | `TODO(vogt)`, `FIXME(vogt)` | behaviour |
+| `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
+| `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
+| `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | pathlib.Path | None | *(no default — must be set)* | behaviour |
+| `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
 
 ## What each setting decides
 
@@ -23,6 +28,26 @@ Directory holding declared.sqlite3, observed.sqlite3 and backups. One instance p
 ### `log_level`
 
 Verbosity of Vogt's own diagnostics.
+
+### `marker_promotion_patterns`
+
+Source markers containing one of these enter backlog and bug views (FR-W11). Every other marker is still observed, still queryable and still counted; it just does not claim to be work. Widening this is how you drown the ranked view.
+
+### `marker_file_extensions`
+
+File types the marker collector reads. Configuration rather than a hard-coded list, because which extensions hold source is an estate's business, not Vogt's (FR-W11).
+
+### `retention_days`
+
+How long observation *history* is kept (NFR-I5). The newest observation per subject is kept indefinitely regardless, and so is anything a drift proposal references.
+
+### `github_token_file`
+
+Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing (FR-S7).
+
+### `verify_horizon_hours`
+
+How recently a subject must have been observed for a linked declared entity to count as `verified` rather than `stale` (FR-R4). Trust is computed from this, never hand-set.
 
 ## Default policy (NFR-D2, revised r4)
 

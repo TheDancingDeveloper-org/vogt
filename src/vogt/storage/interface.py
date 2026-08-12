@@ -17,15 +17,27 @@ from vogt.core.entities import (
     Actor,
     AuditRecord,
     Comment,
+    DepRef,
     Event,
     Initiative,
     Label,
+    Observation,
     Project,
     RelationKind,
+    Suppression,
+    Sweep,
+    SweepOutcome,
     WorkItem,
+    WorkLink,
 )
 from vogt.core.principal import Principal
 from vogt.core.workflow import Workflow
+from vogt.storage.observed_types import (
+    AppendStats,
+    DepRefRow,
+    PendingObservation,
+    PruneReport,
+)
 
 
 @dataclass(frozen=True)
@@ -182,6 +194,20 @@ class ReadView(Protocol):
 
     def workflow_for(self, kind: str) -> Workflow: ...
 
+    # -- observed-first ----------------------------------------------------
+
+    def list_suppressions(
+        self, *, include_revoked: bool = False, limit: int = 100
+    ) -> list[Suppression]: ...
+
+    def suppression_by_id(self, suppression_id: str) -> Suppression | None: ...
+
+    def work_links_for_subjects(self, subject_keys: list[str]) -> dict[str, str]:
+        """Map subject key to the work item ref that adopted it."""
+        ...
+
+    def work_item_by_subject(self, subject_key: str) -> WorkItem | None: ...
+
     # -- history -----------------------------------------------------------
 
     def list_events(self, *, after: int, limit: int) -> list[Event]: ...
@@ -245,6 +271,14 @@ class WriteTxn(ReadView, Protocol):
 
     def insert_comment(self, comment: Comment) -> None: ...
 
+    def insert_suppression(self, suppression: Suppression) -> None: ...
+
+    def revoke_suppression(
+        self, suppression_id: str, *, actor_id: str, reason: str, at: datetime
+    ) -> bool: ...
+
+    def insert_work_link(self, link: WorkLink) -> None: ...
+
     def upsert_workflow(self, workflow: Workflow, *, at: datetime) -> None: ...
 
     def append_audit(
@@ -283,13 +317,40 @@ class DeclaredStore(Protocol):
 
     def bootstrap(self, principal: Principal) -> BootstrapResult: ...
 
+    def publish_event(
+        self,
+        *,
+        kind: str,
+        entity_kind: str,
+        entity_id: str,
+        summary: dict[str, object],
+        at: datetime,
+    ) -> Event:
+        """Append an event that is not a declared write (FR-N1, SCHEMA §2.5).
+
+        The feed has two producers and one table. Declared writes insert
+        their event inside the same transaction as the entity change and the
+        audit row. Observed-side happenings — a sweep finishing, a CI state
+        changing — are published here by the application layer on the
+        collectors' behalf: no audit row, because nobody declared anything,
+        and no revision bump, because the authoritative state did not change.
+
+        Collectors still never write the declared store themselves.
+        """
+        ...
+
     def read(self) -> AbstractContextManager[ReadView]: ...
 
     def write(self) -> AbstractContextManager[WriteTxn]: ...
 
 
 class ObservedStore(Protocol):
-    """The append-only evidence store. Only collectors write here (from M2)."""
+    """The append-only evidence store. Only collectors write here.
+
+    Nothing here knows what a project is: resolving a dependency reference to
+    a registered project is a cross-store question the application layer
+    answers and hands down (`SCHEMA.md` §1).
+    """
 
     def migrate(self) -> MigrationReport: ...
 
@@ -306,6 +367,76 @@ class ObservedStore(Protocol):
         ...
 
     def instance_id(self) -> str | None: ...
+
+    def has_evidence_tables(self) -> bool: ...
+
+    # -- sweeps ------------------------------------------------------------
+
+    def begin_sweep(
+        self, *, collector: str, scope: list[str], at: datetime
+    ) -> Sweep: ...
+
+    def finish_sweep(
+        self,
+        sweep_id: str,
+        *,
+        outcome: SweepOutcome,
+        stats: dict[str, int],
+        at: datetime,
+        detail: str | None = None,
+    ) -> None: ...
+
+    def append(
+        self, sweep_id: str, findings: list[PendingObservation], *, at: datetime
+    ) -> AppendStats: ...
+
+    def list_sweeps(
+        self, *, collector: str | None = None, limit: int = 50
+    ) -> list[Sweep]: ...
+
+    def coverage(self) -> dict[str, Sweep]:
+        """The newest completed sweep per collector."""
+        ...
+
+    # -- reads -------------------------------------------------------------
+
+    def list_observations(
+        self,
+        *,
+        kind: str | None = None,
+        project_id: str | None = None,
+        subject_key: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Observation]: ...
+
+    def latest(
+        self,
+        *,
+        kinds: tuple[str, ...] = (),
+        project_id: str | None = None,
+        promoted_only: bool = False,
+        limit: int = 1000,
+    ) -> list[Observation]: ...
+
+    def dep_refs(
+        self, *, from_project_id: str | None = None, to_project_id: str | None = None
+    ) -> list[DepRef]: ...
+
+    def counts(self) -> dict[str, int]: ...
+
+    # -- projections and retention -----------------------------------------
+
+    def rebuild_latest(self) -> int: ...
+
+    def replace_dep_refs(self, rows: list[DepRefRow]) -> int: ...
+
+    def prune(
+        self,
+        *,
+        before: datetime,
+        protected_observation_ids: frozenset[str] = frozenset(),
+    ) -> PruneReport: ...
 
 
 __all__ = [

@@ -19,6 +19,7 @@ Two conventions worth knowing before adding one:
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,6 +27,7 @@ from vogt.core.entities import (
     Actor,
     AuditRecord,
     Comment,
+    DepRef,
     Effort,
     Event,
     Initiative,
@@ -33,10 +35,12 @@ from vogt.core.entities import (
     Label,
     LifecycleState,
     Name,
+    Observation,
     Priority,
     Project,
     Reason,
     RelationKind,
+    Suppression,
     TrustState,
     WorkItem,
     WorkKind,
@@ -180,6 +184,23 @@ class TransitionProjectParams(Params):
     reason: Reason
 
 
+class Freshness(Result):
+    """How old the evidence behind an answer is (FR-V4).
+
+    Every aggregating answer carries one. `oldest_relevant_sweep` is the
+    honest number: an answer is exactly as fresh as the least fresh thing it
+    depends on.
+    """
+
+    status: Literal["fresh", "never_swept", "partial"] = "never_swept"
+    oldest_relevant_sweep: datetime | None = None
+    age_seconds: int | None = None
+    collectors: dict[str, str] = Field(
+        default={}, description="Per collector: how long ago it last completed."
+    )
+    detail: str | None = None
+
+
 class NotCollected(Result):
     """A value no collector has produced yet.
 
@@ -193,15 +214,64 @@ class NotCollected(Result):
 
 
 class RankedItem(Result):
-    """A work item with its score, as ranked views return it."""
+    """One entry of a ranked view — declared or observed.
 
-    item: WorkItem
+    Observed-first means both halves appear in the same list, ordered by the
+    same weights (FR-W4). The common fields are what ranking needs and what a
+    reader wants; `item` carries the whole work item when there is one, and
+    `subject_key` points at the evidence when there is not.
+    """
+
+    origin: Literal["declared", "observed"]
+    ref: str = Field(
+        description="`WI-7` for declared work, or the observed subject key."
+    )
+    title: str
+    kind: WorkKind
+    state: str
+    priority: Priority
+    project_slug: str | None = None
+    trust_state: TrustState = "unverified"
+    labels: list[str] = []
     score: float
+    updated_at: datetime
+    #: Present only for declared work.
+    item: WorkItem | None = None
+    #: Present only for observed subjects.
+    observation_kind: str | None = None
+    source_url: str | None = None
+    observed_at: datetime | None = None
+    adopted_as: str | None = Field(
+        default=None,
+        description="Work item reference, when this subject has been adopted.",
+    )
 
 
 class ProjectBriefParams(Params):
     slug: str
     backlog_limit: int = Field(default=10, ge=1, le=100)
+
+
+class CiSummary(Result):
+    """The CI story for a project (FR-O6), or the absence of one."""
+
+    status: Literal["not_collected", "no_checks", "passing", "failing"] = (
+        "not_collected"
+    )
+    checks: int = 0
+    failing: list[str] = []
+    revision: str | None = None
+    detail: str | None = None
+
+
+class DependencySummary(Result):
+    """What this project references, and what references it (FR-D1–D4)."""
+
+    status: Literal["not_collected", "collected"] = "not_collected"
+    references_out: int = 0
+    referenced_by: int = 0
+    unresolved: int = 0
+    detail: str | None = None
 
 
 class ProjectBriefResult(Result):
@@ -214,11 +284,23 @@ class ProjectBriefResult(Result):
     by_kind: dict[str, int]
     top_backlog: list[RankedItem]
     current_version: str | None
+    declared_version: str | None = None
+    observed_version: str | None = Field(
+        default=None,
+        description="Newest tag or release seen by a collector (FR-P3).",
+    )
+    version_matches: bool | None = Field(
+        default=None,
+        description=(
+            "Whether declared and observed versions agree. Null when either "
+            "is unknown; the drift proposal this feeds arrives at M3."
+        ),
+    )
     compliance_status: str
     compliance_checked_at: datetime | None
-    ci_status: NotCollected
-    dependencies: NotCollected
-    freshness: NotCollected
+    ci_status: CiSummary
+    dependencies: DependencySummary
+    freshness: Freshness
 
 
 # -- work ------------------------------------------------------------------
@@ -406,8 +488,11 @@ class BacklogParams(Params):
 class BacklogResult(Result):
     items: list[RankedItem]
     total_considered: int
+    declared: int = 0
+    observed: int = 0
+    suppressed: int = 0
     scope: str
-    freshness: NotCollected
+    freshness: Freshness
 
 
 class BugsParams(Params):
@@ -479,3 +564,155 @@ class ListAuditParams(Params):
 
 class AuditListResult(Result):
     records: list[AuditRecord]
+
+
+# -- collection ------------------------------------------------------------
+
+
+class SweepParams(Params):
+    project: str | None = Field(
+        default=None,
+        description="Narrow the sweep to one project. Scope is never widened.",
+    )
+    collectors: list[str] | None = Field(
+        default=None, description="Collector names; omit to run all of them."
+    )
+    offline_only: bool = Field(
+        default=False,
+        description="Skip every collector that needs the network (NFR-PO2).",
+    )
+    reason: Reason
+
+
+class SweepReportView(Result):
+    collector: str
+    sweep_id: str
+    outcome: str
+    projects: int
+    new: int
+    unchanged: int
+    failures: dict[str, str] = {}
+
+
+class SweepResult(Result):
+    scope: str
+    projects: int
+    subjects: int
+    dep_refs: int
+    reports: list[SweepReportView]
+
+
+class CoverageParams(Params):
+    pass
+
+
+class CoverageEntry(Result):
+    collector: str
+    status: str
+    last_swept_at: datetime | None = None
+    age_seconds: int | None = None
+    projects: int = 0
+    detail: str | None = None
+
+
+class CoverageResult(Result):
+    collectors: list[CoverageEntry]
+    swept_project_ids: list[str]
+
+
+class ObservationsParams(Params):
+    project: str | None = None
+    kind: str | None = Field(
+        default=None, description="Observation kind, e.g. marker or forge.issue."
+    )
+    subject_key: str | None = None
+    promoted_only: bool = False
+    latest_only: bool = Field(
+        default=True,
+        description="Newest per subject. Set false for the full history.",
+    )
+    limit: int = Field(default=100, ge=1, le=1000)
+    offset: int = Field(default=0, ge=0)
+
+
+class ObservationsResult(Result):
+    observations: list[Observation]
+    total: int
+
+
+class DepsParams(Params):
+    project: str = Field(description="Project slug.")
+
+
+class DepsResult(Result):
+    project: str
+    references_out: list[DepRef]
+    referenced_by: list[DepRef]
+    unresolved: int = 0
+
+
+class PruneParams(Params):
+    reason: Reason
+
+
+class PruneResult(Result):
+    removed: int
+    kept_latest: int
+    kept_referenced: int
+    horizon_days: int
+
+
+# -- suppression and adoption ---------------------------------------------
+
+
+class SuppressParams(Params):
+    subject: str = Field(
+        description="An exact subject key, or a glob pattern when --pattern is set."
+    )
+    pattern: bool = Field(
+        default=False, description="Treat `subject` as a glob pattern."
+    )
+    project: str | None = Field(
+        default=None, description="Limit the suppression to one project."
+    )
+    reason: Reason
+
+
+class SuppressionResult(Result):
+    suppression: Suppression
+
+
+class ListSuppressionsParams(Params):
+    include_revoked: bool = False
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class SuppressionListResult(Result):
+    suppressions: list[Suppression]
+
+
+class RevokeSuppressionParams(Params):
+    id: str
+    reason: Reason
+
+
+class AdoptParams(Params):
+    subject: str = Field(description="The observed subject key to adopt.")
+    kind: WorkKind | None = Field(
+        default=None, description="Override the inferred work kind."
+    )
+    priority: Priority | None = Field(
+        default=None, description="Override the inferred priority."
+    )
+    project: str | None = Field(
+        default=None, description="Override the project the subject belongs to."
+    )
+    assignee: str | None = None
+    reason: Reason
+
+
+class AdoptResult(Result):
+    item: WorkItem
+    subject_key: str
+    inferred_kind: WorkKind
+    inferred_priority: Priority

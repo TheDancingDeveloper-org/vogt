@@ -96,6 +96,11 @@ known-local-folder = ["tests"]
 "src/vogt/adapters/cli/render.py" = ["ANN401"]
 "src/vogt/adapters/cli/args.py" = ["ANN401"]
 "src/vogt/config.py" = ["ANN401"]
+# JSON and TOML boundaries: a parsed document is `Any` and pretending
+# otherwise would be a cast, not a type.
+"src/vogt/adapters/github/client.py" = ["ANN401"]
+"src/vogt/adapters/github/collectors.py" = ["ANN401"]
+"src/vogt/collectors/dep_refs.py" = ["ANN401"]
 
 [tool.mypy]
 python_version = "3.11"

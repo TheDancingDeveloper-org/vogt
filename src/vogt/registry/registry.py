@@ -130,6 +130,26 @@ class OperationRegistry:
                 raise RegistryError(msg)
             tools[operation.mcp_tool_name] = operation.name
 
+        self._validate_cli_tree(cli_paths)
+
+    def _validate_cli_tree(self, cli_paths: dict[tuple[str, ...], str]) -> None:
+        """A CLI command cannot be both a leaf and a group.
+
+        argparse refuses to register `observations` as a subcommand and then
+        reuse that name for `observations prune` — but it refuses at
+        parser-build time, which is a long way from the definition that
+        caused it. Catching it here names both operations.
+        """
+        for path, owner in sorted(cli_paths.items()):
+            for other, other_owner in sorted(cli_paths.items()):
+                if other != path and other[: len(path)] == path:
+                    msg = (
+                        f"CLI path {' '.join(path)!r} ({owner}) is a prefix of "
+                        f"{' '.join(other)!r} ({other_owner}); a command "
+                        "cannot be both a leaf and a group"
+                    )
+                    raise RegistryError(msg)
+
     def _validate_reasons(self) -> None:
         """Every mutating operation must take a required, non-empty reason.
 
