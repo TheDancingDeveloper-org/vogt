@@ -87,3 +87,24 @@ Actions. Four things are easy to get wrong here:
 Workspace-level Komodo/Infisical/runner rules live in `~/Working/AGENTS.md`
 and are not restated here; `docs/DEPLOYMENT.md` §6 records only the Node B
 failure modes that specifically bite this stack.
+
+### CI prerequisites — done, do not redo (2026-08-12)
+
+The new-repo checklist in `~/Working/docs/CI-RUNNER-GATES.md` has been run
+for this repository. Recorded because its step 1 is the one that gets
+skipped, and skipping it is how every hosted-runner violation in this org
+has started: CI goes red for want of a runner, `ubuntu-latest` makes it
+green, and nothing blocks the commit.
+
+- `vogt` is in the **`public-node-b` runner group** (id 4).
+- Actions are **enabled** for `vogt` (the org policy is
+  `enabled_repositories=selected`, so this is not automatic).
+- `main` is protected: required checks `ci` and
+  `runner-policy / runner-policy`, strict, linear history, no force pushes.
+  `enforce_admins` is false, matching cadastre — the owner can still push
+  directly when something needs it.
+- First run verified on `node-b-gha-public-rust` /
+  `node-b-gha-public-publish-2`, both in `public-node-b`.
+
+If CI is ever red with a job stuck queued, it is a runner-group question,
+never a reason to change `runs-on`.
