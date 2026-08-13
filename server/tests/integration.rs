@@ -1038,20 +1038,33 @@ async fn exited_sessions_are_archived_searchable_and_deletable() {
         "archive should record output bytes: {archived:?}"
     );
 
-    let search: Vec<Value> = client
-        .get(format!(
-            "{base}/api/history/search?q=history-needle%20path%2Fwith"
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(
-        search.iter().any(|hit| hit["session_id"] == id),
-        "history search should find archived output; got {search:?}"
-    );
+    // The session record appearing in /history/sessions does not imply its
+    // output is searchable: archival and indexing complete independently, so
+    // the poll above settles only the first of them. A bare read here passes
+    // on an idle machine and loses under load — pipeline #194 failed exactly
+    // this way while the commit under test touched only .dockerignore. Same
+    // deadline discipline as the loop above.
+    let search_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let hits: Vec<Value> = client
+            .get(format!(
+                "{base}/api/history/search?q=history-needle%20path%2Fwith"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if hits.iter().any(|hit| hit["session_id"] == id) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < search_deadline,
+            "history search should find archived output; got {hits:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     let del = client
         .delete(format!("{base}/api/history/{id}"))
