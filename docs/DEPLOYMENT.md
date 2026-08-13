@@ -482,13 +482,22 @@ The precedent is cadastre, reached from the same containers today. Reading
 `mydevenv2-agent-auth run|check|shell` re-runs it idempotently — settles two
 questions that looked open:
 
-- **No package index is involved, and none is needed.** The bootstrap
-  installs the bridge *editable from the mounted workspace*
-  (`pip3 install --user -e ~/Working/Active/cadastre[mcp-client]`), because
-  "the package lives in the mounted workspace, not the build context". Vogt's
-  source sits in the same mount. This is why NFR-PO4 defers the wheel to
-  PyPI at the public milestone and builds no private index in the meantime:
-  the estate never needed one.
+- **An index is used where one exists, and is not required where one does
+  not.** Cadastre's bridge is installed at *build time from PyPI*
+  (`pip3 install "cadastre[mcp-client]"` in MyDevEnv2's `Dockerfile`), which
+  became possible when cadastre went public. The earlier mechanism — an
+  editable install from the mounted workspace, in
+  `mcp-bootstrap.sh`'s `install_bridge` — is deliberately retained behind a
+  `command -v` guard, both as a fallback for a workspace newer than the
+  image and because it is the only path available to a package with no
+  index.
+
+  Vogt is that package today, and its source sits in the same mount. So the
+  supported mechanism exists and is proven; what it is not is the *preferred*
+  one. NFR-PO4 defers the wheel to PyPI at the public milestone and builds
+  no private index in the meantime — not because an index is unnecessary,
+  but because the interim index would have one user and a migration to undo,
+  while the workspace path already works.
 - **The stdio bridge is doing token hygiene, not just transport.** Codex
   registers the URL natively (`--bearer-token-env-var`); Claude Code and
   OpenCode register a *wrapper command*, so that — in the script's words —
