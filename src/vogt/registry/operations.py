@@ -28,6 +28,8 @@ from vogt.application.models import (
     CommentResult,
     ComplianceParams,
     ComplianceResult,
+    ConnectParams,
+    ConnectResult,
     ContractCheckParams,
     ContractCheckResult,
     CoverageParams,
@@ -145,6 +147,18 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.status,
             route=HttpRoute("GET", "/status"),
             cli=CliBinding(("status",)),
+        ),
+        Operation(
+            name="connect",
+            summary="How to reach this instance, and the client configuration "
+            "for doing so. Renders the connection document.",
+            scope="read",
+            mutating=False,
+            params_model=ConnectParams,
+            result_model=ConnectResult,
+            handler=services.connect,
+            route=HttpRoute("GET", "/connect"),
+            cli=CliBinding(("connect",)),
         ),
         Operation(
             name="mcp.stdio",

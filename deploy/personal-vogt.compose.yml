@@ -56,6 +56,13 @@ services:
     environment:
       VOGT_DATA_DIR: /var/lib/vogt
       VOGT_LOG_LEVEL: "${VOGT_LOG_LEVEL:-info}"
+      # Where clients reach this instance (FR-A8). An exposure value, so it
+      # is required rather than defaulted — the one category NFR-D2 still
+      # forbids a default for, and the reason is visible here: the process
+      # binds 0.0.0.0:8000 in this container and is published on a Tailscale
+      # address at 18094, so nothing inside can work this out. Unset means
+      # `connect` says nobody has told it, which is the honest answer.
+      VOGT_PUBLIC_URL: "${VOGT_PUBLIC_URL:?the URL clients reach vogt at}"
       # Imported repositories land in the estate, not in the instance volume
       # (FR-P6). The product default is `<data_dir>/repos`, which is right
       # for a laptop and wrong here: a clone inside the named volume would be

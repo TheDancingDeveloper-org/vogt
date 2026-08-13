@@ -122,6 +122,20 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "allocation"},
     )
+    public_url: str | None = Field(
+        default=None,
+        description=(
+            "The URL clients reach this instance at, e.g. "
+            "`https://host.tailnet.ts.net:18094`. An exposure value, so it "
+            "has no default and is never guessed: the process binds "
+            "`0.0.0.0:8000` inside a container and is published somewhere "
+            "else entirely, so the server cannot know its own address — only "
+            "the operator does. Unset means `connect` reports that nobody has "
+            "said, which is a different answer from reporting a URL that does "
+            "not work (FR-A8)."
+        ),
+        json_schema_extra={"default_policy": "exposure"},
+    )
     log_level: LogLevel = Field(
         default="info",
         description="Verbosity of Vogt's own diagnostics.",
@@ -448,6 +462,11 @@ def _example_value(field: FieldDoc) -> str:
         return '"/var/lib/vogt"'
     if field.name == "import_root":
         return '"/var/lib/vogt/repos"'
+    if field.name == "public_url":
+        # Shown as an example rather than `null`, because an exposure value
+        # with no default still has a *shape*, and the shape is the part an
+        # operator gets wrong.
+        return '"https://host.tailnet.ts.net:18094"'
     if isinstance(default, tuple):
         rendered = ", ".join(json.dumps(entry) for entry in default)
         return f"[{rendered}]"

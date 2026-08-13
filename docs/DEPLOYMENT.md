@@ -356,14 +356,33 @@ A single generated `CONNECTING.md` (from the running server: `GET
 protocol versions. Client configs are derived from it, never hand-copied
 per client.
 
-**Half built (v1).** The server side exists and is tested:
-`GET /connection-info` is served on every port that serves MCP (FR-A7), and
-the bridge already discovers the remote's URL, `/mcp` path and protocol
-versions from it at startup rather than being told them. What does not
-exist is the generator that turns that response into a committed
-`CONNECTING.md`. For a single-instance tailnet deployment the endpoint is
-the document; the file matters when there is more than one instance or more
-than one person copying values out of it.
+**Built at r7 (FR-A8), and not as a committed file.** `vogt connect` renders
+the document from the running instance — `--format markdown > CONNECTING.md`
+if you want one on disk, `--format json` for a client config you can paste.
+A `CONNECTING.md` tracked in the repository would be one more copy of a URL
+going stale against the instance it describes, which is the failure this
+section was written to prevent.
+
+The half that was actually missing was smaller than "a generator". Between
+them, `/health`, `/version` and `/connection-info` reported every fact about
+an instance **except where it is**: the response carried paths and no URL.
+That absence was not an oversight so much as an unanswerable question — the
+process binds `0.0.0.0:8000` in a container and is published at a tailnet
+address on another port, so the address a client should use is a fact only
+the operator holds.
+
+It is therefore `public_url`: an **exposure** value, so no default, ever
+(NFR-D2). An instance without one reports that nobody has said, rather than
+inventing an answer — a guessed URL would be wrong in exactly the deployment
+the field exists for, and from a client a wrong URL and an unreachable one
+are the same symptom.
+
+**Prefer the HTTP client.** `connect --client http` needs nothing installed,
+which is why it is the default: a client holding a copy of Vogt's code has a
+version that can skew (FR-A6 exists because of it) and a second place to
+upgrade. `--client bridge` is for agent products that can only spawn a local
+process, and the result says `requires_install: true` rather than letting
+that cost go unmentioned.
 
 ### 4.4 Health checks are protocol-version-agnostic
 
@@ -450,6 +469,51 @@ Komodo API shape (2.2.0): each request is its own path — `POST
 /read/GetStack`, `POST /write/UpdateStack`, `POST /execute/DeployStack` —
 with bare JSON params. A `400` with an empty body means the request shape
 is wrong; bad credentials return `401`.
+
+## 7. Reaching an instance from an agent environment *(r7)*
+
+FR-A8 makes an instance able to say where it is and hand out a client
+configuration. It does not put that configuration in front of an agent, and
+those are different problems: an LLM running in a MyDevEnv2 container has no
+way to learn Vogt exists, and would have no credential if it did.
+
+The precedent is cadastre, reached from the same containers today. Reading
+`MyDevEnv2/deploy/mcp-bootstrap.sh` — invoked from `agent-auth.sh`, so every
+`mydevenv2-agent-auth run|check|shell` re-runs it idempotently — settles two
+questions that looked open:
+
+- **No package index is involved, and none is needed.** The bootstrap
+  installs the bridge *editable from the mounted workspace*
+  (`pip3 install --user -e ~/Working/Active/cadastre[mcp-client]`), because
+  "the package lives in the mounted workspace, not the build context". Vogt's
+  source sits in the same mount. This is why NFR-PO4 defers the wheel to
+  PyPI at the public milestone and builds no private index in the meantime:
+  the estate never needed one.
+- **The stdio bridge is doing token hygiene, not just transport.** Codex
+  registers the URL natively (`--bearer-token-env-var`); Claude Code and
+  OpenCode register a *wrapper command*, so that — in the script's words —
+  "registration stores only the endpoint and wrapper command; no bearer
+  value". A bearer token in `~/.claude.json` is the thing being avoided, and
+  it is why `--client bridge` is not merely a fallback for clients that
+  cannot speak HTTP.
+
+**The five prerequisites.** None require a change to Vogt itself; four land
+in `MyDevEnv2` and one in the estate's `AGENTS.md`. They are stated here
+because Vogt is what they make reachable, and because an integration nobody
+wrote down is one that gets rebuilt from memory.
+
+| # | Prerequisite | Where it lands | Done |
+|---|---|---|---|
+| 1 | A scoped token exists and is brokered: `vogt token issue`, stored in Infisical `apps` as `HOMELAB_VOGT_TOKEN`, exported by `mydevenv2-agent-auth`. Nothing brokers a `VOGT_*` secret today. | Infisical + `mydevenv2-agent-auth` | ☐ |
+| 2 | `VOGT_PUBLIC_URL` is set in the Komodo stack environment. The compose gates it (`${VOGT_PUBLIC_URL:?}`) because it is an exposure value (NFR-D2), so **`DeployStack` fails until it is set** — set it before deploying r7, not after. | Komodo stack env | ☐ |
+| 3 | A wrapper `/usr/local/bin/mydevenv2-vogt-mcp` mirroring `mydevenv2-cadastre-mcp`, so Claude Code and OpenCode registrations carry no bearer value. | MyDevEnv2 image | ☐ |
+| 4 | `deploy/mcp-bootstrap.sh` registers Vogt for every client present — editable install of the bridge from the workspace, `codex mcp add --url … --bearer-token-env-var`, and the wrapper for Claude/OpenCode. | MyDevEnv2 image | ☐ |
+| 5 | A row in `~/Working/AGENTS.md`'s service table saying what Vogt is and when to reach for it. Without it an agent has the tools and no idea what they are for — `grep -i vogt` over that file currently returns nothing. | Estate `AGENTS.md` | ☐ |
+
+3 and 4 are image changes, so they go to the `dev` branch, deploy to
+`dev-mydevenv2`, and are validated from inside a container there before
+promotion to prod — which also means applying them restarts the container an
+agent session is running in.
 
 ## 8. Known: every write costs a WAL checkpoint
 
