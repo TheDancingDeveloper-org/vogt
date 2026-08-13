@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from vogt.adapters.git import Cloner, clone_repository
 from vogt.config import VogtConfig, load_config
 from vogt.core.clock import Clock, utc_now
 from vogt.core.ids import IdFactory, new_id
@@ -28,6 +29,12 @@ class AppContext:
     principal: Principal
     clock: Clock
     id_factory: IdFactory
+    #: How `project.import` obtains a checkout (FR-P6). Injectable for the
+    #: same reason the clock is: a use-case that shells out to `git` over the
+    #: network is one the test suite could otherwise only run by having a
+    #: network, and "works offline" is a property this product asserts rather
+    #: than hopes for (NFR-PO2).
+    cloner: Cloner = clone_repository
 
 
 def build_context(
@@ -36,6 +43,7 @@ def build_context(
     principal: Principal | None = None,
     clock: Clock = utc_now,
     id_factory: IdFactory = new_id,
+    cloner: Cloner = clone_repository,
 ) -> AppContext:
     """Build a context over the SQLite backend.
 
@@ -60,4 +68,5 @@ def build_context(
         principal=principal if principal is not None else local_principal(),
         clock=clock,
         id_factory=id_factory,
+        cloner=cloner,
     )

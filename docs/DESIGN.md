@@ -435,6 +435,15 @@ under `/api`; the paths below name the operation, not the URL.
   sweep completions and CI transitions are published into the same table by
   the application layer at sweep completion. `seq` *is* the cursor —
   clients never merge orderings across the two stores. No email/push in v1.
+- *(r6)* `POST /projects/import` — clone a named repository, register it,
+  consolidate it (§5.2). And `GET /notifications` — what GitHub is trying to
+  say about the registered projects, collected per repository as observations
+  (FR-O8). Deliberately a different surface from `/events` above: that feed
+  is what *this instance* did, ordered by a cursor it owns, and merging a
+  forge's inbox into it would make the cursor meaningless and the provenance
+  unreadable. The inbox belongs to the configured token's account, which
+  makes it instance-scoped rather than per-actor — a limit the view states
+  rather than hides.
 - `GET /projects/{id}/deps` (references out), `GET /deps?project=<id>`
   (reverse lookup: which projects reference this one)
 - `GET /drift`, `POST /drift/{id}/accept|reject|contest`
@@ -526,6 +535,34 @@ behind your back.
   every sweep, plus the noise it generates downstream (§3.6). For an
   estate whose working root currently holds 28 stray `pytest` temp
   directories, that trade is not close.
+
+### 5.2 Import is registration for a repository that lives elsewhere (r6)
+
+Registration assumes the working tree is authoritative for its own
+provenance. That holds for a folder and fails for a checkout of a repository
+that lives on GitHub: register the local tree and the first sweep is
+comparing two sources whose relationship nobody has established. Import
+(FR-P6) establishes it — clone the named repository into `import_root`,
+register the result with `repo_url` set, consolidate the existing forge state
+(FR-B3) — so the local tree begins as a known derivative of the remote and
+every later divergence is news rather than ambiguity.
+
+Import is **not** discovery, and §5.1 is unchanged. The user names one
+repository; nothing is listed, searched or suggested. The distinction is not
+academic — the difference between "clone what I named" and "show me what I
+have" is the difference between one command and a permanent classification
+problem, and the second one arrives disguised as a dropdown on the import
+form (`REQUIREMENTS.md` §3, deferred by r6).
+
+Three properties make the operation safe to repeat. The clone lands before
+the declared write, so a failed registration leaves a checkout rather than a
+project pointing at nothing — the same ordering `project create` uses for its
+scaffold. An occupied destination is never overwritten: a clone of the same
+remote is registered as-is, anything else fails untouched (FR-P7). And the
+credential reaches `git` through an askpass helper rather than the remote
+URL, so it appears in no process listing, no `.git/config`, and no stored
+`repo_url` (FR-S8) — FR-S7's rule, applied to the one place a token would
+otherwise be trivially embeddable.
 
 ---
 

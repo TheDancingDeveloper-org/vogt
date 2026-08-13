@@ -21,6 +21,12 @@ const ROUTES = {
   "drift.list": "/api/drift",
   deps: "/api/deps",
   "audit.list": "/api/audit",
+  notifications: "/api/notifications",
+  // The one mutating operation this GUI names, and it is named only because
+  // the import view collects a reason the *user* typed (FR-U3). The rule the
+  // GUI keeps is not "never write" but "never write a reason nobody meant":
+  // a button cannot type one, a form with a required field can.
+  "project.import": "/api/projects/import",
 };
 
 const TOKEN_KEY = "vogt.token";
@@ -28,16 +34,18 @@ const TOKEN_KEY = "vogt.token";
 // -- transport --------------------------------------------------------------
 
 /** Call one registered operation. The only way this GUI reaches the server. */
-async function call(operation, params = {}) {
+async function call(operation, params = {}, method = "GET") {
   const path = ROUTES[operation];
   if (!path) throw new Error(`no route for ${operation}`);
   if (!path.startsWith(API_BASE)) throw new Error(`${path} is not under the API`);
 
   const url = new URL(path, window.location.origin);
-  for (const [key, value] of Object.entries(params)) {
-    if (value === undefined || value === null || value === "") continue;
-    for (const one of Array.isArray(value) ? value : [value]) {
-      url.searchParams.append(key, one);
+  if (method === "GET") {
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null || value === "") continue;
+      for (const one of Array.isArray(value) ? value : [value]) {
+        url.searchParams.append(key, one);
+      }
     }
   }
 
@@ -46,8 +54,13 @@ async function call(operation, params = {}) {
   // Sent as a header, never in the URL: a token in a query string ends up in
   // logs, proxies and browser history (FR-S7).
   if (token) headers.authorization = `Bearer ${token}`;
+  if (method !== "GET") headers["content-type"] = "application/json";
 
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, {
+    headers,
+    method,
+    body: method === "GET" ? undefined : JSON.stringify(params),
+  });
   const body = await response.json().catch(() => null);
   if (!response.ok) {
     const error = body && body.error ? body.error : {};
@@ -350,6 +363,144 @@ async function auditView() {
   );
 }
 
+// -- the forge inbox (FR-N3, FR-U3) -----------------------------------------
+
+/**
+ * What GitHub is trying to say about the registered projects.
+ *
+ * Deliberately not folded into any other view. These are observations about
+ * somebody else's system, they belong to the token's account rather than to
+ * the person reading, and the response says so — which is why `scope` is
+ * rendered rather than dropped.
+ */
+async function inboxView(query) {
+  const params = { limit: 100 };
+  if (query.project) params.project = query.project;
+  if (query.reason) params.reason = query.reason;
+  if (query.unread === "1") params.unread_only = true;
+  const data = await call("notifications", params);
+
+  const filters = el(
+    "p",
+    { class: "filters" },
+    link("/inbox", "all"),
+    link("/inbox?unread=1", "unread only"),
+    ...Object.entries(data.by_reason || {}).map(([reason, count]) =>
+      link(`/inbox?reason=${encodeURIComponent(reason)}`, `${reason} (${count})`),
+    ),
+  );
+
+  return el(
+    "section",
+    {},
+    el("h2", {}, "Inbox"),
+    el("p", { class: "scope" }, data.scope),
+    freshness(data.freshness),
+    filters,
+    data.detail ? el("p", { class: "empty" }, data.detail) : null,
+    el(
+      "table",
+      {},
+      el(
+        "thead",
+        {},
+        el(
+          "tr",
+          {},
+          el("th", {}, "When"),
+          el("th", {}, "Project"),
+          el("th", {}, "Reason"),
+          el("th", {}, "Subject"),
+        ),
+      ),
+      el(
+        "tbody",
+        {},
+        (data.notifications || []).map((entry) =>
+          el(
+            "tr",
+            { class: entry.unread ? "unread" : null },
+            el("td", {}, when(entry.updated_at || entry.observed_at)),
+            el("td", {}, entry.project_slug || entry.repo || "—"),
+            el("td", { class: "mono" }, entry.reason || "unknown"),
+            el(
+              "td",
+              {},
+              entry.url ? el("a", { href: entry.url, target: "_blank", rel: "noreferrer" }, entry.title || entry.thread) : (entry.title || entry.thread),
+              entry.subject_type ? el("span", { class: "kind" }, entry.subject_type) : null,
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+// -- importing a repository (FR-P6, FR-U3) ----------------------------------
+
+/**
+ * The one view that writes, and the reason it is allowed to.
+ *
+ * `reason` is a required field the user types, so the audit row records why
+ * a human imported this repository rather than "via GUI". There is no
+ * repository list, picker or search here and there must never be one: that
+ * is the registration-candidate listing r3 removed (FR-G15).
+ */
+async function importView() {
+  const form = el("form", { class: "import" });
+  const repo = el("input", { name: "repo", required: "required", placeholder: "owner/name or a GitHub URL" });
+  const name = el("input", { name: "name", placeholder: "Display name (defaults to the repository name)" });
+  const reason = el("input", { name: "reason", required: "required", placeholder: "Why are you importing this? (audited)" });
+  const consolidate = el("input", { name: "consolidate", type: "checkbox", checked: "checked" });
+  const outcome = el("div", { class: "outcome" });
+
+  form.append(
+    el("label", {}, "Repository", repo),
+    el("label", {}, "Name", name),
+    el("label", {}, "Reason", reason),
+    el("label", { class: "check" }, consolidate, "Read existing issues, PRs and releases (changes nothing upstream)"),
+    el("button", { type: "submit" }, "Import"),
+  );
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    outcome.replaceChildren(el("p", { class: "loading" }, "Cloning…"));
+    try {
+      const result = await call(
+        "project.import",
+        {
+          repo: repo.value.trim(),
+          name: name.value.trim() || undefined,
+          reason: reason.value.trim(),
+          consolidate: consolidate.checked,
+        },
+        "POST",
+      );
+      outcome.replaceChildren(
+        el("p", { class: "ok" }, `${result.project.name} imported to ${result.root_path}`),
+        result.detail ? el("p", { class: "note" }, result.detail) : null,
+        link(`/project/${result.project.slug}`, "Open the project"),
+      );
+    } catch (error) {
+      outcome.replaceChildren(errorView(error));
+    }
+  });
+
+  return el(
+    "section",
+    {},
+    el("h2", {}, "Import a repository"),
+    el(
+      "p",
+      { class: "note" },
+      "Name the repository. Vogt clones it, registers it, and reads what is " +
+        "already on GitHub — it changes nothing upstream (FR-B3).",
+    ),
+    form,
+    outcome,
+  );
+}
+
 // -- routing ----------------------------------------------------------------
 
 const NAV = [
@@ -357,7 +508,9 @@ const NAV = [
   ["/backlog", "Backlog"],
   ["/bugs", "Bugs"],
   ["/drift", "Drift"],
+  ["/inbox", "Inbox"],
   ["/audit", "Audit"],
+  ["/import", "Import"],
 ];
 
 function parse(hash) {
@@ -388,6 +541,12 @@ async function render() {
         break;
       case "deps":
         section = await depsView(parts[1]);
+        break;
+      case "inbox":
+        section = await inboxView(query);
+        break;
+      case "import":
+        section = await importView();
         break;
       case "audit":
         section = await auditView();

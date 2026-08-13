@@ -56,6 +56,16 @@ services:
     environment:
       VOGT_DATA_DIR: /var/lib/vogt
       VOGT_LOG_LEVEL: "${VOGT_LOG_LEVEL:-info}"
+      # Imported repositories land in the estate, not in the instance volume
+      # (FR-P6). The product default is `<data_dir>/repos`, which is right
+      # for a laptop and wrong here: a clone inside the named volume would be
+      # invisible to MyDevEnv2, so the one thing an import is for — getting
+      # a repository somewhere you can work on it — would not happen.
+      #
+      # Under the workspace mount below, and therefore at the same path
+      # inside and outside the container, because `root_path` is stored
+      # absolute (FR-P5) and read back verbatim by collectors.
+      VOGT_IMPORT_ROOT: "${VOGT_IMPORT_ROOT:-/home/sprooty/Working/Active}"
       # Absent by default: no forge adapter, and forge subjects read as
       # "not collected" rather than absent (NFR-PO1).
       VOGT_GITHUB_TOKEN_FILE: "${VOGT_GITHUB_TOKEN_FILE:-}"

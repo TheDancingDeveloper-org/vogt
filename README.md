@@ -54,6 +54,14 @@ repository's existing issues, PRs, labels and releases; forge drift
 `update_automation_gap`); and opt-in write-back that is additive and
 forward-only — create, comment, label, close/reopen, and nothing else.
 
+**M7 (Onboarding & inbox) is implemented**, post-v1: `project import` names
+a GitHub repository, clones it into the configured import root, registers it
+and consolidates its existing issues and PRs in one audited act — so a
+repository that lives on GitHub is onboarded from GitHub rather than from a
+local tree of unknown ancestry. Its notifications are collected per
+repository, which scopes them to onboarded projects by construction, and read
+through their own inbox rather than being mixed into the events feed.
+
 **M6 (GUI) is implemented**, which completes v1: per-project view, global
 backlog and bugs, drift inbox, dependency graph and audit browser, with trust
 and freshness on every aggregate. Served at `/ui` from the same single port,

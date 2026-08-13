@@ -21,6 +21,11 @@ implementation language.
     no storage, no context, no clock of their own. That is what makes them
     testable against a table of cases and `why` an explanation rather than
     a summary.
+  - `adapters/git/` is the only place Vogt runs `git` to *change* local
+    state (cloning, for `project.import`). `collectors/git_local.py` also
+    shells out to git and stays where it is, because it reads a checkout
+    that already exists — the split is "writes a working tree" vs "does
+    not", not "uses git".
   - `collectors/` return findings and write nothing (FR-O2). The sweeper
     appends them and writes the coverage record; the worst a broken
     collector can do is produce stale evidence, visible as such.

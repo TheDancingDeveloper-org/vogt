@@ -1,6 +1,7 @@
-# Vogt — Deliverable Stages (v0.3, revision r5)
+# Vogt — Deliverable Stages (v0.3, revision r6)
 
-Status: **M0–M6 delivered — v1 is built** (2026-08-12). Requirement IDs
+Status: **M0–M6 delivered — v1 is built** (2026-08-12); **M7 is post-v1 and
+in progress**. Requirement IDs
 refer to `REQUIREMENTS.md`; per its §4, scope changes here must update that
 document in the same change.
 
@@ -38,6 +39,7 @@ operation the stage added.
 | M4 | Service | Node B stack via Komodo, auth, remote MCP, ops | FR-A5(full), FR-A6, FR-A7, FR-S3–S5, FR-S7, FR-L1(full), FR-L2, NFR-D1–D10, NFR-C5, NFR-PO4, NFR-O2 |
 | M5 | GitHub module | Consolidation, forge drift, write-back | FR-O5b, FR-B1–B5, FR-D6 |
 | M6 | GUI | The visual surface over the same API | FR-U1, FR-U2 |
+| M7 | Onboarding & inbox *(post-v1)* | Import a repository from GitHub; collect its notifications | FR-P6, FR-P7, FR-S8, FR-O8, FR-N3, FR-U3 |
 
 Deferred and withdrawn requirement IDs (FR-G2, FR-G5–G10, FR-D7) appear in
 no stage by design — see `REQUIREMENTS.md` §3.
@@ -456,6 +458,85 @@ default was chosen rather than required, and the reason is that an instance
 which never looks cannot tell stale evidence from none — the failure this
 product exists to prevent. `--no-schedule` and `sweep_interval_seconds: 0`
 both turn it off.
+
+---
+
+## M7 — Onboarding & inbox (post-v1)
+
+**Objective**: getting a GitHub repository into Vogt should be one act, and
+what GitHub is trying to tell you about it should be visible here.
+
+Deliverables:
+- **Import** (FR-P6, FR-P7): `project.import` takes a repository the caller
+  names, clones it into `import_root`, registers it with `repo_url` set, and
+  runs the FR-B3 consolidation — one operation, one reason, one audit trail.
+  Clone before declared write, so the failure mode is a stray checkout rather
+  than a project pointing at nothing.
+- **Clone credentials out of band** (FR-S8): the token reaches `git` through
+  an askpass helper. Not in the URL, not in argv, not in the clone's config,
+  and not in the stored `repo_url`.
+- **`gh-notifications`** (FR-O8): a collector over the per-repository
+  notifications endpoint, unpromoted, degrading to `partial` when the token
+  lacks the scope.
+- **The inbox** (FR-N3, FR-U3): a read-only view and a GUI page, plus the
+  import form.
+
+**Demo**: import a repository that exists only on GitHub, from the GUI, with
+a reason. It lands on disk at the configured root, appears in the project
+list with its issues and PRs already consolidated, and its notifications show
+up in the inbox on the next sweep — while `/events` still contains only what
+this instance did.
+
+### Why import rather than register-then-reconcile
+
+`project.register` assumes the working tree is authoritative for its own
+provenance, which is true for a folder and false for a checkout of somebody
+else's repository. Registering a local tree and letting collectors discover
+the remote means the first sweep compares two sources of unknown
+relationship; importing means the local tree is a known derivative of the
+remote from the first observation, and every divergence after that is real
+news. It is the same argument as consolidation being read-only (FR-B3): the
+incumbent is authoritative, and Vogt's job is to notice, not to reconcile
+what it could simply have known.
+
+**The temptation this stage must refuse** is the repository picker. An import
+form with a text field is one HTTP call away from an import form with a
+dropdown of your repositories, and that dropdown is the registration
+candidate listing r3 removed (was FR-G8). `REQUIREMENTS.md` §3 defers it
+again by name so that adding it is a decision rather than a Tuesday.
+
+### M7 as built — one deviation and three notes
+
+**Deviation: the GUI is no longer read-only.** M6 shipped a rule — every
+operation the GUI names is a read — justified by FR-W1: a write needs a
+reason its author typed, and a button cannot type one. The import form can,
+and does: `reason` is a required field, sent verbatim, and the audit row
+records what the user wrote rather than "via GUI". The rule the GUI actually
+keeps is therefore narrower than the one M6 wrote down, and it is now stated
+that way: a mutating operation may appear in the GUI only through a view
+that collects a typed reason. `tests/test_gui.py` holds the permitted set as
+`GUI_WRITES` and asserts the reason field exists for each member, so adding
+a second write means arguing for it rather than appending to a list. Drift
+resolution stays out — resolving from a list *is* a button.
+
+1. **The cloner is injected through the context, not passed to the
+   handler.** `AppContext` already carries the clock and the id factory for
+   exactly this reason, and `project.import` is the only operation that
+   reaches the internet to change local state. Putting it anywhere else
+   would have meant the parity harness — which drives every shared operation
+   over all three transports — needing a network to run.
+2. **The token reaches `git` through `GIT_ASKPASS`.** The three obvious
+   alternatives all leak: a credential in the remote URL is written into
+   `.git/config` permanently, `-c http.extraHeader=` sits in argv, and
+   `credential.helper store` writes a file nobody deletes. Two tests assert
+   the negative — the token appears in no recorded argv and in no resulting
+   `.git/config`, and the helper does not survive the clone.
+3. **An occupied destination is never overwritten.** A clone of the same
+   remote is reused and reported as such; anything else fails untouched. The
+   test that matters is the one where the destination holds unrelated files:
+   an import that deletes somebody's working tree would be the most
+   destructive thing this product could do, and it is the cheapest possible
+   mistake to make.
 
 ---
 

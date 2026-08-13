@@ -258,6 +258,7 @@ def github_collectors(
     client = GitHubClient.from_token_file(config.github_token_file, transport=transport)
     if client is None:
         return []
+    from vogt.adapters.github.notifications import GitHubNotificationCollector
     from vogt.adapters.github.posture import GitHubPostureCollector
 
     return [
@@ -266,6 +267,7 @@ def github_collectors(
         GitHubActionsCollector(client),
         GitHubReleaseCollector(client),
         GitHubPostureCollector(client),
+        GitHubNotificationCollector(client),
     ]
 
 

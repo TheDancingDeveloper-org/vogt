@@ -52,6 +52,8 @@ from vogt.application.models import (
     GetProjectParams,
     GetWorkParams,
     ImportParams,
+    ImportProjectParams,
+    ImportProjectResult,
     ImportResult,
     InitiativeListResult,
     InitiativeResult,
@@ -72,6 +74,8 @@ from vogt.application.models import (
     ListWorkParams,
     McpStdioParams,
     McpStdioResult,
+    NotificationsParams,
+    NotificationsResult,
     ObservationsParams,
     ObservationsResult,
     OnboardParams,
@@ -175,6 +179,18 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.create_project,
             route=HttpRoute("POST", "/projects/create"),
             cli=CliBinding(("project", "create")),
+        ),
+        Operation(
+            name="project.import",
+            summary="Clone a GitHub repository into the import root, register "
+            "it, and consolidate its existing forge state.",
+            scope="project.write",
+            mutating=True,
+            params_model=ImportProjectParams,
+            result_model=ImportProjectResult,
+            handler=services.import_project,
+            route=HttpRoute("POST", "/projects/import"),
+            cli=CliBinding(("project", "import")),
         ),
         Operation(
             name="project.get",
@@ -725,6 +741,19 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.list_events,
             route=HttpRoute("GET", "/events"),
             cli=CliBinding(("events", "list")),
+        ),
+        Operation(
+            name="notifications",
+            summary="What GitHub is trying to say about the registered "
+            "projects. Separate from the events feed, which is this "
+            "instance's own history.",
+            scope="read",
+            mutating=False,
+            params_model=NotificationsParams,
+            result_model=NotificationsResult,
+            handler=services.list_notifications,
+            route=HttpRoute("GET", "/notifications"),
+            cli=CliBinding(("notifications",)),
         ),
         Operation(
             name="audit.list",

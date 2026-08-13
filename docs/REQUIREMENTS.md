@@ -1,6 +1,6 @@
 # Vogt — Requirements (v0.3)
 
-Status: **baseline, revision r5** (2026-08-12), distilled from `DESIGN.md`,
+Status: **baseline, revision r6** (2026-08-12), distilled from `DESIGN.md`,
 `SCHEMA.md`, `DEPLOYMENT.md` and the originating product discussion.
 **v1 (M0–M6) is built**; §5 is the requirement-by-requirement verification
 of the delivered system against this document, including the four
@@ -118,6 +118,52 @@ price of a hotfix. `.github/workflows/build.yml` implements the build half;
 *(This summary is required by §4 and was missing when NFR-C3 was marked
 `revised r5` — added during the delivery verification in §5.)*
 
+### Revision r6 — onboarding from the forge, and the forge's inbox
+
+Two additions, both post-v1 (M7 in `ROADMAP.md`), neither changing an
+existing requirement.
+
+**1. A repository on GitHub is onboarded by importing it, not by finding it
+locally.** Until now the only ways to get a project were `project.register`
+(point at a folder you already have) and `project.create` (scaffold a new
+skeleton). Both assume the working tree already exists and is authoritative
+for its own provenance. For a repository that lives on GitHub that is the
+wrong starting point: it makes Vogt reconcile two sources — a local tree of
+unknown ancestry and a remote — from the first sweep, when one of them is
+plainly derived from the other. FR-P6/FR-P7 add import: clone the named
+repository into the configured import root, register it, and consolidate its
+existing forge state (FR-B3) in one operation.
+
+This is not discovery, and must not become it. FR-G15 is untouched: the user
+names the repository. Listing an account's repositories to choose from is a
+registration-candidate listing — deferred by r3 and deferred again here (§3),
+because the GUI form is exactly where it would reappear as a convenience.
+
+**2. GitHub notifications are observations, not events.** The `/events` feed
+(FR-N1) is Vogt's own audit-backed feed of what happened *here*; FR-N2 keeps
+push out of scope, and neither changes. What GitHub calls a notification is
+upstream evidence about a repository, so it is collected like any other
+evidence (FR-O8) and read through its own view (FR-N3). Scoping the view to
+onboarded repositories is not a filter but a consequence: collection scope is
+the registered project list, so the per-repository endpoint can only ever
+return notifications for projects that exist here.
+
+**One earlier decision is narrowed.** M6 shipped the GUI read-only, on the
+grounds that a write needs a reason its author typed and a button cannot type
+one (FR-W1). FR-U3's import form can, so the rule is restated rather than
+abandoned: a mutating operation may appear in the GUI only through a view
+that collects a reason the user typed. Import qualifies; resolving drift from
+a list does not, and remains out. No requirement changes — FR-U1 and FR-W1
+are untouched — but the reasoning M6 recorded was broader than the rule it
+was protecting, and `ROADMAP.md` M7 names the difference.
+
+Two limits are stated up front rather than discovered later. Notifications
+belong to the *token's* account, so the inbox is instance-scoped, not
+per-actor — per-actor inboxes need per-actor tokens and are deferred.
+And nothing is marked read upstream: that is a mutation of somebody else's
+inbox, and it belongs behind the write-back policy (FR-B1) if it is ever
+built. It is not built.
+
 ---
 
 ## 1. Functional requirements
@@ -131,6 +177,8 @@ price of a hotfix. `.github/workflows/build.yml` implements the build half;
 | FR-P3 | The system shall derive a project's current version from tags/releases/manifest observations, and report declared-vs-observed version mismatch as drift. | M | SCHEMA §2.4 |
 | FR-P4 | The system shall support project lifecycle states (`incubating / active / maintenance / archived`) with validated transitions. | S | DESIGN §3.1 |
 | FR-P5 | *(r2, r3)* A project shall be exactly one explicitly registered repository or folder. Members of a multi-package workspace shall not be separate projects; a standalone repository mirroring a workspace member is its own project, and the relationship is reported (FR-D8), never reconciled. | M | DESIGN §3.1 |
+| FR-P6 | *(r6)* The system shall import a GitHub repository named explicitly by the caller (`owner/name` or a repository URL): clone it into the configured import root, register the result as a project with its `repo_url` set, and — unless the caller declines — consolidate its existing forge state (FR-B3) in the same operation. The clone shall be written before the declared write, so a failed registration leaves a checkout and not a project pointing at nothing. Import shall never list, search, or suggest repositories (FR-G15). | S | DESIGN §4 |
+| FR-P7 | *(r6)* Import shall be non-destructive at its destination. A destination that does not exist is created; a destination that is already a clone of the same remote is registered as-is rather than re-cloned; any other occupied destination shall fail without modifying it. | S | DESIGN §4 |
 
 ### FR-G — Project contract & compliance status
 
@@ -193,6 +241,7 @@ filesystem discovery.*
 | FR-O5 | *(split r2)* **(a)** Read-only GitHub collectors — issues, PRs, Actions runs, releases/tags — shall be available from M2, so observed-first views cover forge-hosted work. **(b)** Historical backfill/consolidation and per-toggle update-automation posture land with the forge module at M5. | M* | DESIGN §3.5, §4 |
 | FR-O6 | CI status shall be modeled as generic per-revision check observations; GitHub Actions is one producer, not the model. | M | DESIGN §1.1 |
 | FR-O7 | Unchanged observations (same subject, same content digest) shall not grow the store; sweeps shall count them as unchanged. | S | SCHEMA §3.1 |
+| FR-O8 | *(r6)* GitHub notifications shall be collected as observations through the **per-repository** endpoint, so that collection scope remains the registered project list (FR-G15) by construction rather than by filtering. They shall not be promoted into ranked views (DESIGN §3.6): a notification is a signal that something happened, not a claim that there is work. A token lacking the notifications scope shall degrade to `partial` coverage like any other unavailable source (FR-O4), never to a failed sweep. | S* | DESIGN §3.5 |
 
 \* M *when the GitHub adapter is enabled*; the adapter itself is optional (NFR-PO1).
 
@@ -246,6 +295,7 @@ by path or repository URL, and stops there.*
 | FR-S5 | Both allow and deny authorization decisions shall be audited. | M | DESIGN §4.1 |
 | FR-S6 | The audit log shall be queryable through the API (filter by actor, entity, operation, time). | M | DESIGN §4.2 |
 | FR-S7 | Secrets (tokens) shall be supplied via file reference, never argv or URL. | M | DEPLOY §2.2 |
+| FR-S8 | *(r6)* Credentials used to clone a repository (FR-P6) shall be supplied to `git` out of band — never in the remote URL, never in argv, and never written into the clone's own configuration. A project's stored `repo_url` shall never contain credentials. | M* | DEPLOY §2.2 |
 
 ### FR-B — Forge write-back (optional module)
 
@@ -271,6 +321,7 @@ by path or repository URL, and stops there.*
 |---|---|---|---|
 | FR-N1 | *(revised r2)* The system shall expose a cursor-based `/events` feed backed by a single append-only `events` table in the declared store with a monotonic `seq`. Declared writes shall insert their event row in the same transaction as the entity change and audit row. Sweep completions and CI state transitions shall be published into the same table by the application layer at sweep completion. `seq` is the cursor; no client shall be required to merge orderings across the two stores. | M | DESIGN §4.2, SCHEMA §2.5 |
 | FR-N2 | Email/desktop/webhook push is out of scope for v1; the events feed is the sole notification surface. | M | DESIGN §9 |
+| FR-N3 | *(r6)* The system shall expose collected GitHub notifications (FR-O8) as their own read-only view, filterable by project, reason and unread state, and separate from the `/events` feed — that feed is this instance's own history and shall not be merged with a forge's. The view shall state that its contents belong to the configured token's account and are therefore instance-scoped, not per-actor. Nothing shall be marked read upstream. | S* | DESIGN §4.2 |
 
 ### FR-U — GUI
 
@@ -278,6 +329,7 @@ by path or repository URL, and stops there.*
 |---|---|---|---|
 | FR-U1 | The GUI shall provide: per-project view, global backlog, global bugs, drift inbox, dependency graph view, audit browser. | M | DESIGN §10 (M6) |
 | FR-U2 | The GUI shall display trust state and data freshness on every aggregated view. | M | DESIGN §6 |
+| FR-U3 | *(r6)* The GUI shall provide an import form taking a repository reference and a reason (FR-P6), and a notification inbox over FR-N3. Both shall consume only the public REST API, and the import form shall offer no repository listing, search, or suggestion. | S | DESIGN §10 |
 
 ---
 
@@ -414,6 +466,23 @@ Deferred by revision r4:
   entry, no reverse-proxy block. Consistent with NFR-D5, restated here
   because a tailnet-only stack is the one shape where someone is most
   likely to "just add a Caddy block".
+
+Deferred by revision r6:
+
+- **Repository listing, search or suggestion during import** — an account's
+  repositories enumerated for the user to pick from. This is the r3
+  registration-candidate listing (was FR-G8) arriving through the import
+  form, which is the one place it looks like a convenience rather than a
+  policy change. Import takes a repository the caller names (FR-P6).
+- **Marking GitHub notifications read from Vogt.** A `PATCH` against
+  somebody's inbox is a forge mutation; if it is ever built it belongs under
+  the write-back policy (FR-B1) and in the write-back ledger (FR-B2), not as
+  a convenience on a read view.
+- **Per-actor notification inboxes.** Notifications belong to the account
+  whose token is configured, so FR-N3 is instance-scoped. Per-actor inboxes
+  require per-actor forge credentials, which is a larger identity change than
+  the inbox is worth today — and the same limitation as the per-project
+  authorization scopes deferred by r2.
 
 Named stretch goal, **not committed and not designed for**:
 
