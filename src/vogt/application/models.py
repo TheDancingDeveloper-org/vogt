@@ -1196,3 +1196,56 @@ class NotificationsResult(Result):
     )
     freshness: Freshness = Freshness()
     detail: str | None = None
+
+
+# -- connecting a client (FR-A8) -------------------------------------------
+
+
+ClientKind = Literal["http", "bridge"]
+
+
+class ConnectParams(Params):
+    """What a client needs in order to reach this instance (FR-A8)."""
+
+    client: ClientKind = Field(
+        default="http",
+        description=(
+            "`http` for a client that speaks streamable HTTP MCP — the "
+            "ordinary case, and the one that needs nothing installed. "
+            "`bridge` for a client that can only spawn a local process."
+        ),
+    )
+    format: Literal["json", "markdown"] = Field(
+        default="json",
+        description=(
+            "`markdown` renders the connection document `DEPLOYMENT.md` §4.3 "
+            "describes; redirect it to CONNECTING.md if you want it on disk."
+        ),
+    )
+
+
+class ConnectResult(Result):
+    """The connection facts, and the client configuration built from them.
+
+    `url` is `None` when nobody has configured one. That is deliberately not
+    a guess: a URL the server invented would be wrong in exactly the
+    deployment this field exists for, and a client cannot tell a wrong URL
+    from an unreachable one.
+    """
+
+    url: str | None = None
+    api_path: str
+    mcp_path: str
+    mcp_url: str | None = None
+    supported_mcp_protocol_versions: list[str]
+    client: ClientKind
+    requires_install: bool = Field(
+        description=(
+            "Whether the client needs Vogt's own code present. False for "
+            "streamable HTTP, which is why it is the recommended path."
+        )
+    )
+    configuration: str = Field(
+        description="Ready to use: JSON for a client config, or the document."
+    )
+    detail: str | None = None

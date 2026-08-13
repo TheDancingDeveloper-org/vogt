@@ -40,6 +40,7 @@ operation the stage added.
 | M5 | GitHub module | Consolidation, forge drift, write-back | FR-O5b, FR-B1–B5, FR-D6 |
 | M6 | GUI | The visual surface over the same API | FR-U1, FR-U2 |
 | M7 | Onboarding & inbox *(post-v1)* | Import a repository from GitHub; collect its notifications | FR-P6, FR-P7, FR-S8, FR-O8, FR-N3, FR-U3 |
+| M8 | Reachable by an agent *(post-v1)* | `connect`, and the five estate prerequisites behind it | FR-A8; `DEPLOYMENT.md` §7 (1–5) |
 
 Deferred and withdrawn requirement IDs (FR-G2, FR-G5–G10, FR-D7) appear in
 no stage by design — see `REQUIREMENTS.md` §3.

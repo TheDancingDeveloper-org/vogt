@@ -1,6 +1,6 @@
 # Vogt — Requirements (v0.3)
 
-Status: **baseline, revision r6** (2026-08-12), distilled from `DESIGN.md`,
+Status: **baseline, revision r7** (2026-08-13), distilled from `DESIGN.md`,
 `SCHEMA.md`, `DEPLOYMENT.md` and the originating product discussion.
 **v1 (M0–M6) is built**; §5 is the requirement-by-requirement verification
 of the delivered system against this document, including the four
@@ -164,6 +164,54 @@ And nothing is marked read upstream: that is a mutation of somebody else's
 inbox, and it belongs behind the write-back policy (FR-B1) if it is ever
 built. It is not built.
 
+### Revision r7 — a client that can connect
+
+**A requirement is added, and one is corrected.** The trigger was an ordinary
+question — how does a client install Vogt's MCP server? — which had no
+answer, and no requirement whose failure would have said so.
+
+**1. FR-A8 is new.** FR-A5 requires the stdio bridge to *exist* and to
+discover the remote tool list at startup. It does. Nothing required that a
+client could *obtain* it, or that an instance could say where it is. The
+verification in §5 could not have caught this: it walks requirement IDs
+looking for ones nothing implements, and there was no ID here to walk.
+
+Three items each recorded a fragment of the same hole and each was filed as
+minor. §5.1 lists NFR-D3 as *vacuously satisfied* — "Vogt ships no
+client-setup script". §5.1 lists `DEPLOYMENT.md` §4.3's `CONNECTING.md` as
+half-built, and explicitly notes it is "not a numbered requirement". NFR-PO4
+promised `uv tool install` against no index and went unlisted entirely.
+Individually: a rule with nothing to bind, a document nobody generated, a
+conjunct nobody checked. Together: a product that could not be connected to,
+with no failing test and no failing requirement anywhere.
+
+The missing fact turned out to be a single one. `/connection-info` reported
+every path a client needs and not the URL — because the server genuinely
+cannot know it: it binds `0.0.0.0:8000` in a container and is published at a
+tailnet address on another port. That makes the URL an **exposure** value,
+which under NFR-D2 must be configured and must never carry a default. So
+`public_url` has none, and an instance without one reports that nobody has
+said rather than inventing an answer. A URL the server guessed would be
+wrong in exactly the deployment the field exists for, and from a client a
+wrong URL and an unreachable one look the same.
+
+**2. NFR-PO4 is corrected, not extended.** It named two install paths joined
+by "and": `uv tool install`, and the OCI image. The image half shipped at M4,
+signed and digest-pinned. The wheel half never had an index behind it — no
+PyPI project, no release asset, the wheel reachable only as an expiring CI
+artifact — and M4 claimed the requirement as delivered.
+
+The correction is deliberately *not* to build a private index. Vogt is
+private today and public later (NFR-O1); an index built for the interim
+would have one user and a migration to undo. The image is the supported
+install path, PyPI is the path at the public milestone, and neither is
+needed to reach a running instance — which is FR-A8's point.
+
+**3. §5.4 gains the method note.** The delivery verification finds
+requirements that nothing implements. It cannot find a requirement whose
+implementation satisfies half its text, because one citation makes the ID
+look answered. Requirements joined by "and" shall be verified per conjunct.
+
 ---
 
 ## 1. Functional requirements
@@ -283,6 +331,7 @@ by path or repository URL, and stops there.*
 | FR-A5 | MCP shall be served over stdio (local, no server required) and streamable HTTP at `/mcp`; a stdio bridge shall serve clients that can only spawn local processes, discovering the remote tool list at startup rather than hardcoding it. | M | DESIGN §4.1 |
 | FR-A6 | Unsupported MCP protocol versions shall be refused with the supported list named; bridge↔server version skew shall warn on stderr and never block startup. | M | DESIGN §4.1 |
 | FR-A7 | The server shall expose plain-HTTP `/health/live`, `/health/ready`, `/version`, and `/connection-info` on every port that serves MCP. | M | DEPLOY §1 |
+| FR-A8 | *(r7)* **Connecting a client shall be a capability of the product, not an exercise for the reader.** The instance shall state the URL clients reach it at — configured, never inferred, and reported as absent when unset rather than guessed — and shall render client configuration from it (`connect`). A client that speaks streamable HTTP shall require no Vogt code installed; installation shall be a property of the stdio bridge alone, and shall be stated as its cost rather than assumed. | M | DEPLOY §4.3 |
 
 ### FR-S — Security, identity & audit
 
@@ -342,7 +391,7 @@ by path or repository URL, and stops there.*
 | NFR-PO1 | The product shall be fully functional with no GitHub and no forge — no network at all: projects, work, backlog, ranking, contracts, compliance status, dependency references, drift, audit. Forge and advisory integrations are optional plugins that only ever *add*. | M |
 | NFR-PO2 | The full test suite shall run forge-less; forge-dependent tests are a separately marked layer. | M |
 | NFR-PO3 | Self-hosting shall require zero external services: SQLite storage, single process, single volume. | M |
-| NFR-PO4 | *(revised r4)* Supported install paths: `uv tool install`, and an OCI image published to `ghcr.io/thedancingdeveloper-org/vogt` with SBOM and keyless cosign signature, consumed by a Docker Compose stack. Image references in deployed compose files shall be **digest-pinned**, not alias-tracking. | M |
+| NFR-PO4 | *(revised r4, r7)* The supported install path is an OCI image published to `ghcr.io/thedancingdeveloper-org/vogt` with SBOM and keyless cosign signature, consumed by a Docker Compose stack; image references in deployed compose files shall be **digest-pinned**, not alias-tracking. The wheel shall be published to **PyPI** when the repository goes public (NFR-O1), and until then to no index at all: a private index built to carry it would be a distribution channel with one user and a migration to undo. Reaching an instance does not require it (FR-A8). | M |
 
 ### NFR-D — Deployment & network
 
@@ -545,17 +594,31 @@ across CLI, REST and MCP by being consistently absent from every one.
 | FR-S3 | M | All five scopes exist, parse, imply correctly and are issuable ✅. **`writeback` gates no operation.** `forge.writeback` sets a project's policy and requires `project.write`; the upstream write is a consequence of `work.write` operations. A token issued with `writeback` alone can read and nothing else. | Medium — a control that grants nothing is worse than one that does not exist, because it is issued in good faith |
 | NFR-S4 | S | The benchmark fixture asserts the NFR-S1 interactive target at **500 projects and 5,000 work items**, not the ~100k items NFR-S1 names. The reduction is deliberate and argued in `tests/test_benchmark.py` — seeding 100k rows per run would cost minutes and prove nothing about the *query* — but the requirement says "at the NFR-S1 envelope" and the fixture is an order of magnitude below it on one axis. It catches an accidental N+1; it does not evidence the envelope. | Low, and honestly documented in the test |
 
-Two further items are **vacuously satisfied** — nothing violates them
-because the thing they constrain was never built:
+An eighth was missed by this verification entirely and is recorded here by
+r7:
+
+- **NFR-PO4** promised two install paths joined by "and" — `uv tool install`
+  *and* an OCI image. The image shipped; the wheel had no index behind it,
+  and M4 claimed the requirement delivered. The ID is cited in `src/` and
+  `tests/`, so the §5.4 method passed it: every citation was about the image.
+  Corrected in r7 rather than implemented — see the revision note.
+
+Two further items were **vacuously satisfied** — nothing violated them
+because the thing they constrain was never built. Both are resolved by
+FR-A8 (r7), and the pattern they formed is the finding:
 
 - **NFR-D3** (client bootstrap reconciles endpoint *values*, not key
-  existence). Vogt ships no client-setup script. The rule binds the first
-  one written; `DEPLOYMENT.md` §4.2 carries the note.
+  existence). Vogt shipped no client-setup script. `connect` is now the
+  first thing the rule binds: it emits values read from the instance, and
+  there is no key-existence check anywhere in it.
 - **`DEPLOYMENT.md` §4.3's generated `CONNECTING.md`.** The server half
-  exists and is tested (`GET /connection-info`, and the bridge discovers
-  URL, path and protocol versions from it at startup); the generator that
-  writes the file does not. Not a numbered requirement — recorded so the
-  absence is visible.
+  existed and was tested; the generator did not. It is now the `connect`
+  operation rather than a committed file — a file in the repository is one
+  more copy of a URL, which is the failure §4.3 was written to prevent.
+
+Each of these was individually small and correctly described. What none of
+them said, and what no requirement owned until FR-A8, is that between them
+**a client could not connect to this product at all**.
 
 ### 5.2 Delivered differently from the specification
 
@@ -609,6 +672,30 @@ The fix is one step in `ci.yml`, in the job that already runs when
 `src/**` changes. Recorded here rather than in `ROADMAP.md` because it is a
 gate failure, not a stage deliverable: NFR-Q4 says CI fails on drift, and
 for the paths most likely to cause drift, it does not.
+
+***Fixed in r7.*** `ci.yml`'s test job now regenerates and diffs, so a
+code-only change to the config schema fails there. Applied while adding
+`public_url` and `import_root` — two commits of exactly the shape that would
+have slipped through.
+
+### 5.4a A second process gap: conjuncts are not verified *(r7)*
+
+**A requirement joined by "and" is verified as though it were one claim.**
+§5.5's method searches each ID across `src/` and `tests/` and hand-checks the
+ones cited nowhere. That finds a requirement nothing implements — it found
+FR-L3 — and it cannot find a requirement whose implementation covers half its
+text, because a single citation makes the ID look answered.
+
+NFR-PO4 is the instance. It named two install paths, `uv tool install` **and**
+an OCI image. The image half is cited in `test_deploy.py` and in the compose
+header; the wheel half had no index behind it at all. Every citation the
+search found was about the image, so the ID passed, and M4 claimed it.
+
+The rule this adds: **an ID containing "and", a comma-joined list, or a
+parenthesised second clause is verified once per conjunct, and §5.1 records
+the conjunct rather than the ID.** No tooling is proposed — the failure was
+one of method, and a checklist that says "split the sentence first" is the
+whole fix.
 
 ### 5.5 What was verified, and how
 

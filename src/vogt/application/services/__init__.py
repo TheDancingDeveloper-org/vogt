@@ -13,6 +13,7 @@ from vogt.application.services.auth import (
     revoke_token,
 )
 from vogt.application.services.collect import coverage, deps, observations, sweep
+from vogt.application.services.connect import connect
 from vogt.application.services.contracts import compliance, contract_check
 from vogt.application.services.drift_service import (
     detect_drift,
@@ -83,6 +84,7 @@ __all__ = [
     "bugs",
     "comment_work",
     "compliance",
+    "connect",
     "contract_check",
     "coverage",
     "create_actor",

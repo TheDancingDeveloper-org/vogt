@@ -12,6 +12,10 @@
 # default policy: allocation
 # import_root = "/var/lib/vogt/repos"
 
+# The URL clients reach this instance at, e.g. `https://host.tailnet.ts.net:18094`. An exposure value, so it has no default and is never guessed: the process binds `0.0.0.0:8000` inside a container and is published somewhere else entirely, so the server cannot know its own address — only the operator does. Unset means `connect` reports that nobody has said, which is a different answer from reporting a URL that does not work (FR-A8).
+# default policy: exposure
+# public_url = "https://host.tailnet.ts.net:18094"
+
 # Verbosity of Vogt's own diagnostics.
 # default policy: behaviour
 # log_level = "info"

@@ -59,6 +59,12 @@ class ConnectionInfo(BaseModel):
 
     name: str = "vogt"
     version: str = __version__
+    #: Where clients reach this instance. `None` when nobody has configured
+    #: one — the server binds a container port and is published elsewhere, so
+    #: this is the one connection fact it cannot infer (FR-A8). Reported as
+    #: absent rather than guessed: from a client, a wrong URL and an
+    #: unreachable one look the same.
+    url: str | None = None
     api_path: str
     mcp_path: str
     health_path: str
@@ -119,7 +125,9 @@ def add_health_routes(
 
     @router.get("/connection-info", response_model=ConnectionInfo, tags=["health"])
     async def connection_info() -> ConnectionInfo:
+        ctx: AppContext = context_factory()  # type: ignore[operator]
         return ConnectionInfo(
+            url=(ctx.config.public_url or "").rstrip("/") or None,
             api_path=api_prefix,
             mcp_path=mcp_path,
             health_path="/health/ready",

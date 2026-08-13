@@ -13,6 +13,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 |---|---|---|---|---|
 | `data_dir` | `VOGT_DATA_DIR` | path | `$XDG_DATA_HOME/vogt`, else `~/.local/share/vogt` | allocation |
 | `import_root` | `VOGT_IMPORT_ROOT` | path, optional | `<data_dir>/repos` | allocation |
+| `public_url` | `VOGT_PUBLIC_URL` | string, optional | *(no default — must be set)* | exposure |
 | `log_level` | `VOGT_LOG_LEVEL` | one of `debug`, `info`, `warning`, `error` | `info` | behaviour |
 | `marker_promotion_patterns` | `VOGT_MARKER_PROMOTION_PATTERNS` | list of strings | `TODO(vogt)`, `FIXME(vogt)` | behaviour |
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
@@ -31,6 +32,10 @@ Directory holding declared.sqlite3, observed.sqlite3 and backups. One instance p
 ### `import_root`
 
 Directory imported repositories are cloned into, one per project slug (FR-P6). An allocation value, so it has a default rather than a gate: unset means `<data_dir>/repos`, which keeps the clone with the instance that registered it. Deployments that observe an estate on a mounted host directory point this at that estate instead, so an imported project lands where the rest of the work already lives.
+
+### `public_url`
+
+The URL clients reach this instance at, e.g. `https://host.tailnet.ts.net:18094`. An exposure value, so it has no default and is never guessed: the process binds `0.0.0.0:8000` inside a container and is published somewhere else entirely, so the server cannot know its own address — only the operator does. Unset means `connect` reports that nobody has said, which is a different answer from reporting a URL that does not work (FR-A8).
 
 ### `log_level`
 

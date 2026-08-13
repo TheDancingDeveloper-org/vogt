@@ -108,6 +108,18 @@ jobs:
       - name: mypy --strict
         run: uv run --no-sync mypy
 
+      # NFR-Q4, on the path that actually causes drift. The same check lives
+      # in `docs.yml`, which triggers on `docs/**` and `**/*.md` — so a commit
+      # that adds a field to `src/vogt/config.py` and nothing else ran this
+      # job, where the check was absent, and landed with the generated files
+      # stale. Recorded as a gate failure in `REQUIREMENTS.md` §5.4: NFR-Q4
+      # says CI fails on drift, and for code-only changes it did not.
+      - name: generated config docs are not stale
+        run: |
+          set -euo pipefail
+          uv run --no-sync python scripts/gen_config_docs.py
+          git diff --exit-code -- docs/CONFIG.md config.example.toml
+
       # Includes the coverage gate (NFR-Q2), the transport-parity matrix
       # (FR-A3) and the M0 demo acceptance test.
       - name: pytest
