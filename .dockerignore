@@ -25,3 +25,4 @@
 !deploy/git-askpass.sh
 !deploy/mcp-bootstrap.sh
 !deploy/rust-analyzer-mcp.sh
+!deploy/vogt-mcp-auth.sh
