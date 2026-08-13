@@ -10,6 +10,7 @@ readonly INFRASTRUCTURE_PROJECT_ID="5b7e75de-e874-484d-9595-873acd6bfd07"
 readonly APPS_PROJECT_ID="76b1ebe1-3656-4cef-952c-30d5d489c6e7"
 readonly INFISICAL_ENV="prod"
 readonly CADASTRE_SECRET_NAME="${MYDEVENV2_CADASTRE_SECRET_NAME:-HOMELAB_CADASTRE_HTTP_TOKEN}"
+readonly VOGT_SECRET_NAME="${MYDEVENV2_VOGT_SECRET_NAME:-HOMELAB_VOGT_AGENT_TOKEN}"
 readonly DEFAULT_CADASTRE_MCP_URL="https://winrarhost.tailc7d3c.ts.net:18092/mcp"
 readonly DEFAULT_CADASTRE_MCP_RESOLVE="${MYDEVENV2_CADASTRE_MCP_RESOLVE:-}"
 AUTH_TMP_DIR=""
@@ -115,10 +116,20 @@ load_agent_environment() {
     export CADASTRE_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$CADASTRE_SECRET_NAME")"
     [[ -n "$CADASTRE_HTTP_TOKEN" ]] || die \
         "Infisical secret $CADASTRE_SECRET_NAME is missing or empty"
+    # Vogt is the estate's backlog/project tracker, reached the same way for
+    # the same reasons. Absent secret is not fatal, unlike cadastre's: an
+    # instance may legitimately not be deployed yet, and agent auth must keep
+    # working for git/gh regardless.
+    export VOGT_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$VOGT_SECRET_NAME" || true)"
+
     umask 077
     AUTH_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mydevenv2-agent-auth.XXXXXXXX")"
     printf '%s' "$CADASTRE_HTTP_TOKEN" >"$AUTH_TMP_DIR/cadastre-http-token"
     export CADASTRE_HTTP_TOKEN_FILE="$AUTH_TMP_DIR/cadastre-http-token"
+    if [[ -n "$VOGT_HTTP_TOKEN" ]]; then
+        printf '%s' "$VOGT_HTTP_TOKEN" >"$AUTH_TMP_DIR/vogt-http-token"
+        export VOGT_TOKEN_FILE="$AUTH_TMP_DIR/vogt-http-token"
+    fi
 
     if [[ "${MYDEVENV2_AUTO_CADASTRE_MCP:-1}" == "1" ]]; then
         /usr/local/bin/mydevenv2-mcp-bootstrap

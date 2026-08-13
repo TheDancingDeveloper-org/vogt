@@ -429,6 +429,7 @@ RUN chmod +x /usr/local/bin/mydevenv2-server
 COPY deploy/entrypoint.sh /usr/local/bin/mydevenv2-entrypoint
 COPY deploy/agent-auth.sh /usr/local/bin/mydevenv2-agent-auth
 COPY deploy/cadastre-mcp-auth.sh /usr/local/bin/mydevenv2-cadastre-mcp
+COPY deploy/vogt-mcp-auth.sh /usr/local/bin/mydevenv2-vogt-mcp
 COPY deploy/mcp-bootstrap.sh /usr/local/bin/mydevenv2-mcp-bootstrap
 COPY deploy/git-askpass.sh /usr/local/bin/mydevenv2-git-askpass
 COPY deploy/rust-analyzer-mcp.sh /usr/local/bin/mydevenv2-rust-analyzer-mcp
@@ -436,6 +437,7 @@ RUN chmod +x \
     /usr/local/bin/mydevenv2-entrypoint \
     /usr/local/bin/mydevenv2-agent-auth \
     /usr/local/bin/mydevenv2-cadastre-mcp \
+    /usr/local/bin/mydevenv2-vogt-mcp \
     /usr/local/bin/mydevenv2-mcp-bootstrap \
     /usr/local/bin/mydevenv2-git-askpass \
     /usr/local/bin/mydevenv2-rust-analyzer-mcp
