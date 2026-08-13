@@ -30,6 +30,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from vogt.adapters.cli.main import EXIT_OK, build_parser, run
+from vogt.adapters.git import CloneOutcome, Cloner, CloneRequest
 from vogt.adapters.http.app import API_PREFIX, build_app
 from vogt.adapters.mcp.surface import McpSurface
 from vogt.application.context import AppContext, build_context
@@ -90,6 +91,15 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "reason": WHY,
         },
     ),
+    (
+        "project.import",
+        {
+            "repo": "parity-org/parity-import",
+            "consolidate": False,
+            "reason": WHY,
+        },
+    ),
+    ("notifications", {}),
     (
         "work.create",
         {
@@ -299,16 +309,40 @@ def _write_fixture_tree(root: Path) -> None:
     )
 
 
+def _recording_cloner(root: Path) -> Cloner:
+    """A clone that writes a directory and never touches the network.
+
+    `project.import` is the one operation whose real implementation reaches
+    the internet, and parity has to drive every shared operation (FR-A3). The
+    cloner is injected through the context for exactly this reason, and what
+    the three transports then compare is the operation's behaviour rather
+    than GitHub's availability.
+    """
+
+    def clone(request: CloneRequest) -> CloneOutcome:
+        destination = Path(str(request.destination).replace("{root}", str(root)))
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "README.md").write_text("imported\n", encoding="utf-8")
+        return CloneOutcome(
+            destination=destination,
+            revision="0" * 40,
+            default_branch="main",
+        )
+
+    return clone
+
+
 def _fresh(
     tmp_path_factory: pytest.TempPathFactory, label: str
 ) -> tuple[AppContext, Path]:
     root = tmp_path_factory.mktemp(label)
     _write_fixture_tree(root)
     context = build_context(
-        config=VogtConfig(data_dir=root / "instance"),
+        config=VogtConfig(data_dir=root / "instance", import_root=root / "imported"),
         principal=TEST_PRINCIPAL,
         clock=StepClock(),
         id_factory=SequentialIds(),
+        cloner=_recording_cloner(root),
     )
     init_instance(context, InitParams())
     return context, root

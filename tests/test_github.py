@@ -114,6 +114,7 @@ def test_a_token_file_enables_the_forge_collectors(
         "gh-actions",
         "gh-releases",
         "gh-posture",
+        "gh-notifications",
     }
 
 

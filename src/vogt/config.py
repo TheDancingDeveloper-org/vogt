@@ -54,6 +54,7 @@ LogLevel = Literal["debug", "info", "warning", "error"]
 DECLARED_DB_NAME = "declared.sqlite3"
 OBSERVED_DB_NAME = "observed.sqlite3"
 BACKUPS_DIR_NAME = "backups"
+IMPORT_DIR_NAME = "repos"
 
 
 def default_data_dir() -> Path:
@@ -105,6 +106,19 @@ class VogtConfig(BaseSettings):
         description=(
             "Directory holding declared.sqlite3, observed.sqlite3 and backups. "
             "One instance per directory."
+        ),
+        json_schema_extra={"default_policy": "allocation"},
+    )
+    import_root: Path | None = Field(
+        default=None,
+        description=(
+            "Directory imported repositories are cloned into, one per project "
+            "slug (FR-P6). An allocation value, so it has a default rather "
+            "than a gate: unset means `<data_dir>/repos`, which keeps the "
+            "clone with the instance that registered it. Deployments that "
+            "observe an estate on a mounted host directory point this at that "
+            "estate instead, so an imported project lands where the rest of "
+            "the work already lives."
         ),
         json_schema_extra={"default_policy": "allocation"},
     )
@@ -239,6 +253,19 @@ class VogtConfig(BaseSettings):
     def resolved_data_dir(self) -> Path:
         return self.data_dir.expanduser()
 
+    @property
+    def resolved_import_root(self) -> Path:
+        """Where `project.import` clones to (FR-P6).
+
+        Derived from `data_dir` when unset, which is why the field itself is
+        optional while the *value* always exists: a default factory cannot
+        see another field, and an allocation value must never be a gate
+        (NFR-D2).
+        """
+        if self.import_root is not None:
+            return self.import_root.expanduser()
+        return self.resolved_data_dir / IMPORT_DIR_NAME
+
 
 def load_config(**overrides: Any) -> VogtConfig:
     """Build the configuration, applying the documented precedence."""
@@ -304,6 +331,11 @@ def _default_label(name: str, field: FieldInfo) -> str:
         if name == "data_dir":
             return "`$XDG_DATA_HOME/vogt`, else `~/.local/share/vogt`"
         return "computed"  # pragma: no cover - no other factory fields yet
+    if name == "import_root":
+        # Derived from another field, so it cannot be a factory — but it is
+        # an allocation value and documenting it as "no default" would be a
+        # lie the policy test would rightly fail on.
+        return "`<data_dir>/repos`"
     if field.default is None:
         return "*(no default — must be set)*"
     if isinstance(field.default, tuple):
@@ -414,6 +446,8 @@ def _example_value(field: FieldDoc) -> str:
     default = VogtConfig.model_fields[field.name].default
     if field.name == "data_dir":
         return '"/var/lib/vogt"'
+    if field.name == "import_root":
+        return '"/var/lib/vogt/repos"'
     if isinstance(default, tuple):
         rendered = ", ".join(json.dumps(entry) for entry in default)
         return f"[{rendered}]"

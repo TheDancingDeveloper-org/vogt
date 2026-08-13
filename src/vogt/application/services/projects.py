@@ -73,6 +73,23 @@ def register_project(ctx: AppContext, params: RegisterProjectParams) -> ProjectR
     duplicate slug, which is a naming collision rather than a judgement about
     the project.
     """
+    return record_registration(ctx, params)
+
+
+def record_registration(
+    ctx: AppContext,
+    params: RegisterProjectParams,
+    *,
+    operation: str = PROJECT_REGISTER,
+    event_kind: str = PROJECT_REGISTERED_EVENT,
+) -> ProjectResult:
+    """The declared half of registration, under a caller-named operation.
+
+    `project.import` lands the same row, but the audit must say which act
+    put it there: "registered" and "imported from GitHub" are different
+    answers to "where did this project come from", and collapsing them would
+    lose the only record that a clone happened (FR-S1).
+    """
     slug = _slug_for(params.name)
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[ProjectResult]:
@@ -87,13 +104,11 @@ def register_project(ctx: AppContext, params: RegisterProjectParams) -> ProjectR
             entity_kind="project",
             entity_id=project.id,
             payload=project.model_dump(mode="json"),
-            event_kind=PROJECT_REGISTERED_EVENT,
+            event_kind=event_kind,
             summary={"slug": project.slug, "name": project.name},
         )
 
-    return audited_write(
-        ctx, operation=PROJECT_REGISTER, reason=params.reason, body=body
-    )
+    return audited_write(ctx, operation=operation, reason=params.reason, body=body)
 
 
 def create_project(ctx: AppContext, params: CreateProjectParams) -> CreateProjectResult:
@@ -310,6 +325,7 @@ __all__ = [
     "create_project",
     "get_project",
     "list_projects",
+    "record_registration",
     "register_project",
     "transition_project",
 ]

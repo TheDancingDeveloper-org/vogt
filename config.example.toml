@@ -8,6 +8,10 @@
 # default policy: allocation
 # data_dir = "/var/lib/vogt"
 
+# Directory imported repositories are cloned into, one per project slug (FR-P6). An allocation value, so it has a default rather than a gate: unset means `<data_dir>/repos`, which keeps the clone with the instance that registered it. Deployments that observe an estate on a mounted host directory point this at that estate instead, so an imported project lands where the rest of the work already lives.
+# default policy: allocation
+# import_root = "/var/lib/vogt/repos"
+
 # Verbosity of Vogt's own diagnostics.
 # default policy: behaviour
 # log_level = "info"

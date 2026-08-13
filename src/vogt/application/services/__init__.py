@@ -20,6 +20,7 @@ from vogt.application.services.drift_service import (
     resolve_drift,
 )
 from vogt.application.services.history import list_audit, list_events
+from vogt.application.services.imports import import_project
 from vogt.application.services.instance import (
     init_instance,
     serve,
@@ -32,6 +33,7 @@ from vogt.application.services.lifecycle import (
     import_instance,
     restore,
 )
+from vogt.application.services.notifications import list_notifications
 from vogt.application.services.observed_first import (
     adopt,
     list_suppressions,
@@ -94,6 +96,7 @@ __all__ = [
     "get_project",
     "get_work",
     "import_instance",
+    "import_project",
     "init_instance",
     "issue_token",
     "list_actors",
@@ -103,6 +106,7 @@ __all__ = [
     "list_events",
     "list_initiatives",
     "list_labels",
+    "list_notifications",
     "list_projects",
     "list_suppressions",
     "list_tokens",

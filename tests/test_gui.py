@@ -171,21 +171,67 @@ def test_the_gui_has_one_way_to_reach_the_server() -> None:
     assert not others, f"another transport crept in: {others}"
 
 
-def test_the_gui_adds_no_capability_of_its_own(client: TestClient) -> None:
-    """Every operation the GUI names is a read.
+#: The mutating operations the GUI is permitted to name (r6, FR-U3).
+#:
+#: The M6 rule was "every operation the GUI names is a read", justified by
+#: FR-W1: a write needs a reason its author typed, and a button cannot type
+#: one. That justification does not extend to a *form*, which is why import
+#: is here and drift resolution still is not — resolving drift from a list is
+#: a button, and "accepted via GUI" is not a reason.
+#:
+#: Anything added to this set must collect a reason the user typed. The test
+#: below checks that rather than trusting the comment.
+GUI_WRITES = {"project.import"}
 
-    The GUI shows; it does not decide. Resolving drift, transitioning work and
-    setting a write-back policy all require a reason its author typed, and a
-    button cannot type one — "accepted via GUI" is not a reason (FR-W1).
-    """
+
+def test_the_gui_adds_no_capability_of_its_own(client: TestClient) -> None:
+    """Every operation the GUI names is a read, or an audited form."""
     source = code(APP_JS)
-    named = set(re.findall(r'"([a-z]+(?:\.[a-z_]+)?)":\s*"/api/', source))
+    named = set(re.findall(r'"?([a-z]+(?:\.[a-z_]+)?)"?:\s*"/api/', source))
     by_name = {operation.name: operation for operation in default_registry()}
 
     assert named, "no operations found in the route table"
     for name in sorted(named):
         assert name in by_name, f"{name} is not a registered operation"
-        assert not by_name[name].mutating, f"the GUI names the mutating op {name}"
+        if by_name[name].mutating:
+            assert name in GUI_WRITES, f"the GUI names the mutating op {name}"
+
+
+def test_every_gui_write_collects_a_reason_the_user_typed() -> None:
+    """FR-W1, kept honest at the one place the GUI writes.
+
+    A form that defaults, hides or generates its reason is the same failure
+    as a button: the audit row then records that somebody clicked, which is
+    the thing the reason field exists to prevent.
+    """
+    source = code(APP_JS)
+    assert sorted(GUI_WRITES) == ["project.import"], (
+        "a new GUI write needs its own reason assertion here"
+    )
+    match = re.search(r"async function importView\(.*?\n}\n", source, re.DOTALL)
+    assert match, "importView not found"
+    body = match.group(0)
+    assert 'name: "reason", required: "required"' in body, (
+        "the import form must require a reason (FR-W1)"
+    )
+    assert "reason: reason.value.trim()" in body, (
+        "the import form must send the reason the user typed, not one of its own"
+    )
+
+
+def test_the_gui_offers_no_repository_listing(client: TestClient) -> None:
+    """FR-G15 through the door it is most likely to come back in.
+
+    An import form with a text field is one call away from an import form
+    with a dropdown of your repositories, and that dropdown is the
+    registration-candidate listing r3 removed. There is no operation that
+    could serve it, and this asserts the GUI has not grown one.
+    """
+    source = code(APP_JS)
+    for banned in ("/user/repos", "/search/repositories", "/orgs/"):
+        assert banned not in source, (
+            f"the GUI reaches for a repository listing: {banned}"
+        )
 
 
 # -- trust and freshness on every aggregate (FR-U2) ------------------------
@@ -228,7 +274,7 @@ def test_the_gui_renders_freshness_on_every_aggregating_view() -> None:
     forgets the line — is exactly the one a source check catches.
     """
     source = code(APP_JS)
-    for view in ("projectView", "rankedView", "driftView", "depsView"):
+    for view in ("projectView", "rankedView", "driftView", "depsView", "inboxView"):
         match = re.search(rf"async function {view}\(.*?\n}}\n", source, re.DOTALL)
         assert match, f"{view} not found"
         assert "freshness(" in match.group(0), (

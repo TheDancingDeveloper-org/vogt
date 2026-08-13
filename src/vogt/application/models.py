@@ -1078,3 +1078,121 @@ class OnboardResult(Result):
         ),
     )
     detail: str | None = None
+
+
+class ImportProjectParams(Params):
+    """Bring a repository that lives on GitHub into Vogt (FR-P6).
+
+    `repo` is named by the caller and is never chosen from a list: there is
+    no listing operation, and adding one would be the registration-candidate
+    listing r3 removed (FR-G15, `REQUIREMENTS.md` §3).
+    """
+
+    repo: str = Field(
+        description="Repository to import: `owner/name`, or any GitHub URL.",
+        min_length=1,
+    )
+    name: str | None = Field(
+        default=None,
+        description="Display name. Defaults to the repository's own name.",
+    )
+    root_path: str | None = Field(
+        default=None,
+        description=(
+            "Where to clone to. Defaults to `<import_root>/<slug>`; supply "
+            "this only when one repository must live somewhere specific."
+        ),
+    )
+    lifecycle_state: LifecycleState = "active"
+    consolidate: bool = Field(
+        default=True,
+        description=(
+            "Read existing issues, PRs, labels and releases after "
+            "registering (FR-B3). Read-only, and on by default because a "
+            "project that arrives empty looks like a project with no work."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ImportProjectResult(Result):
+    project: Project
+    remote: str = Field(description="The remote that was cloned, without credentials.")
+    root_path: str
+    revision: str | None = Field(
+        default=None, description="HEAD at the moment of import."
+    )
+    default_branch: str | None = None
+    cloned: bool = Field(
+        default=True,
+        description=(
+            "False when the destination already held a clone of the same "
+            "remote and was registered as it stood (FR-P7)."
+        ),
+    )
+    consolidated: OnboardResult | None = Field(
+        default=None,
+        description="What the read-only consolidation found, if it ran.",
+    )
+    detail: str | None = None
+
+
+# -- notifications (FR-N3) -------------------------------------------------
+
+
+class NotificationsParams(Params):
+    """Filters over the collected forge inbox (FR-N3)."""
+
+    project: str | None = Field(
+        default=None, description="Project slug. Omit for every registered project."
+    )
+    reason: str | None = Field(
+        default=None,
+        description="GitHub's reason, e.g. mention, review_requested, ci_activity.",
+    )
+    unread_only: bool = Field(
+        default=False,
+        description="Only threads GitHub still considers unread for this token.",
+    )
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class NotificationView(Result):
+    """One collected notification, flattened for reading."""
+
+    thread: str
+    project_slug: str | None = None
+    repo: str | None = None
+    title: str
+    reason: str | None = None
+    subject_type: str | None = None
+    unread: bool = False
+    url: str | None = None
+    updated_at: datetime | None = None
+    observed_at: datetime
+
+
+class NotificationsResult(Result):
+    """The inbox, and what it is honestly able to be.
+
+    `freshness` is here for the same reason every other aggregate carries one
+    (FR-U2): an empty inbox with no sweep behind it means nobody has looked.
+    `scope` states out loud that these belong to the configured token's
+    account rather than to the reading actor — a limit of the design, not of
+    this response (FR-N3).
+    """
+
+    notifications: list[NotificationView]
+    total: int
+    by_reason: dict[str, int] = {}
+    unread: int = 0
+    scope: str = Field(
+        default=(
+            "the GitHub account whose token this instance is configured with; "
+            "notifications are instance-scoped, not per-actor"
+        ),
+        description="Whose inbox this is.",
+    )
+    freshness: Freshness = Freshness()
+    detail: str | None = None
