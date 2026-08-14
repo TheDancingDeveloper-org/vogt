@@ -30,6 +30,7 @@ export const ROUTES = {
   "project.list": "/projects",
   "project.get": "/projects/get",
   "project.brief": "/projects/brief",
+  "project.import": "/projects/import",
   "work.list": "/work",
   "work.get": "/work/get",
   "work.create": "/work",
@@ -262,6 +263,99 @@ export interface WorkDetail {
   sessions: SessionSummary[];
 }
 
+/** The evidence a drift proposal carries, copied at raise time (FR-R5).
+ *
+ *  Self-contained on purpose: retention prunes the two stores independently,
+ *  and a proposal that outlived its evidence would be an act with nothing
+ *  behind it. This is the *observed* side of every disagreement, and it is
+ *  what FR-U18 requires a reader to see before resolving one. */
+export interface EvidenceSnapshot {
+  subject_key?: string;
+  content_digest?: string;
+  observed_at?: string;
+  collector?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface DriftProposal {
+  id: string;
+  kind: string;
+  subject_kind: string;
+  subject_id: string;
+  project_id?: string | null;
+  project_slug?: string | null;
+  summary: string;
+  evidence_observation_id?: string | null;
+  evidence_snapshot?: EvidenceSnapshot;
+  /** What accepting would write. `from`/`to` are the declared and observed
+   *  values for the kinds that propose a change; the kinds that propose none
+   *  say so with an `action` instead. */
+  proposed_change?: Record<string, unknown>;
+  status: "open" | "accepted" | "rejected" | "contested" | string;
+  opened_at: string;
+  resolved_by_actor_id?: string | null;
+  resolved_by_identity_ref?: string | null;
+  resolved_at?: string | null;
+  resolution_reason?: string | null;
+}
+
+export interface DriftListResult {
+  proposals: DriftProposal[];
+  /** Kinds the shipped policy never auto-accepts, and why. Quoted rather
+   *  than restated in a view: two copies of a policy is one too many. */
+  human_gated?: Record<string, string>;
+  freshness: FreshnessSummary;
+}
+
+export interface DriftResult {
+  proposal: DriftProposal;
+  change_applied: boolean;
+}
+
+/** One recorded reference between projects (FR-D1–D4).
+ *
+ *  Records *which projects reference which* and stops there: no lockfile is
+ *  parsed and no package version is resolved (r2 decision), so there is no
+ *  ecosystem or constraint here and a view must not imply one. */
+export interface DepRef {
+  subject_key: string;
+  from_project_id: string;
+  from_project_slug?: string | null;
+  ref_kind: string;
+  raw_target: string;
+  manifest?: string | null;
+  to_project_id?: string | null;
+  to_project_slug?: string | null;
+  observed_at: string;
+}
+
+export interface DepsResult {
+  project: string;
+  references_out: DepRef[];
+  referenced_by: DepRef[];
+  unresolved: number;
+  freshness: FreshnessSummary;
+}
+
+export interface CriterionView {
+  rule: string;
+  target: string;
+  satisfied: boolean;
+  detail: string;
+}
+
+export interface ComplianceResult {
+  project: string;
+  status: string;
+  contract_version: string;
+  checked_at?: string | null;
+  /** How old this answer is. Never refreshed implicitly, so a view that
+   *  renders the status without the age is showing a claim of unknown date. */
+  age_seconds?: number | null;
+  failing: CriterionView[];
+  detail?: string | null;
+}
+
 // -- reads ------------------------------------------------------------------
 
 export const listWorkflows = () =>
@@ -307,6 +401,15 @@ export const projectBrief = (slug: string) =>
     { slug },
   );
 
+export const listDrift = (params: Record<string, unknown> = {}) =>
+  call<DriftListResult>("drift.list", params);
+
+export const deps = (project: string) =>
+  call<DepsResult>("deps", { project });
+
+export const compliance = (project: string) =>
+  call<ComplianceResult>("compliance", { project });
+
 export const listEvents = (after: number, limit = 100) =>
   // The cursor feed behind FR-U10. A surface that polls this and reports how
   // old its answer is tells the truth; one that re-lists and calls itself
@@ -341,6 +444,26 @@ export const updateWork = (
 export const createWork = (
   params: Record<string, unknown> & { reason: string },
 ) => call<WorkDetail>("work.create", params, "POST");
+
+/** Resolve exactly one proposal (FR-R2, FR-U18).
+ *
+ *  Singular by signature, and that is the requirement rather than an
+ *  oversight: bulk accept is deferred by name in `REQUIREMENTS.md` §3, so
+ *  there is no list form of this call for a view to reach for. */
+export const resolveDrift = (
+  id: string,
+  resolution: "accepted" | "rejected" | "contested",
+  reason: string,
+) => call<DriftResult>("drift.resolve", { id, resolution, reason }, "POST");
+
+/** Clone a named repository, register it, and read what is already there.
+ *
+ *  `repo` is always named by the caller. There is no listing operation to
+ *  populate a picker from, and adding one would be the registration-candidate
+ *  listing r3 removed (FR-G15). */
+export const importProject = (
+  params: Record<string, unknown> & { repo: string; reason: string },
+) => call<Record<string, unknown>>("project.import", params, "POST");
 
 export const startSession = (
   params: Record<string, unknown> & { reason: string },
