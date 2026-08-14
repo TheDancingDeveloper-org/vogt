@@ -1,6 +1,7 @@
 import { ErrorBoundary, render } from "solid-js/web";
 import { HashRouter, Route } from "@solidjs/router";
 import App from "./App";
+import { APP_ROUTES } from "./routes";
 import { registerServiceWorker } from "./push";
 import "./styles.css";
 
@@ -78,21 +79,9 @@ render(
       )}
     >
       <HashRouter>
-        <Route path="/" component={App} />
-        <Route path="/t/:id" component={App} />
-        <Route path="/e/*path" component={App} />
-        <Route path="/g" component={App} />
-        <Route path="/g/*path" component={App} />
-        <Route path="/gui" component={App} />
-        <Route path="/history" component={App} />
-        <Route path="/tasks" component={App} />
-        <Route path="/board" component={App} />
-        <Route path="/backlog" component={App} />
-        <Route path="/projects" component={App} />
-        <Route path="/audit" component={App} />
-        <Route path="/w/:ref" component={App} />
-        <Route path="/assistant" component={App} />
-        <Route path="/assistant/*path" component={App} />
+        {/* The paths themselves are in `routes.ts`, so a test can mount the
+            shell behind the same table this bundle routes with. */}
+        <Route path={[...APP_ROUTES]} component={App} />
       </HashRouter>
     </ErrorBoundary>
   ),
