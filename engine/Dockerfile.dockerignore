@@ -1,0 +1,78 @@
+# Context filter for `docker build -f engine/Dockerfile .`
+#
+# BuildKit reads `<dockerfile>.dockerignore` in preference to the context
+# root's `.dockerignore`, so this file scopes itself to the merged image and
+# leaves the root `Dockerfile` (the core-only image, built by
+# .github/workflows with the same context) seeing exactly what it saw before.
+# That is the whole reason it is named this way rather than living at the root.
+#
+# It replaces `engine/.dockerignore`, which was never read once the build moved
+# to a root context — a filter Docker ignores is worse than none, because it
+# reads like protection.
+#
+# Deny-list rather than allow-list, deliberately. The engine's old allow-list
+# cost a fix of its own (`7bc1bfe`, allowlisting vogt-mcp-auth.sh) because a
+# new runtime script is invisible to the image until someone remembers this
+# file. A missing deny entry costs build seconds; a missing allow entry costs
+# a broken image that builds green.
+
+# Version control and agent scratch space.
+.git
+.gitignore
+.github
+.claude
+**/.claude
+
+# Build outputs. `web/dist` is the one exception below: it is a build *input*
+# to the Rust stage (rust-embed compiles it in), but stage 1 produces it, so a
+# host-built copy leaking into the context would silently win a rebuild race
+# with whatever the container just built. Ignore it and let stage 1 decide.
+web/dist
+engine/target
+target
+**/node_modules
+mobile/android/app/build
+mobile/android/build
+mobile/android/.gradle
+mobile/dist
+dist
+build
+*.egg-info
+
+# Python local state.
+.venv
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+htmlcov
+
+# Instance data must never enter an image.
+**/*.sqlite3
+**/*.sqlite3-wal
+**/*.sqlite3-shm
+data
+backups
+
+# Not built into the image: prose, tests, the mobile shell, and the compose
+# files that deploy it. Each is a legitimate part of the repository and none of
+# them is a build input.
+docs
+design
+tests
+scripts
+mobile
+deploy
+engine/.woodpecker
+**/*.md
+# The one exception: `uv sync` reads it, because pyproject names it as the
+# project's readme and a missing one fails the build.
+!README.md
+
+# Editor / OS noise.
+.DS_Store
+*.swp
+.idea
+.vscode

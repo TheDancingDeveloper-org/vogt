@@ -1,0 +1,339 @@
+# The merged stack (NFR-D11, NFR-I6) — one image, two processes, one port.
+#
+# This is the shape `MERGE_MYDEVENV2.md` §5.2 and §10 describe: the Rust
+# engine is the front door, vogt-core runs beside it on loopback and is never
+# published, and one `DeployStack` moves the whole product. It replaces three
+# stacks over time — `personal/vogt`, `prod-mydevenv2`, `dev-mydevenv2` — and
+# it is deliberately *not* deployed by the commit that adds it. Deploying is a
+# separate, human act (NFR-D10).
+#
+# Read `deploy/personal-vogt.compose.yml` beside this file. It is the core-only
+# stack in production today, and the four rules it obeys are inherited here:
+#
+#   1. **Allocation values carry defaults; exposure values do not** (NFR-D2,
+#      revised r4). Gating a port or a certificate path is what broke every
+#      cadastre deploy after `cadastre#42`. The port and the bind address carry
+#      concrete defaults naming Node B; `VOGT_PUBLIC_URL` does not, because
+#      nothing inside the container can work it out.
+#   2. **Never a `./relative` bind mount for state.** Komodo clones stack
+#      directories to a fresh path on every deploy, so a relative mount points
+#      at a new empty directory. State is a named volume or an absolute bind.
+#   3. **The image is digest-pinned**, not alias-tracking (NFR-PO4).
+#   4. **The healthcheck speaks plain HTTP.** Nothing outside a real MCP client
+#      sends `initialize`, and nothing pins a protocol version.
+#
+# ── What is different from the core-only stack, and why ────────────────────
+#
+# **The containment changes, and it is a real trade.** `personal-vogt.compose`
+# runs `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges`, and a tmpfs
+# `/tmp`. None of that survives here, and not through carelessness: this image
+# is a development pod. It opens PTYs, runs agent CLIs that write to a home
+# directory, installs packages into it, and runs Tailscale in kernel mode —
+# which needs `NET_ADMIN` and `/dev/net/tun` by itself. A read-only root would
+# remove the container's entire purpose, and `cap_drop: [ALL]` would remove the
+# tailnet it is reached over.
+#
+# What still contains it is what always did most of the work: tailnet-only
+# exposure with no LAN or public route, no Caddyfile block, scoped bearer
+# tokens on both halves, double-gated writes in the core, and an audit row
+# carrying a reason for every one. What is genuinely lost is the read-only root
+# — so the hardened core-only image at the repository root stays published and
+# stays the right answer for anyone deploying vogt without the session engine.
+#
+# **State is three things now (NFR-I6), and a backup covers all three:**
+#
+#   * `vogt-core-data` → `/var/lib/vogt` — the core's `declared.sqlite3`,
+#     `observed.sqlite3` and its own backups. `vogt backup` handles this half.
+#   * `/home/sprooty/.local/share/mydevenv2` — the engine's `state_dir`: VAPID
+#     keys, push subscriptions, agent-task prompt artefacts, session history.
+#     It sits *inside* the persisted home bind mount rather than in a volume of
+#     its own, because `state_dir` is a config-file-only setting with no env or
+#     CLI override, and a named volume nested at that path would be seeded
+#     root-owned from an image that has nothing there — which fails
+#     `readyz`'s `state_dir` check, and *that* check is fatal. Named here so a
+#     restore knows what it has to bring back.
+#   * `/home/sprooty/Working` — the estate itself, and the one join the merge
+#     rests on (§6.3): vogt's import root and the engine's `workspace_root` are
+#     the same tree. Sessions open where the project registry says the project
+#     is, so a restore that re-establishes the store without the tree leaves
+#     every project pointing at a path that no longer exists.
+#
+# **Two credentials, both brokered as files.** DEPLOY 2.2a's `pre_deploy` hook
+# already writes one; the merged stack needs a second:
+#
+#     umask 077
+#     sed -n 's/^VOGT_GITHUB_TOKEN=//p'   .env > github-token
+#     sed -n 's/^VOGT_CORE_TOKEN=//p'     .env > vogt-core-token
+#     test -s github-token && test -s vogt-core-token
+#     chown 1000:1000 github-token vogt-core-token
+#     chmod 640       github-token vogt-core-token
+#
+# Note `1000:1000`, not the core-only stack's `1000:0`. This image's `sprooty`
+# has gid 1000; the core-only image runs any uid with gid 0 precisely because
+# it has not decided who it is, and this one has.
+#
+# The core token is the one the front door injects on `/api/vogt` (FR-S9). It
+# is chicken-and-egg on a first deploy and that is fine: bring the stack up
+# without it, then `docker exec` a `vogt token issue`, store the value in
+# Infisical as `HOMELAB_VOGT_CORE_TOKEN`, copy it into the Komodo stack
+# environment and redeploy. Until then `/api/vogt` answers 401 from the core
+# and everything else — sessions, terminals, `/mcp` with a caller's own token —
+# works. That degradation is FR-E9 doing its job, not an outage.
+#
+# **One thing the single container costs, said out loud.** The core token is a
+# file readable by uid 1000, and every PTY session in this pod runs as uid
+# 1000. So an agent in a session can read the credential the front door injects
+# on `/api/vogt`, and thereby reach the core with whatever scope that token
+# holds — bypassing the narrower session-scoped token `mydevenv2-vogt-mcp`
+# brokers to it. This is a property of putting both halves in one namespace,
+# not of the file: `MYDEVENV2_TOKEN` is in the same environment and has been
+# all along. Two things bound it. Issue the core token with the narrowest scope
+# the front door actually needs, and treat the pod as one trust domain — which
+# it already is, since a session can read the whole estate at uid 1000 and,
+# with the docker-socket overlay applied, the host daemon too. FR-S10's
+# per-session actor tokens are what eventually make a session's writes
+# distinguishable in the audit log; they land with the session work in M9, and
+# they narrow attribution rather than this boundary.
+
+services:
+  vogt:
+    # TODO: replace with the digest the merged pipeline publishes. Production
+    # moves on this line changing plus DeployStack — publishing an image moves
+    # nothing (NFR-D10).
+    #
+    # The name is a decision CI has to ratify: the core-only image keeps the
+    # GHCR name `ghcr.io/thedancingdeveloper-org/vogt`, and this one succeeds
+    # MyDevEnv2's `repo.indexarr.net/indexarr/mydevenv2`. Two artifacts, told
+    # apart by registry rather than by tag, because they are not
+    # interchangeable — one is hardened and minimal, the other is a dev pod.
+    image: repo.indexarr.net/indexarr/vogt@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    container_name: vogt
+    hostname: vogt
+    restart: unless-stopped
+
+    # tini as PID 1. The engine only wait()s on children it spawns directly; it
+    # has no reaper for orphans reparented to PID 1, and terminal sessions
+    # running agents fork short-lived subprocesses whose parent often exits
+    # first. Without this each one becomes a permanent zombie holding a PID
+    # slot. The merged container makes this *more* load-bearing, not less:
+    # there are two long-lived children now, and `vogt init` plus the core's
+    # own subprocesses reparent the same way.
+    init: true
+
+    ports:
+      # One published port, and it is the engine's (NFR-D11). vogt-core listens
+      # on 127.0.0.1:8911 inside this namespace and appears nowhere here —
+      # there is no mapping to forget to remove, which is the point.
+      #
+      # Bound to Node B's Tailscale address, never 0.0.0.0: this publishes
+      # nothing to the LAN or the internet, and there is no Caddyfile block.
+      # Both values are allocations, not exposure decisions, so both carry
+      # defaults naming this host (NFR-D2 revised r4).
+      #
+      # 18094 is the port the core-only stack holds today, inherited on the
+      # assumption that this stack *replaces* it. A `dev-vogt` running
+      # alongside `personal/vogt` must set VOGT_PORT to a port verified free on
+      # Node B at that moment — not one read out of a document.
+      #
+      # Two consequences of the front door being the engine, both real:
+      #   * **There is no TLS here.** The core terminated TLS in-process from
+      #     the host's Tailscale certificate; the engine has no TLS support at
+      #     all, so the published port speaks plain HTTP over WireGuard. That
+      #     is what `prod-mydevenv2` has always done. Fronting it with Caddy or
+      #     `tailscale serve` for a `https://` name is an ingress decision, and
+      #     it is the decision `MERGE_MYDEVENV2.md` §11.1 leaves open.
+      #   * `VOGT_PUBLIC_URL` below must therefore describe whatever actually
+      #     answers — `http://` on the tailnet address, or the `https://` name
+      #     a fronting proxy serves. It is the URL `vogt connect` hands clients.
+      - "${VOGT_BIND_IP:-100.92.54.45}:${VOGT_PORT:-18094}:8910"
+
+    # Kernel-mode Tailscale. Without these the daemon falls back to userspace
+    # and an exit node silently no-ops. LAN + tailnet stay direct, so a down
+    # exit node degrades to direct egress rather than to a lockout.
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+    extra_hosts:
+      # Not optional plumbing — a landmine if dropped (§10). This container
+      # runs Tailscale, which overwrites /etc/resolv.conf and breaks Docker's
+      # service-name resolution, so the ContextKeeper sidecar is reached
+      # through a pinned entry rather than through container DNS. An
+      # allocation naming this host, therefore defaulted.
+      - "contextkeeper:${CONTEXTKEEPER_IP:-100.92.54.45}"
+
+    volumes:
+      # The estate. ALL development happens here, and it is the same tree both
+      # halves agree on: the engine's `workspace_root` defaults to
+      # $HOME/Working and `VOGT_IMPORT_ROOT` below points inside it (§6.3).
+      #
+      # Mounted at the *identical* in-container path, because a project's
+      # `root_path` is stored absolute (FR-P5) and collectors read it verbatim.
+      # Register a project as /home/sprooty/Working/Active/apps/vogt and this
+      # container has to find it at that exact path or every source collector
+      # reports nothing — which renders as "no markers", not as "could not
+      # look".
+      #
+      # Writable, because `project create` scaffolds on disk (FR-G11) and
+      # because sessions exist to change this tree.
+      - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working"
+      # Persisted home: caches, shell history, agent CLI config — and the
+      # engine's `state_dir` at .local/share/mydevenv2 (see the header). A
+      # backup that skips this loses the VAPID keypair, which means every push
+      # subscription in every browser silently stops working.
+      - "${VOGT_HOME_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/home}:/home/sprooty"
+      # tailscaled state, so the pod does not re-auth on every restart.
+      - "${VOGT_TAILSCALE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/tailscale}:/var/lib/tailscale"
+      # The core's SQLite pair and its backups. A named volume, never a
+      # relative bind (rule 2), and seeded correctly because the image owns
+      # /var/lib/vogt as uid 1000 — which matters on volume *recreation*,
+      # typically during a restore.
+      - vogt-core-data:/var/lib/vogt
+
+    environment:
+      # ── the engine (front door) ──────────────────────────────────────────
+      MYDEVENV2_TOKEN: "${MYDEVENV2_TOKEN:?the front door's primary bearer token}"
+      # Optional scoped tokens. JSON array:
+      # [{"name":"readonly","token":"...","capabilities":[]}]
+      MYDEVENV2_EXTRA_TOKENS_JSON: "${MYDEVENV2_EXTRA_TOKENS_JSON:-}"
+      MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE: "${MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE:-600}"
+      # `0.0.0.0` here is the *container's* namespace, not the host's. Host
+      # exposure was decided in `ports:` above, by publishing on a Tailscale
+      # address only.
+      MYDEVENV2_BIND: 0.0.0.0:8910
+      MYDEVENV2_SCROLLBACK_BYTES: "${MYDEVENV2_SCROLLBACK_BYTES:-4194304}"
+      RUST_LOG: "${RUST_LOG:-info}"
+
+      # ── the front door's view of the core (NFR-D11) ──────────────────────
+      # Loopback, and the entrypoint enforces that rather than trusting it: a
+      # loopback URL is what makes this container *run* a core, and a
+      # non-loopback one makes it only proxy to one. 8911 is an allocation
+      # inside this container's network namespace — it is not published, and no
+      # host port is consumed by it.
+      VOGT_CORE_URL: "http://127.0.0.1:8911"
+      # A file, never a value (FR-S7). Written by the stack's `pre_deploy`
+      # hook; see the header. The file form takes precedence over
+      # `VOGT_CORE_TOKEN` in the engine's config loader, deliberately — a
+      # deployment that went to the trouble of brokering a file should not have
+      # it silently undone by an environment variable it also set.
+      VOGT_CORE_TOKEN_FILE: /run/secrets/vogt_core_token
+
+      # ── vogt-core ────────────────────────────────────────────────────────
+      VOGT_DATA_DIR: /var/lib/vogt
+      VOGT_LOG_LEVEL: "${VOGT_LOG_LEVEL:-info}"
+      # Where clients reach this instance (FR-A8). An exposure value, so it is
+      # required rather than defaulted — the one category NFR-D2 still forbids
+      # a default for. The engine binds 0.0.0.0:8910 in this container and is
+      # published on a Tailscale address at 18094, so nothing inside can work
+      # it out. Unset means `connect` says nobody has told it, which is the
+      # honest answer. Note this is now the *front door's* URL: `/mcp` and
+      # `/api/vogt` under it are the engine's proxied mounts.
+      VOGT_PUBLIC_URL: "${VOGT_PUBLIC_URL:?the URL clients reach the front door at}"
+      # Imported repositories land in the estate, not in the instance volume
+      # (FR-P6), and specifically under the workspace root the engine opens
+      # sessions in (§6.3). The entrypoint warns at boot if these two disagree,
+      # because a disagreement renders as an empty estate rather than an error.
+      VOGT_IMPORT_ROOT: "${VOGT_IMPORT_ROOT:-/home/sprooty/Working/Active}"
+      # Set, unlike the product default: without it the forge adapter is off,
+      # so notifications never collect and a private repository cannot be
+      # imported — silently, because forge subjects then read as "not
+      # collected" rather than absent (NFR-PO1).
+      VOGT_GITHUB_TOKEN_FILE: /run/secrets/github_token
+
+      # ── agent service auth ───────────────────────────────────────────────
+      # Default interactive sessions run through mydevenv2-agent-auth so
+      # Forgejo/Woodpecker/GitHub/Komodo credentials are available to
+      # shell-launched tools without persisting tokens.
+      INFISICAL_API_URL: "${INFISICAL_API_URL:-http://100.92.54.45:8400}"
+      INFISICAL_CLIENT_ID: "${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID:?required for agent auth}"
+      INFISICAL_CLIENT_SECRET: "${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET:?required for agent auth}"
+      MYDEVENV2_AGENT_AUTH_REQUIRED: "1"
+      MYDEVENV2_AUTO_AGENT_AUTH: "1"
+
+      # ── tailnet ──────────────────────────────────────────────────────────
+      # Setting an auth key makes the engine's tailscale readiness check
+      # *fatal* (an unconfigured tailnet reads as "not configured" and is fine;
+      # a configured-but-down one makes this container unready). That is the
+      # correct verdict here — the published port is a tailnet address, so
+      # without the tailnet there is nothing to be ready for.
+      TAILSCALE_AUTH_KEY: "${HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY:-}"
+      TAILSCALE_HOSTNAME: "${TAILSCALE_HOSTNAME:-vogt}"
+      # Keep tailnet DNS available for private service names used by native
+      # MCP/API clients. Override only when an equivalent resolver is present.
+      MYDEVENV2_TAILSCALE_ACCEPT_DNS: "${MYDEVENV2_TAILSCALE_ACCEPT_DNS:-1}"
+      # Route all public egress via this exit node when explicitly set. Blank
+      # by default: LAN + tailnet + accepted subnet routes stay direct.
+      TAILSCALE_EXIT_NODE: "${MYDEVENV2_TAILSCALE_EXIT_NODE:-}"
+
+      # ── optional surfaces, each of which degrades rather than fails ──────
+      # ContextKeeper continuity. Unset means /api/contextkeeper/* answers 404
+      # and every terminal reads as unprotected — which is also what an outage
+      # looks like, deliberately. The token is server-side only; the browser
+      # calls same-origin routes and the engine proxies.
+      CONTEXTKEEPER_URL: "${CONTEXTKEEPER_URL:-}"
+      CONTEXTKEEPER_API_TOKEN: "${CONTEXTKEEPER_API_TOKEN:-}"
+      # FCM service-account JSON (single-line). Empty disables the FCM
+      # transport; web-push still works for any browser subscription.
+      MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON: "${MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON:-}"
+      # Conversational assistant. An empty key disables it entirely — routes
+      # 404 and the PWA hides the tab.
+      MYDEVENV2_ASSISTANT_API_KEY: "${MYDEVENV2_ASSISTANT_API_KEY:-}"
+      MYDEVENV2_ASSISTANT_MODEL: "${MYDEVENV2_ASSISTANT_MODEL:-gpt-5.4-mini}"
+      MYDEVENV2_ASSISTANT_BASE_URL: "${MYDEVENV2_ASSISTANT_BASE_URL:-https://api.theclawbay.com/v1}"
+      # Phase 5: set both when sway+selkies is wired, and add /dev/dri above.
+      START_SWAY: "${START_SWAY:-0}"
+      GUI_STREAM_URL: "${GUI_STREAM_URL:-}"
+      # The cargo cache lives on the home bind mount; sccache hits Redis here.
+      SCCACHE_REDIS: "${SCCACHE_REDIS:-redis://100.92.54.45:6380}"
+
+    healthcheck:
+      # The engine's `/readyz`, which is the aggregate: workspace root, state
+      # dir, tailscale, GUI, and a probe of vogt-core.
+      #
+      # It deliberately does **not** fail on an absent core, and this
+      # healthcheck must not be "fixed" to. The core is a separate process with
+      # its own lifecycle; restarting the engine would not revive it and would
+      # kill every live PTY, which is exactly what FR-E9 says an absent core
+      # must not cost. The outage is reported in the response body in full and
+      # left out of the verdict — read `ReadinessCheck::fatal` before changing
+      # anything here.
+      #
+      # Plain HTTP, no bearer token: /readyz is a public route, and a probe
+      # that needs a credential is a probe that fails for the wrong reasons.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8910/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Longer than the engine-only stack's 10s: the core runs `vogt init`
+      # before it serves, and a migration on a real store is not instant.
+      start_period: 60s
+
+    secrets:
+      - github_token
+      - vogt_core_token
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+secrets:
+  # Written by the stack's `pre_deploy` hook out of the `.env` Komodo writes
+  # beside this file — see the header for the hook. Not `environment:`-sourced
+  # secrets: the pattern is inherited from the core-only stack, where a
+  # read-only root filesystem forbids them outright (DEPLOY 2.2a), and keeping
+  # one mechanism for both stacks means one thing to remember.
+  #
+  # Both copies are point-in-time. Rotating upstream in Infisical does not
+  # reach the stack until someone redeploys it; alert on the symptom (auth
+  # failures at the consumer), never on the freshness of the copy.
+  github_token:
+    file: ./github-token
+  vogt_core_token:
+    file: ./vogt-core-token
+
+volumes:
+  vogt-core-data:
+    name: vogt-core-data
