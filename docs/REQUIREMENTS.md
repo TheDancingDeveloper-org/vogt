@@ -966,7 +966,7 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 125 are delivered, 58 are implemented and
+**201 conjuncts across 46 IDs. 126 are delivered, 57 are implemented and
 asserted by nothing, 7 cannot be verified in this environment at all, and 11
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
@@ -974,7 +974,7 @@ before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved twenty-three conjuncts, and three of them were moved by
+**A fourth pass moved twenty-four conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,9 +996,9 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +23 in the fourth pass (fourteen out of §6.2, seven out of §6.2a, two
+  then +24 in the fourth pass (fourteen out of §6.2, eight out of §6.2a, two
   out of §6.2b)
-- **58 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 7
+- **57 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 8
 - **11 short** = 43 − 19 + 1 arriving from §6.2b, − 14
 - **7 unverifiable** = 69 − 60 − 2
 
@@ -1070,6 +1070,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-E3 | `cwd` is the path the project registry records, and a work item with no project is refused rather than guessed | `tests/test_sessions.py::test_a_session_opens_in_the_path_the_registry_records`, `::test_a_work_item_with_no_project_has_no_tree_to_open_in`; engine-side `integration.rs::session_cwd_must_stay_under_workspace_root` |
 | FR-E3 | The import root and the engine's workspace root are the same tree — co-located by the compose stack, and now *reported* by the front door rather than assumed | `api.rs::check_workspace_agreement` publishes a `workspace_agreement` readiness check; `vogt_core.rs` asserts the disagreeing branch (`ok: false`, a detail that says what it costs, `fatal: false`, and the container still ready) and the nothing-to-compare branch. Deliberately non-fatal: some projects being invisible is a bad answer, not a dead server (FR-E9). The comparison is by path component, not by string prefix — §6.3 finding 12, resolved, and `a_sibling_directory_is_not_inside_the_workspace` is the test that would have caught it |
 | FR-E4 | The description reaches the brief; the brief is written through the agent-task prompt mechanism; the session id is recorded as an audited write; the item's views carry live activity | `tests/test_sessions.py::test_the_work_items_brief_travels_with_the_session`, `::test_the_session_is_linked_to_its_work_item`, `::test_the_work_item_view_shows_what_is_running_for_it`; `integration.rs::session_prompt_is_written_to_a_file_the_child_is_pointed_at` |
+| **FR-E4** | The brief carries the item's relations, named by the related item's ref and title | `tests/test_sessions.py::test_the_brief_carries_the_items_relations`. An item that blocks another is not the same job as one that stands alone, and an agent handed only a title and a body cannot discover that — the relation lives in Vogt and nowhere in the item's own text. Rendering it as an id would satisfy the letter and tell the reader nothing, so the test asserts the ref and title, and dropping either turns it red |
 | FR-E4 | The brief carries the item's `why` — the ranking's per-input contributions, not a single score | `tests/test_sessions.py::test_the_brief_says_why_the_item_is_ranked_where_it_is` (which asserts the *contributions*, so a total on its own would fail it), `::test_a_brief_survives_a_ranking_that_cannot_be_computed` (the session starts either way, so a score never becomes a precondition for starting work) |
 | **FR-E6** | **All four**: exit code, duration, the working-tree delta, and all three collected as observations with the freshness and coverage every other kind carries | `src/vogt/collectors/session_outcomes.py`; `tests/test_session_outcomes.py` (twenty-one, including `test_a_finished_session_reports_its_exit_code_and_duration`, `test_the_delta_counts_what_the_tree_recorded_in_the_window`, `test_an_outcome_is_collected_and_never_declared`, `test_the_outcome_carries_the_sweeps_coverage`, `test_an_unchanged_outcome_does_not_grow_the_store`). The three shapes the previous pass called unbuilt are each asserted twice: once for the value, once for its absence — a session the engine has forgotten is `unknown`, never `finished` with a null code |
 | **FR-E7** | **Both**: a task may be bound to a project or work item, and a bound run's findings are recordable as Vogt observations | `engine/server/src/agent_tasks.rs` (`vogt_project`/`vogt_work_item`, `record_finding`, the binding in the prompt and the environment); `integration.rs::a_bound_task_carries_its_subject_and_records_what_it_reported`, `::an_unbound_task_names_no_vogt_subject`; `tests/test_session_outcomes.py::test_a_bound_runs_findings_become_observations`, `::test_an_unbound_task_is_not_vogts_business`, `::test_a_task_bound_to_a_work_item_lands_on_that_items_project`, `::test_a_binding_naming_something_this_instance_lacks_is_ignored`. "Recordable as observations" is met as a *pull*, not a write plane — see §6.2's note on what that leaves out and why it is a decision |
@@ -1199,7 +1200,7 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Fifty-eight conjuncts whose code was read and believed, which nothing in any
+Fifty-seven conjuncts whose code was read and believed, which nothing in any
 suite would notice the loss of. (Sixty-five, less the seven the fourth pass
 asserted —  NFR-D12, FR-U10, FR-U20, FR-E1, FR-E9, FR-T1/T2 and FR-T6 — which the fourth
 pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
@@ -1217,7 +1218,6 @@ that stopped being the demo's job and became a test somebody has not written.
 | ID | The conjuncts | What would assert it |
 |---|---|---|
 | FR-E2 | The activity state is published on the server-wide SSE stream | A test that reads `/api/events`; today the only activity assertion polls `GET /api/sessions/{id}` |
-| FR-E4 | The brief carries the item's relations | An assertion in `test_the_work_items_brief_travels_with_the_session`, which today checks the ref, title, body, session id and token variable |
 | FR-T2 | One pending action at a time; a new user message supersedes; the 120-second expiry; voice cannot approve | Three Rust tests and one front-end test. There is a front-end test runner now — `web/package.json` has `test` — so the reason this row gave for itself has expired and the row has not. `Assistant.tsx` **is** mounted now, by `assistant.test.tsx`, but only around the microphone: the pending-action rules — one at a time, superseded by a new message, expired at 120 seconds, and never approvable by voice — are still asserted by nothing on this side |
 | FR-T6 | Every GUI hides the surface, the route included *(from §6.2)* | A mount of `App.tsx` at `#/assistant` with `assistant_enabled` false. The route is gated now — the same condition the drawer button carries, read reactively so a deep link still opens once the config resolves — and the gate that was missing was found by an audit rather than by a test, which is the second time in this product for this exact shape (§6.3 findings 3 and 7) |
 | FR-M2 | `waiting-for-input`, `errored`, and the agent-task notify hook are routed | A test that drives `spawn_activity_watcher`; the drift watcher has unit tests and these two, which are the headline notifications, have none |

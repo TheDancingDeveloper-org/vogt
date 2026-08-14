@@ -23,6 +23,7 @@ from vogt.application.models import (
     GetWorkParams,
     ListSessionsParams,
     RegisterProjectParams,
+    RelateWorkParams,
     StartSessionParams,
     StopSessionParams,
 )
@@ -31,6 +32,7 @@ from vogt.application.services import (
     get_work,
     list_sessions,
     register_project,
+    relate_work,
     start_session,
     stop_session,
 )
@@ -381,6 +383,47 @@ def test_the_work_items_brief_travels_with_the_session(
     assert "VOGT_HTTP_TOKEN" in brief, (
         "a brief that describes the work without saying how to record what was "
         "found leaves the write capability undiscovered"
+    )
+
+
+def test_the_brief_carries_the_items_relations(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """FR-E4 names the relations, and they change what the work *is*.
+
+    An item that blocks another is not the same job as one that stands alone,
+    and an agent handed only a title and a body cannot discover that: the
+    relation lives in Vogt and nowhere in the item's own text. It is rendered
+    by the related item's ref and title rather than by its id, because an id
+    tells a reader nothing they can act on.
+    """
+    create_work(
+        wired,
+        CreateWorkParams(
+            kind="bug", title="Sweep drops a page", project="vogt", reason=WHY
+        ),
+    )
+    create_work(
+        wired,
+        CreateWorkParams(
+            kind="feature", title="Paginate the collector", project="vogt", reason=WHY
+        ),
+    )
+    relate_work(
+        wired,
+        RelateWorkParams(ref="WI-2", kind="depends_on", target="WI-3", reason=WHY),
+    )
+
+    start_session(wired, StartSessionParams(work_item="WI-2", reason=WHY))
+    brief = engine.last_spec["prompt"]
+
+    assert "## Relations" in brief
+    assert "depends on" in brief, (
+        "the kind is spelled for a reader, not left as `depends_on`"
+    )
+    assert "WI-3 — Paginate the collector" in brief, (
+        "the related item is named by ref and title; an id is not something "
+        "an agent can act on"
     )
 
 
