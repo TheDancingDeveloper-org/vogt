@@ -2807,3 +2807,156 @@ async fn the_assistant_answers_normally_for_a_model_this_transport_serves() {
         .unwrap();
     assert_eq!(res.status(), reqwest::StatusCode::OK);
 }
+
+// ── FR-T6: unprovisioned means invisible, not broken ──────────────────────
+
+#[tokio::test]
+async fn without_an_api_key_every_assistant_route_is_absent() {
+    // The feature is invisible unless provisioned: a 404 rather than a 500 or
+    // an empty transcript, so a deployment that never configured an assistant
+    // does not look like one whose assistant is broken. Asserted here because
+    // every other test in this file boots with `assistant_api_key: None` and
+    // simply never asks.
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::new();
+    for (method, path) in [
+        ("GET", "/api/assistant/history"),
+        ("POST", "/api/assistant/message"),
+        ("POST", "/api/assistant/reset"),
+    ] {
+        let req = match method {
+            "GET" => client.get(format!("{base}{path}")),
+            _ => client
+                .post(format!("{base}{path}"))
+                .json(&serde_json::json!({"text": "hello"})),
+        };
+        let res = req.headers(auth()).send().await.unwrap();
+        assert_eq!(
+            res.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{method} {path} should be absent, not broken"
+        );
+    }
+}
+
+// ── FR-E9: sessions do not depend on the core ─────────────────────────────
+
+#[tokio::test]
+async fn sessions_work_with_no_vogt_core_configured() {
+    // This is exercised by every session test in this file, because they all
+    // boot with `vogt_core_url: None` — and that is exactly why it needed
+    // naming. A reader looking for the requirement found nothing, and the day
+    // somebody gives this fixture a core, the coverage would vanish without a
+    // single test turning red.
+    let cfg = test_config();
+    assert!(
+        cfg.vogt_core_url.is_none(),
+        "this test is about the core being absent; if the fixture gains one, \
+         FR-E9 needs its own fixture rather than this assertion deleted"
+    );
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::new();
+
+    let created = client
+        .post(format!("{base}/api/sessions"))
+        .headers(auth())
+        .json(&serde_json::json!({"name": "no-core"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::OK);
+    let id = created.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let listed = client
+        .get(format!("{base}/api/sessions"))
+        .headers(auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), reqwest::StatusCode::OK);
+
+    // And the container is ready, so a healthcheck does not restart the
+    // engine — which could not revive a core and would kill every live PTY
+    // trying.
+    let ready = client.get(format!("{base}/readyz")).send().await.unwrap();
+    assert!(ready.status().is_success());
+
+    let killed = client
+        .post(format!("{base}/api/sessions/{id}/kill"))
+        .headers(auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(killed.status(), reqwest::StatusCode::OK);
+}
+
+// ── FR-E1: more than one client on one session, at the same time ──────────
+
+#[tokio::test]
+async fn two_clients_watch_one_session_at_once() {
+    // "Multiple concurrent clients per session" is the conjunct, and the
+    // existing multi-attach test closes the first socket before opening the
+    // second — which exercises re-attachment, not concurrency. The difference
+    // matters: a second attach that silently displaced the first would pass
+    // that test and lose somebody's terminal.
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "shared", "command": ["/bin/cat"] }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut first = ws_attach(&base, &id).await;
+    let mut second = ws_attach(&base, &id).await;
+
+    // Both are still attached, so both see the same output — the first is
+    // asserted *after* the second connected, which is the whole point.
+    first
+        .send(Message::Binary(b"shared-line\n".to_vec().into()))
+        .await
+        .unwrap();
+
+    let contains = |haystack: &[u8], needle: &[u8]| {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    };
+    let seen_by_first =
+        collect_binary_until(&mut first, b"shared-line", Duration::from_secs(3)).await;
+    let seen_by_second =
+        collect_binary_until(&mut second, b"shared-line", Duration::from_secs(3)).await;
+    assert!(
+        contains(&seen_by_first, b"shared-line"),
+        "the client that typed it must still be attached"
+    );
+    assert!(
+        contains(&seen_by_second, b"shared-line"),
+        "the second client must see output caused by the first — one PTY, two \
+         watchers, which is what FR-E1 means by concurrent"
+    );
+
+    // And the second can type too: attaching is not read-only for whoever
+    // arrived later.
+    second
+        .send(Message::Binary(b"from-the-second\n".to_vec().into()))
+        .await
+        .unwrap();
+    let back = collect_binary_until(&mut first, b"from-the-second", Duration::from_secs(3)).await;
+    assert!(
+        contains(&back, b"from-the-second"),
+        "the first client must see what the second typed"
+    );
+}

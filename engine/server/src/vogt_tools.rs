@@ -789,6 +789,35 @@ mod tests {
         assert_eq!(describe_target(&json!({})), "vogt-core");
     }
 
+    #[test]
+    fn the_curated_set_is_the_operations_the_requirement_names() {
+        // FR-T1 and FR-T2 name these, and the existing assertion compares
+        // `CURATED_READS.len()` to itself — which would pass just as happily
+        // with `compliance` deleted. The requirement's value is that the
+        // assistant's reach is a decision somebody wrote down, so the test
+        // has to restate the decision rather than measure it.
+        assert_eq!(
+            CURATED_READS,
+            [
+                "backlog",
+                "bugs",
+                "why",
+                "project.brief",
+                "project.list",
+                "work.get",
+                "work.list",
+                "compliance",
+            ]
+        );
+        // Every one of these passes the pending-action gate. A name added
+        // here without that gate is the failure FR-T2 exists against, so
+        // adding one has to be a deliberate edit of this list too.
+        assert_eq!(
+            CURATED_WRITES,
+            ["work.create", "work.transition", "work.comment", "session.start"]
+        );
+    }
+
     #[tokio::test]
     async fn tool_list_is_fetched_once_and_cached_per_credential() {
         let core = stub::start(stub::full_tool_list()).await;

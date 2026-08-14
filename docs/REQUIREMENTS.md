@@ -966,15 +966,15 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 118 are delivered, 62 are implemented and
-asserted by nothing, 7 cannot be verified in this environment at all, and 14
+**201 conjuncts across 46 IDs. 120 are delivered, 62 are implemented and
+asserted by nothing, 7 cannot be verified in this environment at all, and 12
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
 before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved sixteen conjuncts, and three of them were moved by
+**A fourth pass moved eighteen conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,10 +996,10 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +16 in the fourth pass (eleven out of §6.2, three out of §6.2a, two
+  then +18 in the fourth pass (thirteen out of §6.2, three out of §6.2a, two
   out of §6.2b)
 - **62 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 3
-- **14 short** = 43 − 19 + 1 arriving from §6.2b, − 11
+- **12 short** = 43 − 19 + 1 arriving from §6.2b, − 13
 - **7 unverifiable** = 69 − 60 − 2
 
 One bookkeeping correction, since it is the kind of thing this section exists
@@ -1115,6 +1115,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-M3 | The board's list layout at phone width, in the three rules that make it one: `display: block` on the row, the head row hidden, and the state name grown out of `attr(data-state)` | `tests/test_pwa.py::test_the_board_is_a_list_below_the_narrow_breakpoint`, `::test_the_board_cells_carry_what_the_hidden_head_row_said`, `::test_the_vogt_surfaces_share_the_engine_s_narrow_breakpoint` |
 | NFR-D11 | The engine's native APIs; the WebSocket attach path; `/api/vogt` proxied under its own prefix with the query string intact; `/mcp` proxied with the caller's credential unchanged; aggregate health with a non-fatal core check | `engine/server/tests/vogt_core.rs` (`a_vogt_read_reaches_the_core_under_its_own_prefix`, `a_query_string_survives_the_hop`, `mcp_forwards_the_callers_credential_unchanged`, `a_reachable_core_is_reported_with_its_schema_state`); `integration.rs::readyz_is_public_and_returns_checks` |
 | **NFR-I6** | **All four**: the core's SQLite; the engine's `state_dir`; enough metadata to re-establish FR-E3's path agreement; and one act that covers them | `tests/test_lifecycle.py` — nine for the stores, and six more: `test_a_backup_carries_the_engines_state_and_says_so`, `test_a_backup_without_the_engine_says_which`, `test_a_backup_survives_an_unreadable_engine_directory`, `test_a_restore_puts_the_engine_state_back`, `test_a_restore_reports_an_estate_that_moved`, `test_an_older_manifest_still_restores`. The manifest is version 2 and carries `engine_state` — a sentence on *every* branch, so a backup that covered two thirds of the product is distinguishable from one that covered all of it before somebody restores it — and `import_root`, which with the restored `projects.root_path` values and the front door's `workspace_agreement` check is what re-establishing the path agreement needs. The restore **reports** a moved estate (`import_root_then` / `import_root_now`) and does not rewrite the stored paths, which is the right division — the requirement asks for the metadata, not for a silent rewrite of every project's root — but it is worth knowing that nothing enumerates which projects are now unresolvable. §6.3 finding 14, resolved: the merged compose sets `VOGT_ENGINE_STATE_DIR`, and because two configurations now name one directory, `api.rs::check_backup_agreement` publishes a `backup_agreement` readiness check that says either which directory the backup covers or what the archive would silently omit (`vogt_core.rs`, three tests) |
+| **NFR-S5** | Long lists virtualize on all three surfaces that should, and the board's filter and drag paths do not degrade with backlog size | `web/src/__tests__/boardScale.test.tsx` (fifteen). The board's 60-card cap is gone: 60 is now where windowing *starts*, following `Backlog.tsx`'s mechanism rather than a second idea of what virtualization means, and the audit browser pages deliberately because an audit row is variable-height and a reason is never truncated. The second clause is evidenced by **counting, not timing** — jsdom has no layout, so the tests instrument `JSON.parse` to count reads of the one field the projection walks, which keeps the counter out of the product. Tripling the columns adds no pass; four times the estate in four times the lanes costs no more per item; eight keystrokes in the reason composer cost exactly zero, because `placement` compares on ref and target alone. `tests/test_pwa.py` holds the cross-file guard neither suite can: the CSS card height and the windowing constant must agree, or what is drawn and what is under the scrollbar drift apart silently |
 | NFR-Q6 | The forge-less run; the core run with no engine present, produced by deleting `engine/`, `web/` and `mobile/` rather than by inspection | `.github/workflows/ci.yml` job `core`; `tests/test_pwa.py`'s skip guard is what lets it pass. **Run for real on 2026-08-14** — the job passed on a self-hosted runner, so "the core alone still works" is now an observation rather than a workflow file |
 | **NFR-C6** | The pipeline governs the merged image: it is built from `engine/Dockerfile` with the repository as context, the PWA is built first because `rust-embed` reads `web/dist/` at compile time, both entrypoints run in the candidate before the push, the digest is signed, and a tag can release it | `tests/test_deploy.py::test_the_merged_image_is_built_from_the_engine_dockerfile`, `::test_the_pwa_is_built_before_the_merged_image`, `::test_both_halves_run_before_the_merged_image_is_pushed` (all three over both workflows), `::test_a_tag_can_release_the_merged_image`. The build half is more than asserted — it ran, on 2026-08-14, and published a signed `dev-ee18adc`. The release half is a path that exists and no tag has yet taken, which is why its test reads `release.yml` rather than a registry |
 | **NFR-D12** | `dev` builds `:dev` images and `main` builds `sha-<commit>`, for the core-only image **and** the merged stack, with no alias either can move | `tests/test_deploy.py::test_the_two_streams_are_kept_apart`, parametrized over both jobs — a rule kept by the core image and dropped by the merged one would leave the artefact the merge exists for as the unlabelled stream |
@@ -1131,7 +1132,7 @@ half-present, because nothing about it had to be argued with first.
 
 ### 6.2 Delivered differently, or short — per conjunct
 
-Fourteen conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
+Twelve conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
 is one claim that the requirement makes and the build does not, which is why
 this table's rows can be counted and the other three tables' cannot.
 
@@ -1166,8 +1167,6 @@ the file.
 | NFR-D12 — "only `main` deploys to prod" | Vacuously true, per the row above. `main` builds a `sha-` image and publishes it; a human pins a digest and deploys. | — |
 | NFR-C6 — "shall run both halves on every push" | On pushes to `main` and `dev`, and on pull requests — a push to any other branch with no PR open runs nothing. Within that, each half runs only when its own paths changed: a `mobile/`-only push runs no Rust and no Python; a `web/`-only push runs no APK build. This is NFR-C1 working as intended and NFR-C6's literal sentence being false; the reduction is deliberate and argued in the workflow. | Low, and honestly documented in the file |
 | NFR-C6 — a signed APK | The APK builds unsigned with Gradle's debug key, pointed at `127.0.0.1:8910`, and the workflow calls it "a build artifact [that] points at nothing". **It does now build** — `the Android shell assembles` ran on a self-hosted runner on 2026-08-14, after the engine job it is gated behind stopped failing — so what is short is the signing, not the build. The keystore lives in the retired forge; where a signed APK is published is an untaken decision, not an oversight. | Low until there is somewhere to publish one |
-| NFR-S5 — "long lists virtualize" | One of three does. The backlog truly windows — fixed row height, `ResizeObserver`, a sliced window with overscan. The audit browser pages, deliberately, because an audit row is variable-height and a reason is never truncated. The board **caps** at 60 cards per cell with an explicit "+N more"; all loaded items stay in memory and in the reactive graph. | Board virtualization outstanding, and named as such since M11 |
-| NFR-S5 — "the board's filter and drag paths do not degrade with backlog size" | Unevidenced, and there is reason to doubt it: the cell and column projections are linear scans over the whole loaded set, run per cell and per column, over as many as 2,000 items. `tests/test_benchmark.py` is a server-side query tripwire, and the PWA's tests run in a jsdom with no layout and estates of one to three items, so neither says anything about this. | Medium — it is the clause with no test and no argument |
 
 **FR-E7's second clause, and the thing its author chose not to build.** The
 requirement says a bound run's findings "shall be recordable as Vogt
@@ -1237,6 +1236,15 @@ that stopped being the demo's job and became a test somebody has not written.
 | NFR-C6 | fmt, clippy, `cargo test`, `pnpm typecheck`, `pnpm test`, the APK build and pytest are all in the pipeline | The only test that reads `ci.yml` checks `runs-on:` lines. `pnpm test` runs in the `engine` job, before the bundle is built and gated by the same path filter, on the argument that `assets.rs` already makes a `web/`-only change an engine change |
 | NFR-Q6 | Both suites pass in the merged repository | They are separately path-gated, so "both" is jointly checked only on a change that touches both trees or a shared file |
 | NFR-S5 | No view fetches the whole estate to render a page of it | True on inspection of all four surfaces, and the board's 2,000-item bulk read across four sequential requests is the weakest case rather than a clean one |
+
+**One thing the board work leaves behind, and it belongs here rather than in a
+row of its own.** Restoring a cell's *DOM* scroll position when the board
+rebuilds is untested and untestable here: jsdom has no layout, so the window
+slice is correct either way and only a real browser's scrollbar depends on it.
+The same is true of the card geometry — 116px is arithmetic from the existing
+font sizes and padding, not a measurement. `tests/test_pwa.py` guards the one
+number that matters arithmetically, that the CSS height and the windowing
+constant agree; the rest is visual and is M11's standing caveat.
 
 ### 6.2b Unverifiable in this environment
 
