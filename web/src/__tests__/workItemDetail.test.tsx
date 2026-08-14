@@ -66,6 +66,190 @@ async function openEditor(container: HTMLElement): Promise<HTMLElement> {
   return editor(container);
 }
 
+/** The panel under a heading, or a failure that names the missing panel. */
+function panelNamed(container: HTMLElement, heading: string): HTMLElement {
+  const found = [...container.querySelectorAll<HTMLElement>(".wid-panel")].find(
+    (section) => section.querySelector("h3")?.textContent === heading,
+  );
+  if (!found) throw new Error(`the item page has no "${heading}" panel`);
+  return found;
+}
+
+// -- FR-U5: what is on the page ---------------------------------------------
+//
+// Everything else in this file mounts the item page to watch it *do*
+// something — an edit, an outage, an answer to a waiting session. FR-U5 is a
+// claim about what the page *is*: description, comments, relations, labels,
+// collected evidence and the control that starts a session, all on one page
+// and not spread over five. A panel quietly dropped would have passed every
+// test above, and the person it fails is the one who came to this page to
+// find out what they already know about this item.
+//
+// Each panel is asserted with the server's own answer in it. A heading with
+// an empty body under it is the failure this shape catches and a
+// heading-only assertion would not — on this page most of all, where an empty
+// panel reads as "there are no comments" rather than "the comments are gone".
+
+const RICH_ITEM = workItem({
+  body: "The card should say when it does not know, rather than looking empty.",
+  labels: ["infra", "docs"],
+  relations: [
+    {
+      kind: "blocks",
+      related_id: "01JOTHER",
+      related_ref: "WI-9",
+      related_title: "Ship the front door",
+      related_state: "open",
+    },
+  ],
+});
+
+const COMMENT = {
+  id: "01JCOMMENT",
+  body: "Held until the front door lands.",
+  created_at: "2026-08-02T00:00:00Z",
+  actor_display_name: "ana",
+};
+
+const WHY = {
+  ref: "WI-1",
+  title: "Teach the board to say what it does not know",
+  total: 4.25,
+  contributions: [
+    {
+      input: "age",
+      detail: "opened 12 days ago",
+      value: 12,
+      weight: 0.25,
+      contribution: 3,
+    },
+  ],
+  inputs_not_yet_available: { ci: "no sweep has read this project's CI" },
+};
+
+function fullItem() {
+  return fakeVogt({
+    "GET /work/get": {
+      body: { item: RICH_ITEM, comments: [COMMENT], sessions: [] },
+    },
+    "GET /why": { body: WHY },
+  });
+}
+
+describe("FR-U5 — one item, one page, and everything about it on it", () => {
+  it("shows the description the item was written with", async () => {
+    fullItem();
+    const { container } = detail();
+
+    await waitFor(() =>
+      expect(panelNamed(container, "Description").textContent).toContain(
+        "The card should say when it does not know",
+      ),
+    );
+  });
+
+  it("shows the comments recorded against it, with who and when", async () => {
+    fullItem();
+    const { container } = detail();
+
+    const comments = await waitFor(() => {
+      const found = panelNamed(container, "Comments");
+      expect(found.querySelector(".wid-comments")).toBeTruthy();
+      return found;
+    });
+    expect(comments.textContent).toContain("Held until the front door lands.");
+    expect(comments.textContent).toContain("ana");
+    expect(comments.textContent).toContain("1 recorded");
+  });
+
+  it("shows its relations as links to the items they name", async () => {
+    // A relation to `01JOTHER` is a database row; a link to WI-9 is a thing a
+    // person can follow, which is the whole of what this panel is for.
+    fullItem();
+    const { container } = detail();
+
+    const relations = await waitFor(() => {
+      const found = panelNamed(container, "Relations");
+      expect(found.querySelector(".wid-relations")).toBeTruthy();
+      return found;
+    });
+    expect(relations.textContent).toContain("blocks");
+    const link = relations.querySelector<HTMLAnchorElement>("a")!;
+    expect(link.getAttribute("href")).toBe("#/w/WI-9");
+    expect(link.textContent).toContain("Ship the front door");
+  });
+
+  it("shows its labels", async () => {
+    fullItem();
+    const { container } = detail();
+
+    await waitFor(() => {
+      const labels = [...panelNamed(container, "Labels").querySelectorAll(".wid-chip")];
+      expect(labels.map((node) => node.textContent)).toEqual(["infra", "docs"]);
+    });
+  });
+
+  it("shows the collected evidence behind its ranking, per input", async () => {
+    // FR-U6's shape: the contributions, not a single score. A total on its
+    // own is a number nobody can argue with, which is the problem with it.
+    fullItem();
+    const { container } = detail();
+
+    const evidencePanel = await waitFor(() => {
+      const found = panelNamed(container, "Collected evidence");
+      expect(found.querySelector(".wid-table")).toBeTruthy();
+      return found;
+    });
+    const cells = [...evidencePanel.querySelectorAll("tbody td")].map(
+      (node) => node.textContent,
+    );
+    expect(cells).toEqual(["age", "opened 12 days ago", "12.00", "0.25", "3.000"]);
+    expect(evidencePanel.textContent).toContain("rank score 4.250");
+    // And what did not fire, said rather than left out — an input missing
+    // from the table is otherwise indistinguishable from one that scored zero.
+    expect(evidencePanel.textContent).toContain("ci");
+    expect(evidencePanel.textContent).toContain(
+      "no sweep has read this project's CI",
+    );
+  });
+
+  it("offers the control that starts a session on this item", async () => {
+    fullItem();
+    const { container } = detail();
+
+    const start = await waitFor(() => {
+      const found = container.querySelector<HTMLElement>(".wid-start");
+      expect(found, "the item page has no start-session control").toBeTruthy();
+      return found!;
+    });
+    expect(start.textContent).toContain("Start a session for WI-1");
+    const submit = [...start.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Start session",
+    );
+    expect(submit).toBeTruthy();
+  });
+
+  it("keeps all six on one page, at once", async () => {
+    // The requirement is the *page*, not the six panels: a reader who has to
+    // navigate between them to answer "what is going on with WI-1" has the
+    // product FR-U5 was written against.
+    fullItem();
+    const { container } = detail();
+
+    await waitFor(() => panelNamed(container, "Collected evidence"));
+    for (const heading of [
+      "Description",
+      "Comments",
+      "Relations",
+      "Labels",
+      "Collected evidence",
+    ]) {
+      expect(panelNamed(container, heading)).toBeTruthy();
+    }
+    expect(container.querySelector(".wid-start")).toBeTruthy();
+  });
+});
+
 describe("FR-U12 — an inline edit renders optimistically and the server decides", () => {
   it("opens on the item's own values, from the server", async () => {
     fakeVogt({
