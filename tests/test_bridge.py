@@ -14,7 +14,13 @@ from typing import Any
 
 import pytest
 
-from vogt.adapters.mcp.bridge import Bridge, BridgeReport, Transport, read_token
+from vogt.adapters.mcp.bridge import (
+    Bridge,
+    BridgeReport,
+    Transport,
+    read_token,
+    resolve_token,
+)
 
 REMOTE = "https://winrarhost.example:18094"
 
@@ -214,6 +220,41 @@ def test_an_empty_token_file_reads_as_no_token(tmp_path: Any) -> None:
     path = tmp_path / "token"
     path.write_text("   \n", encoding="utf-8")
     assert read_token(str(path)) is None
+
+
+def test_a_session_presents_its_own_token_not_the_containers(
+    tmp_path: Any,
+) -> None:
+    """The failure this prevents is silent, which is why it is tested here.
+
+    A container brokers one shared token into a file; a coding session mints
+    its own and puts it in the environment of the process it starts
+    (FR-S10). Both are present at once inside a session. If the file won,
+    every session's writes would land under the container's identity — the
+    agent would still work, the audit log would just be wrong about who did
+    it, and nothing would look broken.
+    """
+    shared = tmp_path / "container-token"
+    shared.write_text("vogt_container\n", encoding="utf-8")
+    env = {
+        "VOGT_TOKEN_FILE": str(shared),
+        "VOGT_HTTP_TOKEN": "vogt_session",
+        "VOGT_SESSION_ID": "ses_01J8",
+    }
+    assert resolve_token(env) == "vogt_session"
+
+
+def test_outside_a_session_the_brokered_file_is_the_source(tmp_path: Any) -> None:
+    shared = tmp_path / "container-token"
+    shared.write_text("vogt_container\n", encoding="utf-8")
+    env = {"VOGT_TOKEN_FILE": str(shared), "VOGT_HTTP_TOKEN": "vogt_stale"}
+    assert resolve_token(env) == "vogt_container"
+
+
+def test_a_bare_token_variable_is_accepted_when_there_is_no_file() -> None:
+    """Codex registers the URL natively and passes only this variable."""
+    assert resolve_token({"VOGT_HTTP_TOKEN": "vogt_only"}) == "vogt_only"
+    assert resolve_token({}) is None
 
 
 @pytest.mark.parametrize("url", [REMOTE, REMOTE + "/"])

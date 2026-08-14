@@ -309,6 +309,46 @@ class ProjectBriefResult(Result):
 # -- work ------------------------------------------------------------------
 
 
+# Defined here rather than with the rest of the session models below,
+# because `WorkResult` carries it: a work item's view shows what is
+# running for it (FR-E4), and a forward reference would leave the model
+# incomplete until something remembered to rebuild it.
+class SessionSummary(Result):
+    """One session, as Vogt knows it and as the engine currently reports it.
+
+    Two halves on purpose. `id`, `project`, `work_item` and `reason` are
+    Vogt's declared link — written once, audited, and true whatever the
+    engine is doing. `activity` and `alive` are read from the engine at the
+    moment of asking and are never stored: a cached activity state would be
+    a claim about a running process, which is the one thing this product
+    refuses to invent (FR-E2).
+    """
+
+    id: str
+    engine_session_id: str
+    project: str | None = None
+    work_item: str | None = Field(
+        default=None, description="Work item ref, e.g. WI-7, when opened for one."
+    )
+    actor: str = Field(description="Actor the session's writes are attributed to.")
+    cwd: str
+    template: str | None = None
+    reason: str
+    started_at: datetime
+    stopped_at: datetime | None = None
+    activity: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: idle / running / waiting-for-input / "
+            "errored. None when the engine could not be asked."
+        ),
+    )
+    alive: bool | None = Field(
+        default=None,
+        description="Whether the engine still has this session. None if unasked.",
+    )
+
+
 class CreateWorkParams(Params):
     kind: WorkKind = Field(description="feature / bug / chore / question.")
     title: Name
@@ -329,6 +369,10 @@ class CreateWorkParams(Params):
 class WorkResult(Result):
     item: WorkItem
     comments: list[Comment] = []
+    #: Sessions opened for this item, live activity included (FR-E4).
+    #: Populated by `work.get`; empty on the write operations, which answer
+    #: about the change they made rather than about what is running.
+    sessions: list[SessionSummary] = []
 
 
 class GetWorkParams(Params):
@@ -1249,3 +1293,61 @@ class ConnectResult(Result):
         description="Ready to use: JSON for a client config, or the document."
     )
     detail: str | None = None
+
+
+# -- coding sessions -------------------------------------------------------
+
+
+class StartSessionParams(Params):
+    """Open a terminal for a work item, or for a project.
+
+    Exactly one of `work_item` and `project` is required. A session always
+    belongs to a project — the work item's own, when one is given — because
+    the working directory comes from the project registry and nowhere else
+    (FR-E3).
+    """
+
+    work_item: str | None = Field(default=None, description="Work item ref, e.g. WI-7.")
+    project: str | None = Field(default=None, description="Project slug.")
+    template: str | None = Field(
+        default=None,
+        description=(
+            "Named session template to run, e.g. an agent CLI. Omitted means "
+            "the engine's default shell."
+        ),
+    )
+    name: str | None = Field(
+        default=None, description="Session name. Derived from the subject if omitted."
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class StopSessionParams(Params):
+    id: str = Field(description="Session id, e.g. ses_01J8… .")
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ListSessionsParams(Params):
+    project: str | None = Field(default=None, description="Project slug.")
+    work_item: str | None = Field(default=None, description="Work item ref.")
+    include_stopped: bool = Field(
+        default=False, description="Include sessions Vogt has already stopped."
+    )
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class SessionResult(Result):
+    session: SessionSummary
+
+
+class SessionListResult(Result):
+    sessions: list[SessionSummary] = []
+    engine: str | None = Field(
+        default=None,
+        description=(
+            "What the engine said, when it could not be asked. The links are "
+            "still returned: Vogt's record of what it started does not depend "
+            "on the engine being up (FR-E9)."
+        ),
+    )

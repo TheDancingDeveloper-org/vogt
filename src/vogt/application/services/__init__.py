@@ -50,6 +50,11 @@ from vogt.application.services.projects import (
     transition_project,
 )
 from vogt.application.services.retention import prune
+from vogt.application.services.sessions import (
+    list_sessions,
+    start_session,
+    stop_session,
+)
 from vogt.application.services.taxonomy import (
     create_actor,
     create_initiative,
@@ -110,6 +115,7 @@ __all__ = [
     "list_labels",
     "list_notifications",
     "list_projects",
+    "list_sessions",
     "list_suppressions",
     "list_tokens",
     "list_work",
@@ -127,7 +133,9 @@ __all__ = [
     "serve",
     "serve_mcp_stdio",
     "set_write_back",
+    "start_session",
     "status",
+    "stop_session",
     "suppress",
     "sweep",
     "transition_project",

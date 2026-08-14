@@ -120,7 +120,20 @@ load_agent_environment() {
     # the same reasons. Absent secret is not fatal, unlike cadastre's: an
     # instance may legitimately not be deployed yet, and agent auth must keep
     # working for git/gh regardless.
-    export VOGT_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$VOGT_SECRET_NAME" || true)"
+    #
+    # Inside a coding session, do not: the session already holds a token Vogt
+    # minted for its own actor (FR-S10), and this helper is what launches the
+    # session's shell when MYDEVENV2_AUTO_AGENT_AUTH is on — which is the
+    # deployed configuration. Fetching here would replace that credential
+    # with the pod's before the agent ever ran, and nothing would look
+    # wrong: the writes still land, the audit log just says `agent:mydevenv2`
+    # for work that belongs to a session.
+    if [[ -n "${VOGT_SESSION_ID:-}" && -n "${VOGT_HTTP_TOKEN:-}" ]]; then
+        printf 'agent-auth: keeping the session token for %s\n' \
+            "$VOGT_SESSION_ID" >&2
+    else
+        export VOGT_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$VOGT_SECRET_NAME" || true)"
+    fi
 
     umask 077
     AUTH_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mydevenv2-agent-auth.XXXXXXXX")"

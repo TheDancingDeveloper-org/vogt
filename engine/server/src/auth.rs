@@ -67,6 +67,32 @@ pub struct ScopedTokenConfig {
     pub capabilities: Vec<TokenCapability>,
     #[serde(default = "default_mutating_request_limit_per_minute")]
     pub mutating_requests_per_minute: u32,
+    /// Path to the vogt-core token this front-door token is paired with
+    /// (FR-S9), and the form a deployment should use.
+    ///
+    /// A file rather than a value because the front-door token beside it
+    /// commonly arrives through `MYDEVENV2_EXTRA_TOKENS_JSON`, which is an
+    /// environment variable: putting the *core* token in the same record
+    /// would publish a second credential to `/proc/<pid>/environ` and every
+    /// `docker inspect`, which is exactly what `VOGT_CORE_TOKEN_FILE` and
+    /// FR-S7 exist to avoid. One brokered file per credential is already the
+    /// stack's pattern — see the `pre_deploy` hook in
+    /// `deploy/vogt-stack.compose.yml`.
+    ///
+    /// Read once, at `config::load`; the resolved value lands in
+    /// `vogt_core_token` below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vogt_core_token_file: Option<String>,
+    /// The paired core token itself, for a deployment that keeps its whole
+    /// token table in the config file — where the front-door token is already
+    /// a literal, so the pairing is no more exposed than what it pairs with.
+    ///
+    /// `vogt_core_token_file` wins over this when both are set, for the reason
+    /// the loader gives `VOGT_CORE_TOKEN_FILE` precedence: a deployment that
+    /// went to the trouble of brokering a file should not have it silently
+    /// undone by a value someone also left here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vogt_core_token: Option<String>,
 }
 
 fn default_mutating_request_limit_per_minute() -> u32 {
@@ -121,12 +147,33 @@ pub struct AuthorizedToken<'a> {
     pub name: &'a str,
     pub mutating_requests_per_minute: u32,
     capabilities: &'a [TokenCapability],
+    /// The core token this front-door token is paired with, if it has one of
+    /// its own (FR-S9). `None` means "no pairing", not "no core token": what
+    /// the front door falls back to is the proxy's business, not the gate's.
+    vogt_core_token: Option<&'a str>,
 }
 
 impl AuthorizedToken<'_> {
     pub fn allows(&self, capability: TokenCapability) -> bool {
         self.capabilities.contains(&capability)
     }
+}
+
+/// Who the gate decided this request is, handed on to the handler behind it.
+///
+/// `require_bearer` authorizes and would otherwise discard which token it
+/// matched, leaving every handler downstream unable to tell one caller from
+/// another. A request extension is the mechanism because it is per-request
+/// state that only the handlers on the gated router can see — the alternative,
+/// re-deriving the identity in `vogt_core::api` from the `Authorization`
+/// header, would mean a second comparison of a secret in a second place.
+#[derive(Debug, Clone)]
+pub struct AuthorizedIdentity {
+    /// The configured name of the front-door token that authenticated this
+    /// request — `primary`, or an entry in `extra_tokens`.
+    pub token_name: String,
+    /// The vogt-core token paired with it (FR-S9), or `None` if it has none.
+    pub vogt_core_token: Option<String>,
 }
 
 /// Bearer-token gate. Constant-time compare to avoid timing oracles even on a tailnet.
@@ -139,7 +186,7 @@ impl AuthorizedToken<'_> {
 pub async fn require_bearer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, Response> {
     let request_id = headers
@@ -226,6 +273,15 @@ pub async fn require_bearer(
         }
     }
 
+    // Every check has passed, so the handler may now be told who it is
+    // serving. Inserted last on purpose: a refused request never carries an
+    // identity, so nothing downstream can mistake "was going to be this
+    // caller" for "is this caller".
+    request.extensions_mut().insert(AuthorizedIdentity {
+        token_name: access.name.to_string(),
+        vogt_core_token: access.vogt_core_token.map(str::to_owned),
+    });
+
     let mut response = next.run(request).await;
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert(&REQUEST_ID_HEADER, value);
@@ -280,6 +336,11 @@ fn authorize_token<'a>(
             name: PRIMARY_TOKEN_NAME,
             capabilities: &ALL_CAPABILITIES,
             mutating_requests_per_minute: cfg.token_mutating_request_limit_per_minute,
+            // The primary token's pairing is the deployment-wide
+            // `vogt_core_token`, which is also the fallback — so it is left
+            // unset here and picked up there. Naming it in both places would
+            // make one of them look optional.
+            vogt_core_token: None,
         });
     }
 
@@ -288,6 +349,7 @@ fn authorize_token<'a>(
             name: token.name.as_str(),
             capabilities: token.capabilities.as_slice(),
             mutating_requests_per_minute: token.mutating_requests_per_minute,
+            vogt_core_token: token.vogt_core_token.as_deref(),
         })
     })
 }
@@ -386,12 +448,16 @@ mod tests {
                     token: READONLY_TOKEN.into(),
                     capabilities: vec![],
                     mutating_requests_per_minute: 600,
+                    vogt_core_token_file: None,
+                    vogt_core_token: None,
                 },
                 ScopedTokenConfig {
                     name: "sessions".into(),
                     token: SESSIONS_TOKEN.into(),
                     capabilities: vec![TokenCapability::Sessions],
                     mutating_requests_per_minute: 600,
+                    vogt_core_token_file: None,
+                    vogt_core_token: Some("core-token-for-sessions".into()),
                 },
             ],
             scrollback_bytes: 64 * 1024,
@@ -435,6 +501,22 @@ mod tests {
         let sessions = authorize_token(&cfg, SESSIONS_TOKEN).expect("sessions token");
         assert!(sessions.allows(TokenCapability::Sessions));
         assert!(!sessions.allows(TokenCapability::PushWrite));
+    }
+
+    #[test]
+    fn a_scoped_token_carries_its_own_core_pairing() {
+        let cfg = test_config();
+
+        let sessions = authorize_token(&cfg, SESSIONS_TOKEN).expect("sessions token");
+        assert_eq!(sessions.vogt_core_token, Some("core-token-for-sessions"));
+
+        let readonly = authorize_token(&cfg, READONLY_TOKEN).expect("readonly token");
+        assert_eq!(readonly.vogt_core_token, None);
+
+        // The primary token's pairing is the deployment-wide fallback, applied
+        // by the proxy rather than named here.
+        let primary = authorize_token(&cfg, PRIMARY_TOKEN).expect("primary token");
+        assert_eq!(primary.vogt_core_token, None);
     }
 
     #[test]

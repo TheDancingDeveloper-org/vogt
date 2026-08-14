@@ -30,6 +30,13 @@ pub struct SessionSpec {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<Vec<(String, String)>>,
+    /// The brief the session's agent should start from. The engine writes it
+    /// to a prompt file under its own `state_dir` and hands the child the
+    /// path; callers that have no brief omit the field entirely. It exists
+    /// because the caller (vogt-core) is a separate process and cannot write
+    /// a file the engine owns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -405,5 +412,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(serde_json::to_string(&spec).unwrap(), r#"{"name":"term"}"#);
+    }
+
+    #[test]
+    fn session_spec_reads_a_prompt_from_the_wire() {
+        // vogt-core codes against this exact field name.
+        let spec: SessionSpec =
+            serde_json::from_str(r#"{"name":"term","prompt":"Fix the flaky test."}"#).unwrap();
+        assert_eq!(spec.prompt.as_deref(), Some("Fix the flaky test."));
     }
 }

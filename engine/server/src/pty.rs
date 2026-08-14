@@ -229,7 +229,12 @@ fn shell_escape(arg: &str) -> String {
 
 /// Spawn a PTY-backed session running `spec.command` (or the default shell if
 /// `None`). Starts the reader thread, the exit waiter, and the activity watcher.
+///
+/// `id` is allocated by the caller: the registry needs it before the spawn so
+/// per-session artifacts (the prompt file) can be named for the session and
+/// exist by the time the child's first line runs.
 pub fn spawn(
+    id: Uuid,
     spec: &SessionSpec,
     defaults: SpawnDefaults<'_>,
     bus: EventBus,
@@ -245,9 +250,6 @@ pub fn spawn(
     let pair = pty_system
         .openpty(size)
         .map_err(|e| ApiError::Pty(format!("openpty: {e}")))?;
-
-    // Allocated before the child is spawned so it can be exported to the child.
-    let id = Uuid::new_v4();
 
     let mut cmd = match spec.command.as_ref() {
         Some(argv) if !argv.is_empty() => {

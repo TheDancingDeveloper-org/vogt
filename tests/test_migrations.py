@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from vogt.core.entities import CodingSession, Project
 from vogt.errors import MigrationError, MigrationLocked
 from vogt.storage.sqlite.connection import connect, split_statements
 from vogt.storage.sqlite.declared import MIGRATIONS_DIR as DECLARED_MIGRATIONS
@@ -17,6 +18,11 @@ from vogt.storage.sqlite.observed import SqliteObservedStore
 from tests.conftest import TEST_PRINCIPAL, StepClock
 
 NOW = datetime(2026, 8, 12, 5, 0, 0, tzinfo=UTC)
+
+#: The migration that added `coding_sessions`. Named rather than derived from
+#: "the newest one", so the upgrade this test covers stays the upgrade it
+#: covers after the next migration lands.
+SESSIONS_MIGRATION = 7
 
 
 def _migrator(directory: Path, *, holder: str = "test/1") -> Migrator:
@@ -175,6 +181,70 @@ def test_shipped_migrations_bring_both_stores_up(tmp_path: Path) -> None:
     assert observed.schema_version() == len(observed_report.applied)
     assert not declared.is_initialized()
     assert not observed.is_initialized()
+
+
+def test_a_pre_session_instance_migrates_forward_with_its_data(
+    tmp_path: Path,
+) -> None:
+    """An instance created before 0007 gains sessions without losing anything.
+
+    Built the same way as the M0 case below: a copy of the shipped directory
+    with the newest migration withheld, so the upgrade path exercised here is
+    the real one rather than a hand-written old schema.
+    """
+    shipped = load_migrations(DECLARED_MIGRATIONS)
+    old_migrations = tmp_path / "before-sessions"
+    old_migrations.mkdir()
+    for migration in shipped:
+        if migration.number < SESSIONS_MIGRATION:
+            (old_migrations / f"{migration.id}.sql").write_text(
+                migration.sql, encoding="utf-8"
+            )
+
+    path = tmp_path / "declared.sqlite3"
+    conn = connect(path, create=True)
+    Migrator(store="declared", directory=old_migrations, holder="old/1").migrate(
+        conn, now=NOW
+    )
+    conn.close()
+
+    store = SqliteDeclaredStore(path, clock=StepClock())
+    store.bootstrap(TEST_PRINCIPAL)
+    assert store.schema_version() == SESSIONS_MIGRATION - 1
+    with store.write() as txn:
+        actor = txn.actor_by_identity(TEST_PRINCIPAL.identity_ref)
+        assert actor is not None
+        actor_id = actor.id
+        txn.insert_project(
+            Project(
+                id="prj_old",
+                slug="already-here",
+                name="Already Here",
+                root_path="/srv/already-here",
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+
+    report = store.migrate()
+    assert "0007_sessions" in report.applied
+    assert store.schema_version() == shipped[-1].number
+
+    with store.write() as txn:
+        txn.insert_session(
+            CodingSession(
+                id="ses_first",
+                engine_session_id="eng-1",
+                project_id="prj_old",
+                actor_id=actor_id,
+                cwd="/srv/already-here",
+                reason="the first session on an upgraded instance",
+                started_at=NOW,
+            )
+        )
+    with store.read() as view:
+        assert view.project_by_slug("already-here") is not None
+        assert [s.id for s in view.list_sessions(limit=10, offset=0)] == ["ses_first"]
 
 
 def test_an_m0_instance_migrates_forward_with_its_data(tmp_path: Path) -> None:

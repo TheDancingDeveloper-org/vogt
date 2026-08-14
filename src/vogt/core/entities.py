@@ -179,6 +179,32 @@ class WorkLink(Entity):
     created_at: datetime
 
 
+class CodingSession(Entity):
+    """A terminal the engine runs, and what Vogt started it for (FR-E4).
+
+    The *declared* half of a session: Vogt asked for it, with a reason, and
+    the write is audited like any other. The engine keeps the live half —
+    activity state, scrollback, exit code — and is asked for it, because a
+    cached copy of somebody else's running state is wrong the moment it is
+    written (FR-E2).
+
+    `work_item_id` is `None` for a session opened on a project, which is the
+    other half of FR-E3: every session has a project and a `cwd` the registry
+    recorded, and only some have an item.
+    """
+
+    id: str
+    engine_session_id: str
+    project_id: str
+    work_item_id: str | None = None
+    actor_id: str
+    cwd: str
+    template: str | None = None
+    reason: str
+    started_at: datetime
+    stopped_at: datetime | None = None
+
+
 class Token(Entity):
     """A scoped credential bound to an actor (FR-S3).
 

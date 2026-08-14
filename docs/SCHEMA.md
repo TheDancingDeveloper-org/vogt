@@ -1,4 +1,4 @@
-# Vogt — Data Schema & Topology (v0.3, revision r3)
+# Vogt — Data Schema & Topology (v0.3, revision r4)
 
 Status: **built** (reconciled against the delivered v1 on 2026-08-12; the
 as-built shape of §3.2 is the note at the end of that section, and the
@@ -13,6 +13,11 @@ drift proposals carry an evidence snapshot; retention rules tightened.
 r3 changes: no sweep roots and no discovery — collector scope is always a
 set of registered project ids; `projects.exclusions` replaces per-root
 exclusion patterns; contract results are written by on-demand checks only.
+
+r4 changes: `coding_sessions` added (§2.6) for the merge with the session
+engine — the declared link between a work item or project and a terminal the
+engine runs for it. No other table changed; the engine keeps its own state in
+its own `state_dir` and nothing about it is mirrored here.
 
 ## 1. Storage topology
 
@@ -202,6 +207,34 @@ observed store has no cursor of its own and does not need one.
 `suppressions` lives in the declared store because it is an audited human
 or agent decision, not an observation — which is also why it survives
 re-observation of the same `subject_key`.
+
+### 2.6 Coding sessions (r4)
+
+| Table | Purpose | Key columns |
+|---|---|---|
+| `coding_sessions` | *(M10)* the declared link from a work item or project to a terminal the engine runs for it (FR-E4) | `id, engine_session_id(unique), project_id, work_item_id, actor_id, cwd, template, reason, started_at, stopped_at` |
+
+This table records what Vogt *asked for*: a session, in this project's tree,
+for this item, attributed to this actor (FR-S10), with a reason — an ordinary
+audited declared write. It holds nothing about what is happening inside the
+terminal. Live activity (`idle`/`running`/`waiting-for-input`/`errored`),
+scrollback and exit code are the engine's, published on its SSE stream and
+read from it when a view needs them (FR-E2); a cached column would be stale
+the moment it was written, and a view that renders stale state as current is
+the failure FR-U10 and FR-U21 exist to prevent. `stopped_at` is not a
+counter-example: it says Vogt stopped the session, not that the process ended.
+
+Session **outcomes** — exit code, duration, resulting working-tree delta —
+are evidence, not declaration: they are collected as observations with
+freshness and trust like everything else (FR-E6, §3.1), which is why there is
+no outcome column here. "What did we ask for, and why" and "what happened in
+there" are different questions with different write disciplines.
+
+`cwd` is stored per session rather than read back through `projects.root_path`
+because FR-E3 is about the path a session actually opened in: a project that
+moves later must not silently rewrite where a past session ran.
+`engine_session_id` is unique because everything arriving from the engine's
+side names a terminal by that id alone.
 
 ## 3. observed.sqlite3
 

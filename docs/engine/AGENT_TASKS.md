@@ -19,6 +19,12 @@ recurring agents such as price monitors and recurring workspace checks.
   `state_dir/agent-task-prompts/<task-id>/<run-id>.md` plus a persistent
   `context.md` file. Agent commands receive those paths through environment
   variables and can also use `{prompt_file}` / `{context_file}` placeholders.
+- Sessions created with a `prompt` (FR-E4's work-item brief) share that
+  mechanism: their brief is written to
+  `state_dir/agent-task-prompts/sessions/<session-id>.md` and exported as the
+  same `MYDEVENV2_AGENT_TASK_PROMPT_FILE` variable, so one prompt root exists
+  and `POST /api/agent-tasks/artifacts/cleanup` accounts for everything under
+  it. See `engine/server/src/prompt_files.rs`.
 - Tasks can schedule `manual`, `interval`, or UTC `daily` runs. The first useful
   product-monitor shape is `interval { minutes = 720 }` for twice daily.
 - The default notification hook is output-driven: if an agent prints a line

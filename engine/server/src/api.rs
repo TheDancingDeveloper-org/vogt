@@ -219,6 +219,7 @@ pub struct AgentTaskStorageStatus {
     pub prompt_task_dir_count: u64,
     pub prompt_file_count: u64,
     pub context_file_count: u64,
+    pub session_prompt_file_count: u64,
     pub prompt_bytes: u64,
     pub orphan_task_dir_count: u64,
 }
@@ -265,6 +266,7 @@ pub async fn operational_status(
             prompt_task_dir_count: task_artifacts.task_dir_count,
             prompt_file_count: task_artifacts.prompt_file_count,
             context_file_count: task_artifacts.context_file_count,
+            session_prompt_file_count: task_artifacts.session_prompt_file_count,
             prompt_bytes: task_artifacts.total_bytes,
             orphan_task_dir_count: task_artifacts.orphan_task_dir_count,
         },

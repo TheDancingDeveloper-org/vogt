@@ -44,6 +44,32 @@ native desktop client remains deprecated legacy code.
 `SessionSummary` carries an optional `command` field — the explicit command
 the session was created with; absent for default-shell sessions.
 
+`SessionSpec` (the `POST /api/sessions` body) carries an optional `prompt`
+field — the brief the session's agent should start from:
+
+```json
+{
+  "name": "VOGT-42 fix the flaky forge test",
+  "cwd": "Active/apps/vogt",
+  "prompt": "Fix the flaky forge test.\n\nWhy: it blocks the release."
+}
+```
+
+The text is not passed to the child. The engine writes it to
+`state_dir/agent-task-prompts/sessions/<session-id>.md` before the PTY is
+spawned and exports that path as `MYDEVENV2_AGENT_TASK_PROMPT_FILE` — the same
+variable a scheduled agent task run sets, so an agent started for a work item
+and an agent started by a schedule are configured identically. A `prompt` that
+is absent, empty, or all whitespace writes no file and sets no variable.
+
+`DELETE /api/sessions/:id` removes the session's prompt file; killing does not,
+because a killed session is still inspectable. Prompt files left behind by a
+crash or a restart are collected by
+`POST /api/agent-tasks/artifacts/cleanup`, which removes every session prompt
+whose session the registry no longer holds and reports
+`removed_session_prompt_file_count`. `keep_latest_runs_per_task` does not apply
+to them: session prompts are retained by liveness, not by count.
+
 ## Assistant APIs
 
 All routes 404 unless the server has `MYDEVENV2_ASSISTANT_API_KEY`
