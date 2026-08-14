@@ -660,3 +660,33 @@ def test_the_engine_is_the_only_published_port_in_the_merged_image() -> None:
         f"the merged image exposes {sorted(ports)}; only the engine's "
         f"{ENGINE_PORT} may be published (NFR-D11)"
     )
+
+
+def test_the_gate_fails_on_anything_that_is_not_success_or_skipped() -> None:
+    """NFR-Q6: both suites pass in the merged repository.
+
+    The halves are path-gated (NFR-C1), so on most changes one of them is
+    skipped — and "both passed" for a change that touched both is true only
+    because one job aggregates the results and refuses anything that is
+    neither a pass nor a deliberate skip.
+
+    The case worth pinning is `cancelled`. A gate written as
+    `if result == "failure": fail` treats a cancelled job as a pass, and this
+    repository has already been bitten once today by a cancelled run being
+    indistinguishable from a run that had nothing to do (§6.3 finding 19).
+    Here the default arm fails, so only `success` and `skipped` get through.
+    """
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    gate = ci[ci.index("\n  ci:\n") :]
+
+    for half in ("python:", "core-alone:", "engine:", "android:"):
+        assert half in gate, f"the gate no longer weighs {half.rstrip(':')}"
+
+    # The shape: a success arm, a skipped arm, and a catch-all that fails.
+    assert "success)" in gate and "skipped)" in gate, gate[:400]
+    catch_all = gate.index("*)")
+    assert "failed=1" in gate[catch_all : catch_all + 200], (
+        "the default arm must fail — a gate that only checks for `failure` "
+        "passes a cancelled job, and a cancelled job checked nothing"
+    )
+    assert 'if [ "$failed" -ne 0 ]' in gate and "exit 1" in gate
