@@ -1535,6 +1535,13 @@ similar, and the new entries are all of the same kind as the old ones.
     setting: `cancel-in-progress` was the thing that read as a fix and was
     not one, and a test asserting it would have gone green on both versions.
 
+    **Confirmed by watching, which is the only reason it is struck through
+    this time.** Three pushes in quick succession left three `ci` runs queued
+    together — `654ccc3`, `4f669f5`, `14d4456` — where each would previously
+    have cancelled its predecessor while pending. The cost is visible in the
+    same picture: three runs behind one runner, which is the trade this
+    chooses, runner time for the guarantee that no commit goes unchecked.
+
     The shape is worth naming because this list keeps finding it in new
     dress: **a check that did not run and a check that passed are the same
     colour on a dashboard.** §6.2's NFR-C6 row already records the deliberate
