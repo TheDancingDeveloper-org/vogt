@@ -416,8 +416,8 @@ function sameFilter(a: Filter, b: Filter): boolean {
     a.label === b.label &&
     a.initiative === b.initiative &&
     a.actor === b.actor &&
-    a.kinds.join(" ") === b.kinds.join(" ") &&
-    a.states.join(" ") === b.states.join(" ")
+    a.kinds.join("\u0000") === b.kinds.join("\u0000") &&
+    a.states.join("\u0000") === b.states.join("\u0000")
   );
 }
 
