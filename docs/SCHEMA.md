@@ -1,4 +1,4 @@
-# Vogt — Data Schema & Topology (v0.3, revision r4)
+# Vogt — Data Schema & Topology (v0.3, revision r5)
 
 Status: **built** (reconciled against the delivered v1 on 2026-08-12; the
 as-built shape of §3.2 is the note at the end of that section, and the
@@ -18,6 +18,15 @@ r4 changes: `coding_sessions` added (§2.6) for the merge with the session
 engine — the declared link between a work item or project and a terminal the
 engine runs for it. No other table changed; the engine keeps its own state in
 its own `state_dir` and nothing about it is mirrored here.
+
+r5 changes: **no schema change at all.** Session outcomes and bound
+agent-task runs (FR-E6, FR-E7) arrive as observations of two new kinds,
+`session.outcome` and `agent_task.run`, against two new subject-key shapes
+(§3.1) — which is what r4's §2.6 said would happen and what nothing had
+built. This revision is recorded because the previous one described that
+mechanism as existing: a document that reasons from an unbuilt thing to a
+schema decision is the failure `REQUIREMENTS.md` §5.3 found in this file, and
+r5 is the correction as well as the build.
 
 ## 1. Storage topology
 
@@ -230,6 +239,56 @@ freshness and trust like everything else (FR-E6, §3.1), which is why there is
 no outcome column here. "What did we ask for, and why" and "what happened in
 there" are different questions with different write disciplines.
 
+*This paragraph described a mechanism that did not exist until r5.* It was
+written at r4 as the reason for an absent column and was read for a year as a
+statement of fact; `REQUIREMENTS.md` §6.3 finding 4 is what caught it. The
+mechanism is now the `session-outcomes` collector
+(`src/vogt/collectors/session_outcomes.py`), and what it can and cannot say is
+worth knowing before trusting a number it produced:
+
+| Fact | Where it comes from | When it is absent |
+|---|---|---|
+| exit code | the engine — its live session while it has one, then its archive (`GET /api/history/{id}`) | the engine was restarted and kept no archive: the outcome's `state` is `unknown`, never `finished` with a null code |
+| duration | the engine's archive, `created_at` to `ended_at` — one clock for both ends | no archive: the fallback is Vogt's `started_at` to the end it recorded, and `duration_source` says which of the two was used |
+| working-tree delta | `git` in the session's `cwd`, over the window between its start and its end | the window has no known end, in which case no commits are counted at all |
+
+Three properties of that collector are load-bearing rather than incidental.
+
+**A session that has not finished has no outcome.** Its observation carries
+`state: running` and `provisional: true` (FR-U17) with no exit code and no
+duration — because an outcome row with a null exit code cannot be told apart
+from one whose exit code was lost, which is the confusion this store exists to
+prevent. It also carries no activity state: an observation is a timestamped
+copy, and copying live activity into one is the same mistake as the cached
+column this section rules out.
+
+**The delta is a window, not an attribution.** Vogt takes no snapshot of the
+tree when a session starts, so what the delta reports is every commit in the
+session's window, whoever made it (`attributed_to_the_session: false`). A
+*finished* session's delta reports only the window's commits and deliberately
+not what is uncommitted now: a dirty tree would otherwise write a new evidence
+row on every sweep, which is growth proportional to how often we look rather
+than to what changed (FR-O7). What a session left uncommitted is knowable only
+while it runs, and is on the provisional row.
+
+**Agent-task runs come back the same way** (FR-E7). A task in the engine may
+name a Vogt project or work item; the runs of a bound task, and the findings
+those runs reported, are collected as `agent_task.run` observations against
+that subject. The engine never writes here, and that is the whole design: §1's
+rule that nothing writes `observed.sqlite3` except collectors is what makes an
+observation's freshness and coverage mean anything, and FR-E7's "recordable as
+observations" is therefore a *pull*.
+
+What that leaves unbuilt is worth naming rather than implying. A run cannot
+file an observation of its own choosing — arbitrary kind, arbitrary subject,
+arbitrary payload — because that would be a second writer of this store, with
+no sweep behind it and no coverage record to make its silence readable. What a
+run can report is a line, through the notify phrase it was already using, and
+what Vogt collects is that line against the subject the task was bound to. An
+agent that wants to say something structured about a work item has the write
+plane it has always had: the declared side, through an audited operation, with
+an actor and a reason.
+
 `cwd` is stored per session rather than read back through `projects.root_path`
 because FR-E3 is about the path a session actually opened in: a project that
 moves later must not silently rewrite where a past session ran.
@@ -248,9 +307,16 @@ side names a terminal by that id alone.
 `subject_key` is a deterministic natural key, e.g.
 `gh:owner/repo#123`, `ci:owner/repo@sha:workflow`, `mark:repo/path#L42`,
 `release:owner/repo@tag`, `depref:repo/Cargo.toml→../nzb-core`,
-`contract:project-slug`. Same `subject_key` + same `content_digest` in a
-new sweep ⇒ no new row (sweep stats count it as unchanged), keeping growth
-proportional to change, not to polling frequency.
+`contract:project-slug`, `session:<session id>` (r5, FR-E6),
+`task-run:<run id>` (r5, FR-E7). Same `subject_key` + same `content_digest`
+in a new sweep ⇒ no new row (sweep stats count it as unchanged), keeping
+growth proportional to change, not to polling frequency.
+
+The two session keys are Vogt's own ids rather than the engine's, deliberately:
+a session's subject is the thing Vogt declared, so its evidence survives an
+engine that forgot the terminal, and a re-observed session is the same subject
+whatever the engine now calls it. `session:` is also the key that makes the
+running→finished transition one subject with two rows rather than two subjects.
 
 Marker observations carry a `promoted` flag derived from the FR-W11
 promotion pattern, so unpromoted markers stay queryable without entering

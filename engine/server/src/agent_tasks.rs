@@ -28,6 +28,10 @@ use crate::{
 const TASKS_FILE: &str = "agent-tasks.json";
 const DEFAULT_NOTIFY_PHRASE: &str = "MYDEVENV2_NOTIFY:";
 
+/// The one mechanism that produces findings today (FR-E7). Named rather than
+/// implied so that a second one arriving has to say it is a second one.
+const FINDING_SOURCE_NOTIFY_PHRASE: &str = "notify-phrase";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTask {
     pub id: Uuid,
@@ -43,6 +47,23 @@ pub struct AgentTask {
     pub env: Vec<(String, String)>,
     #[serde(default)]
     pub context: Option<String>,
+    /// The Vogt subject this task's runs are about (FR-E7).
+    ///
+    /// Held as the names a person types — a project slug, a work-item ref —
+    /// and never resolved here: the engine has no view of Vogt's registry,
+    /// and a task that stored a Vogt id would be storing something it cannot
+    /// check, cannot re-resolve, and cannot explain to anyone reading the
+    /// file. Vogt resolves the name at collection time, where the registry
+    /// is, and a binding naming something that instance does not have is
+    /// simply not collected.
+    ///
+    /// The binding does not change what the run does. It says which subject
+    /// the run is *about*, so that what the run reports can become evidence
+    /// against that subject instead of evaporating into a push notification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vogt_project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vogt_work_item: Option<String>,
     #[serde(default)]
     pub notify_on_start: bool,
     #[serde(default = "default_notify_phrase")]
@@ -101,6 +122,28 @@ pub struct AgentTaskRun {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub summary: Option<String>,
+    /// What this run said it found (FR-E7).
+    ///
+    /// Until now the notify phrase produced a push notification and nothing
+    /// else: if the phone was off, the finding was gone. Recording it on the
+    /// run makes it durable, and makes it something a bound task's subject
+    /// can be given as evidence. The push still fires — this is "not only as
+    /// push notifications", not "instead of".
+    #[serde(default)]
+    pub findings: Vec<AgentTaskFinding>,
+}
+
+/// One thing a run reported about itself.
+///
+/// `source` exists because there is exactly one producer today and there
+/// will not always be: a reader of an old run should be able to tell what
+/// mechanism put the line there without inferring it from the shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTaskFinding {
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+    pub text: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -137,6 +180,10 @@ pub struct AgentTaskCreate {
     #[serde(default)]
     pub context: Option<String>,
     #[serde(default)]
+    pub vogt_project: Option<String>,
+    #[serde(default)]
+    pub vogt_work_item: Option<String>,
+    #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
     pub notify_on_start: Option<bool>,
@@ -162,6 +209,10 @@ pub struct AgentTaskUpdate {
     pub env: Option<Vec<(String, String)>>,
     #[serde(default)]
     pub context: Option<String>,
+    #[serde(default)]
+    pub vogt_project: Option<String>,
+    #[serde(default)]
+    pub vogt_work_item: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
@@ -328,6 +379,8 @@ impl AgentTaskRegistry {
             cwd: clean_optional(req.cwd),
             env: req.env.unwrap_or_default(),
             context: clean_optional(req.context),
+            vogt_project: clean_optional(req.vogt_project),
+            vogt_work_item: clean_optional(req.vogt_work_item),
             notify_on_start: req.notify_on_start.unwrap_or(false),
             notify_on_phrase: clean_notify_phrase(req.notify_on_phrase),
             auto_retry_on_rate_limit: req.auto_retry_on_rate_limit.unwrap_or(true),
@@ -371,6 +424,15 @@ impl AgentTaskRegistry {
         }
         if req.context.is_some() {
             task.context = clean_optional(req.context);
+        }
+        // An empty string unbinds, the same way it clears `cwd` and
+        // `context`: there has to be a way to say "this task is nobody's" ,
+        // and a separate verb for it would be a second way to spell one edit.
+        if req.vogt_project.is_some() {
+            task.vogt_project = clean_optional(req.vogt_project);
+        }
+        if req.vogt_work_item.is_some() {
+            task.vogt_work_item = clean_optional(req.vogt_work_item);
         }
         if let Some(enabled) = req.enabled {
             task.status = if enabled {
@@ -558,13 +620,13 @@ impl AgentTaskRegistry {
         Ok(())
     }
 
-    pub async fn run_now(&self, id: Uuid) -> Result<AgentTaskRun> {
+    pub async fn run_now(self: &Arc<Self>, id: Uuid) -> Result<AgentTaskRun> {
         self.start_run(id, AgentTaskRunTrigger::Manual)
             .await?
             .ok_or_else(|| ApiError::Conflict("task did not start".into()))
     }
 
-    async fn run_due_once(&self) {
+    async fn run_due_once(self: &Arc<Self>) {
         let now = OffsetDateTime::now_utc();
         let due: Vec<Uuid> = self
             .tasks
@@ -583,7 +645,7 @@ impl AgentTaskRegistry {
     }
 
     async fn start_run(
-        &self,
+        self: &Arc<Self>,
         id: Uuid,
         trigger: AgentTaskRunTrigger,
     ) -> Result<Option<AgentTaskRun>> {
@@ -604,7 +666,7 @@ impl AgentTaskRegistry {
     }
 
     async fn start_run_inner(
-        &self,
+        self: &Arc<Self>,
         id: Uuid,
         trigger: AgentTaskRunTrigger,
     ) -> Result<Option<AgentTaskRun>> {
@@ -650,6 +712,17 @@ impl AgentTaskRegistry {
             "MYDEVENV2_AGENT_TASK_CONTEXT_FILE".to_string(),
             context_file_display.clone(),
         ));
+        // The binding travels into the run so the agent inside can name the
+        // same subject Vogt will file the run's findings against. It is not
+        // a credential and grants nothing: a task run has no Vogt token
+        // (unlike a session, FR-S10), so an agent that wants to write to
+        // Vogt still has to be given one the ordinary way.
+        if let Some(project) = task.vogt_project.as_deref() {
+            env.push(("VOGT_PROJECT".to_string(), project.to_string()));
+        }
+        if let Some(work_item) = task.vogt_work_item.as_deref() {
+            env.push(("VOGT_WORK_ITEM".to_string(), work_item.to_string()));
+        }
 
         let session_name = format!("[Task] {}", task.name);
         let session = self.sessions.create(SessionSpec {
@@ -680,6 +753,7 @@ impl AgentTaskRegistry {
             completed_at: None,
             exit_code: None,
             summary: None,
+            findings: vec![],
         };
 
         {
@@ -729,7 +803,7 @@ impl AgentTaskRegistry {
             .filter(|s| !s.is_empty())
         {
             spawn_phrase_watcher(
-                Arc::clone(&self.push),
+                Arc::clone(self),
                 Arc::clone(&session),
                 task.name.clone(),
                 task.id,
@@ -824,6 +898,36 @@ impl AgentTaskRegistry {
         Ok(())
     }
 
+    /// Record something a run reported about itself (FR-E7).
+    ///
+    /// Appended rather than replaced, and never deduplicated: two identical
+    /// lines from one run are two moments the agent said the same thing, and
+    /// collapsing them would lose the second. A run the registry no longer
+    /// has — deleted mid-run, or trimmed out of the fifty it keeps — is not
+    /// an error: there is nothing to attach the finding to, and the push
+    /// that follows is still worth sending.
+    pub fn record_finding(&self, task_id: Uuid, run_id: Uuid, text: &str) -> Result<()> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        let mut tasks = self.tasks.lock();
+        let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) else {
+            return Ok(());
+        };
+        let Some(run) = task.runs.iter_mut().find(|run| run.id == run_id) else {
+            return Ok(());
+        };
+        let now = OffsetDateTime::now_utc();
+        run.findings.push(AgentTaskFinding {
+            at: now,
+            text: text.to_string(),
+            source: FINDING_SOURCE_NOTIFY_PHRASE.to_string(),
+        });
+        task.updated_at = now;
+        self.save_locked(&tasks)
+    }
+
     fn advance_next_run(&self, id: Uuid) -> Result<()> {
         let mut tasks = self.tasks.lock();
         let task = tasks
@@ -906,7 +1010,15 @@ impl AgentTaskRegistry {
         prompt.push_str(&format!("Task: {}\n", task.name));
         prompt.push_str(&format!("Task ID: {}\n", task.id));
         prompt.push_str(&format!("Run ID: {run_id}\n"));
-        prompt.push_str(&format!("Run time (UTC): {now}\n\n"));
+        prompt.push_str(&format!("Run time (UTC): {now}\n"));
+        if let Some(binding) = vogt_binding_line(task) {
+            // Named in the prompt as well as in the environment, because the
+            // agent reads the prompt and only sometimes reads its environment
+            // — and a run that does not know what it is about will report
+            // findings that cannot be filed against anything.
+            prompt.push_str(&format!("Vogt subject: {binding}\n"));
+        }
+        prompt.push('\n');
         prompt.push_str("## Instructions\n\n");
         prompt.push_str(task.prompt.trim());
         prompt.push_str("\n\n## Persistent Context\n\n");
@@ -1330,6 +1442,20 @@ fn compute_next_run(
     }
 }
 
+/// How a task's Vogt binding reads in its prompt, or `None` when unbound.
+///
+/// A task may name both a project and a work item; the item is named first
+/// because it is the more specific of the two and is what a run should
+/// report against when it has one.
+fn vogt_binding_line(task: &AgentTask) -> Option<String> {
+    match (task.vogt_work_item.as_deref(), task.vogt_project.as_deref()) {
+        (Some(item), Some(project)) => Some(format!("{item} (project {project})")),
+        (Some(item), None) => Some(item.to_string()),
+        (None, Some(project)) => Some(format!("project {project}")),
+        (None, None) => None,
+    }
+}
+
 fn parse_hhmm(raw: &str) -> Result<Time> {
     let (hour, minute) = raw
         .split_once(':')
@@ -1344,8 +1470,17 @@ fn parse_hhmm(raw: &str) -> Result<Time> {
         .map_err(|e| ApiError::BadRequest(format!("invalid time {raw:?}: {e}")))
 }
 
+/// Watch a run's output for the phrase its task asked to be told about.
+///
+/// Takes the registry rather than only the push manager (FR-E7): the matched
+/// line is recorded on the run *before* it is pushed, so that a finding
+/// survives a phone that was off, a subscription that had expired, and a
+/// push service that was down. The push is unchanged — this is "not only as
+/// push notifications", and both halves happen for every task, bound or not.
+/// Whether anything collects the finding is Vogt's decision, made from the
+/// binding, and is not this watcher's business.
 fn spawn_phrase_watcher(
-    push: Arc<PushManager>,
+    registry: Arc<AgentTaskRegistry>,
     session: Arc<Session>,
     task_name: String,
     task_id: Uuid,
@@ -1353,6 +1488,7 @@ fn spawn_phrase_watcher(
     phrase: String,
     mut rx: tokio::sync::broadcast::Receiver<crate::pty::OutputChunk>,
 ) {
+    let push = Arc::clone(&registry.push);
     tokio::spawn(async move {
         let mut tail = String::new();
         loop {
@@ -1382,6 +1518,18 @@ fn spawn_phrase_watcher(
                 } else {
                     msg
                 };
+                if let Err(e) = registry.record_finding(task_id, run_id, &body) {
+                    // A finding that could not be written is worth a line in
+                    // the log and nothing more: the notification below is
+                    // still the behaviour this task was configured for, and
+                    // losing the durable copy must not lose the alert too.
+                    tracing::warn!(
+                        task = %task_id,
+                        run = %run_id,
+                        error = %e,
+                        "failed to record agent task finding"
+                    );
+                }
                 let data = json!({
                     "kind": "agent-task-notify",
                     "task_id": task_id.to_string(),
@@ -1486,5 +1634,63 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(next, now + Duration::hours(12));
+    }
+
+    fn task_bound_to(project: Option<&str>, work_item: Option<&str>) -> AgentTask {
+        let now = OffsetDateTime::now_utc();
+        AgentTask {
+            id: Uuid::new_v4(),
+            name: "Nightly".into(),
+            prompt: "Look".into(),
+            schedule: AgentTaskSchedule::Manual,
+            status: AgentTaskStatus::Active,
+            command: None,
+            cwd: None,
+            env: vec![],
+            context: None,
+            vogt_project: project.map(str::to_string),
+            vogt_work_item: work_item.map(str::to_string),
+            notify_on_start: false,
+            notify_on_phrase: None,
+            auto_retry_on_rate_limit: false,
+            next_run: None,
+            last_run: None,
+            run_count: 0,
+            runs: vec![],
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn the_more_specific_half_of_a_binding_is_named_first() {
+        assert_eq!(
+            vogt_binding_line(&task_bound_to(Some("vogt"), Some("WI-7"))).as_deref(),
+            Some("WI-7 (project vogt)")
+        );
+        assert_eq!(
+            vogt_binding_line(&task_bound_to(Some("vogt"), None)).as_deref(),
+            Some("project vogt")
+        );
+        assert_eq!(
+            vogt_binding_line(&task_bound_to(None, Some("WI-7"))).as_deref(),
+            Some("WI-7")
+        );
+    }
+
+    #[test]
+    fn an_unbound_task_has_no_binding_line() {
+        assert!(vogt_binding_line(&task_bound_to(None, None)).is_none());
+    }
+
+    #[test]
+    fn a_binding_of_whitespace_is_no_binding() {
+        // The GUI's empty field arrives as `""`, and a task bound to the
+        // empty string would be bound to a project slug nothing can name.
+        assert_eq!(clean_optional(Some("   ".into())), None);
+        assert_eq!(
+            clean_optional(Some(" vogt ".into())).as_deref(),
+            Some("vogt")
+        );
     }
 }

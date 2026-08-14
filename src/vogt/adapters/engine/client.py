@@ -86,6 +86,137 @@ class EngineSession:
 
 
 @dataclass(frozen=True)
+class EngineArchivedSession:
+    """One terminal that has ended, as the engine's history records it.
+
+    The engine archives a session when its process exits: `created_at`,
+    `ended_at` and the exit code, in its own SQLite. This is the only place
+    a *duration* can be had — Vogt's `stopped_at` says when Vogt asked for a
+    kill, which is a different fact and is usually a different moment (
+    `SCHEMA.md` §2.6). Absent means the engine has no archive for that id,
+    which is "not collected", never "it exited with no code".
+    """
+
+    id: str
+    created_at: str
+    ended_at: str | None = None
+    exit_code: int | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineArchivedSession:
+        return cls(
+            id=str(payload.get("id", "")),
+            created_at=str(payload.get("created_at", "")),
+            ended_at=_optional_str(payload.get("ended_at")),
+            exit_code=_optional_int(payload.get("exit_code")),
+        )
+
+
+@dataclass(frozen=True)
+class EngineTaskFinding:
+    """Something a bound agent-task run reported about itself (FR-E7).
+
+    Today there is exactly one producer: the notify-phrase watcher, which is
+    the mechanism a task uses to say "I found something". It has always
+    become a push notification; recording it on the run is what lets it also
+    become evidence.
+    """
+
+    at: str
+    text: str
+    source: str = "notify-phrase"
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineTaskFinding:
+        return cls(
+            at=str(payload.get("at", "")),
+            text=str(payload.get("text", "")),
+            source=str(payload.get("source", "notify-phrase")),
+        )
+
+
+@dataclass(frozen=True)
+class EngineTaskRun:
+    """One execution of an agent task."""
+
+    id: str
+    session_id: str
+    started_at: str
+    status: str
+    completed_at: str | None = None
+    exit_code: int | None = None
+    summary: str | None = None
+    findings: tuple[EngineTaskFinding, ...] = ()
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineTaskRun:
+        raw = payload.get("findings")
+        findings = raw if isinstance(raw, list) else []
+        return cls(
+            id=str(payload.get("id", "")),
+            session_id=str(payload.get("session_id", "")),
+            started_at=str(payload.get("started_at", "")),
+            status=str(payload.get("status", "running")),
+            completed_at=_optional_str(payload.get("completed_at")),
+            exit_code=_optional_int(payload.get("exit_code")),
+            summary=_optional_str(payload.get("summary")),
+            findings=tuple(
+                EngineTaskFinding.from_payload(row)
+                for row in findings
+                if isinstance(row, dict)
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class EngineAgentTask:
+    """A scheduled agent task, and what Vogt subject it was bound to (FR-E7).
+
+    The binding is carried as the names a person types — a project slug, a
+    work-item ref — because the engine has no way to resolve a Vogt id and
+    should not learn one. Resolution happens on this side, where the registry
+    is.
+    """
+
+    id: str
+    name: str
+    cwd: str | None = None
+    project: str | None = None
+    work_item: str | None = None
+    runs: tuple[EngineTaskRun, ...] = ()
+
+    @property
+    def is_bound(self) -> bool:
+        return self.project is not None or self.work_item is not None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineAgentTask:
+        raw = payload.get("runs")
+        runs = raw if isinstance(raw, list) else []
+        return cls(
+            id=str(payload.get("id", "")),
+            name=str(payload.get("name", "")),
+            cwd=_optional_str(payload.get("cwd")),
+            project=_optional_str(payload.get("vogt_project")),
+            work_item=_optional_str(payload.get("vogt_work_item")),
+            runs=tuple(
+                EngineTaskRun.from_payload(row) for row in runs if isinstance(row, dict)
+            ),
+        )
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+@dataclass(frozen=True)
 class EngineClient:
     """Access to one session engine."""
 
@@ -120,7 +251,7 @@ class EngineClient:
                 token = resolved.read_text(encoding="utf-8").strip() or None
         return cls(base_url=url.strip().rstrip("/"), token=token, transport=transport)
 
-    # -- the four things Vogt asks of the engine ---------------------------
+    # -- the six things Vogt asks of the engine ----------------------------
 
     def create_session(
         self,
@@ -187,6 +318,36 @@ class EngineClient:
         )
         return payload is not None
 
+    def archived_session(self, session_id: str) -> EngineArchivedSession | None:
+        """What the engine's history says about a terminal that has ended.
+
+        `None` covers three different things the caller must not conflate
+        with each other: history is switched off in that engine, the session
+        is still running and has not been archived, and the archive was
+        pruned. All three mean "the engine cannot tell us", which is why the
+        outcome collector reports an unknown outcome rather than assuming the
+        session ended cleanly.
+        """
+        payload = self._call(
+            f"/api/history/{urllib.parse.quote(session_id)}", allow_missing=True
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineArchivedSession.from_payload(payload)
+
+    def list_agent_tasks(self) -> list[EngineAgentTask]:
+        """Every scheduled agent task, with its runs (FR-E7).
+
+        Read whole rather than filtered, because the engine has no index on
+        the binding and the list is a handful of tasks. Filtering to the
+        bound ones happens here, where the project registry is.
+        """
+        payload = self._call("/api/agent-tasks")
+        rows = payload if isinstance(payload, list) else []
+        return [
+            EngineAgentTask.from_payload(row) for row in rows if isinstance(row, dict)
+        ]
+
     # -- transport ---------------------------------------------------------
 
     def _call(
@@ -245,4 +406,13 @@ class EngineClient:
             raise EngineUnavailable(msg) from exc
 
 
-__all__ = ["EngineClient", "EngineSession", "EngineUnavailable", "Transport"]
+__all__ = [
+    "EngineAgentTask",
+    "EngineArchivedSession",
+    "EngineClient",
+    "EngineSession",
+    "EngineTaskFinding",
+    "EngineTaskRun",
+    "EngineUnavailable",
+    "Transport",
+]

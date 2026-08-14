@@ -30,6 +30,11 @@ from vogt.application.services import _resolve
 from vogt.application.services.views import freshness_of
 from vogt.collectors import CollectorContext, CollectorRegistry, Sweeper
 from vogt.collectors.dep_refs import KIND_DEP_REF
+from vogt.collectors.session_outcomes import (
+    SESSION_OBSERVATION_LIMIT,
+    SessionOutcomeCollector,
+    SessionRecord,
+)
 from vogt.core.entities import DepRef, Project
 from vogt.errors import InvalidRequest
 from vogt.storage.interface import ReadView
@@ -47,14 +52,85 @@ def collector_registry(ctx: AppContext) -> CollectorRegistry:
     The GitHub adapter registers itself only when it is configured. Its
     absence is not an error and not a degraded mode — it means forge
     subjects are "not collected", which is a different answer from "there
-    are none" (NFR-PO1, FR-O4).
+    are none" (NFR-PO1, FR-O4). `session-outcomes` follows the same rule
+    against the session engine: with no engine configured there is nothing
+    that could know how a session ended, and coverage says the collector has
+    never run rather than reporting no outcomes.
     """
     registry = CollectorRegistry()
     from vogt.adapters.github import github_collectors
 
     for collector in github_collectors(ctx.config):
         registry.add(collector)
+    if ctx.engine is not None:
+        registry.add(SessionOutcomeCollector(ctx.engine, _DeclaredSessions(ctx)))
     return registry
+
+
+class _DeclaredSessions:
+    """The declared reads `session-outcomes` needs, done on its behalf.
+
+    Here rather than in the collector because collectors never touch declared
+    data (FR-O2, `collectors/__init__.py`). The collector is handed flat
+    records; the join from a session to its work item's ref, and from a
+    task's binding to a project slug, is application-layer work like every
+    other cross-store join (`SCHEMA.md` §1).
+    """
+
+    def __init__(self, ctx: AppContext) -> None:
+        self._ctx = ctx
+        # A task binding is asked about once per project per sweep, and the
+        # answer cannot change inside one sweep. Cached so that ten projects
+        # and ten bound tasks are ten lookups rather than a hundred.
+        self._work_item_projects: dict[str, str | None] = {}
+
+    def for_project(self, project: Project) -> list[SessionRecord]:
+        with self._ctx.declared.read() as view:
+            sessions = view.list_sessions(
+                project_id=project.id,
+                include_stopped=True,
+                limit=SESSION_OBSERVATION_LIMIT,
+                offset=0,
+            )
+            refs: dict[str, str] = {}
+            for session in sessions:
+                if session.work_item_id is None or session.work_item_id in refs:
+                    continue
+                item = view.work_item_by_id(session.work_item_id)
+                if item is not None:
+                    refs[session.work_item_id] = item.ref
+            return [
+                SessionRecord(
+                    id=session.id,
+                    engine_session_id=session.engine_session_id,
+                    cwd=session.cwd,
+                    started_at=session.started_at,
+                    stopped_at=session.stopped_at,
+                    work_item=(
+                        None
+                        if session.work_item_id is None
+                        else refs.get(session.work_item_id)
+                    ),
+                )
+                for session in sessions
+            ]
+
+    def project_of_work_item(self, ref: str) -> str | None:
+        if ref in self._work_item_projects:
+            return self._work_item_projects[ref]
+        slug: str | None = None
+        with self._ctx.declared.read() as view:
+            # `view.work_item_by_ref` rather than `_resolve.work_item`, which
+            # exists to raise: a binding naming an item this instance does not
+            # have is a fact about the engine's configuration, not an error
+            # worth failing a sweep over. Those runs are bound to nothing
+            # here, so nothing is collected for them.
+            item = view.work_item_by_ref(ref)
+            if item is not None and item.project_id is not None:
+                project = view.project_by_id(item.project_id)
+                slug = None if project is None else project.slug
+        self._work_item_projects[ref] = slug
+        return slug
 
 
 def sweep(ctx: AppContext, params: SweepParams) -> SweepResult:

@@ -359,7 +359,9 @@ adapters/
                write-back (opt-in write, M5); absent = fully functional
 collectors/    plugin registry — core (no network): git-local,
                source-markers, contract-checker, dep-refs; optional
-               (network): gh-issues, gh-prs, gh-actions, gh-releases
+               (network): gh-issues, gh-prs, gh-actions, gh-releases,
+               session-outcomes (registered only when an engine is
+               configured; FR-E6, FR-E7)
 gui/           static ES modules consuming the HTTP adapter only (M6 chose
                buildless over React — see `ROADMAP.md` M6; a wheel that
                needs npm to build is the cost that decided it)

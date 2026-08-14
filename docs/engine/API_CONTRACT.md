@@ -420,6 +420,19 @@ or `daily` with `times`. `status` is `active` or `paused`. A run carries
 `status` (`running`, `completed`, `errored`), the session it spawned, and the
 paths of the prompt and context files written for it.
 
+A task may also carry a **Vogt binding** — `vogt_project` (a project slug) and
+`vogt_work_item` (a ref such as `WI-7`), both optional, both omitted from the
+response when unset, and both settable to `""` through `PATCH` to unbind
+(Vogt's FR-E7). The engine does not resolve either name: it passes them into
+each run as `VOGT_PROJECT` and `VOGT_WORK_ITEM`, and names the subject in the
+run's prompt file. Resolution belongs to vogt-core, which holds the registry.
+
+A run also carries `findings`: `[{at, text, source}]`, appended whenever the
+notify phrase is seen in the run's output. `source` is `notify-phrase`, the
+only producer today. The push notification is unchanged; the finding is the
+durable copy, so that a bound task's report survives a phone that was off and
+can be collected as evidence rather than only delivered.
+
 `GET /api/status` reports the same artifacts as counts and bytes, so an
 operator can see whether a cleanup is worth running before running one.
 
