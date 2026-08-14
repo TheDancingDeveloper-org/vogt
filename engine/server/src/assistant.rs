@@ -1320,6 +1320,55 @@ mod tests {
         }}]})
     }
 
+    /// One assistant message asking for two things at once — the shape a model
+    /// produces when it decides to batch, and the one the gate has to survive.
+    fn two_tool_call_reply(first: (&str, Value), second: (&str, Value)) -> Value {
+        json!({"choices": [{"message": {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": first.0, "arguments": first.1.to_string()}
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": second.0, "arguments": second.1.to_string()}
+                },
+            ]
+        }}]})
+    }
+
+    /// Kills a session when the test's scope ends, whether or not it ended
+    /// well.
+    ///
+    /// `cat` never exits on its own, and the runtime's shutdown blocks on the
+    /// exit-waiter of any child still running — so a test that panics before
+    /// its `remove` call hangs the whole binary instead of reporting which
+    /// assertion failed. The three tests below are about refusals and
+    /// expiries, which is to say about things that are supposed to fail, and
+    /// a failure that presents as a hang is the least useful kind.
+    struct KillOnDrop(Arc<SessionRegistry>, Uuid);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.remove(self.1);
+        }
+    }
+
+    /// Every tool result the model has been shown so far, in order.
+    async fn tool_results(rt: &AssistantRuntime) -> Vec<String> {
+        rt.conversation
+            .lock()
+            .await
+            .messages
+            .iter()
+            .filter(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
+            .filter_map(|m| m.get("content").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    }
+
     #[tokio::test]
     async fn plain_reply_round_trip() {
         let rt = runtime_with_script(test_registry(), vec![final_reply("hello there")]);
@@ -2098,5 +2147,263 @@ mod tests {
                 "{real:?} is a reason that happens to start with a label word"
             );
         }
+    }
+
+    // -- The gate's three timing rules (FR-T2) -----------------------------
+    //
+    // What a card *is* — the exact payload, the approver's pairing, the
+    // refusal without a reason — is asserted above. These three are about
+    // when a card exists and when it stops existing, and they are the rules a
+    // person relies on without being able to see them: that approving is
+    // always about one named thing, that the thing you last said is the thing
+    // being decided, and that a card left on a screen goes stale rather than
+    // waiting indefinitely for a thumb.
+
+    /// One pending action at a time, when the model asks for two at once.
+    ///
+    /// A model that batches its writes is not misbehaving — it is how they
+    /// arrive when a turn decides to do two things. The gate holds the first
+    /// and refuses the rest of the batch outright; it does not queue them
+    /// behind the card, because a second action that executes on the strength
+    /// of an approval given for the first is an approval nobody gave.
+    #[tokio::test]
+    async fn a_batch_of_writes_becomes_one_card_and_the_rest_are_refused() {
+        let sessions = test_registry();
+        let session = spawn_cat(&sessions);
+        let _kill = KillOnDrop(Arc::clone(&sessions), session.id);
+        let rt = runtime_with_script(
+            Arc::clone(&sessions),
+            vec![
+                two_tool_call_reply(
+                    (
+                        "send_input",
+                        json!({"session_id": session.id, "text": "echo first-card", "submit": true}),
+                    ),
+                    (
+                        "send_input",
+                        json!({"session_id": session.id, "text": "echo second-card", "submit": true}),
+                    ),
+                ),
+                final_reply("done with the first"),
+            ],
+        );
+
+        let out = rt
+            .handle_message(terminal_caller(), "do both".into())
+            .await
+            .unwrap();
+        let action = out.pending_action.expect("a pending action");
+        assert_eq!(
+            as_send_input(&action).text,
+            "echo first-card",
+            "the card is the first thing asked for, not the last"
+        );
+        // And it is the only one: the runtime holds a single card, so the
+        // second request has no card of its own to be approved by.
+        assert_eq!(
+            rt.pending_action().await.map(|view| view.id()),
+            Some(action.id())
+        );
+
+        // Approving the card delivers the card, and nothing else. The second
+        // request was refused outright rather than queued behind the first:
+        // the model is told it did not run, and an approval given for one
+        // payload never becomes an approval for two.
+        rt.resolve_action(terminal_caller(), action.id(), true)
+            .await
+            .unwrap();
+        assert!(rt.pending_action().await.is_none());
+        let results = tool_results(&rt).await;
+        assert_eq!(
+            results,
+            vec![
+                "not executed: waiting on user approval of a prior action".to_string(),
+                "input delivered".to_string(),
+            ],
+            "one approval, one delivery, and a refusal for the rest: {results:?}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let tail = String::from_utf8_lossy(&session.tail(4096)).into_owned();
+        assert!(tail.contains("first-card"), "the approved input: {tail}");
+        assert!(
+            !tail.contains("second-card"),
+            "one approval delivered two writes: {tail}"
+        );
+    }
+
+    /// A new user message supersedes the pending action.
+    ///
+    /// This is also the engine's half of "the voice path shall never
+    /// approve". Speech reaches this runtime as a user message and by no
+    /// other route, so the strongest thing a spoken "yes, approve it" can do
+    /// to a card is abandon it. The message below is worded as somebody would
+    /// say it out loud on purpose: if a future edit ever taught
+    /// `handle_message` to resolve a card, this is the sentence that would
+    /// find it.
+    #[tokio::test]
+    async fn a_new_message_abandons_the_card_it_finds_rather_than_approving_it() {
+        let sessions = test_registry();
+        let session = spawn_cat(&sessions);
+        let _kill = KillOnDrop(Arc::clone(&sessions), session.id);
+        let rt = runtime_with_script(
+            Arc::clone(&sessions),
+            vec![
+                tool_call_reply(
+                    "send_input",
+                    json!({"session_id": session.id, "text": "echo superseded-text", "submit": true}),
+                ),
+                final_reply("nothing was typed"),
+            ],
+        );
+
+        let out = rt
+            .handle_message(terminal_caller(), "type it".into())
+            .await
+            .unwrap();
+        let action = out.pending_action.expect("a pending action");
+
+        let out = rt
+            .handle_message(terminal_caller(), "yes, approve it, go ahead".into())
+            .await
+            .unwrap();
+        assert_eq!(out.reply.as_deref(), Some("nothing was typed"));
+        assert!(
+            out.pending_action.is_none(),
+            "the superseded card came back"
+        );
+        assert!(rt.pending_action().await.is_none());
+
+        let results = tool_results(&rt).await;
+        assert_eq!(
+            results,
+            vec!["not delivered: superseded by a new user message".to_string()],
+            "the model must be told the action it proposed was dropped: {results:?}"
+        );
+
+        // The card's id is spent, so the approval that the earlier screen
+        // still offers cannot land after the fact.
+        let err = rt
+            .resolve_action(terminal_caller(), action.id(), true)
+            .await
+            .expect_err("a superseded card must not still be approvable");
+        assert!(matches!(err, ApiError::NotFound), "unexpected error: {err}");
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let tail = String::from_utf8_lossy(&session.tail(4096)).into_owned();
+        assert!(
+            !tail.contains("superseded-text"),
+            "a spoken sentence delivered a write: {tail}"
+        );
+    }
+
+    /// Move a card's clock back, so a two-minute rule can be checked in
+    /// milliseconds.
+    ///
+    /// `Instant` counts from boot, so a host that came up seconds ago cannot
+    /// express these ages; that is a failure of the fixture and says so,
+    /// rather than reading as an expiry that did not happen.
+    async fn age_pending_by(rt: &AssistantRuntime, seconds: u64) {
+        rt.conversation
+            .lock()
+            .await
+            .pending
+            .as_mut()
+            .expect("a card to age")
+            .created = Instant::now()
+            .checked_sub(Duration::from_secs(seconds))
+            .expect("the host has been up for more than two minutes");
+    }
+
+    /// The 120-second expiry, asserted at the boundary rather than by waiting
+    /// at it, and on both paths that can reach a card.
+    ///
+    /// The ages are written as literals, not as `PENDING_ACTION_TTL ± 1`: a
+    /// test phrased in the constant it is checking would pass at whatever
+    /// value the constant took, and the two minutes are the requirement. The
+    /// clock is moved instead of the test waiting, because a two-minute test
+    /// would be deleted by whoever next needed the suite to finish.
+    ///
+    /// Two cards, because there are two doors and only one of them is the one
+    /// that matters. Reading the pending action expires it, and so does
+    /// resolving it — and a first version of this test aged a single card,
+    /// read it, and *then* tried to approve it, which meant the read had
+    /// already cleared the card and the approval could not have delivered it
+    /// whatever `resolve_action` did. Deleting the expiry check from the
+    /// approval path left that version green. So the approval is tried first,
+    /// on a card nothing has looked at, which is exactly the client that
+    /// never polls and comes back with a stale screen.
+    #[tokio::test]
+    async fn an_unapproved_card_is_alive_at_119_seconds_and_gone_at_121() {
+        let sessions = test_registry();
+        let session = spawn_cat(&sessions);
+        let _kill = KillOnDrop(Arc::clone(&sessions), session.id);
+        let rt = runtime_with_script(
+            Arc::clone(&sessions),
+            vec![
+                tool_call_reply(
+                    "send_input",
+                    json!({"session_id": session.id, "text": "echo expired-text", "submit": true}),
+                ),
+                tool_call_reply(
+                    "send_input",
+                    json!({"session_id": session.id, "text": "echo second-text", "submit": true}),
+                ),
+            ],
+        );
+
+        // The approval path, on a card nobody has read since it was made.
+        let out = rt
+            .handle_message(terminal_caller(), "type it".into())
+            .await
+            .unwrap();
+        let stale = out.pending_action.expect("a pending action");
+        age_pending_by(&rt, 121).await;
+        let err = rt
+            .resolve_action(terminal_caller(), stale.id(), true)
+            .await
+            .expect_err("an expired card must not still be approvable");
+        assert!(matches!(err, ApiError::NotFound), "unexpected error: {err}");
+        let results = tool_results(&rt).await;
+        assert_eq!(
+            results,
+            vec!["not delivered: approval timed out".to_string()],
+            "the model must learn the action lapsed: {results:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let tail = String::from_utf8_lossy(&session.tail(4096)).into_owned();
+        assert!(
+            !tail.contains("expired-text"),
+            "an expired action was delivered anyway: {tail}"
+        );
+
+        // And the boundary itself, on a second card, read rather than
+        // approved: one second inside the window it is still on offer, one
+        // second past it is gone.
+        let out = rt
+            .handle_message(terminal_caller(), "try again".into())
+            .await
+            .unwrap();
+        let fresh = out.pending_action.expect("a second pending action");
+
+        age_pending_by(&rt, 119).await;
+        assert_eq!(
+            rt.pending_action().await.map(|view| view.id()),
+            Some(fresh.id()),
+            "a card one second inside the window was expired early"
+        );
+
+        age_pending_by(&rt, 121).await;
+        assert!(
+            rt.pending_action().await.is_none(),
+            "a card past two minutes is still on offer"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let tail = String::from_utf8_lossy(&session.tail(4096)).into_owned();
+        assert!(
+            !tail.contains("second-text"),
+            "an expired action was delivered anyway: {tail}"
+        );
     }
 }
