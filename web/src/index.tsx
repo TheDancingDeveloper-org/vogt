@@ -86,6 +86,9 @@ render(
         <Route path="/gui" component={App} />
         <Route path="/history" component={App} />
         <Route path="/tasks" component={App} />
+        <Route path="/board" component={App} />
+        <Route path="/backlog" component={App} />
+        <Route path="/w/:ref" component={App} />
         <Route path="/assistant" component={App} />
         <Route path="/assistant/*path" component={App} />
       </HashRouter>

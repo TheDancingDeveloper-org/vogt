@@ -15,8 +15,11 @@ import Editor from "./Editor";
 import EditorWorkspace from "./EditorWorkspace";
 import AgentTasks from "./AgentTasks";
 import Assistant from "./Assistant";
+import Backlog from "./Backlog";
+import Board from "./Board";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
+import WorkItemDetail from "./WorkItemDetail";
 import History from "./History";
 import KeyboardShortcuts from "./KeyboardShortcuts";
 import ModKeyRow from "./ModKeyRow";
@@ -235,6 +238,9 @@ function pathFor(tab: Tab): string {
   if (tab.kind === "git") return `/g/${encodeURIComponent(tab.repo)}`;
   if (tab.kind === "gui") return "/gui";
   if (tab.kind === "history") return "/history";
+  if (tab.kind === "board") return "/board";
+  if (tab.kind === "backlog") return "/backlog";
+  if (tab.kind === "workitem") return `/w/${encodeURIComponent(tab.ref)}`;
   if (tab.kind === "assistant") return "/assistant";
   return "/tasks";
 }
@@ -1101,6 +1107,24 @@ const App: Component = () => {
                     <Assistant
                       onError={(msg) => showToast(msg, { kind: "error" })}
                     />
+                  </Show>
+                  <Show when={t.kind === "board"}>
+                    <Board onError={(msg) => showToast(msg, { kind: "error" })} />
+                  </Show>
+                  <Show when={t.kind === "backlog"}>
+                    <Backlog
+                      onError={(msg) => showToast(msg, { kind: "error" })}
+                    />
+                  </Show>
+                  <Show when={t.kind === "workitem" && t}>
+                    {(tab) => (
+                      <WorkItemDetail
+                        itemRef={
+                          (tab() as Extract<Tab, { kind: "workitem" }>).ref
+                        }
+                        onError={(msg) => showToast(msg, { kind: "error" })}
+                      />
+                    )}
                   </Show>
                   <Show when={t.kind === "tasks"}>
                     <AgentTasks

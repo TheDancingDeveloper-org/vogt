@@ -7,7 +7,13 @@ export type Tab =
   | { id: string; kind: "gui"; label: string }
   | { id: string; kind: "history"; label: string }
   | { id: string; kind: "tasks"; label: string }
-  | { id: string; kind: "assistant"; label: string };
+  | { id: string; kind: "assistant"; label: string }
+  // The Vogt surfaces (M11). A board and a backlog are one per client; a work
+  // item is one tab per item, because two of them open at once is the
+  // ordinary case when one blocks the other.
+  | { id: string; kind: "board"; label: string }
+  | { id: string; kind: "backlog"; label: string }
+  | { id: string; kind: "workitem"; ref: string; label: string };
 
 export interface TabsStateSnapshot {
   tabs: Tab[];
@@ -52,10 +58,20 @@ function normalizeTab(value: unknown): Tab | null {
         repo: raw.repo,
         label: raw.label,
       };
+    case "workitem":
+      if (typeof raw.ref !== "string" || typeof raw.label !== "string") return null;
+      return {
+        id: raw.id,
+        kind: "workitem",
+        ref: raw.ref,
+        label: raw.label,
+      };
     case "gui":
     case "history":
     case "tasks":
     case "assistant":
+    case "board":
+    case "backlog":
       if (typeof raw.label !== "string") return null;
       return {
         id: raw.id,
@@ -312,4 +328,57 @@ export function replaceTabs(next: TabsStateSnapshot) {
     }),
   );
   persist();
+}
+
+/** The board: one per client, and the surface a Vogt session usually starts from. */
+export function openBoardTab(): Tab {
+  return openSingletonTab("board", "board", "Board");
+}
+
+/** The ranked backlog and bugs, which share a tab and a filter set. */
+export function openBacklogTab(): Tab {
+  return openSingletonTab("backlog", "backlog", "Backlog");
+}
+
+/** One work item, addressable so the tab survives a reload (FR-U11). */
+export function openWorkItemTab(ref: string): Tab {
+  const id = `workitem:${ref}`;
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind: "workitem", ref, label: ref };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+/** Shared by the tabs there is exactly one of. */
+function openSingletonTab(
+  id: string,
+  kind: "board" | "backlog",
+  label: string,
+): Tab {
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind, label } as Tab;
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
 }
