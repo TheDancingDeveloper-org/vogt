@@ -271,7 +271,7 @@ def test_the_api_prefix_matches_what_the_front_door_strips() -> None:
 
 LEGACY_APP_JS = REPO_ROOT / "src" / "vogt" / "gui" / "static" / "app.js"
 
-#: Operations the vanilla GUI exposes and the PWA does not yet.
+#: Operations the vanilla GUI exposes and the PWA does not yet *render*.
 #:
 #: FR-U9 lets the legacy surface keep serving at `/ui-legacy` until every
 #: operation it exposed is reachable in the PWA, and requires that parity be
@@ -279,7 +279,12 @@ LEGACY_APP_JS = REPO_ROOT / "src" / "vogt" / "gui" / "static" / "app.js"
 #: exact set rather than a `<=` so it fails in both directions: closing the
 #: last gap fails this test, and the fix is to retire the legacy GUI —
 #: which is the point. Growing a new gap fails it too.
-LEGACY_ONLY = {"project.import"}
+#:
+#: "Reachable" means a surface calls it, not that the client could. The route
+#: table is written ahead of the views that use it, so comparing tables would
+#: have declared parity while `notifications` had a binding and no inbox —
+#: which is how a requirement gets marked done by a spelling.
+LEGACY_ONLY = {"audit.list", "notifications"}
 
 
 def legacy_routes() -> set[str]:
@@ -290,8 +295,53 @@ def legacy_routes() -> set[str]:
     return set(re.findall(r'"?([a-z][a-z._]*)"?:\s*"/api/', block.group(1)))
 
 
+def surfaces() -> str:
+    """Every Vogt surface's source, concatenated.
+
+    The surfaces are the components the shell mounts; `vogtApi.ts` itself is
+    excluded deliberately, because a binding nothing calls is the thing this
+    check exists to catch.
+    """
+    names = ("Board", "Backlog", "WorkItemDetail", "Projects", "AuditBrowser")
+    return "\n".join(
+        source(WEB_SRC / f"{name}.tsx")
+        for name in names
+        if (WEB_SRC / f"{name}.tsx").is_file()
+    )
+
+
+def rendered_operations() -> set[str]:
+    """The operations some surface actually calls.
+
+    Read through the binding names `vogtApi.ts` exports for them, since a
+    surface calls `listDrift()`, not `"drift.list"`. The map is written out
+    rather than derived: a derivation would have to guess, and a wrong guess
+    here silently reports parity.
+    """
+    bindings = {
+        "status": ("status",),
+        "project.list": ("listProjects",),
+        "project.brief": ("projectBrief",),
+        "project.import": ("importProject",),
+        "backlog": ("backlog",),
+        "bugs": ("bugs",),
+        "drift.list": ("listDrift",),
+        "drift.resolve": ("resolveDrift",),
+        "deps": ("deps",),
+        "compliance": ("compliance",),
+        "audit.list": ("listAudit",),
+        "notifications": ("notifications", "listNotifications"),
+    }
+    text = surfaces()
+    return {
+        operation
+        for operation, names in bindings.items()
+        if any(re.search(rf"\b{name}\s*\(", text) for name in names)
+    }
+
+
 def test_the_legacy_gui_can_be_retired_when_the_pwa_reaches_parity() -> None:
-    gaps = legacy_routes() - set(client_routes())
+    gaps = legacy_routes() - rendered_operations()
     assert gaps == LEGACY_ONLY, (
         "the PWA's coverage of the legacy GUI changed. If this list is now "
         f"empty ({sorted(gaps)}), FR-U9's condition is met: remove "
