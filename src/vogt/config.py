@@ -198,6 +198,32 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    engine_url: str | None = Field(
+        default=None,
+        description=(
+            "Where the session engine listens, e.g. `http://127.0.0.1:8910`. "
+            "The engine is the other half of the merged product: it owns the "
+            "PTYs a work item's session runs in (FR-E1). Unset means the "
+            "`session.*` operations report that no engine is configured — "
+            "absence of the engine costs sessions and nothing else, which is "
+            "FR-E9 read from this side. An exposure value, so it is never "
+            "guessed: co-located today, its address is still the operator's "
+            "to state."
+        ),
+        json_schema_extra={"default_policy": "exposure"},
+    )
+    engine_token_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file containing the engine token Vogt calls it with. "
+            "The token needs only the engine's `sessions` capability: Vogt "
+            "starts and stops terminals, and has no business writing that "
+            "pod's files. A file rather than an environment variable, for the "
+            "same reason as `github_token_file` — a token in the environment "
+            "is a token in every `docker inspect` (FR-S7)."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     sqlite_synchronous: Literal["off", "normal", "full", "extra"] = Field(
         default="normal",
         description=(
