@@ -31,7 +31,20 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Cancel a superseded *pull request* run; never cancel a branch push.
+  #
+  # NFR-C1's path gating classifies a push by `before..sha`, so each commit is
+  # checked by exactly one run and no later run ever looks at it again. Cancel
+  # a push run and those files are not "checked later" — they are checked
+  # never. That is not hypothetical: `tests/test_deploy.py` changed in one
+  # push, the run was cancelled by the next push a few minutes later, and the
+  # following run's range began after it. A lint error reached `dev` through
+  # the gap and was found by a person running `ruff` locally.
+  #
+  # A pull request is different: its runs classify against the merge base, so
+  # a later run covers everything an earlier one would have, and cancelling
+  # the superseded one loses nothing.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

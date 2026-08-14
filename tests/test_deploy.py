@@ -454,7 +454,10 @@ RETIRED_CORE_STACK = "winrarhost.tailc7d3c.ts.net:18094"
 #: makes it very easy to write a core test that quietly needs the engine.
 needs_engine = pytest.mark.skipif(
     not MCP_BOOTSTRAP.is_file(),
-    reason="the merged tree carries the engine's deploy scripts; a core-only checkout does not",
+    reason=(
+        "the merged tree carries the engine's deploy scripts; "
+        "a core-only checkout does not"
+    ),
 )
 
 
@@ -513,4 +516,25 @@ def test_the_opencode_registration_does_not_freeze_an_endpoint() -> None:
     assert "--env" not in opencode, (
         "the wrapper reads VOGT_URL at spawn; a registration that pins one "
         "freezes whichever deployment was current when it was written"
+    )
+
+
+def test_a_push_run_is_never_cancelled_by_the_next_push() -> None:
+    """NFR-C1's path gating makes cancellation lose coverage permanently.
+
+    A push is classified by `before..sha`, so each commit is checked by
+    exactly one run and no later run looks at it again. Cancel that run and
+    those files are not checked later — they are checked never.
+
+    Found the way these things are found: `tests/test_deploy.py` changed in
+    one push, the run was cancelled by the next push, the following run's
+    range began after it, and a lint error reached `dev` through the gap.
+    """
+    raw = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    assert (
+        "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in raw
+    ), (
+        "a branch push must run to completion; only a superseded pull request "
+        "may be cancelled, because its runs classify against the merge base "
+        "and a later run covers everything an earlier one would have"
     )

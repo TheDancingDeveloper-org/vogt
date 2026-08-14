@@ -982,7 +982,7 @@ were false failed on their first run, in the two places a file cannot show
 you. `docs` failed on a link that resolved on this machine and nowhere else.
 The engine job failed on `sudo apt-get` with *root is not in the sudoers
 file* — the runner is root, so there was nothing to elevate from. Neither was
-a code defect and both were invisible to review, which is §6.3 finding 18.
+a code defect and both were invisible to review, which is §6.3 finding 20.
 
 **Delivered means a file and a test.** Not a citation — §5.4a's whole point is
 that a grep for an ID finds the docstring that names it. Where code plainly
@@ -1287,9 +1287,9 @@ a shape — **working behaviour and a false record** — which is the failure
 class this product exists to make visible.
 
 Findings are struck through when the thing they describe is fixed *and* the
-fix was checked here — **ten are** (4, 5, 7, 11, 12, 13, 14, 15, 17, 18), one
-of them (5) only in part, and two of the rest (6, 8) have closed a half each.
-Eighteen entries, eight of them open.
+fix was checked here — **eleven are** (4, 5, 7, 11, 12, 13, 14, 15, 17, 19,
+20), one of them (5) only in part, and two of the rest (6, 8) have closed a
+half each. Twenty entries, nine of them open.
 
 **Three of those strikes were added by the fourth pass to findings that were
 already fixed** — 12's string comparison had become a component comparison,
@@ -1501,7 +1501,30 @@ similar, and the new entries are all of the same kind as the old ones.
     and not harmless at all for a test that counts the calls a surface makes.
     Every green run before this one was greener than it should have been.
 
-18. ~~**Both first-run CI failures were checks written against this
+19. ~~**A cancelled run means a commit is checked by nothing, ever.**~~
+    **Resolved.** NFR-C1
+    classifies a push by `before..sha`, so each commit is examined by exactly
+    one run and no later run looks at it again. `ci.yml` set
+    `cancel-in-progress: true` for every trigger, so pushing twice in a few
+    minutes cancelled the first run — and the second run's range began after
+    the first commit. Those files were not checked later; they were checked
+    never.
+
+    Not hypothetical, and not caught by CI: `tests/test_deploy.py` changed in
+    one push, that run was cancelled by the next, and a line-length error
+    reached `dev` and sat there green. It was found by running `ruff` by hand
+    while looking at something else. The fix is one expression —
+    cancellation now applies to pull requests only, whose runs classify
+    against the merge base, so a later run covers everything an earlier one
+    would have — and `test_deploy.py` asserts it.
+
+    The shape is worth naming because this list keeps finding it in new
+    dress: **a check that did not run and a check that passed are the same
+    colour on a dashboard.** §6.2's NFR-C6 row already records the deliberate
+    path gating; what it did not anticipate was gating plus cancellation
+    turning a reduction in *when* checks run into a hole in *whether* they do.
+
+20. ~~**Both first-run CI failures were checks written against this
     machine.**~~ **Both resolved, in the commits that found them.**
     The pipeline for the merged product ran for the first time on 2026-08-14
     and failed twice, in ways review could not see and neither of which was a
