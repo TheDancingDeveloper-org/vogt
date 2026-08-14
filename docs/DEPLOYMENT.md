@@ -805,15 +805,25 @@ reaches a core — that is §9.2, and it needs a running pair.
 
 ### 9.2 Smoke-test it locally, before any stack sees it
 
-Run the image with a throwaway data directory and a core token, then check the
-four things that distinguish a working front door from a plausible one:
+```bash
+scripts/smoke_merged_stack.sh https://vogt.sprooty.com "$FRONT_DOOR_TOKEN"
+```
+
+Five checks, each naming what its failure means, exiting non-zero if any
+fails. It exists because the failure worth catching is not a crash: it is a
+front door that comes up, passes its healthcheck and serves no Vogt. Run it
+against the container before any stack sees it, and again after the first
+deploy.
+
+What it asks, and why each one:
 
 | Check | What proves it |
 |---|---|
 | `GET /readyz` | `checks[].name == "vogt_core"` says `ready`, **not** the top-level `ok` |
 | `GET /api/config` | `vogt.configured` is `true` — this is what makes the GUI offer its Vogt tabs |
 | `GET /api/vogt/status` with a front-door token | answers with a `principal` that is the actor you paired, not a 401 or a 503 |
-| `POST /mcp` `initialize` with a core token | answers identically to the core's own port |
+| `POST /mcp` `initialize` with a core token | answers identically to the core's own port (not automated: it needs a *core* token, which the script deliberately does not take) |
+| `workspace_agreement` in `/readyz` | the import root is inside the engine's workspace root, or imported projects are invisible to sessions (FR-E3) |
 
 Two of those were wrong at some point during the merge and neither failed
 loudly: a missing pairing answers 503 naming the setting, and an unconfigured
