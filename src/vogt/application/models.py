@@ -1006,11 +1006,31 @@ class BackupParams(Params):
 
 
 class BackupResult(Result):
+    """What a backup covered, including the parts it could not (NFR-I6)."""
+
     path: str
     instance_id: str
     declared_schema_version: int
     observed_schema_version: int
     taken_at: datetime
+    engine_state: str = Field(
+        default="not configured",
+        description=(
+            "What happened to the session engine's state directory: copied, "
+            "not configured, or a failure. Stated rather than implied — a "
+            "backup that quietly covered two thirds of the product would be "
+            "indistinguishable from one that covered all of it until "
+            "somebody restored it."
+        ),
+    )
+    import_root: str | None = Field(
+        default=None,
+        description=(
+            "Where imported projects lived when this was taken. A restore "
+            "elsewhere leaves every project pointing at a path that is not "
+            "there (FR-E3)."
+        ),
+    )
 
 
 class RestoreParams(Params):
@@ -1022,11 +1042,30 @@ class RestoreParams(Params):
 
 
 class RestoreResult(Result):
+    """What came back, and whether the estate is still where it was."""
+
     source: str
     instance_id: str
     restored_from: datetime
     migrations_applied: list[str]
     declared_schema_version: int
+    engine_state: str = Field(
+        default="not in this backup",
+        description="What happened to the session engine's state directory.",
+    )
+    import_root_then: str | None = Field(
+        default=None,
+        description="Where imported projects lived when the backup was taken.",
+    )
+    import_root_now: str | None = Field(
+        default=None,
+        description=(
+            "Where they will be looked for now. A difference is not an error "
+            "and is not corrected — the paths are in the store — but it is "
+            "the reason a restored session will not open, so it is reported "
+            "here rather than discovered there (FR-E3)."
+        ),
+    )
 
 
 class ExportParams(Params):

@@ -20,6 +20,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `engine_url` | `VOGT_ENGINE_URL` | string, optional | *(no default — must be set)* | exposure |
+| `engine_state_dir` | `VOGT_ENGINE_STATE_DIR` | path, optional | *(no default — must be set)* | behaviour |
 | `engine_token_file` | `VOGT_ENGINE_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
@@ -62,6 +63,10 @@ Path to a file containing a GitHub token. Its absence is what switches the optio
 ### `engine_url`
 
 Where the session engine listens, e.g. `http://127.0.0.1:8910`. The engine is the other half of the merged product: it owns the PTYs a work item's session runs in (FR-E1). Unset means the `session.*` operations report that no engine is configured — absence of the engine costs sessions and nothing else, which is FR-E9 read from this side. An exposure value, so it is never guessed: co-located today, its address is still the operator's to state.
+
+### `engine_state_dir`
+
+The session engine's state directory, when this process can read it — the merged deployment runs both halves in one container, so it usually can. `backup` copies it and `restore` puts it back, because half a restore is the failure NFR-I6 exists to prevent: the work items come back and the terminals' history, push subscriptions and agent tasks do not. Its absence is what makes a backup a core-only backup, so there is no default — the same reason `github_token_file` has none. Unset, the manifest says 'not configured' rather than quietly covering less than it appears to.
 
 ### `engine_token_file`
 

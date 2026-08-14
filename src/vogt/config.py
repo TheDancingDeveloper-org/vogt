@@ -212,6 +212,22 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "exposure"},
     )
+    engine_state_dir: Path | None = Field(
+        default=None,
+        description=(
+            "The session engine's state directory, when this process can read "
+            "it — the merged deployment runs both halves in one container, so "
+            "it usually can. `backup` copies it and `restore` puts it back, "
+            "because half a restore is the failure NFR-I6 exists to prevent: "
+            "the work items come back and the terminals' history, push "
+            "subscriptions and agent tasks do not. Its absence is what makes "
+            "a backup a core-only backup, so there is no default — the same "
+            "reason `github_token_file` has none. Unset, the manifest says "
+            "'not configured' rather than quietly covering less than it "
+            "appears to."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     engine_token_file: Path | None = Field(
         default=None,
         description=(

@@ -40,6 +40,10 @@
 # default policy: exposure
 # engine_url = null
 
+# The session engine's state directory, when this process can read it — the merged deployment runs both halves in one container, so it usually can. `backup` copies it and `restore` puts it back, because half a restore is the failure NFR-I6 exists to prevent: the work items come back and the terminals' history, push subscriptions and agent tasks do not. Its absence is what makes a backup a core-only backup, so there is no default — the same reason `github_token_file` has none. Unset, the manifest says 'not configured' rather than quietly covering less than it appears to.
+# default policy: behaviour
+# engine_state_dir = null
+
 # Path to a file containing the engine token Vogt calls it with. The token needs only the engine's `sessions` capability: Vogt starts and stops terminals, and has no business writing that pod's files. A file rather than an environment variable, for the same reason as `github_token_file` — a token in the environment is a token in every `docker inspect` (FR-S7).
 # default policy: behaviour
 # engine_token_file = null

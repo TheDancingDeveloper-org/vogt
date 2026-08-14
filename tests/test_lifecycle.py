@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -235,3 +236,128 @@ def test_import_reports_without_applying(populated: AppContext, tmp_path: Path) 
 def test_importing_something_absent_says_so(instance: AppContext) -> None:
     with pytest.raises(NotFound, match="no such export"):
         import_instance(instance, ImportParams(source="/nope.json", reason=WHY))
+
+
+# -- NFR-I6: one act covers the whole product ------------------------------
+
+
+def test_a_backup_carries_the_engines_state_and_says_so(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """The requirement is "as one act", and the manifest is where it is checked.
+
+    Half a restore is the failure: the work items come back and the
+    terminals' history, push subscriptions and agent tasks do not.
+    """
+    engine_state = tmp_path / "engine-state"
+    (engine_state / "agent-task-prompts").mkdir(parents=True)
+    (engine_state / "agent-task-prompts" / "one.md").write_text("a brief", "utf-8")
+    (engine_state / "push.json").write_text('{"subscriptions": []}', "utf-8")
+
+    ctx = dataclasses.replace(
+        instance,
+        config=instance.config.model_copy(update={"engine_state_dir": engine_state}),
+    )
+    result = backup(ctx, BackupParams(reason="nfr-i6"))
+
+    copied = Path(result.path) / "engine-state"
+    assert (copied / "push.json").read_text("utf-8") == '{"subscriptions": []}'
+    assert (copied / "agent-task-prompts" / "one.md").read_text("utf-8") == "a brief"
+    assert "copied from" in result.engine_state
+    assert result.import_root, "a restore elsewhere needs to know where projects were"
+
+
+def test_a_backup_without_the_engine_says_which(instance: AppContext) -> None:
+    """Not an error, and not silence.
+
+    A core-only deployment has no engine state, and a backup of one is
+    complete. What it must not do is look identical to a merged backup that
+    missed half the product.
+    """
+    result = backup(instance, BackupParams(reason="core only"))
+    assert result.engine_state == "not configured"
+    assert not (Path(result.path) / "engine-state").exists()
+
+
+def test_a_backup_survives_an_unreadable_engine_directory(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """A partial backup beats no backup, and says which part it is."""
+    ctx = dataclasses.replace(
+        instance,
+        config=instance.config.model_copy(
+            update={"engine_state_dir": tmp_path / "not-there"}
+        ),
+    )
+    result = backup(ctx, BackupParams(reason="engine gone"))
+    assert "does not exist" in result.engine_state
+    assert (Path(result.path) / "declared.sqlite3").is_file()
+
+
+def test_a_restore_puts_the_engine_state_back(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    engine_state = tmp_path / "engine-state"
+    engine_state.mkdir()
+    (engine_state / "push.json").write_text("original", "utf-8")
+
+    ctx = dataclasses.replace(
+        instance,
+        config=instance.config.model_copy(update={"engine_state_dir": engine_state}),
+    )
+    taken = backup(ctx, BackupParams(reason="before"))
+    (engine_state / "push.json").write_text("clobbered", "utf-8")
+
+    restored = restore(
+        ctx, RestoreParams(source=taken.path, confirm=True, reason="nfr-i6 test")
+    )
+
+    assert (engine_state / "push.json").read_text("utf-8") == "original"
+    assert "restored into" in restored.engine_state
+
+
+def test_a_restore_reports_an_estate_that_moved(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """FR-E3's path agreement, at the moment it is most likely to break.
+
+    A restore does not rewrite the paths in the store — they are declared
+    state, and rewriting them would be inventing a decision. So it says
+    where projects were and where they will be looked for, and lets somebody
+    who moved the estate see it here rather than in a session that will not
+    open.
+    """
+    taken = backup(instance, BackupParams(reason="before the move"))
+    moved = dataclasses.replace(
+        instance,
+        config=instance.config.model_copy(update={"import_root": tmp_path / "moved"}),
+    )
+    restored = restore(
+        moved, RestoreParams(source=taken.path, confirm=True, reason="nfr-i6 test")
+    )
+
+    assert restored.import_root_then != restored.import_root_now
+    assert restored.import_root_now is not None
+    assert "moved" in restored.import_root_now
+
+
+def test_an_older_manifest_still_restores(instance: AppContext, tmp_path: Path) -> None:
+    """A version bump must not strand the backups taken before it.
+
+    Manifest v1 covered the two stores and said nothing about the rest — not
+    because it failed to copy the engine's state, but because there was none
+    to copy. It reads as unknown, which is the honest word for it.
+    """
+    taken = backup(instance, BackupParams(reason="v1 era"))
+    manifest_path = Path(taken.path) / "manifest.json"
+    raw = json.loads(manifest_path.read_text("utf-8"))
+    raw["manifest_version"] = 1
+    del raw["engine_state"]
+    del raw["import_root"]
+    manifest_path.write_text(json.dumps(raw), "utf-8")
+
+    restored = restore(
+        instance,
+        RestoreParams(source=taken.path, confirm=True, reason="nfr-i6 test"),
+    )
+    assert restored.instance_id == taken.instance_id

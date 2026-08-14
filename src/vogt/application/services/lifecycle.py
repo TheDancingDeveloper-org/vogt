@@ -36,7 +36,7 @@ from vogt.errors import Conflict, InvalidRequest, NotFound
 from vogt.storage.interface import WorkFilter
 
 MANIFEST_NAME = "manifest.json"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 
 #: An export covers everything, finished work included: it is a record,
 #: not a to-do list.
@@ -56,6 +56,17 @@ class Manifest:
     declared_schema_version: int
     observed_schema_version: int
     taken_at: datetime
+    #: What this backup covers besides the two stores, and what it does not
+    #: (NFR-I6). A backup that silently covers less than the product is the
+    #: failure the requirement names: the work items come back and the
+    #: terminals' history, push subscriptions and agent tasks do not.
+    engine_state: str = "not configured"
+    #: Where imported projects lived when this was taken. A restore that
+    #: re-establishes the stores without the tree leaves every project
+    #: pointing at a path that no longer exists (FR-E3, §6.3), and the
+    #: restore says so rather than letting it be discovered by a session
+    #: that will not open.
+    import_root: str | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -65,6 +76,8 @@ class Manifest:
             "declared_schema_version": self.declared_schema_version,
             "observed_schema_version": self.observed_schema_version,
             "taken_at": to_iso(self.taken_at),
+            "engine_state": self.engine_state,
+            "import_root": self.import_root,
         }
 
     @classmethod
@@ -76,7 +89,66 @@ class Manifest:
             declared_schema_version=int(str(raw.get("declared_schema_version", 0))),
             observed_schema_version=int(str(raw.get("observed_schema_version", 0))),
             taken_at=from_iso(str(raw.get("taken_at"))),
+            # Absent in a version-1 manifest, which covered the two stores and
+            # said nothing about the rest. Read as "unknown" rather than as
+            # "nothing", because an old backup did not fail to copy the engine
+            # state — it was taken before there was any.
+            engine_state=str(raw.get("engine_state", "unknown (manifest v1)")),
+            import_root=(
+                None if raw.get("import_root") is None else str(raw["import_root"])
+            ),
         )
+
+
+#: Where the engine's state lands inside a backup directory.
+ENGINE_STATE_DIR = "engine-state"
+
+
+def _copy_engine_state(source: Path | None, target: Path) -> str:
+    """Copy the engine's state directory, and say what happened either way.
+
+    Returns the sentence the manifest carries. Every branch returns one,
+    including the failures: NFR-I6 asks for the whole product in one act, and
+    a backup that quietly covered two thirds of it would be indistinguishable
+    from one that covered all three until somebody restored it.
+
+    Not fatal. A backup of the stores is worth having even when the engine's
+    directory is unreadable — refusing to take one would trade a partial
+    backup for none, which is the wrong way round.
+    """
+    if source is None:
+        return "not configured"
+    resolved = Path(source).expanduser()
+    if not resolved.is_dir():
+        return f"configured at {resolved}, which does not exist"
+    try:
+        shutil.copytree(resolved, target, symlinks=True, dirs_exist_ok=True)
+    except OSError as exc:
+        return f"copy of {resolved} failed: {exc}"
+    return f"copied from {resolved}"
+
+
+def _restore_engine_state(source: Path, target: Path | None) -> str:
+    """Put the engine's state back, and say what happened either way.
+
+    Never fatal, and never silent. The stores are already in place by the
+    time this runs — refusing here would leave a half-restored instance,
+    which is the state `restore` verifies its manifest up-front to avoid.
+    """
+    if not source.is_dir():
+        return "not in this backup"
+    if target is None:
+        return (
+            f"in the backup at {source}, but no engine_state_dir is "
+            "configured here, so it was not restored"
+        )
+    resolved = Path(target).expanduser()
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, resolved, symlinks=True, dirs_exist_ok=True)
+    except OSError as exc:
+        return f"restoring into {resolved} failed: {exc}"
+    return f"restored into {resolved}"
 
 
 def _snapshot(source: Path, target: Path) -> None:
@@ -114,6 +186,9 @@ def backup(ctx: AppContext, params: BackupParams) -> BackupResult:
 
     _snapshot(ctx.config.declared_db_path, destination / "declared.sqlite3")
     _snapshot(ctx.config.observed_db_path, destination / "observed.sqlite3")
+    engine_state = _copy_engine_state(
+        ctx.config.engine_state_dir, destination / ENGINE_STATE_DIR
+    )
 
     manifest = Manifest(
         manifest_version=MANIFEST_VERSION,
@@ -122,6 +197,8 @@ def backup(ctx: AppContext, params: BackupParams) -> BackupResult:
         declared_schema_version=ctx.declared.schema_version(),
         observed_schema_version=ctx.observed.schema_version(),
         taken_at=taken_at,
+        engine_state=engine_state,
+        import_root=str(ctx.config.resolved_import_root),
     )
     (destination / MANIFEST_NAME).write_text(
         json.dumps(manifest.to_json(), indent=2) + "\n", encoding="utf-8"
@@ -137,6 +214,8 @@ def backup(ctx: AppContext, params: BackupParams) -> BackupResult:
     return BackupResult(
         path=str(destination),
         instance_id=instance_id,
+        engine_state=manifest.engine_state,
+        import_root=manifest.import_root,
         declared_schema_version=manifest.declared_schema_version,
         observed_schema_version=manifest.observed_schema_version,
         taken_at=taken_at,
@@ -157,11 +236,15 @@ def restore(ctx: AppContext, params: RestoreParams) -> RestoreResult:
         raise NotFound(msg)
     manifest = Manifest.from_json(json.loads(manifest_path.read_text("utf-8")))
 
-    if manifest.manifest_version != MANIFEST_VERSION:
+    if manifest.manifest_version > MANIFEST_VERSION:
         msg = (
-            f"backup manifest version {manifest.manifest_version} is not "
-            f"{MANIFEST_VERSION}; this build cannot read it"
+            f"backup manifest version {manifest.manifest_version} is newer "
+            f"than {MANIFEST_VERSION}; run a newer build rather than guessing "
+            "what it contains"
         )
+        raise InvalidRequest(msg)
+    if manifest.manifest_version < 1:
+        msg = f"backup manifest version {manifest.manifest_version} is not readable"
         raise InvalidRequest(msg)
     for name in ("declared.sqlite3", "observed.sqlite3"):
         if not (source / name).is_file():
@@ -195,6 +278,10 @@ def restore(ctx: AppContext, params: RestoreParams) -> RestoreResult:
             if stale.exists():
                 stale.unlink()
 
+    engine_state = _restore_engine_state(
+        source / ENGINE_STATE_DIR, ctx.config.engine_state_dir
+    )
+
     migrated = ctx.declared.migrate()
     ctx.observed.migrate()
     return RestoreResult(
@@ -203,6 +290,9 @@ def restore(ctx: AppContext, params: RestoreParams) -> RestoreResult:
         restored_from=manifest.taken_at,
         migrations_applied=list(migrated.applied),
         declared_schema_version=ctx.declared.schema_version(),
+        engine_state=engine_state,
+        import_root_then=manifest.import_root,
+        import_root_now=str(ctx.config.resolved_import_root),
     )
 
 
