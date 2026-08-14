@@ -536,3 +536,45 @@ def test_a_push_run_is_never_cancelled_by_the_next_push() -> None:
         "may be cancelled, because its runs classify against the merge base "
         "and a later run covers everything an earlier one would have"
     )
+
+
+def test_the_local_check_runs_what_ci_runs() -> None:
+    """`scripts/check.sh` is a floor under CI, not a second opinion.
+
+    It exists because remembering four commands per half and being right
+    about all of them every time is not a strategy — `ruff check` and
+    `ruff format --check` feel like one command and are two, and that is how
+    a red build reached `dev`.
+
+    Asserted one way only. Every command the script runs must be a command CI
+    runs, so a green run locally means something; the reverse is not required,
+    because a job may legitimately do more than a developer needs before
+    pushing.
+    """
+    # Comments stripped, because this file's own header explains the
+    # `ruff check` / `ruff format` slip by naming both — so a guard that
+    # searched the raw text would find "ruff format" in the sentence about
+    # forgetting to run it. That is the mistake `_without_comments` exists
+    # for, made again three hundred lines below it, and caught by mutating
+    # the script rather than by reading the test.
+    script = _without_comments(
+        (REPO_ROOT / "scripts" / "check.sh").read_text(encoding="utf-8")
+    )
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    required = [
+        ("ruff check", "ruff check ."),
+        ("ruff format", "ruff format --check ."),
+        ("mypy", "mypy"),
+        ("pytest", "pytest"),
+        ("cargo fmt", "--all"),
+        ("cargo clippy", "--workspace --all-targets -- -D warnings"),
+        ("cargo test", "--workspace"),
+        ("pnpm typecheck", "pnpm typecheck"),
+        ("pnpm test", "pnpm test"),
+    ]
+    for label, fragment in required:
+        assert label in script, f"{label} is missing from scripts/check.sh"
+        assert fragment in ci, (
+            f"scripts/check.sh runs {label}, and `ci.yml` no longer contains "
+            f"{fragment!r} — one of the two has moved and they must not drift"
+        )
