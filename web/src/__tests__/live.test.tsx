@@ -27,6 +27,7 @@ import AuditBrowser from "../AuditBrowser";
 import Backlog from "../Backlog";
 import Board from "../Board";
 import Projects from "../Projects";
+import WorkItemDetail from "../WorkItemDetail";
 import { describeAge } from "../viewAge";
 import { isConnected } from "../store";
 import {
@@ -153,6 +154,19 @@ describe("FR-U10 — every Vogt surface says how old it is", () => {
           "Stale — updated 5m ago, press Refresh",
         ),
       { timeout: 4_000 },
+    );
+  });
+
+  it("the item page says how old it is, where a stale read is quietest", async () => {
+    fakeVogt();
+    const { container } = mountAt("/w/WI-1", "/w/WI-1", () => (
+      <WorkItemDetail itemRef="WI-1" />
+    ));
+
+    await waitFor(() =>
+      expect(container.querySelector(".wid-age")?.textContent).toMatch(
+        /Updated \d+s ago/,
+      ),
     );
   });
 
