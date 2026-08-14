@@ -966,7 +966,7 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 127 are delivered, 56 are implemented and
+**201 conjuncts across 46 IDs. 131 are delivered, 52 are implemented and
 asserted by nothing, 7 cannot be verified in this environment at all, and 11
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
@@ -974,7 +974,7 @@ before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved twenty-five conjuncts, and three of them were moved by
+**A fourth pass moved twenty-nine conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,9 +996,9 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +25 in the fourth pass (fourteen out of §6.2, nine out of §6.2a, two
-  out of §6.2b)
-- **56 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 9
+  then +29 in the fourth pass (fourteen out of §6.2, thirteen out of §6.2a,
+  two out of §6.2b)
+- **52 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 13
 - **11 short** = 43 − 19 + 1 arriving from §6.2b, − 14
 - **7 unverifiable** = 69 − 60 − 2
 
@@ -1105,6 +1105,10 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-U15 | Quick-create exists on the board as well as the backlog, will not submit without a title *or* a typed reason, never prefills the reason, and is unreachable while Vogt cannot be asked | `board.test.tsx`'s FR-U15 block (seven), including `never prefills the reason, however convenient the last one was` — the board deliberately remembers the last *move's* reason, and the create form deliberately does not inherit it |
 | **FR-U10** | Drift arrivals and notification counts re-read on `vogt-changed` rather than waiting to be asked; all five surfaces report their own age; a lost stream is indicated and reconciles | `web/src/__tests__/live.test.tsx` (twenty-four) over `web/src/viewAge.tsx`, which is the board's inline machinery lifted out so there is one implementation and not five. Two surfaces deliberately do *not* subscribe, and each is pinned by a test so it stays a decision rather than an omission: the backlog, because re-ranking the estate under a reader's cursor on every announced change is a different act from telling them how old the view is, and the project page's sweep aggregates, because a four-panel pull per transition is a poll wearing an event's clothes. The drift re-read is refused while a card holds a half-typed reason, since refetching replaces every proposal object and would eat it (FR-W1) |
 | **FR-U10** | A lost stream is indicated and reconciles on reconnect | `live.test.tsx`, over the fix in `api.ts`. This conjunct was in §6.2a — implemented, asserted by nothing — and was not implemented: an ended stream broke the read loop and returned, so a restarted engine left the client believing it was connected with no reconnect scheduled. §6.3 finding 17 |
+| **FR-U11** | A pasted link opens the surface it names — project, work item, session and audit query — and a second link opens a second surface without closing the first | `web/src/__tests__/shell.test.tsx` (nine), which mounts the **whole shell** rather than a surface. That was the half M11 found broken for every surface and the half nothing mounted, and the stated blocker was wrong: `App.tsx` mounts in jsdom given four engine stubs and nothing else. `/audit?ref=WI-1` is asserted to carry the item's `entity_id` rather than opening an unfiltered log, and a stale session id opens no phantom tab |
+| **FR-T6** | Every GUI hides the assistant when it is not provisioned, the route included | `shell.test.tsx` (two): `#/assistant` with `assistant_enabled` false opens no tab and no drawer button, and the same link *with* a key opens it. The mirror is what makes the first assertion worth anything — without it, a dead route would pass |
+| **FR-U7** | The project page carries all six: brief, CI status, contract and compliance, drift inbox, dependency graph, import form | `web/src/__tests__/projectPage.test.tsx` (nine), asserting contents rather than presence — the failing CI check by name, the criteria under the compliance status, the declared-versus-observed version in the brief, the unresolved count on the graph |
+| **FR-U5** | Description, comments, relations, labels, collected evidence and the start-session control, on one page | Seven tests in `workItemDetail.test.tsx`, six for the panels and one holding all six together. Relations render as links to the related item; evidence shows the per-input contributions and the inputs that did not fire |
 | FR-U11, FR-U14 | The board's six filters and its swimlane mode are the URL: restored from a pasted link, written back when chosen on the surface, round-tripped, and put back when the shell navigates to the bare path | `board.test.tsx`'s FR-U11 block (four) and `restores every one of the six filters from a pasted link`; `backlog.test.tsx::round-trips a filter chosen on the surface through the URL` |
 | FR-U14 | A combined filter is nameable, recalled in full, survives a reload as per-client state, and a refresh interval is not part of what a name means | `board.test.tsx`'s FR-U14 block (five), including `keeps the multi-valued filters intact through the round trip` and `does not let a named view change how often the board refreshes`; `backlog.test.tsx::saves a named filter set and recalls it` |
 | **FR-U17** | A claim backed by a still-running session is marked provisional, not fresh — read from the observed store itself, not from a ranking over it | `web/src/WorkItemDetail.tsx`'s "Observed evidence" panel, through the new `observations.list` binding in `vogtApi.ts`; ten tests in `workItemDetail.test.tsx`. Three states, not two: an observation whose payload does not carry the flag at all is `unverified` rather than settled, in the same words the trust badge uses, because a blank says "no opinion" when the honest answer is "nobody checked". `settlement()` reads the collector's own `provisional` flag rather than re-deriving liveness — a surface deciding for itself what "still running" means is a second copy of a rule the collector already keeps, and the two would eventually disagree. There is no work-item parameter on the operation, so the panel matches on the payload's `work_item`, which `session_outcomes.py` writes for both kinds it produces |
@@ -1200,7 +1204,7 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Fifty-six conjuncts whose code was read and believed, which nothing in any
+Fifty-two conjuncts whose code was read and believed, which nothing in any
 suite would notice the loss of. (Sixty-five, less the seven the fourth pass
 asserted —  NFR-D12, FR-U10, FR-U20, FR-E1, FR-E9, FR-T1/T2 and FR-T6 — which the fourth
 pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
@@ -1219,14 +1223,10 @@ that stopped being the demo's job and became a test somebody has not written.
 |---|---|---|
 | FR-E2 | The activity state is published on the server-wide SSE stream | A test that reads `/api/events`; today the only activity assertion polls `GET /api/sessions/{id}` |
 | FR-T2 | One pending action at a time; a new user message supersedes; the 120-second expiry; voice cannot approve | Three Rust tests and one front-end test. There is a front-end test runner now — `web/package.json` has `test` — so the reason this row gave for itself has expired and the row has not. `Assistant.tsx` **is** mounted now, by `assistant.test.tsx`, but only around the microphone: the pending-action rules — one at a time, superseded by a new message, expired at 120 seconds, and never approvable by voice — are still asserted by nothing on this side |
-| FR-T6 | Every GUI hides the surface, the route included *(from §6.2)* | A mount of `App.tsx` at `#/assistant` with `assistant_enabled` false. The route is gated now — the same condition the drawer button carries, read reactively so a deep link still opens once the config resolves — and the gate that was missing was found by an audit rather than by a test, which is the second time in this product for this exact shape (§6.3 findings 3 and 7) |
 | FR-M2 | `waiting-for-input`, `errored`, and the agent-task notify hook are routed | A test that drives `spawn_activity_watcher`; the drift watcher has unit tests and these two, which are the headline notifications, have none |
 | FR-S9 | The audit records real actors across the hop; FR-S4's double gating is unweakened behind the proxy | A test that drives a real vogt-core through the front door. Every engine test uses a stand-in core that approves everything, so the second gate is asserted on its own and never behind the first |
-| FR-U5 | Description, comments, relations, labels, collected evidence, and the start-session control, on one page *(from §6.2b)* | A mount of `WorkItemDetail` asserting each panel is there. `workItemDetail.test.tsx` mounts it and asserts the inline edit and the outage states, and nothing about what the page contains |
 | FR-U6 | The explainable `why` on the ranked views *(from §6.2b)* | An assertion that the `why` panel renders the contributions `GET /why` returned. The harness answers that route and no test looks at what was drawn with it |
-| FR-U7 | Brief, CI status, contract and compliance, drift inbox, dependency graph, import form on a project page *(from §6.2b)* | A mount of `Projects`. `absentStates.test.tsx` mounts it for the outage cases and incidentally proves the page survives a per-panel failure; nothing asserts the six panels exist when Vogt answers |
 | FR-U10 | Session activity updates from the SSE stream without a refresh | A test that drives the engine's own activity events through `store.ts`. The board's half is asserted now — `live.test.tsx` drives `vogt-changed` end to end — and the session-activity half still rests on inspection |
-| FR-U11 | Project, work item, session and audit query addressable by URL *(from §6.2b)* | A mount of `App.tsx` — not of a surface. The surfaces restore from their own URLs and that is now asserted, but `App.tsx`'s URL→tabs effect is what turns a pasted link into an open surface, and it is the half M11 found broken for every surface and the half nothing mounts |
 | FR-U13 | Swimlanes by project or initiative; per-column WIP counts; collapse/expand of lanes and columns; layout persisted per client *(from §6.2b)* | Four assertions on the board, which is already mounted twenty-eight times in `board.test.tsx`. The swimlane *mode* is asserted as a filter value and the grouping it produces is not; `data-wip` is rendered and read by nobody |
 | FR-U16 | Sessions by fuzzy name *(from §6.2b)* | A palette test with a populated session store. `commandPalette.test.tsx` asserts projects, work items and views, and the session entries come from the engine's store, which no test seeds |
 | FR-U18 | Both sides of a disagreement, with provenance and age, rendered open before any act is possible *(from §6.2b)* | A mount of the drift inbox against a proposal carrying an evidence snapshot. That bulk accept cannot arrive is asserted from source; that the evidence is *shown first* is not asserted anywhere |
