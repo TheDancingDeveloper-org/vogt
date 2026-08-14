@@ -4874,6 +4874,13 @@ textarea {
   flex-wrap: wrap;
 }
 
+/* Two acts on one batch, each with its own reason (FR-U6). The rule is drawn
+   because the fields would otherwise read as one long row of one form. */
+.vogt-backlog-bulk-row + .vogt-backlog-bulk-row {
+  border-top: 1px dashed var(--bd);
+  padding-top: 8px;
+}
+
 .vogt-backlog-bulk-row .vogt-backlog-field {
   min-width: 160px;
 }
