@@ -519,22 +519,37 @@ def test_the_opencode_registration_does_not_freeze_an_endpoint() -> None:
     )
 
 
-def test_a_push_run_is_never_cancelled_by_the_next_push() -> None:
-    """NFR-C1's path gating makes cancellation lose coverage permanently.
+def test_no_two_pushed_commits_share_a_concurrency_group() -> None:
+    """NFR-C1's path gating makes a lost run lose coverage permanently.
 
     A push is classified by `before..sha`, so each commit is checked by
-    exactly one run and no later run looks at it again. Cancel that run and
+    exactly one run and no later run looks at it again. Lose that run and
     those files are not checked later — they are checked never.
 
-    Found the way these things are found: `tests/test_deploy.py` changed in
-    one push, the run was cancelled by the next push, the following run's
-    range began after it, and a lint error reached `dev` through the gap.
+    **`cancel-in-progress: false` is not enough, and believing it was cost a
+    second escape.** That setting governs runs which are *in progress*; a run
+    still **pending** is cancelled whenever a newer run joins its group,
+    unconditionally. On a single self-hosted runner nearly every run is
+    pending for a while, so a `ruff format` failure slipped through exactly
+    as the previous failure had, while the workflow carried a comment saying
+    the hole was shut.
+
+    Keying a push by its commit is what closes it: no two pushed commits
+    share a group, so none can supersede another. A pull request still
+    cancels its own superseded runs, which loses nothing — those classify
+    against the merge base.
     """
     raw = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
-    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in raw, (
-        "a branch push must run to completion; only a superseded pull request "
-        "may be cancelled, because its runs classify against the merge base "
-        "and a later run covers everything an earlier one would have"
+    group = re.search(r"^  group: (.+)$", raw, re.MULTILINE)
+    assert group, "ci.yml declares a concurrency group"
+    assert "github.sha" in group.group(1), (
+        f"pushes must be keyed by commit, not by ref: {group.group(1)!r}. Two "
+        "commits in one group means the older run can be cancelled while "
+        "pending, and its files are then checked by nothing, ever"
+    )
+    assert "pull_request.number" in group.group(1), (
+        "a pull request still groups by PR, so its superseded runs can be "
+        "cancelled — they classify against the merge base and lose nothing"
     )
 
 

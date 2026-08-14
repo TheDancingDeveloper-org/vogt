@@ -1518,11 +1518,29 @@ similar, and the new entries are all of the same kind as the old ones.
     against the merge base, so a later run covers everything an earlier one
     would have — and `test_deploy.py` asserts it.
 
+    **The first fix did not work, and the record said it had.** Setting
+    `cancel-in-progress` to false for pushes governs runs that are *in
+    progress*; a run still **pending** is cancelled whenever a newer run
+    joins its group, unconditionally and whatever that setting says. On a
+    single self-hosted runner nearly every run is pending for a while, so the
+    hole stayed open — and a `ruff format` failure went through it in exactly
+    the way the lint error had, hours after the workflow gained a comment
+    explaining that this could no longer happen. It was found by noticing a
+    cancelled run with **no jobs at all**, which is what a pending
+    cancellation looks like.
+
+    Pushes are now keyed by commit, so no two pushed commits share a group
+    and none can supersede another. The test asserts the group, not the
+    setting: `cancel-in-progress` was the thing that read as a fix and was
+    not one, and a test asserting it would have gone green on both versions.
+
     The shape is worth naming because this list keeps finding it in new
     dress: **a check that did not run and a check that passed are the same
     colour on a dashboard.** §6.2's NFR-C6 row already records the deliberate
     path gating; what it did not anticipate was gating plus cancellation
-    turning a reduction in *when* checks run into a hole in *whether* they do.
+    turning a reduction in *when* checks run into a hole in *whether* they
+    do. What I did not anticipate is that fixing it wrongly would look
+    identical to fixing it.
 
 21. ~~**A test that proved the wrong path, and looked exactly like proof of
     the right one.**~~ **Caught by a surviving mutation, and rewritten.** The
