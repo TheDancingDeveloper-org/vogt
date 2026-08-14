@@ -39,6 +39,7 @@ import {
   createMemo,
   createResource,
   createSignal,
+  onCleanup,
 } from "solid-js";
 import { useNavigate, useSearchParams } from "@solidjs/router";
 import {
@@ -58,6 +59,7 @@ import {
   type FreshnessSummary,
 } from "./vogtApi";
 import { openWorkItemTab } from "./tabs";
+import { ViewAgeBadge, createLoadStamp, createViewAge, onVogtLive } from "./viewAge";
 
 interface Props {
   onError?: (message: string) => void;
@@ -532,11 +534,21 @@ const DriftCard: Component<{
   onResolved: (message: string) => void;
   onFailure: (message: string) => void;
   onOpenProject: (slug: string) => void;
+  /** Whether this card is holding a reason somebody has started typing. */
+  onDrafting?: (id: string, drafting: boolean) => void;
 }> = (props) => {
   const [resolution, setResolution] = createSignal<Resolution>("accepted");
   const [reason, setReason] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [failure, setFailure] = createSignal<string | null>(null);
+
+  // The inbox re-reads when Vogt announces a change, and a re-read replaces
+  // every proposal object — which would take a half-written reason with it.
+  // So a card says when it is holding one, and the live re-read waits.
+  createEffect(() => {
+    props.onDrafting?.(props.proposal.id, reason().trim().length > 0 || busy());
+  });
+  onCleanup(() => props.onDrafting?.(props.proposal.id, false));
 
   const sides = createMemo(() => describeSides(props.proposal));
   const showable = createMemo(() => evidenceIsShowable(props.proposal));
@@ -979,6 +991,71 @@ const Projects: Component<Props> = (props) => {
 
   const gates = createMemo(() => driftValue()?.human_gated ?? {});
 
+  // -- drift arrives rather than being asked for (FR-U10) -------------------
+  //
+  // A drift proposal is raised by a sweep, not by anybody looking at this
+  // page, and until now the only way to find out was to press Refresh — so
+  // the inbox was as current as the last time somebody wondered whether it
+  // was. Raising one publishes `drift.raised` onto vogt-core's event feed,
+  // the front door republishes that onto the stream this client already has
+  // open, and the read below is the same one the filter key makes.
+  //
+  // Guarded twice. Only the drift view re-reads: the brief and the dependency
+  // graph are per-project aggregates over sweeps, and re-pulling four panels
+  // on every announced work-item transition would be a poll wearing an
+  // event's clothes. And a card holding a half-typed reason stops the
+  // re-read outright — the answer replaces every proposal object, and losing
+  // somebody's sentence to a background refresh is exactly the write FR-W1
+  // makes them type.
+  const [drafting, setDrafting] = createSignal<string[]>([]);
+
+  const noteDrafting = (id: string, active: boolean) =>
+    setDrafting((current) => {
+      const held = current.includes(id);
+      if (active === held) return current;
+      return active ? [...current, id] : current.filter((one) => one !== id);
+    });
+
+  onVogtLive(() => void refetchDrift(), {
+    when: () => place().view === "drift" && drafting().length === 0,
+  });
+
+  // -- how old this view is (FR-U10) ----------------------------------------
+  //
+  // Per view, because the panels are separate reads: the drift inbox's age is
+  // not the brief's, and one badge covering both would be wrong about
+  // whichever was older. Distinct again from the freshness lines inside the
+  // panels, which say how old the *evidence* is — this one says how long ago
+  // this tab last spoke to Vogt at all.
+  const driftLoadedAt = createLoadStamp(drift, (result) => result.ok);
+  const briefLoadedAt = createLoadStamp(brief, (result) => result.ok);
+  const graphLoadedAt = createLoadStamp(graph, (result) => result.ok);
+  const listLoadedAt = createLoadStamp(projects, (result) => result.ok);
+
+  /** Which read the badge is about: the one this view is showing. */
+  const shownRead = createMemo(() => {
+    const view = place().view;
+    if (view === "drift") return { at: driftLoadedAt(), failure: driftOutage() };
+    if (view === "deps") return { at: graphLoadedAt(), failure: graphOutage() };
+    if (view === "overview" && place().project) {
+      return { at: briefLoadedAt(), failure: briefOutage() };
+    }
+    // The estate list, which is what "overview with no project" and the
+    // import form are both looking at.
+    return { at: listLoadedAt(), failure: projectOutage() };
+  });
+
+  const viewAge = createViewAge(() => {
+    const shown = shownRead();
+    return {
+      loadedAt: shown.at,
+      outage: shown.failure?.unavailable ? shown.failure.message : null,
+      failed: Boolean(shown.failure),
+      // Only the inbox re-reads on the stream, so only the inbox may claim it.
+      live: place().view === "drift",
+    };
+  });
+
   /**
    * Slugs the inbox's project picker offers.
    *
@@ -1172,6 +1249,11 @@ const Projects: Component<Props> = (props) => {
             )}
           </For>
         </div>
+        <ViewAgeBadge
+          age={viewAge()}
+          class="vogt-projects-age"
+          title="How long ago this view last got an answer from Vogt — not how old the evidence behind it is, which each panel says for itself"
+        />
         <button type="button" onClick={refresh}>
           Refresh
         </button>
@@ -1706,6 +1788,7 @@ const Projects: Component<Props> = (props) => {
                     }}
                     onFailure={(message) => props.onError?.(message)}
                     onOpenProject={openProject}
+                    onDrafting={noteDrafting}
                   />
                 )}
               </For>

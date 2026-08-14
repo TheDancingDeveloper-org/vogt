@@ -55,6 +55,7 @@ import {
   type RankedView,
 } from "./vogtApi";
 import { openWorkItemTab } from "./tabs";
+import { ViewAgeBadge, createLoadStamp, createViewAge } from "./viewAge";
 
 interface Props {
   onError?: (message: string) => void;
@@ -577,6 +578,31 @@ const Backlog: Component<Props> = (props) => {
     return result && !result.ok ? result : null;
   });
 
+  // -- how old this *view* is (FR-U10) --------------------------------------
+  //
+  // Distinct from the freshness line below it, which is how old the evidence
+  // Vogt ranked from is. Both are needed and neither substitutes for the
+  // other: a sweep that ran a minute ago, rendered by a tab that last asked
+  // an hour ago, is a fresh answer on a stale screen — and until this badge
+  // existed that tab looked exactly like one opened a second ago, which is
+  // the clause FR-U10 is actually about.
+  //
+  // No poll and no subscription here, deliberately: the ranked views are a
+  // sweep product and re-ranking the estate under a reader's cursor on every
+  // announced change is a different decision from telling them the truth
+  // about the age of what they are reading. So the badge says "press
+  // Refresh", which is a thing this header has.
+  const loadedAt = createLoadStamp(ranked, (result) => result.ok);
+
+  const viewAge = createViewAge(() => {
+    const failure = outage();
+    return {
+      loadedAt: loadedAt(),
+      outage: failure?.unavailable ? failure.message : null,
+      failed: Boolean(failure),
+    };
+  });
+
   const entries = createMemo<RankedEntry[]>(() => view()?.items ?? []);
 
   /**
@@ -1068,6 +1094,11 @@ const Backlog: Component<Props> = (props) => {
           </For>
         </div>
         <div class="vogt-backlog-header-actions">
+          <ViewAgeBadge
+            age={viewAge()}
+            class="vogt-backlog-age"
+            title="How long ago this page last got an answer from Vogt — not how old the evidence behind that answer is, which is the line below"
+          />
           <button type="button" onClick={openQuickCreate}>
             Quick create
           </button>

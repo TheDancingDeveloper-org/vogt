@@ -23,6 +23,7 @@ import type { JSX } from "solid-js";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { render } from "@solidjs/testing-library";
 import { vi } from "vitest";
+import { startEventStream, stopEventStream } from "../store";
 
 /** The front door's mount, as `vogtApi.ts` names it. */
 const VOGT_PREFIX = "/api/vogt";
@@ -95,6 +96,94 @@ export interface FakeVogt {
   route(key: string, handler: Handler): void;
   /** The calls matching `"POST /work/transition"`, in order. */
   matching(key: string): RecordedCall[];
+  /** The engine's SSE stream, which FR-U10 is about. */
+  stream: FakeStream;
+}
+
+// -- the event stream (FR-U10) ----------------------------------------------
+//
+// The engine's `/api/events` is not a Vogt path, so it is not in the route
+// table above — it is the *other* half of this product, and the half FR-U10
+// names. `store.ts` reads it with `fetch` and a `ReadableStream` rather than
+// with `EventSource` (an `EventSource` cannot carry the bearer token), which
+// is lucky: jsdom has no `EventSource` and this harness already owns `fetch`.
+//
+// So the stub answers `/api/events` with a stream the test holds the writing
+// end of. That makes a live-update test an assertion about the *join*: a
+// frame in the engine's wire format goes in, `subscribeEvents` parses it,
+// `store.ts` routes `vogt-changed` to its listeners, and the surface re-reads
+// through the real route table. Nothing in the middle is mocked, which is the
+// only reason the test is worth writing — the two ends were already asserted
+// separately and the join between them was not.
+
+export interface FakeStream {
+  /** How many times a client has opened the stream, reconnects included. */
+  opens(): number;
+  /** Resolves once a client has it open. */
+  opened(): Promise<void>;
+  /** Push one frame, in the engine's own wire format. */
+  push(event: Record<string, unknown>): void;
+  /** Announce that vogt-core changed, as the front door republishes it. */
+  changed(over?: Record<string, unknown>): void;
+  /** Drop the stream the way a dead socket does: no error, just an end. */
+  drop(): void;
+}
+
+function fakeStream(): { stream: FakeStream; answer: () => Response } {
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  let opens = 0;
+  let announce: () => void = () => {};
+  let isOpen = new Promise<void>((resolve) => {
+    announce = resolve;
+  });
+  const encoder = new TextEncoder();
+  let seq = 0;
+
+  const answer = () => {
+    opens += 1;
+    const body = new ReadableStream<Uint8Array>({
+      start(open) {
+        controller = open;
+      },
+      cancel() {
+        controller = null;
+      },
+    });
+    announce();
+    return new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  };
+
+  const stream: FakeStream = {
+    opens: () => opens,
+    opened: () => isOpen,
+    push(event) {
+      if (!controller) throw new Error("nothing has the event stream open");
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+    },
+    changed(over = {}) {
+      seq += 1;
+      stream.push({
+        type: "vogt-changed",
+        kind: "work.transitioned",
+        entity_kind: "work_item",
+        entity_id: "01JWORKITEM",
+        seq,
+        ...over,
+      });
+    },
+    drop() {
+      controller?.close();
+      controller = null;
+      isOpen = new Promise<void>((resolve) => {
+        announce = resolve;
+      });
+    },
+  };
+
+  return { stream, answer };
 }
 
 // -- the default estate ------------------------------------------------------
@@ -165,6 +254,34 @@ export function rankedEntry(over: Record<string, unknown> = {}): Record<string, 
   };
 }
 
+/** One open drift proposal, carrying the evidence FR-U18 makes acting on it
+ *  conditional upon — without a snapshot the card refuses to offer a resolve
+ *  control at all, so a fixture with none tests a different thing. */
+export function driftProposal(
+  over: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: "dft_01",
+    kind: "version_mismatch",
+    subject_kind: "project",
+    subject_id: "prj_01",
+    project_id: "prj_01",
+    project_slug: "alpha",
+    summary: "alpha declares 1.2.0; the repository says 1.3.0",
+    evidence_observation_id: "obs_01",
+    evidence_snapshot: {
+      subject_key: "project:alpha",
+      collector: "git",
+      observed_at: "2026-08-01T00:00:00Z",
+      payload: { version: "1.3.0" },
+    },
+    proposed_change: { from: "1.2.0", to: "1.3.0" },
+    status: "open",
+    opened_at: "2026-08-01T00:00:00Z",
+    ...over,
+  };
+}
+
 export function freshness(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     status: "fresh",
@@ -219,6 +336,7 @@ export function fakeVogt(routes: Routes = {}): FakeVogt {
   const table: Routes = { ...defaults(), ...routes };
   const calls: RecordedCall[] = [];
   const unhandled: RecordedCall[] = [];
+  const { stream, answer: openStream } = fakeStream();
 
   const stub = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const raw = typeof input === "string" ? input : String(input);
@@ -228,6 +346,12 @@ export function fakeVogt(routes: Routes = {}): FakeVogt {
       typeof init?.body === "string"
         ? (JSON.parse(init.body) as Record<string, unknown>)
         : null;
+
+    // Answered whether or not a test drives it: a surface only reaches this
+    // path when something called `startEventStream`, and the alternative — a
+    // 404 — puts `store.ts` into its reconnect backoff for the rest of the
+    // file.
+    if (url.pathname === "/api/events") return openStream();
 
     if (!url.pathname.startsWith(VOGT_PREFIX)) {
       // The engine's own API — sessions, files, git. A Vogt surface that
@@ -270,8 +394,25 @@ export function fakeVogt(routes: Routes = {}): FakeVogt {
       const [method, path] = key.split(" ");
       return calls.filter((call) => call.method === method && call.path === path);
     },
+    stream,
   };
 }
+
+/**
+ * Open the client's event stream, as `App.tsx` does on mount.
+ *
+ * `store.ts` holds the subscription in module state, so a test that opens it
+ * must close it — `stopLiveStream` in an `afterEach` — or the next test
+ * inherits a live stream, a reconnect timer, and a set of listeners belonging
+ * to surfaces that are no longer mounted.
+ */
+export async function liveStream(vogt: FakeVogt): Promise<void> {
+  startEventStream();
+  await vogt.stream.opened();
+  await settle();
+}
+
+export const stopLiveStream = stopEventStream;
 
 // -- mounting a surface at a URL --------------------------------------------
 

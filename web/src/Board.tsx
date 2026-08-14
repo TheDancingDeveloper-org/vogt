@@ -63,8 +63,8 @@ import {
 } from "solid-js";
 import { useLocation, useNavigate, useSearchParams } from "@solidjs/router";
 import { ApiError } from "./api";
-import { onVogtChanged } from "./store";
 import { openWorkItemTab } from "./tabs";
+import { ViewAgeBadge, createViewAge, onVogtLive } from "./viewAge";
 import {
   VogtUnavailable,
   createWork,
@@ -497,24 +497,6 @@ function serverReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function formatAgo(ms: number): string {
-  const seconds = Math.max(0, Math.round(ms / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
-
-function formatClock(at: number): string {
-  try {
-    return new Date(at).toLocaleTimeString();
-  } catch {
-    return String(at);
-  }
-}
-
 function humanState(state: string): string {
   return state.replace(/_/g, " ");
 }
@@ -613,7 +595,6 @@ const Board: Component<Props> = (props) => {
   const [loading, setLoading] = createSignal(false);
   const [outage, setOutage] = createSignal<string | null>(null);
   const [loadError, setLoadError] = createSignal<string | null>(null);
-  const [now, setNow] = createSignal(Date.now());
 
   const [projects, setProjects] = createSignal<{ slug: string; name: string }[]>([]);
   const [initiatives, setInitiatives] = createSignal<
@@ -844,12 +825,8 @@ const Board: Component<Props> = (props) => {
     return key;
   });
 
-  // The freshness clock, and the poll it describes.
-  onMount(() => {
-    const tick = window.setInterval(() => setNow(Date.now()), 1000);
-    onCleanup(() => window.clearInterval(tick));
-  });
-
+  // The poll the freshness line below describes. The clock it is measured
+  // against belongs to `createViewAge` now, with the rest of the badge.
   createEffect(() => {
     const seconds = filters().poll;
     if (seconds <= 0) return;
@@ -863,29 +840,19 @@ const Board: Component<Props> = (props) => {
     onCleanup(() => window.clearInterval(timer));
   });
 
-  onMount(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void loadItems(true);
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    onCleanup(() => document.removeEventListener("visibilitychange", onVisible));
-  });
-
-  // Vogt's own changes, pushed. The front door follows the core's event
-  // cursor and republishes onto the stream this client already has open
-  // (FR-U10), so a transition somebody else made arrives here rather than
-  // waiting for the next poll. The poll stays as the floor: this stream can
-  // drop, and a board that stopped refreshing because a socket died would be
-  // stale while looking current — which is the thing the requirement is
-  // actually about.
-  onMount(() => {
-    const stop = onVogtChanged(() => {
-      if (typeof document !== "undefined" && document.hidden) return;
-      if (pending()) return; // never race a write the user is composing
-      void loadItems(true);
-    });
-    onCleanup(stop);
-  });
+  // Vogt's own changes, pushed, plus the reconcile a tab gets when it comes
+  // back to the front. The front door follows the core's event cursor and
+  // republishes onto the stream this client already has open (FR-U10), so a
+  // transition somebody else made arrives here rather than waiting for the
+  // next poll. The poll stays as the floor: this stream can drop, and a board
+  // that stopped refreshing because a socket died would be stale while
+  // looking current — which is the thing the requirement is actually about.
+  //
+  // Shared with the other four Vogt surfaces since they gained the same
+  // clause; the board's visibility handler used to sit alongside this one and
+  // is `onVogtLive`'s second half now, which also gives it the composer guard
+  // it never had.
+  onVogtLive(() => void loadItems(true), { when: () => !pending() });
 
   // -- the model the board draws -------------------------------------------
 
@@ -1241,30 +1208,18 @@ const Board: Component<Props> = (props) => {
       .join(" "),
   );
 
-  const freshness = createMemo(() => {
-    const at = loadedAt();
-    if (outage()) {
-      return {
-        tone: "outage",
-        text: at
-          ? `Vogt unreachable — last answer ${formatClock(at)}, not current`
-          : "Vogt unreachable",
-      };
-    }
-    if (!at) return { tone: "waiting", text: "Not loaded yet" };
-    const age = now() - at;
-    if (filters().poll === 0) {
-      return { tone: "paused", text: `Paused — updated ${formatAgo(age)}` };
-    }
-    if (loadError()) {
-      return { tone: "stale", text: `Stale — updated ${formatAgo(age)}, retrying` };
-    }
-    const overdue = age > filters().poll * 3000;
-    return {
-      tone: overdue ? "stale" : "live",
-      text: `${overdue ? "Stale" : "Polling"} — updated ${formatAgo(age)}`,
-    };
-  });
+  // The words are `viewAge.tsx`'s now, and the same ones every other Vogt
+  // surface says. Nothing about what the board reports changed in the move:
+  // the poll interval is still what "Polling" and "Stale" are measured
+  // against, and three times the interval is still the point at which this
+  // view stops calling itself current.
+  const freshness = createViewAge(() => ({
+    loadedAt: loadedAt(),
+    outage: outage(),
+    failed: Boolean(loadError()),
+    poll: filters().poll,
+    live: true,
+  }));
 
   const toggleKind = (kind: string) => {
     const current = filters().kinds;
@@ -1356,9 +1311,10 @@ const Board: Component<Props> = (props) => {
               <span>of {total()} matching</span>
             </Show>
             <span>{columns().length} columns</span>
-            <span class={`board-freshness board-freshness--${freshness().tone}`}>
-              {freshness().text}
-            </span>
+            <ViewAgeBadge
+              age={freshness()}
+              class={`board-freshness board-freshness--${freshness().tone}`}
+            />
           </div>
           <p class="board-note">
             Columns come from <code>workflow.list</code>; a drag is a{" "}
