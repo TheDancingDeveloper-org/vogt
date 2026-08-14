@@ -1392,6 +1392,271 @@ async fn task_prompt_artifact_cleanup_prunes_old_runs_and_orphans() {
     assert!(!orphan_dir.exists());
 }
 
+/// A session's brief lands in a file, and the child is told where it is —
+/// never handed the text. Vogt writes the work item's brief this way because
+/// it is a separate process and the file belongs on the engine's state dir.
+#[tokio::test]
+async fn session_prompt_is_written_to_a_file_the_child_is_pointed_at() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let brief = "Fix the flaky forge test.\n\nWhy: it blocks the release.";
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "work item 42",
+            "prompt": brief,
+            "command": ["/bin/sh", "-lc",
+                "printf 'file=[%s]\\n' \"$MYDEVENV2_AGENT_TASK_PROMPT_FILE\"; \
+                 cat \"$MYDEVENV2_AGENT_TASK_PROMPT_FILE\""],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let prompt_path = tmp
+        .path()
+        .join("state")
+        .join("agent-task-prompts")
+        .join("sessions")
+        .join(format!("{id}.md"));
+    assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), brief);
+
+    let printed = session_output_after_exit(&client, &base, &id).await;
+    assert!(
+        printed.contains(&format!("file=[{}]", prompt_path.display())),
+        "child should be told the prompt file path; got {printed:?}"
+    );
+    assert!(
+        printed.contains("Fix the flaky forge test."),
+        "child should be able to read the brief; got {printed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_session_without_a_prompt_gets_no_file_and_no_variable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "plain terminal",
+            // Whitespace is not a brief: this must behave exactly like a
+            // request that omits the field.
+            "prompt": "   ",
+            "command": ["/bin/sh", "-lc",
+                "printf 'file=[%s]\\n' \"$MYDEVENV2_AGENT_TASK_PROMPT_FILE\""],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let printed = session_output_after_exit(&client, &base, &id).await;
+    assert!(
+        printed.contains("file=[]"),
+        "no brief means no variable; got {printed:?}"
+    );
+    let sessions_dir = tmp
+        .path()
+        .join("state")
+        .join("agent-task-prompts")
+        .join("sessions");
+    assert!(
+        !sessions_dir.join(format!("{id}.md")).exists(),
+        "no brief means no prompt file"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_session_forgets_its_prompt_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "work item 43",
+            "prompt": "Land the migration.",
+            "command": ["/bin/cat"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let prompt_path = tmp
+        .path()
+        .join("state")
+        .join("agent-task-prompts")
+        .join("sessions")
+        .join(format!("{id}.md"));
+    assert!(prompt_path.exists());
+
+    // Killing keeps the session inspectable, and its brief with it.
+    let killed = client
+        .post(format!("{base}/api/sessions/{id}/kill"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(killed.status(), StatusCode::OK);
+    assert!(
+        prompt_path.exists(),
+        "a killed session is still inspectable; its brief stays"
+    );
+
+    let deleted = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert!(
+        !prompt_path.exists(),
+        "forgetting the session forgets its brief"
+    );
+}
+
+/// Prompt files whose session the registry no longer knows — the ones a crash
+/// or a restart leaves behind — are collected by the same artifact cleanup
+/// endpoint that prunes task run prompts.
+#[tokio::test]
+async fn artifact_cleanup_collects_prompts_of_sessions_the_registry_forgot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "work item 44",
+            "prompt": "Keep me: my session still exists.",
+            "command": ["/bin/true"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let sessions_dir = tmp
+        .path()
+        .join("state")
+        .join("agent-task-prompts")
+        .join("sessions");
+    let live_prompt = sessions_dir.join(format!("{id}.md"));
+    // Stands in for a prompt file written before a restart: the session id is
+    // well formed, but the registry has never heard of it.
+    let stale_prompt = sessions_dir.join(format!("{}.md", uuid::Uuid::new_v4()));
+    std::fs::write(&stale_prompt, "brief of a session that no longer exists").unwrap();
+
+    let status: Value = client
+        .get(format!("{base}/api/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["agent_tasks"]["session_prompt_file_count"], 2);
+
+    let cleanup: Value = client
+        .post(format!("{base}/api/agent-tasks/artifacts/cleanup"))
+        .json(&json!({ "keep_latest_runs_per_task": 10 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cleanup["removed_session_prompt_file_count"], 1);
+    // The sessions directory is not a task directory and must never be swept
+    // as an orphan one.
+    assert_eq!(cleanup["removed_task_dir_count"], 0);
+    assert!(!stale_prompt.exists());
+    assert!(
+        live_prompt.exists(),
+        "a brief whose session the registry still holds must survive cleanup"
+    );
+}
+
+/// Run a session to completion and return everything it printed.
+async fn session_output_after_exit(client: &reqwest::Client, base: &str, id: &str) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let detail: SessionDetail = loop {
+        let detail: SessionDetail = client
+            .get(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if detail.summary.exit_code.is_some() && detail.summary.scrollback_bytes > 0 {
+            break detail;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session {id} never exited with output; exit_code={:?}, scrollback_bytes={}",
+            detail.summary.exit_code,
+            detail.summary.scrollback_bytes,
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    };
+    let snapshot = base64::engine::general_purpose::STANDARD
+        .decode(detail.scrollback_base64.as_bytes())
+        .unwrap();
+    String::from_utf8_lossy(&snapshot).into_owned()
+}
+
 async fn ws_attach(
     base: &str,
     id: &str,

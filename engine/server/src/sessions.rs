@@ -8,6 +8,7 @@ use crate::{
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
     history::SessionHistory,
+    prompt_files,
     pty::{self, Session, SessionSpec, SessionSummary, SpawnDefaults},
     workspace_path,
 };
@@ -52,8 +53,43 @@ impl SessionRegistry {
                 spec.cwd = None;
             }
         }
+        // Allocated here rather than inside `pty::spawn` so the prompt file
+        // below can be named for the session it belongs to, and so the file
+        // exists before the child does.
+        let id = Uuid::new_v4();
+        let prompt_file = match spec
+            .prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            Some(text) => Some(prompt_files::write_session_prompt(
+                &self.cfg.state_dir,
+                id,
+                text,
+            )?),
+            // A brief that is absent, empty, or all whitespace is no brief:
+            // the child is left exactly as it was before this field existed.
+            None => None,
+        };
+        if let Some(path) = prompt_file.as_ref() {
+            // The child is told *where* the brief is, never handed the text.
+            // A work item's brief runs to paragraphs of prose: as an argument
+            // it would hit argv limits, need quoting no caller can be trusted
+            // to get right, and stand in `ps` output for every process on the
+            // box to read. A path is short, quoting-proof, and re-readable by
+            // an agent that wants its instructions again later. Appended last
+            // so the file the engine just wrote wins over a same-named
+            // variable a caller supplied.
+            spec.env.get_or_insert_with(Vec::new).push((
+                prompt_files::PROMPT_FILE_ENV.to_string(),
+                path.to_string_lossy().into_owned(),
+            ));
+        }
+
         // Names need not be unique — duplicates are merely confusing, not invalid.
         let spawned = pty::spawn(
+            id,
             &spec,
             SpawnDefaults {
                 default_shell: &self.cfg.default_shell,
@@ -65,7 +101,17 @@ impl SessionRegistry {
             },
             self.bus.clone(),
             self.history.clone(),
-        )?;
+        );
+        let spawned = match spawned {
+            Ok(spawned) => spawned,
+            Err(e) => {
+                // No child means nothing will ever read the brief.
+                if prompt_file.is_some() {
+                    prompt_files::remove_session_prompt(&self.cfg.state_dir, id);
+                }
+                return Err(e);
+            }
+        };
         let session = spawned.session;
         self.sessions.insert(session.id, Arc::clone(&session));
         self.bus.publish(ServerEvent::SessionCreated {
@@ -125,6 +171,14 @@ impl SessionRegistry {
             .map(|(_, v)| v)
             .ok_or(ApiError::NotFound)?;
         let _ = s.kill();
+        // The brief outlives the child on purpose — a killed session is still
+        // inspectable, and an agent may re-read its prompt after a restart —
+        // but not the session record. Forgetting the session forgets its
+        // prompt. Anything left behind by a crash or a server restart is
+        // collected by the agent-task artifact cleanup
+        // (`POST /api/agent-tasks/artifacts/cleanup`), which sweeps prompt
+        // files whose session the registry no longer knows.
+        prompt_files::remove_session_prompt(&self.cfg.state_dir, id);
         Ok(())
     }
 }
