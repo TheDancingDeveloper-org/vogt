@@ -9,7 +9,11 @@ import {
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { createSession, sessionsStore } from "./store";
-import { listWork, type WorkItem as VogtWorkItem } from "./vogtApi";
+import {
+  listProjects,
+  listWork,
+  type WorkItem as VogtWorkItem,
+} from "./vogtApi";
 import {
   focusTab,
   openAuditTab,
@@ -181,6 +185,9 @@ const CommandPalette: Component<Props> = (props) => {
   const [agentTasks, setAgentTasks] = createSignal<AgentTask[]>([]);
   const [projectCommands, setProjectCommands] = createSignal<Command[]>([]);
   const [workItems, setWorkItems] = createSignal<VogtWorkItem[]>([]);
+  const [vogtProjects, setVogtProjects] = createSignal<
+    { slug: string; name: string }[]
+  >([]);
   const [savedLayouts, setSavedLayouts] = createSignal<SavedWorkspaceLayout[]>([]);
   let inputRef: HTMLInputElement | undefined;
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -205,6 +212,14 @@ const CommandPalette: Component<Props> = (props) => {
     void listWork({ limit: 200 })
       .then((answer) => setWorkItems(answer.items ?? []))
       .catch(() => setWorkItems([]));
+    // Projects, for the same reason and on the same terms (FR-U16). "Every
+    // read surface (projects, work items, sessions, views) by fuzzy name" —
+    // and until now the palette imported `listWork` and nothing else, so
+    // "open project rustnzb" was not a thing the keyboard could do. The
+    // estate is a short list; 200 is the same cap the surfaces use.
+    void listProjects({ limit: 200 })
+      .then((answer) => setVogtProjects(answer.projects ?? []))
+      .catch(() => setVogtProjects([]));
   });
 
   const activeEditorTab = () => {
@@ -960,6 +975,22 @@ const CommandPalette: Component<Props> = (props) => {
     return [
       ...baseCommands(),
       ...projectCommands(),
+      // A registered project, opened on its own page (FR-U16). The palette
+      // navigates and does not write — `/projects?p=<slug>` is the same deep
+      // link the Projects surface writes for itself, so what the keyboard
+      // reaches and what a shared link reaches are the same place (FR-U11).
+      ...vogtProjects().map<Command>((project) => ({
+        id: `vogt-project-${project.slug}`,
+        label: `Open project ${project.name}`,
+        description: project.slug,
+        icon: "▤",
+        action: () => {
+          openProjectsTab();
+          navigate(`/projects?p=${encodeURIComponent(project.slug)}`);
+          props.onClose();
+        },
+        category: "Vogt",
+      })),
       ...workItems().map<Command>((item) => ({
         id: `vogt-work-${item.ref}`,
         label: `${item.ref} — ${item.title}`,
