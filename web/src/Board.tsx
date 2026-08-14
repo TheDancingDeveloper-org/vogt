@@ -143,6 +143,96 @@ export function asPoll(value: string | undefined): number {
   return parsed;
 }
 
+/** The URL keys this surface owns. Anything else in the query is left alone. */
+const URL_KEYS = [
+  "project",
+  "kind",
+  "state",
+  "label",
+  "initiative",
+  "assignee",
+  "lanes",
+  "poll",
+] as const;
+
+export function filtersFromQuery(query: BoardParams): Filters {
+  return {
+    project: (query.project ?? "").trim(),
+    kinds: asList(query.kind),
+    states: asList(query.state),
+    label: (query.label ?? "").trim(),
+    initiative: (query.initiative ?? "").trim(),
+    assignee: (query.assignee ?? "").trim(),
+    lanes: asLaneMode(query.lanes),
+    poll: asPoll(query.poll),
+  };
+}
+
+/** `null` clears a key; every key this surface does not own is left alone. */
+function queryFor(
+  active: Filters,
+): Record<(typeof URL_KEYS)[number], string | string[] | null> {
+  return {
+    project: active.project || null,
+    kind: active.kinds.length ? active.kinds : null,
+    state: active.states.length ? active.states : null,
+    label: active.label || null,
+    initiative: active.initiative || null,
+    assignee: active.assignee || null,
+    lanes: active.lanes === "none" ? null : active.lanes,
+    poll:
+      active.poll === DEFAULT_POLL_SECONDS
+        ? null
+        : active.poll === 0
+          ? "off"
+          : String(active.poll),
+  };
+}
+
+/** The canonical text of this surface's slice of the query.
+ *
+ *  Both encoders walk `URL_KEYS` in the same order, so two equal states always
+ *  produce the same string — which is what lets one effect tell "the user
+ *  changed a filter" from "somebody handed us a different URL". `Backlog.tsx`
+ *  reasons this out at length; the board needs it for the same reason and did
+ *  not have it, which is why a link pasted into a mounted board used to be
+ *  ignored and a tab switch used to drop the query for good. */
+export function encodeFilters(active: Filters): string {
+  const params = new URLSearchParams();
+  const desired = queryFor(active);
+  for (const key of URL_KEYS) {
+    const value = desired[key];
+    if (value === null) continue;
+    for (const one of Array.isArray(value) ? value : [value]) params.append(key, one);
+  }
+  return params.toString();
+}
+
+export function encodeQuery(query: BoardParams): string {
+  const params = new URLSearchParams();
+  for (const key of URL_KEYS) {
+    const value = query[key];
+    if (value === undefined) continue;
+    for (const one of Array.isArray(value) ? value : [value]) params.append(key, one);
+  }
+  return params.toString();
+}
+
+/**
+ * The value of a `<select>` whose options arrive asynchronously.
+ *
+ * Reading the option list is load-bearing rather than decorative, and this is
+ * `Backlog.tsx`'s helper moved to the surface that needed it just as much.
+ * Solid compiles `value={...}` into an effect that re-applies when *its own*
+ * dependencies change; a value applied before its `<option>` exists is
+ * silently dropped by the browser, and the control then reads "All projects"
+ * while a project filter is in force — which is a deep link restoring the
+ * query and lying about it (FR-U11).
+ */
+function optionValue(current: string, options: readonly string[]): string {
+  return options.find((option) => option === current) ?? current;
+}
+
 // -- workflow shapes --------------------------------------------------------
 //
 // Everything from here to `columnsFor` is pure, and exported for that reason:
@@ -405,16 +495,7 @@ const Board: Component<Props> = (props) => {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const [filters, setFilters] = createSignal<Filters>({
-    project: (searchParams.project ?? "").trim(),
-    kinds: asList(searchParams.kind),
-    states: asList(searchParams.state),
-    label: (searchParams.label ?? "").trim(),
-    initiative: (searchParams.initiative ?? "").trim(),
-    assignee: (searchParams.assignee ?? "").trim(),
-    lanes: asLaneMode(searchParams.lanes),
-    poll: asPoll(searchParams.poll),
-  });
+  const [filters, setFilters] = createSignal<Filters>(filtersFromQuery(searchParams));
   const patch = (next: Partial<Filters>) => setFilters({ ...filters(), ...next });
 
   const [workflows, setWorkflows] = createSignal<Workflow[] | null>(null);
@@ -472,31 +553,42 @@ const Board: Component<Props> = (props) => {
 
   // -- the URL is the filter set (FR-U11) -----------------------------------
   //
-  // The signal is the source of truth and the URL is written from it, guarded
-  // on this surface actually being the route: the shell navigates to a bare
-  // `/board` when its tab is re-selected, and this effect puts the query back
-  // rather than letting a tab switch silently drop the view.
+  // One effect, both directions, with the ambiguity resolved by remembering
+  // what this surface last asserted — the shape `Backlog.tsx` arrived at and
+  // explains, and which the board needed and did not have. Two things were
+  // broken without it, both of them FR-U11's actual subject:
+  //
+  //   * The shell navigates to a bare `/board` when its tab is re-selected,
+  //     which drops the query. The old effect read neither the pathname's
+  //     *value* nor the query, so nothing re-ran and the filters were gone
+  //     from the URL for good — the view survived, its address did not.
+  //   * A link pasted into an already-mounted board was ignored: the query
+  //     was read once, at construction, and never again.
+  //
+  // Guarded on the pathname because every tab in this shell is mounted at
+  // once and `project`, `label` and `assignee` are keys more than one Vogt
+  // surface owns.
+  let lastWritten = encodeQuery(searchParams);
+
   createEffect(() => {
     if (location.pathname !== "/board") return;
-    const active = filters();
-    setSearchParams(
-      {
-        project: active.project || null,
-        kind: active.kinds.length ? active.kinds : null,
-        state: active.states.length ? active.states : null,
-        label: active.label || null,
-        initiative: active.initiative || null,
-        assignee: active.assignee || null,
-        lanes: active.lanes === "none" ? null : active.lanes,
-        poll:
-          active.poll === DEFAULT_POLL_SECONDS
-            ? null
-            : active.poll === 0
-              ? "off"
-              : String(active.poll),
-      },
-      { replace: true, scroll: false },
-    );
+    const desired = encodeFilters(filters());
+    const current = encodeQuery(searchParams);
+    if (desired === current) {
+      lastWritten = current;
+      return;
+    }
+    if (current !== lastWritten && current !== "") {
+      // The query changed to something this surface did not write, and is not
+      // empty: a pasted link, or the back button. That is an instruction.
+      setFilters(filtersFromQuery(searchParams));
+      lastWritten = current;
+      return;
+    }
+    // Otherwise the signals are authoritative, which is also what restores
+    // the query after a tab switch emptied it.
+    setSearchParams(queryFor(filters()), { replace: true, scroll: false });
+    lastWritten = desired;
   });
 
   // -- loading --------------------------------------------------------------
@@ -1096,7 +1188,10 @@ const Board: Component<Props> = (props) => {
         <label class="board-field">
           <span>Project</span>
           <select
-            value={filters().project}
+            value={optionValue(
+              filters().project,
+              projects().map((one) => one.slug),
+            )}
             onInput={(event) => patch({ project: event.currentTarget.value })}
           >
             <option value="">All projects</option>
@@ -1112,7 +1207,10 @@ const Board: Component<Props> = (props) => {
         <label class="board-field">
           <span>Initiative</span>
           <select
-            value={filters().initiative}
+            value={optionValue(
+              filters().initiative,
+              initiatives().map((one) => one.slug),
+            )}
             onInput={(event) => patch({ initiative: event.currentTarget.value })}
           >
             <option value="">All initiatives</option>
@@ -1130,7 +1228,7 @@ const Board: Component<Props> = (props) => {
         <label class="board-field">
           <span>Label</span>
           <select
-            value={filters().label}
+            value={optionValue(filters().label, labels())}
             onInput={(event) => patch({ label: event.currentTarget.value })}
           >
             <option value="">All labels</option>
@@ -1144,7 +1242,10 @@ const Board: Component<Props> = (props) => {
         <label class="board-field">
           <span>Assignee</span>
           <select
-            value={filters().assignee}
+            value={optionValue(
+              filters().assignee,
+              actors().map((one) => one.identity_ref),
+            )}
             onInput={(event) => patch({ assignee: event.currentTarget.value })}
           >
             <option value="">Anyone</option>
