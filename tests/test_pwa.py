@@ -445,3 +445,23 @@ def test_no_vogt_surface_opens_its_own_door() -> None:
             f"{name} calls fetch directly, so its URL is not in the route "
             "table the registry check reads"
         )
+
+
+def test_drift_is_resolved_one_proposal_at_a_time() -> None:
+    """FR-U18's last clause, and §3's deferral, kept where they erode.
+
+    Bulk accept is deferred *by name*: a drift acceptance is a declared-state
+    write carrying its own reason, and making that convenient in bulk is
+    exactly how r6's rule stops meaning anything. One call site is the
+    smallest checkable form of "one act, one proposal" — a loop over selected
+    ids would need a second, or a `.map` around this one.
+    """
+    text = source(WEB_SRC / "Projects.tsx")
+    calls = len(re.findall(r"\bresolveDrift\s*\(", text))
+    assert calls == 1, (
+        f"drift is resolved from {calls} places; it was written to have one, "
+        "and a second is how a bulk accept arrives"
+    )
+    assert not re.search(r"\bselectAll\b|\bselectedProposals\b", text), (
+        "a multi-select over drift proposals is a bulk accept with extra steps"
+    )
