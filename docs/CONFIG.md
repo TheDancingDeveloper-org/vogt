@@ -19,6 +19,8 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
+| `engine_url` | `VOGT_ENGINE_URL` | string, optional | *(no default — must be set)* | exposure |
+| `engine_token_file` | `VOGT_ENGINE_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
@@ -56,6 +58,14 @@ How long observation *history* is kept (NFR-I5). The newest observation per subj
 ### `github_token_file`
 
 Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing (FR-S7).
+
+### `engine_url`
+
+Where the session engine listens, e.g. `http://127.0.0.1:8910`. The engine is the other half of the merged product: it owns the PTYs a work item's session runs in (FR-E1). Unset means the `session.*` operations report that no engine is configured — absence of the engine costs sessions and nothing else, which is FR-E9 read from this side. An exposure value, so it is never guessed: co-located today, its address is still the operator's to state.
+
+### `engine_token_file`
+
+Path to a file containing the engine token Vogt calls it with. The token needs only the engine's `sessions` capability: Vogt starts and stops terminals, and has no business writing that pod's files. A file rather than an environment variable, for the same reason as `github_token_file` — a token in the environment is a token in every `docker inspect` (FR-S7).
 
 ### `sqlite_synchronous`
 

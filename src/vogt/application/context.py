@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from vogt.adapters.engine import EngineClient
 from vogt.adapters.git import Cloner, clone_repository
 from vogt.config import VogtConfig, load_config
 from vogt.core.clock import Clock, utc_now
@@ -35,6 +36,11 @@ class AppContext:
     #: network, and "works offline" is a property this product asserts rather
     #: than hopes for (NFR-PO2).
     cloner: Cloner = clone_repository
+    #: The session engine, or `None` when none is configured — which is the
+    #: shape v1 shipped in and stays supported (FR-E9 read from this side).
+    #: `None` is not an outage: the `session.*` operations say no engine is
+    #: configured, and every other operation is unaffected.
+    engine: EngineClient | None = None
 
 
 def build_context(
@@ -44,6 +50,7 @@ def build_context(
     clock: Clock = utc_now,
     id_factory: IdFactory = new_id,
     cloner: Cloner = clone_repository,
+    engine: EngineClient | None = None,
 ) -> AppContext:
     """Build a context over the SQLite backend.
 
@@ -69,4 +76,11 @@ def build_context(
         clock=clock,
         id_factory=id_factory,
         cloner=cloner,
+        # Injectable for the same reason the cloner is: a use-case that talks
+        # to another process over HTTP is one the suite could otherwise only
+        # exercise by running that process.
+        engine=engine
+        or EngineClient.from_config(
+            resolved_config.engine_url, resolved_config.engine_token_file
+        ),
     )

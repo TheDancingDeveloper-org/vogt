@@ -21,6 +21,7 @@ Four staleness checks run alongside it, all failing in **both** directions:
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -30,6 +31,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from vogt.adapters.cli.main import EXIT_OK, build_parser, run
+from vogt.adapters.engine import EngineClient
 from vogt.adapters.git import CloneOutcome, Cloner, CloneRequest
 from vogt.adapters.http.app import API_PREFIX, build_app
 from vogt.adapters.mcp.surface import McpSurface
@@ -192,6 +194,24 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ),
     ("observations.prune", {"reason": WHY}),
     # -- identity and portability -------------------------------------------
+    # -- coding sessions ----------------------------------------------------
+    #
+    # Driven against a stand-in engine (`_stand_in_engine`), because the
+    # operations are Vogt's and the PTY is not: what parity has to prove is
+    # that all three transports start the same session in the same tree and
+    # get the same answer back.
+    (
+        "session.start",
+        {"project": "parity-project", "reason": WHY},
+    ),
+    ("session.list", {}),
+    (
+        "session.stop",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "reason": "the harness is finished with it",
+        },
+    ),
     (
         "token.issue",
         {
@@ -333,6 +353,42 @@ def _recording_cloner(root: Path) -> Cloner:
     return clone
 
 
+def _stand_in_engine() -> EngineClient:
+    """An engine that answers predictably, so three transports can be compared.
+
+    Deterministic ids on purpose: the parity assertion is that CLI, REST and
+    MCP produce the *same* answer, and an engine handing out random session
+    ids would make three identical runs differ for a reason that has nothing
+    to do with the surfaces.
+    """
+    counter = itertools.count(1)
+
+    def transport(
+        url: str,
+        headers: dict[str, str],
+        body: bytes = b"",
+        method: str = "GET",
+    ) -> tuple[int, bytes]:
+        spec = json.loads(body.decode("utf-8")) if body else {}
+        if method == "POST" and url.endswith("/api/sessions"):
+            return 200, json.dumps(
+                {
+                    "id": f"eng-{next(counter)}",
+                    "name": spec.get("name", ""),
+                    "activity": "running",
+                    "cwd": spec.get("cwd", ""),
+                    "exit_code": None,
+                }
+            ).encode()
+        if method == "POST" and url.endswith("/kill"):
+            return 200, b'{"ok":true}'
+        if method == "GET" and url.endswith("/api/sessions"):
+            return 200, b"[]"
+        return 404, b""
+
+    return EngineClient(base_url="http://127.0.0.1:8910", transport=transport)
+
+
 def _fresh(
     tmp_path_factory: pytest.TempPathFactory, label: str
 ) -> tuple[AppContext, Path]:
@@ -344,6 +400,7 @@ def _fresh(
         clock=StepClock(),
         id_factory=SequentialIds(),
         cloner=_recording_cloner(root),
+        engine=_stand_in_engine(),
     )
     init_instance(context, InitParams())
     return context, root

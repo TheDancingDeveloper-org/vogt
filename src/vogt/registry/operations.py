@@ -71,6 +71,7 @@ from vogt.application.models import (
     ListInitiativesParams,
     ListLabelsParams,
     ListProjectsParams,
+    ListSessionsParams,
     ListSuppressionsParams,
     ListTokensParams,
     ListWorkParams,
@@ -96,9 +97,13 @@ from vogt.application.models import (
     RevokeTokenParams,
     ServeParams,
     ServeResult,
+    SessionListResult,
+    SessionResult,
     SetWriteBackParams,
+    StartSessionParams,
     StatusParams,
     StatusResult,
+    StopSessionParams,
     SuppressionListResult,
     SuppressionResult,
     SuppressParams,
@@ -619,6 +624,46 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.serve,
             route=HttpRoute("POST", "/instance/serve"),
             cli=CliBinding(("serve",)),
+        ),
+        # -- coding sessions (FR-E8) --------------------------------------
+        #
+        # Three operations, so the capability arrives on CLI, REST and MCP at
+        # once (FR-A1). `session.start` is scoped `work.write` rather than
+        # `admin`: opening a terminal on a bug is the ordinary act of working
+        # on it, and gating it behind admin would mean the agents that most
+        # need it are the ones that cannot.
+        Operation(
+            name="session.start",
+            summary="Open a coding session for a work item or a project.",
+            scope="work.write",
+            mutating=True,
+            params_model=StartSessionParams,
+            result_model=SessionResult,
+            handler=services.start_session,
+            route=HttpRoute("POST", "/sessions"),
+            cli=CliBinding(("session", "start")),
+        ),
+        Operation(
+            name="session.list",
+            summary="List coding sessions with their live activity state.",
+            scope="read",
+            mutating=False,
+            params_model=ListSessionsParams,
+            result_model=SessionListResult,
+            handler=services.list_sessions,
+            route=HttpRoute("GET", "/sessions"),
+            cli=CliBinding(("session", "list")),
+        ),
+        Operation(
+            name="session.stop",
+            summary="Stop a coding session and revoke the token it ran with.",
+            scope="work.write",
+            mutating=True,
+            params_model=StopSessionParams,
+            result_model=SessionResult,
+            handler=services.stop_session,
+            route=HttpRoute("POST", "/sessions/stop"),
+            cli=CliBinding(("session", "stop")),
         ),
         Operation(
             name="token.issue",
