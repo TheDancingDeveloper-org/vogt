@@ -1,13 +1,46 @@
-# MyDevEnv2 — single-image dev pod.
+# syntax=docker/dockerfile:1
 #
-# Three stages:
-#   1. web-build   — pnpm install + vite build of web/
-#   2. server-build — cargo build --release of server/, embedding the bundle
-#   3. runtime     — Ubuntu 26.04 with the full TOOLING.md toolchain, sway,
-#                    selkies-gstreamer, and the binary copied in
+# Vogt — the merged image (NFR-D11).
 #
-# Built and pushed by .woodpecker/server.yml as repo.indexarr.net/indexarr/mydevenv2.
-# Deployed via Komodo (see deploy/docker-compose.yml).
+# One image, two processes, one published port: the Rust engine is the front
+# door and vogt-core runs beside it on loopback. Both halves are built here.
+#
+# **The build context is the repository root, not `engine/`.** Two things force
+# that and neither is negotiable:
+#
+#   * `server/src/assets.rs` embeds `../../web/dist/`, which from
+#     `engine/server/` is `<repo>/web/dist` — the PWA moved to the repository
+#     root when the trees were merged, so a build rooted at `engine/` cannot
+#     see the bundle it is supposed to embed.
+#   * The Python core is `<repo>/pyproject.toml` + `<repo>/src`. An image that
+#     ships both halves has to be able to read both halves.
+#
+# So: `docker build -f engine/Dockerfile .` from the repository root. The
+# context is trimmed by `engine/Dockerfile.dockerignore`, which BuildKit reads
+# in preference to any `.dockerignore` at the context root — so this build
+# stays lean without changing what the root `Dockerfile` (the core-only image,
+# still published by .github/workflows) sees.
+#
+# Four stages:
+#   1. web-build    — pnpm install + vite build of web/
+#   2. server-build — cargo build --release of engine/server, embedding the bundle
+#   3. core-build   — uv sync of the Python core into a self-contained venv
+#   4. runtime      — Ubuntu 26.04 with the full TOOLING.md toolchain, sway,
+#                     selkies-gstreamer, and both halves copied in
+#
+# Stage order matters in one place: rust-embed reads `web/dist` at *compile*
+# time, so the web bundle is a build input to the Rust binary rather than a
+# runtime asset. Stage 2 cannot start before stage 1 finishes.
+#
+# Why the core-only image at the repository root still exists: it is the
+# hardened artifact (`read_only`, `cap_drop: [ALL]`, runnable as any uid) that
+# Topology A and the standalone core deployments use, and NFR-Q6 keeps
+# vogt-core independently runnable on purpose. This image cannot be that: it
+# is a development pod — sudo, agent CLIs, a writable home, kernel-mode
+# Tailscale — and collapsing the two would quietly delete vogt's containment
+# story under an unchanged image name.
+#
+# Deployed via Komodo as one stack (see ../deploy/vogt-stack.compose.yml).
 
 # Most tool versions are resolved to "latest at build time" rather than
 # pinned — each RUN block below queries the tool's own release API/index and
@@ -22,6 +55,18 @@
 #     XML), so they stay pinned. Bumped to current as of the last audit.
 ARG NODE_IMAGE=node:22-bookworm
 ARG RUST_IMAGE=rust:1-bookworm
+# The runtime base, named once because the core's venv is built on it too —
+# see stage 3 for why that matters more than it looks.
+ARG RUNTIME_IMAGE=ubuntu:26.04
+# uv builds the core's virtualenv from the committed lockfile, so the image
+# contains exactly what CI tested (NFR-Q5). Same pin as the root Dockerfile;
+# they should move together.
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.9.18
+# The interpreter the core runs on. Requested from uv rather than from the
+# distribution: `requires-python = ">=3.11"` is satisfied by whatever Ubuntu
+# ships, but "whatever Ubuntu ships" is not a version this repository chose,
+# and it changes under us on a base-image bump.
+ARG CORE_PYTHON=3.13
 ARG ANDROID_CMDLINE_TOOLS_VERSION=15859902
 ARG ANDROID_CMDLINE_TOOLS_SHA256=4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
 ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.1
@@ -51,24 +96,71 @@ RUN pnpm build
 
 # ─── Stage 2: rust binary with embedded web/ ────────────────────────────────
 FROM ${RUST_IMAGE} AS server-build
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY contract/Cargo.toml ./contract/Cargo.toml
-COPY contract/src ./contract/src
-COPY server/Cargo.toml ./server/Cargo.toml
-COPY server/src ./server/src
-COPY --from=web-build /app/web/dist ./web/dist
+# The layout inside this stage mirrors the repository's, because rust-embed
+# resolves `../../web/dist/` against the *crate* directory. Build the workspace
+# at /app/engine and the bundle lands where the macro already looks: put the
+# crate at /app/server instead and it would read /web/dist, which is nothing.
+WORKDIR /app/engine
+COPY engine/Cargo.toml engine/Cargo.lock ./
+COPY engine/contract/Cargo.toml ./contract/Cargo.toml
+COPY engine/contract/src ./contract/src
+COPY engine/server/Cargo.toml ./server/Cargo.toml
+COPY engine/server/src ./server/src
+COPY --from=web-build /app/web/dist /app/web/dist
 # BuildKit cache mounts keep registry/git deps + the target dir warm across
 # rebuilds without the brittle "dummy main.rs to prime deps" dance.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
+    --mount=type=cache,target=/app/engine/target \
     cargo build --release -p mydevenv2-server \
     && cp target/release/mydevenv2-server /usr/local/bin/mydevenv2-server \
     && strip /usr/local/bin/mydevenv2-server
 
-# ─── Stage 3: runtime + dev tooling ─────────────────────────────────────────
-FROM ubuntu:26.04
+FROM ${UV_IMAGE} AS uv
+
+# ─── Stage 3: the Python core's virtualenv ──────────────────────────────────
+#
+# Built on the runtime base rather than on `python:3.13-slim` (which is what
+# the root Dockerfile uses, because there its runtime stage is that same
+# image). A venv is not a self-contained thing: `bin/python` is a link to the
+# interpreter that created it, so a venv built on Debian and copied onto Ubuntu
+# is a directory full of scripts whose interpreter does not exist — and the
+# error names the script, not the missing interpreter.
+#
+# Two ways out; this takes the second. Copying the base image's `/usr/local`
+# python across works but silently entangles two distributions' libc and
+# OpenSSL. Instead uv downloads a standalone CPython into /opt/vogt/python and
+# builds the venv against it, so `COPY /opt/vogt` carries the interpreter, the
+# venv, and every console script's absolute shebang as one relocation-free
+# unit. The install directory is fixed rather than defaulted for exactly that
+# reason: the path in this stage has to be the path in the runtime stage.
+FROM ${RUNTIME_IMAGE} AS core-build
+ARG CORE_PYTHON
+COPY --from=uv /uv /usr/local/bin/uv
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON=${CORE_PYTHON} \
+    UV_PYTHON_DOWNLOADS=automatic \
+    UV_PYTHON_INSTALL_DIR=/opt/vogt/python \
+    UV_PROJECT_ENVIRONMENT=/opt/vogt/.venv
+WORKDIR /src
+# Dependencies first, so a source-only change does not re-resolve them.
+COPY pyproject.toml uv.lock README.md LICENSE ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-install-project --no-dev
+COPY src/ ./src/
+# `--no-editable` because uv.lock records the project as an editable source.
+# An editable install is a `.pth` file pointing back at /src, which does not
+# exist in the runtime stage — the venv would import every dependency and then
+# fail on `No module named 'vogt'`.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable \
+    && /opt/vogt/.venv/bin/vogt --version
+
+# ─── Stage 4: runtime + dev tooling ─────────────────────────────────────────
+FROM ${RUNTIME_IMAGE}
 # Android SDK lives in /opt (NOT ~/Android/Sdk): the runtime bind-mounts the
 # host home over /home/sprooty, so anything under $HOME vanishes at runtime —
 # same reason gradle/uv/pnpm are installed system-wide below.
@@ -290,7 +382,7 @@ ARG INSTALL_AI_CLIENTS
 # boundary, so install the real Codex entry point under libexec and expose the
 # codex-full-access wrapper as `codex`. This overrides persisted per-user
 # workspace-write/network restrictions for every repo under ~/Working.
-COPY --chmod=755 deploy/codex-full-access.sh /usr/local/bin/codex-full-access
+COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
 RUN if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
         sudo npm install -g --prefix=/usr/local @openai/codex @anthropic-ai/claude-code \
         && sudo install -d /usr/local/libexec \
@@ -424,15 +516,40 @@ RUN pip3 install --break-system-packages --no-cache-dir uv ruff pytest "cadastre
 COPY --from=server-build /usr/local/bin/mydevenv2-server /usr/local/bin/mydevenv2-server
 RUN chmod +x /usr/local/bin/mydevenv2-server
 
+# The other half. `/opt/vogt` carries the standalone interpreter *and* the
+# venv built against it — see stage 3; splitting them here is how you get a
+# `vogt` that reports its own script as missing.
+#
+# Symlinked onto PATH rather than prepending the venv's `bin` to it. That
+# directory also holds `python` and `python3`, and a dev pod whose `python3`
+# is silently the core's private interpreter is a pod where every agent's
+# `pip install` goes somewhere surprising. Three names, no PATH surgery — and
+# `vogt` on PATH is also what makes the core reachable from a session inside
+# this container, which is the whole point of merging the trees.
+COPY --from=core-build /opt/vogt /opt/vogt
+RUN ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt \
+    && ln -s /opt/vogt/.venv/bin/vogt-mcp /usr/local/bin/vogt-mcp \
+    && ln -s /opt/vogt/.venv/bin/vogt-mcp-remote /usr/local/bin/vogt-mcp-remote \
+    && vogt --version
+
+# The core's data directory (declared.sqlite3, observed.sqlite3, backups).
+# Owned by the pod's user rather than root:0 group-writable as in the
+# core-only image: that image is runnable as any uid because a deployer picks
+# one, whereas this one has already decided — the whole image is built around
+# uid ${SPROOTY_UID} owning /home/sprooty. A fresh named volume is seeded from
+# this ownership, so getting it wrong here surfaces on volume *recreation*,
+# which usually means during a restore.
+RUN install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0750 /var/lib/vogt
+
 # Runtime scripts. Agent-specific CLIs are optional; these helpers only broker
 # credentials on demand for neutral tools already present in the image.
-COPY deploy/entrypoint.sh /usr/local/bin/mydevenv2-entrypoint
-COPY deploy/agent-auth.sh /usr/local/bin/mydevenv2-agent-auth
-COPY deploy/cadastre-mcp-auth.sh /usr/local/bin/mydevenv2-cadastre-mcp
-COPY deploy/vogt-mcp-auth.sh /usr/local/bin/mydevenv2-vogt-mcp
-COPY deploy/mcp-bootstrap.sh /usr/local/bin/mydevenv2-mcp-bootstrap
-COPY deploy/git-askpass.sh /usr/local/bin/mydevenv2-git-askpass
-COPY deploy/rust-analyzer-mcp.sh /usr/local/bin/mydevenv2-rust-analyzer-mcp
+COPY engine/deploy/entrypoint.sh /usr/local/bin/mydevenv2-entrypoint
+COPY engine/deploy/agent-auth.sh /usr/local/bin/mydevenv2-agent-auth
+COPY engine/deploy/cadastre-mcp-auth.sh /usr/local/bin/mydevenv2-cadastre-mcp
+COPY engine/deploy/vogt-mcp-auth.sh /usr/local/bin/mydevenv2-vogt-mcp
+COPY engine/deploy/mcp-bootstrap.sh /usr/local/bin/mydevenv2-mcp-bootstrap
+COPY engine/deploy/git-askpass.sh /usr/local/bin/mydevenv2-git-askpass
+COPY engine/deploy/rust-analyzer-mcp.sh /usr/local/bin/mydevenv2-rust-analyzer-mcp
 RUN chmod +x \
     /usr/local/bin/mydevenv2-entrypoint \
     /usr/local/bin/mydevenv2-agent-auth \
@@ -442,14 +559,25 @@ RUN chmod +x \
     /usr/local/bin/mydevenv2-git-askpass \
     /usr/local/bin/mydevenv2-rust-analyzer-mcp
 
+# One port. vogt-core listens on loopback inside this namespace and is not
+# exposed here, because there is nothing to expose it to: NFR-D11 makes the
+# engine the only way in.
 EXPOSE 8910
 VOLUME ["/home/sprooty/Working"]
+VOLUME ["/var/lib/vogt"]
 
 USER sprooty
 WORKDIR /home/sprooty/Working
 
 ENV MYDEVENV2_BIND=0.0.0.0:8910
 ENV RUST_LOG=info
+# An allocation, so it carries a default (NFR-D2 as revised r4): it names a
+# directory inside this image, which is the one thing the image does know.
+ENV VOGT_DATA_DIR=/var/lib/vogt
+# `VOGT_CORE_URL` is deliberately *not* defaulted here. It is what decides
+# whether this container runs a core at all, and an image that always tries to
+# is an image that cannot be MyDevEnv2 on its own — which FR-E9 requires it to
+# stay. The compose file turns the core on; see deploy/entrypoint.sh.
 
 ENTRYPOINT ["/usr/local/bin/mydevenv2-entrypoint"]
 CMD []
