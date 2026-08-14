@@ -966,15 +966,15 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 108 are delivered, 64 are implemented and
-asserted by nothing, 8 cannot be verified in this environment at all, and 21
+**201 conjuncts across 46 IDs. 112 are delivered, 63 are implemented and
+asserted by nothing, 8 cannot be verified in this environment at all, and 18
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
 before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved six conjuncts, and three of them were moved by nothing
+**A fourth pass moved ten conjuncts, and three of them were moved by nothing
 being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -982,7 +982,7 @@ were false failed on their first run, in the two places a file cannot show
 you. `docs` failed on a link that resolved on this machine and nowhere else.
 The engine job failed on `sudo apt-get` with *root is not in the sudoers
 file* — the runner is root, so there was nothing to elevate from. Neither was
-a code defect and both were invisible to review, which is §6.3 finding 16.
+a code defect and both were invisible to review, which is §6.3 finding 18.
 
 **Delivered means a file and a test.** Not a citation — §5.4a's whole point is
 that a grep for an ID finds the docstring that names it. Where code plainly
@@ -996,10 +996,10 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +6 in the fourth pass (four out of §6.2, one each out of §6.2a and
-  §6.2b)
-- **64 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 1
-- **21 short** = 43 − 19 + 1 arriving from §6.2b, − 4
+  then +10 in the fourth pass (seven out of §6.2, two out of §6.2a, one out
+  of §6.2b)
+- **63 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 2
+- **18 short** = 43 − 19 + 1 arriving from §6.2b, − 7
 - **8 unverifiable** = 69 − 60 − 1
 
 One bookkeeping correction, since it is the kind of thing this section exists
@@ -1097,6 +1097,8 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-U6 | Bulk transition and bulk label, each one audited write per item carrying the batch's reason, each refusing without one, each reporting a partial batch as partial in Vogt's words | `backlog.test.tsx` (six tests for label, three for transition, including `does not let a reason typed for a transition justify a labelling` and `leaves the refused items selected and the rest not`) |
 | FR-U6, FR-U15 | The ranked views render, quick-create raises an item, and bulk transition moves a batch — as things a person operates rather than bindings that exist | `backlog.test.tsx`, `board.test.tsx::raises an item without leaving the board` (the new card appears in its column and no navigation happens) |
 | FR-U15 | Quick-create exists on the board as well as the backlog, will not submit without a title *or* a typed reason, never prefills the reason, and is unreachable while Vogt cannot be asked | `board.test.tsx`'s FR-U15 block (seven), including `never prefills the reason, however convenient the last one was` — the board deliberately remembers the last *move's* reason, and the create form deliberately does not inherit it |
+| **FR-U10** | Drift arrivals and notification counts re-read on `vogt-changed` rather than waiting to be asked; all five surfaces report their own age; a lost stream is indicated and reconciles | `web/src/__tests__/live.test.tsx` (twenty-four) over `web/src/viewAge.tsx`, which is the board's inline machinery lifted out so there is one implementation and not five. Two surfaces deliberately do *not* subscribe, and each is pinned by a test so it stays a decision rather than an omission: the backlog, because re-ranking the estate under a reader's cursor on every announced change is a different act from telling them how old the view is, and the project page's sweep aggregates, because a four-panel pull per transition is a poll wearing an event's clothes. The drift re-read is refused while a card holds a half-typed reason, since refetching replaces every proposal object and would eat it (FR-W1) |
+| **FR-U10** | A lost stream is indicated and reconciles on reconnect | `live.test.tsx`, over the fix in `api.ts`. This conjunct was in §6.2a — implemented, asserted by nothing — and was not implemented: an ended stream broke the read loop and returned, so a restarted engine left the client believing it was connected with no reconnect scheduled. §6.3 finding 17 |
 | FR-U11, FR-U14 | The board's six filters and its swimlane mode are the URL: restored from a pasted link, written back when chosen on the surface, round-tripped, and put back when the shell navigates to the bare path | `board.test.tsx`'s FR-U11 block (four) and `restores every one of the six filters from a pasted link`; `backlog.test.tsx::round-trips a filter chosen on the surface through the URL` |
 | FR-U14 | A combined filter is nameable, recalled in full, survives a reload as per-client state, and a refresh interval is not part of what a name means | `board.test.tsx`'s FR-U14 block (five), including `keeps the multi-valued filters intact through the round trip` and `does not let a named view change how often the board refreshes`; `backlog.test.tsx::saves a named filter set and recalls it` |
 | **FR-U17** | A claim backed by a still-running session is marked provisional, not fresh — read from the observed store itself, not from a ranking over it | `web/src/WorkItemDetail.tsx`'s "Observed evidence" panel, through the new `observations.list` binding in `vogtApi.ts`; ten tests in `workItemDetail.test.tsx`. Three states, not two: an observation whose payload does not carry the flag at all is `unverified` rather than settled, in the same words the trust badge uses, because a blank says "no opinion" when the honest answer is "nobody checked". `settlement()` reads the collector's own `provisional` flag rather than re-deriving liveness — a surface deciding for itself what "still running" means is a second copy of a rule the collector already keeps, and the two would eventually disagree. There is no work-item parameter on the operation, so the panel matches on the payload's `work_item`, which `session_outcomes.py` writes for both kinds it produces |
@@ -1124,7 +1126,7 @@ half-present, because nothing about it had to be argued with first.
 
 ### 6.2 Delivered differently, or short — per conjunct
 
-Twenty-one conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
+Eighteen conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
 is one claim that the requirement makes and the build does not, which is why
 this table's rows can be counted and the other three tables' cannot.
 
@@ -1156,9 +1158,6 @@ the file.
 | FR-M1 — "session start/approve" | There is no Vogt session-approval flow, on any surface. `vogtApi.ts` has no approval binding and the registry has no approval operation; the two approvals in the product are ContextKeeper's recovery bundle and the assistant's pending action, neither of which is this. Session *start* exists and is three taps deep through a work item. | Medium — it is a named MVP1 item that was never built |
 | FR-U5 — "state history" | The panel renders the workflow's states with the current one marked, and says in as many words that the transitions belong in the audit trail. That is the machine, not the item's history: a reader cannot see when this item entered this state or what it came from without leaving the surface. | Low, and honestly labelled on the surface itself |
 | FR-U5 — "per-item audit trail" | **The silent omission is closed.** An item's trail now includes the writes audited against its comments, by semi-join through `comments.work_item_id` — chosen over denormalising a work item id onto `audit`, because back-filling `audit` means editing the record of what happened. What remains is the same division as before: a link to the audit browser rather than an embedded trail, which is FR-U19's second clause working. | Low, down from Medium — the trail no longer omits a kind of write, which was the part that mattered |
-| FR-U10 — "drift arrivals … shall update live" | The drift inbox has no subscription and no poll. It re-reads when its filter key changes or when a person presses Refresh. | Medium |
-| FR-U10 — "notification counts … shall update live" | Same: the inbox reads `unread` once per query and never again. | Medium |
-| FR-U10 — "a stale view shall never present itself as current" | True of the board, which tracks when it loaded and says "Stale — updated N ago, retrying". The other four surfaces have no age indicator at all: a backlog tab left open all morning looks exactly like one loaded a second ago. | **Medium** — it is the clause the requirement is actually about, kept on one surface of five |
 | FR-U16 — "every GUI-exposed mutating verb by opening the view that collects its reason" | One of them. `New Work Item…` opens the backlog's quick-create; transition, comment, drift resolve, import and session start/stop have no palette entry. The board's own quick-create arrived without a palette entry too, so the ratio is unchanged by a surface gaining one. The rule the clause exists to keep — never execute, only open — is kept perfectly by the one entry that exists. | Low |
 | FR-U19 — "filter by … project" | **Half moved: the server can now answer it and the surface does not ask.** `audit.list` filters by project server-side, through a table naming every audited kind the declared store can attribute to a project — items, their comments, coding sessions, drift proposals, suppressions — with instance-wide kinds excluded deliberately. `AuditBrowser.tsx` still resolves at most 500 of a project's items and filters the loaded window, and its own comments now describe a server that no longer exists. | Low, and it is wiring |
 | FR-U19 — "filter by … time range" | Same shape. `since`/`until` and `limit`/`offset`/`total` exist and are asserted on all three transports (§5.1's FR-S6, now delivered); the browser still windows rather than pages and cannot see past the newest 500 records, because nothing on the surface passes an offset yet. | Low, and it is wiring |
@@ -1196,8 +1195,8 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Sixty-four conjuncts whose code was read and believed, which nothing in any
-suite would notice the loss of. (Sixty-five, less NFR-D12's, which the fourth
+Sixty-three conjuncts whose code was read and believed, which nothing in any
+suite would notice the loss of. (Sixty-five, less NFR-D12's and FR-U10's, which the fourth
 pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
 core-only job *and* the merged one, so the branch split is now checked for
 both images rather than for neither.) They are not defects; they are the places a
@@ -1225,8 +1224,7 @@ that stopped being the demo's job and became a test somebody has not written.
 | FR-U5 | Description, comments, relations, labels, collected evidence, and the start-session control, on one page *(from §6.2b)* | A mount of `WorkItemDetail` asserting each panel is there. `workItemDetail.test.tsx` mounts it and asserts the inline edit and the outage states, and nothing about what the page contains |
 | FR-U6 | The explainable `why` on the ranked views *(from §6.2b)* | An assertion that the `why` panel renders the contributions `GET /why` returned. The harness answers that route and no test looks at what was drawn with it |
 | FR-U7 | Brief, CI status, contract and compliance, drift inbox, dependency graph, import form on a project page *(from §6.2b)* | A mount of `Projects`. `absentStates.test.tsx` mounts it for the outage cases and incidentally proves the page survives a per-panel failure; nothing asserts the six panels exist when Vogt answers |
-| FR-U10 | Session activity updates from the SSE stream without a refresh; the board reloads on `vogt-changed` | A test that drives `onVogtChanged`. The board subscribes to it (`Board.tsx`'s `onMount`) and the front door republishes the core's cursor onto the stream (`vogt_core.rs`), so both ends are asserted and the join between them is not |
-| FR-U10 | A lost stream is indicated and reconciles on reconnect *(from §6.2b)* | A stubbed `EventSource` that closes and reopens. jsdom has none, and the harness stubs `fetch` only |
+| FR-U10 | Session activity updates from the SSE stream without a refresh | A test that drives the engine's own activity events through `store.ts`. The board's half is asserted now — `live.test.tsx` drives `vogt-changed` end to end — and the session-activity half still rests on inspection |
 | FR-U11 | Project, work item, session and audit query addressable by URL *(from §6.2b)* | A mount of `App.tsx` — not of a surface. The surfaces restore from their own URLs and that is now asserted, but `App.tsx`'s URL→tabs effect is what turns a pasted link into an open surface, and it is the half M11 found broken for every surface and the half nothing mounts |
 | FR-U13 | Swimlanes by project or initiative; per-column WIP counts; collapse/expand of lanes and columns; layout persisted per client *(from §6.2b)* | Four assertions on the board, which is already mounted twenty-eight times in `board.test.tsx`. The swimlane *mode* is asserted as a filter value and the grouping it produces is not; `data-wip` is rendered and read by nobody |
 | FR-U16 | Sessions by fuzzy name *(from §6.2b)* | A palette test with a populated session store. `commandPalette.test.tsx` asserts projects, work items and views, and the session entries come from the engine's store, which no test seeds |
@@ -1280,9 +1278,9 @@ a shape — **working behaviour and a false record** — which is the failure
 class this product exists to make visible.
 
 Findings are struck through when the thing they describe is fixed *and* the
-fix was checked here — **eight are** (4, 5, 7, 11, 12, 13, 14, 15), one of
-them (5) only in part, and two of the remaining eight (6, 8) have closed a
-half each. Sixteen entries.
+fix was checked here — **ten are** (4, 5, 7, 11, 12, 13, 14, 15, 17, 18), one
+of them (5) only in part, and two of the rest (6, 8) have closed a half each.
+Eighteen entries, eight of them open.
 
 **Three of those strikes were added by the fourth pass to findings that were
 already fixed** — 12's string comparison had become a component comparison,
@@ -1464,7 +1462,38 @@ similar, and the new entries are all of the same kind as the old ones.
     because the new function was inserted between the old comment and the
     function it documented; `parse_vogt_write` now has no doc comment at all.
     Neither changes behaviour. Both are the failure this section is a list of.
-16. **Both first-run CI failures were checks written against this machine.**
+17. ~~**A conjunct in §6.2a was not implemented.**~~ **Resolved, and the
+    bucket's own definition is what let it sit there.** §6.2a is "implemented, and asserted
+    by nothing" — code read and believed. FR-U10's "a lost stream shall be
+    indicated and shall reconcile on reconnect" was read, believed, and
+    false: `subscribeEvents` treated an ended stream as a normal exit, so a
+    restarted engine or a proxy's idle timeout ended the body cleanly, the
+    read loop broke, and the client went on believing it was connected with
+    no reconnect ever scheduled. Every surface that re-reads on an
+    announcement went quiet **while looking live** — which is the clause the
+    age badge was being added to satisfy, failing in the one way the badge
+    could not cover.
+
+    Two things about how it was found are worth more than the fix. First, it
+    was found by writing the test, not by reading the code again — the code
+    had already been read twice and believed twice. Second, the row in §6.2b
+    that had excused the test said "jsdom has no `EventSource`", and that was
+    a **false premise**: this client uses `fetch` and a `ReadableStream`
+    precisely so it can send a bearer token, so the existing harness was
+    always sufficient. An excuse nobody rechecked kept a defect alive through
+    two audits.
+
+    The suite had a matching hole, found the same way.
+    `@solidjs/testing-library` registers its own cleanup only when
+    `afterEach` is a global, and this suite deliberately runs without Vitest
+    globals — so **nothing any test mounted was ever unmounted**. A second
+    board answered the first board's events; an old inbox refetched into the
+    next test's call log. Harmless while assertions were about one container,
+    and not harmless at all for a test that counts the calls a surface makes.
+    Every green run before this one was greener than it should have been.
+
+18. ~~**Both first-run CI failures were checks written against this
+    machine.**~~ **Both resolved, in the commits that found them.**
     The pipeline for the merged product ran for the first time on 2026-08-14
     and failed twice, in ways review could not see and neither of which was a
     code defect:
