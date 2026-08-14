@@ -1010,10 +1010,11 @@ Deliverables:
   `DESIGN.md` §4's merged-tree section.)*
 - **NFR-I6** — backup and restore covering the whole product as one act: the
   core's SQLite, the engine's `state_dir`, and enough metadata to
-  re-establish FR-E3's path agreement after a restore. It appears in no
-  other milestone's `Delivers` line, which is why nobody built it; §6 records
-  it as absent. It lands here because retiring the standalone stacks is
-  exactly when somebody will need to restore one.
+  re-establish FR-E3's path agreement after a restore. *(Built. It had
+  appeared in no milestone's `Delivers` line at all, which is why nobody had
+  built it — a §4 traceability failure the per-conjunct audit found. It
+  lands here because retiring the standalone stacks is exactly when somebody
+  needs to restore one.)*
 
 **Demo**: there is none, and that is honest — the acceptance test for this
 stage is `REQUIREMENTS.md` §5 agreeing with the build, which is the same bar
