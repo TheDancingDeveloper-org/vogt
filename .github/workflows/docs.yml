@@ -7,7 +7,8 @@ name: docs
 
 on:
   push:
-    branches: [main]
+    # `dev` is a real environment now (NFR-D12), so it is gated like main.
+    branches: [main, dev]
     paths:
       - "docs/**"
       - "design/**"

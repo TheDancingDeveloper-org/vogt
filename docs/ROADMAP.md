@@ -1,7 +1,8 @@
-# Vogt — Deliverable Stages (v0.3, revision r6)
+# Vogt — Deliverable Stages (v0.3, revision r9)
 
-Status: **M0–M6 delivered — v1 is built** (2026-08-12); **M7 is post-v1 and
-in progress**. Requirement IDs
+Status: **M0–M6 delivered — v1 is built** (2026-08-12); **M7 and M8 are
+post-v1**; **M9–M14 are v2** — the MyDevEnv2 merge, added by
+`REQUIREMENTS.md` revision r9 (2026-08-14) and not started. Requirement IDs
 refer to `REQUIREMENTS.md`; per its §4, scope changes here must update that
 document in the same change.
 
@@ -25,6 +26,12 @@ to trip it (NFR-Q4).
   **M6** adds the GUI. **v1 = M0–M6.**
 - M5 precedes M6 and the order is fixed: build the GUI once, against
   complete data.
+- **v2 = M9–M13** (r9): the merge with MyDevEnv2, after which Vogt runs the
+  work it governs. **Merge-MVP = M9–M10** — the first build where a work item
+  can open a coding session. M14 is consolidation and delivers no new ID.
+- M9 precedes M10 for the same reason M5 precedes M6, from the other
+  direction: the session capability is built once, against a repository and a
+  stack that are already one.
 
 Each stage ends with a **demo** — the stage is done when the demo runs,
 its requirements' tests pass, and transport parity is green for every
@@ -41,9 +48,22 @@ operation the stage added.
 | M6 | GUI | The visual surface over the same API | FR-U1, FR-U2 |
 | M7 | Onboarding & inbox *(post-v1)* | Import a repository from GitHub; collect its notifications | FR-P6, FR-P7, FR-S8, FR-O8, FR-N3, FR-U3 |
 | M8 | Reachable by an agent *(post-v1)* | `connect`, and the five estate prerequisites behind it | FR-A8; `DEPLOYMENT.md` §7 (1–5) |
+| M9 | Foundations *(v2)* | One repo, one stack, one published port; both halves' CI green | NFR-D11, NFR-D12, NFR-C6, NFR-Q6, FR-U9 |
+| M10 | Coding sessions *(v2, merge-MVP)* | A work item can open a session in its project's tree | FR-E1–E5, FR-E8, FR-E9, FR-S9, FR-S10 |
+| M11 | GUI uplift *(v2)* | The Solid PWA becomes the single front end, specified to interaction depth | FR-U4–U8, FR-U10–U22, NFR-S5 |
+| M12 | AI layer & voice *(v2)* | The assistant learns the Vogt domain; voice is validated rather than assumed | FR-T1–T4, FR-T6; FR-T5 validated, FR-T7 attempted |
+| M13 | Mobile MVP1 *(v2)* | The phone is a first-class surface | FR-M1–M3, FR-E6, FR-E7 |
+| M14 | Consolidation *(ongoing)* | Old stacks retired, names settled, r9 verified against the build | — (no new IDs) |
 
 Deferred and withdrawn requirement IDs (FR-G2, FR-G5–G10, FR-D7) appear in
 no stage by design — see `REQUIREMENTS.md` §3.
+
+**On the numbering of M9–M14.** `MERGE_MYDEVENV2.md` §14 drafted these
+stages as M8–M13, on the stated grounds that M7 was the last one. M8 was
+already taken by *Reachable by an agent* above — the stage during which r8's
+protocol-negotiation failure was found — so the merge stages start at M9.
+The requirement IDs they deliver are unaffected: §4's append-only rule
+governs IDs, and no ID moved.
 
 ---
 
@@ -538,6 +558,198 @@ resolution stays out — resolving from a list *is* a button.
    an import that deletes somebody's working tree would be the most
    destructive thing this product could do, and it is the cheapest possible
    mistake to make.
+
+---
+
+## v2 — the merge (M9–M14)
+
+Added by `REQUIREMENTS.md` revision **r9**, which reverses `DESIGN.md`
+§1.2's *"being an agent runner"* non-goal: MyDevEnv2 becomes Vogt's session
+engine, and Vogt runs the work it governs. The surviving boundary is that
+Vogt never decides to run anything on its own — every session traces to a
+person or to a schedule a person created (`REQUIREMENTS.md` §3, autonomous
+work pickup). The design behind these stages is
+[`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md) §§1–11; sizes are relative
+(S < M < L), and as everywhere in this document, "as built" notes come after
+the stage is built, not before.
+
+## M9 — Foundations (M)
+
+**Objective**: one repository, one stack, one published port — the ground
+every later merge stage stands on, and nothing user-visible beyond the fact
+that both halves now answer at the same address.
+
+Delivers NFR-D11, NFR-D12, NFR-C6, NFR-Q6, FR-U9.
+
+Deliverables:
+- **The repo merge, with history**, from **MyDevEnv2@dev** (head `2214a7d`)
+  via `git subtree`: `engine/` (Rust workspace), `web/` (Solid PWA),
+  `mobile/` (Capacitor shell), MyDevEnv2's documents under `docs/engine/`.
+  The archived GPUI desktop client is not carried over
+  (`REQUIREMENTS.md` §3). Provenance is the `dev` branch, not `main`: `dev`
+  is where the Vogt MCP registration and the ContextKeeper work already
+  live, and merging `main` would mean re-doing them.
+- **The front door** (NFR-D11): the Rust engine is the single listening
+  process — PWA, native APIs, WebSocket attach, `/api/vogt` and `/mcp`
+  reverse-proxied to vogt-core, and aggregate health. Vogt-core binds
+  loopback only. Every port that serves MCP still serves plain HTTP health
+  (FR-A7), which is the invariant the proxy is most likely to quietly lose.
+- **The dev/prod split** (NFR-D12), branch-shaped before anything else
+  lands: `dev` → `:dev` images → the `dev-vogt` stack on Node B; only `main`
+  reaches prod. Mobile, voice and push are verifiable nowhere else.
+- **Merged CI** (NFR-C6): Rust fmt/clippy/test, web typecheck and APK build
+  join the Python suite, under NFR-C3's build-vs-release discipline.
+- **Both absence-modes green** (NFR-Q6): the forge-less run, unchanged, and
+  a core run with no engine present.
+- **The legacy GUI keeps serving** at `/ui-legacy` (FR-U9) so nothing
+  regresses while M11 is being built.
+
+**Demo**: one URL serves the PWA, a terminal session, and a Vogt backlog
+query. Both suites pass in the merged repository, including the engine-less
+core run; a push to `dev` produces a `:dev` image that deploys to the dev
+stack, and no push to `dev` moves prod.
+
+## M10 — Coding sessions (M) *(merge-MVP)*
+
+**Objective**: the capability the reversal exists for — a work item can open
+a session in its project's tree, and what the agent does in there comes back
+as attributed, audited writes.
+
+Delivers FR-E1–E5, FR-E8, FR-E9, FR-S9, FR-S10.
+
+Deliverables:
+- **Workspace unification** (FR-E3), the one semantic join: Vogt's import
+  root and the engine's workspace root become the same tree, and the project
+  registry — not a path heuristic and not a repo-name match — decides where a
+  session for a project opens.
+- **`session.start` / `session.list` / `session.stop`** in the operation
+  registry (FR-E8), and therefore on CLI, REST and MCP with parity, like
+  everything else.
+- **Work item ↔ session linkage** (FR-E4): the brief written to a prompt file
+  through the agent-task mechanism, the session id recorded on the item as an
+  audited write, the item's views carrying the session's live activity state
+  (FR-E2).
+- **First-party MCP registration** (FR-E5) for agents inside a session,
+  carrying a **per-session actor-scoped token** minted at start and revoked at
+  session end (FR-S10).
+- **Auth mapping** (FR-S9): the front door's token namespace maps to named
+  Vogt actors whose paired core tokens the proxy injects. The proxy forwards
+  and never pre-approves; double-gated writes are unweakened.
+- **The engine still boots without the core** (FR-E9) — absence of Vogt costs
+  Vogt features, never a terminal.
+
+**Demo**: import a GitHub repository, create a work item on it, start an
+agent session from that item, watch the agent update the work item over MCP,
+and read the write in the audit log attributed to *that session's* actor —
+not to the proxy and not to a shared assistant. Then stop vogt-core and
+confirm the terminal is still usable.
+
+## M11 — GUI uplift (L)
+
+**Objective**: the Solid PWA becomes the single front end, specified to
+interaction depth rather than to a list of views — M6's lesson, applied
+before the fact this time.
+
+Delivers FR-U4–U8, FR-U10–U22, NFR-S5, and retires FR-U9's legacy surface
+at parity.
+
+Build order, which is part of the deliverable:
+1. Board **with its interaction contract** — FR-U10–U12 land *with* FR-U4,
+   not after it. A board that renders before it reconciles is a board that
+   will be shipped that way.
+2. Work item detail (FR-U5, U17, U20).
+3. Backlog and bugs (FR-U6, U14, U15).
+4. Project pages and the drift inbox (FR-U7, U18).
+5. Global surfaces — audit browser (FR-U19), notification inbox, admin.
+6. Palette and keyboard pass (FR-U16, U22).
+7. Absent-state pass (FR-U21).
+
+The parity rule carries over and gets stronger (FR-U8): every URL in the
+shipped bundle resolves against the operation registry *and* the engine's
+API contract. r6's rule binds the new surfaces unchanged — a mutating
+operation appears only through a view that collects a reason the user typed,
+which is why quick-create (FR-U15) will not submit without one and why the
+command palette opens that view rather than executing the write.
+
+**Demo**: every operation the legacy GUI exposed is reachable in the PWA; a
+board drag round-trips `work.transition`, *including* a rejected transition
+rolling back visibly with the server's stated reason; a board URL carrying
+filters restores its exact view after reload; killing the engine mid-demo
+disables session controls with a named reason while every Vogt view keeps
+answering.
+
+## M12 — AI layer & voice validation (M–L)
+
+**Objective**: the assistant learns the Vogt domain — and voice, adopted
+unproven, is put through its paces rather than assumed.
+
+Delivers FR-T1–T4, FR-T6; FR-T5 validated; FR-T7 attempted.
+
+Deliverables:
+- **Registry-derived read tools** (FR-T1): the curated read slice generated
+  from the operation registry, not hand-written, so a new operation does not
+  mean a new hand-maintained schema.
+- **The gated write set** (FR-T2): every mutating tool through the
+  pending-action gate — one at a time, exact payload shown, expiring
+  unapproved, approved only on screen. Voice never approves
+  (`REQUIREMENTS.md` §3).
+- **Honest attribution** (FR-T3): an assistant-initiated write is audited to
+  the approving user's actor with a `why` from the conversation.
+- **Threat-model extension** (FR-T4): Vogt reads are external content by the
+  assistant's own rule — issue titles and imported forge text get the same
+  untrusted-data delimiting terminal output already gets.
+- **Provider cleanup** (FR-T7): a native Anthropic path, or the documented
+  `claude-*` hang resolved, or the route refused with a named reason.
+- **The voice shakedown** (FR-T5): a deliberate validation pass against
+  domain vocabulary — project names, "backlog" — because "it has a mic" is
+  not evidence.
+
+**Demo**, by voice on the APK: ask for the top bug, hear the answer, start a
+session on it, approve by on-screen tap — and confirm that saying "approve"
+does not.
+
+## M13 — Mobile MVP1 (S–M)
+
+**Objective**: the phone becomes a real surface — the one where an agent
+waiting for input actually reaches you.
+
+Delivers FR-M1–M3, FR-E6, FR-E7.
+
+Deliverables:
+- The Capacitor shell repointed at the merged PWA (FR-M1), APK CI on the dev
+  stream, phone-width pass with the board rendering as a list below the
+  narrow breakpoint (FR-M3).
+- **Push routing worth an interruption** (FR-M2): `waiting-for-input`,
+  `errored`, new drift, and the agent-task notify hook — and nothing else by
+  default, because a notification channel that cries wolf is uninstalled.
+- **Session outcomes as observations** (FR-E6): exit code, duration, and the
+  working-tree delta the session left behind, carrying freshness and trust
+  like all other evidence.
+- **Bound agent tasks** (FR-E7): a scheduled task may name a project or work
+  item and file its findings as observations rather than only as a push.
+
+**Demo**, from the phone: receive a push that a session is waiting for input,
+open it, unblock it — and see the session's outcome land as an observation
+against the work item afterwards.
+
+## M14 — Consolidation (S, ongoing)
+
+**Objective**: finish the merge rather than leave it half-standing. Delivers
+no new requirement ID, which is the point.
+
+Deliverables:
+- The standalone stacks retired (`prod/dev-mydevenv2`, `personal/vogt`) once
+  the merged stack has carried the load.
+- The name and domain decision (`MERGE_MYDEVENV2.md` §11.1), and the sunset
+  of the `MYDEVENV2_*` config aliases after their transition period.
+- **The r9 as-built reconciliation**: `REQUIREMENTS.md` and `DESIGN.md`
+  brought back against what was actually built, in the usual style —
+  including a §5-style delivery verification of every ID r9 added, by §5.5's
+  method and §5.4a's per-conjunct rule.
+
+**Demo**: there is none, and that is honest — the acceptance test for this
+stage is `REQUIREMENTS.md` §5 agreeing with the build, which is the same bar
+v1 was held to.
 
 ---
 

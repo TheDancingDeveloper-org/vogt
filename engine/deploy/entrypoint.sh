@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# MyDevEnv2 pod entrypoint.
+# Vogt pod entrypoint — the supervisor of the merged container (NFR-D11).
 #
 # Responsibilities (in order):
 #   1. Optionally join the tailnet (if TAILSCALE_AUTH_KEY is set).
 #   2. Optionally start sway headless in the background (if START_SWAY=1).
-#   3. Exec the MyDevEnv2 server. PID 1 = the server, so signals propagate.
+#   3. Optionally start and supervise vogt-core on loopback (if VOGT_CORE_URL
+#      names a loopback address).
+#   4. Exec the engine. PID 1's child = the engine, so signals propagate.
 #
 # Configurable via env (compose passes these through):
 #   MYDEVENV2_TOKEN              required
@@ -18,6 +20,50 @@
 #                                Set to "0" only with an equivalent resolver.
 #   START_SWAY                   "1" → spawn sway in background with WAYLAND_DISPLAY=wayland-1
 #   GUI_STREAM_URL               passed through to the server; web UI iframes it
+#   VOGT_CORE_URL                where the engine proxies /api/vogt, /mcp and
+#                                /ui-legacy. Loopback → this script also *runs*
+#                                the core there. Unset → no core, and the
+#                                engine is MyDevEnv2 as it shipped (FR-E9).
+#   VOGT_DATA_DIR                the core's SQLite + backups (default from the
+#                                image: /var/lib/vogt)
+#
+# ── Why supervision lives in this script ───────────────────────────────────
+#
+# The obvious answers are s6-overlay and supervisord, and both are wrong for
+# *this* container, which is not a service image. It is a development pod: it
+# carries agent CLIs, an Android SDK, sway, and kernel-mode Tailscale, it runs
+# as `sprooty` with passwordless sudo, and its startup order is already an
+# ordered script — tailscaled must be up before `tailscale up`, sway needs
+# XDG_RUNTIME_DIR, agent auth is validated before anything can use it.
+#
+# Adopting a supervision framework would mean:
+#   * a second init system. The compose sets `init: true`, so tini is already
+#     PID 1 and already reaps the orphans that agent sessions leave behind —
+#     that is why it is there, and s6 wanting PID 1 would displace it.
+#   * PID 1 as root. This image deliberately ends `USER sprooty`; s6-overlay's
+#     supported shape is root-owned stage scripts.
+#   * startup order in two places — some of it here, some of it in a service
+#     directory — for a container with exactly two long-lived processes.
+#
+# What is actually needed is smaller than a framework: start one more
+# background process, keep restarting it when it dies, and never let its death
+# take the container with it. That last clause is the requirement, not a
+# convenience: FR-E9 says a missing core must not cost the running PTYs, and
+# `api::readyz` deliberately reports the core's outage without failing
+# readiness for the same reason. A supervisor that restarts the *container*
+# when the core exits would undo both.
+#
+# The engine is still what `exec` replaces this shell with, so the container's
+# lifetime is the engine's lifetime. That is the right coupling: the engine is
+# the published port, and if it dies there is nothing to be ready *for*.
+#
+# One consequence, stated rather than hidden: on `docker stop`, tini signals
+# the engine and the core is torn down with the namespace rather than asked
+# politely. That is safe here — the core opens a SQLite connection per
+# transaction and closes it (DEPLOYMENT.md §8), so at any instant there is
+# usually no open write, and WAL makes the worst case crash-consistent rather
+# than corrupt. It is the same deal tailscaled and sway have always had in
+# this image.
 
 set -euo pipefail
 
@@ -112,6 +158,131 @@ if [[ "${START_SWAY:-0}" == "1" ]]; then
     echo "sway started (PID $!)"
 fi
 
-# `exec` so the server becomes PID 1 from here; SIGTERM from `docker stop`
-# reaches it cleanly. Pass through any args.
+# ── vogt-core ───────────────────────────────────────────────────────────────
+#
+# One value turns this on: VOGT_CORE_URL, which is *also* the value the engine
+# reads to know where to proxy. Deriving the listen address from the proxy
+# target rather than configuring them separately removes the failure this pair
+# would otherwise invite — a front door pointed confidently at a port nothing
+# is listening on, which reads to a client as "vogt-core did not answer" and
+# to an operator as a mystery.
+#
+# A non-loopback URL is not an error and does not start anything: it means the
+# core lives elsewhere (the two-service compose that §5.2 allows as a
+# fallback), and this container is only its front door. A loopback URL means
+# the core is ours to run — and NFR-D11's "binds loopback only and is never
+# published" is then enforced here, at the one place that can actually enforce
+# it, rather than trusted to a comment in a compose file.
+
+vogt_core_listen() {
+    # Echo "host port" for a loopback URL; echo nothing for anything else.
+    local url="$1" authority host port
+    authority="${url#*://}"
+    authority="${authority%%/*}"
+
+    if [[ "$authority" == \[*\]* ]]; then
+        host="${authority%%\]*}]"       # [::1]
+        port="${authority##*\]}"
+        port="${port#:}"
+    else
+        host="${authority%%:*}"
+        port="${authority#"$host"}"
+        port="${port#:}"
+    fi
+
+    if [[ -z "$port" ]]; then
+        echo "vogt-core: VOGT_CORE_URL has no port; not starting a core" >&2
+        return 1
+    fi
+
+    case "$host" in
+        127.0.0.1|localhost|'[::1]')
+            # `vogt serve --host` wants a bare address; the brackets are URL
+            # syntax, not part of the address.
+            printf '%s %s\n' "${host//[\[\]]/}" "$port"
+            ;;
+        *)
+            echo "vogt-core: VOGT_CORE_URL names ${host}, not loopback —" \
+                 "proxying to a core this container does not run" >&2
+            return 1
+            ;;
+    esac
+}
+
+supervise_vogt_core() {
+    local host="$1" port="$2"
+    local backoff=1 started=0 uptime=0
+
+    # `init` before every `serve`, because nothing else migrates. `serve` does
+    # not, and there is no `vogt migrate` verb, so an image carrying a new
+    # migration would otherwise come up, pass its healthcheck, and fail later
+    # as a SQL error at whatever operation first touched the missing table —
+    # the one deployment gap DEPLOYMENT.md §5 records against this product, and
+    # the manual step ("run `vogt init` in the container after a digest bump")
+    # nobody remembers under pressure. Owning the container's startup is what
+    # finally lets it be closed: `init` is idempotent and brings an existing
+    # instance forward, so paying for it every boot costs a no-op.
+    #
+    # It is inside the loop rather than before it so that a failure — a volume
+    # not yet writable, a migration that needs a moment — is retried on the
+    # same backoff as everything else, instead of leaving the core dead until
+    # somebody restarts the container.
+    while :; do
+        started=$SECONDS
+        if ! vogt init; then
+            echo "vogt-core: init failed — refusing to serve a store this" \
+                 "build does not understand" >&2
+        else
+            echo "vogt-core: serving on ${host}:${port}"
+            if vogt serve --host "$host" --port "$port"; then
+                echo "vogt-core: exited cleanly" >&2
+            else
+                echo "vogt-core: exited with status $?" >&2
+            fi
+        fi
+        uptime=$(( SECONDS - started ))
+
+        # A core that ran for a while and then died is a different animal from
+        # one that cannot start: reset the backoff for the first so a restart
+        # is quick, and let it grow for the second so a crash-loop does not
+        # bury the log line that says why.
+        if (( uptime >= 60 )); then
+            backoff=1
+        fi
+        echo "vogt-core: restarting in ${backoff}s (ran for ${uptime}s)" >&2
+        sleep "$backoff"
+        if (( backoff < 30 )); then
+            backoff=$(( backoff * 2 ))
+        fi
+    done
+}
+
+if [[ -n "${VOGT_CORE_URL:-}" ]]; then
+    if core_listen="$(vogt_core_listen "${VOGT_CORE_URL}")"; then
+        read -r core_host core_port <<<"$core_listen"
+
+        # Both halves must agree about where the estate is (§6.3): vogt's
+        # import root and the engine's workspace_root are the same tree, so a
+        # session opened "for" a project opens in the path the registry
+        # recorded. A mismatch does not fail anything — it just means every
+        # collector reports nothing about a tree nobody edits, which renders as
+        # an empty estate rather than as "could not look". Say so loudly at
+        # boot, because that is the only moment anyone is reading.
+        workspace_root="${HOME:-/home/sprooty}/Working"
+        import_root="${VOGT_IMPORT_ROOT:-}"
+        if [[ -n "$import_root" && "$import_root" != "$workspace_root"* ]]; then
+            echo "vogt-core: WARNING VOGT_IMPORT_ROOT (${import_root}) is not" \
+                 "under the engine's workspace root (${workspace_root});" \
+                 "imported projects will be invisible to sessions (§6.3)" >&2
+        fi
+
+        supervise_vogt_core "$core_host" "$core_port" &
+        echo "vogt-core: supervisor started (PID $!)"
+    fi
+else
+    echo "vogt-core: VOGT_CORE_URL unset; running the engine alone (FR-E9)"
+fi
+
+# `exec` so the server becomes the container's foreground process from here;
+# SIGTERM from `docker stop` reaches it cleanly. Pass through any args.
 exec /usr/local/bin/mydevenv2-server "$@"

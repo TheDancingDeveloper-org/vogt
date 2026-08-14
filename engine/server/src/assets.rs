@@ -8,9 +8,14 @@ use rust_embed::RustEmbed;
 
 /// Embedded PWA bundle. Built by `web/` (pnpm build) prior to `cargo build`.
 ///
-/// If the directory is missing (fresh checkout, web not yet built), the
-/// macro emits an empty asset set — the server still works headlessly, the
-/// root just serves a small placeholder.
+/// **`web/dist/` must exist before this crate compiles.** The comment here
+/// used to claim a missing directory yields an empty asset set and a
+/// headless server; it does not. The derive fails to expand and the crate
+/// dies with three errors about `WebAssets` having no `get`, which reads
+/// like a version mismatch in `rust-embed` rather than a missing build step.
+/// An empty `web/dist/` is enough — CI creates a placeholder file there
+/// before building, and so should anything else that builds the engine
+/// without the PWA.
 #[derive(RustEmbed)]
 #[folder = "../../web/dist/"]
 #[prefix = ""]

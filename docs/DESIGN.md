@@ -1,6 +1,7 @@
 # Vogt — Design Outline
 
-Status: **v0.3 (revision r5), built** · design 2026-08-12, reconciled
+Status: **v0.3 (revision r5), built**; **§1.2 reversed at r9** (2026-08-14 —
+Vogt runs the work it governs) · design 2026-08-12, reconciled
 against the delivered v1 on 2026-08-12. Sections that describe something
 the build decided differently are marked *as built* in place; the
 requirement-by-requirement verification is `REQUIREMENTS.md` §5.
@@ -51,15 +52,43 @@ Consequences:
   GitHub Actions collector is one producer.
 - Write-back, historical backfill, and forge-derived drift remain at M5.
 
-### 1.2 Non-goals (v1)
+### 1.2 Non-goals (v1) *(one reversed at r9)*
 
 - Multi-forge support (GitHub + GitHub Actions are the only *optional*
   forge integration in v1).
 - Multi-node / hosted SaaS (single-node self-hosted only).
 - Time tracking, sprint ceremonies, burndown charts.
-- Being an agent runner. Vogt tells agents *what* and *why*; it does
-  not execute them.
+- ~~Being an agent runner. Vogt tells agents *what* and *why*; it does
+  not execute them.~~ **Reversed at r9** — see below. The line stays because
+  it was true for v1, and because a reader of the delivered v1 will find
+  nothing in it that runs anything.
 - Enforcing anything. Vogt reports; the human or agent acts (§5).
+
+**The agent-runner reversal (r9).** Vogt now runs the work it governs.
+MyDevEnv2 is merged in as Vogt's session engine — from the `dev` branch of
+MyDevEnv2, head `2214a7d` — and with it come PTY sessions, agent tasks and
+an assistant, so a work item can *open a coding session* in its project's
+tree instead of only describing one. The design change is recorded here
+rather than in a deleted bullet because the original line was not a mistake:
+Vogt had no execution surface, and a tracker that claims to run agents
+without one is describing a wish.
+
+What made it a non-goal was never a distaste for execution; it was the
+worry, in the same family as §2.1's "never going looking", that a system
+which can act starts acting on its own. That worry is answered by a
+narrower rule, which survives and is now the boundary: **Vogt never decides
+to run anything on its own.** Every session traces to a person, or to a
+schedule a person created. Autonomous work pickup — an agent taking the top
+backlog item because it was there — is deferred by name in
+[`REQUIREMENTS.md`](REQUIREMENTS.md) §3, and §5.1's rule that collection
+scope is the registered project list is untouched. §2.1 also stands
+unchanged: an execution surface is not an enforcement surface, and nothing
+in the merged product consumes compliance, trust or drift status as a
+precondition for running anything.
+
+The numbered form of all this is `REQUIREMENTS.md` revision **r9** (families
+FR-E, FR-T, FR-M, and the appended FR-U/FR-S/NFR rows); the merge's own
+reasoning is [`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md).
 
 ### 1.3 Alternatives considered
 
@@ -753,6 +782,11 @@ GUI) with per-stage requirement IDs and demo acceptance criteria.
 the local estate *and* read-only GitHub. M3 adds compliance reporting and
 the drift lifecycle, M4 service mode, M5 forge consolidation and
 write-back, M6 the GUI. **v1 = M0–M6.**
+
+Post-v1: M7 (import and the notification inbox) and M8 (`connect` — reaching
+an instance from an agent environment). The merge stages **M9–M14** carry the
+§1.2 reversal into delivery — foundations, coding sessions, GUI uplift, the
+AI layer, mobile, consolidation. **v2 = M9–M13.**
 
 ---
 

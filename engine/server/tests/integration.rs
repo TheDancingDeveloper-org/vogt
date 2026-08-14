@@ -908,6 +908,14 @@ async fn create_session_accepts_scrollback_override() {
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
 
+    // The child can exit before the PTY reader has drained what it wrote:
+    // process exit and output accounting complete independently, exactly as
+    // archival and indexing do in the history test below. Waiting only for
+    // `exit_code` therefore observed a scrollback of 0 about one run in five
+    // — a flake that only became visible once CI started running this suite
+    // on every push. Poll until the accounting settles, on a deadline, so a
+    // count that is genuinely wrong still fails rather than hanging.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let detail: SessionDetail = loop {
         let detail: SessionDetail = client
             .get(format!("{base}/api/sessions/{id}"))
@@ -917,9 +925,16 @@ async fn create_session_accepts_scrollback_override() {
             .json()
             .await
             .unwrap();
-        if detail.summary.exit_code.is_some() {
+        if detail.summary.exit_code.is_some() && detail.summary.scrollback_bytes == 11 {
             break detail;
         }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session never accounted for the 11 bytes it wrote; \
+             scrollback_bytes={}, exit_code={:?}",
+            detail.summary.scrollback_bytes,
+            detail.summary.exit_code
+        );
         tokio::time::sleep(Duration::from_millis(40)).await;
     };
 

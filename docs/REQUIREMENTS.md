@@ -1,18 +1,24 @@
 # Vogt — Requirements (v0.3)
 
-Status: **baseline, revision r8** (2026-08-13), distilled from `DESIGN.md`,
-`SCHEMA.md`, `DEPLOYMENT.md` and the originating product discussion.
+Status: **baseline, revision r9** (2026-08-14), distilled from `DESIGN.md`,
+`SCHEMA.md`, `DEPLOYMENT.md`, [`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md) and
+the originating product discussion.
 **v1 (M0–M6) is built**; §5 is the requirement-by-requirement verification
 of the delivered system against this document, including the four
 requirements that are not fully met.
 
-Priority key (MoSCoW): **M** = must have (v1 is not shippable without it) ·
-**S** = should have (v1 target, degradable) · **C** = could have (explicitly
-designed-for, may slip past v1). Deferred items are in §3.
+Priority key (MoSCoW): **M** = must have (not shippable without it) ·
+**S** = should have (target for its release, degradable) · **C** = could have
+(explicitly designed-for, may slip). Deferred items are in §3.
 
 **v1 = M0–M6** (all stages in `ROADMAP.md`). **MVP = M0–M2** — the first
 build that is daily-usable. "M" priority means required for v1, not
 required for MVP; the roadmap says which stage delivers each ID.
+
+**v2 = M9–M13**, the merge stages added by revision r9; M14 is consolidation
+and delivers no new ID. **Merge-MVP = M9–M10** — the first build where a work
+item can open a coding session. Requirements marked *(r9)* are v2 scope and
+their priority reads against v2, not v1.
 
 Requirements use *shall*; each is intended to be testable. Source column
 points at the governing design section.
@@ -244,6 +250,79 @@ became `test_an_unknown_version_negotiates_down_rather_than_refusing`, and its
 HTTP counterpart likewise. A third was added, because negotiating down must
 not become ignoring what was asked for.
 
+### Revision r9 — Vogt runs the work it governs
+
+**One non-goal is reversed, deliberately.** `DESIGN.md` §1.2 and §3 of this
+document have listed *"being an agent runner"* as out of scope since the
+first draft: Vogt tells agents *what* and *why*; it does not schedule or
+execute them. That was the right boundary for a product with no execution
+surface. The merge adopted in [`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md) —
+MyDevEnv2 brought in as Vogt's session engine, from the **`dev` branch of
+MyDevEnv2 at head `2214a7d`** — gives Vogt one, and the boundary moves with
+the reason for it: **Vogt still never decides to run anything on its own.**
+Every session starts because a person asked, or because a person created the
+schedule that asked. What r3 refused — the system going looking, continuous
+checking, autonomous action — stays refused, and FR-G15 is untouched. What
+changes is only that "start work on this" is now an *operation* instead of
+advice.
+
+The half of the non-goal that survives is restated in §3 as **autonomous work
+pickup**, so that the reversal is bounded rather than open: there is no loop
+in which an agent takes the top backlog item because it was there.
+
+Four subordinate decisions, each recorded because a future reader will ask:
+
+1. **The engine is adopted as-built, not respecified.** Sessions, PTY,
+   attach, scrollback, activity states, agent tasks, push and the assistant
+   arrive with delivered behaviour and their own documents
+   (`API_CONTRACT.md`, `ASSISTANT.md`, `AGENT_TASKS.md`, under `docs/engine/`
+   after the merge). FR-E1/E2 and FR-T1/T2 state the *load-bearing*
+   properties Vogt now depends on — the ones whose regression would break a
+   Vogt requirement — not a re-derivation of the engine's full surface.
+2. **The write plane is not weakened by the front door.** FR-W1's rule — a
+   write needs a reason its author typed — and r6's restatement — a mutating
+   operation appears in the GUI only through a view that collects one — bind
+   the new surfaces identically (FR-U6, FR-U15, FR-T3). The proxy forwards;
+   it never pre-approves (FR-S9).
+3. **The assistant's approval gate is a structural guarantee, not
+   configuration.** The engine's threat model — no model output reaches an
+   effector without an on-screen approval, and voice never approves — is
+   promoted from module documentation to a numbered requirement (FR-T2),
+   because the merged product leans on it far harder than MyDevEnv2 did.
+4. **The GUI is specified to interaction depth, not surface list.** M6's
+   requirements named views (FR-U1) and the delivery was judged by their
+   existence. A Jira/Trello-grade GUI fails in its *interactions* — a drag
+   that lies about what the server accepted, a filter that resets on reload,
+   a list that only updates on refresh — so FR-U10–U22 pin the interaction
+   contract itself: liveness, addressability, optimistic honesty, keyboard
+   reach, and what every surface does when its data source is absent. Each is
+   testable without a pixel being asserted.
+
+**Numbering, checked rather than assumed.** The draft named each family's
+maximum "as of r8" — FR-U3, FR-S8, FR-A8, NFR-D10, NFR-C5, NFR-I5, NFR-Q5 —
+and every one of those is correct against the file; each ID appended below
+continues its family with no collision and no gap, and the three new family
+letters (E, T, M) are unused by any existing family. Two things the draft did
+not have right are corrected here.
+
+- **NFR-S was absent from the draft's list of maxima although the draft
+  appends to it.** Its maximum was NFR-S4, so NFR-S5 is right — but it was
+  right unchecked, which is how the next one lands wrong. Recorded here as
+  checked: every family's IDs now run 1..n with no gap and no repeat.
+- **The stage numbers were wrong.** The draft's stages opened at M8, on the
+  stated grounds that M7 was the last one. M8 is taken: `ROADMAP.md` already
+  carries *M8 — Reachable by an agent* (FR-A8), the stage r8's own revision
+  note describes itself as happening during. The merge stages are therefore
+  **M9–M14**, and every reference to them here and in `ROADMAP.md` uses the
+  corrected numbers. Renumbering a stage is not renumbering a requirement:
+  §4 forbids the latter, and no appended ID is affected.
+
+This revision folds `MERGE_MYDEVENV2.md` §12 into this document and §13 into
+§3; §14 of that document becomes `ROADMAP.md` M9–M14. Those sections stay in
+place as the merge's working record, and no longer govern. Sections §§1–11 of
+that document remain the design authority for the merge itself, and the
+Source column below cites them as **MERGE §n**.
+
 ---
 
 ## 1. Functional requirements
@@ -377,6 +456,8 @@ by path or repository URL, and stops there.*
 | FR-S6 | The audit log shall be queryable through the API (filter by actor, entity, operation, time). | M | DESIGN §4.2 |
 | FR-S7 | Secrets (tokens) shall be supplied via file reference, never argv or URL. | M | DEPLOY §2.2 |
 | FR-S8 | *(r6)* Credentials used to clone a repository (FR-P6) shall be supplied to `git` out of band — never in the remote URL, never in argv, and never written into the clone's own configuration. A project's stored `repo_url` shall never contain credentials. | M* | DEPLOY §2.2 |
+| FR-S9 | *(r9)* The front door shall hold the single public token namespace, extended with Vogt capabilities; each front-door token shall map to a named Vogt actor whose paired core token the proxy injects — so audit records real actors, the proxy never pre-approves, and the double-gated writes of FR-S4 are not weakened. | M | MERGE §9 |
+| FR-S10 | *(r9)* A session started for a project or work item shall receive a per-session actor-scoped token, minted at start and revoked at session end; its writes shall be distinguishable in the audit log from every other actor's. | M | MERGE §6.1, §9 |
 
 ### FR-B — Forge write-back (optional module)
 
@@ -411,6 +492,62 @@ by path or repository URL, and stops there.*
 | FR-U1 | The GUI shall provide: per-project view, global backlog, global bugs, drift inbox, dependency graph view, audit browser. | M | DESIGN §10 (M6) |
 | FR-U2 | The GUI shall display trust state and data freshness on every aggregated view. | M | DESIGN §6 |
 | FR-U3 | *(r6)* The GUI shall provide an import form taking a repository reference and a reason (FR-P6), and a notification inbox over FR-N3. Both shall consume only the public REST API, and the import form shall offer no repository listing, search, or suggestion. | S | DESIGN §10 |
+| FR-U4 | *(r9)* The GUI shall present a board of work items whose columns are the workflow's states read from `workflow.list` — never hard-coded — where a drag is a `work.transition` and an illegal transition bounces with the server's stated reason. | M | MERGE §7.1 |
+| FR-U5 | *(r9)* The GUI shall present a work item in full: description, state history, comments, relations, labels, per-item audit trail, collected evidence with freshness and trust, and the start-session control (FR-E4). | M | MERGE §7.2 |
+| FR-U6 | *(r9)* The GUI shall present the ranked backlog and bugs views with the explainable `why`, quick-create, and bulk transition/label — under r6's rule: a mutating operation appears only through a view that collects a reason the user typed. | M | MERGE §7.3 |
+| FR-U7 | *(r9)* The GUI shall present per-project pages: brief, CI status, contract/compliance, drift inbox, dependency graph, and the import form. | S | MERGE §7.4 |
+| FR-U8 | *(r9)* The PWA shall consume only public APIs, and every URL in the shipped bundle shall resolve against the operation registry *and* the engine's API contract — extending the existing M6 assertion to the Solid bundle and to both halves. | M | MERGE §7 |
+| FR-U9 | *(r9)* The legacy GUI shall keep serving at `/ui-legacy` until every operation it exposed is reachable in the PWA, and shall then be removed — parity is asserted, not assumed. | S | MERGE §5.1 |
+| FR-U10 | *(r9)* Views showing server-announced state — session activity (FR-E2), work item state, drift arrivals, notification counts — shall update live from the SSE stream without a manual refresh. A lost stream shall be indicated and shall reconcile on reconnect; a stale view shall never present itself as current. | M | MERGE §7; engine README |
+| FR-U11 | *(r9)* Every project, work item, board (including its active filter set), session, and audit query shall be addressable by URL: deep links shall survive reload, be shareable, and restore the exact view. Terminal deep links (`/#/t/<id>`) are adopted as-built; Vogt surfaces shall follow the same scheme. | M | MERGE §7; engine README |
+| FR-U12 | *(r9)* A drag or inline edit shall render optimistically and reconcile against the server's answer, which is authoritative: a refused `work.transition` shall roll the item back visibly and surface the server's stated reason where the drop happened. The client shall never persist, cache, or re-derive a state the server refused. | M | MERGE §7.1 |
+| FR-U13 | *(r9)* The board shall support swimlanes by project or initiative, per-column WIP counts, and collapse/expand of lanes and columns; lane and column layout preferences shall persist per client. | S | MERGE §7.1 |
+| FR-U14 | *(r9)* Board, backlog, and bugs views shall filter by project, workflow state, type, label, initiative, and actor, with filters combinable and reflected in the URL (FR-U11). A combined filter shall be nameable and recalled as a saved filter; saved filters are per-client state in v2 (server-side shared filters are deferred, §3). | S | MERGE §7.1, §7.3 |
+| FR-U15 | *(r9)* Quick-create shall exist on the board and backlog: title, type, project, and the typed reason FR-W1 requires, inline, without leaving the view; every other field is deferrable to the detail view. A quick-create that omits the reason shall not submit. | M | MERGE §7.3, FR-W1 |
+| FR-U16 | *(r9)* The command palette shall reach every read surface (projects, work items, sessions, views) by fuzzy name, and every GUI-exposed mutating verb by opening the view that collects its reason — the palette itself shall never execute a write directly (r6's rule restated for the keyboard path). | S | MERGE §7 |
+| FR-U17 | *(r9)* Trust state and freshness shall be displayed on every aggregated view (FR-U2 extended to the new surfaces), and session-derived evidence shall show the session's activity state as its liveness indicator: a claim backed by a still-running session is marked provisional, not fresh. | M | FR-U2, MERGE §6.2 |
+| FR-U18 | *(r9)* The drift inbox shall show each proposal's evidence (both sides of the disagreement, with provenance and age) *before* any act is possible, and accept/reject shall collect a typed reason. Bulk accept shall not exist. | M | MERGE §7.4, FR-R2 |
+| FR-U19 | *(r9)* The audit browser shall filter by actor, project, operation, and time range, and every rendered write shall show who, what, and why. A work item's detail view shall link into the audit browser pre-filtered to that item. | S | MERGE §7.5, FR-S6 |
+| FR-U20 | *(r9)* A work item linked to a session (FR-E4) shall show the live activity badge and an open-terminal control that navigates to the terminal surface attached to that session; the terminal surface shall link back to the owning work item. | M | MERGE §6.1, §7.2 |
+| FR-U21 | *(r9)* Every surface shall have a designed absent state: engine unavailable → Vogt views work and session controls disable with the named reason; vogt-core unavailable → terminal, files, git, and assistant-over-sessions work and Vogt surfaces report the outage rather than rendering empty data as truth (FR-E9's degrade rule, made visible). | M | MERGE §11.2, FR-E9 |
+| FR-U22 | *(r9)* The board shall be operable entirely from the keyboard: item focus, moving an item between columns (the drag's equivalent, still subject to FR-U12's reconcile), opening detail, and quick-create shall each have a binding discoverable in the GUI. | S | MERGE §7.1 |
+
+### FR-E — Coding sessions & session engine *(r9)*
+
+The families below are introduced by r9 and are v2 scope throughout; their
+priorities read against v2 (M9–M13), per the r9 revision note.
+
+| ID | Requirement | Pri | Source |
+|---|---|---|---|
+| FR-E1 | *(r9)* The system shall run interactive terminal sessions: per-session PTY with ring-buffer scrollback, WebSocket attach with snapshot replay, multiple concurrent clients per session, and full lifecycle (create / list / get / rename / kill / delete). *(Adopted as-built from the engine.)* | M | MERGE §5.2; engine README |
+| FR-E2 | *(r9)* Each session shall carry a live activity state (`idle` / `running` / `waiting-for-input` / `errored`) derived from output heuristics and published on the server-wide SSE event stream. | M | engine README |
+| FR-E3 | *(r9)* The system shall start a session *for a registered project*: the working directory shall be the path the project registry records for it, and template selection shall consult the registry — never path heuristics — so a session opened "for" a project always opens in the registry's tree. The import root and the engine's workspace root shall be the same tree. | M | MERGE §6.3 |
+| FR-E4 | *(r9)* The system shall start a session *for a work item*: the item's brief (description, `why`, relations) shall be written to a prompt file via the agent-task prompt mechanism; the session id shall be recorded on the work item as an audited write; and the work item's views shall reflect the session's live activity state. | M | MERGE §6.1 |
+| FR-E5 | *(r9)* Sessions started for a project or work item shall register the Vogt MCP server for agents running inside them, carrying a per-session actor-scoped token (FR-S10), so that agent writes to Vogt are attributed to that session's actor. | M | MERGE §6.1 |
+| FR-E6 | *(r9)* Session outcomes — exit code, duration, resulting working-tree delta — shall be collected as observations with freshness and trust, like all other evidence. | S | MERGE §6.2 |
+| FR-E7 | *(r9)* A scheduled agent task may be bound to a project or work item; a bound run's findings shall be recordable as Vogt observations, not only as push notifications. The schedule remains one a person created (§3). | S | MERGE §6.1 |
+| FR-E8 | *(r9)* `session.start`, `session.list`, and `session.stop` shall be operations in the registry, and therefore present with parity on CLI, REST, and MCP (FR-A1). | M | MERGE §6.2 |
+| FR-E9 | *(r9)* The engine shall remain bootable with vogt-core absent, degrading to plain sessions — absence of the core costs Vogt features, never session availability (the ContextKeeper degrade rule, applied inward). | S | MERGE §11.2 |
+
+### FR-T — Conversational assistant (the AI layer) *(r9)*
+
+| ID | Requirement | Pri | Source |
+|---|---|---|---|
+| FR-T1 | *(r9)* The assistant shall be a server-side tool-use loop with read access to sessions (`list_sessions`, `read_session_tail`) and to a curated read-only slice of the operation registry (at minimum: `backlog`, `bugs`, `why`, `project.brief`, `project.list`, `work.get`, `work.list`, `compliance`); registry-backed tool schemas shall be generated from the registry, not hand-written. | M | MERGE §8.1 |
+| FR-T2 | *(r9)* Every mutating assistant tool — `send_input`, any `work.*` write, `session.start` — shall pass the pending-action gate: one pending action at a time, carrying the exact payload and target, expiring unapproved, approved only by an on-screen act. No model output shall be able to bypass the gate, and the voice path shall never approve. *(Promoted from the engine's `ASSISTANT.md` threat model.)* | M | MERGE §8.2 |
+| FR-T3 | *(r9)* An assistant-initiated Vogt write shall be audited to the approving user's actor with a `why` derived from the conversational context — never to a shared "assistant" actor. | M | MERGE §8.2, FR-W1 |
+| FR-T4 | *(r9)* Assistant tool results carrying external content — terminal output, forge-derived text, imported issue bodies — shall be delimited as untrusted data; the threat-model rule that external content never becomes instructions extends to every Vogt read. | M | MERGE §8.5 |
+| FR-T5 | *(r9)* The assistant shall be drivable by voice: push-to-talk STT in the mobile shell, spoken replies in any client, with a validation pass against domain vocabulary (project names, "backlog") before v2 ships — voice is adopted unproven and shall not be presumed working. | S | MERGE §8.4; engine ASSISTANT.md |
+| FR-T6 | *(r9)* The assistant shall not exist unless configured: absent its API key the routes answer 404 and every GUI hides the surface. *(As-built rule, retained.)* | M | engine ASSISTANT.md |
+| FR-T7 | *(r9)* The tool loop shall be provider-portable: an OpenAI-compatible backend and a native Anthropic backend shall both be supported, and the currently-documented hang against `claude-*` proxy routes shall be resolved or the route refused with a named reason. | C | MERGE §8.4 |
+
+### FR-M — Mobile surface *(r9)*
+
+| ID | Requirement | Pri | Source |
+|---|---|---|---|
+| FR-M1 | *(r9)* The mobile app shall be the Capacitor shell loading the merged PWA. Its MVP1 feature set shall be: terminal sessions, assistant with voice, push, backlog/board read, and session start/approve. | M | MERGE §3; ROADMAP M13 |
+| FR-M2 | *(r9)* Push notifications shall be routed for events worth a phone interruption: a session entering `waiting-for-input` or `errored`, new drift, and the agent-task notify hook — and for nothing else by default. | S | MERGE §10 |
+| FR-M3 | *(r9)* Vogt surfaces shall be usable at phone widths; the board shall render as a list, not columns, below the narrow breakpoint. | S | MERGE §7 |
 
 ---
 
@@ -439,6 +576,8 @@ by path or repository URL, and stops there.*
 | NFR-D8 | *(r4)* In the NFR-D7 deployment, the published listener shall bind the host's Tailscale address, never `0.0.0.0`; stateful data shall use a named volume, and operator-owned material shall use absolute bind mounts (never `./relative` paths, which Komodo's per-deploy stack clone silently redirects). NFR-D5 continues to govern what the *product* permits an operator to bind. | M |
 | NFR-D9 | *(r4)* The shipped image and the NFR-D7 compose stack shall run non-root with a read-only root filesystem, `no-new-privileges`, all capabilities dropped, and writable scratch supplied as `tmpfs`. Token files shall be mode-restricted to the container's uid. | M |
 | NFR-D10 | *(r4)* Publishing an image and deploying it shall be distinct acts: a tag publishes, and production moves only when the pinned digest in `indexarr/ops` is changed and a deploy is executed. Rollback shall be a revert of that digest plus a redeploy, subject to the forward-only migration constraint (NFR-I3). | M |
+| NFR-D11 | *(r9)* The merged product shall ship as one stack with one published port: the Rust engine is the front door, serving the PWA, its native APIs, the WebSocket attach path, `/api/vogt` and `/mcp` proxied to the core, and aggregate health. Vogt-core shall bind loopback only and shall never be published. Any port that serves MCP shall serve plain HTTP health, so FR-A7 and NFR-D1 hold at the front door rather than being lost behind it. (MERGE §5.2) | M |
+| NFR-D12 | *(r9)* The dev/prod split shall be branch-shaped before any merge phase lands: `dev` builds `:dev` images deployed to a dev stack for live validation, and only `main` deploys to prod. Several merge stages — mobile, voice, push — are verifiable only against a live dev stack. *(Adopted from the engine's `uplift.md`, where it is already named a prerequisite; MERGE §10.)* | M |
 
 ### NFR-I — Integrity & reliability
 
@@ -449,6 +588,7 @@ by path or repository URL, and stops there.*
 | NFR-I3 | Migrations shall be forward-only, run under a lock, and gate readiness until complete. | M |
 | NFR-I4 | Derived tables shall be reconstructible from retained observations at any time; reconstruction is bounded by the retention horizon, and the latest observation per subject is retained regardless of age. | M |
 | NFR-I5 | Retention: latest observation per subject kept indefinitely; history pruned by configurable policy (default 180 days), except observations referenced by drift proposals (FR-R5). | S |
+| NFR-I6 | *(r9)* Backup and restore shall cover the whole product state as one act: the core's SQLite, the engine's `state_dir`, and enough registry/workspace metadata to re-establish FR-E3's path agreement after restore. (MERGE §10) | M |
 
 ### NFR-S — Scale & performance
 
@@ -458,6 +598,7 @@ by path or repository URL, and stops there.*
 | NFR-S2 | Observed-store growth shall be proportional to change, not polling frequency (digest dedup). | M |
 | NFR-S3 | The storage layer shall avoid SQLite-only semantics that would block a later Postgres backend behind the same interface. | S |
 | NFR-S4 | *(r2)* A seeded benchmark fixture at the NFR-S1 envelope shall exist from M2, and the interactive-query target shall be asserted against it in CI. | S |
+| NFR-S5 | *(r9)* GUI views shall stay interactive at estate scale — on the order of a hundred projects and a few thousand open work items: long lists virtualize, the board's filter and drag paths do not degrade with backlog size, and no view fetches the whole estate to render a page of it. Server-side pagination and filtered queries already exist; the GUI shall use them. (MERGE §7) | S |
 
 ### NFR-Q — Quality & maintainability
 
@@ -468,6 +609,7 @@ by path or repository URL, and stops there.*
 | NFR-Q3 | A feature merges only with CLI + REST + MCP + audit coverage (enforced by the parity test matrix, subject to the FR-A3 exclusion lists). | M |
 | NFR-Q4 | The pydantic config schema is the single source of truth; example configs, compose files, and docs are generated from it and CI fails on drift. | M |
 | NFR-Q5 | Own dependencies: committed `uv.lock`; Renovate/Dependabot weekly with version updates, vulnerability alerts, and security fixes each explicitly enabled; CI fails on manifest/lockfile mismatch. | M |
+| NFR-Q6 | *(r9)* Both test suites shall pass in the merged repository, and two absence-modes shall stay green: the forge-less run (NFR-PO1–PO3, untouched) and a core run with no engine present — vogt-core remains fully testable alone. (MERGE §5.1, FR-E9) | M |
 
 ### NFR-C — CI/CD (GitHub Actions)
 
@@ -478,6 +620,7 @@ by path or repository URL, and stops there.*
 | NFR-C3 | *(revised r5)* **Releases** — a semver-tagged image, `latest`, the wheel, the SBOM attestation — shall be tag-triggered only; a push to main shall never cut a release. A push to main **may** publish a **commit-identified** image (`sha-<commit>`, signed, carrying no semver and never moving `latest`), because deploying a fix must not require inventing a version number for it. Deploying remains a separate act (NFR-D10). | M |
 | NFR-C4 | *(r4)* Every workflow job shall select a self-hosted runner explicitly (`runs-on: [self-hosted, node-b, linux, x64, …]`); GitHub-hosted runners and dynamic `runs-on` expressions shall not appear. The repository shall be added to the `public-node-b` runner group before its first workflow exists. Jobs needing a Docker daemon shall additionally request the `docker, publish` labels. | M |
 | NFR-C5 | *(r4)* Image signing shall be keyless (workflow OIDC identity via Fulcio/Rekor), so that no signing key exists to store or rotate and the signature binds to this repository and workflow. | M |
+| NFR-C6 | *(r9)* The merged CI shall run both halves on every push — Rust fmt/clippy/test, web typecheck, APK build, and the existing Python suite — and the build-vs-release discipline of NFR-C3 (a push builds `sha-` images, only a tag releases) shall govern the merged image. (MERGE §5.1) | M |
 
 ### NFR-O — Open source & product
 
@@ -489,16 +632,19 @@ by path or repository URL, and stops there.*
 
 ---
 
-## 3. Explicitly deferred (non-goals for v1)
+## 3. Explicitly deferred (non-goals for v1, and from r9 for v2)
 
 Recorded so absence is a decision, not an omission.
 
 Deferred from the outset: multi-forge support (GitHub is the only,
 optional, forge target); hosted/multi-tenant SaaS; multi-node/HA; public
-internet exposure; split MCP/API processes; boards, sprints, burndown,
-time tracking; inbound webhooks (polling baseline); agent execution (the
-platform informs agents, it does not run them); Postgres backend (kept
-possible, not built); attachments (paths/URLs in body text meanwhile).
+internet exposure; split MCP/API processes; ~~boards~~ *(reversed at r9 —
+FR-U4 adds a board whose columns are the workflow states that already
+exist)*, sprints, burndown, time tracking; inbound webhooks (polling
+baseline); ~~agent execution (the platform informs agents, it does not run
+them)~~ *(reversed at r9 — see the revision note, and "autonomous work
+pickup" below for the half that survives)*; Postgres backend (kept possible,
+not built); attachments (paths/URLs in body text meanwhile).
 
 Deferred by revision r2:
 
@@ -565,6 +711,42 @@ Deferred by revision r6:
   the inbox is worth today — and the same limitation as the per-project
   authorization scopes deferred by r2.
 
+Deferred by revision r9. Everything r2–r8 deferred — discovery, candidate
+listing, per-actor notification inboxes, multi-forge, multi-node — **remains
+deferred and is not re-litigated by the merge**.
+
+- **Autonomous work pickup.** The system shall not start sessions on its own
+  initiative: no loop in which an agent takes the top backlog item because it
+  was there. Every session traces to a human act or a human-created schedule
+  (FR-E4, FR-E7). **This is the surviving core of the non-goal r9 reversed**,
+  and it is the reason the reversal is a change of surface rather than of
+  posture — the r3 rule that the system never goes looking is untouched.
+- **Voice approval.** Approving a pending action by voice, in any form. FR-T2
+  forbids it for v2; lifting that is a threat-model revision, not a feature.
+- **Backend convergence on Rust.** The two-process shape is the v2
+  requirement (NFR-D11); porting the Python core is a possible future with no
+  requirement justified by it — the same discipline r3 applied to the
+  AI-assisted-drift stretch goal below. Note that NFR-D11's two processes are
+  *not* the split MCP/API topology deferred at the outset: there is still one
+  published port, and the core is not reachable from outside it.
+- **Sprint ceremonies, burndown, time tracking.** v1's non-goals stand;
+  Jira-*shaped* does not mean Jira-complete.
+- **Server-side saved filters.** FR-U14's saved filters are per-client in v2.
+  Sharing them requires per-user server state, which Vogt does not otherwise
+  have and should not grow for this alone.
+- **Bulk drift resolution.** FR-U18 forbids bulk accept deliberately: a drift
+  acceptance is a declared-state write and carries its own reason. Making
+  that convenient in bulk is exactly how r6's rule would erode.
+- **GUI-side offline mode.** The PWA installs, but no Vogt surface caches
+  data for offline mutation; a queued offline write cannot carry an honest
+  freshness answer.
+- **The archived GPUI desktop client.** It stays in the MyDevEnv2 repository
+  and is not carried into the merged tree.
+- **Cadastre consolidation.** Both "estate registers" keep running as they
+  are; their overlap is its own future investigation, not part of this merge.
+- **iOS shell.** MVP1 is Android — the existing Capacitor shell. Nothing
+  designed here precludes iOS and nobody builds for it in v2.
+
 Named stretch goal, **not committed and not designed for**:
 
 - **AI-assisted drift detection and recommendation.** The intended
@@ -593,6 +775,13 @@ Named stretch goal, **not committed and not designed for**:
 ---
 
 ## 5. Delivery verification (v1, 2026-08-12)
+
+*This section verifies v1 and is not restated by r9. The IDs r9 appended —
+FR-E, FR-T, FR-M, FR-U4–U22, FR-S9/S10 and the six appended NFRs — are v2
+scope and unbuilt; the counts below are v1's and do not move because a later
+revision added requirements. `ROADMAP.md` M14 carries the §5-style
+verification of them, in the same style and by the same method (§5.4a
+included).*
 
 M0–M6 are built; 482 tests pass at 92% coverage. This section is the audit
 of the *delivered* system against every requirement above — read against
