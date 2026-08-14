@@ -974,18 +974,22 @@ before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved forty-three conjuncts, and three of them were moved by
-nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
-image streams and the Android shell was a claim about a workflow file that had
-never once executed, and three of them turned out to be true; the two that
-were false failed on their first run, in the two places a file cannot show
-you. `docs` failed on a link that resolved on this machine and nowhere else.
+**A fourth pass moved forty-one conjuncts, and three of them were moved by
+nothing being written.** The pipeline ran. Every claim this section made about
+the merged image, the two image streams and the Android shell was a claim
+about a workflow file that had never once executed; three turned out to be
+true, and the two that were false failed on their first run, in the two
+places a file cannot show you. `docs` failed on a link that resolved on this machine and nowhere else.
 The engine job failed on `sudo apt-get` with *root is not in the sudoers
 file* — the runner is root, so there was nothing to elevate from. Neither was
 a code defect and both were invisible to review, which is §6.3 finding 22.
 
 **Delivered means a file and a test.** Not a citation — §5.4a's whole point is
-that a grep for an ID finds the docstring that names it. Where code plainly
+that a grep for an ID finds the docstring that names it. Finding 24 is this
+rule failing in this section: a row named a file and three tests, none of
+which exist, and it survived four passes because naming them *looked* like
+having them. `tests/test_requirements_audit.py` now checks every path and
+every test name §6.1 cites. Where code plainly
 does the thing and nothing asserts it, the answer is *implemented, untested*,
 which §5 distinguishes and this section does too.
 
@@ -995,9 +999,10 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 §6.2b group conjuncts by ID and their rows carry several each. The totals are
 therefore checkable without re-deriving all 201:
 
-- **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +41 in the fourth pass (fifteen out of §6.2, twenty-six out of §6.2a,
-  two out of §6.2b, less two returned to §6.2a by finding 24)
+- **143 delivered** = 102 at the third pass, then +41 in the fourth: fifteen
+  out of §6.2, twenty-six out of §6.2a and two out of §6.2b, **less two
+  returned to §6.2a by finding 24** — the first conjuncts this document has
+  ever moved backwards, and the number in this section I trust most
 - **41 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 26, + 2
   returned from §6.1 by finding 24
 - **10 short** = 43 − 19 + 1 arriving from §6.2b, − 15
