@@ -6073,3 +6073,25 @@ textarea {
     min-width: 0;
   }
 }
+
+/* The work item a terminal was opened for (FR-U20). Positioned over the
+   terminal rather than in a header bar: the terminal fills its tab, and a
+   badge that reflows the PTY would resize somebody's shell. */
+.terminal-work-link {
+  position: absolute;
+  top: 6px;
+  right: 12px;
+  z-index: 4;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  text-decoration: none;
+  background: var(--surface-2, rgba(0, 0, 0, 0.55));
+  color: var(--text-2, #cbd5f5);
+  border: 1px solid var(--border, rgba(148, 163, 184, 0.35));
+  opacity: 0.75;
+}
+
+.terminal-work-link:hover {
+  opacity: 1;
+}

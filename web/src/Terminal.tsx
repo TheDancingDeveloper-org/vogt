@@ -1,4 +1,5 @@
 import { Component, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { listSessions } from "./vogtApi";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -106,6 +107,7 @@ function configureTerminalTextarea(textarea: HTMLTextAreaElement | undefined) {
  * tearing down. For Phase 2 we render only the active tab — good enough.
  */
 const TerminalView: Component<Props> = (props) => {
+  const [openedFor, setOpenedFor] = createSignal<string | null>(null);
   let hostRef: HTMLDivElement | undefined;
   let term: XTerm | null = null;
   let ws: WebSocket | null = null;
@@ -417,6 +419,18 @@ const TerminalView: Component<Props> = (props) => {
   };
 
   onMount(() => {
+    // Ask Vogt whether this PTY belongs to a work item. One read, at mount,
+    // and silence on any failure: the badge is worth having and worth
+    // nothing at all if it costs the terminal.
+    void listSessions({ include_stopped: true })
+      .then((answer) => {
+        const link = (answer.sessions ?? []).find(
+          (row) => row.engine_session_id === props.sessionId,
+        );
+        setOpenedFor(link?.work_item ?? null);
+      })
+      .catch(() => setOpenedFor(null));
+
     if (!hostRef) return;
     const cleanupTouchGestures = installTouchGestures();
 
@@ -825,6 +839,29 @@ const TerminalView: Component<Props> = (props) => {
   return (
     <>
       <div class="terminal-shell">
+        {/*
+          FR-U20's return leg. A terminal opened for a work item links back to
+          it — the forward link (item → terminal) shipped with the work item
+          surface, and a link that only goes one way leaves whoever is looking
+          at the terminal to work out what it was for.
+
+          Vogt is asked, not the engine: the engine knows this PTY and nothing
+          about why it exists. An unreachable Vogt, or a session Vogt did not
+          start, contributes nothing and says nothing — this is a badge, not a
+          surface, and a terminal must keep working whatever Vogt is doing
+          (FR-E9).
+        */}
+        <Show when={openedFor()}>
+          {(ref) => (
+            <a
+              class="terminal-work-link"
+              href={`#/w/${encodeURIComponent(ref())}`}
+              title="The work item this session was opened for"
+            >
+              ✦ {ref()}
+            </a>
+          )}
+        </Show>
         <div class="terminal-host" ref={hostRef} />
         <Show when={statusText()}>
           {(text) => <div class="terminal-status-overlay">{text()}</div>}
