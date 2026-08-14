@@ -53,6 +53,7 @@ import {
   type WorkDetail,
   type WorkItem,
 } from "./vogtApi";
+import { ViewAgeBadge, createLoadStamp, createViewAge } from "./viewAge";
 
 interface Props {
   itemRef: string;
@@ -603,6 +604,21 @@ const WorkItemDetail: Component<Props> = (props) => {
     return loaded && !loaded.ok && !loaded.absent ? loaded.message : null;
   });
 
+  // -- how old this page is (FR-U10) ----------------------------------------
+  //
+  // The fifth surface, and the one where a stale read is quietest: an item
+  // page shows a *single* item's state, so there is nothing on it that looks
+  // wrong when it is an hour out of date. It reports its own age like the
+  // rest now, and names the Refresh beside it, because that is what makes it
+  // current — the page does not poll and does not subscribe.
+  const loadedAt = createLoadStamp(work, (loaded) => loaded.ok);
+
+  const viewAge = createViewAge(() => ({
+    loadedAt: loadedAt(),
+    outage: outage(),
+    failed: Boolean(failure()),
+  }));
+
   const sessionList = createMemo<SessionSummary[]>(() => {
     const loaded = sessions();
     return loaded && loaded.ok ? loaded.value.sessions : [];
@@ -900,6 +916,11 @@ const WorkItemDetail: Component<Props> = (props) => {
           >
             {editing() ? "Cancel edit" : "Edit"}
           </button>
+          <ViewAgeBadge
+            age={viewAge()}
+            class="wid-age"
+            title="How long ago this page last got an answer from Vogt — not how old the evidence behind the ranking is, which the evidence panel says for itself"
+          />
           <button type="button" onClick={refreshAll}>
             Refresh
           </button>

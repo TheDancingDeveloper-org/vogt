@@ -890,7 +890,17 @@ export function subscribeEvents(
       let buf = "";
       while (!cancelled) {
         const { value, done } = await reader.read();
-        if (done) break;
+        // A server that closes the stream — a restart, a proxy's idle
+        // timeout, a network drop the body ends cleanly on — used to break
+        // out of this loop and return, which reported nothing: the store
+        // still believed it was connected, no reconnect was ever scheduled,
+        // and every surface that re-reads on `vogt-changed` went quiet while
+        // looking live. That is exactly FR-U10's "a lost stream shall be
+        // indicated and shall reconcile on reconnect", so an end is a
+        // failure here and goes out through the same path a failed connect
+        // does. An end caused by *this* client unsubscribing is caught by
+        // the `cancelled` guard below, as an abort already was.
+        if (done) throw new Error("the event stream ended");
         buf += decoder.decode(value, { stream: true });
         let idx;
         while ((idx = buf.indexOf("\n\n")) !== -1) {

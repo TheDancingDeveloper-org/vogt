@@ -54,6 +54,7 @@ import {
   type AuditRecord,
   type FreshnessSummary,
 } from "./vogtApi";
+import { ViewAgeBadge, createLoadStamp, createViewAge, onVogtLive } from "./viewAge";
 
 interface Props {
   onError?: (message: string) => void;
@@ -894,6 +895,40 @@ const AuditBrowser: Component<Props> = (props) => {
     Math.max(1, Math.ceil((inboxValue()?.total ?? 0) / INBOX_PAGE_SIZE)),
   );
 
+  // -- live, and honest about the difference (FR-U10) -----------------------
+  //
+  // Both views on this surface show state the server announces, and both used
+  // to be read exactly once per filter key: the audit log is the record of
+  // the very writes `vogt-changed` is republishing, and the inbox read its
+  // unread count on the way in and never again — so a count that said 3 on
+  // Monday still said 3 on Friday, with nothing on screen admitting it was
+  // Monday's answer.
+  //
+  // The nudge bumps the reload key, which is the same thing the Refresh
+  // button does, so there is one path to a re-read and the filter, the page
+  // and the window survive it.
+  //
+  // What arrives when: a notification is collected during a sweep, and a
+  // sweep publishes `sweep.completed` onto the core's event feed, which the
+  // front door republishes here. So the count moves when it can move —
+  // GitHub's own reads are not observed until somebody sweeps — and the badge
+  // covers the rest by saying how old this answer is.
+  onVogtLive(() => refresh());
+
+  const auditLoadedAt = createLoadStamp(records, (result) => result.ok);
+  const inboxLoadedAt = createLoadStamp(inbox, (result) => result.ok);
+
+  const viewAge = createViewAge(() => {
+    const inboxView = filter().view === "inbox";
+    const failure = inboxView ? inboxFailure() : outage();
+    return {
+      loadedAt: inboxView ? inboxLoadedAt() : auditLoadedAt(),
+      outage: failure?.unavailable ? failure.message : null,
+      failed: Boolean(failure),
+      live: true,
+    };
+  });
+
   return (
     <div class="vogt-surface vab">
       <header class="vab-header">
@@ -912,6 +947,11 @@ const AuditBrowser: Component<Props> = (props) => {
           </For>
         </div>
         <div class="vab-header-actions">
+          <ViewAgeBadge
+            age={viewAge()}
+            class="vab-age"
+            title="How long ago this view last got an answer from Vogt. It re-reads when Vogt announces a change; a badge that goes stale means the stream is not arriving."
+          />
           <button
             type="button"
             onClick={refresh}

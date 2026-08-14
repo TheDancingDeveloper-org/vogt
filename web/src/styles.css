@@ -3904,6 +3904,35 @@ textarea {
   gap: 8px;
 }
 
+/* How old a view is (FR-U10), wherever `viewAge.tsx` draws it: the board, the
+   backlog, the audit browser and its inbox, and the project pages. The colour
+   says what the view is and never more. Declared before `.board-freshness` so
+   the board's own header colours still win on the element they share. */
+.vogt-age {
+  padding: 1px 8px;
+  border: 1px solid var(--bd-strong);
+  border-radius: 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--fg-muted);
+}
+
+.vogt-age--live {
+  color: var(--activity-done);
+  border-color: var(--activity-done);
+}
+
+.vogt-age--paused,
+.vogt-age--stale {
+  color: var(--activity-running);
+  border-color: var(--activity-running);
+}
+
+.vogt-age--outage {
+  color: var(--activity-waiting);
+  border-color: var(--activity-waiting);
+}
+
 /* Freshness is the honest half of FR-U10: the colour says what the view is,
    never more. `live` is the good case and still says "polling". */
 .board-freshness {
