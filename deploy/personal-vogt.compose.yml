@@ -73,9 +73,13 @@ services:
       # inside and outside the container, because `root_path` is stored
       # absolute (FR-P5) and read back verbatim by collectors.
       VOGT_IMPORT_ROOT: "${VOGT_IMPORT_ROOT:-/home/sprooty/Working/Active}"
-      # Absent by default: no forge adapter, and forge subjects read as
-      # "not collected" rather than absent (NFR-PO1).
-      VOGT_GITHUB_TOKEN_FILE: "${VOGT_GITHUB_TOKEN_FILE:-}"
+      # Set, unlike the product default: without it the forge adapter is off,
+      # so notifications never collect and a private repository cannot be
+      # imported — silently, because forge subjects then read as "not
+      # collected" rather than absent (NFR-PO1). The file is written by the
+      # stack's pre_deploy hook; see DEPLOY 2.2a for why it is not an
+      # `environment:` secret.
+      VOGT_GITHUB_TOKEN_FILE: /run/secrets/github_token
       # Keeps the local principal readable when `user:` is overridden to a uid
       # with no passwd entry in the image. Cosmetic: provenance for anything
       # arriving over the network comes from the token, never from this
@@ -178,11 +182,21 @@ services:
       retries: 3
       start_period: 20s
 
+    secrets:
+      - github_token
+
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+secrets:
+  # Written by the stack's `pre_deploy` hook out of the `.env` Komodo writes
+  # beside this file, because Docker refuses an `environment:`-sourced secret
+  # for a service with a read-only root filesystem. DEPLOY 2.2a.
+  github_token:
+    file: ./github-token
 
 volumes:
   vogt-komodo-data:

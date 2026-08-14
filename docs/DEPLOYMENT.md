@@ -87,7 +87,7 @@ GitHub  <───outbound only─── collectors (optional adapter; no inboun
 |---|---|
 | Host | Node B, `winrarhost` — TS `100.92.54.45`, LAN `192.168.1.75` |
 | Komodo server (periphery) | `Local` |
-| Komodo stack | `personal-vogt` |
+| Komodo stack | `vogt` (the ops directory is `personal/vogt`; the stack name is not prefixed) |
 | Desired state | `indexarr/ops` → `personal/vogt/docker-compose.yml` |
 | Image | `ghcr.io/thedancingdeveloper-org/vogt`, digest-pinned |
 | Exposure | tailnet only — bound to the Tailscale address, never `0.0.0.0` |
@@ -95,6 +95,45 @@ GitHub  <───outbound only─── collectors (optional adapter; no inboun
 | App data | named volume `vogt-komodo-data` → `/var/lib/vogt` |
 | Operator material | `/mnt/2tnvme/docker/volumes/vogt/{tls,auth}`, mounted `:ro` |
 | Estate | `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` → `/home/sprooty/Working`, writable, as `VOGT_UID` (1000) |
+| Forge credential | `VOGT_GITHUB_TOKEN_FILE` → `/run/secrets/github_token` (see 2.2a) |
+
+#### 2.2a Delivering the GitHub token to a read-only container
+
+The forge adapter is off unless `github_token_file` names a readable file, and
+off is silent by design (NFR-PO1): forge subjects read as *not collected*
+rather than absent, so a stack deployed without the token looks healthy and
+answers `notifications` with an empty list forever. This happened — r6 shipped
+notifications and import, and both sat inert on Node B until 2026-08-14.
+
+The token cannot arrive as an environment variable (FR-S7), and the obvious
+Compose shape for turning one into a file — `secrets: { github_token: {
+environment: VOGT_GITHUB_TOKEN } }` — is refused for this service:
+
+```
+cannot create secret "vogt_github_token" in read-only service vogt:
+`file` is the sole supported option
+```
+
+Docker materialises an environment-sourced secret by writing into the
+container, which `read_only: true` forbids. The read-only root is worth more
+than the tidier compose, so the stack's `pre_deploy` hook extracts the one
+variable it needs from the `.env` Komodo writes beside the compose file:
+
+```sh
+umask 077
+sed -n 's/^VOGT_GITHUB_TOKEN=//p' .env > github-token
+test -s github-token
+chown 1000:0 github-token   # Compose ignores secret uid/mode outside swarm,
+chmod 640 github-token      # and a bind mount keeps the host's ownership
+```
+
+and the compose references it as `secrets: { github_token: { file:
+./github-token } }`. The value never appears on a command line, and the stack
+stays reproducible from the ops repository plus Komodo's stack environment.
+
+Upstream of the copy is Infisical `apps/prod/HOMELAB_VOGT_GITHUB_TOKEN`.
+The copy is point-in-time: rotating upstream does not reach the stack until
+someone redeploys it.
 
 `personal/` rather than `prod/` because this is home-homelab infrastructure
 on Node B, matching `personal/cadastre` — the ops repo's top-level
