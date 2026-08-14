@@ -49,6 +49,7 @@ import {
   listActors,
   listAudit,
   listProjects,
+  notifications,
   listWork,
   type AuditRecord,
   type FreshnessSummary,
@@ -92,21 +93,6 @@ const PROJECT_SCOPE_LIMIT = 500;
 /** The collector behind FR-N3. Its absence from a sweep is a real answer. */
 const NOTIFICATION_COLLECTOR = "gh-notifications";
 
-/**
- * The one call this view needs and this branch cannot add.
- *
- * `notifications` is in `vogtApi.ts`'s route table — the operation exists and
- * is proven against the registry — but the module exports no binding for it,
- * and `call()` is private to that file. A surface is not allowed to open its
- * own door (`tests/test_pwa.py` fails the build on a second `fetch`), and this
- * branch does not own `vogtApi.ts`. So the inbox is built to the shape of the
- * answer and its single read is blocked here, in one place, with the exact
- * export it is waiting for.
- */
-const INBOX_BINDING =
-  "this client has no binding for the `notifications` operation yet: " +
-  "`vogtApi.ts` lists its route but exports no call for it, and a view may " +
-  "not open its own door to Vogt";
 
 /** The URL keys this surface owns. Anything else in the query is left alone. */
 const URL_KEYS = [
@@ -207,16 +193,9 @@ interface InboxResult {
   detail?: string | null;
 }
 
-/**
- * The inbox's single read.
- *
- * Written as the call it will be, so that landing FR-N3 here is one line in
- * `vogtApi.ts` and one line here rather than a view somebody still has to
- * write. Until then it fails loudly and specifically: this is not Vogt being
- * unreachable, and it must not be reported as though it were.
- */
-async function readInbox(_params: Record<string, unknown>): Promise<InboxResult> {
-  throw new Error(INBOX_BINDING);
+/** The inbox's single read (FR-N3). */
+async function readInbox(params: Record<string, unknown>): Promise<InboxResult> {
+  return (await notifications(params)) as unknown as InboxResult;
 }
 
 // -- results, tagged rather than thrown -------------------------------------

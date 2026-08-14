@@ -1062,12 +1062,23 @@ const WorkItemDetail: Component<Props> = (props) => {
 
                 <section class="wid-panel">
                   <h3>Audit trail</h3>
+                  <p class="wid-note">
+                    Every write to {props.itemRef} is audited with who, what
+                    and why. The browser holds the filters, the paging and the
+                    time range, so this links there rather than rendering a
+                    second, thinner copy of it.
+                  </p>
+                  <a
+                    class="wid-action"
+                    href={`#/audit?ref=${encodeURIComponent(props.itemRef)}`}
+                  >
+                    Open the audit trail for {props.itemRef}
+                  </a>
                   <p class="wid-absent">
-                    Vogt audits every write to {props.itemRef} and{" "}
-                    <span class="wid-mono">audit.list</span> can be filtered to
-                    this item, but this client exposes no binding for it yet. No
-                    records are shown rather than an empty list, which would read
-                    as "nothing has ever been written here".
+                    Comments are audited against the comment, not the item, so
+                    that view shows creates, transitions and updates — not the
+                    comment history above it. Closing that gap is a server-side
+                    change, not a filter this link is missing.
                   </p>
                 </section>
               </aside>

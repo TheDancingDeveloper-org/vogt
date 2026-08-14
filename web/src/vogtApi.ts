@@ -392,6 +392,12 @@ export const listActors = () =>
     "actor.list",
   );
 
+export const notifications = (params: Record<string, unknown> = {}) =>
+  // The inbox. Its coverage block is the load-bearing half: an empty list
+  // under a collector that did not run means "nobody asked", which is a
+  // different answer from "nothing to say" (FR-N3).
+  call<Record<string, unknown>>("notifications", params);
+
 export const listAudit = (params: Record<string, unknown> = {}) =>
   call<{ records: AuditRecord[] }>("audit.list", params);
 

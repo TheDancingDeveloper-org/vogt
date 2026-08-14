@@ -37,7 +37,7 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
-import { useNavigate, useSearchParams } from "@solidjs/router";
+import { useLocation, useNavigate, useSearchParams } from "@solidjs/router";
 import {
   VogtUnavailable,
   backlog,
@@ -469,6 +469,7 @@ interface BulkOutcome {
 const Backlog: Component<Props> = (props) => {
   const navigate = useNavigate();
   const [query, setQuery] = useSearchParams<Query>();
+  const location = useLocation();
 
   // The URL is read once here and written from the signal afterwards. It has
   // to be this way round in this shell: activating a tab navigates to the
@@ -498,6 +499,12 @@ const Backlog: Component<Props> = (props) => {
   let lastWritten = encodeQuery(query);
 
   createEffect(() => {
+    // Every tab is mounted at once, and `view`, `actor` and `project` are keys
+    // more than one Vogt surface owns. Without this guard the backlog writes
+    // its filters into whichever route happens to be active, and reads the
+    // other surface's values back as an instruction — the board guards its
+    // own effect the same way and for the same reason.
+    if (location.pathname !== "/backlog") return;
     const desired = encodeState(filter(), limit(), explained());
     const current = encodeQuery(query);
     if (desired === current) {

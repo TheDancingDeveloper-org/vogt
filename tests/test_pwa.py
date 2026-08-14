@@ -271,20 +271,13 @@ def test_the_api_prefix_matches_what_the_front_door_strips() -> None:
 
 LEGACY_APP_JS = REPO_ROOT / "src" / "vogt" / "gui" / "static" / "app.js"
 
-#: Operations the vanilla GUI exposes and the PWA does not yet *render*.
+#: Operations the vanilla GUI exposes that no PWA surface renders.
 #:
-#: FR-U9 lets the legacy surface keep serving at `/ui-legacy` until every
-#: operation it exposed is reachable in the PWA, and requires that parity be
-#: *asserted, not assumed*. This is that assertion, and it is written as an
-#: exact set rather than a `<=` so it fails in both directions: closing the
-#: last gap fails this test, and the fix is to retire the legacy GUI —
-#: which is the point. Growing a new gap fails it too.
-#:
-#: "Reachable" means a surface calls it, not that the client could. The route
-#: table is written ahead of the views that use it, so comparing tables would
-#: have declared parity while `notifications` had a binding and no inbox —
-#: which is how a requirement gets marked done by a spelling.
-LEGACY_ONLY = {"audit.list", "notifications"}
+#: **Empty as of M11**, which is FR-U9's condition for retiring the legacy
+#: GUI. It stays an exact set rather than a `<=` so it fails in both
+#: directions: an operation dropping out of the PWA fails here, and so does a
+#: view added to the wrong front end.
+LEGACY_ONLY: set[str] = set()
 
 
 def legacy_routes() -> set[str]:
@@ -340,14 +333,31 @@ def rendered_operations() -> set[str]:
     }
 
 
-def test_the_legacy_gui_can_be_retired_when_the_pwa_reaches_parity() -> None:
+def test_the_pwa_renders_everything_the_legacy_gui_did() -> None:
     gaps = legacy_routes() - rendered_operations()
     assert gaps == LEGACY_ONLY, (
-        "the PWA's coverage of the legacy GUI changed. If this list is now "
-        f"empty ({sorted(gaps)}), FR-U9's condition is met: remove "
-        "`src/vogt/gui/`, the `/ui-legacy` routes in the engine, and this "
-        "test. If it grew, a view was added to the wrong front end."
+        f"the PWA no longer renders {sorted(gaps)}, which the legacy GUI does. "
+        "FR-U9's parity condition is met at M11 and this asserts it stays met."
     )
+
+
+def test_the_legacy_gui_is_still_here_and_says_why() -> None:
+    """Parity of operations is met; parity of *interactions* is not proven.
+
+    FR-U9 permits removing the vanilla GUI once every operation it exposed is
+    reachable in the PWA, and the check above says that day has come. It has
+    not been removed, deliberately: none of the five Solid surfaces has been
+    rendered in a browser — this environment has none — so what is proven is
+    that they call the right operations, not that a person can use them.
+    Deleting the working front end on that evidence would be trading a
+    verified surface for an unverified one.
+
+    This test is the reminder, and removing it is part of the act it is
+    waiting for: run the M11 demo in a browser, then delete `src/vogt/gui/`,
+    the `/ui-legacy` routes, and both of these tests together.
+    """
+    assert LEGACY_APP_JS.is_file()
+    assert (WEB_SRC / "Board.tsx").is_file()
 
 
 # -- FR-U16: the palette reaches writes, and never performs one ------------
