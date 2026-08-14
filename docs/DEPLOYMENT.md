@@ -74,18 +74,38 @@ through FastAPI would add a fragile hop to it.
 Three properties are load-bearing, and each is asserted in
 `engine/server/tests/vogt_core.rs`:
 
-- **The core token never leaves the process.** A caller presents a
-  *front-door* token; the engine swaps in the core token it was configured
-  with, so Vogt's audit rows name a real actor rather than "the proxy"
-  (FR-S9). `VOGT_CORE_TOKEN_FILE` is the preferred form and takes
-  precedence over `VOGT_CORE_TOKEN` — a deployment that brokered the value
-  into a file meant to keep it out of the environment.
+- **No core token leaves the process, and each front-door token is its own
+  actor.** A caller presents a *front-door* token; the engine injects the
+  core token that token is **paired** with, so Vogt's audit rows name the
+  actor who acted rather than "the proxy" (FR-S9). A pairing is
+  `vogt_core_token_file` on the token's `extra_tokens` entry — a path to a
+  brokered file, the same form `VOGT_CORE_TOKEN_FILE` takes and for the same
+  reason: the front-door token beside it usually arrives through
+  `MYDEVENV2_EXTRA_TOKENS_JSON`, and a paired value written there would put
+  a second credential in the environment, where `docker inspect` shows it. A
+  deployment that keeps its whole token table in the config file may write
+  the pairing as `vogt_core_token` on the entry instead; the file wins where
+  both are set, and a file that is missing or empty fails the boot rather
+  than silently reverting that token to the shared actor.
+
+  A token with no pairing of its own — including the primary one — falls
+  back to the deployment-wide `vogt_core_token`, so a deployment
+  provisioned with one core token and no pairings, which is what
+  `deploy/vogt-stack.compose.yml` describes, is unaffected: pairings are how
+  a deployment opts in to named actors, one token at a time. For that
+  fallback `VOGT_CORE_TOKEN_FILE` is still the preferred form and still
+  takes precedence over `VOGT_CORE_TOKEN` — a deployment that brokered the
+  value into a file meant to keep it out of the environment. A caller with
+  neither a pairing nor a fallback gets a 503 naming the token whose pairing
+  is missing; the request is not forwarded to the core uncredentialed.
 - **`/mcp` is a pass-through, deliberately.** An MCP client already holds a
   core token bound to an actor (`vogt token issue`) — that is how agents in
   a MyDevEnv2 container reach Vogt today, §7 — so rewriting its credential
-  would replace a real actor with a shared one. The M9 front door injects
-  one configured token on `/api/vogt` only; per-token actor mapping and the
-  per-session tokens of FR-S10 arrive in M10.
+  would replace a real actor with a shared one. The actor mapping above
+  reaches `/api/vogt` only: `/mcp` forwards what the caller sent even when
+  that caller's front-door token has a pairing, and works with no core token
+  configured at all. The per-session tokens of FR-S10 arrive with the
+  session work.
 - **An absent core does not make the container unready.** `/readyz` reports
   the core's state in full — including its applied schema version, read
   from the core's own `/health/ready` — and excludes it from the verdict,
