@@ -325,8 +325,22 @@ jobs:
           command -v rg >/dev/null || missing="$missing ripgrep"
           if [ -n "$missing" ]; then
             echo "installing:$missing"
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends $missing
+            # The runner executes as root and has no sudoers entry, so
+            # `sudo apt-get` fails with "root is not in the sudoers file" —
+            # which is what the first run on this branch did. Elevate only
+            # when there is something to elevate from.
+            if [ "$(id -u)" = "0" ]; then
+              apt-get update
+              apt-get install -y --no-install-recommends $missing
+            elif command -v sudo >/dev/null; then
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends $missing
+            else
+              echo "cannot install$missing: not root and no sudo." >&2
+              echo "The engine's tests shell out to both; a runner image" >&2
+              echo "without them cannot run this job." >&2
+              exit 1
+            fi
           fi
           git --version
           rg --version
