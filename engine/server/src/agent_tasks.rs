@@ -19,13 +19,13 @@ use crate::{
     app::AppState,
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
+    prompt_files,
     pty::{Session, SessionSpec},
     push::{NotificationKind, PushManager},
     sessions::SessionRegistry,
 };
 
 const TASKS_FILE: &str = "agent-tasks.json";
-const PROMPT_DIR: &str = "agent-task-prompts";
 const DEFAULT_NOTIFY_PHRASE: &str = "MYDEVENV2_NOTIFY:";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +193,9 @@ pub struct PromptArtifactStats {
     pub task_dir_count: u64,
     pub prompt_file_count: u64,
     pub context_file_count: u64,
+    /// Briefs written for sessions rather than for task runs. Counted apart
+    /// from `prompt_file_count` so the task numbers still mean tasks.
+    pub session_prompt_file_count: u64,
     pub total_bytes: u64,
     pub orphan_task_dir_count: u64,
 }
@@ -202,6 +205,7 @@ pub struct PromptArtifactCleanup {
     pub removed_task_dir_count: u64,
     pub removed_prompt_file_count: u64,
     pub removed_context_file_count: u64,
+    pub removed_session_prompt_file_count: u64,
     pub removed_bytes: u64,
 }
 
@@ -210,6 +214,7 @@ struct PromptArtifactRemovalTally {
     task_dirs: u64,
     prompt_files: u64,
     context_files: u64,
+    session_prompts: u64,
     bytes: u64,
 }
 
@@ -229,7 +234,7 @@ impl AgentTaskRegistry {
         push: Arc<PushManager>,
     ) -> Result<Self> {
         std::fs::create_dir_all(state_dir)?;
-        let prompt_dir = state_dir.join(PROMPT_DIR);
+        let prompt_dir = prompt_files::prompt_root(state_dir);
         std::fs::create_dir_all(&prompt_dir)?;
         let path = state_dir.join(TASKS_FILE);
         let tasks = load_tasks(&path)?;
@@ -425,6 +430,7 @@ impl AgentTaskRegistry {
             task_dir_count: 0,
             prompt_file_count: 0,
             context_file_count: 0,
+            session_prompt_file_count: 0,
             total_bytes: 0,
             orphan_task_dir_count: 0,
         };
@@ -436,8 +442,12 @@ impl AgentTaskRegistry {
                     if !entry.file_type()?.is_dir() {
                         continue;
                     }
-                    stats.task_dir_count += 1;
                     let name = entry.file_name();
+                    if name == prompt_files::SESSION_SUBDIR {
+                        accumulate_session_prompt_stats(&entry.path(), &mut stats)?;
+                        continue;
+                    }
+                    stats.task_dir_count += 1;
                     let task_id = name.to_string_lossy();
                     let is_orphan = Uuid::parse_str(&task_id)
                         .ok()
@@ -477,6 +487,10 @@ impl AgentTaskRegistry {
                         continue;
                     }
                     let path = entry.path();
+                    if entry.file_name() == prompt_files::SESSION_SUBDIR {
+                        self.cleanup_session_prompt_dir(&path, &mut tally)?;
+                        continue;
+                    }
                     let task_id = Uuid::parse_str(&entry.file_name().to_string_lossy()).ok();
                     let Some(task_id) = task_id else {
                         remove_path_recursive(&path, &mut tally)?;
@@ -508,8 +522,40 @@ impl AgentTaskRegistry {
             removed_task_dir_count: tally.task_dirs,
             removed_prompt_file_count: tally.prompt_files,
             removed_context_file_count: tally.context_files,
+            removed_session_prompt_file_count: tally.session_prompts,
             removed_bytes: tally.bytes,
         })
+    }
+
+    /// Session briefs are retained by liveness, not by count: the registry is
+    /// the authority on whether a session still exists, so
+    /// `keep_latest_runs_per_task` has nothing to say here. A session's own
+    /// deletion removes its brief; this pass exists for the ones a crash or a
+    /// restart left behind, whose sessions the registry has already forgotten.
+    fn cleanup_session_prompt_dir(
+        &self,
+        path: &Path,
+        tally: &mut PromptArtifactRemovalTally,
+    ) -> Result<()> {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let entry_path = entry.path();
+            if !file_type.is_file() {
+                // Nothing writes directories here; whatever it is, it is not
+                // a session brief.
+                remove_path_recursive(&entry_path, tally)?;
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let live = prompt_files::session_id_from_prompt_file(name.as_ref())
+                .is_some_and(|id| self.sessions.get(id).is_ok());
+            if !live {
+                remove_session_prompt_with_tally(&entry_path, tally)?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn run_now(&self, id: Uuid) -> Result<AgentTaskRun> {
@@ -597,7 +643,7 @@ impl AgentTaskRegistry {
             run_id.to_string(),
         ));
         env.push((
-            "MYDEVENV2_AGENT_TASK_PROMPT_FILE".to_string(),
+            prompt_files::PROMPT_FILE_ENV.to_string(),
             prompt_file_display.clone(),
         ));
         env.push((
@@ -611,6 +657,11 @@ impl AgentTaskRegistry {
             command: Some(command),
             cwd: task.cwd.clone(),
             env: Some(env),
+            // A task run has already written its own prompt file above, with
+            // the context and run history a session brief knows nothing
+            // about, and has just named it in `env`. Asking the registry for
+            // a second one would write the brief twice.
+            prompt: None,
             cols: Some(100),
             rows: Some(30),
             scrollback_bytes: None,
@@ -850,7 +901,6 @@ impl AgentTaskRegistry {
         let context = task.context.as_deref().unwrap_or("").trim();
         std::fs::write(&context_file, context)?;
 
-        let prompt_file = task_dir.join(format!("{run_id}.md"));
         let mut prompt = String::new();
         prompt.push_str("# MyDevEnv2 Scheduled Agent Task\n\n");
         prompt.push_str(&format!("Task: {}\n", task.name));
@@ -890,7 +940,7 @@ impl AgentTaskRegistry {
             prompt.push_str(" <short notification text>\n");
             prompt.push_str("```\n");
         }
-        std::fs::write(&prompt_file, prompt)?;
+        let prompt_file = prompt_files::write_prompt(&task_dir, run_id, &prompt)?;
         Ok((prompt_file, context_file))
     }
 
@@ -1025,6 +1075,38 @@ fn accumulate_prompt_dir_stats(path: &Path, stats: &mut PromptArtifactStats) -> 
     Ok(())
 }
 
+fn accumulate_session_prompt_stats(path: &Path, stats: &mut PromptArtifactStats) -> Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        if !meta.is_file() {
+            continue;
+        }
+        stats.total_bytes = stats.total_bytes.saturating_add(meta.len());
+        stats.session_prompt_file_count += 1;
+    }
+    Ok(())
+}
+
+fn remove_session_prompt_with_tally(
+    path: &Path,
+    tally: &mut PromptArtifactRemovalTally,
+) -> Result<()> {
+    let bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            tally.bytes = tally.bytes.saturating_add(bytes);
+            tally.session_prompts += 1;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(ApiError::Internal(format!(
+            "remove session prompt {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
 fn cleanup_task_prompt_dir(
     path: &Path,
     task: &AgentTask,
@@ -1036,7 +1118,7 @@ fn cleanup_task_prompt_dir(
         .iter()
         .rev()
         .take(keep_latest_runs_per_task)
-        .map(|run| format!("{}.md", run.id))
+        .map(|run| prompt_files::prompt_file_name(run.id))
         .collect();
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;

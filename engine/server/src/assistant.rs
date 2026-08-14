@@ -728,6 +728,7 @@ mod tests {
                 command: Some(vec!["cat".into()]),
                 cwd: None,
                 env: None,
+                prompt: None,
                 cols: Some(80),
                 rows: Some(24),
                 scrollback_bytes: None,
