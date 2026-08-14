@@ -22,7 +22,21 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-REQUIREMENTS = Path(__file__).resolve().parents[1] / "docs" / "REQUIREMENTS.md"
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+REQUIREMENTS = REPO_ROOT / "docs" / "REQUIREMENTS.md"
+
+#: §6.1 cites files across all three trees, and the `core` job in CI proves
+#: the core stands alone by deleting two of them (NFR-Q6). Checking a citation
+#: against a tree that is not there says nothing about the citation — it says
+#: the checkout is a core-only one, which is the point of that job. Caught by
+#: that job on the first run, which is the third time in a day it has found a
+#: core test quietly needing the other half.
+merged_tree_only = pytest.mark.skipif(
+    not (REPO_ROOT / "engine").is_dir() or not (REPO_ROOT / "web").is_dir(),
+    reason="§6.1 cites the engine and the PWA; a core-only checkout has neither",
+)
 
 #: Only as far as the counts actually go. A bigger table would be inviting the
 #: next reader to add a word rather than a row.
@@ -148,6 +162,7 @@ def test_no_delivered_row_is_filed_under_untested() -> None:
         )
 
 
+@merged_tree_only
 def test_every_file_6_1_cites_exists() -> None:
     """§6.1's rule is "a file and a test", so the file has to be there.
 
@@ -171,9 +186,7 @@ def test_every_file_6_1_cites_exists() -> None:
     )
     assert cited, "§6.1 cites files in backticks; the pattern no longer matches any"
     cited -= generated
-    missing = sorted(
-        path for path in cited if not (REQUIREMENTS.parents[1] / path).exists()
-    )
+    missing = sorted(path for path in cited if not (REPO_ROOT / path).exists())
     assert not missing, (
         f"§6.1 cites {missing}, which do not exist. A delivered row names a "
         "file and a test; a file that is not there means the row is about "
@@ -181,6 +194,7 @@ def test_every_file_6_1_cites_exists() -> None:
     )
 
 
+@merged_tree_only
 def test_every_test_name_6_1_cites_exists_somewhere() -> None:
     """The other half of finding 24: the names, not the paths.
 
@@ -199,7 +213,7 @@ def test_every_test_name_6_1_cites_exists_somewhere() -> None:
 
     found = subprocess.run(
         ["git", "grep", "-h", "-o", "-E", r"fn [a-z_][a-z0-9_]*|def [a-z_][a-z0-9_]*"],
-        cwd=REQUIREMENTS.parents[1],
+        cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=True,
