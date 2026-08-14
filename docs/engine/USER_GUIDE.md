@@ -3,7 +3,10 @@
 ## Quick Start
 
 ### First Launch
-1. Open https://mydevenv2.sprooty.com
+1. Open https://vogt.sprooty.com — the merged product. (Until the
+   standalone stack is retired, https://mydevenv2.sprooty.com still answers
+   and serves the session engine *without* Vogt: terminals and the assistant
+   work, and every Vogt surface reports that no core is configured.)
 2. Enter your bearer token in Settings (⚙)
 3. Click "Save & reload"
 

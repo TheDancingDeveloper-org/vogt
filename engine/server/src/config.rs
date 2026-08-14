@@ -629,7 +629,13 @@ fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<
     }
     // Defaults: deployed PWA + Vite dev server. Adjust via MYDEVENV2_ALLOWED_ORIGINS
     // for staging/preview environments.
+    //
+    // The merged product is served from `vogt.sprooty.com` (M14's naming
+    // decision). The old host stays in this list for the transition period:
+    // an origin removed too early is a CORS failure in a browser somebody is
+    // using, and the cost of one extra entry is nothing.
     vec![
+        "https://vogt.sprooty.com".to_string(),
         "https://mydevenv2.sprooty.com".to_string(),
         "http://localhost:5173".to_string(),
         "http://127.0.0.1:5173".to_string(),

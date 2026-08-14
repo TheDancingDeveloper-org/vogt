@@ -37,7 +37,9 @@ archive.
 
 ## Current status
 
-MyDevEnv2 is live at `https://mydevenv2.sprooty.com`. Production stack details,
+The merged product is served at `https://vogt.sprooty.com` (M14's naming
+decision); `https://mydevenv2.sprooty.com` is the standalone engine's own
+host and remains until its stack is retired. Production stack details,
 health endpoints, Komodo flow, and required environment now live in
 `engine/deploy/KOMODO.md` rather than being duplicated here.
 
@@ -193,6 +195,7 @@ activity_idle_after_ms = 1500
 state_dir = "/home/sprooty/.local/share/mydevenv2"
 vapid_subject = "mailto:admin@example.invalid"
 allowed_origins = [
+  "https://vogt.sprooty.com",
   "https://mydevenv2.sprooty.com",
   "http://localhost:5173",
   "http://127.0.0.1:5173",

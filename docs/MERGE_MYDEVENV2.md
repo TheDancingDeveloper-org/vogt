@@ -353,13 +353,23 @@ Both stacks already live on Node B, deployed by Komodo from
    `vogt.sprooty.com`? Config env prefix consolidation (`VOGT_*` vs
    `MYDEVENV2_*`) — recommend new `VOGT_*` names with the old ones
    accepted as aliases for one transition period.
-   **Still open, and now has a shape.** As built, the two prefixes divide by
-   *process*, not by product: the engine reads `MYDEVENV2_*` for what it
-   owns and `VOGT_CORE_*` for the core it fronts, and vogt-core reads
-   `VOGT_*`. That is coherent enough to defer the rename to M14 rather than
-   pay for it twice — but it means an operator setting `VOGT_PORT` and
-   `MYDEVENV2_TOKEN` on the same stack, which the compose comments have to
-   keep explaining. See `deploy/vogt-stack.compose.yml`.
+   **Resolved at M14 (2026-08-14): the merged product is served at
+   `vogt.sprooty.com`, and the product is Vogt.** `mydevenv2.sprooty.com`
+   remains the standalone engine's own host until that stack is retired, and
+   both origins are in the merged CORS list for the transition — an origin
+   removed early is a CORS failure in a browser somebody is using, and one
+   extra entry costs nothing.
+
+   The **config prefixes are a separate decision and are deliberately not
+   renamed yet.** As built they divide by *process*, not by product: the
+   engine reads `MYDEVENV2_*` for what it owns and `VOGT_CORE_*` for the core
+   it fronts, and vogt-core reads `VOGT_*`. Renaming them is a stack-env
+   migration on a live deployment, and doing it in the same change as the
+   host move would mean two ways for one cutover to fail. The sunset order
+   is: move the host, retire the standalone stack, *then* alias the
+   `MYDEVENV2_*` names and sunset them. Until then the compose comments carry
+   the explanation, which is the cost of the delay and is written down as
+   such.
 2. **MyDevEnv2's standalone life** — does anything keep needing MyDevEnv2
    *without* vogt? If yes, the engine must stay bootable with vogt-core
    absent (it degrades naturally today; recommend preserving that
