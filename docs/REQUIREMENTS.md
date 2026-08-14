@@ -966,7 +966,7 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 140 are delivered, 44 are implemented and
+**201 conjuncts across 46 IDs. 145 are delivered, 39 are implemented and
 asserted by nothing, 7 cannot be verified in this environment at all, and 10
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
@@ -974,7 +974,7 @@ before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved thirty-eight conjuncts, and three of them were moved by
+**A fourth pass moved forty-three conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,9 +996,9 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +38 in the fourth pass (fifteen out of §6.2, twenty-one out of §6.2a,
+  then +43 in the fourth pass (fifteen out of §6.2, twenty-six out of §6.2a,
   two out of §6.2b)
-- **44 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 21
+- **39 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 26
 - **10 short** = 43 − 19 + 1 arriving from §6.2b, − 15
 - **7 unverifiable** = 69 − 60 − 2
 
@@ -1120,9 +1120,14 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-U17 | Trust state is on every card and every ranked row, and an absent one reads as `unverified` rather than as blank; the aggregate says how old it is | `board.test.tsx`'s FR-U17 block (four — including `puts one on every card, so the aggregate cannot drop the awkward column`); `backlog.test.tsx::reads an absent trust state as unverified`. A blank badge says "no opinion"; the honest answer is "nobody checked" |
 | **FR-T5** | Replies are spoken in sentence chunks when the toggle is on and not when it is off; a pending action is announced in words that offer no spoken way to approve it; a new message stops the previous answer mid-sentence | `web/src/__tests__/assistant.test.tsx`'s FR-T5 block (four), driving real replies through a stubbed engine and a stubbed synth. The announcement test asserts an *absence* — no "say yes", no "yes or no" — which is FR-T2's voice clause and the one thing a device demo cannot check, since it can tell you what was said and not what was carefully left unsaid. Writing it found that the chunker split `work.transition` at its own full stop, so the one word saying what was about to happen was read as two |
 | FR-U22 | Focus moves across and within columns; `Shift`+arrow proposes a move and still collects the reason; `Enter` opens the item at its own URL; `n` opens quick-create and is announced on the board's own keyboard line | `board.test.tsx`'s two FR-U22 blocks (five), including the one asserting that an `n` typed into the move composer is not stolen by the shortcut |
+| **FR-U6** | The `why` panel draws the contributions `GET /why` returned, and says which inputs did not fire | `backlog.test.tsx` (four). The default estate answered that route with an empty `contributions` array, so no existing mount could have seen the panel draw nothing — which is why this was worth writing rather than assuming |
+| **FR-U13** | Swimlanes group by project or initiative; per-column WIP counts count what is drawn; lanes and columns collapse and expand; the layout is per-client and survives a reload | `board.test.tsx` (seven). The swimlane *mode* was asserted as a filter value and the grouping it produces was not; `data-wip` was rendered and read by nobody. Counting `item.state` instead of the drawn state turns it red, which is the difference between a WIP count and a filter |
+| **FR-U16** | Sessions are reachable by fuzzy name, labelled by name rather than id, and each opens its own terminal | `commandPalette.test.tsx` (four), with the engine's session store seeded — no test had done that, because the entries come from the engine and the harness answers Vogt |
+| **FR-U18** | Both sides of a disagreement, with provenance and age, rendered *open* before any act is possible | `driftInbox.test.tsx` (seven). Asserted as an ordering and a state, not a presence: moving the evidence after the controls fails, and so does wrapping it in a `<details>` — a person must not be able to resolve a proposal they have not been shown |
 | FR-U18 | Bulk accept does not exist, and cannot arrive by accident | `tests/test_pwa.py::test_drift_is_resolved_one_proposal_at_a_time` (one call site, and no multi-select) |
 | **FR-U19** | Filter by actor, project, operation and a half-open time range, server-side; and the log is readable past its newest page | `web/src/__tests__/auditQuery.test.tsx` (seventeen), which asserts **the query the server receives** rather than the rows drawn — a filter applied client-side and one applied server-side look identical on screen and differ entirely in what they can see, so a rows test would have passed against the old surface. The presets are day-aligned so `Yesterday.until === Today.since` and the half-open interval tiles; the timezone is stubbed off-UTC so a build that appended `Z` to typed wall-clock text fails. A filter that cannot be pushed to the server now stops the read rather than filtering one page of a wider query under a total describing the wider one |
 | **FR-U20** | Both legs: the live activity badge and the open-terminal control on the item, and the terminal's link back to the work item it was opened for | `workItemDetail.test.tsx`'s FR-U20 block (four) and `terminalLink.test.tsx` (four). The forward leg asserts the engine's activity is what is shown, that an unasked session reads `unknown` rather than `idle`, that the control addresses the *engine's* session id, and that a stopped session gets no control to a PTY that is gone. The return leg asserts the link, that the read includes stopped sessions because a finished run still had a subject, that a PTY Vogt did not start says nothing, and that an unreachable Vogt costs the badge and never the terminal (FR-E9). The blocker §6.2a recorded was smaller than it looked: xterm asks for `matchMedia` at mount and jsdom has none, so `Terminal.tsx` could not be mounted at all — `setup.ts` stubs it the way it already stubs `ResizeObserver` |
+| **FR-U21** | The **engine** away, rather than Vogt: the Vogt views keep answering and the session controls disable with the named reason | `engineAbsent.test.tsx` (eight), the mirror of the outage tests that already existed — every one of those takes Vogt away, and none took the engine. The row needed a qualification, now in that file's header: every Vogt read goes through the engine's front door, so "the engine is unavailable" cannot mean the front-door process is down — that takes the Vogt views with it and leaves no absent state to design. The case the requirement names is the front door answering while the *session* engine behind it cannot be reached, which `sessions.list` reports in its `engine` note |
 | FR-U21 | Every Vogt surface can tell an outage from an empty answer and renders the server's own reason; the core-absent half — terminals, files, git keep working | `tests/test_pwa.py::test_every_vogt_surface_distinguishes_an_outage_from_emptiness` asserts the structural half and says in its own docstring that it cannot judge the copy; `web/src/__tests__/absentStates.test.tsx` and the outage blocks in the other three files now judge it, on all five surfaces — the server's sentence verbatim, the sentence that says what the absence *means*, nothing rendered as data, writes disabled, and a 500 called a failure rather than an outage. `contextkeeper.rs::a_contextkeeper_outage_leaves_terminals_working_and_unprotected` is the core-absent half. **One panel is thinner than the rest**: the item page's Sessions panel renders Vogt's sentence and nothing asserts it does — found while mutation-testing FR-U17, when a mutation that should have gone red survived because the same literal appears first in `sessionsFailure`. The conjunct is delivered on all five surfaces; that one panel is where a regression would be quiet |
 | **FR-M1** | A session waiting for input is answered from the item page, without a terminal — MVP1's "session start/approve", as MERGE §14's M12 demo defines it | `web/src/__tests__/workItemDetail.test.tsx`'s FR-M1 block (six). The control shows the session's own scrollback tail before it offers any way to answer, and offers none at all when the engine cannot be asked. The other reading of "approve" — a Vogt approval *operation* — is deliberately not built, and §6.2 no longer carries a row implying it is owed |
 | **FR-T7** | The recorded hang is refused with a named reason — the second of the two ways the requirement offers out of it | `assistant.rs::openai_route_refusal` and three unit tests, plus `integration.rs::a_claude_route_on_the_openai_backend_refuses_with_a_named_reason`, which drives the route and asserts the answer is *not* a 404 — reporting the assistant absent would send an operator looking for a missing API key when the key is fine. The sentence names the model, the transport and the setting that overrides it, because a hang is indistinguishable from thinking and the 60-second client timeout that used to catch it reported "took too long" about something that was never going to answer. `assistant_allow_claude_proxy` turns it off: the fault is a proxy's, not the model's, and a deployment whose proxy serves those routes is entitled to own the result. The check is on the transport, so FR-T7's other clause — a native Anthropic backend, still unbuilt — is untouched by it |
@@ -1211,7 +1216,7 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Forty-four conjuncts whose code was read and believed, which nothing in any
+Thirty-nine conjuncts whose code was read and believed, which nothing in any
 suite would notice the loss of. (Sixty-five, less the seven the fourth pass
 asserted —  NFR-D12, FR-U10, FR-U20, FR-E1, FR-E9, FR-T1/T2 and FR-T6 — which the fourth
 pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
@@ -1228,13 +1233,8 @@ that stopped being the demo's job and became a test somebody has not written.
 
 | ID | The conjuncts | What would assert it |
 |---|---|---|
-| FR-U6 | The explainable `why` on the ranked views *(from §6.2b)* | An assertion that the `why` panel renders the contributions `GET /why` returned. The harness answers that route and no test looks at what was drawn with it |
 | FR-U10 | Session activity updates from the SSE stream without a refresh | A test that drives the engine's own activity events through `store.ts`. The board's half is asserted now — `live.test.tsx` drives `vogt-changed` end to end — and the session-activity half still rests on inspection |
-| FR-U13 | Swimlanes by project or initiative; per-column WIP counts; collapse/expand of lanes and columns; layout persisted per client *(from §6.2b)* | Four assertions on the board, which is already mounted twenty-eight times in `board.test.tsx`. The swimlane *mode* is asserted as a filter value and the grouping it produces is not; `data-wip` is rendered and read by nobody |
-| FR-U16 | Sessions by fuzzy name *(from §6.2b)* | A palette test with a populated session store. `commandPalette.test.tsx` asserts projects, work items and views, and the session entries come from the engine's store, which no test seeds |
-| FR-U18 | Both sides of a disagreement, with provenance and age, rendered open before any act is possible *(from §6.2b)* | A mount of the drift inbox against a proposal carrying an evidence snapshot. That bulk accept cannot arrive is asserted from source; that the evidence is *shown first* is not asserted anywhere |
 | FR-U19 | Actor and operation filtered server-side; every row shows who, what and why; the item page links in pre-filtered *(from §6.2b)* | A mount of `AuditBrowser`, which `absentStates.test.tsx` already does for its outage states and never with records in it |
-| FR-U21 | Engine unavailable → Vogt views keep answering and session controls disable with the named reason *(from §6.2b)* | The mirror of the outage tests that exist. Every one of them takes Vogt away; none takes the engine away, which in a test is no harder and in the product is the only half a person can reach |
 | NFR-S5 | No view fetches the whole estate to render a page of it | True on inspection of all four surfaces, and the board's 2,000-item bulk read across four sequential requests is the weakest case rather than a clean one |
 
 **One thing the board work leaves behind, and it belongs here rather than in a
@@ -1287,9 +1287,9 @@ a shape — **working behaviour and a false record** — which is the failure
 class this product exists to make visible.
 
 Findings are struck through when the thing they describe is fixed *and* the
-fix was checked here — **twelve are** (4, 5, 7, 11, 12, 13, 14, 15, 17, 19,
-21, 22), one of them (5) only in part, and two of the rest (6, 8) have closed
-a half each. Twenty-two entries, ten of them open.
+fix was checked here — **thirteen are** (4, 5, 7, 11, 12, 13, 14, 15, 17,
+19, 21, 22, 23), one of them (5) only in part, and two of the rest (6, 8)
+have closed a half each. Twenty-three entries, ten of them open.
 
 **Three of those strikes were added by the fourth pass to findings that were
 already fixed** — 12's string comparison had become a component comparison,
@@ -1549,6 +1549,25 @@ similar, and the new entries are all of the same kind as the old ones.
     turning a reduction in *when* checks run into a hole in *whether* they
     do. What I did not anticipate is that fixing it wrongly would look
     identical to fixing it.
+
+23. ~~**An assertion against a class that exists nowhere.**~~ **Found by a
+    survivor, fixed before it landed.** A new FR-U21 test asserted the board
+    renders no outage banner by querying `.board-outage` — a class in no file
+    in this repository; the surface renders `board-banner--outage`. The
+    assertion could not fail, and it read exactly like one that could.
+
+    What found it was a mutation surviving for an unrelated reason: pinning
+    the board's `outage` signal left the test green, because a successful
+    read clears that signal before the assertion runs. Chasing why led to the
+    selector. Neither the mutation nor the test was wrong about the product —
+    the mutation was neutralised, and the assertion was vacuous — and one led
+    to the other only because a survivor was treated as information rather
+    than as noise.
+
+    A negative assertion is where this hides: "nothing is rendered" is true
+    of a selector that matches nothing, of a component that renders nothing,
+    and of a component that does not exist. §6.3 finding 21 is its sibling
+    from the other direction — an assertion that could only ever pass.
 
 21. ~~**A test that proved the wrong path, and looked exactly like proof of
     the right one.**~~ **Caught by a surviving mutation, and rewritten.** The
