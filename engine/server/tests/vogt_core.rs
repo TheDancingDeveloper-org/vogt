@@ -194,7 +194,10 @@ async fn the_core_is_handed_the_core_token_not_the_callers() {
         .unwrap();
 
     let seen = log.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(seen.authorization.as_deref(), Some("Bearer core-token-abcdef1234567890"));
+    assert_eq!(
+        seen.authorization.as_deref(),
+        Some("Bearer core-token-abcdef1234567890")
+    );
     assert!(
         !seen.authorization.unwrap().contains(TEST_TOKEN),
         "the front-door token must not reach the core: it would only be refused, \
@@ -301,7 +304,7 @@ async fn mcp_forwards_the_callers_credential_unchanged() {
 async fn the_legacy_gui_is_served_from_the_front_door() {
     let (base, log) = front_door().await;
     let res = client()
-        .get(format!("{base}/ui-legacy"))
+        .get(format!("{base}/ui-legacy/"))
         .send()
         .await
         .unwrap();
@@ -309,15 +312,60 @@ async fn the_legacy_gui_is_served_from_the_front_door() {
     assert!(res.text().await.unwrap().contains("<title>Vogt</title>"));
 
     let seen = log.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(
-        seen.path, "/ui/",
-        "a bare /ui-legacy must map to the core's /ui/, not to a redirect \
-         pointing at a path this front door does not serve"
-    );
+    assert_eq!(seen.path, "/ui/");
     assert!(
         seen.authorization.is_none(),
         "static assets carry no token — there has to be a page on which to enter one"
     );
+}
+
+#[tokio::test]
+async fn the_legacy_gui_redirects_to_its_directory() {
+    let (base, _log) = front_door().await;
+    let res = client()
+        .get(format!("{base}/ui-legacy"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(
+        res.headers()[reqwest::header::LOCATION],
+        "/ui-legacy/",
+        "index.html links its assets relatively, so the page has to be served \
+         from a path a browser will resolve them against"
+    );
+}
+
+/// A wildcard segment matches at least one character, so every prefix needs
+/// its bare form, its trailing-slash form *and* its wildcard form. Missing
+/// the middle one sent `/ui-legacy/` to the PWA's catch-all, which answered
+/// 404 with the engine's own "web bundle not present" placeholder — a
+/// convincing wrong answer, and the reason this test enumerates the shapes.
+#[tokio::test]
+async fn a_trailing_slash_still_reaches_the_core() {
+    let (base, log) = front_door().await;
+    for (front, upstream) in [
+        ("/api/vogt/", "/api/"),
+        ("/mcp/", "/mcp/"),
+        ("/ui-legacy/", "/ui/"),
+    ] {
+        let res = client()
+            .get(format!("{base}{front}"))
+            .headers(bearer(TEST_TOKEN))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "{front} did not reach the core"
+        );
+        assert_eq!(
+            log.lock().unwrap().last().unwrap().path,
+            upstream,
+            "{front} reached the wrong upstream path"
+        );
+    }
 }
 
 #[tokio::test]

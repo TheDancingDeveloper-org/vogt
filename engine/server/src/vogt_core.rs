@@ -38,7 +38,7 @@ use axum::{
     body::Body,
     extract::{Request, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     Json,
 };
 use serde_json::json;
@@ -244,15 +244,21 @@ pub async fn legacy_gui(State(state): State<Arc<AppState>>, request: Request) ->
         return not_configured();
     };
     let path = map_prefix(request.uri(), LEGACY_GUI_PREFIX, CORE_GUI_PREFIX);
-    // `/ui-legacy` with no trailing slash would otherwise map to `/ui`, which
-    // the core answers with a redirect to `/ui/` — a path that does not exist
-    // out here.
-    let path = if path == CORE_GUI_PREFIX {
-        format!("{CORE_GUI_PREFIX}/")
-    } else {
-        path
-    };
     core.forward(&path, false, request).await
+}
+
+/// `/ui-legacy` → `/ui-legacy/`, the same redirect the core does at `/ui`.
+///
+/// Not cosmetic. `index.html` links its stylesheet and module relatively, and
+/// a browser resolves those against the *directory* of the current document:
+/// served at `/ui-legacy`, `app.js` would be looked for at `/app.js`, which
+/// out here is the PWA's catch-all. Serving the page only under a path that
+/// ends in a slash is what makes the relative links land.
+pub async fn legacy_gui_root(State(state): State<Arc<AppState>>) -> Response {
+    if state.vogt_core.is_none() {
+        return not_configured();
+    }
+    Redirect::permanent(&format!("{LEGACY_GUI_PREFIX}/")).into_response()
 }
 
 fn map_prefix(uri: &Uri, from: &str, to: &str) -> String {

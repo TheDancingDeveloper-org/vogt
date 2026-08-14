@@ -247,7 +247,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         // carry the same bearer gate as every other API route here: the
         // engine's token namespace is the public one, and the core token this
         // proxy injects never leaves the process (FR-S9).
+        // Three routes for two shapes: a wildcard segment needs at least one
+        // character, so `/api/vogt/` matches neither `/api/vogt` nor
+        // `/api/vogt/{*path}` and would fall through to the PWA's catch-all.
         .route("/api/vogt", any(vogt_core::api))
+        .route("/api/vogt/", any(vogt_core::api))
         .route("/api/vogt/{*path}", any(vogt_core::api))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -263,8 +267,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // there has to be a page on which to enter one.
     let vogt_open_routes = Router::new()
         .route("/mcp", any(vogt_core::mcp))
+        .route("/mcp/", any(vogt_core::mcp))
         .route("/mcp/{*path}", any(vogt_core::mcp))
-        .route("/ui-legacy", get(vogt_core::legacy_gui))
+        .route("/ui-legacy", get(vogt_core::legacy_gui_root))
+        .route("/ui-legacy/", get(vogt_core::legacy_gui))
         .route("/ui-legacy/{*path}", get(vogt_core::legacy_gui));
 
     // WS handles its own auth so query-param tokens work (browsers can't set

@@ -699,8 +699,8 @@ mod tests {
             assistant_reasoning_effort: None,
             contextkeeper_url: None,
             contextkeeper_token: None,
-        vogt_core_url: None,
-        vogt_core_token: None,
+            vogt_core_url: None,
+            vogt_core_token: None,
         });
         Arc::new(SessionRegistry::new(cfg, EventBus::default(), None))
     }
