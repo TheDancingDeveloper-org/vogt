@@ -572,18 +572,17 @@ async fn check_workspace_agreement(root: &FsPath, import_root: Option<&FsPath>) 
             fatal: false,
         };
     };
-    // Compared canonically where possible: `/home/x/Working` and a symlink to
-    // it are the same tree, and a string comparison would call them different
-    // and send somebody looking for a misconfiguration that is not there.
-    let canonical = |path: &FsPath| {
-        path.canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf())
-            .to_string_lossy()
-            .into_owned()
-    };
+    // Canonically, because `/home/x/Working` and a symlink to it are the same
+    // tree and a textual comparison would call them different — and by *path
+    // component*, because a textual prefix says `/srv/work` contains
+    // `/srv/workspace`, which is two unrelated trees agreeing by accident.
+    let canonical = |path: &FsPath| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let ours = canonical(root);
     let theirs = canonical(import_root);
-    if theirs.starts_with(&ours) {
+    let inside = theirs.starts_with(&ours);
+    let ours = ours.to_string_lossy().into_owned();
+    let theirs = theirs.to_string_lossy().into_owned();
+    if inside {
         ReadinessCheck {
             name: "workspace_agreement",
             ok: true,

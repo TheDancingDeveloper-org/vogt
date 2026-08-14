@@ -15,6 +15,18 @@ permissions:
 
 env:
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
+  # The merged product — core plus session engine in one container. Released
+  # alongside the core image because NFR-C6 says the build-vs-release
+  # discipline governs *the merged image*, and a tag that produced only half
+  # the product would leave the estate's own deployment with no versioned
+  # artefact to roll back to.
+  #
+  # It is not the supported install of Vogt (NFR-PO4 — that is the image
+  # above, and it is the one the wheel and the docs point at). This one
+  # carries a development environment: agent CLIs, an Android SDK, Sway.
+  # Published, versioned and signed; not recommended to anybody who wants
+  # Vogt rather than this estate's pod.
+  STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
 
 jobs:
   distribution:
@@ -145,4 +157,103 @@ jobs:
             echo "Nothing has been deployed. Production moves when this digest"
             echo "is pinned in \`indexarr/ops\` at \`personal/vogt/docker-compose.yml\`"
             echo "and \`DeployStack\` runs for \`personal-vogt\` (NFR-D10)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  stack-image:
+    name: build, sign and publish the merged image
+    needs: distribution
+    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: build the PWA
+        # `rust-embed` reads `web/dist/` at compile time, so the bundle is a
+        # build input rather than a separate artefact: an image built without
+        # this step compiles and serves a placeholder where the product's
+        # front end should be.
+        run: |
+          set -euo pipefail
+          corepack enable
+          cd web
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.STACK_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - uses: docker/build-push-action@v6
+        id: candidate
+        with:
+          # The repository root: the Dockerfile reaches for `web/dist`,
+          # `pyproject.toml` and `src/` as well as the crates.
+          context: .
+          file: engine/Dockerfile
+          load: true
+          tags: ${{ env.STACK_IMAGE }}:smoke-test
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: both halves run
+        env:
+          CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint vogt "$CANDIDATE" --version
+          docker run --rm --entrypoint mydevenv2-server "$CANDIDATE" --help >/dev/null
+          echo "both halves are present and start"
+
+      - uses: docker/build-push-action@v6
+        id: push
+        with:
+          context: .
+          file: engine/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: sign the image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${STACK_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "## Published (merged stack)"
+            echo
+            echo "\`deploy/vogt-stack.compose.yml\` pins:"
+            echo
+            echo '```yaml'
+            echo "    image: ${STACK_IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Publishing is not deploying (NFR-D10). See"
+            echo "\`docs/DEPLOYMENT.md\` §9 before the first one."
           } >> "$GITHUB_STEP_SUMMARY"

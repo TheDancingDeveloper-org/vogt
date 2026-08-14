@@ -1362,8 +1362,10 @@ const Board: Component<Props> = (props) => {
           </div>
           <p class="board-note">
             Columns come from <code>workflow.list</code>; a drag is a{" "}
-            <code>work.transition</code> and Vogt decides it. Freshness is
-            polling — Vogt does not yet publish a change stream to this client.
+            <code>work.transition</code> and Vogt decides it. Changes arrive on
+            the event stream and the poll below is the floor under it — a
+            stream can drop, and a board that stopped refreshing because a
+            socket died would be stale while looking current.
           </p>
         </div>
         <div class="board-header-actions">

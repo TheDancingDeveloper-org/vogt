@@ -1611,22 +1611,96 @@ mod tests {
         }));
     }
 
+    /// Every opening delimiter this file emits, read out of the source.
+    ///
+    /// Read rather than listed: a list is a second copy of the thing it is
+    /// checking, and the first version of this test held one — it asserted
+    /// that four literals appeared in the prompt and never looked at the loop
+    /// at all, so a fifth tag would have passed it.
+    fn emitted_delimiters() -> std::collections::BTreeSet<String> {
+        // Everything above the test module: this file's own tests quote
+        // delimiters in their failure messages, and a scan that read those
+        // would be asserting against itself. Split on the *module*, not on
+        // `#[cfg(test)]` — two of those appear in the first two hundred lines,
+        // on a mock backend, and splitting there left nothing to scan.
+        // Two files, because the delimiters come from two: this loop wraps
+        // what it fetches itself, and `vogt_tools::delimit` wraps everything
+        // that came from the core. Scanning one and asserting about both is
+        // how the first version of this test passed while missing a tag.
+        let whole = include_str!("assistant.rs");
+        let tools = include_str!("vogt_tools.rs");
+        let source = format!(
+            "{}{}",
+            whole.split("\nmod tests {").next().unwrap_or(whole),
+            tools.split("\nmod tests {").next().unwrap_or(tools),
+        );
+        let source = source.as_str();
+        let mut tags = std::collections::BTreeSet::new();
+        let take_tag = |fragment: &str| -> String {
+            fragment
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                .collect()
+        };
+        // `"<name ...` — how a delimiter written inline appears.
+        for fragment in source.split("\"<").skip(1) {
+            let tag = take_tag(fragment);
+            if !tag.is_empty() && !tag.ends_with('-') {
+                tags.insert(tag);
+            }
+        }
+        // `untrusted("name", ...)` — how the rest are emitted.
+        // The literal may sit on the next line after rustfmt has had it, so
+        // the quote is sought rather than assumed to be adjacent.
+        for fragment in source.split("untrusted(").skip(1) {
+            let Some((_, quoted)) = fragment.split_once('"') else {
+                continue;
+            };
+            let tag = take_tag(quoted);
+            if !tag.is_empty() && !tag.ends_with('-') {
+                tags.insert(tag);
+            }
+        }
+        tags
+    }
+
     #[test]
-    fn every_delimiter_the_prompt_names_is_one_the_loop_emits() {
-        // The prompt tells the model which tags mean "untrusted". A tag the
-        // loop emits and the prompt does not name is text the model has no
-        // reason to distrust; a tag the prompt names and nothing emits is a
-        // rule about nothing. Both are the same bug from opposite ends.
-        for tag in ["terminal-output", "vogt-data", "session-list", "tool-error"] {
+    fn every_delimiter_the_loop_emits_is_one_the_prompt_names() {
+        // A tag the loop emits and the prompt does not name is text the model
+        // has no reason to distrust. The prompt names bare tags while the loop
+        // emits some with attributes (`<vogt-data operation="…">`), so the
+        // comparison is on the tag itself.
+        let emitted = emitted_delimiters();
+        assert!(
+            emitted.contains("terminal-output") && emitted.contains("vogt-data"),
+            "the extractor found nothing it should have: {emitted:?}"
+        );
+        for tag in &emitted {
             assert!(
                 SYSTEM_PROMPT.contains(&format!("<{tag}>")),
-                "the prompt does not name <{tag}>"
+                "the loop emits <{tag}> and the prompt does not name it as untrusted"
             );
         }
-        assert_eq!(
-            untrusted("tool-error", "boom"),
-            "<tool-error>\nboom\n</tool-error>"
-        );
+    }
+
+    #[test]
+    fn the_prompt_names_no_delimiter_that_nothing_emits() {
+        // The same bug from the other end: a rule about a boundary that never
+        // arrives teaches the model to expect one that is not there.
+        let emitted = emitted_delimiters();
+        for fragment in SYSTEM_PROMPT.split('<').skip(1) {
+            let tag: String = fragment
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                .collect();
+            if tag.is_empty() || !SYSTEM_PROMPT.contains(&format!("<{tag}>")) {
+                continue;
+            }
+            assert!(
+                emitted.contains(&tag),
+                "the prompt names <{tag}> as untrusted and nothing emits it"
+            );
+        }
     }
 
     #[tokio::test]

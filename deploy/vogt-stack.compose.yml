@@ -241,6 +241,15 @@ services:
       # sessions in (§6.3). The entrypoint warns at boot if these two disagree,
       # because a disagreement renders as an empty estate rather than an error.
       VOGT_IMPORT_ROOT: "${VOGT_IMPORT_ROOT:-/home/sprooty/Working/Active}"
+      # What makes `vogt backup` cover the product rather than the core
+      # (NFR-I6). This is the engine's own `state_dir` — session history, push
+      # subscriptions, agent tasks and their prompts — and both halves run in
+      # this container, so the core can read it. Unset, a backup here would
+      # say `engine_state: "not configured"` and be a core-only backup taken
+      # from a merged deployment: complete-looking, and missing everything the
+      # engine owns. It must match the engine's `state_dir`, which the
+      # header above pins to this same path and the home bind mount carries.
+      VOGT_ENGINE_STATE_DIR: /home/sprooty/.local/share/mydevenv2
       # Set, unlike the product default: without it the forge adapter is off,
       # so notifications never collect and a private repository cannot be
       # imported — silently, because forge subjects then read as "not

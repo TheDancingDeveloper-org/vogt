@@ -329,9 +329,11 @@ describe("FR-U17 — trust on every card, and never blank", () => {
     // itself as current.
     const line = container.querySelector(".board-freshness");
     expect(line?.textContent).toMatch(/Polling — updated \d+s ago/);
-    expect(container.textContent).toContain(
-      "Vogt does not yet publish a change stream to this client",
-    );
+    // The note says what the freshness line means. It said the opposite
+    // until the front door started republishing vogt-core's changes — and a
+    // test asserting the old sentence is how a corrected comment fails a
+    // build, which is what happened.
+    expect(container.textContent).toContain("the poll below is the floor");
   });
 
   it("puts one on every card, so the aggregate cannot drop the awkward column", async () => {

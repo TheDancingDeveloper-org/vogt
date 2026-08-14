@@ -1009,3 +1009,36 @@ async fn readiness_says_nothing_when_there_is_nothing_to_compare() {
         .unwrap()
         .contains("nothing to compare"));
 }
+
+#[tokio::test]
+async fn a_sibling_directory_is_not_inside_the_workspace() {
+    // `/srv/work` and `/srv/workspace` are two unrelated trees that a textual
+    // prefix says are nested. The first version of this check compared
+    // strings, and both of its tests used unrelated temporary directories, so
+    // neither noticed.
+    let parent = tempfile::tempdir().unwrap();
+    let workspace = parent.path().join("work");
+    let sibling = parent.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
+
+    let mut cfg = base_config();
+    cfg.workspace_root = workspace.clone();
+    cfg.default_cwd = workspace;
+    cfg.vogt_import_root = Some(sibling);
+    let base = boot(cfg).await;
+
+    let body: Value = client()
+        .get(format!("{base}/readyz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        find_check(&body, "workspace_agreement")["ok"],
+        false,
+        "a name that starts the same is not a directory that contains it"
+    );
+}
