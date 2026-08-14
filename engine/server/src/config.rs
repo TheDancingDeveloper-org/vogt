@@ -243,6 +243,7 @@ struct FileConfig {
     contextkeeper_token: Option<String>,
     vogt_core_url: Option<String>,
     vogt_core_token: Option<String>,
+    vogt_core_token_file: Option<String>,
 }
 
 pub fn load(
@@ -314,14 +315,24 @@ pub fn load(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin/mydevenv2-agent-auth"));
 
-    // The file path wins over the bare variable: a deployment that brokers
-    // the token into a file has gone to the trouble deliberately, and falling
-    // back to an environment value it also set would silently undo that.
-    let vogt_core_token = match from_file.vogt_core_token {
+    // A file wins over a bare value everywhere it appears: a deployment that
+    // brokered the token into a file has gone to the trouble deliberately,
+    // and reading an inline copy it also set would silently undo that.
+    //
+    // The config file can name the file too, and not only the value. It was
+    // value-only at first, while a *per-token* pairing could already be a
+    // path — so the recommended form was expressible for every token except
+    // the deployment-wide one, which is the sort of asymmetry that is
+    // discovered by an operator writing the obvious key and getting a
+    // refusal that names something else.
+    let vogt_core_token = match read_token_path(from_file.vogt_core_token_file.as_deref())? {
         Some(value) => Some(value),
-        None => match read_token_file("VOGT_CORE_TOKEN_FILE")? {
+        None => match from_file.vogt_core_token {
             Some(value) => Some(value),
-            None => std::env::var("VOGT_CORE_TOKEN").ok(),
+            None => match read_token_file("VOGT_CORE_TOKEN_FILE")? {
+                Some(value) => Some(value),
+                None => std::env::var("VOGT_CORE_TOKEN").ok(),
+            },
         },
     };
 
@@ -430,6 +441,24 @@ pub fn load(
 /// and exports their paths, which keeps the value out of the process
 /// environment — where `/proc/<pid>/environ` and every `docker inspect`
 /// would otherwise show it.
+/// Read a token from a path the config file gave, if it gave one.
+fn read_token_path(path: Option<&str>) -> Result<Option<String>> {
+    let Some(path) = path.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| ApiError::Config(format!("reading vogt_core_token_file ({path}): {e}")))?;
+    let value = raw.trim().to_string();
+    if value.is_empty() {
+        // An empty brokered file is a deployment mid-rotation, not a request
+        // to fall back to a shared actor; failing the boot is the safe read.
+        return Err(ApiError::Config(format!(
+            "vogt_core_token_file ({path}) is empty"
+        )));
+    }
+    Ok(Some(value))
+}
+
 fn read_token_file(name: &str) -> Result<Option<String>> {
     let Ok(path) = std::env::var(name) else {
         return Ok(None);
@@ -644,6 +673,44 @@ mod tests {
             vogt_core_token_file: None,
             vogt_core_token: None,
         }
+    }
+
+    #[test]
+    fn the_deployment_wide_core_token_can_be_a_file_in_the_config() {
+        // The recommended form is a brokered file, and until this existed the
+        // config file could express it for every *paired* token and not for
+        // the fallback — so the obvious key was silently ignored and the
+        // refusal named something else entirely.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("core-token");
+        std::fs::write(&path, " fallback-core-token \n").unwrap();
+
+        assert_eq!(
+            read_token_path(Some(&path.display().to_string())).unwrap(),
+            Some("fallback-core-token".to_string())
+        );
+        assert_eq!(read_token_path(None).unwrap(), None);
+        assert_eq!(read_token_path(Some("   ")).unwrap(), None);
+    }
+
+    #[test]
+    fn an_empty_core_token_file_fails_the_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("core-token");
+        std::fs::write(&path, "\n").unwrap();
+
+        let err = read_token_path(Some(&path.display().to_string())).unwrap_err();
+        assert!(
+            err.to_string().contains("is empty"),
+            "a deployment mid-rotation must not quietly fall through to a \
+             shared actor: {err}"
+        );
+    }
+
+    #[test]
+    fn a_missing_core_token_file_fails_the_boot() {
+        let err = read_token_path(Some("/nonexistent/core-token")).unwrap_err();
+        assert!(err.to_string().contains("vogt_core_token_file"));
     }
 
     #[test]
