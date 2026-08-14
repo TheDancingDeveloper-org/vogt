@@ -3346,3 +3346,538 @@ textarea {
   text-align: left;
   font-size: 12px;
 }
+
+/* -- Vogt: the ranked backlog and bugs (FR-U6, FR-U14, FR-U15, NFR-S5) ----
+ *
+ * Every selector here is prefixed `vogt-backlog-` on purpose: the Vogt
+ * surfaces are being built in parallel, and a shared `.vogt-*` vocabulary
+ * would be three authors editing the same rules. The row grid is the one
+ * load-bearing part — `--vogt-row-h` must match `ROW_HEIGHT` in
+ * `Backlog.tsx`, because the virtualized list computes its window from it.
+ */
+
+.vogt-backlog {
+  --vogt-row-h: 40px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px;
+  gap: 10px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.vogt-backlog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.vogt-backlog-views {
+  display: flex;
+  gap: 4px;
+}
+
+.vogt-backlog-viewtab {
+  padding: 6px 14px;
+  border-radius: 6px;
+  color: var(--fg-muted);
+}
+
+.vogt-backlog-viewtab.active {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: var(--bg-elev);
+}
+
+.vogt-backlog-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Freshness is rendered even when it is good news: an empty answer and a
+ * stale answer have to stop looking alike (FR-U2, FR-U17). */
+.vogt-backlog-freshness {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--bd);
+  border-left-width: 3px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: var(--bg-elev);
+}
+
+.vogt-backlog-freshness.fresh {
+  border-left-color: var(--activity-done);
+}
+
+.vogt-backlog-freshness.partial {
+  border-left-color: var(--activity-running);
+}
+
+.vogt-backlog-freshness.never_swept,
+.vogt-backlog-freshness.unknown {
+  border-left-color: var(--activity-waiting);
+}
+
+.vogt-backlog-collectors {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: 10px;
+}
+
+.vogt-backlog-collector {
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  padding: 0 6px;
+}
+
+.vogt-backlog-filters,
+.vogt-backlog-create,
+.vogt-backlog-bulk {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  padding: 10px;
+}
+
+.vogt-backlog-filter-grid,
+.vogt-backlog-create-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.vogt-backlog-create-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.vogt-backlog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.vogt-backlog-field > span {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.vogt-backlog-field-wide {
+  grid-column: span 2;
+}
+
+.vogt-backlog-field select,
+.vogt-backlog-field input[type="text"],
+.vogt-backlog-savedrow input[type="text"] {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.vogt-backlog-field select:disabled {
+  opacity: 0.5;
+}
+
+.vogt-backlog-chiprow,
+.vogt-backlog-savedrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.vogt-backlog-chiplabel {
+  font-size: 11px;
+  color: var(--fg-muted);
+  min-width: 40px;
+}
+
+.vogt-backlog-chip {
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.vogt-backlog-chip.on {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: var(--bg);
+}
+
+.vogt-backlog-saved {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.vogt-backlog-saved-recall {
+  border-radius: 4px 0 0 4px;
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.vogt-backlog-saved-drop {
+  border-radius: 0 4px 4px 0;
+  border-left: none;
+  padding: 2px 6px;
+  color: var(--fg-muted);
+}
+
+.vogt-backlog-muted,
+.vogt-backlog-note {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.vogt-backlog-note {
+  margin: 0;
+}
+
+.vogt-backlog-pending {
+  display: inline-block;
+  margin-right: 10px;
+}
+
+.vogt-backlog-create-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.vogt-backlog-created {
+  font-size: 12px;
+  color: var(--activity-done);
+}
+
+.vogt-backlog-bulk {
+  border-color: var(--accent);
+}
+
+.vogt-backlog-bulk-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.vogt-backlog-bulk-row .vogt-backlog-field {
+  min-width: 160px;
+}
+
+.vogt-backlog-bulk-row .vogt-backlog-field-wide {
+  flex: 1;
+  min-width: 240px;
+}
+
+.vogt-backlog-outcomes {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.vogt-backlog-outcomes li.ok {
+  color: var(--activity-done);
+}
+
+.vogt-backlog-outcomes li.failed {
+  color: var(--activity-errored);
+}
+
+.vogt-backlog-count {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.vogt-backlog-outage {
+  border: 1px solid var(--activity-waiting);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.vogt-backlog-outage h3,
+.vogt-backlog-outage p {
+  margin: 0;
+}
+
+.vogt-backlog-outage h3 {
+  color: var(--activity-waiting);
+}
+
+.vogt-backlog-listwrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+/* One grid, shared by the header row and every data row, so the columns line
+ * up without the list becoming a <table> the virtualizer cannot window. */
+.vogt-backlog-headrow,
+.vogt-backlog-row {
+  display: grid;
+  grid-template-columns:
+    28px 110px minmax(0, 1fr) 76px 92px 40px 82px 130px 130px 92px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  height: var(--vogt-row-h);
+}
+
+.vogt-backlog-headrow {
+  background: var(--bg-tab);
+  border-bottom: 1px solid var(--bd);
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vogt-backlog-row {
+  border-bottom: 1px solid var(--bd);
+  font-size: 13px;
+}
+
+.vogt-backlog-row:hover {
+  background: var(--bg-elev);
+}
+
+.vogt-backlog-row.explained {
+  background: var(--bg-tab);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.vogt-backlog-headrow > span,
+.vogt-backlog-row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vogt-backlog-cell-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vogt-backlog-cell-kind,
+.vogt-backlog-cell-state,
+.vogt-backlog-cell-pri,
+.vogt-backlog-cell-project,
+.vogt-backlog-cell-updated {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.vogt-backlog-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.vogt-backlog-link {
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.vogt-backlog-link:hover {
+  background: transparent;
+  text-decoration: underline;
+}
+
+.vogt-backlog-origin {
+  flex: none;
+  border: 1px solid var(--bd-strong);
+  border-radius: 10px;
+  padding: 0 6px;
+  font-size: 10px;
+  color: var(--fg-muted);
+}
+
+/* Trust is never blank: a blank cell says "no opinion", and the honest
+ * answer is "nobody has verified this". */
+.vogt-backlog-trust {
+  border: 1px solid var(--bd-strong);
+  border-radius: 10px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.vogt-backlog-trust.trust-verified {
+  color: var(--activity-done);
+  border-color: var(--activity-done);
+}
+
+.vogt-backlog-trust.trust-stale {
+  color: var(--activity-running);
+  border-color: var(--activity-running);
+}
+
+.vogt-backlog-trust.trust-disputed {
+  color: var(--activity-errored);
+  border-color: var(--activity-errored);
+}
+
+.vogt-backlog-score {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.vogt-backlog-why {
+  font-family: inherit;
+  font-size: 10px;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+
+.vogt-backlog-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.vogt-backlog-empty {
+  margin: 0;
+  padding: 24px 12px;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+.vogt-backlog-explain {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  padding: 10px;
+  max-height: 40vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vogt-backlog-explain-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.vogt-backlog-explain-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.vogt-backlog-explain-table th,
+.vogt-backlog-explain-table td {
+  border-bottom: 1px solid var(--bd);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.vogt-backlog-explain-table thead th {
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+
+.vogt-backlog-explain-total,
+.vogt-backlog-explain-title {
+  display: block;
+  font-weight: 400;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.vogt-backlog-contrib {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--fg);
+}
+
+.vogt-backlog-bar-track {
+  display: block;
+  height: 4px;
+  margin: 4px 0 2px;
+  background: var(--bg);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.vogt-backlog-bar {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.vogt-backlog-bar.negative {
+  background: var(--activity-errored);
+}
+
+.vogt-backlog-detail {
+  display: block;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.vogt-backlog-delta {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--accent);
+}
+
+@media (max-width: 900px) {
+  .vogt-backlog-filter-grid,
+  .vogt-backlog-create-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .vogt-backlog-headrow,
+  .vogt-backlog-row {
+    grid-template-columns: 28px 96px minmax(0, 1fr) 78px 76px 84px;
+  }
+
+  .vogt-backlog-cell-kind,
+  .vogt-backlog-cell-pri,
+  .vogt-backlog-cell-project,
+  .vogt-backlog-cell-updated {
+    display: none;
+  }
+}
