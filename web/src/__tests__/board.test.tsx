@@ -547,6 +547,139 @@ describe("FR-U11 — the filter set is the URL", () => {
   });
 });
 
+describe("FR-U14 — a combined filter is nameable and recalled", () => {
+  function nameField(container: HTMLElement): HTMLInputElement {
+    return container.querySelector<HTMLInputElement>(".board-savedname")!;
+  }
+
+  function saveButton(container: HTMLElement): HTMLButtonElement {
+    return [...container.querySelectorAll("button")].find(
+      (node) => node.textContent === "Save filter",
+    ) as HTMLButtonElement;
+  }
+
+  function pick(container: HTMLElement, label: string, value: string): void {
+    const field = [...container.querySelectorAll<HTMLElement>(".board-field")].find(
+      (node) => node.querySelector("span")?.textContent === label,
+    )!;
+    fireEvent.input(field.querySelector("select")!, { target: { value } });
+  }
+
+  it("saves the set in force under a name, and recalls all of it", async () => {
+    fakeVogt();
+    const view = board();
+    await waitFor(() => expect(columnNames(view.container).length).toBeGreaterThan(0));
+
+    pick(view.container, "Project", "beta");
+    pick(view.container, "Label", "infra");
+    pick(view.container, "Swimlanes", "project");
+    await waitFor(() => expect(queryOf(view.url()).get("label")).toBe("infra"));
+
+    fireEvent.input(nameField(view.container), { target: { value: "beta infra" } });
+    fireEvent.click(saveButton(view.container));
+
+    await waitFor(() =>
+      expect(view.container.querySelector(".board-saved-recall")?.textContent).toBe(
+        "beta infra",
+      ),
+    );
+
+    // Somewhere else entirely.
+    const clear = [...view.container.querySelectorAll("button")].find((node) =>
+      node.textContent?.startsWith("Clear filters"),
+    )!;
+    fireEvent.click(clear);
+    await waitFor(() => expect(queryOf(view.url()).get("label")).toBeNull());
+
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".board-saved-recall")!);
+
+    // Every one of the three comes back, and the URL says so.
+    await waitFor(() => {
+      const query = queryOf(view.url());
+      expect(query.get("project")).toBe("beta");
+      expect(query.get("label")).toBe("infra");
+      expect(query.get("lanes")).toBe("project");
+    });
+  });
+
+  it("keeps the multi-valued filters intact through the round trip", async () => {
+    fakeVogt();
+    const view = board("/board?kind=bug&kind=feature&state=open&state=done");
+    await waitFor(() => expect(columnNames(view.container).length).toBeGreaterThan(0));
+
+    fireEvent.input(nameField(view.container), { target: { value: "two of each" } });
+    fireEvent.click(saveButton(view.container));
+    await waitFor(() => expect(view.container.querySelector(".board-saved")).toBeTruthy());
+
+    const clear = [...view.container.querySelectorAll("button")].find((node) =>
+      node.textContent?.startsWith("Clear filters"),
+    )!;
+    fireEvent.click(clear);
+    await waitFor(() => expect(queryOf(view.url()).getAll("kind")).toEqual([]));
+
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".board-saved-recall")!);
+    await waitFor(() =>
+      expect(queryOf(view.url()).getAll("kind")).toEqual(["bug", "feature"]),
+    );
+    expect(queryOf(view.url()).getAll("state")).toEqual(["open", "done"]);
+  });
+
+  it("survives a reload, because it is per-client state and says so", async () => {
+    fakeVogt();
+    const first = board();
+    await waitFor(() => expect(columnNames(first.container).length).toBeGreaterThan(0));
+
+    pick(first.container, "Project", "beta");
+    fireEvent.input(nameField(first.container), { target: { value: "just beta" } });
+    fireEvent.click(saveButton(first.container));
+    await waitFor(() => expect(first.container.querySelector(".board-saved")).toBeTruthy());
+
+    // A second mount is this client after a reload; localStorage is the only
+    // thing carried across, which is FR-U14's "per-client in v2".
+    const second = board();
+    await waitFor(() =>
+      expect(second.container.querySelector(".board-saved-recall")?.textContent).toBe(
+        "just beta",
+      ),
+    );
+    expect(second.container.textContent).toContain("saved filters are kept in this browser");
+  });
+
+  it("will not save an unnamed set, and forgets one on request", async () => {
+    fakeVogt();
+    const view = board();
+    await waitFor(() => expect(columnNames(view.container).length).toBeGreaterThan(0));
+
+    expect(saveButton(view.container).disabled).toBe(true);
+    fireEvent.input(nameField(view.container), { target: { value: "  " } });
+    expect(saveButton(view.container).disabled).toBe(true);
+
+    fireEvent.input(nameField(view.container), { target: { value: "keep" } });
+    fireEvent.click(saveButton(view.container));
+    await waitFor(() => expect(view.container.querySelector(".board-saved")).toBeTruthy());
+
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".board-saved-drop")!);
+    await waitFor(() => expect(view.container.querySelector(".board-saved")).toBeNull());
+  });
+
+  it("does not let a named view change how often the board refreshes", async () => {
+    fakeVogt();
+    const view = board("/board?poll=off");
+    await waitFor(() => expect(columnNames(view.container).length).toBeGreaterThan(0));
+
+    pick(view.container, "Project", "beta");
+    fireEvent.input(nameField(view.container), { target: { value: "beta" } });
+    fireEvent.click(saveButton(view.container));
+    await waitFor(() => expect(view.container.querySelector(".board-saved")).toBeTruthy());
+
+    // A refresh interval is a preference, not a filter: it is left out of what
+    // is saved and left alone on recall.
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".board-saved-recall")!);
+    await waitFor(() => expect(queryOf(view.url()).get("project")).toBe("beta"));
+    expect(queryOf(view.url()).get("poll")).toBe("off");
+  });
+});
+
 describe("FR-U21 — an outage is not an empty board", () => {
   it("renders the server's own reason and disables the writes", async () => {
     fakeVogt({

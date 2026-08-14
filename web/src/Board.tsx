@@ -219,6 +219,92 @@ export function encodeQuery(query: BoardParams): string {
   return params.toString();
 }
 
+/** A query string back into the shape `filtersFromQuery` reads. */
+export function queryFromSearch(search: string): BoardParams {
+  const params = new URLSearchParams(search);
+  // Built as a plain record and handed back as `BoardParams`: writing through
+  // the named keys asks TypeScript for the intersection of their types, and
+  // `kind` is a list where `project` is not.
+  const out: Record<string, string | string[]> = {};
+  for (const key of URL_KEYS) {
+    const all = params.getAll(key);
+    if (!all.length) continue;
+    out[key] = key === "kind" || key === "state" ? all : (all[0] as string);
+  }
+  return out as BoardParams;
+}
+
+// -- saved filters (FR-U14) -------------------------------------------------
+//
+// Per-client state in v2: server-side shared filters are deferred by name in
+// `REQUIREMENTS.md` §3, so this is `localStorage` and the row on screen says
+// so. The backlog and bugs views have had this since M11; the board — which
+// FR-U14 names first, and whose filter set is the more elaborate of the two —
+// had none.
+//
+// **A saved filter is stored as its query string.** Not as an object: the
+// encoder is already canonical, already the thing a link carries, and already
+// the thing `filtersFromQuery` can read back. So "save this view" and "copy
+// this link" preserve exactly the same set, a stored filter written by an
+// older build decodes under the same tolerances a pasted URL gets, and a key
+// this build stopped understanding is dropped rather than resurrected as
+// `undefined`.
+
+const SAVED_FILTERS_KEY = "mydevenv2.boardFilters.v1";
+
+/** Enough that a runaway list cannot be saved into a full storage quota. */
+const MAX_SAVED_FILTERS = 40;
+
+export interface SavedFilter {
+  name: string;
+  /** The filter set, encoded exactly as the URL encodes it. */
+  query: string;
+}
+
+export function readSavedFilters(): SavedFilter[] {
+  try {
+    const raw = window.localStorage.getItem(SAVED_FILTERS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((entry) => {
+        const record = (entry ?? {}) as Record<string, unknown>;
+        return {
+          name: typeof record.name === "string" ? record.name : "",
+          query: typeof record.query === "string" ? record.query : "",
+        };
+      })
+      .filter((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedFilters(entries: SavedFilter[]): SavedFilter[] {
+  const next = entries.slice(0, MAX_SAVED_FILTERS);
+  try {
+    window.localStorage.setItem(SAVED_FILTERS_KEY, JSON.stringify(next));
+  } catch {
+    // Private mode, quota, or no storage at all: the in-memory list still
+    // recalls for this session.
+  }
+  return next;
+}
+
+/** What a saved filter set says it is, for the recall button's tooltip. */
+export function describeFilters(active: Filters): string {
+  const parts: string[] = [];
+  if (active.project) parts.push(`project ${active.project}`);
+  if (active.kinds.length) parts.push(`type ${active.kinds.join("/")}`);
+  if (active.states.length) parts.push(`state ${active.states.join("/")}`);
+  if (active.label) parts.push(`label ${active.label}`);
+  if (active.initiative) parts.push(`initiative ${active.initiative}`);
+  if (active.assignee) parts.push(`assignee ${active.assignee}`);
+  if (active.lanes !== "none") parts.push(`lanes by ${active.lanes}`);
+  return parts.length ? parts.join(" · ") : "no filters — the whole board";
+}
+
 /**
  * The value of a `<select>` whose options arrive asynchronously.
  *
@@ -1207,6 +1293,38 @@ const Board: Component<Props> = (props) => {
     });
   };
 
+  // -- saved filters (FR-U14) ----------------------------------------------
+
+  const [savedFilters, setSavedFilters] = createSignal<SavedFilter[]>(readSavedFilters());
+  const [saveName, setSaveName] = createSignal("");
+
+  const saveCurrent = () => {
+    const name = saveName().trim();
+    if (!name) return;
+    // The poll interval is a refresh preference, not a filter, so it is left
+    // out of what gets saved and left alone on recall: a named view should
+    // not change how often the reader's board refreshes.
+    const query = encodeFilters({ ...filters(), poll: DEFAULT_POLL_SECONDS });
+    setSavedFilters(
+      writeSavedFilters([
+        { name, query },
+        ...savedFilters().filter((entry) => entry.name !== name),
+      ]),
+    );
+    setSaveName("");
+  };
+
+  const recallSaved = (entry: SavedFilter) => {
+    setFilters({ ...filtersFromQuery(queryFromSearch(entry.query)), poll: filters().poll });
+  };
+
+  const forgetSaved = (name: string) => {
+    setSavedFilters(writeSavedFilters(savedFilters().filter((one) => one.name !== name)));
+  };
+
+  const describeSaved = (entry: SavedFilter) =>
+    describeFilters(filtersFromQuery(queryFromSearch(entry.query)));
+
   const filterCount = createMemo(() => {
     const active = filters();
     return (
@@ -1438,6 +1556,51 @@ const Board: Component<Props> = (props) => {
             Clear filters ({filterCount()})
           </button>
         </div>
+      </div>
+
+      {/* FR-U14's second clause: a combined filter is nameable and recalled. */}
+      <div class="board-savedrow">
+        <input
+          type="text"
+          class="board-savedname"
+          placeholder="Name this filter set"
+          value={saveName()}
+          onInput={(event) => setSaveName(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            saveCurrent();
+          }}
+        />
+        <button type="button" onClick={saveCurrent} disabled={!saveName().trim()}>
+          Save filter
+        </button>
+        <For each={savedFilters()}>
+          {(entry) => (
+            <span class="board-saved">
+              <button
+                type="button"
+                class="board-saved-recall"
+                title={describeSaved(entry)}
+                onClick={() => recallSaved(entry)}
+              >
+                {entry.name}
+              </button>
+              <button
+                type="button"
+                class="board-saved-drop"
+                aria-label={`Forget the saved filter ${entry.name}`}
+                onClick={() => forgetSaved(entry.name)}
+              >
+                ×
+              </button>
+            </span>
+          )}
+        </For>
+        <span class="board-muted">
+          saved filters are kept in this browser · the URL above carries the
+          same set to somebody else
+        </span>
       </div>
 
       <Show when={createOpen()}>

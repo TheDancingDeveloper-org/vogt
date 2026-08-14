@@ -3964,6 +3964,42 @@ textarea {
   color: var(--fg-muted);
 }
 
+/* Naming a combined filter, and recalling one (FR-U14). Per-client state, as
+   §3 defers the shared kind, and the row says so. */
+.board-savedrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.board-savedname {
+  font-size: 12px;
+  min-width: 180px;
+}
+
+.board-saved {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--bd-strong);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.board-saved-recall {
+  border: none;
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.board-saved-drop {
+  border: none;
+  border-left: 1px solid var(--bd-strong);
+  padding: 0 6px;
+  color: var(--fg-muted);
+  line-height: 1;
+}
+
 /* Quick-create, inline (FR-U15). Laid out like the toolbar above it rather
    than as a dialog: the requirement's words are "inline, without leaving the
    view", and a modal over the board is leaving the view. */
