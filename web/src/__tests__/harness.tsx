@@ -267,6 +267,27 @@ export function auditRecord(over: Record<string, unknown> = {}): Record<string, 
   };
 }
 
+/** One row of the event feed, as `events.list` returns it.
+ *
+ *  A `work.transitioned` event by default, because that is the kind the item
+ *  page's state history is built from: `summary` carries the `from` the
+ *  audit's digest cannot say, and `audit_id` names the row that says why.
+ *  Both are what make the two feeds joinable, so a fixture missing either
+ *  tests the case where the join does not close. */
+export function feedEvent(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    seq: 1,
+    kind: "work.transitioned",
+    entity_kind: "work_item",
+    entity_id: "01JWORKITEM",
+    actor_id: "01JACTOR1",
+    audit_id: "01JAUDIT1",
+    summary: { ref: "WI-1", from: "open", to: "in_progress" },
+    at: "2026-08-02T00:00:00Z",
+    ...over,
+  };
+}
+
 export function rankedEntry(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     origin: "declared",
@@ -388,6 +409,10 @@ function defaults(): Routes {
       body: { project: "alpha", status: "compliant", contract_version: "1", failing: [] },
     },
     "GET /audit": { body: { records: [], total: 0 } },
+    // Empty by default, like the audit log above it: an item that has never
+    // moved is a state the item page has to render honestly, so it is the
+    // one a test gets without asking.
+    "GET /events": { body: { events: [], next_cursor: 0 } },
     "GET /observations": { body: { observations: [], total: 0 } },
     "GET /sessions": { body: { sessions: [], engine: null } },
     "GET /notifications": { body: { notifications: [], unread: 0, freshness: freshness() } },

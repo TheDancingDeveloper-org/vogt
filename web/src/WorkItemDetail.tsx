@@ -39,6 +39,8 @@ import {
   backlog,
   commentWork,
   getWork,
+  listAudit,
+  listEvents,
   listObservations,
   listSessions,
   listWorkflows,
@@ -46,9 +48,11 @@ import {
   stopSession,
   updateWork,
   why,
+  type AuditRecord,
   type FreshnessSummary,
   type Observation,
   type SessionSummary,
+  type VogtEvent,
   type WhyResult,
   type WorkDetail,
   type WorkItem,
@@ -421,6 +425,136 @@ function exitText(observation: Observation): string {
   return "no exit code recorded";
 }
 
+// -- the item's own state history (FR-U5) ----------------------------------
+//
+// Two feeds, read together, because neither answers on its own.
+//
+// The audit log records that a transition happened, who made it and why, and
+// keeps a `payload_digest` rather than the payload — deliberately, since it
+// proves what changed without duplicating it — so the audit alone can say an
+// item moved and cannot say *which state it moved from*. The event feed can:
+// `work.transitioned` carries `{ref, from, to}` in its summary, `events.list`
+// narrows to one entity in SQL, and nothing prunes that table. An item's
+// slice of the feed is therefore its complete history rather than a recent
+// window, which is why this panel can walk it to the end and say so.
+//
+// **Why the reasons are fetched and not linked to.** The decision looks like
+// "should the panel show why", and it is not: it is "can the panel say who".
+// An event names its actor with `actor_id`, a ULID, and "who moved it"
+// answered with `01JACTOR7Q…` is not an answer a person can read. The name
+// they can read — `actor_identity_ref` — is on the audit row, so the panel
+// has to fetch that row whatever it decides about reasons. Once it is in
+// hand the reason is in hand too, and sending a reader to another surface for
+// a sentence already in memory would be a click charged for nothing. The join
+// is the one the server designed: every event names its audit row in
+// `audit_id` precisely so the two halves can be read together.
+//
+// **What happens when the join does not close.** A move whose audit row is
+// not held — the audit read failed, or the log was longer than one page —
+// renders neither a blank nor an invented reason. It says who by the id the
+// event does carry, and links to the audit trail for the why. The panel says
+// how many such moves there are, so a reader is never left to infer from a
+// missing sentence that nobody gave a reason. Vogt refuses a write without
+// one; a panel implying otherwise would be libelling the person who moved it.
+
+/** How many events one page of the history asks for. */
+const HISTORY_PAGE = 200;
+
+/** How many pages the history will walk before it stops and says it stopped.
+ *  The feed is complete, not capped, so the only reason to bound this is that
+ *  an unbounded loop against a server is not a thing a page should open with. */
+const HISTORY_PAGES = 5;
+
+/** How many audit rows the reasons are joined from — `audit.list`'s ceiling. */
+const HISTORY_REASONS = 500;
+
+/** What one page of this item's history came back as. */
+interface History {
+  events: VogtEvent[];
+  /** True when the walk stopped at `HISTORY_PAGES` with the feed still going,
+   *  so there are later events this panel is not showing. */
+  cut: boolean;
+}
+
+/** One entry into a state: what it came from, when, and who moved it. */
+interface Move {
+  seq: number;
+  at: string;
+  /** The state entered, or null when the event does not name it. */
+  to: string | null;
+  /** The state left, or null when this is the item being created. */
+  from: string | null;
+  actorId: string | null;
+  auditId: string | null;
+}
+
+function summaryText(event: VogtEvent, key: string): string | null {
+  const value = (event.summary ?? {})[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+/**
+ * Walk this item's slice of the feed, from the beginning.
+ *
+ * Paged rather than read in one call, and paged *forwards*: the feed is
+ * ordered oldest first and a history has to start at the start. The loop
+ * stops the moment a page comes back short, which for any real work item is
+ * the first one — the bound exists for the case that is not true, and when it
+ * bites the caller is told rather than handed a prefix that looks whole.
+ */
+async function walkHistory(entityId: string): Promise<History> {
+  const events: VogtEvent[] = [];
+  let after = 0;
+  for (let page = 0; page < HISTORY_PAGES; page += 1) {
+    const answer = await listEvents({
+      entity_id: entityId,
+      after,
+      limit: HISTORY_PAGE,
+    });
+    events.push(...answer.events);
+    if (answer.events.length < HISTORY_PAGE) return { events, cut: false };
+    after = answer.next_cursor;
+  }
+  return { events, cut: true };
+}
+
+/**
+ * The moves in a slice of the feed, oldest first.
+ *
+ * The creation is a move: it is when the item entered its first state, and a
+ * history that began at the second one would be starting mid-story. That
+ * state is not in the creation event's summary — which carries the ref, the
+ * kind and the title — so it is read from the first transition's `from`, and
+ * from the workflow's initial state when there has been no transition at all.
+ * When neither can name it the row still appears, saying the item was created
+ * and that the feed does not record what state in. That is a worse answer
+ * than the state, and a much better one than a blank.
+ */
+function movesFrom(events: VogtEvent[], initialState: string | null): Move[] {
+  const firstFrom =
+    events
+      .filter((event) => event.kind === "work.transitioned")
+      .map((event) => summaryText(event, "from"))
+      .find((state) => state !== null) ?? null;
+
+  const moves: Move[] = [];
+  for (const event of events) {
+    if (event.kind !== "work.created" && event.kind !== "work.transitioned") {
+      continue;
+    }
+    const created = event.kind === "work.created";
+    moves.push({
+      seq: event.seq,
+      at: event.at,
+      to: created ? (firstFrom ?? initialState) : summaryText(event, "to"),
+      from: created ? null : summaryText(event, "from"),
+      actorId: event.actor_id ?? null,
+      auditId: event.audit_id ?? null,
+    });
+  }
+  return moves;
+}
+
 // -- the form every write appears through ----------------------------------
 
 /**
@@ -756,6 +890,27 @@ const WorkItemDetail: Component<Props> = (props) => {
 
   const [workflows] = createResource(() => attempt(() => listWorkflows()));
 
+  // -- this item's state history (FR-U5) ------------------------------------
+  //
+  // Keyed on the item's *id*, not its ref: both feeds are keyed by entity id,
+  // and the ref is the thing a person can read rather than the thing the log
+  // is filed under. Which means neither read starts until `work.get` has
+  // answered — correct, since without the id there is no question to ask, and
+  // an unnarrowed read of the whole estate's feed would be a different one.
+  const historyKey = createMemo<string | null>(() => serverItem()?.id ?? null);
+
+  const [history, { refetch: refetchHistory }] = createResource(historyKey, (id) =>
+    attempt(() => walkHistory(id)),
+  );
+
+  // The audit rows the events name. Read alongside rather than joined on the
+  // server because there is no operation that joins them — and read at all
+  // because the events name their actor by id, which is not a name (see the
+  // note above `HISTORY_PAGE`).
+  const [reasons, { refetch: refetchReasons }] = createResource(historyKey, (id) =>
+    attempt(() => listAudit({ entity_id: id, limit: HISTORY_REASONS })),
+  );
+
   // The engine's own template list, so the start form offers the templates
   // that exist rather than asking for a name to be typed from memory.
   const [templates] = createResource(async () => {
@@ -771,6 +926,8 @@ const WorkItemDetail: Component<Props> = (props) => {
     void refetchSessions();
     void refetchEvidence();
     void refetchObserved();
+    void refetchHistory();
+    void refetchReasons();
   };
 
   createEffect(() => {
@@ -989,6 +1146,117 @@ const WorkItemDetail: Component<Props> = (props) => {
     const flow = workflowForKind();
     if (!flow) return [];
     return [...flow.states];
+  });
+
+  // -- what the two feeds add up to -----------------------------------------
+
+  const moves = createMemo<Move[]>(() => {
+    const loaded = history();
+    if (!loaded || !loaded.ok) return [];
+    return movesFrom(loaded.value.events, workflowForKind()?.initial_state ?? null);
+  });
+
+  /** Moves that are transitions. The creation is a move and is not one. */
+  const transitions = createMemo(() => moves().filter((move) => move.from !== null));
+
+  const historyCut = createMemo(() => {
+    const loaded = history();
+    return Boolean(loaded && loaded.ok && loaded.value.cut);
+  });
+
+  const historyFailure = createMemo<string | null>(() => {
+    const loaded = history();
+    if (!loaded || loaded.ok) return null;
+    return loaded.absent
+      ? `Vogt cannot be reached: ${loaded.message}`
+      : `This item's history could not be read: ${loaded.message}`;
+  });
+
+  /** The audit rows held, by their id, so an event can find the one it names. */
+  const reasonById = createMemo<Map<string, AuditRecord>>(() => {
+    const loaded = reasons();
+    const found = new Map<string, AuditRecord>();
+    if (!loaded || !loaded.ok) return found;
+    for (const record of loaded.value.records) found.set(record.id, record);
+    return found;
+  });
+
+  const reasonsFailure = createMemo<string | null>(() => {
+    const loaded = reasons();
+    return loaded && !loaded.ok ? loaded.message : null;
+  });
+
+  /** True when the audit log had more rows than one page of it holds, so some
+   *  of these moves name a row this page does not have. */
+  const reasonsCut = createMemo(() => {
+    const loaded = reasons();
+    if (!loaded || !loaded.ok) return false;
+    const { records, total } = loaded.value;
+    return total !== undefined && total > records.length;
+  });
+
+  /** Moves whose audit row is not held, and which therefore link for the why. */
+  const unexplained = createMemo(
+    () => moves().filter((move) => !move.auditId || !reasonById().has(move.auditId)).length,
+  );
+
+  /** Where a move sends a reader for the reason behind it. The browser holds
+   *  the paging and the filters; narrowing to the operation lands them on the
+   *  transitions rather than on the whole trail. */
+  const transitionTrailHref = createMemo(
+    () => `#/audit?ref=${encodeURIComponent(props.itemRef)}&op=work.transition`,
+  );
+
+  /** The sentence under the heading. Never empty, in any of its states. */
+  const historySummary = createMemo<string>(() => {
+    const failed = historyFailure();
+    if (failed) {
+      return (
+        `${failed} — nothing is listed below because nothing was read, not ` +
+        `because ${props.itemRef} has never moved`
+      );
+    }
+    if (!history()) return "reading this item's history…";
+
+    const parts: string[] = [];
+    const count = transitions().length;
+    if (count === 0) {
+      parts.push(
+        moves().length === 0
+          ? `no event is recorded for ${props.itemRef} at all, not even its ` +
+            "creation — so this is what the feed holds, and not a claim that " +
+            "nothing happened"
+          : `${props.itemRef} has not been moved since it was created`,
+      );
+    } else {
+      parts.push(`${count} transition${count === 1 ? "" : "s"}`);
+    }
+
+    parts.push(
+      historyCut()
+        ? `this is the first ${HISTORY_PAGE * HISTORY_PAGES} events recorded ` +
+          "for it and the feed has more, so later moves are missing from the " +
+          "list below"
+        : "the feed these come from is never pruned, so this is the whole of " +
+          "its history and not a recent window on it",
+    );
+
+    if (reasonsFailure()) {
+      parts.push(
+        `the reasons could not be read: ${reasonsFailure()} — each move links ` +
+          "to the audit trail instead, where they are recorded",
+      );
+    } else if (unexplained() > 0) {
+      parts.push(
+        `${unexplained()} name${unexplained() === 1 ? "s" : ""} an audit row ` +
+          `this page does not hold${
+            reasonsCut() ? `, the log being longer than ${HISTORY_REASONS} rows` : ""
+          } and link${unexplained() === 1 ? "s" : ""} to the audit trail for ` +
+          "the reason — every one of them has one, because Vogt refuses a " +
+          "write without it",
+      );
+    }
+    return parts.join(" · ");
   });
 
   const [commentBody, setCommentBody] = createSignal("");
@@ -1249,11 +1517,112 @@ const WorkItemDetail: Component<Props> = (props) => {
                       </For>
                     </div>
                   </Show>
-                  <p class="wid-hint">
-                    The transitions that produced this state are audited writes
-                    and belong in the audit trail below, not in a second story
-                    told by this panel.
-                  </p>
+                  {/* How it got here (FR-U5's "state history"). The rail above
+                      is the machine with the current state marked, which says
+                      where the item is and nothing about how it arrived. This
+                      says that, from the feed that records the state each
+                      transition came *from* — the one thing the audit log's
+                      digest cannot recover. */}
+                  <div class="wid-history">
+                    <div class="wid-panel-head">
+                      <h4>How it got here</h4>
+                      <a class="wid-history-trail" href={transitionTrailHref()}>
+                        Open these in the audit trail
+                      </a>
+                    </div>
+
+                    <p
+                      class={`wid-history-summary${
+                        historyFailure() ? " wid-failure" : ""
+                      }`}
+                      role={historyFailure() ? "alert" : undefined}
+                    >
+                      {historySummary()}
+                    </p>
+
+                    <Show when={!historyFailure() && history()}>
+                      <Show
+                        when={moves().length > 0}
+                        fallback={
+                          <p class="wid-absent">
+                            {props.itemRef} has no recorded moves. Its state
+                            changes appear here as they are made — an empty list
+                            here is "it has not moved", not "the moves were lost".
+                          </p>
+                        }
+                      >
+                        <ol class="wid-moves">
+                          <For each={moves()}>
+                            {(move) => {
+                              const record = createMemo<AuditRecord | null>(() =>
+                                move.auditId
+                                  ? (reasonById().get(move.auditId) ?? null)
+                                  : null,
+                              );
+                              return (
+                                <li
+                                  class={`wid-move${
+                                    move.from === null ? " wid-move--created" : ""
+                                  }`}
+                                >
+                                  <div class="wid-move-head">
+                                    <span class="wid-move-states">
+                                      <Show
+                                        when={move.from}
+                                        fallback={<em>created in </em>}
+                                      >
+                                        {(from) => (
+                                          <>
+                                            <span class="wid-mono">{from()}</span>
+                                            {" → "}
+                                          </>
+                                        )}
+                                      </Show>
+                                      <span class="wid-mono wid-move-to">
+                                        {move.to ??
+                                          "a state the feed does not record"}
+                                      </span>
+                                    </span>
+                                    <span class="wid-hint wid-move-at">
+                                      {formatWhen(move.at)}
+                                    </span>
+                                    {/* Never blank, and never invented: the
+                                        readable identity when the audit row is
+                                        held, the actor id the event carries
+                                        when it is not, and a statement that
+                                        the event named nobody when it did
+                                        not. */}
+                                    <span class="wid-move-actor">
+                                      {record()
+                                        ? `by ${record()?.actor_identity_ref}`
+                                        : move.actorId
+                                          ? `by actor ${move.actorId}`
+                                          : "by an actor this event does not name"}
+                                    </span>
+                                  </div>
+                                  <Show
+                                    when={record()}
+                                    fallback={
+                                      <a
+                                        class="wid-move-why"
+                                        href={transitionTrailHref()}
+                                      >
+                                        why this happened is in the audit trail
+                                      </a>
+                                    }
+                                  >
+                                    {(row) => (
+                                      <p class="wid-move-reason">“{row().reason}”</p>
+                                    )}
+                                  </Show>
+                                </li>
+                              );
+                            }}
+                          </For>
+                        </ol>
+                      </Show>
+                    </Show>
+                  </div>
                 </section>
 
                 <section class="wid-panel">

@@ -3579,6 +3579,76 @@ textarea {
   border-color: var(--accent);
 }
 
+/* The item's own state history (FR-U5). Ordered and read top-down, so it is
+   an `<ol>` with a rule down the left: the shape says "these happened in this
+   order" before a word of it is read. The creation is marked apart because it
+   is the only entry with nothing before it. */
+.wid-history {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.wid-history h4 {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+.wid-history-trail {
+  font-size: 12px;
+}
+.wid-history-summary {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wid-moves {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 12px;
+  border-left: 2px solid var(--bd);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wid-move {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.wid-move--created .wid-move-states {
+  color: var(--fg-muted);
+}
+.wid-move-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.wid-move-states {
+  font-size: 12px;
+}
+.wid-move-to {
+  font-weight: 600;
+}
+.wid-move-actor {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wid-move-reason {
+  margin: 0;
+  font-size: 12px;
+  font-style: italic;
+}
+/* Not a blank where a reason would go: the reason exists, this page does not
+   hold it, and the link is where it is. */
+.wid-move-why {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
 .wid-sessions,
 .wid-comments,
 .wid-relations {
