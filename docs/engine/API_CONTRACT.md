@@ -83,10 +83,14 @@ section that documents it.
 - `GET /healthz` -> `OkResponse` — the process is listening. It reads nothing,
   so it stays cheap enough for a container liveness probe.
 - `GET /readyz` -> `{"ok": bool, "checks": [{"name","ok","detail","fatal"}]}`
-  — five checks: `workspace_root` (readable directory), `state_dir` (writable,
-  proved by writing and removing a probe file), `tailscale` (skipped unless
-  `TAILSCALE_AUTH_KEY` is set), `gui` (skipped unless `START_SWAY`) and
-  `vogt_core`. `200` when every *fatal* check passes, `503` otherwise.
+  — seven checks: `workspace_root` (readable directory), `state_dir`
+  (writable, proved by writing and removing a probe file), `tailscale`
+  (skipped unless `TAILSCALE_AUTH_KEY` is set), `gui` (skipped unless
+  `START_SWAY`), `vogt_core`, `workspace_agreement` (the core imports inside
+  this server's workspace root — FR-E3) and `backup_agreement` (`vogt backup`
+  would cover this server's `state_dir` — NFR-I6). `200` when every *fatal*
+  check passes, `503` otherwise; the last three are non-fatal by design, so a
+  ready container can still be reporting one of them false.
 - `GET /api/config` -> `PublicConfig`
   `{gui_stream_url, version, features, session_templates, assistant_enabled,
   assistant_model?}` — what the browser needs at boot, before the user has

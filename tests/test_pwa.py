@@ -611,3 +611,24 @@ def test_the_vogt_surfaces_share_the_engine_s_narrow_breakpoint() -> None:
         f"a second phone breakpoint appeared at {sorted(narrower)}px; the "
         "shell has one, and it is 768"
     )
+
+
+def test_every_readiness_check_is_in_the_engines_contract() -> None:
+    """`API_CONTRACT.md` said "five checks" while the code published seven.
+
+    It had been stale since `workspace_agreement` landed and got staler when
+    `backup_agreement` did — a document nobody could have caught out by
+    reading either file alone, which is what a cross-file guard is for. The
+    names are the interface: `scripts/smoke_merged_stack.sh` greps for two of
+    them by name, and `DEPLOYMENT.md` §9.2 tells a deployer to.
+    """
+    api = (REPO_ROOT / "engine" / "server" / "src" / "api.rs").read_text("utf-8")
+    published = set(re.findall(r'ReadinessCheck \{\s*name: "([a-z_]+)"', api))
+    assert published, "the readiness checks are literals in `api.rs`"
+    documented = ENGINE_CONTRACT_DOC.read_text(encoding="utf-8")
+    missing = sorted(name for name in published if f"`{name}`" not in documented)
+    assert not missing, (
+        f"{missing} are published by /readyz and named nowhere in "
+        "API_CONTRACT.md; a check a deployer cannot look up is one they "
+        "cannot act on"
+    )
