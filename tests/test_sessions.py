@@ -384,6 +384,51 @@ def test_the_work_items_brief_travels_with_the_session(
     )
 
 
+def test_the_brief_says_why_the_item_is_ranked_where_it_is(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """FR-E4 names the `why`, and it is the half an agent cannot reconstruct.
+
+    A description says what the item is. The ranking says why it is above the
+    others, which is the question "should I be working on this?" actually
+    turns on — and it is computed from inputs (blocking fan-out, initiative
+    weight, age) that are nowhere in the item's own text.
+    """
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert "## Why this is ranked where it is" in brief
+    assert "Score " in brief
+    # Every contribution the ranking reports, named — not a single number.
+    assert brief.count("- **") >= 2, (
+        "the explanation is the per-input contributions; one total is a score, "
+        "not a reason"
+    )
+
+
+def test_a_brief_survives_a_ranking_that_cannot_be_computed(
+    wired: AppContext,
+    engine: StandInEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The session starts either way.
+
+    A brief that refused to be written because a score was unavailable would
+    make the ranking a precondition for starting work — the inversion FR-G13
+    spends its whole sentence forbidding.
+    """
+
+    def explodes(*args: object, **kwargs: object) -> None:
+        raise NotFound("no such ranked entry")
+
+    monkeypatch.setattr("vogt.application.services.sessions.why", explodes)
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+
+    assert result.session.work_item == "WI-1"
+    brief = engine.last_spec["prompt"]
+    assert "WI-1" in brief
+    assert "## Why this is ranked where it is" not in brief
+
+
 def test_the_brief_carries_no_credential(
     wired: AppContext, engine: StandInEngine
 ) -> None:

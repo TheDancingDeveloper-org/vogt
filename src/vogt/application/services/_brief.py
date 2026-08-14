@@ -15,12 +15,24 @@ else. Two rules shaped it:
 
 from __future__ import annotations
 
+from vogt.application.models import WhyResult
 from vogt.core.entities import WorkItem
 from vogt.storage.interface import ReadView
 
 
-def brief_for_work_item(view: ReadView, item: WorkItem, session_id: str) -> str:
-    """The work item, as a page an agent can read before it starts."""
+def brief_for_work_item(
+    view: ReadView,
+    item: WorkItem,
+    session_id: str,
+    ranking: WhyResult | None = None,
+) -> str:
+    """The work item, as a page an agent can read before it starts.
+
+    `ranking` is optional because the brief must survive a ranking that
+    cannot be computed — an observed subject, a store mid-sweep — and a
+    session that refused to start because a score was unavailable would be
+    the tail wagging the dog.
+    """
     lines: list[str] = [f"# {item.ref} — {item.title}", ""]
 
     facts = [
@@ -51,6 +63,32 @@ def brief_for_work_item(view: ReadView, item: WorkItem, session_id: str) -> str:
                 else f"{related.ref} — {related.title}"
             )
             lines.append(f"- {relation.kind.replace('_', ' ')} {label}")
+        lines.append("")
+
+    if ranking is not None:
+        # FR-E4 names the `why` as part of the brief, and it is the half an
+        # agent cannot reconstruct: the description says what the item is,
+        # and this says why it is above the others — which is the question
+        # "should I be working on this?" actually turns on.
+        lines += ["## Why this is ranked where it is", ""]
+        lines.append(f"Score {ranking.total:g}, from:")
+        lines.append("")
+        for row in sorted(
+            ranking.contributions, key=lambda one: one.contribution, reverse=True
+        ):
+            detail = f" — {row.detail}" if row.detail else ""
+            lines.append(
+                f"- **{row.input}** {row.contribution:+g} "
+                f"({row.value:g} x {row.weight:g}){detail}"
+            )
+        if ranking.inputs_not_yet_available:
+            lines += [
+                "",
+                "Not yet collected, so absent rather than zero:",
+                "",
+            ]
+            for name, note in sorted(ranking.inputs_not_yet_available.items()):
+                lines.append(f"- {name} — {note}")
         lines.append("")
 
     comments = view.comments_for(item.id, limit=20)

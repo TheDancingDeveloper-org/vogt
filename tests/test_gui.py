@@ -427,17 +427,20 @@ def test_every_field_the_gui_reads_off_a_result_exists() -> None:
     read a *result object*. The loop variables are named after what they hold
     (`proposal`, `ref`, `record`), which is what makes this checkable at all.
     """
-    from vogt.application import models
+    from pydantic import BaseModel
+
+    from vogt.application.models import RankedItem
+    from vogt.core import entities
 
     source_text = code(APP_JS)
     # `item` holds either shape depending on the view — a ranked entry in the
     # backlog and bugs tables, a work item elsewhere — so it is checked
     # against both. The others hold one thing each.
-    subjects = {
-        "proposal": (models.DriftProposal,),
-        "ref": (models.DepRef,),
-        "record": (models.AuditRecord,),
-        "item": (models.RankedItem, models.WorkItem),
+    subjects: dict[str, tuple[type[BaseModel], ...]] = {
+        "proposal": (entities.DriftProposal,),
+        "ref": (entities.DepRef,),
+        "record": (entities.AuditRecord,),
+        "item": (RankedItem, entities.WorkItem),
     }
     unknown: list[str] = []
     for name, candidates in subjects.items():

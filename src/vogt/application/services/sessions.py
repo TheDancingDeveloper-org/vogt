@@ -36,16 +36,19 @@ from vogt.application.models import (
     SessionSummary,
     StartSessionParams,
     StopSessionParams,
+    WhyParams,
+    WhyResult,
 )
 from vogt.application.services import _resolve
 from vogt.application.services._brief import (
     brief_for_project,
     brief_for_work_item,
 )
+from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.auth import Scope, issue
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem
-from vogt.errors import Conflict, InvalidRequest, NotFound
+from vogt.errors import Conflict, InvalidRequest, NotFound, VogtError
 from vogt.storage.interface import ReadView, WriteTxn
 
 SESSION_START = "session.start"
@@ -272,11 +275,24 @@ def _subject(ctx: AppContext, params: StartSessionParams, session_id: str) -> _S
         raise InvalidRequest(msg)
 
     with ctx.declared.read() as view:
-        return _resolve_subject(view, params, session_id)
+        return _resolve_subject(view, params, session_id, ctx)
+
+
+def _ranking(ctx: AppContext, ref: str) -> WhyResult | None:
+    """The item's score explanation, or nothing if it cannot be had.
+
+    Optional on purpose: a brief that refused to be written because a score
+    could not be computed would make the ranking a precondition for starting
+    work, which is the inversion FR-G13 spends its whole sentence on.
+    """
+    try:
+        return why(ctx, WhyParams(ref=ref))
+    except VogtError:
+        return None
 
 
 def _resolve_subject(
-    view: ReadView, params: StartSessionParams, session_id: str
+    view: ReadView, params: StartSessionParams, session_id: str, ctx: AppContext
 ) -> _Subject:
     if params.work_item is not None:
         item = _resolve.work_item(view, params.work_item)
@@ -297,7 +313,7 @@ def _resolve_subject(
             project_slug=project.slug,
             cwd=project.root_path,
             work_item=item,
-            brief=brief_for_work_item(view, item, session_id),
+            brief=brief_for_work_item(view, item, session_id, _ranking(ctx, item.ref)),
         )
 
     project = _resolve.project(view, params.project or "")
