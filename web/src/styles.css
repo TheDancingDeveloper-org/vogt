@@ -4924,3 +4924,763 @@ textarea {
     display: none;
   }
 }
+
+/* -- Vogt: per-project pages and the drift inbox (FR-U7, FR-U18, FR-U21) ---
+ *
+ * Every selector here is prefixed `vogt-projects-`, for the reason the
+ * backlog block gives: the Vogt surfaces are built in parallel and a shared
+ * `.vogt-*` vocabulary would be several authors editing the same rules.
+ *
+ * The one load-bearing part is `.vogt-projects-sides`. FR-U18 requires both
+ * halves of a disagreement to be *seen* before an act is possible, so the
+ * two sides sit side by side above the resolve form, always rendered and
+ * never collapsed — and below the narrow breakpoint they stack rather than
+ * shrink, because a half nobody can read is a half nobody saw.
+ */
+
+.vogt-projects {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px;
+  gap: 10px;
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+.vogt-projects-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.vogt-projects-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vogt-projects-crumb {
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: var(--fg-muted);
+  border: 1px solid transparent;
+  background: transparent;
+}
+
+.vogt-projects-crumb.active {
+  color: var(--fg);
+}
+
+.vogt-projects-views {
+  display: flex;
+  gap: 4px;
+}
+
+.vogt-projects-viewtab {
+  padding: 6px 14px;
+  border-radius: 6px;
+  color: var(--fg-muted);
+}
+
+.vogt-projects-viewtab.active {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: var(--bg-elev);
+}
+
+/* Freshness is rendered even when it is good news, and one line per
+ * aggregate rather than one for the surface: the brief, the inbox and the
+ * graph are answers over different sweeps (FR-U2, FR-U17). */
+.vogt-projects-freshness {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--bd);
+  border-left-width: 3px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: var(--bg-elev);
+}
+
+.vogt-projects-freshness-what {
+  margin-right: 8px;
+  color: var(--fg);
+}
+
+.vogt-projects-freshness.fresh {
+  border-left-color: var(--activity-done);
+}
+
+.vogt-projects-freshness.partial {
+  border-left-color: var(--activity-running);
+}
+
+.vogt-projects-freshness.never_swept,
+.vogt-projects-freshness.unknown {
+  border-left-color: var(--activity-waiting);
+}
+
+.vogt-projects-collectors {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: 10px;
+}
+
+.vogt-projects-collector {
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  padding: 0 6px;
+}
+
+.vogt-projects-muted {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.vogt-projects-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.vogt-projects-hint {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.vogt-projects-link {
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  background: transparent;
+  text-align: left;
+}
+
+.vogt-projects-link:hover {
+  background: transparent;
+  text-decoration: underline;
+}
+
+.vogt-projects-tag {
+  display: inline-block;
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  padding: 0 6px;
+  margin-right: 4px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.vogt-projects-trust {
+  display: inline-block;
+  border: 1px solid var(--bd-strong);
+  border-radius: 10px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.vogt-projects-trust.trust-verified {
+  color: var(--activity-done);
+  border-color: var(--activity-done);
+}
+
+.vogt-projects-trust.trust-stale {
+  color: var(--activity-running);
+  border-color: var(--activity-running);
+}
+
+.vogt-projects-trust.trust-disputed,
+.vogt-projects-trust.trust-contested {
+  color: var(--activity-errored);
+  border-color: var(--activity-errored);
+}
+
+.vogt-projects-note,
+.vogt-projects-empty {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  background: var(--bg-elev);
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.vogt-projects-note button {
+  margin-left: 10px;
+}
+
+.vogt-projects-failure {
+  margin: 6px 0 0;
+  color: var(--activity-errored);
+  font-size: 12px;
+}
+
+/* An outage is rendered, never escalated, and never mistaken for emptiness
+ * (FR-U21). */
+.vogt-projects-outage {
+  border: 1px solid var(--activity-waiting);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: 10px 12px;
+  background: var(--bg-elev);
+}
+
+.vogt-projects-outage h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.vogt-projects-outage p {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+
+/* -- the estate list ------------------------------------------------------ */
+
+.vogt-projects-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vogt-projects-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.vogt-projects-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 6px;
+  background: var(--bg-elev);
+  text-align: left;
+}
+
+.vogt-projects-card:hover {
+  border-color: var(--accent);
+}
+
+.vogt-projects-card-name {
+  font-weight: 600;
+}
+
+.vogt-projects-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* -- one project ---------------------------------------------------------- */
+
+.vogt-projects-project {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vogt-projects-project-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.vogt-projects-project-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.vogt-projects-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.vogt-projects-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  padding: 10px;
+}
+
+.vogt-projects-panel h3 {
+  margin: 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+
+.vogt-projects-panel > button {
+  align-self: flex-start;
+}
+
+.vogt-projects-kv {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.vogt-projects-kv > div {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.vogt-projects-kv dt {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.vogt-projects-kv dd {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* A computed status reads as a word, not a colour alone: the colour is the
+ * second signal, never the only one. */
+.vogt-projects-status {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.vogt-projects-status--passing,
+.vogt-projects-status--compliant,
+.vogt-projects-status--collected {
+  color: var(--activity-done);
+}
+
+.vogt-projects-status--failing,
+.vogt-projects-status--non_compliant {
+  color: var(--activity-errored);
+}
+
+.vogt-projects-status--not_collected,
+.vogt-projects-status--not_checked,
+.vogt-projects-status--no_checks {
+  color: var(--fg-muted);
+}
+
+.vogt-projects-criteria {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.vogt-projects-criteria li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vogt-projects-backlog {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vogt-projects-backlog li {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.vogt-projects-backlog-title {
+  flex: 1;
+  min-width: 120px;
+}
+
+/* -- the dependency graph ------------------------------------------------- */
+
+.vogt-projects-deps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* One hop, drawn as a hub: what points here, this project, what it points
+ * at. Reaching further means opening a neighbour, which is what the API
+ * answers and therefore what the picture may claim. */
+.vogt-projects-hub {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.vogt-projects-hub-col h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vogt-projects-hub-centre {
+  display: flex;
+  justify-content: center;
+}
+
+.vogt-projects-hub-node {
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  padding: 8px 14px;
+  background: var(--bg-elev);
+  font-weight: 600;
+}
+
+.vogt-projects-edges {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vogt-projects-edge {
+  border: 1px solid var(--bd);
+  border-left-width: 3px;
+  border-left-color: var(--activity-done);
+  border-radius: 4px;
+  padding: 6px 8px;
+  background: var(--bg-elev);
+}
+
+/* An unresolved reference is a real answer — the thing is depended on and is
+ * not in the estate — so it is marked, not blanked. */
+.vogt-projects-edge--unresolved {
+  border-left-color: var(--activity-running);
+}
+
+.vogt-projects-edge-node {
+  display: block;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.vogt-projects-edge-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+/* -- the drift inbox ------------------------------------------------------ */
+
+.vogt-projects-inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vogt-projects-inbox-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  padding: 10px;
+}
+
+.vogt-projects-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.vogt-projects-field input,
+.vogt-projects-field select {
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+
+.vogt-projects-drift {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  padding: 10px;
+}
+
+.vogt-projects-drift--open {
+  border-left: 3px solid var(--activity-running);
+}
+
+.vogt-projects-drift--accepted {
+  border-left: 3px solid var(--activity-done);
+}
+
+.vogt-projects-drift--rejected,
+.vogt-projects-drift--contested {
+  border-left: 3px solid var(--activity-idle);
+}
+
+.vogt-projects-drift-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.vogt-projects-kind {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+}
+
+.vogt-projects-drift-status {
+  border: 1px solid var(--bd-strong);
+  border-radius: 10px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.vogt-projects-drift-summary {
+  margin: 0;
+  font-size: 14px;
+}
+
+/* Both sides of the disagreement, above the act and never behind a
+ * disclosure (FR-U18). */
+.vogt-projects-sides {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.vogt-projects-side {
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  padding: 8px 10px;
+  background: var(--bg);
+}
+
+/* A half the proposal does not carry says so, and is dimmed rather than
+ * blank: a blank cell reads as "nothing", which is a different claim. */
+.vogt-projects-side--absent {
+  border-style: dashed;
+}
+
+.vogt-projects-side h5 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+
+.vogt-projects-side-value {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+.vogt-projects-side--absent .vogt-projects-side-value {
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+.vogt-projects-provenance {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.vogt-projects-provenance li {
+  overflow-wrap: anywhere;
+}
+
+.vogt-projects-age {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.vogt-projects-sides--tight .vogt-projects-side {
+  background: var(--bg-elev);
+}
+
+.vogt-projects-raw summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.vogt-projects-raw .vogt-projects-kv {
+  margin-top: 6px;
+}
+
+.vogt-projects-effect {
+  margin: 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.vogt-projects-gate {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.vogt-projects-blocked {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px dashed var(--bd-strong);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+/* One form per proposal, one act per submit. There is deliberately no
+ * multi-select and no batch control anywhere in this block: bulk drift
+ * resolution is deferred by name in `REQUIREMENTS.md` §3. */
+.vogt-projects-resolve {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--bd);
+  padding-top: 8px;
+}
+
+.vogt-projects-resolutions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.vogt-projects-resolution {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px 8px;
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.vogt-projects-resolution.on {
+  border-color: var(--accent);
+  background: var(--bg);
+}
+
+.vogt-projects-resolution .vogt-projects-muted {
+  grid-column: 2;
+  font-size: 11px;
+}
+
+.vogt-projects-resolve-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* -- the import form ------------------------------------------------------ */
+
+.vogt-projects-import {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 720px;
+}
+
+.vogt-projects-import h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.vogt-projects-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  padding: 10px;
+}
+
+.vogt-projects-check {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.vogt-projects-imported {
+  border: 1px solid var(--activity-done);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: 10px;
+  background: var(--bg-elev);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vogt-projects-imported p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.vogt-projects-imported button {
+  align-self: flex-start;
+}
+
+@media (max-width: 900px) {
+  /* The two sides stack rather than shrink: a half nobody can read is a
+     half nobody saw, and FR-U18 is about what the reader actually sees. */
+  .vogt-projects-sides,
+  .vogt-projects-resolutions,
+  .vogt-projects-inbox-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vogt-projects-hub {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vogt-projects-kv > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
