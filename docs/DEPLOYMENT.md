@@ -718,6 +718,39 @@ here because an estate-wide file is not this repository's to change, and
 because stale remediation advice is worse than none — it sends an agent to
 Infisical for a value it already has in its environment.
 
+### 7.2 Inside a coding session, the credential is the session's *(r9)*
+
+M10 mints a token per coding session, bound to an actor that exists for that
+session alone, so that what an agent writes is attributable to the session it
+ran in (FR-S10). Everything in §7 above describes how an agent in a
+*container* gets the pod's shared token — and those two mechanisms met badly.
+
+Three places replaced the session's credential with the pod's, and all three
+did it silently: `agent-auth.sh` fetched the shared token unconditionally,
+and with `MYDEVENV2_AUTO_AGENT_AUTH=1` — the deployed setting — it is what
+launches a session's shell; the MCP wrapper Claude Code and OpenCode are
+registered with re-brokers through that same helper; and the stdio bridge
+read only `VOGT_TOKEN_FILE`, which the broker rewrites. The agent still
+authenticated, still wrote, still got a 200. Only the audit log was wrong.
+
+The rule now, in all three: **`VOGT_SESSION_ID` present means the session's
+token wins.**
+
+| Where | Behaviour |
+|---|---|
+| `engine/deploy/agent-auth.sh` | Keeps `VOGT_HTTP_TOKEN` as it found it inside a session; brokers everything else as before |
+| `engine/deploy/vogt-mcp-auth.sh` | Skips brokering entirely and execs the bridge with the session's token |
+| `vogt-mcp-remote` (`adapters/mcp/bridge.py`) | `VOGT_HTTP_TOKEN` inside a session, else the brokered `VOGT_TOKEN_FILE`, else the bare variable — the shape codex passes |
+
+Codex was already correct by accident: it registers the URL natively with
+`--bearer-token-env-var VOGT_HTTP_TOKEN` and reads what the session set.
+
+**The failure class is worth remembering, because the next integration can
+reproduce it.** A credential that is silently replaced produces working
+writes and a false audit trail. Nothing errors, no test that stubs the
+transport can see it, and the only signal is an actor name nobody reads until
+they need it — which is exactly when it has to be right.
+
 ## 8. Known: every write costs a WAL checkpoint
 
 Measured against the deployed data volume on Node B, one declared write
