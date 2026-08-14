@@ -1,5 +1,17 @@
 # MyDevEnv2 Outstanding Uplift Backlog
 
+> **This document is the engine's history, not Vogt's backlog** *(r9)*. It was
+> MyDevEnv2's own plan before the merge, and it is kept because the reasoning
+> in it is worth reading — the dev/prod split below became **NFR-D12** and is
+> delivered, and the Redis-backed sccache it warns about is why the merged CI
+> uses `Swatinem/rust-cache` instead.
+>
+> **The estate's open work lives in Vogt itself**, which is the product this
+> repository builds: `docs/ROADMAP.md` for the stages, `REQUIREMENTS.md` §6
+> for what is delivered against them. An item here that is still outstanding
+> is outstanding *as engine work*, and needs a requirement before it is
+> anybody's plan.
+
 This is the single canonical backlog for remaining uplift work in MyDevEnv2.
 Completed uplift work lives in normal repo history, README status notes, and
 the code itself. No other markdown file should carry a parallel open-items
