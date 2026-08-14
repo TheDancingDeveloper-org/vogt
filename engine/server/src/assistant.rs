@@ -1839,6 +1839,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_place_the_core_answers_this_loop_delimits_what_it_said() {
+        // FR-T4's coverage of forge-derived text — imported issue bodies,
+        // remote branch names, a stranger's PR description — is real and is
+        // structural rather than specific: there is no forge-aware path in
+        // this file, and there does not need to be, because every one of
+        // those strings reaches the model through a core answer and every
+        // core answer is wrapped where it arrives.
+        //
+        // "Every" is the part worth asserting. It was true by inspection of
+        // two call sites, which is a fact about today's call graph and not a
+        // rule; a third added tomorrow would be undelimited and nothing would
+        // fail. This reads the source and makes it a rule.
+        let whole = include_str!("assistant.rs");
+        let source = whole.split("\nmod tests {").next().unwrap_or(whole);
+        let sites: Vec<&str> = source.split("vogt.call(").skip(1).collect();
+        assert!(
+            sites.len() >= 2,
+            "the extractor found {} call sites; it is looking for the wrong \
+             thing, which is how a source-reading test passes while checking \
+             nothing",
+            sites.len()
+        );
+        for (index, tail) in sites.iter().enumerate() {
+            // The `Ok` arm is what carries the core's words into the
+            // conversation. Look only as far as the end of that match arm.
+            let window: String = tail.chars().take(200).collect();
+            let ok_arm = window
+                .find("Ok(")
+                .map(|at| &window[at..])
+                .unwrap_or(window.as_str());
+            assert!(
+                ok_arm.contains("delimit("),
+                "call site {index} hands the core's answer to the model \
+                 undelimited: {ok_arm}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_imported_issue_body_arrives_as_data_like_any_other_stored_text() {
+        // The row this closes said no test exercised an imported body, so
+        // the rule's coverage of the case FR-T4 names first — text a stranger
+        // typed into someone else's issue tracker — rested on nobody having
+        // added a path that skipped the wrapping.
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let rt = runtime_with_vogt(
+            test_registry(),
+            vec![
+                tool_call_reply("vogt_work_get", json!({"ref": "WI-7"})),
+                final_reply("that item came in from GitHub"),
+            ],
+            &core.base_url,
+            None,
+        );
+        let out = rt
+            .handle_message(paired_caller(), "what is WI-7?".into())
+            .await
+            .unwrap();
+        assert_eq!(out.reply.as_deref(), Some("that item came in from GitHub"));
+
+        let convo = rt.conversation.lock().await;
+        let content = convo
+            .messages
+            .iter()
+            .find(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+            .expect("a tool result");
+        assert!(
+            content.starts_with("<vogt-data operation=\""),
+            "an imported body reached the model undelimited: {content}"
+        );
+        assert!(content.ends_with("</vogt-data>"));
+    }
+
     #[tokio::test]
     async fn a_write_without_a_reason_is_refused_before_it_becomes_a_card() {
         let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;

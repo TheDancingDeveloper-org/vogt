@@ -966,16 +966,16 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 105 are delivered, 64 are implemented and
-asserted by nothing, 8 cannot be verified in this environment at all, and 24
+**201 conjuncts across 46 IDs. 106 are delivered, 64 are implemented and
+asserted by nothing, 8 cannot be verified in this environment at all, and 23
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
 before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved three conjuncts, and what moved them was not code.** The
-pipeline ran. Every claim this section made about the merged image, the two
+**A fourth pass moved four conjuncts, and three of them were moved by nothing
+being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
 were false failed on their first run, in the two places a file cannot show
@@ -995,10 +995,10 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 §6.2b group conjuncts by ID and their rows carry several each. The totals are
 therefore checkable without re-deriving all 201:
 
-- **105 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +3 in the fourth pass (one each out of §6.2, §6.2a and §6.2b)
+- **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
+  then +4 in the fourth pass (two out of §6.2, one each out of §6.2a and §6.2b)
 - **64 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 1
-- **24 short** = 43 − 19 + 1 arriving from §6.2b, − 1
+- **23 short** = 43 − 19 + 1 arriving from §6.2b, − 2
 - **8 unverifiable** = 69 − 60 − 1
 
 One bookkeeping correction, since it is the kind of thing this section exists
@@ -1079,6 +1079,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-T2 | `send_input` passes the same gate, with no setting that turns it off | `assistant.rs::send_input_pauses_and_approve_delivers`, which no longer takes an `auto_type` argument because there is none: `assistant_auto_type` is removed rather than defaulted, and the dispatcher's `send_input` arm refuses instead of delivering, so an edit that loses the interception fails closed |
 | FR-T3 | The credential is the *approver's*, taken from the request that pressed approve; a write has no shared fallback and an unpaired approver is refused by name | `assistant.rs::a_vogt_write_waits_for_approval_and_then_uses_the_approver_pairing` (proposed by an unpaired token, approved by a paired one, and the core saw the approver's), `::an_unpaired_approver_gets_a_refusal_rather_than_a_shared_actor`; `vogt_tools.rs::a_write_has_no_fallback_credential` |
 | FR-T4 | Both delimiters exist; terminal output is delimited; every Vogt read and every approved write's answer is delimited | `assistant.rs::list_then_tail_then_reply`, `::a_vogt_read_arrives_delimited_as_untrusted_data` (instruction-shaped text from the core arrives inside the tags) |
+| FR-T4 | Forge-derived text and imported issue bodies arrive as data — structurally, because every string from the core reaches the model through a core answer and every core answer is wrapped where it arrives | `assistant.rs::every_place_the_core_answers_this_loop_delimits_what_it_said`, which reads the source and asserts the `Ok` arm of every `vogt.call` site delimits; `::an_imported_issue_body_arrives_as_data_like_any_other_stored_text`. There is no forge-aware path in the loop and there does not need to be — but "every" was a fact about two call sites rather than a rule, and a third added tomorrow would have been undelimited with nothing failing. Deleting the wrapping at one site now turns three tests red |
 | FR-T4 | The system prompt names the delimiters as untrusted, and names all four the loop now uses | `assistant.rs::every_delimiter_the_loop_emits_is_one_the_prompt_names` and `::the_prompt_names_no_delimiter_that_nothing_emits`, over `emitted_delimiters`, which reads the tags out of the source of both emitting files rather than holding a list of them. Both directions, so a tag added to the loop and not the prompt fails, and so does a rule about a boundary that never arrives. §6.3 finding 13 is what the previous version of this test missed |
 | FR-S9 | The front door holds one token namespace carrying Vogt capabilities; the proxy strips the caller's credential and injects the paired core token; the proxy never pre-approves — a refusal forwards nothing | `engine/server/src/auth.rs::scoped_tokens_limit_capabilities`; `vogt_core.rs::the_core_is_handed_the_core_token_not_the_callers`, `::two_front_door_tokens_reach_the_core_as_two_actors`, `::a_write_needs_the_vogt_write_capability` and `::an_unauthenticated_caller_never_reaches_the_core`, both of which assert nothing was proxied |
 | **FR-S10** | **All four**: the token is per-session and actor-scoped, minted at start, revoked at stop, and its writes are distinguishable in the audit log | `tests/test_sessions.py::test_the_session_carries_its_own_token`, `::test_stopping_a_session_revokes_what_it_held`; `tests/test_m10_demo.py` step 5, which asserts the comment's actor is `agent:session:<id>` *and* differs from the `session.start` actor |
@@ -1120,7 +1121,7 @@ half-present, because nothing about it had to be argued with first.
 
 ### 6.2 Delivered differently, or short — per conjunct
 
-Twenty-four conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
+Twenty-three conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
 is one claim that the requirement makes and the build does not, which is why
 this table's rows can be counted and the other three tables' cannot.
 
@@ -1146,7 +1147,6 @@ the file.
 | FR-E3 — "template selection shall consult the registry" | Vogt performs no template selection at all. `start_session` passes the caller's `template` through as the command (`src/vogt/application/services/sessions.py`); there is no per-project template, no registry lookup, and nothing to consult. The clause is satisfied only in the sense that a heuristic it forbids is also absent. The engine's own template matching is untouched and still applies to sessions the engine starts. | Low — the failure it forbids cannot happen; the capability it implies does not exist |
 | FR-E5 — "shall register the Vogt MCP server for agents running inside them" | The session start path registers nothing. It exports `VOGT_HTTP_TOKEN`, `VOGT_SESSION_ID` and `VOGT_URL`; registration is `engine/deploy/mcp-bootstrap.sh`, an image-level script run out of band by the container bootstrap. The session supplies the credential, the bootstrap supplies the endpoint — which works in the deployed pod and is not what the requirement says, and means a session started against an engine built any other way has no Vogt MCP server. | Medium, and stated as delivered-in-substance in the previous pass without naming what supplies the other half |
 | FR-T3 — "a `why` derived from the conversational context" | Still short, and less so. The `why` is whatever the model puts in the tool argument, and **nothing can verify that a sentence was derived from anything** — that half is not a gap to be closed but a claim no code can make. What was a gap is that the two failures the prompt names by name went unenforced, so the phrasing the instructions single out was the one that always got through. `assistant.rs::contentless_reason` now refuses them: a reason that only says who asked, and a reason that restates the act. It refuses by *removal*, so "the user asked for this after the sprint scope changed" passes and "as requested" does not — the refusal must not teach the model to hide the provenance, which would trade a useless audit row for a misleading one. The refusal returns to the model as a tool error and the loop continues, so the ordinary outcome is a second attempt before any card reaches a person. Three tests, one of which asserts the refusal reaches the model rather than only that no card appeared. | Medium — an unverifiable reason in an audit row is the failure mode FR-W1 exists against, and this narrows the class it can be *contentless* in without pretending to settle whether it is true |
-| FR-T4 — "forge-derived text, imported issue bodies" | Covered only transitively: they are delimited if and only if they arrive inside a Vogt read's result, which they do today. No forge-specific path exists and no test exercises an imported body, so the coverage is a property of the current call graph rather than of the rule. | Low |
 | FR-T5 — "push-to-talk STT" | It is tap-to-toggle. The mic button is `onClick`, and `startListening` toggles off if already listening; there is no press-and-hold handler anywhere. `docs/engine/ASSISTANT.md` calls it push-to-talk. | Low as a defect, and it is a documented behaviour that does not exist |
 | FR-T5 — "a validation pass against domain vocabulary … before v2 ships" | Not run, and nothing was built that would let it be: the recognizer's best match goes straight into the composer and is auto-sent. No project list, no slug normalisation, no `WI-\d+` repair. What was done instead is that the prompt now states items are `WI-7` and projects are slugs. The requirement says voice "shall not be presumed working", and it is still presumed. | **The requirement's own words** |
 | FR-T7 — a native Anthropic backend | `ChatBackend` has two variants, `Http` and a test mock. Nothing in the repository speaks the Anthropic API. | Known, priority C |
