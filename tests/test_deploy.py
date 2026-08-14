@@ -705,3 +705,28 @@ def test_the_gate_fails_on_anything_that_is_not_success_or_skipped() -> None:
         "passes a cancelled job, and a cancelled job checked nothing"
     )
     assert 'if [ "$failed" -ne 0 ]' in gate and "exit 1" in gate
+
+
+def test_a_workflow_may_cancel_only_when_a_later_run_covers_the_same_ground() -> None:
+    """The rule that tells `docs.yml` apart from `ci.yml`.
+
+    Both cancel superseded runs on a branch and only one of them can afford
+    to. `docs.yml` checks the whole tree every time, so a later run covers
+    everything a superseded one would have. `ci.yml` classifies a push by
+    `before..sha` — each commit is examined by exactly one run, and a lost
+    run is coverage lost permanently.
+
+    Asserted because the two files look the same at the point where they
+    differ, and the difference cost two escaped failures before it was
+    understood (§6.3 finding 19).
+    """
+    docs = (WORKFLOWS / "docs.yml").read_text(encoding="utf-8")
+    assert "whole tree" in docs, (
+        "docs.yml cancels superseded runs; the comment saying why that is "
+        "safe here is the thing that stops it being copied into a workflow "
+        "where it is not"
+    )
+    assert "before..sha" not in _without_comments(docs), (
+        "if docs.yml ever classifies by diff range, cancelling its runs loses "
+        "coverage the way ci.yml's did"
+    )

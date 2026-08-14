@@ -21,6 +21,13 @@ on:
 
 concurrency:
   group: docs-${{ github.ref }}
+  # Safe to cancel, unlike `ci.yml`, and the difference is worth stating
+  # because the two look identical: this workflow checks the *whole tree*
+  # every time — every link in every markdown file, and the generated config
+  # docs against the schema — so a later run covers everything a superseded
+  # one would have. `ci.yml` classifies a push by `before..sha`, so each
+  # commit is examined by exactly one run and a lost run is coverage lost for
+  # good; it keys pushes by commit for that reason (§6.3 finding 19).
   cancel-in-progress: true
 
 permissions:
