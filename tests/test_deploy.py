@@ -447,7 +447,18 @@ MCP_BOOTSTRAP = REPO_ROOT / "engine" / "deploy" / "mcp-bootstrap.sh"
 VOGT_MCP_WRAPPER = REPO_ROOT / "engine" / "deploy" / "vogt-mcp-auth.sh"
 RETIRED_CORE_STACK = "winrarhost.tailc7d3c.ts.net:18094"
 
+#: These three read the *engine's* deploy scripts, which a core-only checkout
+#: does not have — and NFR-Q6's `core` job proves the core stands alone by
+#: deleting `engine/`, `web/` and `mobile/` and running this suite. It found
+#: these on their first run, which is the job working: a merged repository
+#: makes it very easy to write a core test that quietly needs the engine.
+needs_engine = pytest.mark.skipif(
+    not MCP_BOOTSTRAP.is_file(),
+    reason="the merged tree carries the engine's deploy scripts; a core-only checkout does not",
+)
 
+
+@needs_engine
 def test_a_sessions_own_endpoint_is_what_its_agent_is_registered_against() -> None:
     """FR-E5, and a failure that was silent in both directions.
 
@@ -469,6 +480,7 @@ def test_a_sessions_own_endpoint_is_what_its_agent_is_registered_against() -> No
     )
 
 
+@needs_engine
 def test_no_vogt_registration_names_the_stack_this_product_replaces() -> None:
     """The core-only stack is retired by `DEPLOYMENT.md` §9.5.
 
@@ -487,6 +499,7 @@ def test_no_vogt_registration_names_the_stack_this_product_replaces() -> None:
     ), "the fallback is the front door on loopback (NFR-D11)"
 
 
+@needs_engine
 def test_the_opencode_registration_does_not_freeze_an_endpoint() -> None:
     """It is written once and reused by every later session.
 
