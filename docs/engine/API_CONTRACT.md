@@ -462,10 +462,31 @@ remain switchable; the default is the claim, not the capability. A
 subscription stored before this change carries every value explicitly and
 therefore keeps whatever it was last set to.
 
-`drift` is dispatched by a poller over vogt-core's `events.list` cursor rather
-than by anything the engine observes itself, so it is silent when no core is
-configured. It coalesces: one poll's worth of newly raised drift is one
-notification, however many proposals it found.
+`drift` is not something the engine observes itself. It rides the event
+follower (FR-U10): that task polls vogt-core's `events.list` cursor and
+republishes each change onto the server's own bus as `vogt-changed`, and the
+drift watcher subscribes to that bus the way the session watcher subscribes to
+activity. So it is silent whenever the follower is — no core configured, no
+core token configured, or the core unreachable.
+
+It fires only on `drift.raised`, a named kind rather than a `drift.` prefix,
+because "and for nothing else by default" has to survive the core growing new
+kinds. `drift.resolved` is deliberately not in the set.
+
+It coalesces: the first drift event opens a ten-second window and everything
+inside it is counted, so a sweep that raises thirty proposals sends one
+notification rather than thirty. Worst-case latency is the follower's
+five-second poll plus that window.
+
+**A restart is a hole in this stream, by choice.** The follower's cursor is in
+memory and starts from the core's current head, so drift raised while the
+engine was down is never republished and never notified. The proposal itself
+is not lost — it stays open in the drift inbox until somebody rules on it — so
+what a redeploy costs is the interruption, not the work. The alternative, a
+second persisted cursor read only by the notifier, buys that back at the price
+of a phone that can replay an estate's history after a restart; a missed buzz
+is recoverable by opening the app, and a notification channel someone switched
+off is not.
 
 Notifications the engine sends carry `{kind, session_id, url}` in their data,
 where `url` is a PWA route (`/#/t/<session-id>`), so a tap lands on the

@@ -14,6 +14,7 @@ Includes the M3 demo. From `ROADMAP.md`:
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -41,6 +42,10 @@ from vogt.application.services import (
     register_project,
     resolve_drift,
     sweep,
+)
+from vogt.application.services.drift_service import (
+    DRIFT_RAISED_EVENT,
+    DRIFT_RESOLVED_EVENT,
 )
 from vogt.core.drift import UNRESOLVED_DEPENDENCY, VERSION_MISMATCH, normalise_version
 from vogt.errors import Conflict, InvalidRequest, NotFound
@@ -375,3 +380,59 @@ def test_m3_demo(instance: AppContext, tmp_path: Path) -> None:
     resolved = list_drift(instance, DriftListParams(status="accepted")).proposals[0]
     assert resolved.evidence_snapshot["subject_key"]
     assert resolved.resolution_reason is not None
+
+
+# -- FR-M2: the engine's drift push filter names the kind this module emits --
+
+ENGINE_PUSH_API = (
+    Path(__file__).resolve().parents[1] / "engine" / "server" / "src" / "push_api.rs"
+)
+
+
+def engine_drift_notify_kinds() -> set[str]:
+    source = ENGINE_PUSH_API.read_text(encoding="utf-8")
+    match = re.search(
+        r"const DRIFT_NOTIFY_KINDS: \[&str; \d+\] = \[(.*?)\];", source, re.S
+    )
+    assert match, "the engine's drift notification filter was not found"
+    kinds = set(re.findall(r'"([^"]+)"', match.group(1)))
+    assert kinds, "the filter is empty, so this check would prove nothing"
+    return kinds
+
+
+@pytest.mark.skipif(
+    not ENGINE_PUSH_API.is_file(),
+    reason="the merged tree carries the engine; a core-only checkout does not",
+)
+def test_the_engine_notifies_on_the_event_kind_this_module_publishes() -> None:
+    """One string, spelled in two languages, with nothing else linking them.
+
+    `push_api::spawn_vogt_drift_watcher` decides what is worth waking someone
+    for by matching the core's event `kind` against a named set. That string is
+    a literal in Rust and a constant here, and a rename on this side leaves a
+    filter matching nothing — a phone that silently stops ringing, which is the
+    failure nobody reports because it looks exactly like "no drift".
+
+    Not hypothetical: the engine's own contract crate documented this kind as
+    `drift.opened`, which has never been emitted, and a filter written from
+    that comment would have shipped broken and looked right.
+    """
+    kinds = engine_drift_notify_kinds()
+    assert DRIFT_RAISED_EVENT in kinds, (
+        f"the engine pushes for {sorted(kinds)}, but this module publishes "
+        f"{DRIFT_RAISED_EVENT!r} — so newly raised drift reaches nobody's phone"
+    )
+
+
+@pytest.mark.skipif(
+    not ENGINE_PUSH_API.is_file(),
+    reason="the merged tree carries the engine; a core-only checkout does not",
+)
+def test_resolving_drift_is_not_worth_a_phone_interruption() -> None:
+    """FR-M2 says "new drift", and the filter is a named set for this reason.
+
+    Somebody resolving drift is somebody already looking at it. This is the
+    conjunct most likely to be lost by a well-meaning widening to
+    `kind.startswith("drift.")`.
+    """
+    assert DRIFT_RESOLVED_EVENT not in engine_drift_notify_kinds()

@@ -148,7 +148,11 @@ pub enum ServerEvent {
     /// from Vogt; this says only that there is something to read, which is
     /// what stops a board from polling.
     VogtChanged {
-        /// The core's event kind, e.g. `work.transitioned`, `drift.opened`.
+        /// The core's event kind, verbatim — e.g. `work.transitioned`,
+        /// `drift.raised`. Spelled here as `services/drift_service.py` spells
+        /// it, because this comment is what someone writing a filter reads:
+        /// it said `drift.opened`, which the core has never emitted, and a
+        /// filter built on that would match nothing while looking right.
         kind: String,
         /// What the change was about, as the core names it.
         entity_kind: String,

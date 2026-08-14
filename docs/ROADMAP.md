@@ -967,14 +967,25 @@ round-trip, and the default set. Treat the APK as unbuilt.
    keeps it. This is the requirement being read as a *list* rather than as a
    direction, which is what it says.
 
-3. **Two readers of the core's event cursor, on purpose.** The follower
-   (M11, FR-U10) keeps clients current: head-start, in-memory cursor, republish
-   onto the SSE stream. The drift watcher wakes a phone: persisted cursor,
-   seeds on first run, coalesces a burst into one notification, and writes its
-   cursor *before* dispatch — so a crash costs a notification rather than
-   repeating one, and a proposal nobody was told about is still sitting in the
-   drift inbox. One cursor would force one behaviour onto the other: a UI that
-   replays history at boot, or a phone that goes quiet across a redeploy.
+3. **One reader of the core's event cursor, and drift push hangs off it.**
+   The follower (M11, FR-U10) already polls `events.list` and republishes each
+   change onto the server's bus; the drift watcher subscribes to that bus the
+   way the session watcher subscribes to activity, and adds only the filter
+   and the fan-out. It fires on `drift.raised` — a named kind, not a `drift.`
+   prefix, because "and for nothing else by default" has to survive the core
+   growing kinds — and coalesces a ten-second window, so a sweep raising
+   thirty proposals is one notification rather than thirty.
+
+   This was built twice. The first attempt was a second poller with its own
+   persisted cursor, which is strictly more machinery for the same
+   notification and was replaced. What the surviving design costs is stated
+   rather than hidden: the follower's cursor is in memory, so drift raised
+   while the engine was down is never notified. A redeploy is a hole in the
+   stream. The proposal is not lost — it stays open in the inbox until
+   somebody rules on it — so what is missed is the interruption, not the work,
+   and the alternative buys that back at the price of a phone that can replay
+   an estate's history after a restart. A missed buzz is recoverable by
+   opening the app; a channel someone switched off is not.
 
 **The breakpoint the surfaces had all missed**: the shell goes to phone
 layout at 768px and each of the five Vogt surfaces had picked 900, leaving a
