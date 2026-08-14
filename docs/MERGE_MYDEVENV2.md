@@ -353,17 +353,32 @@ Both stacks already live on Node B, deployed by Komodo from
    `vogt.sprooty.com`? Config env prefix consolidation (`VOGT_*` vs
    `MYDEVENV2_*`) — recommend new `VOGT_*` names with the old ones
    accepted as aliases for one transition period.
+   **Still open, and now has a shape.** As built, the two prefixes divide by
+   *process*, not by product: the engine reads `MYDEVENV2_*` for what it
+   owns and `VOGT_CORE_*` for the core it fronts, and vogt-core reads
+   `VOGT_*`. That is coherent enough to defer the rename to M14 rather than
+   pay for it twice — but it means an operator setting `VOGT_PORT` and
+   `MYDEVENV2_TOKEN` on the same stack, which the compose comments have to
+   keep explaining. See `deploy/vogt-stack.compose.yml`.
 2. **MyDevEnv2's standalone life** — does anything keep needing MyDevEnv2
    *without* vogt? If yes, the engine must stay bootable with vogt-core
    absent (it degrades naturally today; recommend preserving that
    property — it also keeps the engine testable alone).
+   **Resolved at M9**: preserved and asserted rather than assumed. FR-E9 is
+   the requirement; `engine/server/tests/vogt_core.rs` boots the engine with
+   no core configured and with a core that will not answer, and checks that
+   sessions keep working, that readiness stays green (the core's probe is
+   reported and deliberately not fatal), and that the Vogt routes refuse
+   with a named reason instead of an empty answer.
 3. **ContextKeeper and cadastre** — both sidecars integrate with
    MyDevEnv2 `dev` today. Assumed carried over unchanged; cadastre's
    overlap with vogt (both "estate registers") deserves its own look
    later, not in this merge.
 4. **Assistant provider** — resolve the hung `claude-*` proxy routes or
    add a native Anthropic client before the assistant becomes the
-   headline interaction (§8.4).
+   headline interaction (§8.4). Carried into r9 as **FR-T7**, priority C:
+   the merge does not settle it, and M12 attempts it rather than promising
+   it.
 5. **Vogt REQUIREMENTS.md amendment** — §12 drafts this as revision r9
    in the document's own format (numbered FR/NFR, append-only IDs); it
    must be folded into `REQUIREMENTS.md` proper before M9 starts, per
@@ -374,7 +389,12 @@ Both stacks already live on Node B, deployed by Komodo from
 6. **Editor/Files/Git tabs vs vogt's forge view** — the PWA's git tab
    operates on working trees; vogt's project pages show forge state. They
    should cross-link (project page → open git tab in that tree), not
-   merge.
+   merge. **Answered in the negative for M11, deliberately**: the two stayed
+   separate and the cross-link was not built. A project page knows the
+   registry's path for a project, so the link is available to build; what
+   stopped it is that nothing has been rendered in a browser yet, and a
+   navigation between two surfaces is exactly the kind of claim that should
+   not be made untested.
 
 ## 12. Proposed requirements baseline (draft revision r9)
 
