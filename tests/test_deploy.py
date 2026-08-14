@@ -531,9 +531,7 @@ def test_a_push_run_is_never_cancelled_by_the_next_push() -> None:
     range began after it, and a lint error reached `dev` through the gap.
     """
     raw = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
-    assert (
-        "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in raw
-    ), (
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in raw, (
         "a branch push must run to completion; only a superseded pull request "
         "may be cancelled, because its runs classify against the merge base "
         "and a later run covers everything an earlier one would have"
