@@ -41,9 +41,13 @@ pub enum TokenCapability {
     PushWrite,
     HistoryWrite,
     Assistant,
+    /// Writing to vogt-core through the front door (`/api/vogt`). Reads need
+    /// only a valid token; a write needs to have been granted this, because
+    /// what it changes is the estate's declared state and not this pod's.
+    VogtWrite,
 }
 
-const ALL_CAPABILITIES: [TokenCapability; 8] = [
+const ALL_CAPABILITIES: [TokenCapability; 9] = [
     TokenCapability::Sessions,
     TokenCapability::FilesystemWrite,
     TokenCapability::GitWrite,
@@ -52,6 +56,7 @@ const ALL_CAPABILITIES: [TokenCapability; 8] = [
     TokenCapability::PushWrite,
     TokenCapability::HistoryWrite,
     TokenCapability::Assistant,
+    TokenCapability::VogtWrite,
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,6 +338,13 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     if path.starts_with("/api/history/") && (*method == Method::DELETE || *method == Method::POST) {
         return Some(TokenCapability::HistoryWrite);
     }
+    // Everything under the Vogt front door that is not a read. The core
+    // enforces its own rules on top of this — a reason on every write, the
+    // scopes on the injected token — so this gate is about which front-door
+    // holders may reach the write plane at all, not about which write.
+    if path.starts_with("/api/vogt") && *method != Method::GET {
+        return Some(TokenCapability::VogtWrite);
+    }
     None
 }
 
@@ -404,6 +416,8 @@ mod tests {
             assistant_reasoning_effort: None,
             contextkeeper_url: None,
             contextkeeper_token: None,
+        vogt_core_url: None,
+        vogt_core_token: None,
         }
     }
 

@@ -161,16 +161,27 @@ pub struct ReadinessCheck {
     pub name: &'static str,
     pub ok: bool,
     pub detail: String,
+    /// Whether this check failing means *this container* is not ready.
+    ///
+    /// Every check the engine owns is fatal, because the engine is what a
+    /// restart would fix. The vogt-core probe is not: the core is a separate
+    /// process with its own lifecycle, restarting the engine would not
+    /// revive it, and doing so would kill every live PTY — which is exactly
+    /// what FR-E9 says an absent core must not cost. So its outage is
+    /// reported here in full and left out of the verdict; the surfaces that
+    /// need the core say so themselves (FR-U21).
+    pub fatal: bool,
 }
 
 pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadinessResponse>) {
-    let mut checks = Vec::with_capacity(4);
+    let mut checks = Vec::with_capacity(5);
     checks.push(check_workspace_root(&state.config.workspace_root).await);
     checks.push(check_state_dir(&state.config.state_dir).await);
     checks.push(check_tailscale().await);
     checks.push(check_gui(state.config.gui_stream_url.is_some()).await);
+    checks.push(check_vogt_core(&state).await);
 
-    let ok = checks.iter().all(|check| check.ok);
+    let ok = checks.iter().all(|check| check.ok || !check.fatal);
     let status = if ok {
         StatusCode::OK
     } else {
@@ -277,22 +288,26 @@ async fn check_workspace_root(path: &FsPath) -> ReadinessCheck {
     match tokio::fs::metadata(path).await {
         Ok(meta) if meta.is_dir() => match tokio::fs::read_dir(path).await {
             Ok(_) => ReadinessCheck {
+                fatal: true,
                 name: "workspace_root",
                 ok: true,
                 detail: format!("readable directory at {}", path.display()),
             },
             Err(err) => ReadinessCheck {
+                fatal: true,
                 name: "workspace_root",
                 ok: false,
                 detail: format!("cannot read {}: {err}", path.display()),
             },
         },
         Ok(_) => ReadinessCheck {
+            fatal: true,
             name: "workspace_root",
             ok: false,
             detail: format!("{} is not a directory", path.display()),
         },
         Err(err) => ReadinessCheck {
+            fatal: true,
             name: "workspace_root",
             ok: false,
             detail: format!("cannot stat {}: {err}", path.display()),
@@ -308,12 +323,14 @@ async fn check_state_dir(path: &FsPath) -> ReadinessCheck {
                 Ok(()) => {
                     let _ = tokio::fs::remove_file(&probe).await;
                     ReadinessCheck {
+                        fatal: true,
                         name: "state_dir",
                         ok: true,
                         detail: format!("writable directory at {}", path.display()),
                     }
                 }
                 Err(err) => ReadinessCheck {
+                    fatal: true,
                     name: "state_dir",
                     ok: false,
                     detail: format!("cannot write {}: {err}", probe.display()),
@@ -321,11 +338,13 @@ async fn check_state_dir(path: &FsPath) -> ReadinessCheck {
             }
         }
         Ok(_) => ReadinessCheck {
+            fatal: true,
             name: "state_dir",
             ok: false,
             detail: format!("{} is not a directory", path.display()),
         },
         Err(err) => ReadinessCheck {
+            fatal: true,
             name: "state_dir",
             ok: false,
             detail: format!("cannot stat {}: {err}", path.display()),
@@ -340,6 +359,7 @@ async fn check_tailscale() -> ReadinessCheck {
         .unwrap_or(true)
     {
         return ReadinessCheck {
+            fatal: true,
             name: "tailscale",
             ok: true,
             detail: "not configured".into(),
@@ -348,6 +368,7 @@ async fn check_tailscale() -> ReadinessCheck {
 
     if !FsPath::new("/var/run/tailscale/tailscaled.sock").exists() {
         return ReadinessCheck {
+            fatal: true,
             name: "tailscale",
             ok: false,
             detail: "tailscaled socket missing".into(),
@@ -365,6 +386,7 @@ async fn check_tailscale() -> ReadinessCheck {
         Ok(Ok(output)) => output,
         Ok(Err(err)) => {
             return ReadinessCheck {
+                fatal: true,
                 name: "tailscale",
                 ok: false,
                 detail: format!("tailscale status failed: {err}"),
@@ -372,6 +394,7 @@ async fn check_tailscale() -> ReadinessCheck {
         }
         Err(_) => {
             return ReadinessCheck {
+                fatal: true,
                 name: "tailscale",
                 ok: false,
                 detail: "tailscale status timed out".into(),
@@ -382,6 +405,7 @@ async fn check_tailscale() -> ReadinessCheck {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return ReadinessCheck {
+            fatal: true,
             name: "tailscale",
             ok: false,
             detail: format!(
@@ -396,6 +420,7 @@ async fn check_tailscale() -> ReadinessCheck {
         Ok(status) => status,
         Err(err) => {
             return ReadinessCheck {
+                fatal: true,
                 name: "tailscale",
                 ok: false,
                 detail: format!("invalid tailscale status JSON: {err}"),
@@ -414,12 +439,14 @@ async fn check_tailscale() -> ReadinessCheck {
         .unwrap_or(false);
     if backend_state == "Running" && online {
         ReadinessCheck {
+            fatal: true,
             name: "tailscale",
             ok: true,
             detail: "running and online".into(),
         }
     } else {
         ReadinessCheck {
+            fatal: true,
             name: "tailscale",
             ok: false,
             detail: format!("backend_state={backend_state}, online={online}"),
@@ -434,6 +461,7 @@ async fn check_gui(gui_stream_configured: bool) -> ReadinessCheck {
         .unwrap_or(false);
     if !sway_enabled {
         return ReadinessCheck {
+            fatal: true,
             name: "gui",
             ok: true,
             detail: if gui_stream_configured {
@@ -455,6 +483,7 @@ async fn check_gui(gui_stream_configured: bool) -> ReadinessCheck {
         Ok(Ok(output)) => output,
         Ok(Err(err)) => {
             return ReadinessCheck {
+                fatal: true,
                 name: "gui",
                 ok: false,
                 detail: format!("swaymsg failed: {err}"),
@@ -462,6 +491,7 @@ async fn check_gui(gui_stream_configured: bool) -> ReadinessCheck {
         }
         Err(_) => {
             return ReadinessCheck {
+                fatal: true,
                 name: "gui",
                 ok: false,
                 detail: "swaymsg timed out".into(),
@@ -471,6 +501,7 @@ async fn check_gui(gui_stream_configured: bool) -> ReadinessCheck {
 
     if output.status.success() {
         ReadinessCheck {
+            fatal: true,
             name: "gui",
             ok: true,
             detail: "sway responsive".into(),
@@ -478,9 +509,32 @@ async fn check_gui(gui_stream_configured: bool) -> ReadinessCheck {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         ReadinessCheck {
+            fatal: true,
             name: "gui",
             ok: false,
             detail: format!("sway unavailable: {}", stderr.trim()),
         }
+    }
+}
+
+/// vogt-core's own readiness, asked of vogt-core (NFR-D11).
+///
+/// Reported and never fatal: see `ReadinessCheck::fatal` for why an outage in
+/// the other half of the product must not take this container down with it.
+async fn check_vogt_core(state: &Arc<AppState>) -> ReadinessCheck {
+    let Some(core) = state.vogt_core.as_ref() else {
+        return ReadinessCheck {
+            name: "vogt_core",
+            ok: true,
+            detail: "not configured".into(),
+            fatal: false,
+        };
+    };
+    let (ok, detail) = core.probe().await;
+    ReadinessCheck {
+        name: "vogt_core",
+        ok,
+        detail,
+        fatal: false,
     }
 }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     http::{header, HeaderValue, Method},
     middleware,
-    routing::{get, post},
+    routing::{any, get, post},
     Router,
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -25,6 +25,7 @@ use crate::{
     history_api,
     push::PushManager,
     sessions::SessionRegistry,
+    vogt_core::{self, VogtCore},
     ws,
 };
 
@@ -43,6 +44,10 @@ pub struct AppState {
     /// unprotected and the continuity routes answer 404 — MyDevEnv2 does not
     /// depend on the sidecar for anything it owns.
     pub contextkeeper: Option<Arc<ContextKeeperRuntime>>,
+    /// None when no vogt-core is configured, which is the engine running as
+    /// it always has. The Vogt routes then answer 503 with a named reason
+    /// and every session keeps working (FR-E9).
+    pub vogt_core: Option<Arc<VogtCore>>,
 }
 
 pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
@@ -91,6 +96,20 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         tracing::info!(model = %cfg.assistant_model, "assistant enabled");
     }
 
+    let vogt_core = VogtCore::from_config(&cfg);
+    match cfg.vogt_core_url.as_deref() {
+        Some(url) => tracing::info!(
+            url = %url,
+            token = cfg.vogt_core_token.is_some(),
+            "vogt-core front door enabled"
+        ),
+        // Logged at info, not warn: an engine with no core is a supported
+        // deployment, not a misconfiguration (FR-E9).
+        None => {
+            tracing::info!("no vogt-core configured; /api/vogt, /mcp and /ui-legacy will refuse")
+        }
+    }
+
     let state = Arc::new(AppState {
         config: cfg,
         auth: Arc::new(auth::AuthRuntime::default()),
@@ -102,6 +121,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         history,
         assistant,
         contextkeeper,
+        vogt_core,
     });
 
     // Background task: fan out a push notification whenever a session enters
@@ -223,10 +243,29 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             "/api/history/{id}",
             get(history_api::get_session).delete(history_api::delete_session),
         )
+        // Vogt's operations, reached through the front door (NFR-D11). They
+        // carry the same bearer gate as every other API route here: the
+        // engine's token namespace is the public one, and the core token this
+        // proxy injects never leaves the process (FR-S9).
+        .route("/api/vogt", any(vogt_core::api))
+        .route("/api/vogt/{*path}", any(vogt_core::api))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_bearer,
         ));
+
+    // MCP and the legacy GUI are deliberately outside that gate.
+    //
+    // `/mcp` carries a *core* token minted by `vogt token issue` and bound to
+    // an actor; the core validates it, and re-checking it against the
+    // engine's unrelated token list would refuse every legitimate agent.
+    // `/ui-legacy` is static files, which need no token at the core either —
+    // there has to be a page on which to enter one.
+    let vogt_open_routes = Router::new()
+        .route("/mcp", any(vogt_core::mcp))
+        .route("/mcp/{*path}", any(vogt_core::mcp))
+        .route("/ui-legacy", get(vogt_core::legacy_gui))
+        .route("/ui-legacy/{*path}", get(vogt_core::legacy_gui));
 
     // WS handles its own auth so query-param tokens work (browsers can't set
     // Authorization on a WebSocket handshake).
@@ -244,6 +283,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     let router = Router::new()
         .merge(public)
         .merge(api_routes)
+        .merge(vogt_open_routes)
         .merge(ws_routes)
         .merge(asset_routes)
         .layer(TraceLayer::new_for_http())

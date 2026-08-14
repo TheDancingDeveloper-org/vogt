@@ -196,6 +196,16 @@ pub struct Config {
     /// ContextKeeper's control token. Server-side only — the browser talks to
     /// same-origin MyDevEnv2 routes and never holds this.
     pub contextkeeper_token: Option<String>,
+    /// Base URL of vogt-core on loopback. None disables `/api/vogt`, `/mcp`
+    /// and `/ui-legacy`: they answer 503 with a named reason rather than
+    /// pretending the core is empty (FR-U21). The engine itself keeps
+    /// serving — sessions do not depend on the core (FR-E9).
+    pub vogt_core_url: Option<String>,
+    /// The core token the front door injects on `/api/vogt` (FR-S9). Server-
+    /// side only: a browser holds a *front-door* token, never this one. The
+    /// core sees a real actor rather than "the proxy", which is what keeps
+    /// its audit rows worth reading.
+    pub vogt_core_token: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -226,6 +236,8 @@ struct FileConfig {
     assistant_reasoning_effort: Option<String>,
     contextkeeper_url: Option<String>,
     contextkeeper_token: Option<String>,
+    vogt_core_url: Option<String>,
+    vogt_core_token: Option<String>,
 }
 
 pub fn load(
@@ -295,6 +307,17 @@ pub fn load(
         .or(from_file.agent_auth_helper)
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin/mydevenv2-agent-auth"));
+
+    // The file path wins over the bare variable: a deployment that brokers
+    // the token into a file has gone to the trouble deliberately, and falling
+    // back to an environment value it also set would silently undo that.
+    let vogt_core_token = match from_file.vogt_core_token {
+        Some(value) => Some(value),
+        None => match read_token_file("VOGT_CORE_TOKEN_FILE")? {
+            Some(value) => Some(value),
+            None => std::env::var("VOGT_CORE_TOKEN").ok(),
+        },
+    };
 
     Ok(Config {
         bind,
@@ -383,7 +406,34 @@ pub fn load(
             .contextkeeper_token
             .or_else(|| std::env::var("CONTEXTKEEPER_API_TOKEN").ok())
             .filter(|s| !s.trim().is_empty()),
+        // Unprefixed like the ContextKeeper pair above, and for the same
+        // reason: these are vogt's own variable names, and the same values
+        // configure its CLI inside the container. One name for one thing.
+        vogt_core_url: from_file
+            .vogt_core_url
+            .or_else(|| std::env::var("VOGT_CORE_URL").ok())
+            .filter(|s| !s.trim().is_empty()),
+        vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
     })
+}
+
+/// Read a token from the file `name` points at, if it points anywhere.
+///
+/// The file form is the one the container uses: `mydevenv2-agent-auth`
+/// brokers Infisical secrets into files under a private temporary directory
+/// and exports their paths, which keeps the value out of the process
+/// environment — where `/proc/<pid>/environ` and every `docker inspect`
+/// would otherwise show it.
+fn read_token_file(name: &str) -> Result<Option<String>> {
+    let Ok(path) = std::env::var(name) else {
+        return Ok(None);
+    };
+    if path.trim().is_empty() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path.trim())
+        .map_err(|e| ApiError::Config(format!("reading {name} ({path}): {e}")))?;
+    Ok(Some(raw.trim().to_string()).filter(|s| !s.is_empty()))
 }
 
 fn parse_bool_env(name: &str, raw: &str) -> Result<bool> {

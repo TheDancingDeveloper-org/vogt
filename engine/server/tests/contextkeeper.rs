@@ -159,6 +159,8 @@ fn test_config(contextkeeper_url: Option<String>) -> Config {
         assistant_reasoning_effort: None,
         contextkeeper_url,
         contextkeeper_token: contextkeeper_url_token(),
+        vogt_core_url: None,
+        vogt_core_token: None,
     }
 }
 

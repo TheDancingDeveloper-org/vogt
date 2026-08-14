@@ -9,7 +9,25 @@
 //
 // Buildless on purpose — see the package docstring in `vogt/gui/__init__.py`.
 
+// The prefix every route below is written under. It is also where this GUI
+// finds them when vogt-core serves it directly, at `/ui` on its own port.
 const API_BASE = "/api";
+
+// Behind the merged product's front door the same core answers under a
+// different mount: the engine publishes the only port, proxies `/api/vogt` to
+// the core, and serves this bundle at `/ui-legacy` until the PWA reaches
+// parity with it (NFR-D11, FR-U9). The prefix is derived from where the page
+// was served rather than configured, so one bundle works both ways and
+// neither deployment can be given the other's setting by mistake.
+//
+// ROUTES keeps its `/api/...` literals either way. They name operations, the
+// parity test resolves them against the registry, and only the mount point in
+// front of them moves — which is what `call()` rewrites.
+const FRONT_DOOR_GUI = "/ui-legacy";
+const FRONT_DOOR_API = "/api/vogt";
+const API_ROOT = window.location.pathname.startsWith(FRONT_DOOR_GUI)
+  ? FRONT_DOOR_API
+  : API_BASE;
 
 // One entry per operation this GUI reads. Names match the operation registry.
 const ROUTES = {
@@ -39,7 +57,7 @@ async function call(operation, params = {}, method = "GET") {
   if (!path) throw new Error(`no route for ${operation}`);
   if (!path.startsWith(API_BASE)) throw new Error(`${path} is not under the API`);
 
-  const url = new URL(path, window.location.origin);
+  const url = new URL(API_ROOT + path.slice(API_BASE.length), window.location.origin);
   if (method === "GET") {
     for (const [key, value] of Object.entries(params)) {
       if (value === undefined || value === null || value === "") continue;

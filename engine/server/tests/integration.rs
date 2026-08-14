@@ -42,6 +42,8 @@ fn test_config() -> Config {
         assistant_reasoning_effort: None,
         contextkeeper_url: None,
         contextkeeper_token: None,
+        vogt_core_url: None,
+        vogt_core_token: None,
     }
 }
 
