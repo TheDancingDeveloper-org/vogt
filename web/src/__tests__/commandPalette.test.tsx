@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import { fireEvent, render, waitFor } from "@solidjs/testing-library";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import CommandPalette from "../CommandPalette";
-import { fakeVogt, workItem } from "./harness";
+import { fakeVogt, settle, workItem } from "./harness";
 
 function palette() {
   const history = createMemoryHistory();
@@ -118,5 +118,43 @@ describe("FR-U16 — every read surface by fuzzy name", () => {
     await waitFor(() => expect(view.text()).toContain("Open Board"));
     expect(view.text()).not.toContain("Open project");
     expect(view.text()).not.toContain("no core");
+  });
+});
+
+
+describe("FR-U16 — a mutating verb opens the view that collects its reason", () => {
+  it("opens the drift inbox rather than resolving anything", async () => {
+    fakeVogt(ESTATE);
+    const view = palette();
+    await settle();
+    view.type("Resolve Drift");
+    view.click("Resolve Drift...");
+    // The inbox, where each proposal shows both sides and takes a typed
+    // reason. The palette cannot type one, which is why it must not act.
+    await waitFor(() => expect(view.url()).toBe("/projects?view=drift"));
+    expect(view.closed()).toBe(1);
+  });
+
+  it("opens the import form rather than importing anything", async () => {
+    fakeVogt(ESTATE);
+    const view = palette();
+    await settle();
+    view.type("Import a Project");
+    view.click("Import a Project...");
+    await waitFor(() => expect(view.url()).toBe("/projects?view=import"));
+  });
+
+  it("writes nothing to Vogt when a mutating verb is chosen", async () => {
+    // The rule the whole entry set exists under: open, never execute.
+    // Asserted at runtime here and by import in `test_pwa.py`, because the
+    // two catch different mistakes — an entry that calls a write binding,
+    // and an entry that posts by some other path.
+    const vogt = fakeVogt(ESTATE);
+    const view = palette();
+    await settle();
+    view.type("Resolve Drift");
+    view.click("Resolve Drift...");
+    await waitFor(() => expect(view.url()).toContain("view=drift"));
+    expect(vogt.calls.filter((call) => call.method !== "GET")).toEqual([]);
   });
 });

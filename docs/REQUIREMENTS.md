@@ -966,15 +966,15 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 120 are delivered, 62 are implemented and
-asserted by nothing, 7 cannot be verified in this environment at all, and 12
+**201 conjuncts across 46 IDs. 121 are delivered, 62 are implemented and
+asserted by nothing, 7 cannot be verified in this environment at all, and 11
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
 before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved eighteen conjuncts, and three of them were moved by
+**A fourth pass moved nineteen conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,10 +996,10 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +18 in the fourth pass (thirteen out of §6.2, three out of §6.2a, two
+  then +19 in the fourth pass (fourteen out of §6.2, three out of §6.2a, two
   out of §6.2b)
 - **62 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 3
-- **12 short** = 43 − 19 + 1 arriving from §6.2b, − 13
+- **11 short** = 43 − 19 + 1 arriving from §6.2b, − 14
 - **7 unverifiable** = 69 − 60 − 2
 
 One bookkeeping correction, since it is the kind of thing this section exists
@@ -1089,6 +1089,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-U6, FR-U15, FR-U18 | r6's rule, on the surface most likely to erode it: no exported write can be called without a reason, and quick-create will not submit without one | `tests/test_pwa.py::test_every_vogt_write_the_pwa_offers_collects_a_reason` |
 | **FR-T5** | Push-to-talk: the microphone is open exactly as long as the button is held, from a pointer or from the keyboard, and the release sends what was said | `web/src/__tests__/assistant.test.tsx` (six), the first thing in this repository to mount `Assistant.tsx`. Held rather than toggled because the take auto-sends — a toggle left on in a room with other people does not merely listen, it eventually speaks — and a pointer that ends off the button still ends the take. Two of the six were rewritten after the mutations they were meant to catch survived: one now asserts the take is *closed* once rather than that one message was sent, because sending clears the draft and the message count stays right for the wrong reason, and the other says in its own body that the behaviour it pins has a spare mechanism holding it |
 | FR-U16 | Every read *view* is reachable from the palette; the palette can never execute a write, checked by import | `tests/test_pwa.py::test_the_palette_reaches_every_vogt_surface`, `::test_the_command_palette_never_writes_to_vogt` |
+| **FR-U16** | The mutating verbs whose collector is a *place* — quick-create, the drift inbox, the import form — each open that view and perform nothing | `commandPalette.test.tsx`'s FR-U16 block (three), asserting the URL each entry opens and that choosing one sends Vogt no write at runtime; `test_pwa.py::test_the_command_palette_never_writes_to_vogt` asserts the same rule by import. **What is deliberately absent is per-item verbs**: "Comment on…" with no item cannot open a form that collects anything, and an entry per verb per item would multiply the list by five, so transition, comment and session start are reached through the item's own fuzzy-named entry, which opens the page carrying all three forms |
 | FR-U16 | Projects and work items are reachable *by name*, fuzzily, and a project's entry opens the deep link a shared URL uses | `web/src/__tests__/commandPalette.test.tsx` (`offers each registered project by name`, `finds a project by a fuzzy fragment of its name` — `rstnz` finds `rustnzb` and does not drag in `Vogt` — `opens the project's own deep link`, `still reaches work items and every view by name`, and `contributes nothing when Vogt cannot be asked`, which is the palette declining to fail open) |
 | FR-U4 | The columns are the union of `workflow.list`'s states, walked from each machine's initial state, and are never written down | `web/src/__tests__/board.test.tsx` (`draws one column per state the server published`, `changes shape when the workflow does` — a different machine and not one previous name survives — and `gives a state no machine mentions a column, and says no machine mentions it`) |
 | FR-U4, FR-U12 | A drag is a `work.transition`; it renders optimistically before anything is written; a refusal rolls the card back; the refusal is Vogt's own sentence, rendered in the column the drop landed in | `board.test.tsx` (`moves the card on the drop, before anything is written`, `sends the transition with the reason the user typed`, `rolls a refused move back and renders Vogt's own sentence where the drop happened`, `will not submit a move with no reason`, `puts the card back when the reason is abandoned`). Residual: the tests fire `dragStart` and `drop` and never `dragover`, whose `preventDefault` is what lets a browser deliver a drop at all — the semantics are asserted, the gesture is the M11 demo's |
@@ -1132,7 +1133,7 @@ half-present, because nothing about it had to be argued with first.
 
 ### 6.2 Delivered differently, or short — per conjunct
 
-Twelve conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
+Eleven conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
 is one claim that the requirement makes and the build does not, which is why
 this table's rows can be counted and the other three tables' cannot.
 
@@ -1162,7 +1163,6 @@ the file.
 | FR-T7 — a native Anthropic backend | `ChatBackend` has two variants, `Http` and a test mock. Nothing in the repository speaks the Anthropic API. | Known, priority C |
 | FR-U5 — "state history" | The panel renders the workflow's states with the current one marked, and says in as many words that the transitions belong in the audit trail. That is the machine, not the item's history: a reader cannot see when this item entered this state or what it came from without leaving the surface. | Low, and honestly labelled on the surface itself |
 | FR-U5 — "per-item audit trail" | **The silent omission is closed.** An item's trail now includes the writes audited against its comments, by semi-join through `comments.work_item_id` — chosen over denormalising a work item id onto `audit`, because back-filling `audit` means editing the record of what happened. What remains is the same division as before: a link to the audit browser rather than an embedded trail, which is FR-U19's second clause working. | Low, down from Medium — the trail no longer omits a kind of write, which was the part that mattered |
-| FR-U16 — "every GUI-exposed mutating verb by opening the view that collects its reason" | One of them. `New Work Item…` opens the backlog's quick-create; transition, comment, drift resolve, import and session start/stop have no palette entry. The board's own quick-create arrived without a palette entry too, so the ratio is unchanged by a surface gaining one. The rule the clause exists to keep — never execute, only open — is kept perfectly by the one entry that exists. | Low |
 | NFR-D12 — "deployed to a dev stack for live validation" | Nothing deploys, from any branch. `build.yml` says so in its own step summary, and `ci.yml` records the decision — Vogt has never deployed from CI (NFR-D10). **The artefact now exists**: on 2026-08-14 the `stack-image` job ran for the first time, built `engine/Dockerfile` with the repository as its context, ran `vogt --version` and `mydevenv2-server --help` inside the candidate, signed the digest and published `dev` and `dev-ee18adc`; `deploy/vogt-stack.compose.yml` pins that digest rather than the placeholder it carried. So the image a dev stack would run and the image `dev` builds are the same artefact, and it is a real one. **What is left is one human act** — `docs/DEPLOYMENT.md` §9.4 — and until it happens no stack has run this image and mobile, voice and push remain unvalidated. | **High**, and now blocked on a deploy rather than on a build. Everything this section can do for it has been done |
 | NFR-D12 — "only `main` deploys to prod" | Vacuously true, per the row above. `main` builds a `sha-` image and publishes it; a human pins a digest and deploys. | — |
 | NFR-C6 — "shall run both halves on every push" | On pushes to `main` and `dev`, and on pull requests — a push to any other branch with no PR open runs nothing. Within that, each half runs only when its own paths changed: a `mobile/`-only push runs no Rust and no Python; a `web/`-only push runs no APK build. This is NFR-C1 working as intended and NFR-C6's literal sentence being false; the reduction is deliberate and argued in the workflow. | Low, and honestly documented in the file |

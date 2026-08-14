@@ -376,6 +376,11 @@ def test_the_command_palette_never_writes_to_vogt() -> None:
     Checked by import: the writes all live in `vogtApi.ts` and are named, so
     a palette that imports one is a palette that can call it.
     """
+    # Every write `vogtApi.ts` exports. `resolveDrift` and `importProject`
+    # were absent from this set while the palette named neither verb, so the
+    # guard held by luck rather than by construction; the palette now offers
+    # both — as *openers* — and an entry that called one instead would have
+    # slipped through the check written to prevent exactly that.
     writes = {
         "createWork",
         "updateWork",
@@ -383,6 +388,8 @@ def test_the_command_palette_never_writes_to_vogt() -> None:
         "commentWork",
         "startSession",
         "stopSession",
+        "resolveDrift",
+        "importProject",
     }
     text = source(PALETTE)
     imported = set()

@@ -701,6 +701,20 @@ const CommandPalette: Component<Props> = (props) => {
         },
         category: "Vogt",
       },
+      // FR-U16's mutating verbs. Every one of these *opens the view that
+      // collects the reason* and none of them performs anything — the rule is
+      // the point, and `test_pwa.py` asserts it by import, so a palette entry
+      // that called a write would fail the suite rather than ship.
+      //
+      // Which verbs are here and which are not is a decision worth stating. A
+      // verb whose collector is a *place* gets an entry: quick-create, the
+      // drift inbox, the import form. A verb that needs a subject first —
+      // transition, comment, start a session — does not, because "Comment
+      // on..." with no item cannot open a form that collects anything, and an
+      // entry per verb per item would multiply this list by five. Those are
+      // reached through the item's own entry, which the palette already offers
+      // by fuzzy name and which opens the page carrying all three forms.
+      // Moving a card is the board's, which has its own entry above.
       {
         id: "vogt-new-work",
         label: "New Work Item...",
@@ -709,6 +723,32 @@ const CommandPalette: Component<Props> = (props) => {
         action: () => {
           openBacklogTab();
           navigate("/backlog?create=1");
+          props.onClose();
+        },
+        category: "Vogt",
+      },
+      {
+        id: "vogt-resolve-drift",
+        label: "Resolve Drift...",
+        description:
+          "Opens the drift inbox, where each proposal shows both sides and " +
+          "takes a typed reason",
+        icon: "⚖",
+        action: () => {
+          openProjectsTab();
+          navigate("/projects?view=drift");
+          props.onClose();
+        },
+        category: "Vogt",
+      },
+      {
+        id: "vogt-import-project",
+        label: "Import a Project...",
+        description: "Opens the import form, which collects a reason",
+        icon: "⇤",
+        action: () => {
+          openProjectsTab();
+          navigate("/projects?view=import");
           props.onClose();
         },
         category: "Vogt",
