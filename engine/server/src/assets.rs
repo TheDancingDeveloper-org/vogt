@@ -12,7 +12,7 @@ use rust_embed::RustEmbed;
 /// macro emits an empty asset set — the server still works headlessly, the
 /// root just serves a small placeholder.
 #[derive(RustEmbed)]
-#[folder = "../web/dist/"]
+#[folder = "../../web/dist/"]
 #[prefix = ""]
 struct WebAssets;
 
