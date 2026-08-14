@@ -4,8 +4,9 @@ Status: **M0–M6 delivered — v1 is built** (2026-08-12); **M7 and M8 are
 post-v1**; **M9–M14 are v2** — the MyDevEnv2 merge, added by
 `REQUIREMENTS.md` revision r9 (2026-08-14). **M9–M13 are built**
 (2026-08-14); M11's demo is outstanding for want of a browser, and M13's for
-want of a device, and its "as
-built" note says what that costs. M12–M14 are not started. Requirement IDs
+want of a device, and its "as built" note says what that costs. **M14 is in
+progress** — the sentence here previously read "M12–M14 are not started",
+which contradicted the line above it in the same paragraph. Requirement IDs
 refer to `REQUIREMENTS.md`; per its §4, scope changes here must update that
 document in the same change.
 
@@ -938,8 +939,16 @@ Deliverables:
   item and file its findings as observations rather than only as a push.
 
 **Demo**, from the phone: receive a push that a session is waiting for input,
-open it, unblock it — and see the session's outcome land as an observation
-against the work item afterwards.
+open it, unblock it. Then, **not from the phone**: `vogt observations list
+--kind session.outcome` (or `--kind agent_task.run`), which is where the
+outcome lands and the only place it is readable. The original sentence said
+"see the session's outcome land as an observation against the work item", and
+no surface can show that: `vogtApi.ts` has no `observations` binding, so no
+Vogt surface in the PWA reads the observed store at all, and the item page's
+"Collected evidence" panel is the ranking's contributions rather than
+evidence. The evidence is real, tested and CLI-only — `REQUIREMENTS.md` §6.2
+carries the row (FR-U17's provisional clause) and this line is not allowed to
+imply otherwise.
 
 ### M13 as built — three notes and a thing that was already wrong
 
