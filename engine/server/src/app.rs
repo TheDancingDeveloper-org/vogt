@@ -139,10 +139,18 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // never fired).
     push_api::spawn_idle_stall_watcher(Arc::clone(&state));
     push_api::spawn_digest_flusher(Arc::clone(&state));
-    // Background task: follow vogt-core's event feed and republish onto this
-    // server's stream, so a client with one event source has both halves of
-    // the product on it (FR-U10). No-op when no core is configured.
+    // Two background readers of vogt-core's event cursor, and they are
+    // deliberately not one. The follower keeps *clients* current: it starts
+    // at the core's head so a restart cannot replay an estate into a live UI,
+    // holds its cursor in memory, and republishes onto this server's stream.
+    // The drift watcher wakes a *phone*: it persists its cursor across
+    // restarts, seeds on first run, and coalesces a burst into one
+    // notification. Sharing one cursor would force one of those behaviours
+    // onto the other — a UI that replays history at boot, or a phone that
+    // goes quiet across a redeploy. Both are no-ops when no core is
+    // configured (FR-E9).
     vogt_core::spawn_event_follower(Arc::clone(&state));
+    crate::vogt_drift::spawn_drift_watcher(Arc::clone(&state));
     state.agent_tasks.spawn_scheduler();
     state.agent_tasks.spawn_run_watcher(state.bus.clone());
 

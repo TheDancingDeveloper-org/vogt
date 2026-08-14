@@ -47,6 +47,9 @@ pub enum NotificationKind {
     IdleStall,
     AgentTaskStarted,
     AgentTaskNotify,
+    /// New drift raised in vogt-core: the estate disagrees with what was
+    /// declared about it, and nobody has ruled on the disagreement yet.
+    Drift,
     Test,
 }
 
@@ -76,18 +79,41 @@ impl Default for QuietHours {
     }
 }
 
+/// Which kinds a device has agreed to be interrupted by.
+///
+/// FR-M2 names the set that is worth a phone interruption — a session
+/// entering `waiting-for-input` or `errored`, new drift, and the agent-task
+/// notify hook — "and for nothing else by default". The last clause is the
+/// requirement, not a gloss on it: a notification surface that grows quietly
+/// is one people turn off entirely, and then the three that mattered are lost
+/// with the rest.
+///
+/// So the four named kinds default on and everything else defaults off. Two
+/// kinds sit on the off side today: `idle_stall`, which fires on a heuristic
+/// about silence rather than on anything the session said, and
+/// `agent_task_started`, which announces work beginning rather than work
+/// needing a person. Both remain available — this is a default, not a
+/// removal, and a device that wants them can still ask.
+///
+/// **A device that already chose keeps its choice.** These are `serde`
+/// defaults, and they apply only to fields absent from `push.json`; every
+/// subscription stored before this change carries all five values
+/// explicitly, so nobody's phone goes quieter than they left it. The default
+/// governs new subscriptions, which is what "by default" means.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushPreferences {
     #[serde(default = "default_true")]
     pub waiting_for_input: bool,
     #[serde(default = "default_true")]
     pub errored: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub idle_stall: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub agent_task_started: bool,
     #[serde(default = "default_true")]
     pub agent_task_notify: bool,
+    #[serde(default = "default_true")]
+    pub drift: bool,
     #[serde(default)]
     pub quiet_hours: QuietHours,
 }
@@ -97,9 +123,10 @@ impl Default for PushPreferences {
         Self {
             waiting_for_input: true,
             errored: true,
-            idle_stall: true,
-            agent_task_started: true,
+            idle_stall: false,
+            agent_task_started: false,
             agent_task_notify: true,
+            drift: true,
             quiet_hours: QuietHours::default(),
         }
     }
@@ -113,6 +140,7 @@ impl PushPreferences {
             NotificationKind::IdleStall => self.idle_stall,
             NotificationKind::AgentTaskStarted => self.agent_task_started,
             NotificationKind::AgentTaskNotify => self.agent_task_notify,
+            NotificationKind::Drift => self.drift,
             NotificationKind::Test => true,
         }
     }
@@ -126,6 +154,11 @@ pub struct PendingDigest {
     pub idle_stall_count: u32,
     pub agent_task_started_count: u32,
     pub agent_task_notify_count: u32,
+    /// Defaulted, unlike its siblings, because a `push.json` written before
+    /// drift was a kind has a digest object without this field — and
+    /// `PushManager::new` turns a parse failure into a refusal to boot.
+    #[serde(default)]
+    pub drift_count: u32,
     #[serde(with = "time::serde::rfc3339")]
     pub queued_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -582,6 +615,7 @@ fn queue_digest(
         idle_stall_count: 0,
         agent_task_started_count: 0,
         agent_task_notify_count: 0,
+        drift_count: 0,
         queued_at: now,
         last_event_at: now,
         latest_title: title.to_string(),
@@ -607,6 +641,7 @@ fn queue_digest(
         NotificationKind::AgentTaskNotify => {
             digest.agent_task_notify_count = digest.agent_task_notify_count.saturating_add(1)
         }
+        NotificationKind::Drift => digest.drift_count = digest.drift_count.saturating_add(1),
         NotificationKind::Test => {}
     }
 }
@@ -630,6 +665,9 @@ fn digest_notification_payload(digest: &PendingDigest) -> (String, String, serde
     }
     if digest.agent_task_notify_count > 0 {
         parts.push(format!("{} task alert", digest.agent_task_notify_count));
+    }
+    if digest.drift_count > 0 {
+        parts.push(format!("{} drift", digest.drift_count));
     }
     let summary = if parts.is_empty() {
         format!("{} queued notifications", digest.total_count)
@@ -781,12 +819,13 @@ mod tests {
     #[test]
     fn digest_payload_summarizes_counts() {
         let digest = PendingDigest {
-            total_count: 4,
+            total_count: 6,
             waiting_for_input_count: 2,
             errored_count: 0,
             idle_stall_count: 0,
             agent_task_started_count: 1,
             agent_task_notify_count: 1,
+            drift_count: 2,
             queued_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
             last_event_at: OffsetDateTime::from_unix_timestamp(1_700_000_100).unwrap(),
             latest_title: "Task wants attention".into(),
@@ -797,8 +836,44 @@ mod tests {
         assert_eq!(title, "MyDevEnv2 digest");
         assert!(body.contains("2 waiting-for-input"));
         assert!(body.contains("1 task started"));
+        assert!(body.contains("2 drift"));
         assert!(body.contains("Latest: Task wants attention"));
         assert_eq!(data["kind"], "digest");
-        assert_eq!(data["queued_count"], 4);
+        assert_eq!(data["queued_count"], 6);
+    }
+
+    /// FR-M2's "and for nothing else by default", asserted rather than
+    /// described — this is the clause a later kind is most likely to erode,
+    /// because adding one defaulted-on is a one-line change nobody reads as a
+    /// requirement violation.
+    #[test]
+    fn only_the_kinds_fr_m2_names_are_on_by_default() {
+        let prefs = PushPreferences::default();
+        assert!(prefs.waiting_for_input);
+        assert!(prefs.errored);
+        assert!(prefs.agent_task_notify);
+        assert!(prefs.drift);
+        assert!(!prefs.idle_stall);
+        assert!(!prefs.agent_task_started);
+    }
+
+    /// A device that chose before this change keeps what it chose. The
+    /// defaults above govern a subscription with no stored opinion; they must
+    /// not quietly overwrite one that has.
+    #[test]
+    fn a_stored_opinion_survives_the_new_defaults() {
+        let stored: PushPreferences = serde_json::from_str(
+            r#"{"waiting_for_input":true,"errored":true,"idle_stall":true,
+                "agent_task_started":true,"agent_task_notify":true}"#,
+        )
+        .expect("a push.json written before drift existed still parses");
+        assert!(
+            stored.idle_stall,
+            "the device asked for these and still has them"
+        );
+        assert!(stored.agent_task_started);
+        // Absent because it did not exist when this was written, so it takes
+        // the default rather than reading as an opt-out.
+        assert!(stored.drift);
     }
 }

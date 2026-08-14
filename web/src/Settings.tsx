@@ -63,13 +63,19 @@ interface Props {
   onDeleteWorkspaceLayout?: (layoutId: string) => Promise<boolean | void>;
 }
 
+// Must agree with `PushPreferences::default()` in the engine's `push.rs`,
+// which is where FR-M2's "and for nothing else by default" is actually kept.
+// This copy is only what the form shows before the server has answered; a
+// disagreement would make the checkboxes lie about what a new device signed
+// up for.
 function defaultPushPreferences(): PushPreferences {
   return {
     waiting_for_input: true,
     errored: true,
-    idle_stall: true,
-    agent_task_started: true,
+    idle_stall: false,
+    agent_task_started: false,
     agent_task_notify: true,
+    drift: true,
     quiet_hours: {
       enabled: false,
       start_minute: 22 * 60,
@@ -78,6 +84,22 @@ function defaultPushPreferences(): PushPreferences {
       digest: true,
     },
   };
+}
+
+// What this device will actually be interrupted by, enumerated rather than
+// hand-chained. The chain this replaced named three of the five kinds, so a
+// device subscribed only to `errored` read as "none" — which is the one
+// answer a summary of a notification channel must never give wrongly.
+function describePushRules(prefs: PushPreferences): string {
+  const on = [
+    prefs.waiting_for_input && "waiting",
+    prefs.errored && "errored",
+    prefs.idle_stall && "idle stall",
+    prefs.agent_task_started && "task start",
+    prefs.agent_task_notify && "task alerts",
+    prefs.drift && "drift",
+  ].filter((label): label is string => typeof label === "string");
+  return on.length ? on.join(" • ") : "none";
 }
 
 function formatMinuteOfDay(minute: number): string {
@@ -1208,6 +1230,19 @@ const Settings: Component<Props> = (props) => {
                     />
                     <span style={{ "font-size": "12px" }}>Task phrase alerts</span>
                   </label>
+                  <label style={{ display: "flex", gap: "6px", "align-items": "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={pushPrefs().drift}
+                      onChange={(e) =>
+                        setPushPrefs((current) => ({
+                          ...current,
+                          drift: e.currentTarget.checked,
+                        }))
+                      }
+                    />
+                    <span style={{ "font-size": "12px" }}>New drift</span>
+                  </label>
                 </div>
               </Show>
               <Show when={pushOn()}>
@@ -1272,12 +1307,7 @@ const Settings: Component<Props> = (props) => {
                           </div>
                         </div>
                         <div style={opsMetaStyle}>
-                          Rules: {sub.prefs.waiting_for_input ? "session" : ""}
-                          {sub.prefs.waiting_for_input && (sub.prefs.agent_task_started || sub.prefs.agent_task_notify) ? " • " : ""}
-                          {sub.prefs.agent_task_started ? "task start" : ""}
-                          {sub.prefs.agent_task_started && sub.prefs.agent_task_notify ? " • " : ""}
-                          {sub.prefs.agent_task_notify ? "task alerts" : ""}
-                          {!sub.prefs.waiting_for_input && !sub.prefs.agent_task_started && !sub.prefs.agent_task_notify ? "none" : ""}
+                          Rules: {describePushRules(sub.prefs)}
                           <Show when={sub.pending_digest_count > 0}>
                             <span>
                               {" "}

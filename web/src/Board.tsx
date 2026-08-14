@@ -1314,6 +1314,16 @@ const Board: Component<Props> = (props) => {
                               class={`board-cell${collapsedColumn(column.state) ? " collapsed" : ""}${
                                 dragOver() === cellKey ? " dropping" : ""
                               }${dragRef() && unlisted() ? " unlisted" : ""}`}
+                              // Below the narrow breakpoint the board is a
+                              // list and the column head row is not rendered
+                              // (FR-M3), so the state a cell belongs to has
+                              // to travel on the cell itself — `styles.css`
+                              // draws these two as its heading. They are
+                              // duplicated from the head row rather than
+                              // moved: at desk widths the head row is still
+                              // the thing that labels the column.
+                              data-state={humanState(column.state)}
+                              data-wip={`${columnCount(column.state)}${truncated() ? "+" : ""}`}
                               onDragOver={(event) => {
                                 if (!dragRef() || writesDisabled()) return;
                                 event.preventDefault();

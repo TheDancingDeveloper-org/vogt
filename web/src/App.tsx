@@ -82,6 +82,35 @@ import {
   saveWorkspaceLayout,
 } from "./workspaceLayouts";
 
+// The glyph on a tab, by kind. A record rather than the ternary chain this
+// replaced, which had grown past the point of being read and had no arm for
+// any of the five Vogt kinds — so board, backlog, projects, audit and work
+// item tabs drew bare while the drawer buttons that opened them had icons.
+// That is worst at phone width, where the tab strip is a sheet of labels and
+// the glyph is most of what tells one entry from another at a glance. The
+// glyphs match the drawer's, deliberately: the same surface should not be two
+// different pictures depending on which control you reached it from.
+//
+// Typed against `Tab["kind"]` so a new kind that forgets its glyph is a
+// compile error rather than a blank space nobody notices.
+const TAB_GLYPHS: Record<Tab["kind"], string> = {
+  // Terminal tabs carry an activity dot instead, rendered just above; History
+  // is the one kind whose glyph is baked into its label in `tabs.ts`, so a
+  // glyph here would draw it twice.
+  terminal: "",
+  history: "",
+  editor: "📄 ",
+  git: "⎇ ",
+  gui: "🖥 ",
+  tasks: "≡ ",
+  assistant: "🎙 ",
+  board: "▦ ",
+  backlog: "☰ ",
+  projects: "▤ ",
+  audit: "⧉ ",
+  workitem: "◈ ",
+};
+
 interface LoginScreenProps {
   initialToken: string;
   initialBase: string;
@@ -683,7 +712,18 @@ const App: Component = () => {
       (location.pathname === "/history" && tabId === "history") ||
       (location.pathname === "/tasks" && tabId === "tasks") ||
       ((location.pathname === "/assistant" || location.pathname.startsWith("/assistant/")) &&
-        tabId === "assistant");
+        tabId === "assistant") ||
+      // The five Vogt surfaces were missing from this list, so closing the
+      // tab you were looking at left the URL pointing at a route with no tab
+      // behind it and the main area fell through to the empty state. It shows
+      // up worst on a phone, where the tab sheet is the only way to move
+      // between tabs and closing one is the common gesture.
+      (location.pathname === "/board" && tabId === "board") ||
+      (location.pathname === "/backlog" && tabId === "backlog") ||
+      (location.pathname === "/projects" && tabId === "projects") ||
+      (location.pathname === "/audit" && tabId === "audit") ||
+      (location.pathname.startsWith("/w/") &&
+        `workitem:${decodeURIComponent(params.ref ?? "")}` === tabId);
 
     // Drop any per-tab registrations so we don't leak references.
     senders.delete(tabId);
@@ -1065,17 +1105,7 @@ const App: Component = () => {
                     <span class={`activity-dot ${tabActivityClass(t) ?? "idle"}`} />
                   </Show>
                   <span class="label">
-                    {t.kind === "editor"
-                      ? "📄 "
-                      : t.kind === "git"
-                        ? "⎇ "
-                        : t.kind === "gui"
-                          ? "🖥 "
-                          : t.kind === "tasks"
-                            ? "≡ "
-                            : t.kind === "assistant"
-                              ? "🎙 "
-                          : ""}
+                    {TAB_GLYPHS[t.kind] ?? ""}
                     {t.label}
                   </span>
                   <Show when={t.kind === "editor" && t.dirty}>

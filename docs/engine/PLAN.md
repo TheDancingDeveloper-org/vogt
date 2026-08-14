@@ -84,9 +84,11 @@ Mobile-specific UX:
 ### Mobile wrap (Android only for MVP)
 
 Capacitor 8 wraps the PWA into an installable Android app. Adds native FCM push,
-home-screen install, and deep links. No second UI codebase: the WebView loads
-`https://mydevenv2.sprooty.com` directly, with `mobile/web/` only as the
-Capacitor-required fallback bundle.
+home-screen install, and deep links. No second UI codebase: the WebView loads a
+deployed front door directly — the URL is a build input (`VOGT_ANDROID_SERVER_URL`)
+with no default, because which Vogt an APK talks to is a deployment fact this
+tree does not know (FR-M1) — with `mobile/web/` only as the Capacitor-required
+fallback bundle.
 
 **Distribution:** sideload the debug APK directly for MVP — no Play Store
 listing, no signing-key registration, no review cycle. The server Woodpecker

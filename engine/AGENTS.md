@@ -213,7 +213,7 @@ The sync mode is `two-way-safe`. VCS metadata, machine-local Claude settings, ge
 - The ContextKeeper token is server-side only. The browser calls same-origin `/api/contextkeeper/*` and the server proxies; never forward the token to the client or let the PWA call the sidecar directly. The proxy is an allow-list of the operations the UI needs, because ContextKeeper also exposes prune and maintenance routes.
 - Render ContextKeeper's continuation recipe; do not reinvent provider policy in the UI. It picks the rung (reattach / resume / fork / bundle) and supplies the command, cwd, and env; MyDevEnv2 creates the PTY from them verbatim, because the correlation identifiers that bind the new session to its work travel in that env. A bundle recovery is never launched without showing the bundle first — approval is a human decision about one specific bundle.
 - The sidecar is reached through the pinned `extra_hosts` entry, not container DNS: this container runs Tailscale, which overwrites `/etc/resolv.conf` and breaks Docker service-name resolution.
-- Mobile WebView loads `https://mydevenv2.sprooty.com` directly. UI changes ship without rebuilding the APK; the APK only needs a rebuild for native plumbing such as Capacitor plugins, manifest changes, and FCM config.
+- Mobile WebView loads whatever front door the APK was built against — `VOGT_ANDROID_SERVER_URL` at `cap sync` time, which has no default on purpose (FR-M1; the reasoning is in `mobile/capacitor.config.ts`). UI changes ship without rebuilding the APK; the APK only needs a rebuild for native plumbing such as Capacitor plugins, manifest changes, and FCM config — or to point it at a different front door.
 
 ## 8. Cross-refs
 

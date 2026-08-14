@@ -118,9 +118,9 @@ client release kept in Forgejo for historical reference.
 
 - Server: VAPID web-push (any modern browser PushManager subscription, including installed-PWA iOS Safari 16.4+) + FCM HTTP v1 (native Capacitor tokens). Service-account JWT → OAuth2 with token caching. Subscriptions persist as JSON under `state_dir`; auto-prune on 404/410.
 - Server routes: `POST /api/push/subscribe`, `POST /api/push/unsubscribe`, `GET /api/push/list`, `POST /api/push/test`, `GET /api/push/public-key` (public — no token needed).
-- Activity watcher: fires push to all subscriptions when any session enters `waiting-for-input`.
+- Activity watcher: fires push to all subscriptions when any session enters `waiting-for-input`. A drift watcher polls vogt-core's `events.list` cursor and does the same for newly raised drift; both are off for any device that switched the kind off, and `idle_stall` / `agent_task_started` are off unless a device asks (FR-M2).
 - Web: `/sw.js` + `/manifest.webmanifest` for PWA install + push event handling. Installed PWAs show an explicit offline fallback page instead of pretending to support disconnected use. Settings modal gains "Enable push" / "Send test" with current-permission visibility.
-- Mobile: `mobile/` Capacitor 8 Android wrap (`com.sprooty.mydevenv2`). WebView loads `https://mydevenv2.sprooty.com` directly so UI updates ship without rebuilding the APK. `@capacitor/push-notifications` registers a native FCM token at first launch; the same `/api/push/subscribe` endpoint accepts both transports.
+- Mobile: `mobile/` Capacitor 8 Android wrap (`com.sprooty.mydevenv2`). WebView loads the front door named by `VOGT_ANDROID_SERVER_URL` at build time — no default, see `mobile/capacitor.config.ts` (FR-M1) — so UI updates ship without rebuilding the APK. `@capacitor/push-notifications` registers a native FCM token at first launch; the same `/api/push/subscribe` endpoint accepts both transports.
 - CI: `mobile-apk` builds a signed release APK on pushes handled by `engine/.woodpecker/server.yml`, derives Android `versionName` / `versionCode` from `mobile/package.json` plus the built commit, and uploads it to the Forgejo release tag `apk-latest` under a versioned asset name.
 
 Phase 7 (Android emulator KVM VM) remains.

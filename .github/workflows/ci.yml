@@ -354,8 +354,19 @@ jobs:
       # `android/settings.gradle` includes `:capacitor-cordova-android-plugins`,
       # which `cap sync` generates — the Gradle build cannot configure without
       # this having run first.
+      #
+      # `VOGT_ANDROID_SERVER_URL` has no default (FR-M1; see the comment in
+      # `mobile/capacitor.config.ts`), so it has to be named here. Loopback is
+      # the right value *for this job* and a wrong one for anything else: this
+      # step proves the shell assembles, exactly as the debug signing below
+      # proves nothing about distribution. The APK it uploads is a build
+      # artifact and points at nothing — installing it would show the offline
+      # page. A real APK is built by a release job that names a real front
+      # door.
       - name: capacitor sync
         working-directory: mobile
+        env:
+          VOGT_ANDROID_SERVER_URL: http://127.0.0.1:8910
         run: npx cap sync android
 
       # A *debug* APK: it is signed with Gradle's generated debug key, so it

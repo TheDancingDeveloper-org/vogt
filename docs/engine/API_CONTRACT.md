@@ -198,7 +198,10 @@ rather than treat it as a fact about the child process:
 A session that goes quiet without printing a recognizable prompt therefore
 reads as `idle`, not `waiting-for-input`. That gap is what the idle-stall
 watcher covers: after `idle_stall_after_ms` of continuous `idle` it sends one
-notification, and re-arms only once the session leaves the state.
+notification, and re-arms only once the session leaves the state. It is
+switched **off** for a new subscription — a heuristic about silence is not one
+of the four kinds FR-M2 says is worth a phone interruption — so the watcher
+runs and dispatches to whoever asked for it and to nobody else.
 
 `SessionSummary.continuity` is ContextKeeper enrichment and is **absent**, not
 null, when there is nothing to say — no sidecar configured, sidecar
@@ -444,12 +447,25 @@ operator can see whether a cleanup is worth running before running one.
   (requires `push-write`) — sends every digest whose quiet hours have ended,
   which a background task also does once a minute.
 
-`PushPreferences` is a per-kind opt-out —
+`PushPreferences` is a per-kind switch —
 `{waiting_for_input, errored, idle_stall, agent_task_started,
-agent_task_notify, quiet_hours}`, each true by default — plus
+agent_task_notify, drift, quiet_hours}` — plus
 `quiet_hours: {enabled, start_minute, end_minute, utc_offset_minutes, digest}`.
 During quiet hours a notification is counted into a digest instead of sent, and
 `queued` in a dispatch count is that outcome rather than a failure.
+
+**Not all of them default on.** FR-M2 names the set worth a phone
+interruption — `waiting_for_input`, `errored`, `drift` and
+`agent_task_notify` — "and for nothing else by default", so those four
+default `true` and `idle_stall` and `agent_task_started` default `false`. Both
+remain switchable; the default is the claim, not the capability. A
+subscription stored before this change carries every value explicitly and
+therefore keeps whatever it was last set to.
+
+`drift` is dispatched by a poller over vogt-core's `events.list` cursor rather
+than by anything the engine observes itself, so it is silent when no core is
+configured. It coalesces: one poll's worth of newly raised drift is one
+notification, however many proposals it found.
 
 Notifications the engine sends carry `{kind, session_id, url}` in their data,
 where `url` is a PWA route (`/#/t/<session-id>`), so a tap lands on the
