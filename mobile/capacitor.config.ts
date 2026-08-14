@@ -32,15 +32,21 @@ import type { CapacitorConfig } from "@capacitor/cli";
 // knows where your Vogt lives, and an APK that guesses wrong is one that
 // silently talks to the wrong estate.
 //
-// ── Names, and what is deliberately not being renamed ──────────────────────
+// ── Names: one changed, one deliberately not ───────────────────────────────
 //
-// `appId` and `appName` still say MyDevEnv2. That is §11.1's open question
-// and it belongs to M14, but there is also a mechanical reason not to touch
-// it here: `android/app/google-services.json` is keyed to the package name,
-// so changing `appId` invalidates FCM registration for every installed
-// device, and `build.gradle`'s `applicationId` would have to move in the same
-// commit. Renaming is a deliberate act with a migration, not a side effect of
-// repointing a URL.
+// M14 settled §11.1: the merged product is **Vogt**, served at
+// `vogt.sprooty.com`. `appName` is the label under the icon, so it says Vogt
+// — a phone showing "MyDevEnv2" beside a product that calls itself something
+// else is the naming decision failing at the only place a user reads it.
+//
+// **`appId` stays `com.sprooty.mydevenv2`, and that is not an oversight.** A
+// package name is an identity, not a label: `android/app/google-services.json`
+// is keyed to it, so changing it invalidates FCM registration for every
+// installed device; `build.gradle`'s `applicationId` would have to move in the
+// same commit; and the store/sideload result is a *second* app beside the
+// first rather than an upgrade of it. Renaming it is a migration with a
+// device-side cost, and it belongs with the FCM project decision rather than
+// with a URL change.
 
 const SERVER_URL =
   process.env.VOGT_ANDROID_SERVER_URL ||
@@ -60,7 +66,11 @@ if (!SERVER_URL) {
 
 const config: CapacitorConfig = {
   appId: process.env.MYDEVENV2_ANDROID_APP_ID || "com.sprooty.mydevenv2",
-  appName: process.env.MYDEVENV2_ANDROID_APP_NAME || "MyDevEnv2",
+  appName:
+    process.env.VOGT_ANDROID_APP_NAME ||
+    // The transition alias, as with the server URL above.
+    process.env.MYDEVENV2_ANDROID_APP_NAME ||
+    "Vogt",
   webDir: "web",
   zoomEnabled: true,
   android: {
