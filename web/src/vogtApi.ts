@@ -47,6 +47,7 @@ export const ROUTES = {
   "drift.list": "/drift",
   "drift.resolve": "/drift/resolve",
   deps: "/deps",
+  "observations.list": "/observations",
   compliance: "/compliance",
   "audit.list": "/audit",
   notifications: "/notifications",
@@ -337,6 +338,37 @@ export interface DepsResult {
   freshness: FreshnessSummary;
 }
 
+/** One thing a collector found, as the observed store holds it (FR-O2).
+ *
+ *  The raw evidence row, not a view over it: `observations.list` is the one
+ *  operation that returns the observed store itself, and a surface reading it
+ *  is reading what was *seen* rather than what a ranking made of it.
+ *
+ *  `payload` is deliberately `unknown`-valued. Its shape is the collector's,
+ *  it differs per `kind`, and a reader that wants a field out of it has to
+ *  say what it expects and cope with the field not being there — which is the
+ *  honest position, since a sweep from an older build wrote older payloads. */
+export interface Observation {
+  id: string;
+  sweep_id: string;
+  collector: string;
+  kind: string;
+  project_id?: string | null;
+  subject_key: string;
+  payload?: Record<string, unknown>;
+  content_digest: string;
+  source_url?: string | null;
+  promoted?: boolean;
+  observed_at: string;
+}
+
+export interface ObservationsResult {
+  observations: Observation[];
+  /** How many rows this answer carries. Equal to `limit` means the store had
+   *  at least that many and the list is cut, not complete. */
+  total: number;
+}
+
 export interface CriterionView {
   rule: string;
   target: string;
@@ -412,6 +444,21 @@ export const listDrift = (params: Record<string, unknown> = {}) =>
 
 export const deps = (project: string) =>
   call<DepsResult>("deps", { project });
+
+/** The observed store, unranked (FR-O2, FR-U17).
+ *
+ *  Everything else this client reads is a *view*: `backlog` and `bugs` rank,
+ *  `why` explains a ranking, and all three filter out subjects a decision hid.
+ *  This is the evidence itself, including the rows those views drop, which is
+ *  the only place a surface can read what a collector actually saw.
+ *
+ *  There is no work-item parameter, and that is the registry's shape rather
+ *  than an omission: an observation is filed under its own subject key
+ *  (`session:01J…`), not under the item it happens to be about. A reader that
+ *  wants one item's evidence asks for the kinds it understands and matches on
+ *  the payload, which is what `WorkItemDetail` does. */
+export const listObservations = (params: Record<string, unknown> = {}) =>
+  call<ObservationsResult>("observations.list", params);
 
 export const compliance = (project: string) =>
   call<ComplianceResult>("compliance", { project });
