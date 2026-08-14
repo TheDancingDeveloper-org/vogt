@@ -4,11 +4,22 @@ Status: **M0–M6 delivered — v1 is built** (2026-08-12); **M7 and M8 are
 post-v1**; **M9–M14 are v2** — the MyDevEnv2 merge, added by
 `REQUIREMENTS.md` revision r9 (2026-08-14). **M9–M13 are built**
 (2026-08-14); M11's demo is outstanding for want of a browser, and M13's for
-want of a device, and its "as built" note says what that costs. **M14 is in
-progress** — the sentence here previously read "M12–M14 are not started",
-which contradicted the line above it in the same paragraph. Requirement IDs
-refer to `REQUIREMENTS.md`; per its §4, scope changes here must update that
-document in the same change.
+want of a device, and its "as built" note says what that costs.
+
+**M14 is delivered except for the acts that are somebody's to take.** The
+merge is on `main`, both image streams are built and signed, CI is green
+across both halves on the self-hosted runners, and `REQUIREMENTS.md` §6's
+fourth pass has taken the "short or absent" column from twenty-five conjuncts
+to ten. Every one of those ten is a decision rather than unfinished work, and
+§6.2 names which: a dev-stack deploy and a prod deploy, an APK signing
+keystore that lives in the retired forge, a native Anthropic backend deferred
+at priority C, a voice pass that needs a device, and four rows where the
+argued position is now stated instead of an owed item. What remains of this
+stage is retiring the old stacks once the merged one has carried load, and
+sunsetting the `MYDEVENV2_*` aliases after their transition period.
+
+Requirement IDs refer to `REQUIREMENTS.md`; per its §4, scope changes here
+must update that document in the same change.
 
 Each stage below carries an "as built" note recording where the delivery
 differed from the sketch. What those notes cannot say is whether the set of
