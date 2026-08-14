@@ -966,15 +966,15 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 116 are delivered, 62 are implemented and
-asserted by nothing, 7 cannot be verified in this environment at all, and 16
+**201 conjuncts across 46 IDs. 118 are delivered, 62 are implemented and
+asserted by nothing, 7 cannot be verified in this environment at all, and 14
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
 before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved twelve conjuncts, and three of them were moved by
+**A fourth pass moved sixteen conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,10 +996,10 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +14 in the fourth pass (nine out of §6.2, three out of §6.2a, two out
-  of §6.2b)
+  then +16 in the fourth pass (eleven out of §6.2, three out of §6.2a, two
+  out of §6.2b)
 - **62 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 3
-- **16 short** = 43 − 19 + 1 arriving from §6.2b, − 9
+- **14 short** = 43 − 19 + 1 arriving from §6.2b, − 11
 - **7 unverifiable** = 69 − 60 − 2
 
 One bookkeeping correction, since it is the kind of thing this section exists
@@ -1106,6 +1106,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | **FR-T5** | Replies are spoken in sentence chunks when the toggle is on and not when it is off; a pending action is announced in words that offer no spoken way to approve it; a new message stops the previous answer mid-sentence | `web/src/__tests__/assistant.test.tsx`'s FR-T5 block (four), driving real replies through a stubbed engine and a stubbed synth. The announcement test asserts an *absence* — no "say yes", no "yes or no" — which is FR-T2's voice clause and the one thing a device demo cannot check, since it can tell you what was said and not what was carefully left unsaid. Writing it found that the chunker split `work.transition` at its own full stop, so the one word saying what was about to happen was read as two |
 | FR-U22 | Focus moves across and within columns; `Shift`+arrow proposes a move and still collects the reason; `Enter` opens the item at its own URL; `n` opens quick-create and is announced on the board's own keyboard line | `board.test.tsx`'s two FR-U22 blocks (five), including the one asserting that an `n` typed into the move composer is not stolen by the shortcut |
 | FR-U18 | Bulk accept does not exist, and cannot arrive by accident | `tests/test_pwa.py::test_drift_is_resolved_one_proposal_at_a_time` (one call site, and no multi-select) |
+| **FR-U19** | Filter by actor, project, operation and a half-open time range, server-side; and the log is readable past its newest page | `web/src/__tests__/auditQuery.test.tsx` (seventeen), which asserts **the query the server receives** rather than the rows drawn — a filter applied client-side and one applied server-side look identical on screen and differ entirely in what they can see, so a rows test would have passed against the old surface. The presets are day-aligned so `Yesterday.until === Today.since` and the half-open interval tiles; the timezone is stubbed off-UTC so a build that appended `Z` to typed wall-clock text fails. A filter that cannot be pushed to the server now stops the read rather than filtering one page of a wider query under a total describing the wider one |
 | **FR-U20** | Both legs: the live activity badge and the open-terminal control on the item, and the terminal's link back to the work item it was opened for | `workItemDetail.test.tsx`'s FR-U20 block (four) and `terminalLink.test.tsx` (four). The forward leg asserts the engine's activity is what is shown, that an unasked session reads `unknown` rather than `idle`, that the control addresses the *engine's* session id, and that a stopped session gets no control to a PTY that is gone. The return leg asserts the link, that the read includes stopped sessions because a finished run still had a subject, that a PTY Vogt did not start says nothing, and that an unreachable Vogt costs the badge and never the terminal (FR-E9). The blocker §6.2a recorded was smaller than it looked: xterm asks for `matchMedia` at mount and jsdom has none, so `Terminal.tsx` could not be mounted at all — `setup.ts` stubs it the way it already stubs `ResizeObserver` |
 | FR-U21 | Every Vogt surface can tell an outage from an empty answer and renders the server's own reason; the core-absent half — terminals, files, git keep working | `tests/test_pwa.py::test_every_vogt_surface_distinguishes_an_outage_from_emptiness` asserts the structural half and says in its own docstring that it cannot judge the copy; `web/src/__tests__/absentStates.test.tsx` and the outage blocks in the other three files now judge it, on all five surfaces — the server's sentence verbatim, the sentence that says what the absence *means*, nothing rendered as data, writes disabled, and a 500 called a failure rather than an outage. `contextkeeper.rs::a_contextkeeper_outage_leaves_terminals_working_and_unprotected` is the core-absent half. **One panel is thinner than the rest**: the item page's Sessions panel renders Vogt's sentence and nothing asserts it does — found while mutation-testing FR-U17, when a mutation that should have gone red survived because the same literal appears first in `sessionsFailure`. The conjunct is delivered on all five surfaces; that one panel is where a regression would be quiet |
 | **FR-M1** | A session waiting for input is answered from the item page, without a terminal — MVP1's "session start/approve", as MERGE §14's M12 demo defines it | `web/src/__tests__/workItemDetail.test.tsx`'s FR-M1 block (six). The control shows the session's own scrollback tail before it offers any way to answer, and offers none at all when the engine cannot be asked. The other reading of "approve" — a Vogt approval *operation* — is deliberately not built, and §6.2 no longer carries a row implying it is owed |
@@ -1130,7 +1131,7 @@ half-present, because nothing about it had to be argued with first.
 
 ### 6.2 Delivered differently, or short — per conjunct
 
-Sixteen conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
+Fourteen conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
 is one claim that the requirement makes and the build does not, which is why
 this table's rows can be counted and the other three tables' cannot.
 
@@ -1161,8 +1162,6 @@ the file.
 | FR-U5 — "state history" | The panel renders the workflow's states with the current one marked, and says in as many words that the transitions belong in the audit trail. That is the machine, not the item's history: a reader cannot see when this item entered this state or what it came from without leaving the surface. | Low, and honestly labelled on the surface itself |
 | FR-U5 — "per-item audit trail" | **The silent omission is closed.** An item's trail now includes the writes audited against its comments, by semi-join through `comments.work_item_id` — chosen over denormalising a work item id onto `audit`, because back-filling `audit` means editing the record of what happened. What remains is the same division as before: a link to the audit browser rather than an embedded trail, which is FR-U19's second clause working. | Low, down from Medium — the trail no longer omits a kind of write, which was the part that mattered |
 | FR-U16 — "every GUI-exposed mutating verb by opening the view that collects its reason" | One of them. `New Work Item…` opens the backlog's quick-create; transition, comment, drift resolve, import and session start/stop have no palette entry. The board's own quick-create arrived without a palette entry too, so the ratio is unchanged by a surface gaining one. The rule the clause exists to keep — never execute, only open — is kept perfectly by the one entry that exists. | Low |
-| FR-U19 — "filter by … project" | **Half moved: the server can now answer it and the surface does not ask.** `audit.list` filters by project server-side, through a table naming every audited kind the declared store can attribute to a project — items, their comments, coding sessions, drift proposals, suppressions — with instance-wide kinds excluded deliberately. `AuditBrowser.tsx` still resolves at most 500 of a project's items and filters the loaded window, and its own comments now describe a server that no longer exists. | Low, and it is wiring |
-| FR-U19 — "filter by … time range" | Same shape. `since`/`until` and `limit`/`offset`/`total` exist and are asserted on all three transports (§5.1's FR-S6, now delivered); the browser still windows rather than pages and cannot see past the newest 500 records, because nothing on the surface passes an offset yet. | Low, and it is wiring |
 | NFR-D12 — "deployed to a dev stack for live validation" | Nothing deploys, from any branch. `build.yml` says so in its own step summary, and `ci.yml` records the decision — Vogt has never deployed from CI (NFR-D10). **The artefact now exists**: on 2026-08-14 the `stack-image` job ran for the first time, built `engine/Dockerfile` with the repository as its context, ran `vogt --version` and `mydevenv2-server --help` inside the candidate, signed the digest and published `dev` and `dev-ee18adc`; `deploy/vogt-stack.compose.yml` pins that digest rather than the placeholder it carried. So the image a dev stack would run and the image `dev` builds are the same artefact, and it is a real one. **What is left is one human act** — `docs/DEPLOYMENT.md` §9.4 — and until it happens no stack has run this image and mobile, voice and push remain unvalidated. | **High**, and now blocked on a deploy rather than on a build. Everything this section can do for it has been done |
 | NFR-D12 — "only `main` deploys to prod" | Vacuously true, per the row above. `main` builds a `sha-` image and publishes it; a human pins a digest and deploys. | — |
 | NFR-C6 — "shall run both halves on every push" | On pushes to `main` and `dev`, and on pull requests — a push to any other branch with no PR open runs nothing. Within that, each half runs only when its own paths changed: a `mobile/`-only push runs no Rust and no Python; a `web/`-only push runs no APK build. This is NFR-C1 working as intended and NFR-C6's literal sentence being false; the reduction is deliberate and argued in the workflow. | Low, and honestly documented in the file |
