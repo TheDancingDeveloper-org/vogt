@@ -240,6 +240,20 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ("export", {"destination": "{root}/export.json", "reason": WHY}),
     ("events.list", {}),
     ("audit.list", {}),
+    # Every narrowing the audit query offers, driven on all three transports:
+    # a date arrives as a string on each of them and has to mean the same
+    # instant, and a project filter answered in the query has to select the
+    # same writes whoever asked.
+    (
+        "audit.list",
+        {
+            "project": "parity-project",
+            "since": "2026-01-01T00:00:00+00:00",
+            "until": "2027-01-01T00:00:00+00:00",
+            "limit": 5,
+            "offset": 2,
+        },
+    ),
 ]
 
 #: Values that legitimately differ between two runs of the same sequence.

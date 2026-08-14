@@ -13,7 +13,7 @@ import socket
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from vogt.core.clock import Clock, from_iso, to_iso, utc_now
@@ -84,6 +84,41 @@ _WORK_JOINS = (
 #: the first real change a client could care about.
 INIT_OPERATION = "instance.init"
 INIT_REASON = "instance bootstrap"
+
+#: How a project id resolves to the entity ids of one audited entity kind
+#: (FR-U19's project filter).
+#:
+#: Every audited kind that the declared store can relate to a project is
+#: here, so the filter cannot silently drop one: `project` itself, the work
+#: items in it, the comments on those items, the coding sessions opened in
+#: it, the drift proposals raised against it and the suppressions scoped to
+#: it. The kinds that are absent — `instance`, `actor`, `label`,
+#: `initiative`, `token` — are absent because they belong to the instance
+#: rather than to any project, so no project's trail is missing them.
+#:
+#: Each is a semi-join through the owning table's own foreign key. Nothing
+#: about a project is copied onto an audit row: `audit` describes one write
+#: and is never rewritten when the thing it named later moves, and a
+#: denormalised `project_id` would either be wrong after a work item is
+#: reassigned or would have to be back-filled — editing history to make a
+#: query cheaper.
+_PROJECT_SCOPED_AUDIT: tuple[tuple[str, str], ...] = (
+    ("project", "SELECT id FROM projects WHERE id = ?"),
+    ("work_item", "SELECT id FROM work_items WHERE project_id = ?"),
+    (
+        "comment",
+        "SELECT c.id FROM comments c JOIN work_items w ON w.id = c.work_item_id "
+        "WHERE w.project_id = ?",
+    ),
+    ("session", "SELECT id FROM coding_sessions WHERE project_id = ?"),
+    ("drift_proposal", "SELECT id FROM drift_proposals WHERE project_id = ?"),
+    ("suppression", "SELECT id FROM suppressions WHERE scope_project_id = ?"),
+)
+
+#: The order the audit log is read in, newest write first. `id` is the
+#: primary key, so the three columns are a total order: two pages taken from
+#: an unchanged log neither skip a record nor repeat one.
+_AUDIT_ORDER = "ORDER BY a.revision DESC, a.at DESC, a.id DESC"
 
 
 def _holder_name() -> str:
@@ -841,30 +876,53 @@ class SqliteReadView:
         self,
         *,
         limit: int,
+        offset: int = 0,
         actor_id: str | None = None,
         operation: str | None = None,
         entity_id: str | None = None,
+        project_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[AuditRecord]:
-        clauses: list[str] = []
-        params: list[object] = []
-        if actor_id is not None:
-            clauses.append("a.actor_id = ?")
-            params.append(actor_id)
-        if operation is not None:
-            clauses.append("a.operation = ?")
-            params.append(operation)
-        if entity_id is not None:
-            clauses.append("a.entity_id = ?")
-            params.append(entity_id)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        params.append(limit)
+        where, params = _audit_where(
+            actor_id=actor_id,
+            operation=operation,
+            entity_id=entity_id,
+            project_id=project_id,
+            since=since,
+            until=until,
+        )
+        params.extend((limit, offset))
         rows = self._conn.execute(
             "SELECT a.*, ac.identity_ref AS actor_identity_ref "
             "FROM audit a JOIN actors ac ON ac.id = a.actor_id "
-            f"{where} ORDER BY a.revision DESC, a.at DESC, a.id DESC LIMIT ?",
+            f"{where} {_AUDIT_ORDER} LIMIT ? OFFSET ?",
             tuple(params),
         ).fetchall()
         return [_row_to_audit(row) for row in rows]
+
+    def count_audit(
+        self,
+        *,
+        actor_id: str | None = None,
+        operation: str | None = None,
+        entity_id: str | None = None,
+        project_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> int:
+        where, params = _audit_where(
+            actor_id=actor_id,
+            operation=operation,
+            entity_id=entity_id,
+            project_id=project_id,
+            since=since,
+            until=until,
+        )
+        row = self._conn.execute(
+            f"SELECT COUNT(*) AS n FROM audit a {where}", tuple(params)
+        ).fetchone()
+        return int(row["n"])
 
 
 class SqliteWriteTxn(SqliteReadView):
@@ -1472,6 +1530,98 @@ def _work_where(work_filter: WorkFilter) -> tuple[str, list[object]]:
             "ON l.id = wl.label_id WHERE wl.work_item_id = w.id AND l.name = ?)"
         )
         params.append(work_filter.label)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, params
+
+
+def _audit_bound(moment: datetime | None) -> str | None:
+    """Render a time bound the way `at` is stored, so text compares right.
+
+    Every `at` is written through `to_iso`, which converts to UTC first, so
+    stored timestamps all carry `+00:00` and sort lexicographically in the
+    order they happened. A bound has to be rendered the same way to be
+    compared against them — and a *naive* bound is read as UTC, the same rule
+    `from_iso` applies to stored text. Passing it to `astimezone` instead
+    would silently reinterpret it in whatever zone the server happens to sit
+    in, which would move the boundary of an audit query by an hour on one
+    host and not on another.
+    """
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return to_iso(moment)
+
+
+def _audit_where(
+    *,
+    actor_id: str | None,
+    operation: str | None,
+    entity_id: str | None,
+    project_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> tuple[str, list[object]]:
+    """Build the WHERE clause both audit reads filter through.
+
+    One builder because `list_audit` and `count_audit` answer the same
+    question — a total that counted a different set from the records beside
+    it would be a page indicator that lies.
+    """
+    clauses: list[str] = []
+    params: list[object] = []
+
+    if actor_id is not None:
+        clauses.append("a.actor_id = ?")
+        params.append(actor_id)
+    if operation is not None:
+        clauses.append("a.operation = ?")
+        params.append(operation)
+    if entity_id is not None:
+        # An entity's trail, not its rows. A comment is audited against the
+        # comment — `entity_kind = 'comment'`, `entity_id = <comment id>` —
+        # so an exact match on a work item's id returns its creation, its
+        # updates and its transitions and silently omits everything anybody
+        # said about it. `comments` already carries the link and is indexed
+        # on it (`idx_comments_work_item`), so the trail is a semi-join and
+        # nothing has to be written twice.
+        #
+        # The rejected alternative is denormalising `work_item_id` onto
+        # `audit`: it would need a back-fill to answer for rows already
+        # written, and back-filling `audit` means editing the record of what
+        # happened — the one table in this product that must only ever be
+        # appended to. A third option, deriving the item from the comment id,
+        # is not available either: ids here are opaque (`cmt_0001`) and carry
+        # no parent, deliberately.
+        #
+        # The clause is written so it needs no lookup first: an `entity_id`
+        # that names something other than a work item simply matches no
+        # comment.
+        clauses.append(
+            "(a.entity_id = ? OR (a.entity_kind = 'comment' AND a.entity_id IN "
+            "(SELECT id FROM comments WHERE work_item_id = ?)))"
+        )
+        params.extend((entity_id, entity_id))
+    if project_id is not None:
+        scoped: list[str] = []
+        for kind, resolver in _PROJECT_SCOPED_AUDIT:
+            scoped.append(f"(a.entity_kind = '{kind}' AND a.entity_id IN ({resolver}))")
+            params.append(project_id)
+        clauses.append(f"({' OR '.join(scoped)})")
+    # `since` is inclusive and `until` is exclusive, so consecutive windows
+    # tile the log exactly: [Mon, Tue) and [Tue, Wed) between them contain
+    # every write, once. Two inclusive bounds would return a write made at
+    # midnight in both windows, and a reader counting records across a week
+    # would count that write seven times.
+    since_text = _audit_bound(since)
+    if since_text is not None:
+        clauses.append("a.at >= ?")
+        params.append(since_text)
+    until_text = _audit_bound(until)
+    if until_text is not None:
+        clauses.append("a.at < ?")
+        params.append(until_text)
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, params

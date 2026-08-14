@@ -306,10 +306,34 @@ class ReadView(Protocol):
         self,
         *,
         limit: int,
+        offset: int = 0,
         actor_id: str | None = None,
         operation: str | None = None,
         entity_id: str | None = None,
-    ) -> list[AuditRecord]: ...
+        project_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[AuditRecord]:
+        """The audit log, newest write first.
+
+        `entity_id` returns the entity's *trail*: for a work item that
+        includes the writes audited against its comments, which are audited
+        against the comment. `since` is inclusive and `until` exclusive.
+        """
+        ...
+
+    def count_audit(
+        self,
+        *,
+        actor_id: str | None = None,
+        operation: str | None = None,
+        entity_id: str | None = None,
+        project_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> int:
+        """How many records `list_audit` would return unpaged."""
+        ...
 
 
 class WriteTxn(ReadView, Protocol):
