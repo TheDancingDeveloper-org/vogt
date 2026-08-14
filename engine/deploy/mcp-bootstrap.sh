@@ -8,7 +8,26 @@ readonly CADASTRE_URL="${CADASTRE_MCP_URL:-https://winrarhost.tailc7d3c.ts.net:1
 readonly CADASTRE_WRAPPER="/usr/local/bin/mydevenv2-cadastre-mcp"
 readonly CADASTRE_SRC="${MYDEVENV2_CADASTRE_SRC:-$HOME/Working/Active/cadastre}"
 
-readonly VOGT_URL="${VOGT_MCP_URL:-https://winrarhost.tailc7d3c.ts.net:18094/mcp}"
+# Where an agent in this session should reach Vogt, in the order of what
+# actually knows the answer:
+#
+#   1. `VOGT_MCP_URL`, an explicit override. Unchanged.
+#   2. The session's own `VOGT_URL`. `vogt session start` exports the endpoint
+#      the operator configured for clients (FR-E5), and it is the only thing
+#      here that knows which deployment this session belongs to. Ignoring it
+#      is what this script used to do.
+#   3. The front door on loopback. In the merged stack the engine is the only
+#      published port (NFR-D11) and the agent runs in this container, so
+#      loopback needs no DNS and no certificate — and it cannot go on naming
+#      a deployment after that deployment is retired, which is what the
+#      previous default did: `winrarhost:18094` is the core-only stack this
+#      product replaces, and `DEPLOYMENT.md` §9.5 turns it off.
+_vogt_endpoint="${VOGT_MCP_URL:-}"
+if [[ -z "$_vogt_endpoint" && -n "${VOGT_URL:-}" ]]; then
+    _vogt_endpoint="${VOGT_URL%/}/mcp"
+fi
+readonly VOGT_ENDPOINT="${_vogt_endpoint:-http://127.0.0.1:8910/mcp}"
+unset _vogt_endpoint
 readonly VOGT_WRAPPER="/usr/local/bin/mydevenv2-vogt-mcp"
 readonly VOGT_SRC="${MYDEVENV2_VOGT_SRC:-$HOME/Working/Active/apps/vogt}"
 
@@ -62,12 +81,12 @@ install_vogt_codex() {
     # Reconcile the URL rather than checking the key exists — same lesson the
     # cadastre :18081 -> :18092 move taught below.
     if codex mcp get vogt >/dev/null 2>&1; then
-        if codex mcp get vogt 2>/dev/null | grep -qF "$VOGT_URL"; then
+        if codex mcp get vogt 2>/dev/null | grep -qF "$VOGT_ENDPOINT"; then
             return 0
         fi
         codex mcp remove vogt >/dev/null 2>&1 || return 0
     fi
-    codex mcp add vogt --url "$VOGT_URL" \
+    codex mcp add vogt --url "$VOGT_ENDPOINT" \
         --bearer-token-env-var VOGT_HTTP_TOKEN >/dev/null
 }
 
@@ -91,8 +110,13 @@ install_vogt_opencode() {
         "$PWD/opencode.jsonc" 2>/dev/null; then
         return 0
     fi
+    # No `--env VOGT_URL`, unlike the cadastre registration below. This
+    # registration is written once and reused by every later session, so
+    # pinning a URL here freezes whichever deployment happened to be current
+    # when a client was first registered — and it would *override* the
+    # session's own `VOGT_URL`, which is the one value that knows where this
+    # session's Vogt is. The wrapper reads it at spawn instead.
     opencode mcp add vogt \
-        --env "VOGT_URL=${VOGT_URL%/mcp}" \
         -- "$VOGT_WRAPPER" >/dev/null
 }
 

@@ -8,7 +8,15 @@
 # takes the URL directly with --bearer-token-env-var and does not need this.
 set -euo pipefail
 
-readonly VOGT_URL_DEFAULT="https://winrarhost.tailc7d3c.ts.net:18094"
+# The front door on loopback, for the reason `mcp-bootstrap.sh` gives at
+# length: in the merged stack the engine is the only published port
+# (NFR-D11) and this wrapper runs inside that container, so loopback needs no
+# DNS and no certificate. It is only a fallback — a session exports its own
+# `VOGT_URL` and that wins — but a fallback naming a specific deployment
+# stops working the day that deployment is retired, and the one this named
+# (`winrarhost:18094`, the core-only stack) is retired by `DEPLOYMENT.md`
+# §9.5.
+readonly VOGT_URL_DEFAULT="http://127.0.0.1:8910"
 
 # Inside a coding session, the session already holds a credential of its own
 # — one Vogt minted for this session's actor so that what the agent writes

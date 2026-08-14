@@ -439,3 +439,65 @@ def test_a_tag_can_release_the_merged_image() -> None:
     assert 'cosign sign --yes "${STACK_IMAGE}@${DIGEST}"' in job, (
         "sign the digest, never a tag: a tag can be moved after signing"
     )
+
+
+# ── What a session's agent is told about where Vogt is (FR-E5) ────────────
+
+MCP_BOOTSTRAP = REPO_ROOT / "engine" / "deploy" / "mcp-bootstrap.sh"
+VOGT_MCP_WRAPPER = REPO_ROOT / "engine" / "deploy" / "vogt-mcp-auth.sh"
+RETIRED_CORE_STACK = "winrarhost.tailc7d3c.ts.net:18094"
+
+
+def test_a_sessions_own_endpoint_is_what_its_agent_is_registered_against() -> None:
+    """FR-E5, and a failure that was silent in both directions.
+
+    `vogt session start` exports `VOGT_URL` — the deployment this session
+    belongs to. The bootstrap that registers the MCP clients read only its
+    own `VOGT_MCP_URL`, so every session's agent was pointed at whatever the
+    script's default said, and the session's answer was discarded.
+    """
+    script = MCP_BOOTSTRAP.read_text(encoding="utf-8")
+    body = _without_comments(script)
+    assert "${VOGT_MCP_URL:-}" in body, "an explicit override still wins"
+    assert '_vogt_endpoint="${VOGT_URL%/}/mcp"' in body, (
+        "the session's own endpoint is the second thing consulted, before "
+        "any default: it is the only value here that knows which deployment "
+        "this session belongs to"
+    )
+    assert '--url "$VOGT_ENDPOINT"' in body, (
+        "and the registration that pins a URL pins that one"
+    )
+
+
+def test_no_vogt_registration_names_the_stack_this_product_replaces() -> None:
+    """The core-only stack is retired by `DEPLOYMENT.md` §9.5.
+
+    A default naming a specific deployment keeps working right up until that
+    deployment is turned off, and then fails as a handshake error inside an
+    agent — the furthest possible place from the file that caused it.
+    """
+    for path in (MCP_BOOTSTRAP, VOGT_MCP_WRAPPER):
+        body = _without_comments(path.read_text(encoding="utf-8"))
+        assert RETIRED_CORE_STACK not in body, (
+            f"{path.name} still defaults a Vogt endpoint to the core-only "
+            "stack this merge replaces"
+        )
+    assert "http://127.0.0.1:8910" in _without_comments(
+        VOGT_MCP_WRAPPER.read_text(encoding="utf-8")
+    ), "the fallback is the front door on loopback (NFR-D11)"
+
+
+def test_the_opencode_registration_does_not_freeze_an_endpoint() -> None:
+    """It is written once and reused by every later session.
+
+    Pinning `VOGT_URL` there overrode the session's own value — the exact
+    lesson the cadastre `:18081 -> :18092` move taught, which this file
+    already records in a comment for Codex and had not applied here.
+    """
+    body = _without_comments(MCP_BOOTSTRAP.read_text(encoding="utf-8"))
+    opencode = body[body.index("install_vogt_opencode()") :]
+    opencode = opencode[: opencode.index("\n}")]
+    assert "--env" not in opencode, (
+        "the wrapper reads VOGT_URL at spawn; a registration that pins one "
+        "freezes whichever deployment was current when it was written"
+    )
