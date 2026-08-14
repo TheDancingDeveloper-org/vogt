@@ -35,14 +35,15 @@
 //     re-derived (FR-U12's last sentence). The only thing this file
 //     persists is which columns and lanes the user collapsed.
 //
-//  4. **"Live" here means polling, and says so.** The engine's SSE stream
-//     (`/api/events`, consumed by `store.ts`) carries *engine* events —
-//     session created/renamed/killed and activity. Vogt's own feed
-//     (`events.list`, a cursor over `work.transitioned` and friends) is not
-//     reachable from this client: it is not in `vogtApi.ts`'s route table,
-//     and nothing proxies it into the SSE stream. So the board polls, shows
-//     how old the view is, and never calls itself current when it is not.
-//     See the report/commit for what would make it real.
+//  4. **Live, and honest about the difference.** The front door follows
+//     vogt-core's `events.list` cursor and republishes each change onto the
+//     engine's SSE stream as `vogt-changed` (FR-U10), so a transition
+//     somebody else made arrives here rather than waiting for a poll. The
+//     poll stays as the floor: a stream can drop, and a board that stopped
+//     refreshing because a socket died would be stale while looking
+//     current, which is the failure the requirement is actually about. The
+//     view still reports its own age and never calls itself current when it
+//     is not.
 //
 //  5. **Bounded reads.** `work.list` is paged and ordered oldest-first, so a
 //     truncated read is a *misleading* read on a board. The load pages until

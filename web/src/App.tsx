@@ -476,7 +476,12 @@ const App: Component = () => {
     } else if (path === "/tasks") {
       openTasksTab();
     } else if (path === "/assistant" || path.startsWith("/assistant/")) {
-      openAssistantTab();
+      // The same condition the drawer button carries. Without it a hand-typed
+      // `#/assistant` opened a tab against routes that answer 404 when no key
+      // is configured — FR-T6 says the assistant does not exist unless it is
+      // provisioned, and a tab that opens and then fails is a worse answer
+      // than no tab.
+      if (publicCfg()?.assistant_enabled) openAssistantTab();
     } else if (path === "/board") {
       openBoardTab();
     } else if (path === "/backlog") {
