@@ -49,6 +49,7 @@ export const ROUTES = {
   compliance: "/compliance",
   "audit.list": "/audit",
   notifications: "/notifications",
+  "events.list": "/events",
   "session.list": "/sessions",
   "session.start": "/sessions",
   "session.stop": "/sessions/stop",
@@ -128,7 +129,13 @@ export type TrustState = string;
 
 export interface FreshnessSummary {
   status: "fresh" | "partial" | "never_swept" | string;
-  swept_at?: string | null;
+  /** The oldest sweep any of this answer's evidence came from. */
+  oldest_relevant_sweep?: string | null;
+  age_seconds?: number | null;
+  /** Per-collector coverage: collector name to its state for this answer.
+   *  A collector that did not run is *in* this map saying so — which is the
+   *  difference between "nothing found" and "not collected". */
+  collectors?: Record<string, string>;
   detail?: string | null;
 }
 
@@ -154,6 +161,12 @@ export interface WorkItem {
 
 export interface RankedEntry {
   origin: string;
+  /** Set on observed subjects: what kind of thing was seen, and where. */
+  observation_kind?: string | null;
+  source_url?: string | null;
+  observed_at?: string | null;
+  /** The work item ref an observed subject was adopted as, if it was. */
+  adopted_as?: string | null;
   ref: string;
   title: string;
   kind: string;
@@ -169,7 +182,46 @@ export interface RankedEntry {
 
 export interface RankedView {
   items: RankedEntry[];
+  /** How many candidates were ranked to produce `items`, before the cut. */
+  total_considered?: number;
+  declared?: number;
+  observed?: number;
+  suppressed?: number;
+  scope?: string | null;
   freshness: FreshnessSummary;
+}
+
+export interface ScoreContribution {
+  input: string;
+  detail?: string | null;
+  value: number;
+  weight: number;
+  contribution: number;
+}
+
+export interface WhyResult {
+  ref: string;
+  title: string;
+  total: number;
+  contributions: ScoreContribution[];
+  /** Documented inputs this build cannot compute, each with the note saying
+   *  why. Their absence is not a zero, and rendering it as one would be the
+   *  explanation lying. */
+  inputs_not_yet_available: Record<string, string>;
+}
+
+export interface AuditRecord {
+  id: string;
+  txn_id: string;
+  revision: number;
+  actor_id: string;
+  actor_identity_ref: string;
+  operation: string;
+  entity_kind: string;
+  entity_id: string;
+  reason: string;
+  payload_digest: string;
+  at: string;
 }
 
 export interface WorkflowState {
@@ -181,8 +233,12 @@ export interface WorkflowState {
 export interface Workflow {
   kind: string;
   initial_state: string;
-  states: (WorkflowState | string)[];
-  transitions?: { from: string; to: string }[];
+  states: string[];
+  /** Adjacency, not edge pairs: `{open: ["in_progress", "wont_do"], …}`.
+   *  Read only as a hint — the server decides what is legal, and a client
+   *  that pre-empts it will eventually be wrong about a workflow somebody
+   *  edited (FR-U4). */
+  transitions?: Record<string, string[]>;
 }
 
 export interface SessionSummary {
@@ -222,8 +278,7 @@ export const backlog = (params: Record<string, unknown> = {}) =>
 export const bugs = (params: Record<string, unknown> = {}) =>
   call<RankedView>("bugs", params);
 
-export const why = (ref: string) =>
-  call<Record<string, unknown>>("why", { ref });
+export const why = (ref: string) => call<WhyResult>("why", { ref });
 
 export const listProjects = (params: Record<string, unknown> = {}) =>
   call<{ projects: { slug: string; name: string }[] }>("project.list", params);
@@ -232,11 +287,33 @@ export const listLabels = () =>
   call<{ labels: { name: string; color?: string }[] }>("label.list");
 
 export const listInitiatives = () =>
-  call<{ initiatives: { slug: string; title: string }[] }>("initiative.list");
+  // `id` is not decoration: work items carry `initiative_id`, so a swimlane
+  // cannot be labelled from the slug alone.
+  call<{ initiatives: { id: string; slug: string; title: string }[] }>(
+    "initiative.list",
+  );
 
 export const listActors = () =>
   call<{ actors: { identity_ref: string; display_name: string }[] }>(
     "actor.list",
+  );
+
+export const listAudit = (params: Record<string, unknown> = {}) =>
+  call<{ records: AuditRecord[] }>("audit.list", params);
+
+export const projectBrief = (slug: string) =>
+  call<Record<string, unknown> & { freshness: FreshnessSummary }>(
+    "project.brief",
+    { slug },
+  );
+
+export const listEvents = (after: number, limit = 100) =>
+  // The cursor feed behind FR-U10. A surface that polls this and reports how
+  // old its answer is tells the truth; one that re-lists and calls itself
+  // live does not.
+  call<{ events: Record<string, unknown>[]; next_cursor: number }>(
+    "events.list",
+    { after, limit },
   );
 
 export const listSessions = (params: Record<string, unknown> = {}) =>
@@ -256,6 +333,10 @@ export const commentWork = (ref: string, body: string, reason: string) =>
     { ref, body, reason },
     "POST",
   );
+
+export const updateWork = (
+  params: Record<string, unknown> & { ref: string; reason: string },
+) => call<WorkDetail>("work.update", params, "POST");
 
 export const createWork = (
   params: Record<string, unknown> & { reason: string },

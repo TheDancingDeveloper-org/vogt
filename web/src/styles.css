@@ -3359,41 +3359,8 @@ textarea {
   gap: 12px;
 }
 .wid-header {
-/* The Vogt board (FR-U4, U10–U13). Scoped to `.board` rather than to
-   `.vogt-surface`, so the shared Vogt surface class stays free for the other
-   M11 surfaces to define. Column widths are set inline from the workflow the
-   server published — the stylesheet does not know how many columns there are,
-   which is the point. */
-.vogt-surface.board {
-/* -- Vogt: the ranked backlog and bugs (FR-U6, FR-U14, FR-U15, NFR-S5) ----
- *
- * Every selector here is prefixed `vogt-backlog-` on purpose: the Vogt
- * surfaces are being built in parallel, and a shared `.vogt-*` vocabulary
- * would be three authors editing the same rules. The row grid is the one
- * load-bearing part — `--vogt-row-h` must match `ROW_HEIGHT` in
- * `Backlog.tsx`, because the virtualized list computes its window from it.
- */
-
-.vogt-backlog {
-  --vogt-row-h: 40px;
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-  padding: 16px;
-  gap: 12px;
-  padding: 12px 16px;
-  gap: 10px;
-  background: var(--bg);
-  overflow: hidden;
-}
-
-.board-header {
   display: flex;
   align-items: flex-start;
-.vogt-backlog-header {
-  display: flex;
-  align-items: center;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
@@ -3594,14 +3561,6 @@ textarea {
   flex-wrap: wrap;
 }
 .wid-session-meta {
-
-.board-header h2 {
-  margin: 0 0 6px;
-  font-size: 20px;
-  color: var(--fg);
-}
-
-.board-summary {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -3664,6 +3623,165 @@ textarea {
   border-color: var(--accent);
 }
 .wid-inline-btn {
+  align-self: flex-start;
+  font-size: 12px;
+}
+
+/* Freshness is shown even when it is fine, so "not collected" and "nothing
+   found" stop looking alike; `provisional` is the still-running case. */
+.wid-freshness {
+  margin: 0;
+  border-left: 3px solid var(--bd-strong);
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wid-freshness--fresh {
+  border-left-color: var(--activity-done);
+}
+.wid-freshness--partial,
+.wid-freshness--provisional {
+  border-left-color: var(--activity-running);
+  color: var(--activity-running);
+}
+.wid-freshness--never_swept,
+.wid-freshness--unknown {
+  border-left-color: var(--activity-errored);
+  color: var(--activity-errored);
+}
+.wid-collectors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.wid-missing {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.wid-table th,
+.wid-table td {
+  border-bottom: 1px solid var(--bd);
+  padding: 4px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+.wid-table th {
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+
+.wid-comment {
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wid-comment-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.wid-relations li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.wid-relations a {
+  color: var(--accent);
+}
+
+/* Every write is a form, because a reason has to be typed (FR-W1). */
+.wid-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--bd);
+  padding-top: 8px;
+}
+.wid-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wid-field input,
+.wid-field select,
+.wid-field textarea {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+}
+.wid-field textarea {
+  resize: vertical;
+}
+.wid-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wid-start {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* The Vogt board (FR-U4, U10–U13). Scoped to `.board` rather than to
+   `.vogt-surface`, so the shared Vogt surface class stays free for the other
+   M11 surfaces to define. Column widths are set inline from the workflow the
+   server published — the stylesheet does not know how many columns there are,
+   which is the point. */
+.vogt-surface.board {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 16px;
+  gap: 12px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.board-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.board-header h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+  color: var(--fg);
+}
+
+.board-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
 
 .board-note {
   margin: 6px 0 0;
@@ -3778,115 +3896,6 @@ textarea {
   padding: 8px 10px;
   border: 1px solid var(--bd);
   border-radius: 6px;
-
-.vogt-backlog-views {
-  display: flex;
-  gap: 4px;
-}
-
-.vogt-backlog-viewtab {
-  padding: 6px 14px;
-  border-radius: 6px;
-  color: var(--fg-muted);
-}
-
-.vogt-backlog-viewtab.active {
-  color: var(--fg);
-  border-color: var(--accent);
-  background: var(--bg-elev);
-}
-
-.vogt-backlog-header-actions {
-  display: flex;
-  gap: 8px;
-}
-
-/* Freshness is rendered even when it is good news: an empty answer and a
- * stale answer have to stop looking alike (FR-U2, FR-U17). */
-.vogt-backlog-freshness {
-  margin: 0;
-  padding: 6px 10px;
-  border: 1px solid var(--bd);
-  border-left-width: 3px;
-  border-radius: 4px;
-  font-size: 12px;
-  color: var(--fg-muted);
-  background: var(--bg-elev);
-}
-
-.vogt-backlog-freshness.fresh {
-  border-left-color: var(--activity-done);
-}
-
-.vogt-backlog-freshness.partial {
-  border-left-color: var(--activity-running);
-}
-
-.vogt-backlog-freshness.never_swept,
-.vogt-backlog-freshness.unknown {
-  border-left-color: var(--activity-waiting);
-}
-
-.vogt-backlog-collectors {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-left: 10px;
-}
-
-.vogt-backlog-collector {
-  border: 1px solid var(--bd);
-  border-radius: 10px;
-  padding: 0 6px;
-}
-
-.vogt-backlog-filters,
-.vogt-backlog-create,
-.vogt-backlog-bulk {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border: 1px solid var(--bd);
-  border-radius: 6px;
-  background: var(--bg-elev);
-  padding: 10px;
-}
-
-.vogt-backlog-filter-grid,
-.vogt-backlog-create-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.vogt-backlog-create-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.vogt-backlog-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.vogt-backlog-field > span {
-  font-size: 11px;
-  color: var(--fg-muted);
-}
-
-.vogt-backlog-field-wide {
-  grid-column: span 2;
-}
-
-.vogt-backlog-field select,
-.vogt-backlog-field input[type="text"],
-.vogt-backlog-savedrow input[type="text"] {
-  width: 100%;
-  min-width: 0;
-  padding: 6px 8px;
-  border: 1px solid var(--bd);
-  border-radius: 4px;
   background: var(--bg);
   color: var(--fg);
   font: inherit;
@@ -4182,6 +4191,347 @@ textarea {
 }
 
 .board-card-ref:hover {
+  background: transparent;
+  text-decoration: underline;
+}
+
+.board-pri {
+  padding: 0 5px;
+  border-radius: 8px;
+  border: 1px solid var(--bd-strong);
+  color: var(--fg-muted);
+}
+
+.board-pri--p0,
+.board-pri--p1 {
+  color: var(--activity-waiting);
+  border-color: var(--activity-waiting);
+}
+
+.board-kind {
+  margin-left: auto;
+  color: var(--fg-muted);
+}
+
+.board-card-title {
+  font-size: 13px;
+  color: var(--fg);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.board-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.board-card-unsaved {
+  color: var(--activity-running);
+}
+
+.board-card-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.board-label {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--bd);
+  color: var(--fg-muted);
+}
+
+/* Where the reason is collected, and where the refusal comes back: the same
+   slot in the same column the drop landed in. */
+.board-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--activity-running);
+  border-radius: 6px;
+  background: var(--bg-elev);
+}
+
+.board-composer-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.board-composer-head strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--fg);
+}
+
+.board-composer textarea {
+  width: 100%;
+  resize: vertical;
+  font-size: 12px;
+}
+
+.board-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.board-composer-hint {
+  font-size: 10px;
+  color: var(--fg-muted);
+}
+
+.board-refusal {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--activity-errored);
+  border-radius: 6px;
+  background: rgba(248, 81, 73, 0.08);
+}
+
+.board-refusal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--activity-errored);
+}
+
+.board-refusal-close {
+  border: none;
+  padding: 0 4px;
+  color: var(--fg-muted);
+  line-height: 1;
+}
+
+/* Vogt's own sentence, wrapped but never rewritten. */
+.board-refusal-message {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.board-refusal-detail {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.board-refusal button {
+  align-self: flex-start;
+  font-size: 12px;
+}
+
+/* Vogt unreachable: nothing below is current, and it must not look it. */
+.board--outage .board-scroll {
+  opacity: 0.65;
+}
+
+.board--outage .board-card {
+  cursor: default;
+}
+
+@media (max-width: 900px) {
+  .board-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .board-field--wide {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 600px) {
+  .vogt-surface.board {
+    padding: 10px;
+  }
+  .board-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .board-field--wide {
+    grid-column: span 1;
+  }
+}
+
+/* The rollback, made visible: a refused move puts the card back and the card
+   says so for a couple of seconds (FR-U12). */
+@keyframes board-bounce {
+  0% {
+    border-color: var(--activity-errored);
+    background: rgba(248, 81, 73, 0.22);
+  }
+  100% {
+    border-color: var(--bd);
+    background: var(--bg-elev);
+  }
+}
+
+.board-card--bounced {
+  animation: board-bounce 2.4s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-card--bounced {
+    animation: none;
+    border-color: var(--activity-errored);
+  }
+}
+
+/* -- Vogt: the ranked backlog and bugs (FR-U6, FR-U14, FR-U15, NFR-S5) ----
+ *
+ * Every selector here is prefixed `vogt-backlog-` on purpose: the Vogt
+ * surfaces are being built in parallel, and a shared `.vogt-*` vocabulary
+ * would be three authors editing the same rules. The row grid is the one
+ * load-bearing part — `--vogt-row-h` must match `ROW_HEIGHT` in
+ * `Backlog.tsx`, because the virtualized list computes its window from it.
+ */
+
+.vogt-backlog {
+  --vogt-row-h: 40px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px;
+  gap: 10px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.vogt-backlog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.vogt-backlog-views {
+  display: flex;
+  gap: 4px;
+}
+
+.vogt-backlog-viewtab {
+  padding: 6px 14px;
+  border-radius: 6px;
+  color: var(--fg-muted);
+}
+
+.vogt-backlog-viewtab.active {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: var(--bg-elev);
+}
+
+.vogt-backlog-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Freshness is rendered even when it is good news: an empty answer and a
+ * stale answer have to stop looking alike (FR-U2, FR-U17). */
+.vogt-backlog-freshness {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--bd);
+  border-left-width: 3px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: var(--bg-elev);
+}
+
+.vogt-backlog-freshness.fresh {
+  border-left-color: var(--activity-done);
+}
+
+.vogt-backlog-freshness.partial {
+  border-left-color: var(--activity-running);
+}
+
+.vogt-backlog-freshness.never_swept,
+.vogt-backlog-freshness.unknown {
+  border-left-color: var(--activity-waiting);
+}
+
+.vogt-backlog-collectors {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: 10px;
+}
+
+.vogt-backlog-collector {
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  padding: 0 6px;
+}
+
+.vogt-backlog-filters,
+.vogt-backlog-create,
+.vogt-backlog-bulk {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  padding: 10px;
+}
+
+.vogt-backlog-filter-grid,
+.vogt-backlog-create-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.vogt-backlog-create-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.vogt-backlog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.vogt-backlog-field > span {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.vogt-backlog-field-wide {
+  grid-column: span 2;
+}
+
+.vogt-backlog-field select,
+.vogt-backlog-field input[type="text"],
+.vogt-backlog-savedrow input[type="text"] {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
 .vogt-backlog-field select:disabled {
   opacity: 0.5;
 }
@@ -4410,35 +4760,6 @@ textarea {
   text-decoration: underline;
 }
 
-.board-pri {
-  padding: 0 5px;
-  border-radius: 8px;
-  border: 1px solid var(--bd-strong);
-  color: var(--fg-muted);
-}
-
-.board-pri--p0,
-.board-pri--p1 {
-  color: var(--activity-waiting);
-  border-color: var(--activity-waiting);
-}
-
-.board-kind {
-  margin-left: auto;
-  color: var(--fg-muted);
-}
-
-.board-card-title {
-  font-size: 13px;
-  color: var(--fg);
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.board-card-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
 .vogt-backlog-origin {
   flex: none;
   border: 1px solid var(--bd-strong);
@@ -4458,148 +4779,6 @@ textarea {
   color: var(--fg-muted);
 }
 
-.board-card-unsaved {
-  color: var(--activity-running);
-}
-
-.board-card-labels {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.board-label {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 8px;
-  border: 1px solid var(--bd);
-  color: var(--fg-muted);
-}
-
-/* Where the reason is collected, and where the refusal comes back: the same
-   slot in the same column the drop landed in. */
-.board-composer {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid var(--activity-running);
-  border-radius: 6px;
-  background: var(--bg-elev);
-}
-
-.board-composer-head {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: baseline;
-  font-size: 11px;
-  color: var(--fg-muted);
-}
-
-.board-composer-head strong {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--fg);
-}
-
-.board-composer textarea {
-  width: 100%;
-  resize: vertical;
-  font-size: 12px;
-}
-
-.board-composer-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.board-composer-hint {
-  font-size: 10px;
-  color: var(--fg-muted);
-}
-
-.board-refusal {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid var(--activity-errored);
-  border-radius: 6px;
-  background: rgba(248, 81, 73, 0.08);
-}
-
-.board-refusal-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--activity-errored);
-}
-
-.board-refusal-close {
-  border: none;
-  padding: 0 4px;
-  color: var(--fg-muted);
-  line-height: 1;
-}
-
-/* Vogt's own sentence, wrapped but never rewritten. */
-.board-refusal-message {
-  margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  color: var(--fg);
-  overflow-wrap: anywhere;
-}
-
-.board-refusal-detail {
-  margin: 0;
-  font-size: 11px;
-  color: var(--fg-muted);
-}
-
-.board-refusal button {
-  align-self: flex-start;
-  font-size: 12px;
-}
-
-/* Freshness is shown even when it is fine, so "not collected" and "nothing
-   found" stop looking alike; `provisional` is the still-running case. */
-.wid-freshness {
-  margin: 0;
-  border-left: 3px solid var(--bd-strong);
-  padding: 4px 8px;
-  font-size: 12px;
-  color: var(--fg-muted);
-}
-.wid-freshness--fresh {
-  border-left-color: var(--activity-done);
-}
-.wid-freshness--partial,
-.wid-freshness--provisional {
-  border-left-color: var(--activity-running);
-  color: var(--activity-running);
-}
-.wid-freshness--never_swept,
-.wid-freshness--unknown {
-  border-left-color: var(--activity-errored);
-  color: var(--activity-errored);
-}
-.wid-collectors {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.wid-missing {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.wid-table {
 .vogt-backlog-trust.trust-verified {
   color: var(--activity-done);
   border-color: var(--activity-done);
@@ -4670,135 +4849,6 @@ textarea {
   border-collapse: collapse;
   font-size: 12px;
 }
-.wid-table th,
-.wid-table td {
-  border-bottom: 1px solid var(--bd);
-  padding: 4px 6px;
-  text-align: left;
-  vertical-align: top;
-}
-.wid-table th {
-  color: var(--fg-muted);
-  font-weight: 500;
-}
-
-.wid-comment {
-  border: 1px solid var(--bd);
-  border-radius: 6px;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.wid-comment-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--fg-muted);
-}
-
-.wid-relations li {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  font-size: 12px;
-}
-.wid-relations a {
-  color: var(--accent);
-}
-
-/* Every write is a form, because a reason has to be typed (FR-W1). */
-.wid-form {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border-top: 1px solid var(--bd);
-  padding-top: 8px;
-}
-.wid-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--fg-muted);
-}
-.wid-field input,
-.wid-field select,
-.wid-field textarea {
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--bd);
-  border-radius: 6px;
-  padding: 6px 8px;
-  font: inherit;
-  font-size: 13px;
-}
-.wid-field textarea {
-  resize: vertical;
-}
-.wid-form-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.wid-start {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-/* Vogt unreachable: nothing below is current, and it must not look it. */
-.board--outage .board-scroll {
-  opacity: 0.65;
-}
-
-.board--outage .board-card {
-  cursor: default;
-}
-
-@media (max-width: 900px) {
-  .board-toolbar {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .board-field--wide {
-    grid-column: span 2;
-  }
-}
-
-@media (max-width: 600px) {
-  .vogt-surface.board {
-    padding: 10px;
-  }
-  .board-toolbar {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .board-field--wide {
-    grid-column: span 1;
-  }
-}
-
-/* The rollback, made visible: a refused move puts the card back and the card
-   says so for a couple of seconds (FR-U12). */
-@keyframes board-bounce {
-  0% {
-    border-color: var(--activity-errored);
-    background: rgba(248, 81, 73, 0.22);
-  }
-  100% {
-    border-color: var(--bd);
-    background: var(--bg-elev);
-  }
-}
-
-.board-card--bounced {
-  animation: board-bounce 2.4s ease-out;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .board-card--bounced {
-    animation: none;
-    border-color: var(--activity-errored);
 
 .vogt-backlog-explain-table th,
 .vogt-backlog-explain-table td {

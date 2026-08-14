@@ -43,6 +43,7 @@ import {
   why,
   type FreshnessSummary,
   type SessionSummary,
+  type WhyResult,
   type WorkDetail,
   type WorkItem,
 } from "./vogtApi";
@@ -131,33 +132,26 @@ function commentsOf(detail: WorkDetail): CommentView[] {
   return detail.comments as CommentView[];
 }
 
-function contributionsOf(raw: Record<string, unknown> | undefined): Contribution[] {
-  const rows = raw?.contributions;
-  if (!Array.isArray(rows)) return [];
-  return rows.map((row) => {
-    const record = (row ?? {}) as Record<string, unknown>;
-    return {
-      input: String(record.input ?? "unnamed input"),
-      detail: String(record.detail ?? ""),
-      value: Number(record.value ?? 0),
-      weight: Number(record.weight ?? 0),
-      contribution: Number(record.contribution ?? 0),
-    };
-  });
+// These three read `why` directly now that the client types it. They were
+// written defensively against `Record<string, unknown>` when it did not, and
+// the defence was hiding the mismatch rather than surviving it.
+
+function contributionsOf(raw: WhyResult | undefined): Contribution[] {
+  return (raw?.contributions ?? []).map((row) => ({
+    input: row.input,
+    detail: row.detail ?? "",
+    value: row.value,
+    weight: row.weight,
+    contribution: row.contribution,
+  }));
 }
 
-function missingInputsOf(raw: Record<string, unknown> | undefined): [string, string][] {
-  const missing = raw?.inputs_not_yet_available;
-  if (!missing || typeof missing !== "object") return [];
-  return Object.entries(missing as Record<string, unknown>).map(([name, note]) => [
-    name,
-    String(note),
-  ]);
+function missingInputsOf(raw: WhyResult | undefined): [string, string][] {
+  return Object.entries(raw?.inputs_not_yet_available ?? {});
 }
 
-function scoreOf(raw: Record<string, unknown> | undefined): number | null {
-  const total = raw?.total;
-  return typeof total === "number" ? total : null;
+function scoreOf(raw: WhyResult | undefined): number | null {
+  return raw?.total ?? null;
 }
 
 // -- the three honest renderings -------------------------------------------
@@ -505,7 +499,7 @@ const WorkItemDetail: Component<Props> = (props) => {
     return freshnessState()?.status || "unknown";
   });
 
-  const evidenceRaw = createMemo<Record<string, unknown> | undefined>(() => {
+  const evidenceRaw = createMemo<WhyResult | undefined>(() => {
     const loaded = evidence();
     return loaded && loaded.ok ? loaded.value : undefined;
   });
@@ -528,9 +522,7 @@ const WorkItemDetail: Component<Props> = (props) => {
   const workflowStates = createMemo<string[]>(() => {
     const flow = workflowForKind();
     if (!flow) return [];
-    return flow.states.map((state) =>
-      typeof state === "string" ? state : state.name,
-    );
+    return [...flow.states];
   });
 
   const [commentBody, setCommentBody] = createSignal("");

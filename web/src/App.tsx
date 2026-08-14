@@ -56,12 +56,15 @@ import {
   closeTab,
   focusTab,
   openAssistantTab,
+  openBacklogTab,
+  openBoardTab,
   openEditorTab,
   openGitTab,
   openGuiTab,
   openHistoryTab,
   openTasksTab,
   openTerminalTab,
+  openWorkItemTab,
   replaceTabs,
   snapshotTabs,
   tabsStore,
@@ -232,6 +235,22 @@ function tabActivityClass(tab: Tab): string | null {
   return s ? activityClass(s) : "idle";
 }
 
+/**
+ * Where each tab was last seen, including its query string.
+ *
+ * `pathFor` gives a tab's canonical path and nothing more, so activating a
+ * tab used to drop everything after the `?` — which on a Vogt surface is the
+ * filter set, the thing FR-U11 requires a link to restore. Held in memory
+ * rather than persisted: it describes this window's history, and a filter
+ * worth keeping across restarts is a saved filter, which is a different
+ * feature with a name.
+ */
+const lastUrlByTab = new Map<string, string>();
+
+function urlForTab(tab: Tab): string {
+  return lastUrlByTab.get(tab.id) ?? pathFor(tab);
+}
+
 function pathFor(tab: Tab): string {
   if (tab.kind === "terminal") return `/t/${tab.sessionId}`;
   if (tab.kind === "editor") return `/e/${encodeURIComponent(tab.path)}`;
@@ -247,7 +266,7 @@ function pathFor(tab: Tab): string {
 
 const App: Component = () => {
   const navigate = useNavigate();
-  const params = useParams<{ id?: string; path?: string }>();
+  const params = useParams<{ id?: string; path?: string; ref?: string }>();
   const location = useLocation();
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [mobileTabsOpen, setMobileTabsOpen] = createSignal(false);
@@ -390,6 +409,15 @@ const App: Component = () => {
     if (toastTimer !== undefined) window.clearTimeout(toastTimer);
   });
 
+  // Remember where the active tab is, so re-selecting it comes back here and
+  // not to the surface's default view.
+  createEffect(() => {
+    const active = tabsStore.tabs.find((tab) => tab.id === tabsStore.active);
+    if (!active) return;
+    const here = `${location.pathname}${location.search}`;
+    if (location.pathname === pathFor(active)) lastUrlByTab.set(active.id, here);
+  });
+
   // URL → tabs syncing. createEffect (not createMemo) — we want side effects,
   // not a memoised value.
   createEffect(() => {
@@ -414,6 +442,16 @@ const App: Component = () => {
       openTasksTab();
     } else if (path === "/assistant" || path.startsWith("/assistant/")) {
       openAssistantTab();
+    } else if (path === "/board") {
+      openBoardTab();
+    } else if (path === "/backlog") {
+      openBacklogTab();
+    } else if (path.startsWith("/w/") && params.ref) {
+      // Unlike a terminal id, a work item ref is not checked against a store
+      // first: the item lives in vogt-core, which this shell does not read,
+      // and the surface itself reports a ref that does not resolve. Refusing
+      // to open the tab would turn a typo into a blank screen.
+      openWorkItemTab(decodeURIComponent(params.ref));
     }
   });
 
@@ -736,7 +774,7 @@ const App: Component = () => {
       if (next) {
         e.preventDefault();
         focusTab(next.id);
-        navigate(pathFor(next));
+        navigate(urlForTab(next));
       }
     }
   };
@@ -962,7 +1000,7 @@ const App: Component = () => {
                   class="tab-main"
                   onClick={() => {
                     focusTab(t.id);
-                    navigate(pathFor(t));
+                    navigate(urlForTab(t));
                   }}
                 >
                   <Show when={t.kind === "terminal"}>
@@ -1184,7 +1222,7 @@ const App: Component = () => {
                     class="mobile-tab-main"
                     onClick={() => {
                       focusTab(tab.id);
-                      navigate(pathFor(tab));
+                      navigate(urlForTab(tab));
                       setMobileTabsOpen(false);
                     }}
                   >

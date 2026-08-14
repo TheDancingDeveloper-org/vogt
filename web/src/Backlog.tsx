@@ -675,7 +675,7 @@ const Backlog: Component<Props> = (props) => {
     for (const workflow of result.value.workflows) {
       if (kinds.size && !kinds.has(workflow.kind)) continue;
       for (const state of workflow.states) {
-        states.add(typeof state === "string" ? state : state.name);
+        states.add(state);
       }
     }
     return [...states].sort();
