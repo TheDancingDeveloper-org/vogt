@@ -20,11 +20,32 @@ LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 EXTERNAL = ("http://", "https://", "mailto:", "tel:")
 
 
+def in_nested_checkout(path: Path) -> bool:
+    """Is this file inside another checkout of something?
+
+    A git worktree — an agent's branch, a bisect, a release build — is a whole
+    second copy of the tree living under this one, and its documents are the
+    *other* branch's problem. Checking them here reports work in progress as
+    rot in `main`, and the first time it happened it reported eighteen broken
+    links that were already fixed on the branch being checked.
+
+    Detected by the marker rather than by name: a worktree's `.git` is a file,
+    a clone's is a directory, and a rule about either would miss the other.
+    """
+    for parent in path.parents:
+        if parent == REPO_ROOT:
+            return False
+        if (parent / ".git").exists():
+            return True
+    return False
+
+
 def markdown_files() -> list[Path]:
     return sorted(
         path
         for path in REPO_ROOT.rglob("*.md")
         if not SKIP_DIRS & set(path.relative_to(REPO_ROOT).parts)
+        and not in_nested_checkout(path)
     )
 
 
