@@ -194,7 +194,10 @@ async fn the_core_is_handed_the_core_token_not_the_callers() {
         .unwrap();
 
     let seen = log.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(seen.authorization.as_deref(), Some("Bearer core-token-abcdef1234567890"));
+    assert_eq!(
+        seen.authorization.as_deref(),
+        Some("Bearer core-token-abcdef1234567890")
+    );
     assert!(
         !seen.authorization.unwrap().contains(TEST_TOKEN),
         "the front-door token must not reach the core: it would only be refused, \
