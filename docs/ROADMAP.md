@@ -1086,7 +1086,22 @@ for the first time and all three had been asserted in prose:
    was failing — so the first green engine run was also the first APK the
    pipeline has ever built. It still points at `127.0.0.1:8910` and is still
    signed with Gradle's debug key.
-4. **A cancelled run was a check that never ran.** Path gating classifies a
+4. **The image jobs are rate-limited by Docker Hub, and that is now the only
+   thing standing between this branch and a fully green pipeline.** Every base
+   image in both Dockerfiles is pulled anonymously from Docker Hub; a
+   self-hosted runner is one IP for every build this repository makes; an
+   afternoon of merged-image builds exhausts the per-IP allowance, and the
+   next build fails at `FROM` with `429 Too Many Requests` before a line is
+   compiled. It failed twice, including a deliberate retry.
+
+   `build.yml` and `release.yml` now log in when a `DOCKERHUB_USERNAME` /
+   `DOCKERHUB_TOKEN` secret exists and emit a notice when it does not, so the
+   failure names itself. **Adding the secret is a decision for the operator,
+   and so is the alternative**: mirroring the bases into GHCR, which every job
+   already authenticates to, and which would remove the dependency entirely
+   at the cost of moving the digests this repository pins.
+
+5. **A cancelled run was a check that never ran.** Path gating classifies a
    push by `before..sha`, so each commit is examined by exactly one run — and
    `cancel-in-progress` was true for every trigger, so pushing twice within a
    few minutes cancelled the first run and the next run's range began after
