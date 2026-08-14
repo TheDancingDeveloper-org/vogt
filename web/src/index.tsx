@@ -88,6 +88,8 @@ render(
         <Route path="/tasks" component={App} />
         <Route path="/board" component={App} />
         <Route path="/backlog" component={App} />
+        <Route path="/projects" component={App} />
+        <Route path="/audit" component={App} />
         <Route path="/w/:ref" component={App} />
         <Route path="/assistant" component={App} />
         <Route path="/assistant/*path" component={App} />

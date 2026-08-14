@@ -15,10 +15,12 @@ import Editor from "./Editor";
 import EditorWorkspace from "./EditorWorkspace";
 import AgentTasks from "./AgentTasks";
 import Assistant from "./Assistant";
+import AuditBrowser from "./AuditBrowser";
 import Backlog from "./Backlog";
 import Board from "./Board";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
+import Projects from "./Projects";
 import WorkItemDetail from "./WorkItemDetail";
 import History from "./History";
 import KeyboardShortcuts from "./KeyboardShortcuts";
@@ -58,6 +60,8 @@ import {
   openAssistantTab,
   openBacklogTab,
   openBoardTab,
+  openAuditTab,
+  openProjectsTab,
   openEditorTab,
   openGitTab,
   openGuiTab,
@@ -259,6 +263,8 @@ function pathFor(tab: Tab): string {
   if (tab.kind === "history") return "/history";
   if (tab.kind === "board") return "/board";
   if (tab.kind === "backlog") return "/backlog";
+  if (tab.kind === "projects") return "/projects";
+  if (tab.kind === "audit") return "/audit";
   if (tab.kind === "workitem") return `/w/${encodeURIComponent(tab.ref)}`;
   if (tab.kind === "assistant") return "/assistant";
   return "/tasks";
@@ -446,6 +452,10 @@ const App: Component = () => {
       openBoardTab();
     } else if (path === "/backlog") {
       openBacklogTab();
+    } else if (path === "/projects") {
+      openProjectsTab();
+    } else if (path === "/audit") {
+      openAuditTab();
     } else if (path.startsWith("/w/") && params.ref) {
       // Unlike a terminal id, a work item ref is not checked against a store
       // first: the item lives in vogt-core, which this shell does not read,
@@ -1163,6 +1173,16 @@ const App: Component = () => {
                         onError={(msg) => showToast(msg, { kind: "error" })}
                       />
                     )}
+                  </Show>
+                  <Show when={t.kind === "projects"}>
+                    <Projects
+                      onError={(msg) => showToast(msg, { kind: "error" })}
+                    />
+                  </Show>
+                  <Show when={t.kind === "audit"}>
+                    <AuditBrowser
+                      onError={(msg) => showToast(msg, { kind: "error" })}
+                    />
                   </Show>
                   <Show when={t.kind === "tasks"}>
                     <AgentTasks

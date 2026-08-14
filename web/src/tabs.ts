@@ -13,6 +13,8 @@ export type Tab =
   // ordinary case when one blocks the other.
   | { id: string; kind: "board"; label: string }
   | { id: string; kind: "backlog"; label: string }
+  | { id: string; kind: "projects"; label: string }
+  | { id: string; kind: "audit"; label: string }
   | { id: string; kind: "workitem"; ref: string; label: string };
 
 export interface TabsStateSnapshot {
@@ -72,6 +74,8 @@ function normalizeTab(value: unknown): Tab | null {
     case "assistant":
     case "board":
     case "backlog":
+    case "projects":
+    case "audit":
       if (typeof raw.label !== "string") return null;
       return {
         id: raw.id,
@@ -340,6 +344,16 @@ export function openBacklogTab(): Tab {
   return openSingletonTab("backlog", "backlog", "Backlog");
 }
 
+/** Per-project pages and the drift inbox they carry. */
+export function openProjectsTab(): Tab {
+  return openSingletonTab("projects", "projects", "Projects");
+}
+
+/** The audit browser: who wrote what, and the reason they gave. */
+export function openAuditTab(): Tab {
+  return openSingletonTab("audit", "audit", "Audit");
+}
+
 /** One work item, addressable so the tab survives a reload (FR-U11). */
 export function openWorkItemTab(ref: string): Tab {
   const id = `workitem:${ref}`;
@@ -363,7 +377,7 @@ export function openWorkItemTab(ref: string): Tab {
 /** Shared by the tabs there is exactly one of. */
 function openSingletonTab(
   id: string,
-  kind: "board" | "backlog",
+  kind: "board" | "backlog" | "projects" | "audit",
   label: string,
 ): Tab {
   const existing = store.tabs.find((t) => t.id === id);
