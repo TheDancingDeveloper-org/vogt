@@ -1,8 +1,18 @@
 # Vogt — Agent Guidance
 
-Design-phase project: a standalone, self-hosted, open-source product
-development environment (Jira-like scope) built AI-native. Python is the
-implementation language.
+A standalone, self-hosted, open-source product development environment
+(Jira-like scope) built AI-native. Two implementation languages, deliberately:
+**Python** for the domain — entities, workflow, ranking, storage, the operation
+registry and every adapter generated from it — and **Rust** for the session
+engine merged in from MyDevEnv2, which runs PTYs, streams them over WebSocket
+and serves the PWA. The split is not accidental and is argued in
+`docs/MERGE_MYDEVENV2.md` §4: porting 16.5k lines of audited domain logic to
+Rust, or a PTY fan-out engine to Python, both cost more than a narrow interface
+between two processes does.
+
+Nothing about that changed the Python core. It is still the authority for the
+operation registry, and an operation that does not exist there does not exist
+on any surface.
 
 ## Where things live
 
@@ -32,8 +42,37 @@ implementation language.
 - `docs/CONFIG.md` and `config.example.toml` are **generated** from
   `src/vogt/config.py` by `scripts/gen_config_docs.py`. Edit the schema, run
   the script; CI fails on drift (NFR-Q4).
+- `engine/` — the Rust session engine, merged from MyDevEnv2 with its history.
+  It is **its own Cargo workspace** (`engine/Cargo.toml`, members `server` and
+  `contract`); the repository root is not one, so `cargo` run from the root
+  finds no manifest. `engine/server` owns PTY lifecycle, WebSocket attach, SSE,
+  the workspace-scoped file and git APIs and the assistant loop;
+  `engine/contract` is the shared wire DTOs the PWA mirrors in TypeScript. It
+  carries its own `Dockerfile`, `deploy/` and `.woodpecker/` because it
+  publishes its own image to its own Komodo stack, which is why those live
+  under `engine/` rather than joining the root ones. Read `engine/AGENTS.md`
+  before changing anything in there.
+- `web/` — the Solid/Vite PWA, and the product's GUI going forward. It is baked
+  into the Rust binary at compile time (`engine/server/src/assets.rs` embeds
+  `../../web/dist/`), so a `cargo build` without a fresh `pnpm build` ships a
+  stale frontend — the single most common way to "fix" a UI bug and see
+  nothing change. `src/vogt/gui/static/` is the older buildless GUI and stays
+  until the Solid surfaces reach parity.
+- `mobile/` — the Capacitor 8 Android shell. Its WebView loads the deployed PWA
+  directly, so UI changes ship without an APK rebuild; only native plumbing
+  (plugins, manifest, FCM) needs one.
+- `docs/engine/` — MyDevEnv2's own documents (`API_CONTRACT.md`, `ASSISTANT.md`,
+  `AGENT_TASKS.md`, `PLAN.md`, `INTENT.md`, `TOOLING.md`, `USER_GUIDE.md`,
+  `uplift.md`). They describe the engine only. Vogt's numbered baseline is
+  still `docs/REQUIREMENTS.md`, and `docs/engine/uplift.md` is the engine's
+  backlog, not the product's — `docs/ROADMAP.md` is that.
+- The archived GPUI desktop client was **not** carried across; the MyDevEnv2
+  repo remains its archive. A reference to `client/` anywhere in this tree is a
+  reference to something that is not here.
 
 ## Working on the code
+
+The Python core, from the repository root:
 
 ```bash
 uv sync                       # dev environment
@@ -41,6 +80,22 @@ uv run pytest                 # tests + coverage gate (>=80%)
 uv run mypy                   # strict, over src/, tests/ and scripts/
 uv run ruff check . && uv run ruff format --check .
 uv run python scripts/check_docs.py
+```
+
+The engine and the PWA, each from its own directory — there is no root-level
+runner that drives all three, and inventing one would hide which toolchain
+failed:
+
+```bash
+cd engine                     # Cargo workspace root
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test --all              # server unit + integration (HTTP + WS)
+
+cd ../web
+pnpm install
+pnpm typecheck
+pnpm build                    # refresh web/dist/ before a release cargo build
 ```
 
 Adding an operation means writing the handler in `application/services/`,
@@ -112,6 +167,15 @@ Actions. Four things are easy to get wrong here:
 Workspace-level Komodo/Infisical/runner rules live in `~/Working/AGENTS.md`
 and are not restated here; `docs/DEPLOYMENT.md` §6 records only the Node B
 failure modes that specifically bite this stack.
+
+**The merge did not merge the deployments.** One repository now feeds two
+pipelines and separate stacks: this one (GitHub Actions → GHCR →
+`personal/vogt`), and the engine's (`engine/.woodpecker/server.yml` →
+Woodpecker → Forgejo registry → `prod-mydevenv2` and `dev-mydevenv2`). Both are
+Komodo-from-`indexarr/ops` on Node B, so the rules above apply to both.
+Collapsing them into one stack is planned, not done —
+`docs/MERGE_MYDEVENV2.md` §10 — so do not assume a change under `engine/`
+reaches production by tagging this repo, or the reverse.
 
 ### If this repository ever goes public
 

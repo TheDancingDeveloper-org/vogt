@@ -22,7 +22,7 @@ first, auto-deploy to the dev stack, get validated, then merge/fast-forward
 to `main` to ship to prod. `main` remains the only branch that deploys to
 prod.
 
-**CI (`.woodpecker/server.yml`):**
+**CI (`engine/.woodpecker/server.yml`):**
 - fmt/clippy/test/web-typecheck already run on push + PR; no change needed.
 - Add a push trigger for `branch: dev` alongside the existing `main` trigger.
 - `build-and-push`: on `dev`, tag `:dev` + `:dev-<sha>` instead of `:latest`
@@ -59,20 +59,20 @@ cloned from the prod compose with:
   resource contention later argues otherwise.
 - New Caddy site block on Node B: `mydevenv2-dev.sprooty.com -> localhost:8911`.
 
-**Status:** done. `.woodpecker/server.yml` has the `dev` push trigger,
+**Status:** done. `engine/.woodpecker/server.yml` has the `dev` push trigger,
 `build-and-push-dev` (`:dev` / `:dev-<sha>` tags), and `komodo-deploy-dev`
 (targets `dev-mydevenv2` / `personal/mydevenv2-dev`) steps, all gated on
 `branch: dev` and additive to the existing `main` steps, which are
 unchanged. `personal/mydevenv2-dev/docker-compose.yml` lives on ops's
 **`main`** branch, not a mirrored `dev` branch — an ops `dev` branch was
 tried first and abandoned because `scripts/komodo-deploy.sh` clones ops's
-default branch unconditionally; see `deploy/KOMODO.md` "Dev stack" for why.
+default branch unconditionally; see `engine/deploy/KOMODO.md` "Dev stack" for why.
 The `dev` branch exists in `MyDevEnv2` (only); `personal/mydevenv2-dev/docker-compose.yml`
 is committed and pushed to ops `main`; the `dev-mydevenv2` Komodo stack
 exists (`git_account` set, `branch: main`, fetches `ops` cleanly);
 `MYDEVENV2_DEV_TOKEN` is minted and stored in Infisical; the Caddy site
 block for `mydevenv2-dev.sprooty.com -> localhost:8911` is live and issuing
-certs correctly. See MyDevEnv2's `deploy/KOMODO.md` "Dev stack (dev-mydevenv2)"
+certs correctly. See `engine/deploy/KOMODO.md` "Dev stack (dev-mydevenv2)"
 for the full picture, including a disk-layout fix folded into this rollout:
 dev's `home`/`tailscale`/`tmp` now live on a dedicated disk (`/mnt/sdg`, see
 root `AGENTS.md` "Node B Disk Layout") instead of prod's root-disk-backed
@@ -101,7 +101,7 @@ the dev stack, before relying on side-by-side dev/prod APKs for testing.
 
 ## Stack / Ops
 
-1. **Bearer-token risk boundary** (`server/src/auth.rs`, `deploy/docker-compose.yml`)
+1. **Bearer-token risk boundary** (`engine/server/src/auth.rs`, `engine/deploy/docker-compose.yml`)
    Repo-side audit logging, per-token mutation rate limits, and scoped token
    capabilities now exist. Production now has provisioned read-only and
    interactive scoped tokens, and the live stack is running with
@@ -130,8 +130,8 @@ the dev stack, before relying on side-by-side dev/prod APKs for testing.
 
 3. **Voice conversational interaction (new surface)** — **implemented, not
    yet validated live**
-   Landed as the conversational assistant (see `docs/ASSISTANT.md`):
-   `server/src/assistant.rs` + `assistant_api.rs` (OpenAI-compatible tool-use
+   Landed as the conversational assistant (see `docs/engine/ASSISTANT.md`):
+   `engine/server/src/assistant.rs` + `assistant_api.rs` (OpenAI-compatible tool-use
    loop against The Claw Bay proxy, `MYDEVENV2_ASSISTANT_*` config keys, new
    `assistant` token capability, confirmation-gated `send_input`),
    `web/src/Assistant.tsx` tab (transcript, TTS via `speechSynthesis`,
@@ -229,7 +229,7 @@ manual steps left below.
    live clients onto scoped tokens and whether the primary token keeps full
    Docker-adjacent access long term.
 8. Voice conversational interaction — implemented (assistant tab + voice, see
-   Mobile item 3 and `docs/ASSISTANT.md`); needs `MYDEVENV2_ASSISTANT_API_KEY`
+   Mobile item 3 and `docs/engine/ASSISTANT.md`); needs `MYDEVENV2_ASSISTANT_API_KEY`
    provisioned on the dev stack and live validation (browser first, then dev
    APK mic flow).
 9. Cross-agent orchestration (scope after 5-6, separate design pass) — not

@@ -1,10 +1,10 @@
 # MyDevEnv2 — Tooling Baseline
 
-Captured from review of `MyDevEnv/Dockerfile.server` (v1). The pod provides a neutral development baseline for builds under `~/Working/Active/apps/`. Codex and Claude are not installed during prod container bootstrap; the dev image (`INSTALL_AI_CLIENTS=true`, see `deploy/KOMODO.md` "Dev stack") bakes both in for pre-prod trial. In that trusted dev pod, the system `codex` command always uses `--dangerously-bypass-approvals-and-sandbox`, giving it normal container-user access across all of `/home/sprooty/Working` rather than restricting writes to the repository it was launched from. The `opencode` CLI is bundled in every image; other AI clients remain user-managed on prod.
+Captured from review of `MyDevEnv/Dockerfile.server` (v1). The pod provides a neutral development baseline for builds under `~/Working/Active/apps/`. Codex and Claude are not installed during prod container bootstrap; the dev image (`INSTALL_AI_CLIENTS=true`, see `engine/deploy/KOMODO.md` "Dev stack") bakes both in for pre-prod trial. In that trusted dev pod, the system `codex` command always uses `--dangerously-bypass-approvals-and-sandbox`, giving it normal container-user access across all of `/home/sprooty/Working` rather than restricting writes to the repository it was launched from. The `opencode` CLI is bundled in every image; other AI clients remain user-managed on prod.
 
 This file is the source of truth for what tooling the runtime image is meant to
 carry. Keep deploy shape, Komodo environment, and rollout/recovery steps in
-`deploy/KOMODO.md` instead of repeating them here.
+`engine/deploy/KOMODO.md` instead of repeating them here.
 
 ## Base OS
 
@@ -81,7 +81,7 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
 
 - Docker CLI + compose plugin (installed in the image, but daemon access is
   deployment-selected: the base stack is socketless and the direct DooD mount
-  lives in `deploy/docker-compose.docker-socket.yml`)
+  lives in `engine/deploy/docker-compose.docker-socket.yml`)
 - `gh` (GitHub CLI)
 - `rclone`
 - `infisical` (CLI for secret retrieval; already used in CI and at runtime)
@@ -96,7 +96,7 @@ Notably **not** carried over from v1: `tmux` (no longer needed — server-owned 
 - `github-mcp-server` (official GitHub MCP server binary, latest at build time
   from GitHub releases, installed to `/usr/local/bin`; needs
   `GITHUB_PERSONAL_ACCESS_TOKEN` set when a client registers it — see
-  README.md "GitHub MCP server for agents")
+  `engine/README.md` "GitHub MCP server for agents")
 
 ## Auth keys / secrets needed at pod startup
 
@@ -189,9 +189,11 @@ socket. The compose `group_add` value must match `stat -c %g
 
 ## Native desktop client tooling
 
-The native client in `client/` was deprecated on July 7, 2026. Its old GPUI /
-FluentGUI toolchain notes are retained only so the archived code can still be
-understood locally if needed.
+The native client was deprecated on July 7, 2026 and was **not** carried into
+this repository by the merge — its `client/` tree stayed behind in the
+MyDevEnv2 repo, which is now its archive. Its old GPUI / FluentGUI toolchain
+notes are retained here only so the archived code can still be understood if
+someone goes back for it.
 
 There is no active CI, release, or supported runtime target for that client.
 Do not plan new work around the old Windows release path or the removed

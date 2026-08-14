@@ -339,7 +339,7 @@ scrollback_bytes = 4194304  # 4 MiB
 
 ## Getting Help
 
-- **Documentation:** `README.md` in the repository
+- **Documentation:** `engine/README.md` in the Vogt repository
 - **Issues:** Report bugs on Forgejo/GitHub
 - **Logs:** Browser console (F12) for client errors
 - **Server logs:** Check server output for backend issues
