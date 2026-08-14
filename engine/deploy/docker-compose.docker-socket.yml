@@ -1,0 +1,18 @@
+# Direct host Docker socket access for trusted personal deployments.
+#
+# Add this file alongside `docker-compose.yml` in Komodo when the dev pod needs
+# DooD semantics (`docker`, `docker compose`, test containers, etc.). This is
+# intentionally separate from the base stack so Docker access is opt-in.
+
+services:
+  mydevenv2:
+    # Host docker.sock is owned by a host-specific group. Add that GID so
+    # `docker` works in normal sessions without sudo; override if the host changes.
+    group_add:
+      - "${DOCKER_SOCKET_GID:-984}"
+
+    volumes:
+      # DooD: containers launched from inside the pod hit the host daemon.
+      # SECURITY: any shell or workflow with Docker access effectively has
+      # host-level container control. Use only on trusted personal deployments.
+      - /var/run/docker.sock:/var/run/docker.sock

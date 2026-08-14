@@ -63,6 +63,40 @@ def test_unknown_command_is_a_usage_error() -> None:
     assert run(["nope"]).exit_code == EXIT_USAGE
 
 
+def test_every_command_builds_its_parser() -> None:
+    """The parser is built for the whole registry, so one bad flag is fatal.
+
+    `serve --no-auth` was exactly that. `BooleanOptionalAction` refuses an
+    option name beginning with `--no-` from Python 3.13 onward, and it refuses
+    it while the parser is being *constructed* — so on a new enough
+    interpreter every `vogt` invocation, including `--help`, raised
+    `ValueError` before reading its arguments. The suite ran on 3.11 and saw
+    none of it; `requires-python` says 3.11 *or later*.
+
+    Asserted against the built parser rather than one command's behaviour,
+    because the failure was never about `--no-auth` in particular: any field a
+    future operation phrases as a negative brings the same crash back.
+    """
+    from vogt.adapters.cli.main import build_parser
+    from vogt.registry import default_registry
+
+    parser = build_parser(default_registry())
+    assert parser.prog == "vogt"
+
+
+def test_a_negative_flag_is_a_plain_switch() -> None:
+    """`--no-auth` sets it; there is no `--no-no-auth` to unset it."""
+    from vogt.adapters.cli.main import build_parser
+    from vogt.registry import default_registry
+
+    parser = build_parser(default_registry())
+    serve = ["serve", "--host", "127.0.0.1", "--port", "8000"]
+    assert parser.parse_args([*serve, "--no-auth"]).no_auth is True
+    assert parser.parse_args(serve).no_auth is None
+    # `--read-only` is not phrased as a negative, so it keeps both forms.
+    assert parser.parse_args([*serve, "--no-read-only"]).read_only is False
+
+
 def test_choices_come_from_the_model(instance: AppContext) -> None:
     result = run(
         shlex.split(

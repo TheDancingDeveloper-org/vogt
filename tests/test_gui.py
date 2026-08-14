@@ -134,15 +134,52 @@ def registered_paths() -> set[str]:
     }
 
 
+#: The one `/api/...` literal in the GUI that is not an operation.
+#:
+#: It is where the merged product's front door mounts this core (NFR-D11): the
+#: engine publishes the only port and proxies `/api/vogt` to `/api` here, so a
+#: bundle served at `/ui-legacy` asks for `/api/vogt/backlog` and the core
+#: still sees `/api/backlog`. Named here rather than pattern-matched, because
+#: the exemption has to be as narrow as the thing it excuses — a second
+#: unregistered path still fails.
+FRONT_DOOR_MOUNT = "/api/vogt"
+
+
 def test_every_url_in_the_gui_resolves_to_a_registered_operation() -> None:
     """Read the shipped source; resolve what it actually asks for."""
     source = code(APP_JS)
     referenced = set(re.findall(r'"(/api/[A-Za-z0-9/_.-]*)"', source))
     assert referenced, "the parity check found no API paths, so it proves nothing"
 
-    unknown = referenced - registered_paths()
+    unknown = referenced - registered_paths() - {FRONT_DOOR_MOUNT}
     assert not unknown, (
         f"the GUI calls {sorted(unknown)}, which no registered operation serves"
+    )
+
+
+def test_the_front_door_mount_is_only_ever_a_prefix() -> None:
+    """The same bundle serves two mounts, and neither is configured.
+
+    Served by the core at `/ui`, this GUI asks `/api`. Served through the
+    engine at `/ui-legacy`, it asks `/api/vogt` and the engine strips the
+    difference back off (NFR-D11, FR-U9). What makes that safe is that the
+    route table never learns about it: the prefix is chosen from
+    `window.location`, applied once in `call()`, and every route stays a
+    registry path the test above can resolve.
+    """
+    source = code(APP_JS)
+    assert 'const FRONT_DOOR_GUI = "/ui-legacy"' in source
+    assert f'const FRONT_DOOR_API = "{FRONT_DOOR_MOUNT}"' in source
+    assert "window.location.pathname.startsWith(FRONT_DOOR_GUI)" in source, (
+        "the prefix must be derived from where the page was served — a "
+        "configured one is a setting the wrong deployment can be given"
+    )
+    assert "API_ROOT + path.slice(API_BASE.length)" in source, (
+        "call() is the one place the mount point is applied"
+    )
+    assert len(re.findall(re.escape(FRONT_DOOR_MOUNT), source)) == 1, (
+        "the front-door mount appears once, as a constant; a second use is a "
+        "route that would not resolve against the registry"
     )
 
 

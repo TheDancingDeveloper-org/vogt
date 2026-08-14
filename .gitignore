@@ -21,6 +21,21 @@ htmlcov/
 data/
 backups/
 
+# Engine (Rust)
+target/
+**/*.rs.bk
+
+# Web / mobile
+node_modules/
+web/dist/
+mobile/android/app/build/
+mobile/android/build/
+mobile/android/.gradle/
+mobile/dist/
+
+# Agent worktrees (this repo's own, not a product artifact)
+.claude/worktrees/
+
 # Editor / OS
 .DS_Store
 *.swp

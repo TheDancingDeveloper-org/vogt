@@ -46,6 +46,61 @@ Split-mode (separate MCP process/port) is not a v1 topology. The door stays
 open — transports are thin adapters — but it is not built, documented, or
 defaulted.
 
+### 1.1 The merged product: two processes, still one port *(r9)*
+
+From M9 the repository also contains the session engine (`engine/`, merged
+from MyDevEnv2's `dev` branch at `2214a7d`), and the deployed shape gains a
+second process — not a second port (NFR-D11):
+
+```
+one container, one published port
+  ├── engine (Rust/Axum) ← the only listener
+  │     ├── /                     the PWA
+  │     ├── /api/sessions|files|git|assistant|…   its own surface
+  │     ├── /api/sessions/{id}/attach             WebSocket
+  │     ├── /api/vogt/...   → core /api/...   (core token injected)
+  │     ├── /mcp            → core /mcp       (caller's own token)
+  │     ├── /ui-legacy/...  → core /ui/...    (FR-U9)
+  │     └── /healthz, /readyz  ← aggregate, incl. a probe of the core
+  └── vogt-core (`vogt serve`) ← loopback only, never published
+```
+
+Everything §1 says about the core is still true of the core; what changed
+is which process the world reaches first. The engine fronts rather than the
+core because it already embeds and serves the PWA and already speaks
+WebSocket on the hottest path there is — terminal I/O — and proxying that
+through FastAPI would add a fragile hop to it.
+
+Three properties are load-bearing, and each is asserted in
+`engine/server/tests/vogt_core.rs`:
+
+- **The core token never leaves the process.** A caller presents a
+  *front-door* token; the engine swaps in the core token it was configured
+  with, so Vogt's audit rows name a real actor rather than "the proxy"
+  (FR-S9). `VOGT_CORE_TOKEN_FILE` is the preferred form and takes
+  precedence over `VOGT_CORE_TOKEN` — a deployment that brokered the value
+  into a file meant to keep it out of the environment.
+- **`/mcp` is a pass-through, deliberately.** An MCP client already holds a
+  core token bound to an actor (`vogt token issue`) — that is how agents in
+  a MyDevEnv2 container reach Vogt today, §7 — so rewriting its credential
+  would replace a real actor with a shared one. The M9 front door injects
+  one configured token on `/api/vogt` only; per-token actor mapping and the
+  per-session tokens of FR-S10 arrive in M10.
+- **An absent core does not make the container unready.** `/readyz` reports
+  the core's state in full — including its applied schema version, read
+  from the core's own `/health/ready` — and excludes it from the verdict,
+  because restarting the engine cannot revive the core and would kill every
+  live PTY doing it (FR-E9). The Vogt routes then answer 503 naming the
+  reason rather than an empty result (FR-U21). Do not "fix" a red
+  `vogt_core` check by making it fatal; fix the core.
+
+A wildcard route segment matches at least one character, so each proxied
+prefix is registered in three shapes — bare, trailing-slash, and wildcard.
+Missing the middle one sent `/ui-legacy/` to the PWA's catch-all, which
+answered with the engine's "web bundle not present" placeholder: a 404 that
+mentions neither Vogt nor the proxy, and reads like a front-door
+misconfiguration rather than a routing miss.
+
 ## 2. Topologies
 
 ### 2.1 Topology A — local single-user (dev box / laptop)
@@ -517,13 +572,15 @@ those are different problems: an LLM running in a MyDevEnv2 container has no
 way to learn Vogt exists, and would have no credential if it did.
 
 The precedent is cadastre, reached from the same containers today. Reading
-`MyDevEnv2/deploy/mcp-bootstrap.sh` — invoked from `agent-auth.sh`, so every
-`mydevenv2-agent-auth run|check|shell` re-runs it idempotently — settles two
-questions that looked open:
+`engine/deploy/mcp-bootstrap.sh` — invoked from `engine/deploy/agent-auth.sh`,
+so every `mydevenv2-agent-auth run|check|shell` re-runs it idempotently —
+settles two questions that looked open. (Those paths were
+`MyDevEnv2/deploy/…` when this section was written; the merge brought that
+tree into this repository under `engine/`.)
 
 - **An index is used where one exists, and is not required where one does
   not.** Cadastre's bridge is installed at *build time from PyPI*
-  (`pip3 install "cadastre[mcp-client]"` in MyDevEnv2's `Dockerfile`), which
+  (`pip3 install "cadastre[mcp-client]"` in `engine/Dockerfile`), which
   became possible when cadastre went public. The earlier mechanism — an
   editable install from the mounted workspace, in
   `mcp-bootstrap.sh`'s `install_bridge` — is deliberately retained behind a
@@ -545,23 +602,101 @@ questions that looked open:
   it is why `--client bridge` is not merely a fallback for clients that
   cannot speak HTTP.
 
-**The five prerequisites.** None require a change to Vogt itself; four land
-in `MyDevEnv2` and one in the estate's `AGENTS.md`. They are stated here
+**The five prerequisites.** None required a change to Vogt itself; four landed
+in what was then the `MyDevEnv2` repository and is now this repository's
+`engine/` subtree, and one in the estate's `AGENTS.md`. They are stated here
 because Vogt is what they make reachable, and because an integration nobody
 wrote down is one that gets rebuilt from memory.
 
-| # | Prerequisite | Where it lands | Done |
+| # | Prerequisite | Where it landed | Done |
 |---|---|---|---|
-| 1 | A scoped token exists and is brokered: `vogt token issue`, stored in Infisical `apps` as `HOMELAB_VOGT_TOKEN`, exported by `mydevenv2-agent-auth`. Nothing brokers a `VOGT_*` secret today. | Infisical + `mydevenv2-agent-auth` | ☐ |
-| 2 | `VOGT_PUBLIC_URL` is set in the Komodo stack environment. The compose gates it (`${VOGT_PUBLIC_URL:?}`) because it is an exposure value (NFR-D2), so **`DeployStack` fails until it is set** — set it before deploying r7, not after. | Komodo stack env | ☐ |
-| 3 | A wrapper `/usr/local/bin/mydevenv2-vogt-mcp` mirroring `mydevenv2-cadastre-mcp`, so Claude Code and OpenCode registrations carry no bearer value. | MyDevEnv2 image | ☐ |
-| 4 | `deploy/mcp-bootstrap.sh` registers Vogt for every client present — editable install of the bridge from the workspace, `codex mcp add --url … --bearer-token-env-var`, and the wrapper for Claude/OpenCode. | MyDevEnv2 image | ☐ |
-| 5 | A row in `~/Working/AGENTS.md`'s service table saying what Vogt is and when to reach for it. Without it an agent has the tools and no idea what they are for — `grep -i vogt` over that file currently returns nothing. | Estate `AGENTS.md` | ☐ |
+| 1 | A scoped token exists and is brokered: `vogt token issue`, stored in Infisical `apps` as `HOMELAB_VOGT_AGENT_TOKEN`, exported by `mydevenv2-agent-auth`. | Infisical + `engine/deploy/agent-auth.sh` | ☑ |
+| 2 | `VOGT_PUBLIC_URL` is set in the Komodo stack environment. The compose gates it (`${VOGT_PUBLIC_URL:?}`) because it is an exposure value (NFR-D2), so **`DeployStack` fails until it is set** — set it before deploying r7, not after. | Komodo stack env | ☑ |
+| 3 | A wrapper `/usr/local/bin/mydevenv2-vogt-mcp` mirroring `mydevenv2-cadastre-mcp`, so Claude Code and OpenCode registrations carry no bearer value. | `engine/deploy/vogt-mcp-auth.sh`, installed by `engine/Dockerfile` | ☑ |
+| 4 | `mcp-bootstrap.sh` registers Vogt for every client present — editable install of the bridge from the workspace, `codex mcp add --url … --bearer-token-env-var`, and the wrapper for Claude/OpenCode. | `engine/deploy/mcp-bootstrap.sh` | ☑ |
+| 5 | A row in `~/Working/AGENTS.md`'s service table saying what Vogt is and when to reach for it. Without it an agent has the tools and no idea what they are for. | Estate `AGENTS.md` | ☑ |
 
-3 and 4 are image changes, so they go to the `dev` branch, deploy to
-`dev-mydevenv2`, and are validated from inside a container there before
-promotion to prod — which also means applying them restarts the container an
-agent session is running in.
+3 and 4 were image changes, so they went to the `dev` branch, deployed to
+`dev-mydevenv2`, and were validated from inside a container there before
+promotion to prod — which also meant applying them restarted the container an
+agent session was running in.
+
+### 7.1 As delivered
+
+All five are done, verified from inside a running `mydevenv2-dev` container.
+Recorded in this shape — prediction beside outcome — because the differences
+are the part worth keeping.
+
+**The secret is `HOMELAB_VOGT_AGENT_TOKEN`, not `HOMELAB_VOGT_TOKEN`.** The
+table above has been corrected. `agent-auth.sh` reads it under
+`MYDEVENV2_VOGT_SECRET_NAME`, defaulting to `HOMELAB_VOGT_AGENT_TOKEN`, from
+Infisical project `apps` (`prod`); the token is bound to actor
+`agent:mydevenv2` with scopes `read` and `work.write`, which is deliberately
+not `admin` — issuing tokens still needs `docker exec vogt vogt token issue` on
+Node B. The name says which of Vogt's tokens it is, and there is more than one
+(a read-only `VOGT_GUI_TOKEN` exists for a browser session), so the qualified
+name is the better one. Anything still saying `HOMELAB_VOGT_TOKEN` is wrong.
+
+**An absent Vogt secret is not fatal; an absent cadastre secret is.**
+`agent-auth.sh` exports `CADASTRE_HTTP_TOKEN` and dies if it is empty, but
+exports `VOGT_HTTP_TOKEN` with a trailing `|| true` and only writes
+`VOGT_TOKEN_FILE` when the value is non-empty. That asymmetry is deliberate and
+is commented as such: an instance may legitimately not be deployed yet, and
+agent auth must keep working for `git` and `gh` regardless. The same
+best-effort rule governs registration — the four `install_vogt_*` functions run
+after cadastre's, so a Vogt failure cannot cost an agent its git credentials.
+
+**The token exists in two forms at once, on purpose.** It is exported as
+`VOGT_HTTP_TOKEN` *and* written to a `umask 077` temp file exported as
+`VOGT_TOKEN_FILE`, cleaned up on exit. Two forms because the two clients need
+different ones: codex takes `--bearer-token-env-var VOGT_HTTP_TOKEN` and reads
+the variable; `vogt-mcp-remote` reads `VOGT_TOKEN_FILE`, a file rather than an
+argument so the token never reaches a process listing.
+
+**`VOGT_PUBLIC_URL` is set, and `/connection-info` is the proof.** The deployed
+instance answers with
+`{"name":"vogt","version":"0.2.0","url":"https://winrarhost.tailc7d3c.ts.net:18094",…}`
+and `/health/ready` reports
+`{"status":"ready","declared_schema_version":6,"observed_schema_version":2}`.
+That endpoint reports a *configured* URL, never
+an inferred one (§4.3), so a URL coming back at all is the evidence the stack
+environment carries it.
+
+**Registration stores an endpoint and a command, never a bearer.** Confirmed in
+`mcp-bootstrap.sh`: codex gets the URL plus an env-var name; Claude Code and
+OpenCode get `/usr/local/bin/mydevenv2-vogt-mcp`, which `engine/Dockerfile`
+installs from `engine/deploy/vogt-mcp-auth.sh` and which execs
+`mydevenv2-agent-auth run -- env VOGT_URL=… vogt-mcp-remote`. The codex path
+also reconciles the URL rather than checking the key exists — the lesson from
+the cadastre `:18081` → `:18092` move, applied to Vogt before it could bite.
+
+**The bridge installs from the workspace, as §7 predicted it would have to.**
+`install_vogt_bridge` guards on `command -v vogt-mcp-remote`, then does an
+editable `pip3 install --user -e` of this repository from
+`$HOME/Working/Active/apps/vogt`. Verified present at `~/.local/bin`. Its
+comment already names the exit: when Vogt goes public this moves into the
+Dockerfile and the runtime install becomes the same no-op fallback cadastre's
+is today (NFR-PO4).
+
+**Where it landed changed under the plan's feet.** The table predicted "MyDevEnv2
+image" for 3 and 4, meaning a separate repository. The MyDevEnv2 merge arrived
+first, so all four code-side prerequisites are now files in this repository's
+`engine/` subtree, built by `engine/Dockerfile` and shipped by
+`engine/.woodpecker/server.yml` — which is a happier place for them: the
+integration and the thing it integrates with are now reviewable in one diff.
+The image and Komodo stack it deploys to are still the engine's own, not
+Vogt's; see `docs/MERGE_MYDEVENV2.md` §10 for the stack consolidation that has
+not happened yet.
+
+**One thing is still open, and it is in a file this repository must not edit.**
+The estate `AGENTS.md` Vogt row (prerequisite 5, done) still says the token is
+"not yet exported by `mydevenv2-agent-auth` — read it from Infisical directly
+until the image ships that". The image has shipped it: `VOGT_TOKEN_FILE` is set
+in a live container and the file is non-empty. That sentence should be struck
+by whoever next edits `~/Working/AGENTS.md`. It is noted here rather than fixed
+here because an estate-wide file is not this repository's to change, and
+because stale remediation advice is worse than none — it sends an agent to
+Infisical for a value it already has in its environment.
 
 ## 8. Known: every write costs a WAL checkpoint
 

@@ -1,0 +1,381 @@
+# MyDevEnv2 — Vogt's session engine
+
+From-scratch redesign of MyDevEnv v1 (a separate checkout in the estate, not
+part of this repository). Same goal — a centrally-hosted, Tailscale-accessible
+dev environment driven from any browser — built cleanly without the accumulated
+surface area of v1 (code-server fork, multiple half-finished native clients).
+
+MyDevEnv2 has since been merged into Vogt as its session engine and now lives
+in this repo's `engine/` subtree; `web/` and `mobile/` sit beside it at the
+repository root, and its own documents live under `docs/engine/`. **Paths in
+this file are relative to the repository root, not to `engine/`** — the tree it
+was written against no longer exists, and half-relative paths are how a merged
+document quietly stops being true.
+
+## Documentation map
+
+Use each project doc for one job:
+
+- `engine/README.md`
+  Product status, local development, smoke tests, and protocol notes.
+- `engine/AGENTS.md`
+  Project-specific workflow rules for coding agents.
+- `docs/engine/TOOLING.md`
+  Source of truth for the runtime/dev-pod toolchain inventory.
+- `engine/deploy/KOMODO.md`
+  Source of truth for production stack shape, environment, rollout, and recovery.
+- `docs/engine/uplift.md`
+  Only open backlog for remaining uplift work.
+- **[`docs/engine/INTENT.md`](../docs/engine/INTENT.md)** — what I'm trying to achieve and why a rewrite
+- **[`docs/engine/PLAN.md`](../docs/engine/PLAN.md)** — architecture, components, build order
+- **[`docs/engine/TOOLING.md`](../docs/engine/TOOLING.md)** — required tools/toolchains for the dev pod (derived from v1 Dockerfile)
+- **[`engine/deploy/KOMODO.md`](deploy/KOMODO.md)** — production stack and deploy notes
+
+The archived GPUI desktop client's notes are not here: `client/` was not carried
+across in the merge and stayed behind in the MyDevEnv2 repo, which is now its
+archive.
+
+## Current status
+
+MyDevEnv2 is live at `https://mydevenv2.sprooty.com`. Production stack details,
+health endpoints, Komodo flow, and required environment now live in
+`engine/deploy/KOMODO.md` rather than being duplicated here.
+
+The engine has four active components and two supported product surfaces:
+
+- `engine/contract/` — shared Rust wire DTOs used by the server.
+- `engine/server/` — Rust/Axum server plus embedded Solid PWA.
+- `web/` — Solid/Vite PWA served by the Rust binary.
+- `mobile/` — Capacitor 8 Android shell that loads the deployed PWA.
+
+`engine/` is its own Cargo workspace (`engine/Cargo.toml` declares `server` and
+`contract` as members); the repository root is not a Rust workspace, so every
+`cargo` invocation below runs from `engine/`.
+
+Supported product surfaces:
+
+- Browser / installable PWA
+- Android Capacitor shell over the same deployed web client
+
+August 2026: a conversational assistant landed on `dev` — a server-side
+tool-use loop with read access to all sessions and confirmation-gated
+keystroke injection, surfaced as an Assistant tab with push-to-talk STT (APK)
+and spoken replies. Disabled unless `MYDEVENV2_ASSISTANT_API_KEY` is set; see
+`docs/engine/ASSISTANT.md`.
+
+CI is split across `engine/.woodpecker/`:
+
+- `engine/.woodpecker/server.yml` runs server fmt/clippy/test, web typecheck,
+  debug APK build, Docker buildx, and Komodo deploy for non-`client/**` pushes
+  to `main`.
+
+As of July 7, 2026, the native desktop client is deprecated. No client CI or
+release workflow remains active; `client-v0.1.4` is the last verified native
+client release kept in Forgejo for historical reference.
+
+## Server + PWA phases
+
+**Phase 1 (server foundation) — complete.** Single Axum binary at
+`engine/server/`:
+
+- Bearer-token gated HTTP API for session lifecycle (create / list / get / rename / kill / delete)
+- Per-session PTY with a ring-buffer scrollback (default 4 MiB)
+- WebSocket attach endpoint with scrollback snapshot replay + live broadcast to multiple clients
+- Activity state machine: `idle` / `running` / `waiting-for-input` / `errored`, with regex heuristics on the stripped output tail
+- SSE event stream of server-wide session events
+
+**Phase 2 (web UI MVP) — complete.** Solid + Vite + TS PWA at `web/`, embedded into the server binary via `rust-embed`:
+
+- Responsive shell — tab strip + main pane + drawer; three breakpoints, one component tree
+- xterm.js terminal tab attached over WebSocket with snapshot replay
+- Mobile modifier-key row (Esc / Tab / Ctrl (sticky) / arrows / `/` / `|` / `~` / Enter)
+- Per-tab activity badges driven by SSE; pulse animation for `running` and `waiting-for-input`
+- Deep-link URLs via HashRouter (`/#/t/<session-id>`)
+- Settings modal stores bearer token + (optional) backend base URL in localStorage
+
+**Phase 3 (files + editor) — complete.**
+
+- Server: `workspace_root`-scoped file API — `GET /api/dir`, `GET /api/tree`, `GET/PUT /api/files`, `GET /api/search` (via ripgrep). Path-traversal guarded with strict component checks; binary detection; 5 MiB read cap.
+- Client: file tree in the drawer with lazy expand; Monaco editor as a new tab kind, lazily imported so the first paint stays at ~93 KB gz; Ctrl/Cmd+S saves; per-tab dirty indicator; tab state persisted to localStorage.
+- Deep-link route `/#/e/<path>` opens an editor tab on that file.
+
+**Phase 4 (git tab) — complete, read-only.**
+
+- Server: `GET /api/git/{status,diff,log,branch}` — auto-detects repo root by walking up from the supplied `?repo=` relative path. Shells out to `git`.
+- Client: new `git` tab kind. Status pane groups entries by kind (conflicted / staged / modified / renamed / deleted / untracked); click a path to load a Monaco diff editor (HEAD vs working tree). Recent commits below; branch + ahead/behind chip up top.
+- Deep-link route `/#/g/<repo>` opens the git tab for that repo.
+
+**Phase 5 (GUI tab + dev-pod packaging) — code-complete and deployed; GUI stream disabled by default.**
+
+- Server: `POST /api/gui/launch`, `GET /api/gui/processes`, `POST /api/gui/kill?pid=`. Optional `via_sway` prefixes with `swaymsg exec --`. `GET /api/config` (public) returns `gui_stream_url` and build feature flags for the web UI.
+- Client: `gui` tab kind iframing the configured stream URL; toolbar to launch arbitrary GUI commands; running-processes list with kill buttons. Deep-link `/#/gui`.
+- Packaging: `engine/Dockerfile` builds a single runtime image with the embedded
+  PWA. Tool inventory lives in `docs/engine/TOOLING.md`; production
+  compose/runtime details live in `engine/deploy/KOMODO.md`.
+- Production: the Komodo stack exists and is deployed. `START_SWAY=0` and `GUI_STREAM_URL=""` keep the GUI stream off until Selkies is wired and verified inside the pod.
+
+**Phase 6 (push + Android Capacitor APK) — code-complete; runtime push delivery pending real-device verification.**
+
+- Server: VAPID web-push (any modern browser PushManager subscription, including installed-PWA iOS Safari 16.4+) + FCM HTTP v1 (native Capacitor tokens). Service-account JWT → OAuth2 with token caching. Subscriptions persist as JSON under `state_dir`; auto-prune on 404/410.
+- Server routes: `POST /api/push/subscribe`, `POST /api/push/unsubscribe`, `GET /api/push/list`, `POST /api/push/test`, `GET /api/push/public-key` (public — no token needed).
+- Activity watcher: fires push to all subscriptions when any session enters `waiting-for-input`.
+- Web: `/sw.js` + `/manifest.webmanifest` for PWA install + push event handling. Installed PWAs show an explicit offline fallback page instead of pretending to support disconnected use. Settings modal gains "Enable push" / "Send test" with current-permission visibility.
+- Mobile: `mobile/` Capacitor 8 Android wrap (`com.sprooty.mydevenv2`). WebView loads `https://mydevenv2.sprooty.com` directly so UI updates ship without rebuilding the APK. `@capacitor/push-notifications` registers a native FCM token at first launch; the same `/api/push/subscribe` endpoint accepts both transports.
+- CI: `mobile-apk` builds a signed release APK on pushes handled by `engine/.woodpecker/server.yml`, derives Android `versionName` / `versionCode` from `mobile/package.json` plus the built commit, and uploads it to the Forgejo release tag `apk-latest` under a versioned asset name.
+
+Phase 7 (Android emulator KVM VM) remains.
+
+**June 2026 UX uplift — code-complete.**
+
+- Command palette (`Ctrl/Cmd+K`) opens sessions, files, recent files, settings, GUI, git, shortcuts, and history search. Prefix a query with `>` to search archived session output.
+- Session history archives exited PTY sessions into SQLite under `state_dir`, writes raw logs under `state_dir/session-logs`, indexes ANSI-stripped output with FTS5, and exposes list/search/get/delete routes under `/api/history/*`.
+- IDE layout mode now embeds the real workspace file tree and keeps non-editor tabs usable. When an editor tab is active, the editor workspace can split files side-by-side or stacked, resize panes by dragging, and keeps dirty-state tracking tied to the real editor tabs.
+- Editor quality-of-life features include breadcrumbs, file icons, file-tree filtering, recent files, minimap toggle, and persisted layout/editor preferences.
+- Session templates, custom template editing, terminal themes, bookmarks, and keyboard shortcut reference are available from the PWA settings/commands.
+
+**July 2026 workflow uplift — code-complete.**
+
+- Weather and daily briefing were removed; recurring work now lives in a first-class Tasks tab backed by `/api/agent-tasks`, with schedule management, run history, and session-open actions.
+- Session templates grew into richer workspace presets with tags, repo/path matching, placeholder expansion, and direct launch from the command palette or file tree.
+- File and git surfaces now cover common mutating workflows: move/delete/mkdir/duplicate in the workspace tree, plus stage/unstage/discard/commit/checkout in the git tab.
+- Saved workspace layouts capture browser-local tab sets and layout mode, and grouped terminal workspaces now support multiple panes plus broadcast input.
+- History gained filtering, archived-output search, pinning, replay-tail previews, and raw-log export for post-run inspection.
+
+---
+
+## Native desktop client
+
+The GPUI desktop client was deprecated as of July 7, 2026. MyDevEnv2 now treats
+the browser/PWA as the primary desktop experience, with the Android app
+remaining a thin native shell over the same web surface.
+
+Its `client/` tree was **not** carried into this repository by the merge — it
+stayed behind in the MyDevEnv2 repo, which is now its archive, along with its
+`client/README.md` notes. Nothing here builds, releases, or tests it, and a
+future thin Windows wrapper would start from that archive rather than from this
+tree.
+
+## Running the server
+
+```bash
+# 1. Mint a token (≥16 chars)
+export MYDEVENV2_TOKEN="$(openssl rand -hex 24)"
+# Optional: additional scoped API tokens and a write-rate cap for the
+# primary token. Capability names are:
+# sessions, filesystem-write, git-write, gui-control, agent-tasks-write,
+# push-write, history-write, assistant
+export MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE=600
+export MYDEVENV2_EXTRA_TOKENS_JSON='[
+  {
+    "name": "readonly",
+    "token": "replace-with-another-16+-char-secret",
+    "capabilities": []
+  }
+]'
+
+# 2. Run — from engine/, which is the Cargo workspace root
+cd engine
+cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
+# or via env:
+MYDEVENV2_BIND=127.0.0.1:8910 cargo run -p mydevenv2-server
+```
+
+Optional TOML config (`mydevenv2.toml`):
+
+```toml
+bind = "0.0.0.0:8910"
+token = "..."                  # or use MYDEVENV2_TOKEN env
+scrollback_bytes = 4194304
+default_shell = "/bin/bash"
+default_cwd   = "/home/sprooty/Working"
+workspace_root = "/home/sprooty/Working"
+activity_idle_after_ms = 1500
+state_dir = "/home/sprooty/.local/share/mydevenv2"
+vapid_subject = "mailto:admin@example.invalid"
+allowed_origins = [
+  "https://mydevenv2.sprooty.com",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+]
+auto_agent_auth = false
+agent_auth_helper = "/usr/local/bin/mydevenv2-agent-auth"
+token_mutating_request_limit_per_minute = 600
+
+[[extra_tokens]]
+name = "readonly"
+token = "replace-with-another-16+-char-secret"
+capabilities = []
+mutating_requests_per_minute = 60
+```
+
+Pass with `--config mydevenv2.toml`. CLI flags > env > config file.
+
+`capabilities = []` means "authenticated read-only token". Mutating routes map
+to capability gates: `sessions`, `filesystem-write`, `git-write`,
+`gui-control`, `agent-tasks-write`, `push-write`, and `history-write`.
+
+For browser/PWA cutover, the Settings modal supports device-local named auth
+profiles. Save one profile per scoped token and switch the active browser token
+there instead of leaving the primary token in `localStorage`.
+
+Recommended production token policy:
+
+- Keep `MYDEVENV2_TOKEN` as the full-access admin/recovery token.
+- Use a scoped interactive token for normal browser/PWA use.
+- Use a scoped read-only token for passive viewers or lower-trust clients.
+- If regular browser use needs GUI launch/kill, provision a separate scoped
+  token with `gui-control` rather than reusing the primary token.
+
+Runtime/deploy details such as Docker socket access, Komodo overlays, agent
+auth bootstrap, and production health endpoints are intentionally documented in
+`engine/deploy/KOMODO.md` and `docs/engine/TOOLING.md` instead of repeated here.
+
+## Rust LSP for agents
+
+The runtime image now bundles `rust-analyzer`, `rust-analyzer-mcp`, and the
+helper wrapper `mydevenv2-rust-analyzer-mcp`. The wrapper starts the MCP server
+from the nearest parent directory containing a `Cargo.toml`, which keeps
+`rust-analyzer` anchored to the active Rust workspace when Codex or Claude
+launch it from a repo subdirectory.
+
+Codex project/user registration:
+
+```bash
+codex mcp add rust-analyzer -- mydevenv2-rust-analyzer-mcp
+```
+
+Claude Code registration for the current project:
+
+```bash
+claude mcp add --scope project rust-analyzer -- mydevenv2-rust-analyzer-mcp
+```
+
+If a client launches the MCP server from a non-Rust directory, set
+`MYDEVENV2_RUST_ANALYZER_WORKSPACE=/path/to/rust/workspace` for that MCP
+server entry.
+
+## GitHub MCP server for agents
+
+The runtime image bundles the official `github-mcp-server` binary
+(`/usr/local/bin/github-mcp-server`, resolved to latest at image build time
+from the upstream GitHub releases). It needs `GITHUB_PERSONAL_ACCESS_TOKEN` set
+when a client registers it; inside an `mydevenv2-agent-auth` shell that token
+is already available as `$GH_TOKEN`.
+
+Codex project/user registration:
+
+```bash
+codex mcp add github -- env GITHUB_PERSONAL_ACCESS_TOKEN=$GH_TOKEN github-mcp-server stdio
+```
+
+Claude Code registration for the current project:
+
+```bash
+claude mcp add --scope project github -e GITHUB_PERSONAL_ACCESS_TOKEN=$GH_TOKEN -- github-mcp-server stdio
+```
+
+Use `GITHUB_AUSAGENTSMITH_PAT` instead of `GH_TOKEN` to register a second
+instance scoped to the AusAgentSmith-org identity if source-org GitHub access
+is needed alongside the main-org one.
+
+## Smoke test with curl + websocat
+
+```bash
+TOKEN=$MYDEVENV2_TOKEN
+BASE=http://127.0.0.1:8910
+
+# Liveness / readiness
+curl -s $BASE/healthz
+curl -s $BASE/readyz
+
+# Create a session
+ID=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"name":"shell-1"}' $BASE/api/sessions | jq -r .id)
+
+# List
+curl -s -H "Authorization: Bearer $TOKEN" $BASE/api/sessions | jq
+
+# Attach over WebSocket. The first frame must authenticate:
+websocat "ws://127.0.0.1:8910/api/sessions/$ID/attach"
+# First paste (resume_from is optional and is an absolute scrollback_pos):
+#   {"type":"auth","token":"'"$TOKEN"'","resume_from":123}
+# Then type and see the shell respond. JSON control frames also work:
+#   {"type":"resize","cols":120,"rows":40}
+
+# Stream server events (SSE)
+curl -sN -H "Authorization: Bearer $TOKEN" $BASE/api/events
+
+# Kill the child but keep scrollback addressable
+curl -s -X POST -H "Authorization: Bearer $TOKEN" $BASE/api/sessions/$ID/kill
+
+# Forget it entirely
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" $BASE/api/sessions/$ID
+```
+
+### WebSocket protocol
+
+On attach the server sends:
+
+1. Text frame: `{"type":"snapshot-start","session_id":"...","scrollback_bytes":N,"scrollback_pos":N,"reset":true|false}`
+2. Zero or more binary frames containing scrollback bytes (chunks ≤ 64 KiB)
+3. Text frame: `{"type":"snapshot-done"}`
+4. Live binary frames from the PTY thereafter
+
+From the client:
+
+- First text frame must be `{"type":"auth","token":"..."}`. A reconnecting
+  client may include `"resume_from":N` with the last applied `scrollback_pos`;
+  the server then sends only retained output after that cursor and returns
+  `"reset":false`. A stale cursor falls back to a full snapshot with
+  `"reset":true`. Legacy
+  `?token=...` WebSocket auth still exists only for older clients and should
+  not be used for new code because URLs land in proxy/access logs.
+- **Binary frames** → written to PTY stdin
+- **Text frames** parsed as JSON control:
+  - `{"type":"resize","cols":120,"rows":40}` — resize PTY
+  - `{"type":"ping"}` — keepalive
+
+The web client rejects individual terminal inputs larger than 64 KiB before
+they reach the PTY, preserving the editable composer and live session when a
+clipboard contains an accidentally huge payload.
+
+If the client falls too far behind the broadcast buffer the server sends `{"type":"lag",...}` and closes the socket; client should reattach (the fresh snapshot will catch them up).
+
+## Tests
+
+```bash
+cd engine                        # the Cargo workspace root
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test                       # server unit + integration tests
+cargo test -p mydevenv2-contract # shared wire-contract tests
+
+cd ../web && pnpm typecheck      # PWA TypeScript check
+```
+
+The legacy native client's checks are gone with its source: `client/` stayed in
+the MyDevEnv2 repo and no longer has a build here.
+
+## Building the embedded PWA
+
+The Rust server `cargo build` embeds whatever is in `web/dist/` at compile
+time — the repository-root `web/`, one level above the Cargo workspace. To
+refresh:
+
+```bash
+cd web && pnpm install && pnpm build
+cd ../engine && cargo build --release
+```
+
+For UI development, run the server on its native port and Vite dev server
+in parallel — Vite proxies `/api` and the WS endpoint to the backend:
+
+```bash
+# terminal 1
+cd engine
+MYDEVENV2_TOKEN=$(openssl rand -hex 24) cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
+
+# terminal 2
+cd web && pnpm dev
+# → http://127.0.0.1:5173, paste the token into Settings (⚙)
+```

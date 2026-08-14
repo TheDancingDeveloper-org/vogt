@@ -1,0 +1,203 @@
+# MyDevEnv2 — Tooling Baseline
+
+Captured from review of `MyDevEnv/Dockerfile.server` (v1). The pod provides a neutral development baseline for builds under `~/Working/Active/apps/`. Codex and Claude are not installed during prod container bootstrap; the dev image (`INSTALL_AI_CLIENTS=true`, see `engine/deploy/KOMODO.md` "Dev stack") bakes both in for pre-prod trial. In that trusted dev pod, the system `codex` command always uses `--dangerously-bypass-approvals-and-sandbox`, giving it normal container-user access across all of `/home/sprooty/Working` rather than restricting writes to the repository it was launched from. The `opencode` CLI is bundled in every image; other AI clients remain user-managed on prod.
+
+This file is the source of truth for what tooling the runtime image is meant to
+carry. Keep deploy shape, Komodo environment, and rollout/recovery steps in
+`engine/deploy/KOMODO.md` instead of repeating them here.
+
+## Base OS
+
+Ubuntu 26.04 (or newer LTS). Same as v1 — proven to work with all the toolchains below.
+
+## Core system + dev utilities
+
+`ca-certificates`, `curl`, `wget`, `gnupg`, `lsb-release`,
+`git`, `git-lfs`, `vim`, `nano`, `less`, `man-db`, `sudo`,
+`build-essential`, `pkg-config`, `cmake`, `clang`, `lld`, `nasm`,
+`jq`, `ripgrep`, `fd-find`, `bat`, `rsync`,
+`openssh-client`, `openssh-server`, `iputils-ping`, `netcat-openbsd`, `dnsutils`, `xdg-utils`,
+`htop`, `tree`, `file`, `unzip`, `zip`,
+`musl-tools`, `gcc-mingw-w64-x86-64`, `gcc-aarch64-linux-gnu`, `g++-aarch64-linux-gnu`,
+`libssl-dev`, `libclang-dev`, `protobuf-compiler`
+
+Notably **not** carried over from v1: `tmux` (no longer needed — server-owned PTYs replace it).
+
+## Language toolchains
+
+### Rust (primary)
+
+- `rustup` stable channel
+- Components: `rustfmt`, `clippy`, `rust-analyzer`
+- Cross-compile targets:
+  - `x86_64-unknown-linux-musl` (static Linux binaries)
+  - `aarch64-unknown-linux-gnu` (ARM Linux)
+  - `x86_64-pc-windows-gnu` (Windows cross-compile via mingw)
+- Cargo tools: `cargo-deb`, `cargo-zigbuild`, `cargo-xwin`, `cargo-watch`
+- `rust-analyzer-mcp` for agent-facing Rust LSP access over MCP
+- `sccache` v0.10.0+ from GitHub releases (NOT apt — apt package lacks Redis support)
+- `SCCACHE_REDIS=redis://100.92.54.45:6380` (Node B Redis instance)
+- Installed to `/opt/rust` via `RUSTUP_HOME=/opt/rust/rustup` and
+  `CARGO_HOME=/opt/rust/cargo` (NOT `~/.rustup` + `~/.cargo` — the home bind
+  mount would shadow them at runtime, exactly as with the Android SDK above).
+  Until 2026-07-31 they were installed under `$HOME`, so at runtime the pod
+  silently had none of the cargo tools, none of the cross-compile targets, and
+  no `sccache` — only whatever the home volume happened to contain.
+  Consequence: the crate registry cache lives in the image, not on the
+  persisted home volume, so crates re-download after an image redeploy.
+
+### Python
+
+- `python3`, `python3-pip`, `python3-venv`, `python3-dev`
+- Tools via pip: `uv`, `ruff`
+
+### Node.js
+
+- Node 22 (from NodeSource)
+- `pnpm` global install
+
+### Android (Capacitor app under `mobile/`)
+
+- JDK 21 (`openjdk-21-jdk-headless`); `JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64`
+- Android SDK installed to `/opt/android-sdk` (NOT `~/Android/Sdk` — the home
+  bind mount would shadow it at runtime). `ANDROID_HOME` / `ANDROID_SDK_ROOT`
+  both point there; `sdkmanager`, `adb`, `apkanalyzer` are on PATH.
+- SDK packages: `cmdline-tools;latest`, `platform-tools`,
+  `platforms;android-35`, `platforms;android-36`, `build-tools;35.0.0`,
+  `build-tools;36.0.0`. Licenses accepted at build time.
+- Builds run through the committed wrapper (`mobile/android/gradlew`), not
+  system gradle. The Capacitor project currently targets compile/target SDK 35
+  (`mobile/android/variables.gradle`); SDK 36 is installed ahead of the bump.
+
+### Flutter (dev image only)
+
+- Flutter 3.44.9 stable, including its bundled Dart 3.12.2 SDK.
+- Installed to `/opt/flutter` so the runtime home bind mount cannot hide it.
+  Both `flutter` and `dart` are on `PATH`.
+- Enabled only for the `dev` image with `INSTALL_FLUTTER=true`; production does
+  not carry the large Flutter SDK.
+
+## Container + cloud tools
+
+- Docker CLI + compose plugin (installed in the image, but daemon access is
+  deployment-selected: the base stack is socketless and the direct DooD mount
+  lives in `engine/deploy/docker-compose.docker-socket.yml`)
+- `gh` (GitHub CLI)
+- `rclone`
+- `infisical` (CLI for secret retrieval; already used in CI and at runtime)
+- `tailscale` (joins the tailnet at container start)
+- `step` (Smallstep CLI — self-issues short-lived SSH certs against the Node B
+  step-ca via `step ssh certificate ...`; the only host-shell SSH path for
+  in-pod agents)
+- `opencode` (installed via the upstream `https://opencode.ai/install` script,
+  latest at build time, with the binary under `/home/sprooty/.opencode/bin`)
+- `mydevenv2-rust-analyzer-mcp` (wrapper around `rust-analyzer-mcp` that picks
+  the nearest Rust workspace root before starting the MCP server)
+- `github-mcp-server` (official GitHub MCP server binary, latest at build time
+  from GitHub releases, installed to `/usr/local/bin`; needs
+  `GITHUB_PERSONAL_ACCESS_TOKEN` set when a client registers it — see
+  `engine/README.md` "GitHub MCP server for agents")
+
+## Auth keys / secrets needed at pod startup
+
+| Secret | Infisical location | Purpose |
+|---|---|---|
+| `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` | `apps` project, env `prod` | Auto-join the pod to the tailnet on startup |
+| `MYDEVENV2_TOKEN` | `apps` project, env `prod` | Bearer token for MyDevEnv2 server API auth |
+| `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` | `apps` project, env `prod` | Read-only Universal Auth identity required by the production agent shells |
+| `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` | `apps` project, env `prod` | Secret for the production agent identity |
+| `HOMELAB_CADASTRE_HTTP_TOKEN` | `apps` project, env `prod` | Child-process bearer for the private Cadastre MCP endpoint |
+| `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` | `apps` project, env `prod` | Optional Firebase service-account JSON for native Android FCM push |
+| Other app-specific secrets | Infisical `apps` / `cicd` / `infrastructure` | Fetched on demand by `mydevenv2-agent-auth` |
+
+VAPID keys for browser web-push are generated by the server on first use and
+persisted under `state_dir`; they are not injected as Komodo environment
+secrets. `MYDEVENV2_VAPID_SUBJECT` can override the VAPID JWT subject if the
+default placeholder is not acceptable.
+
+MyDevEnv2 fetches service credentials into child shells rather than exporting
+service tokens from PID 1. Production default sessions are wrapped
+automatically; these commands remain useful for validation and explicit
+commands:
+
+```bash
+mydevenv2-agent-auth check
+mydevenv2-agent-auth run -- gh api user
+mydevenv2-agent-auth shell
+```
+
+The helper also fetches `HOMELAB_CADASTRE_HTTP_TOKEN` on demand and exports it
+only inside the command or shell child. It validates the private Streamable HTTP
+MCP endpoint during `check`; the bearer is never placed in the Dockerfile,
+Compose environment, command line, logs, or persisted home.
+
+On the first authenticated session, the helper automatically performs an
+idempotent client bootstrap when `MYDEVENV2_AUTO_CADASTRE_MCP=1` (the default).
+It registers Codex's native HTTP transport and registers Claude Code/OpenCode
+through `/usr/local/bin/mydevenv2-cadastre-mcp`, which obtains a fresh token for
+each bridge process. Existing client registrations are preserved. Set the
+variable to `0` to disable automatic registration.
+
+The default endpoint is `https://winrarhost.tailc7d3c.ts.net:18092/mcp` and may
+be overridden for a controlled test with `CADASTRE_MCP_URL`. Register clients
+inside an authenticated shell using native environment-variable token support,
+for example:
+
+```bash
+mydevenv2-agent-auth run -- codex mcp add cadastre \
+  --url https://winrarhost.tailc7d3c.ts.net:18092/mcp \
+  --bearer-token-env-var CADASTRE_HTTP_TOKEN
+```
+
+The same automatic bootstrap registers Claude Code and OpenCode through the
+ephemeral bridge. To run those clients explicitly while still obtaining the
+token on demand:
+
+```bash
+mydevenv2-agent-auth run -- claude
+mydevenv2-agent-auth run -- opencode
+```
+
+No manual MCP command is needed unless automatic registration was disabled.
+
+The machine identity must have read-only access to the `cicd`, `infrastructure`,
+and `apps` Infisical projects. The helper uses the direct tailnet endpoint
+`http://100.92.54.45:8400` to avoid the browser-facing Caddy auth gate.
+
+When the direct-socket overlay is enabled, the Docker CLI uses the host daemon
+socket. The compose `group_add` value must match `stat -c %g
+/var/run/docker.sock` on Node B (currently `984`).
+
+## Things v1 had that v2 did not carry forward
+
+- **The `xdg-open` shim** — was a workaround for VS Code Remote's browser forwarding. With no code-server in v2, this shim isn't needed. URLs printed in a terminal can be click-handled by the web UI itself (xterm.js link addon → POST to server → server can launch in Sway-Chromium or just copy to client clipboard).
+- **The `/home/sprooty → /workspace` symlink** — existed to make VS Code Remote SSH paths line up. v2 bind-mounts the workspace at `/home/sprooty/Working` directly so paths match the host exactly.
+- **SSH server on port 2223** — v1 exposed this for emergency / IDE-less access, but v2 currently does not start or expose `sshd`. Prefer the server-owned PTY sessions and the host workspace bind mount unless an explicit emergency SSH path is added later.
+
+## GUI/runtime tooling state
+
+- **Sway** is installed in the runtime image for headless GUI app rendering.
+- **Selkies-GStreamer** is installed from the pinned `SELKIES_VERSION` when
+  available. The image records feature state in `/etc/mydevenv2/features.json`;
+  the server exposes it through `/api/config`.
+- **Chromium** is installed for in-pod browser testing.
+- Production currently leaves `START_SWAY=0` and `GUI_STREAM_URL=""`, so the
+  GUI tab is present in code but not operational until the stream is enabled
+  and verified.
+- GUI launch APIs can run commands directly or through `swaymsg exec` via the
+  request's `via_sway` flag.
+
+## Native desktop client tooling
+
+The native client was deprecated on July 7, 2026 and was **not** carried into
+this repository by the merge — its `client/` tree stayed behind in the
+MyDevEnv2 repo, which is now its archive. Its old GPUI / FluentGUI toolchain
+notes are retained here only so the archived code can still be understood if
+someone goes back for it.
+
+There is no active CI, release, or supported runtime target for that client.
+Do not plan new work around the old Windows release path or the removed
+`.woodpecker/client*.yml` workflows. The supported product surfaces are the
+server, embedded PWA, and Android shell.
+
+For the Android emulator KVM VM (separate from the pod), tooling is its own concern — Android Studio + SDK + emulator image, installed inside that VM, not the dev pod.

@@ -1,0 +1,607 @@
+use std::{net::SocketAddr, path::Path};
+
+use serde::{Deserialize, Serialize};
+
+use crate::auth::ScopedTokenConfig;
+use crate::error::{ApiError, Result};
+
+const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_MUTATING_REQUEST_LIMIT_PER_MINUTE: u32 = 600;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTemplate {
+    pub name: String,
+    pub description: String,
+    pub command: Option<Vec<String>>,
+    pub cwd: Option<String>,
+    pub env: Vec<(String, String)>,
+    #[serde(default)]
+    pub default_name: Option<String>,
+    #[serde(default)]
+    pub match_repo_names: Vec<String>,
+    #[serde(default)]
+    pub match_path_prefixes: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+impl SessionTemplate {
+    pub fn default_templates() -> Vec<Self> {
+        vec![
+            SessionTemplate {
+                name: "Shell".to_string(),
+                description: "Default shell session".to_string(),
+                command: None,
+                cwd: None,
+                env: vec![],
+                default_name: Some("shell-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["shell".to_string()],
+            },
+            SessionTemplate {
+                name: "Node Dev".to_string(),
+                description: "Node.js development environment".to_string(),
+                command: Some(vec!["bash".to_string()]),
+                cwd: None,
+                env: vec![("NODE_ENV".to_string(), "development".to_string())],
+                default_name: Some("{repo_name}-node-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["node".to_string(), "web".to_string()],
+            },
+            SessionTemplate {
+                name: "Rust Build".to_string(),
+                description: "Rust development with cargo".to_string(),
+                command: Some(vec!["bash".to_string()]),
+                cwd: None,
+                env: vec![("RUST_BACKTRACE".to_string(), "1".to_string())],
+                default_name: Some("{repo_name}-rust-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["rust".to_string()],
+            },
+            // Agent CLIs, wrapped in the credential broker explicitly.
+            // Automatic agent-auth wraps only sessions created *without* a
+            // command, so a template that supplies one must opt in itself or
+            // the provider starts with no brokered credentials.
+            SessionTemplate {
+                name: "Claude Code (protected)".to_string(),
+                description: "Claude Code through agent-auth, captured by ContextKeeper"
+                    .to_string(),
+                command: Some(vec![
+                    "mydevenv2-agent-auth".to_string(),
+                    "run".to_string(),
+                    "--".to_string(),
+                    "claude".to_string(),
+                ]),
+                cwd: None,
+                env: vec![],
+                default_name: Some("{repo_name}-claude-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["agent".to_string(), "claude".to_string()],
+            },
+            SessionTemplate {
+                name: "Codex (protected)".to_string(),
+                description: "Codex CLI through agent-auth, captured by ContextKeeper".to_string(),
+                command: Some(vec![
+                    "mydevenv2-agent-auth".to_string(),
+                    "run".to_string(),
+                    "--".to_string(),
+                    "codex".to_string(),
+                ]),
+                cwd: None,
+                env: vec![],
+                default_name: Some("{repo_name}-codex-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["agent".to_string(), "codex".to_string()],
+            },
+            SessionTemplate {
+                name: "OpenCode (protected)".to_string(),
+                description: "OpenCode through agent-auth; capture is the sanitized export"
+                    .to_string(),
+                command: Some(vec![
+                    "mydevenv2-agent-auth".to_string(),
+                    "run".to_string(),
+                    "--".to_string(),
+                    "opencode".to_string(),
+                ]),
+                cwd: None,
+                env: vec![],
+                default_name: Some("{repo_name}-opencode-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["agent".to_string(), "opencode".to_string()],
+            },
+            SessionTemplate {
+                name: "Python Env".to_string(),
+                description: "Python development environment".to_string(),
+                command: Some(vec!["bash".to_string()]),
+                cwd: None,
+                env: vec![("PYTHONUNBUFFERED".to_string(), "1".to_string())],
+                default_name: Some("{repo_name}-py-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["python".to_string()],
+            },
+        ]
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub bind: SocketAddr,
+    pub token: String,
+    pub token_mutating_request_limit_per_minute: u32,
+    pub extra_tokens: Vec<ScopedTokenConfig>,
+    pub scrollback_bytes: usize,
+    pub default_shell: String,
+    pub default_cwd: std::path::PathBuf,
+    pub activity_idle_after_ms: u64,
+    /// How long a session may sit continuously `Idle` before the idle-stall
+    /// watcher fires a one-shot push notification. Distinct from
+    /// `activity_idle_after_ms` (which is a short quiet-window before
+    /// `Running` collapses to `Idle`); this is a much longer "nobody has
+    /// looked at this in a while" threshold.
+    pub idle_stall_after_ms: u64,
+    /// Root the file API operates inside. Any request path is resolved
+    /// against this and rejected if it escapes the root.
+    pub workspace_root: std::path::PathBuf,
+    /// URL the web UI's GUI tab should iframe. Phase 5: point this at
+    /// Selkies-GStreamer or KasmVNC. None disables the GUI tab.
+    pub gui_stream_url: Option<String>,
+    /// Where persistent state lives (push subscriptions, VAPID keys).
+    /// Defaults to $HOME/.local/share/mydevenv2.
+    pub state_dir: std::path::PathBuf,
+    /// FCM service-account JSON (the full contents, not a path). Sourced
+    /// from `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` env or config file. Empty
+    /// disables FCM push (web-push still works for browser subscriptions).
+    pub fcm_service_account_json: Option<String>,
+    /// VAPID `subject` (`mailto:` or `https:` URL). RFC 8292 requires this on
+    /// the JWT we sign for web-push.
+    pub vapid_subject: String,
+    /// Comma-separated allow-list of origins for the CORS layer. Defaults to
+    /// the production origin plus the local Vite dev origin. Override with
+    /// `MYDEVENV2_ALLOWED_ORIGINS` (comma-separated) or the config file.
+    pub allowed_origins: Vec<String>,
+    /// When enabled, default interactive sessions are started through the
+    /// agent-auth helper so Forgejo/Woodpecker/GitHub/Komodo credentials are
+    /// available in the child shell without exporting them from PID 1.
+    pub auto_agent_auth: bool,
+    /// Helper executable used when `auto_agent_auth` is enabled.
+    pub agent_auth_helper: std::path::PathBuf,
+    /// Session templates available for quick session creation.
+    pub session_templates: Vec<SessionTemplate>,
+    /// Bearer key for the assistant's LLM backend. Sourced from
+    /// `MYDEVENV2_ASSISTANT_API_KEY` env or config file. Empty disables the
+    /// assistant surface entirely (routes 404, PWA hides the tab).
+    pub assistant_api_key: Option<String>,
+    /// OpenAI-compatible base URL for the assistant backend.
+    pub assistant_base_url: String,
+    /// Model id sent to the assistant backend.
+    pub assistant_model: String,
+    /// When false (default), assistant `send_input` tool calls pause as a
+    /// pending action requiring explicit user approval before any bytes reach
+    /// a PTY. True bypasses confirmation — only for trusted setups.
+    pub assistant_auto_type: bool,
+    /// Upper bound on tool-call rounds per user message.
+    pub assistant_max_tool_calls: u32,
+    /// Optional `reasoning_effort` forwarded to the backend (e.g. "minimal").
+    pub assistant_reasoning_effort: Option<String>,
+    /// Base URL of the ContextKeeper sidecar. None disables every continuity
+    /// surface: terminals still work and simply read as unprotected.
+    pub contextkeeper_url: Option<String>,
+    /// ContextKeeper's control token. Server-side only — the browser talks to
+    /// same-origin MyDevEnv2 routes and never holds this.
+    pub contextkeeper_token: Option<String>,
+    /// Base URL of vogt-core on loopback. None disables `/api/vogt`, `/mcp`
+    /// and `/ui-legacy`: they answer 503 with a named reason rather than
+    /// pretending the core is empty (FR-U21). The engine itself keeps
+    /// serving — sessions do not depend on the core (FR-E9).
+    pub vogt_core_url: Option<String>,
+    /// The core token the front door injects on `/api/vogt` (FR-S9). Server-
+    /// side only: a browser holds a *front-door* token, never this one. The
+    /// core sees a real actor rather than "the proxy", which is what keeps
+    /// its audit rows worth reading.
+    pub vogt_core_token: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileConfig {
+    bind: Option<String>,
+    token: Option<String>,
+    token_mutating_request_limit_per_minute: Option<u32>,
+    extra_tokens: Option<Vec<ScopedTokenConfig>>,
+    scrollback_bytes: Option<usize>,
+    default_shell: Option<String>,
+    default_cwd: Option<String>,
+    activity_idle_after_ms: Option<u64>,
+    idle_stall_after_ms: Option<u64>,
+    workspace_root: Option<String>,
+    gui_stream_url: Option<String>,
+    state_dir: Option<String>,
+    fcm_service_account_json: Option<String>,
+    vapid_subject: Option<String>,
+    allowed_origins: Option<Vec<String>>,
+    auto_agent_auth: Option<bool>,
+    agent_auth_helper: Option<String>,
+    session_templates: Option<Vec<SessionTemplate>>,
+    assistant_api_key: Option<String>,
+    assistant_base_url: Option<String>,
+    assistant_model: Option<String>,
+    assistant_auto_type: Option<bool>,
+    assistant_max_tool_calls: Option<u32>,
+    assistant_reasoning_effort: Option<String>,
+    contextkeeper_url: Option<String>,
+    contextkeeper_token: Option<String>,
+    vogt_core_url: Option<String>,
+    vogt_core_token: Option<String>,
+}
+
+pub fn load(
+    file: Option<&Path>,
+    cli_bind: Option<String>,
+    cli_token: Option<String>,
+) -> Result<Config> {
+    let from_file: FileConfig = match file {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|e| ApiError::Config(format!("reading {}: {e}", path.display())))?;
+            toml::from_str(&raw)
+                .map_err(|e| ApiError::Config(format!("parsing {}: {e}", path.display())))?
+        }
+        None => FileConfig::default(),
+    };
+
+    let bind_str = cli_bind
+        .or(from_file.bind)
+        .unwrap_or_else(|| "127.0.0.1:8910".to_string());
+    let bind: SocketAddr = bind_str
+        .parse()
+        .map_err(|e| ApiError::Config(format!("invalid bind {bind_str:?}: {e}")))?;
+
+    let token = cli_token.or(from_file.token).ok_or_else(|| {
+        ApiError::Config("token required (MYDEVENV2_TOKEN env or config.token)".into())
+    })?;
+    if token.len() < 16 {
+        return Err(ApiError::Config(
+            "token must be at least 16 characters".into(),
+        ));
+    }
+    let token_mutating_request_limit_per_minute =
+        parse_u32_env("MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE")?
+            .or(from_file.token_mutating_request_limit_per_minute)
+            .unwrap_or(DEFAULT_MUTATING_REQUEST_LIMIT_PER_MINUTE);
+
+    let mut extra_tokens = from_file.extra_tokens.unwrap_or_default();
+    if let Some(env_tokens) = parse_extra_tokens_env("MYDEVENV2_EXTRA_TOKENS_JSON")? {
+        extra_tokens.extend(env_tokens);
+    }
+    validate_extra_tokens(&token, &extra_tokens)?;
+
+    let workspace_root_raw = from_file.workspace_root.map(std::path::PathBuf::from);
+    let workspace_root = workspace_root_raw
+        .or_else(|| dirs_home().map(|h| h.join("Working")))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let workspace_root = workspace_root
+        .canonicalize()
+        .map_err(|e| ApiError::Config(format!("workspace_root {workspace_root:?}: {e}")))?;
+
+    let auto_agent_auth = match std::env::var("MYDEVENV2_AUTO_AGENT_AUTH") {
+        Ok(v) => Some(parse_bool_env("MYDEVENV2_AUTO_AGENT_AUTH", &v)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(e) => {
+            return Err(ApiError::Config(format!(
+                "reading MYDEVENV2_AUTO_AGENT_AUTH: {e}"
+            )));
+        }
+    }
+    .or(from_file.auto_agent_auth)
+    .unwrap_or(false);
+
+    let agent_auth_helper = std::env::var("MYDEVENV2_AGENT_AUTH_HELPER")
+        .ok()
+        .or(from_file.agent_auth_helper)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin/mydevenv2-agent-auth"));
+
+    // The file path wins over the bare variable: a deployment that brokers
+    // the token into a file has gone to the trouble deliberately, and falling
+    // back to an environment value it also set would silently undo that.
+    let vogt_core_token = match from_file.vogt_core_token {
+        Some(value) => Some(value),
+        None => match read_token_file("VOGT_CORE_TOKEN_FILE")? {
+            Some(value) => Some(value),
+            None => std::env::var("VOGT_CORE_TOKEN").ok(),
+        },
+    };
+
+    Ok(Config {
+        bind,
+        token,
+        token_mutating_request_limit_per_minute,
+        extra_tokens,
+        scrollback_bytes: parse_usize_env("MYDEVENV2_SCROLLBACK_BYTES")?
+            .or(from_file.scrollback_bytes)
+            .unwrap_or(DEFAULT_SCROLLBACK_BYTES),
+        default_shell: from_file
+            .default_shell
+            .or_else(|| std::env::var("SHELL").ok())
+            .unwrap_or_else(|| "/bin/bash".to_string()),
+        default_cwd: from_file
+            .default_cwd
+            .map(std::path::PathBuf::from)
+            .or_else(dirs_home)
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp")),
+        activity_idle_after_ms: from_file.activity_idle_after_ms.unwrap_or(1_500),
+        idle_stall_after_ms: parse_u64_env("MYDEVENV2_IDLE_STALL_AFTER_MS")?
+            .or(from_file.idle_stall_after_ms)
+            .unwrap_or(10 * 60 * 1_000),
+        workspace_root,
+        gui_stream_url: from_file
+            .gui_stream_url
+            .or_else(|| std::env::var("GUI_STREAM_URL").ok())
+            .filter(|s| !s.is_empty()),
+        state_dir: from_file
+            .state_dir
+            .map(std::path::PathBuf::from)
+            .or_else(|| dirs_home().map(|h| h.join(".local/share/mydevenv2")))
+            .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/mydevenv2")),
+        fcm_service_account_json: from_file
+            .fcm_service_account_json
+            .or_else(|| std::env::var("MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON").ok())
+            .filter(|s| !s.trim().is_empty()),
+        vapid_subject: from_file
+            .vapid_subject
+            .or_else(|| std::env::var("MYDEVENV2_VAPID_SUBJECT").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "mailto:admin@example.invalid".to_string()),
+        allowed_origins: parse_allowed_origins(
+            from_file.allowed_origins,
+            std::env::var("MYDEVENV2_ALLOWED_ORIGINS").ok(),
+        ),
+        auto_agent_auth,
+        agent_auth_helper,
+        session_templates: from_file
+            .session_templates
+            .unwrap_or_else(SessionTemplate::default_templates),
+        assistant_api_key: from_file
+            .assistant_api_key
+            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_API_KEY").ok())
+            .filter(|s| !s.trim().is_empty()),
+        assistant_base_url: from_file
+            .assistant_base_url
+            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_BASE_URL").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "https://api.theclawbay.com/v1".to_string()),
+        assistant_model: from_file
+            .assistant_model
+            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_MODEL").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+        assistant_auto_type: match std::env::var("MYDEVENV2_ASSISTANT_AUTO_TYPE") {
+            Ok(v) => Some(parse_bool_env("MYDEVENV2_ASSISTANT_AUTO_TYPE", &v)?),
+            Err(_) => None,
+        }
+        .or(from_file.assistant_auto_type)
+        .unwrap_or(false),
+        assistant_max_tool_calls: parse_u32_env("MYDEVENV2_ASSISTANT_MAX_TOOL_CALLS")?
+            .or(from_file.assistant_max_tool_calls)
+            .unwrap_or(8),
+        assistant_reasoning_effort: from_file
+            .assistant_reasoning_effort
+            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_REASONING_EFFORT").ok())
+            .filter(|s| !s.trim().is_empty()),
+        // Unprefixed on purpose: these are ContextKeeper's own variable names,
+        // and the same two values configure its CLI and hooks inside the
+        // container. One name for one credential.
+        contextkeeper_url: from_file
+            .contextkeeper_url
+            .or_else(|| std::env::var("CONTEXTKEEPER_URL").ok())
+            .filter(|s| !s.trim().is_empty()),
+        contextkeeper_token: from_file
+            .contextkeeper_token
+            .or_else(|| std::env::var("CONTEXTKEEPER_API_TOKEN").ok())
+            .filter(|s| !s.trim().is_empty()),
+        // Unprefixed like the ContextKeeper pair above, and for the same
+        // reason: these are vogt's own variable names, and the same values
+        // configure its CLI inside the container. One name for one thing.
+        vogt_core_url: from_file
+            .vogt_core_url
+            .or_else(|| std::env::var("VOGT_CORE_URL").ok())
+            .filter(|s| !s.trim().is_empty()),
+        vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
+    })
+}
+
+/// Read a token from the file `name` points at, if it points anywhere.
+///
+/// The file form is the one the container uses: `mydevenv2-agent-auth`
+/// brokers Infisical secrets into files under a private temporary directory
+/// and exports their paths, which keeps the value out of the process
+/// environment — where `/proc/<pid>/environ` and every `docker inspect`
+/// would otherwise show it.
+fn read_token_file(name: &str) -> Result<Option<String>> {
+    let Ok(path) = std::env::var(name) else {
+        return Ok(None);
+    };
+    if path.trim().is_empty() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path.trim())
+        .map_err(|e| ApiError::Config(format!("reading {name} ({path}): {e}")))?;
+    Ok(Some(raw.trim().to_string()).filter(|s| !s.is_empty()))
+}
+
+fn parse_bool_env(name: &str, raw: &str) -> Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(ApiError::Config(format!(
+            "{name} must be one of 1/0, true/false, yes/no, or on/off"
+        ))),
+    }
+}
+
+fn parse_usize_env(name: &str) -> Result<Option<usize>> {
+    match std::env::var(name) {
+        Ok(v) => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = trimmed
+                .parse::<usize>()
+                .map_err(|e| ApiError::Config(format!("{name} must be an integer: {e}")))?;
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
+    }
+}
+
+fn parse_u32_env(name: &str) -> Result<Option<u32>> {
+    match std::env::var(name) {
+        Ok(v) => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = trimmed
+                .parse::<u32>()
+                .map_err(|e| ApiError::Config(format!("{name} must be an integer: {e}")))?;
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
+    }
+}
+
+fn parse_u64_env(name: &str) -> Result<Option<u64>> {
+    match std::env::var(name) {
+        Ok(v) => {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = trimmed
+                .parse::<u64>()
+                .map_err(|e| ApiError::Config(format!("{name} must be an integer: {e}")))?;
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
+    }
+}
+
+fn parse_extra_tokens_env(name: &str) -> Result<Option<Vec<ScopedTokenConfig>>> {
+    match std::env::var(name) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = serde_json::from_str::<Vec<ScopedTokenConfig>>(trimmed)
+                .map_err(|e| ApiError::Config(format!("parsing {name}: {e}")))?;
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
+    }
+}
+
+fn validate_extra_tokens(primary_token: &str, extra_tokens: &[ScopedTokenConfig]) -> Result<()> {
+    for token in extra_tokens {
+        if token.name.trim().is_empty() {
+            return Err(ApiError::Config(
+                "extra token name must not be empty".into(),
+            ));
+        }
+        if token.token.len() < 16 {
+            return Err(ApiError::Config(format!(
+                "extra token {} must be at least 16 characters",
+                token.name
+            )));
+        }
+        if token.token == primary_token {
+            return Err(ApiError::Config(format!(
+                "extra token {} must not duplicate the primary token",
+                token.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<String> {
+    if let Some(list) = file {
+        return list
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    if let Some(s) = env {
+        let list: Vec<String> = s
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !list.is_empty() {
+            return list;
+        }
+    }
+    // Defaults: deployed PWA + Vite dev server. Adjust via MYDEVENV2_ALLOWED_ORIGINS
+    // for staging/preview environments.
+    vec![
+        "https://mydevenv2.sprooty.com".to_string(),
+        "http://localhost:5173".to_string(),
+        "http://127.0.0.1:5173".to_string(),
+    ]
+}
+
+fn dirs_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_scrollback_bytes_env() {
+        const NAME: &str = "MYDEVENV2_TEST_SCROLLBACK_BYTES_VALID";
+        std::env::set_var(NAME, "1048576");
+        let parsed = parse_usize_env(NAME).unwrap();
+        std::env::remove_var(NAME);
+
+        assert_eq!(parsed, Some(1_048_576));
+    }
+
+    #[test]
+    fn rejects_invalid_scrollback_bytes_env() {
+        const NAME: &str = "MYDEVENV2_TEST_SCROLLBACK_BYTES_INVALID";
+        std::env::set_var(NAME, "not-a-number");
+        let err = parse_usize_env(NAME).unwrap_err();
+        std::env::remove_var(NAME);
+
+        assert!(err.to_string().contains(NAME));
+    }
+
+    #[test]
+    fn parses_extra_tokens_env_json() {
+        const NAME: &str = "MYDEVENV2_TEST_EXTRA_TOKENS_JSON";
+        std::env::set_var(
+            NAME,
+            r#"[{"name":"readonly","token":"1234567890abcdef","capabilities":["sessions"]}]"#,
+        );
+        let parsed = parse_extra_tokens_env(NAME).unwrap().unwrap();
+        std::env::remove_var(NAME);
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "readonly");
+    }
+}

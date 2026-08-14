@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# Load service credentials on demand from Infisical for agent commands.
+# The base container intentionally does not install or authenticate Codex/Claude.
+
+set -euo pipefail
+
+readonly DEFAULT_INFISICAL_API_URL="http://100.92.54.45:8400"
+readonly CICD_PROJECT_ID="6d6caff5-7aaf-42f8-a135-2455d7629af8"
+readonly INFRASTRUCTURE_PROJECT_ID="5b7e75de-e874-484d-9595-873acd6bfd07"
+readonly APPS_PROJECT_ID="76b1ebe1-3656-4cef-952c-30d5d489c6e7"
+readonly INFISICAL_ENV="prod"
+readonly CADASTRE_SECRET_NAME="${MYDEVENV2_CADASTRE_SECRET_NAME:-HOMELAB_CADASTRE_HTTP_TOKEN}"
+readonly VOGT_SECRET_NAME="${MYDEVENV2_VOGT_SECRET_NAME:-HOMELAB_VOGT_AGENT_TOKEN}"
+readonly DEFAULT_CADASTRE_MCP_URL="https://winrarhost.tailc7d3c.ts.net:18092/mcp"
+readonly DEFAULT_CADASTRE_MCP_RESOLVE="${MYDEVENV2_CADASTRE_MCP_RESOLVE:-}"
+AUTH_TMP_DIR=""
+
+cleanup_auth_artifacts() {
+    if [[ -n "$AUTH_TMP_DIR" && -d "$AUTH_TMP_DIR" ]]; then
+        rm -rf "$AUTH_TMP_DIR"
+    fi
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  mydevenv2-agent-auth check
+  mydevenv2-agent-auth run -- <command> [args...]
+  mydevenv2-agent-auth shell
+
+Commands:
+  check  Fetch credentials and validate Infisical, Forgejo, Woodpecker,
+         GitHub, Komodo, and Cadastre MCP access.
+  run    Execute one command with service credentials on demand in memory.
+  shell  Start a login shell with service credentials on demand in memory.
+EOF
+}
+
+die() {
+    printf 'mydevenv2-agent-auth: %s\n' "$*" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+require_identity() {
+    [[ -n "${INFISICAL_CLIENT_ID:-}" ]] || die \
+        "INFISICAL_CLIENT_ID is not configured; add the MyDevEnv2 machine identity to the Komodo stack"
+    [[ -n "${INFISICAL_CLIENT_SECRET:-}" ]] || die \
+        "INFISICAL_CLIENT_SECRET is not configured; add the MyDevEnv2 machine identity to the Komodo stack"
+}
+
+mint_access_token() {
+    local temp_home token
+    temp_home="$(mktemp -d)"
+    if ! token="$(HOME="$temp_home" infisical login \
+        --method universal-auth \
+        --domain "${INFISICAL_API_URL:-$DEFAULT_INFISICAL_API_URL}" \
+        --client-id "$INFISICAL_CLIENT_ID" \
+        --client-secret "$INFISICAL_CLIENT_SECRET" \
+        --plain --silent)"; then
+        rm -rf "$temp_home"
+        return 1
+    fi
+    rm -rf "$temp_home"
+    printf '%s' "$token"
+}
+
+get_secret() {
+    local access_token="$1" project_id="$2" secret_name="$3"
+    infisical secrets get "$secret_name" \
+        --domain "${INFISICAL_API_URL:-$DEFAULT_INFISICAL_API_URL}" \
+        --projectId "$project_id" \
+        --env "$INFISICAL_ENV" \
+        --token "$access_token" \
+        --plain --silent
+}
+
+load_agent_environment() {
+    local access_token github_destination_token github_source_token
+
+    require_identity
+    require_command infisical
+    access_token="$(mint_access_token)" || die "Infisical universal-auth login failed"
+
+    export GIT_AUTH_TOKEN="$(get_secret "$access_token" "$CICD_PROJECT_ID" GIT_AUTH_TOKEN)"
+    export FORGEJO_TOKEN="$(get_secret "$access_token" "$CICD_PROJECT_ID" FORGEJO_TOKEN)"
+    export WOODPECKER_TOKEN="$(get_secret "$access_token" "$INFRASTRUCTURE_PROJECT_ID" WOODPECKER_TOKEN)"
+    # GITHUB_PAT / GH_RELEASE_TOKEN are retired release-automation names whose
+    # values are revoked. They used to be exported here as GH_TOKEN, so every
+    # `gh` call in an auto-agent-auth shell failed with "Bad credentials" and
+    # agents concluded GitHub auth was unavailable. Clear anything inherited
+    # so a stale value cannot outlive this fix.
+    unset GITHUB_PAT GH_RELEASE_TOKEN
+    github_destination_token="$(get_secret "$access_token" "$CICD_PROJECT_ID" GITHUB_DANCINGDEVELOPER_PAT 2>/dev/null || true)"
+    [[ -n "$github_destination_token" ]] || die \
+        "Infisical secret GITHUB_DANCINGDEVELOPER_PAT is missing or empty; refusing ambiguous GitHub credential fallback"
+    export GITHUB_DANCINGDEVELOPER_PAT="$github_destination_token"
+    # TheDancingDeveloper-org is the main org, so it owns the default GH_TOKEN.
+    export GH_TOKEN="$github_destination_token"
+
+    # AusAgentSmith-org is still live and holds its own distinct repo set
+    # (AiFw, lindirstat-rs, email-rs, fluent-gpui, ...), so the pod needs both
+    # identities. Source-org work runs as:
+    #   GH_TOKEN="$GITHUB_AUSAGENTSMITH_PAT" gh ...
+    github_source_token="$(get_secret "$access_token" "$CICD_PROJECT_ID" GITHUB_AUSAGENTSMITH_PAT 2>/dev/null || true)"
+    [[ -n "$github_source_token" ]] || die \
+        "Infisical secret GITHUB_AUSAGENTSMITH_PAT is missing or empty"
+    export GITHUB_AUSAGENTSMITH_PAT="$github_source_token"
+    export HOMELAB_KOMODO_API_KEY="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_KEY)"
+    export HOMELAB_KOMODO_API_SECRET="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_SECRET)"
+    # Cadastre is an agent-side dependency, not a container/server setting.
+    # Keep the bearer in the child environment only; never persist or print it.
+    export CADASTRE_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$CADASTRE_SECRET_NAME")"
+    [[ -n "$CADASTRE_HTTP_TOKEN" ]] || die \
+        "Infisical secret $CADASTRE_SECRET_NAME is missing or empty"
+    # Vogt is the estate's backlog/project tracker, reached the same way for
+    # the same reasons. Absent secret is not fatal, unlike cadastre's: an
+    # instance may legitimately not be deployed yet, and agent auth must keep
+    # working for git/gh regardless.
+    export VOGT_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$VOGT_SECRET_NAME" || true)"
+
+    umask 077
+    AUTH_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mydevenv2-agent-auth.XXXXXXXX")"
+    printf '%s' "$CADASTRE_HTTP_TOKEN" >"$AUTH_TMP_DIR/cadastre-http-token"
+    export CADASTRE_HTTP_TOKEN_FILE="$AUTH_TMP_DIR/cadastre-http-token"
+    if [[ -n "$VOGT_HTTP_TOKEN" ]]; then
+        printf '%s' "$VOGT_HTTP_TOKEN" >"$AUTH_TMP_DIR/vogt-http-token"
+        export VOGT_TOKEN_FILE="$AUTH_TMP_DIR/vogt-http-token"
+    fi
+
+    if [[ "${MYDEVENV2_AUTO_CADASTRE_MCP:-1}" == "1" ]]; then
+        /usr/local/bin/mydevenv2-mcp-bootstrap
+    fi
+
+    export INFISICAL_API_URL="${INFISICAL_API_URL:-$DEFAULT_INFISICAL_API_URL}"
+    export GIT_ASKPASS=/usr/local/bin/mydevenv2-git-askpass
+    export GIT_TERMINAL_PROMPT=0
+}
+
+check_access() {
+    local response_file gh_login mcp_url
+    require_command curl
+    require_command git
+    require_command gh
+    load_agent_environment
+    response_file="$(mktemp)"
+    trap "rm -f '$response_file'" EXIT
+
+    printf 'ok: Infisical universal auth\n'
+    curl -fsS -H "Authorization: token $FORGEJO_TOKEN" \
+        https://repo.indexarr.net/api/v1/user >"$response_file"
+    printf 'ok: Forgejo API\n'
+    git ls-remote https://repo.indexarr.net/indexarr/ops.git HEAD >/dev/null
+    printf 'ok: Forgejo git\n'
+    curl -fsS -H "Authorization: Bearer $WOODPECKER_TOKEN" \
+        https://ci.indexarr.net/api/user >"$response_file"
+    printf 'ok: Woodpecker API\n'
+    # GitHub logins are case-insensitive; the API returns canonical casing.
+    gh_login="$(gh api user --jq .login 2>/dev/null || true)"
+    [[ "${gh_login,,}" == "thedancingdeveloper" ]] || die \
+        "GitHub destination token is not authenticated as TheDancingDeveloper (got: ${gh_login:-<none>})"
+    [[ "$(gh api user/memberships/orgs/TheDancingDeveloper-org --jq '.state + ":" + .role')" == "active:admin" ]] || die \
+        "GitHub destination token is not an active TheDancingDeveloper-org admin"
+    printf 'ok: GitHub main org (TheDancingDeveloper-org admin)\n'
+    # Source org is validated with its own PAT from Infisical, not a local
+    # `gh auth login` session — pods have no gh hosts.yml, so a session-based
+    # check could never pass there.
+    gh_login="$(GH_TOKEN="$GITHUB_AUSAGENTSMITH_PAT" gh api user --jq .login 2>/dev/null || true)"
+    [[ "${gh_login,,}" == "ausagentsmith" ]] || die \
+        "GITHUB_AUSAGENTSMITH_PAT is not authenticated as AusAgentSmith (got: ${gh_login:-<none>})"
+    [[ "$(GH_TOKEN="$GITHUB_AUSAGENTSMITH_PAT" gh api user/memberships/orgs/AusAgentSmith-org --jq '.state + ":" + .role' 2>/dev/null)" == "active:admin" ]] || die \
+        "GITHUB_AUSAGENTSMITH_PAT is not an active AusAgentSmith-org admin"
+    printf 'ok: GitHub source org (AusAgentSmith-org admin)\n'
+    curl -fsS http://100.92.54.45:3011/read \
+        -H "X-Api-Key: $HOMELAB_KOMODO_API_KEY" \
+        -H "X-Api-Secret: $HOMELAB_KOMODO_API_SECRET" \
+        -H 'Content-Type: application/json' \
+        --data '{"type":"ListServers","params":{}}' >"$response_file"
+    printf 'ok: Komodo API\n'
+    mcp_url="${CADASTRE_MCP_URL:-$DEFAULT_CADASTRE_MCP_URL}"
+    mcp_curl_args=()
+    if [[ -n "${MYDEVENV2_CADASTRE_MCP_RESOLVE:-$DEFAULT_CADASTRE_MCP_RESOLVE}" ]]; then
+        mcp_curl_args+=(--resolve "${MYDEVENV2_CADASTRE_MCP_RESOLVE}")
+    fi
+    curl -fsS --max-time 15 "${mcp_curl_args[@]}" \
+        -H "Authorization: Bearer $CADASTRE_HTTP_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mydevenv2-agent-auth","version":"1"}}}' \
+        "$mcp_url" >"$response_file"
+    printf 'ok: Cadastre MCP (%s)\n' "$mcp_url"
+}
+
+case "${1:-}" in
+    check)
+        check_access
+        ;;
+    run)
+        shift
+        [[ "${1:-}" == "--" ]] && shift
+        [[ $# -gt 0 ]] || die "run requires a command"
+    load_agent_environment
+        trap cleanup_auth_artifacts EXIT
+        "$@"
+        ;;
+    shell)
+        load_agent_environment
+        trap cleanup_auth_artifacts EXIT
+        "${SHELL:-/bin/bash}" -l
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
