@@ -2,7 +2,7 @@
 
 Status: **M0–M6 delivered — v1 is built** (2026-08-12); **M7 and M8 are
 post-v1**; **M9–M14 are v2** — the MyDevEnv2 merge, added by
-`REQUIREMENTS.md` revision r9 (2026-08-14). **M9, M10 and M11 are built**
+`REQUIREMENTS.md` revision r9 (2026-08-14). **M9–M12 are built**
 (2026-08-14); M11's demo is outstanding for want of a browser, and its "as
 built" note says what that costs. M12–M14 are not started. Requirement IDs
 refer to `REQUIREMENTS.md`; per its §4, scope changes here must update that
@@ -888,6 +888,33 @@ Deliverables:
 **Demo**, by voice on the APK: ask for the top bug, hear the answer, start a
 session on it, approve by on-screen tap — and confirm that saying "approve"
 does not.
+
+### M12 as built — three notes
+
+1. **The tool schemas are fetched, not written.** The core already generates
+   MCP tool schemas from its operation registry, so the assistant asks it —
+   `tools/list` over JSON-RPC, `inputSchema` forwarded verbatim — instead of
+   keeping a second copy that drifts. Curation is an intersection against a
+   named read set, and a curated name the core does not serve is logged and
+   skipped rather than invented. What is deliberately *not* taken from the
+   core is which tools mutate: that comes from a local write set, so the
+   approval gate never depends on a remote answer.
+
+2. **The credential is the approver's, not the proposer's.** FR-T3 says an
+   assistant write is audited to the approving user's actor, and the only way
+   that is true by construction is to take the front-door pairing from the
+   request that pressed approve. A write has no shared fallback at all: an
+   unpaired approver is refused by token name, because falling back to a
+   deployment-wide actor is exactly the "shared assistant actor" the
+   requirement forbids.
+
+3. **Voice is still unproven, and is now written down as such.** FR-T5 asks
+   for a validation pass against domain vocabulary before v2 ships; it needs
+   a device and a microphone, and neither exists here. What was done instead
+   is smaller and honest: the prompt states that items are `WI-7` and
+   projects are slugs, which is what a recognizer's output has to survive.
+   FR-T7 was not attempted — the `claude-*` proxy hang is unexplained and the
+   loop is OpenAI-compatible only.
 
 ## M13 — Mobile MVP1 (S–M)
 

@@ -969,6 +969,11 @@ says and a test asserts what can be asserted without a renderer.
 | FR-U8 | `tests/test_pwa.py` resolves every path in the bundle against the operation registry *and* the engine's router and contract |
 | FR-U12, FR-U13, FR-U14, FR-U15, FR-U17, FR-U18 | Built in the surfaces; the reason-collecting and no-bulk-accept rules are asserted in `tests/test_pwa.py` |
 | FR-U21 | Every surface distinguishes an outage from an empty answer and renders the server's own reason (asserted structurally) |
+| FR-T1 | The assistant's Vogt tools are fetched from the core's own MCP `tools/list` and converted — `inputSchema` forwarded verbatim — so the schemas are the registry's, not a copy of it. Curation is an intersection: a curated name the core does not serve is logged and skipped, never fabricated |
+| FR-T2 | Every Vogt write goes through the same `PendingAction` gate as `send_input`; a write proposed without a reason is refused before it becomes a card |
+| FR-T3 | The credential is taken from the request that *approved* the action, not the one that proposed it, and a write has no shared fallback — an unpaired approver is refused by name. Tested against a stand-in core: proposed by an unpaired token with a fallback configured, approved by a different paired one, and the core saw the approver's token |
+| FR-T4 | Every Vogt result — reads and the core's answer to an approved write — is wrapped in `<vogt-data>`, with the system prompt naming both delimiters as untrusted; a test sends instruction-shaped text from the core and asserts it arrives delimited |
+| FR-T6 | As-built rule retained: no key, no assistant, and the Vogt tools are absent when no core is configured without disabling the assistant itself |
 
 ### 6.2 Delivered differently, or short
 
@@ -985,6 +990,8 @@ says and a test asserts what can be asserted without a renderer.
 | FR-U19 | Actor, operation and entity filter server-side; **time range and project are applied to the loaded window**, because `ListAuditParams` has no time bound — which is §5.1's FR-S6 gap, reappearing in the surface that needed it most. | Compounds FR-S6 |
 | FR-U20 | Both directions: the work item shows its sessions with live activity and opens the terminal; the terminal carries a badge back to the item it was opened for. The badge asks Vogt (the engine knows the PTY, not why it exists) and stays silent when Vogt cannot be asked — a terminal must keep working whatever Vogt is doing. | — |
 | FR-U22 | Focus movement, `Shift`+arrow to propose a move through the same reason composer, `Enter` to open. Not wired into the palette. | Low |
+| FR-T5 | **Not validated.** Voice was adopted unproven and remains so — no domain-vocabulary pass was run, because it needs a device and a microphone. The prompt now tells the model that items are `WI-7` and projects are slugs, which is what a recognizer's output has to survive; whether it does is unknown. | The requirement says "shall not be presumed working" |
+| FR-T7 | **Not attempted.** Still OpenAI-compatible only; the documented `claude-*` proxy hang is still unexplained. Priority C. | Known |
 | NFR-S5 | The backlog virtualizes above 60 rows; the audit browser pages; the board **caps** rendered cards per column with an explicit "+N more" and pages its reads with a truncation banner. Nothing fetches the estate to render a page — the requirement's load-bearing half. | Board virtualization outstanding |
 
 ### 6.3 What this pass found that no requirement names
