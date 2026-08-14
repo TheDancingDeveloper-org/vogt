@@ -309,6 +309,46 @@ class ProjectBriefResult(Result):
 # -- work ------------------------------------------------------------------
 
 
+# Defined here rather than with the rest of the session models below,
+# because `WorkResult` carries it: a work item's view shows what is
+# running for it (FR-E4), and a forward reference would leave the model
+# incomplete until something remembered to rebuild it.
+class SessionSummary(Result):
+    """One session, as Vogt knows it and as the engine currently reports it.
+
+    Two halves on purpose. `id`, `project`, `work_item` and `reason` are
+    Vogt's declared link — written once, audited, and true whatever the
+    engine is doing. `activity` and `alive` are read from the engine at the
+    moment of asking and are never stored: a cached activity state would be
+    a claim about a running process, which is the one thing this product
+    refuses to invent (FR-E2).
+    """
+
+    id: str
+    engine_session_id: str
+    project: str | None = None
+    work_item: str | None = Field(
+        default=None, description="Work item ref, e.g. WI-7, when opened for one."
+    )
+    actor: str = Field(description="Actor the session's writes are attributed to.")
+    cwd: str
+    template: str | None = None
+    reason: str
+    started_at: datetime
+    stopped_at: datetime | None = None
+    activity: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: idle / running / waiting-for-input / "
+            "errored. None when the engine could not be asked."
+        ),
+    )
+    alive: bool | None = Field(
+        default=None,
+        description="Whether the engine still has this session. None if unasked.",
+    )
+
+
 class CreateWorkParams(Params):
     kind: WorkKind = Field(description="feature / bug / chore / question.")
     title: Name
@@ -329,6 +369,10 @@ class CreateWorkParams(Params):
 class WorkResult(Result):
     item: WorkItem
     comments: list[Comment] = []
+    #: Sessions opened for this item, live activity included (FR-E4).
+    #: Populated by `work.get`; empty on the write operations, which answer
+    #: about the change they made rather than about what is running.
+    sessions: list[SessionSummary] = []
 
 
 class GetWorkParams(Params):
@@ -1252,42 +1296,6 @@ class ConnectResult(Result):
 
 
 # -- coding sessions -------------------------------------------------------
-
-
-class SessionSummary(Result):
-    """One session, as Vogt knows it and as the engine currently reports it.
-
-    Two halves on purpose. `id`, `project`, `work_item` and `reason` are
-    Vogt's declared link — written once, audited, and true whatever the
-    engine is doing. `activity` and `alive` are read from the engine at the
-    moment of asking and are never stored: a cached activity state would be
-    a claim about a running process, which is the one thing this product
-    refuses to invent (FR-E2).
-    """
-
-    id: str
-    engine_session_id: str
-    project: str | None = None
-    work_item: str | None = Field(
-        default=None, description="Work item ref, e.g. WI-7, when opened for one."
-    )
-    actor: str = Field(description="Actor the session's writes are attributed to.")
-    cwd: str
-    template: str | None = None
-    reason: str
-    started_at: datetime
-    stopped_at: datetime | None = None
-    activity: str | None = Field(
-        default=None,
-        description=(
-            "Live from the engine: idle / running / waiting-for-input / "
-            "errored. None when the engine could not be asked."
-        ),
-    )
-    alive: bool | None = Field(
-        default=None,
-        description="Whether the engine still has this session. None if unasked.",
-    )
 
 
 class StartSessionParams(Params):

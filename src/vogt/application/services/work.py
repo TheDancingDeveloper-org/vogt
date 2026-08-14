@@ -8,6 +8,7 @@ from vogt.application.models import (
     CommentResult,
     CreateWorkParams,
     GetWorkParams,
+    ListSessionsParams,
     ListWorkParams,
     RelateWorkParams,
     TransitionWorkParams,
@@ -17,6 +18,7 @@ from vogt.application.models import (
     WorkResult,
 )
 from vogt.application.services import _resolve, writeback
+from vogt.application.services.sessions import list_sessions
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.entities import Actor, Comment, Project, WorkItem
 from vogt.core.workflow import (
@@ -97,6 +99,13 @@ def create_work(ctx: AppContext, params: CreateWorkParams) -> WorkResult:
 
 
 def get_work(ctx: AppContext, params: GetWorkParams) -> WorkResult:
+    """One work item, with what is running for it (FR-E4).
+
+    The sessions are read through the same path `session.list` uses, so a
+    work item's view and the session list cannot disagree about liveness —
+    and an engine that cannot be reached costs the activity badge here
+    exactly as it does there, rather than costing the item.
+    """
     with ctx.declared.read() as view:
         item = _resolve.work_item(view, params.ref)
         comments = (
@@ -104,7 +113,8 @@ def get_work(ctx: AppContext, params: GetWorkParams) -> WorkResult:
             if params.comment_limit
             else []
         )
-        return WorkResult(item=item, comments=comments)
+    sessions = list_sessions(ctx, ListSessionsParams(work_item=item.ref)).sessions
+    return WorkResult(item=item, comments=comments, sessions=sessions)
 
 
 def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:

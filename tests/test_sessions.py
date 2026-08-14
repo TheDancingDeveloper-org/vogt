@@ -20,6 +20,7 @@ from vogt.adapters.engine import EngineClient, EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
     CreateWorkParams,
+    GetWorkParams,
     ListSessionsParams,
     RegisterProjectParams,
     StartSessionParams,
@@ -27,6 +28,7 @@ from vogt.application.models import (
 )
 from vogt.application.services import (
     create_work,
+    get_work,
     list_sessions,
     register_project,
     start_session,
@@ -346,3 +348,77 @@ def test_a_session_can_be_closed_when_the_engine_is_gone(wired: AppContext) -> N
     )
     stopped = stop_session(dead, StopSessionParams(id=result.session.id, reason=WHY))
     assert stopped.session.stopped_at is not None
+
+
+# -- the brief the agent is handed (FR-E4) ---------------------------------
+
+
+def test_the_work_items_brief_travels_with_the_session(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The agent is told what it is working on, from what Vogt records.
+
+    Sent as text, not as a path: the file it will be read from lives on the
+    engine's state directory, and the engine is the process that owns that
+    filesystem even when both halves share a container.
+    """
+    create_work(
+        wired,
+        CreateWorkParams(
+            kind="bug",
+            title="Sweep drops a page",
+            body="The second page of results never arrives.",
+            project="vogt",
+            reason=WHY,
+        ),
+    )
+    result = start_session(wired, StartSessionParams(work_item="WI-2", reason=WHY))
+
+    brief = engine.last_spec["prompt"]
+    assert "WI-2 — Sweep drops a page" in brief
+    assert "The second page of results never arrives." in brief
+    assert result.session.id in brief, "the brief says which session it belongs to"
+    assert "VOGT_HTTP_TOKEN" in brief, (
+        "a brief that describes the work without saying how to record what was "
+        "found leaves the write capability undiscovered"
+    )
+
+
+def test_the_brief_carries_no_credential(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert engine.env_of_last_start()["VOGT_HTTP_TOKEN"] not in brief, (
+        "the token is passed in the environment; a copy in a file on disk is "
+        "one more place it can be read from"
+    )
+
+
+def test_a_project_session_is_told_no_task_was_asked_for(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Vogt does not invent work for a terminal nobody attached an item to.
+
+    Suggesting "have a look at the backlog" would be the system deciding to
+    start work, which is the half of the reversed non-goal that stayed
+    refused (r9).
+    """
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert "No work item is attached" in brief
+    assert "backlog" not in brief.lower()
+
+
+def test_the_work_item_view_shows_what_is_running_for_it(
+    wired: AppContext,
+) -> None:
+    """FR-E4's last clause, read through the operation a client actually calls."""
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+
+    item = get_work(wired, GetWorkParams(ref="WI-1"))
+    assert [row.id for row in item.sessions] == [started.session.id]
+    assert item.sessions[0].activity == "running"
+
+    stop_session(wired, StopSessionParams(id=started.session.id, reason=WHY))
+    assert get_work(wired, GetWorkParams(ref="WI-1")).sessions == []

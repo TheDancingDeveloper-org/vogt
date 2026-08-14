@@ -129,6 +129,7 @@ class EngineClient:
         command: list[str] | None,
         cwd: str,
         env: dict[str, str] | None = None,
+        prompt: str | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -141,6 +142,12 @@ class EngineClient:
         spec: dict[str, Any] = {"name": name, "cwd": cwd}
         if command:
             spec["command"] = command
+        if prompt:
+            # The engine writes this to a file on its own state directory and
+            # tells the child where it is (FR-E4). Vogt sends the text rather
+            # than a path because the filesystem the agent will read it from
+            # is the engine's, not Vogt's — even when they share a container.
+            spec["prompt"] = prompt
         if env:
             # The engine takes pairs, not an object, so that ordering is the
             # caller's and duplicate keys are visible rather than merged.

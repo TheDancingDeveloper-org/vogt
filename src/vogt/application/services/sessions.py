@@ -38,6 +38,10 @@ from vogt.application.models import (
     StopSessionParams,
 )
 from vogt.application.services import _resolve
+from vogt.application.services._brief import (
+    brief_for_project,
+    brief_for_work_item,
+)
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.auth import Scope, issue
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem
@@ -59,8 +63,8 @@ SESSION_SCOPES: tuple[Scope, ...] = ("read", "work.write")
 def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     """Open a terminal for a work item or a project (FR-E3, FR-E4, FR-E5)."""
     engine = _engine(ctx)
-    subject = _subject(ctx, params)
     session_id = ctx.id_factory("ses")
+    subject = _subject(ctx, params, session_id)
     actor_ref = f"agent:session:{session_id}"
     credential = issue(SESSION_SCOPES)
 
@@ -70,6 +74,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         template=params.template,
         cwd=subject.cwd,
         env=_session_env(ctx, session_id, credential.secret),
+        brief=subject.brief,
     )
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
@@ -240,11 +245,13 @@ class _Subject:
         project_slug: str,
         cwd: str,
         work_item: WorkItem | None,
+        brief: str,
     ) -> None:
         self.project_id = project_id
         self.project_slug = project_slug
         self.cwd = cwd
         self.work_item = work_item
+        self.brief = brief
 
     @property
     def work_item_id(self) -> str | None:
@@ -259,16 +266,18 @@ class _Subject:
         return self.work_item_ref or self.project_slug
 
 
-def _subject(ctx: AppContext, params: StartSessionParams) -> _Subject:
+def _subject(ctx: AppContext, params: StartSessionParams, session_id: str) -> _Subject:
     if (params.work_item is None) == (params.project is None):
         msg = "give exactly one of --work-item or --project"
         raise InvalidRequest(msg)
 
     with ctx.declared.read() as view:
-        return _resolve_subject(view, params)
+        return _resolve_subject(view, params, session_id)
 
 
-def _resolve_subject(view: ReadView, params: StartSessionParams) -> _Subject:
+def _resolve_subject(
+    view: ReadView, params: StartSessionParams, session_id: str
+) -> _Subject:
     if params.work_item is not None:
         item = _resolve.work_item(view, params.work_item)
         if item.project_id is None:
@@ -288,6 +297,7 @@ def _resolve_subject(view: ReadView, params: StartSessionParams) -> _Subject:
             project_slug=project.slug,
             cwd=project.root_path,
             work_item=item,
+            brief=brief_for_work_item(view, item, session_id),
         )
 
     project = _resolve.project(view, params.project or "")
@@ -296,6 +306,7 @@ def _resolve_subject(view: ReadView, params: StartSessionParams) -> _Subject:
         project_slug=project.slug,
         cwd=project.root_path,
         work_item=None,
+        brief=brief_for_project(view, project.slug, session_id),
     )
 
 
@@ -325,8 +336,10 @@ def _start_on_engine(
     template: str | None,
     cwd: str,
     env: dict[str, str],
+    brief: str,
 ) -> EngineSession:
     return engine.create_session(
+        prompt=brief,
         name=name,
         # A template names a command the *engine* knows; Vogt passes the name
         # through rather than resolving it, because the command a template
