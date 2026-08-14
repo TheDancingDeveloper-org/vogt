@@ -966,15 +966,15 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 139 are delivered, 44 are implemented and
-asserted by nothing, 7 cannot be verified in this environment at all, and 11
+**201 conjuncts across 46 IDs. 140 are delivered, 44 are implemented and
+asserted by nothing, 7 cannot be verified in this environment at all, and 10
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
 before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved thirty-seven conjuncts, and three of them were moved by
+**A fourth pass moved thirty-eight conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,10 +996,10 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +37 in the fourth pass (fourteen out of §6.2, twenty-one out of
-  §6.2a, two out of §6.2b)
+  then +38 in the fourth pass (fifteen out of §6.2, twenty-one out of §6.2a,
+  two out of §6.2b)
 - **44 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 21
-- **11 short** = 43 − 19 + 1 arriving from §6.2b, − 14
+- **10 short** = 43 − 19 + 1 arriving from §6.2b, − 15
 - **7 unverifiable** = 69 − 60 − 2
 
 One bookkeeping correction, since it is the kind of thing this section exists
@@ -1112,6 +1112,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | **FR-U11** | A pasted link opens the surface it names — project, work item, session and audit query — and a second link opens a second surface without closing the first | `web/src/__tests__/shell.test.tsx` (nine), which mounts the **whole shell** rather than a surface. That was the half M11 found broken for every surface and the half nothing mounted, and the stated blocker was wrong: `App.tsx` mounts in jsdom given four engine stubs and nothing else. `/audit?ref=WI-1` is asserted to carry the item's `entity_id` rather than opening an unfiltered log, and a stale session id opens no phantom tab |
 | **FR-T6** | Every GUI hides the assistant when it is not provisioned, the route included | `shell.test.tsx` (two): `#/assistant` with `assistant_enabled` false opens no tab and no drawer button, and the same link *with* a key opens it. The mirror is what makes the first assertion worth anything — without it, a dead route would pass |
 | **FR-U7** | The project page carries all six: brief, CI status, contract and compliance, drift inbox, dependency graph, import form | `web/src/__tests__/projectPage.test.tsx` (nine), asserting contents rather than presence — the failing CI check by name, the criteria under the compliance status, the declared-versus-observed version in the brief, the unresolved count on the graph |
+| **FR-U5** | The item's own state history: every entry into a state, oldest first, with what it came from, when, who moved it and why | Fifteen tests in `workItemDetail.test.tsx`. The reasons are *fetched* rather than linked, and the deciding argument is not about reasons: an event names its actor by ULID, so "who moved it" needs the audit row whatever the panel decides about why — and once that row is held, linking away for a sentence already in memory charges a click for nothing. Where the join does not close, the row shows the id the event carries and links into the audit pre-filtered; never a blank, because Vogt refuses a write without a reason and a blank would read as "nobody gave one". The walk is bounded and says so when it hits the bound, naming which end is missing |
 | **FR-U5** | Description, comments, relations, labels, collected evidence and the start-session control, on one page | Seven tests in `workItemDetail.test.tsx`, six for the panels and one holding all six together. Relations render as links to the related item; evidence shows the per-input contributions and the inputs that did not fire |
 | FR-U11, FR-U14 | The board's six filters and its swimlane mode are the URL: restored from a pasted link, written back when chosen on the surface, round-tripped, and put back when the shell navigates to the bare path | `board.test.tsx`'s FR-U11 block (four) and `restores every one of the six filters from a pasted link`; `backlog.test.tsx::round-trips a filter chosen on the surface through the URL` |
 | FR-U14 | A combined filter is nameable, recalled in full, survives a reload as per-client state, and a refresh interval is not part of what a name means | `board.test.tsx`'s FR-U14 block (five), including `keeps the multi-valued filters intact through the round trip` and `does not let a named view change how often the board refreshes`; `backlog.test.tsx::saves a named filter set and recalls it` |
@@ -1149,7 +1150,7 @@ half-present, because nothing about it had to be argued with first.
 
 ### 6.2 Delivered differently, or short — per conjunct
 
-Eleven conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
+Ten conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
 is one claim that the requirement makes and the build does not, which is why
 this table's rows can be counted and the other three tables' cannot.
 
@@ -1177,7 +1178,6 @@ the file.
 | FR-T3 — "a `why` derived from the conversational context" | Still short, and less so. The `why` is whatever the model puts in the tool argument, and **nothing can verify that a sentence was derived from anything** — that half is not a gap to be closed but a claim no code can make. What was a gap is that the two failures the prompt names by name went unenforced, so the phrasing the instructions single out was the one that always got through. `assistant.rs::contentless_reason` now refuses them: a reason that only says who asked, and a reason that restates the act. It refuses by *removal*, so "the user asked for this after the sprint scope changed" passes and "as requested" does not — the refusal must not teach the model to hide the provenance, which would trade a useless audit row for a misleading one. The refusal returns to the model as a tool error and the loop continues, so the ordinary outcome is a second attempt before any card reaches a person. Three tests, one of which asserts the refusal reaches the model rather than only that no card appeared. | Medium — an unverifiable reason in an audit row is the failure mode FR-W1 exists against, and this narrows the class it can be *contentless* in without pretending to settle whether it is true |
 | FR-T5 — "a validation pass against domain vocabulary … before v2 ships" | Not run, and nothing was built that would let it be: the recognizer's best match goes straight into the composer and is auto-sent. No project list, no slug normalisation, no `WI-\d+` repair. What was done instead is that the prompt now states items are `WI-7` and projects are slugs. The requirement says voice "shall not be presumed working", and it is still presumed. | **The requirement's own words** |
 | FR-T7 — a native Anthropic backend | `ChatBackend` has two variants, `Http` and a test mock. Nothing in the repository speaks the Anthropic API. | Known, priority C |
-| FR-U5 — "state history" | **The server can answer it now and the surface does not ask.** The obstacle was real and is gone: `audit` keeps a `payload_digest` rather than the payload, so the audit alone could say a transition happened and never which state it came from. `events.list` takes `entity_id`, the `work.transitioned` summary carries `{ref, from, to}`, nothing prunes that table, and each event names the audit row that says why — so an item's full state history is one query. Three tests in `tests/test_audit_query.py`. What remains is the panel: the item page still renders the workflow's machine with the current state marked, and says so honestly. | Low, and now wiring rather than a missing capability |
 | FR-U5 — "per-item audit trail" | **The silent omission is closed.** An item's trail now includes the writes audited against its comments, by semi-join through `comments.work_item_id` — chosen over denormalising a work item id onto `audit`, because back-filling `audit` means editing the record of what happened. What remains is the same division as before: a link to the audit browser rather than an embedded trail, which is FR-U19's second clause working. | Low, down from Medium — the trail no longer omits a kind of write, which was the part that mattered |
 | NFR-D12 — "deployed to a dev stack for live validation" | Nothing deploys, from any branch. `build.yml` says so in its own step summary, and `ci.yml` records the decision — Vogt has never deployed from CI (NFR-D10). **The artefact now exists**: on 2026-08-14 the `stack-image` job ran for the first time, built `engine/Dockerfile` with the repository as its context, ran `vogt --version` and `mydevenv2-server --help` inside the candidate, signed the digest and published `dev` and `dev-ee18adc`; `deploy/vogt-stack.compose.yml` pins that digest rather than the placeholder it carried. So the image a dev stack would run and the image `dev` builds are the same artefact, and it is a real one. **What is left is one human act** — `docs/DEPLOYMENT.md` §9.4 — and until it happens no stack has run this image and mobile, voice and push remain unvalidated. | **High**, and now blocked on a deploy rather than on a build. Everything this section can do for it has been done |
 | NFR-D12 — "only `main` deploys to prod" | Vacuously true, per the row above. `main` builds a `sha-` image and publishes it; a human pins a digest and deploys. | — |
