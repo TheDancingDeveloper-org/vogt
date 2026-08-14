@@ -430,8 +430,19 @@ export const notifications = (params: Record<string, unknown> = {}) =>
   // different answer from "nothing to say" (FR-N3).
   call<Record<string, unknown>>("notifications", params);
 
+/** The audit log, narrowed and paged (FR-S6, FR-U19).
+ *
+ *  `AuditListResult` carries `total` beside the records: how many match the
+ *  narrowing, ignoring `limit` and `offset`. It is not decoration — with
+ *  `offset` it is what lets a reader page past the newest records and know
+ *  whether they are looking at the whole story, and a client that dropped it
+ *  from the type would be a client that could not say how much it was hiding.
+ *
+ *  Optional here and only here: an older core answers without it, and a
+ *  surface that read `0` for "the server did not say" would report an empty
+ *  log — which on this operation above all is a claim rather than a shrug. */
 export const listAudit = (params: Record<string, unknown> = {}) =>
-  call<{ records: AuditRecord[] }>("audit.list", params);
+  call<{ records: AuditRecord[]; total?: number }>("audit.list", params);
 
 export const projectBrief = (slug: string) =>
   call<Record<string, unknown> & { freshness: FreshnessSummary }>(

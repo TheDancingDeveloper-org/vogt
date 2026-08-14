@@ -7,7 +7,7 @@
 // the forge inbox have different origins and different owners, and the audit
 // log is a third thing again.
 //
-// Four rules this file exists to keep:
+// Five rules this file exists to keep:
 //
 //   1. **Every row shows who, what and why.** Vogt refuses a write without a
 //      reason precisely so this view can answer "why did this change" months
@@ -15,17 +15,24 @@
 //      reason would waste the whole mechanism, so the reason is rendered on
 //      every row — and a record that somehow carries none says *that*, rather
 //      than leaving the space blank.
-//   2. **A filter says where it was applied.** `audit.list` takes an actor, an
-//      operation and an entity, and nothing else. FR-U19 also asks for project
-//      and time range, so those are applied to the records this page loaded —
-//      and the surface says so in as many words, the way the backlog says it
-//      of its workflow-state filter. A filter that silently means something
-//      narrower than it says is worse than one that is missing.
-//   3. **A query is a place.** The whole filter set lives in the URL (FR-U11),
+//   2. **Every filter is the query.** `audit.list` takes an actor, an
+//      operation, an entity, a project and a half-open time range, and pages
+//      with a limit and an offset. Nothing here narrows rows that were already
+//      loaded, and that is the whole difference: a filter applied to a loaded
+//      page and one applied to the store look identical on screen and differ
+//      entirely in what they can see. If a filter cannot be pushed — an actor
+//      this page could not turn into an id, a bound that will not parse — the
+//      read does not happen at all, because a wider query rendered under a
+//      narrower filter's heading is the failure this surface exists against.
+//   3. **A page says how much of what it is.** The count beside the rows is
+//      `total`: how many records match the *narrowing*, not how many are on
+//      screen. `offset` is what reaches the rest of them, so the log is
+//      readable to its beginning rather than to the newest few hundred rows.
+//   4. **A query is a place.** The whole filter set lives in the URL (FR-U11),
 //      which is what makes FR-U19's second clause work: a work item's detail
 //      view links to `#/audit?ref=WI-7` (or `?entity=<id>`) and lands here
 //      with that filter restored and pushed to the server.
-//   4. **Absence is stated.** An unreachable Vogt renders as an outage with
+//   5. **Absence is stated.** An unreachable Vogt renders as an outage with
 //      the server's own reason, never as an empty audit log (FR-U21). Of every
 //      surface in the product this is the one where an empty list reads as a
 //      claim: "nothing has ever been written here".
@@ -50,7 +57,6 @@ import {
   listAudit,
   listProjects,
   notifications,
-  listWork,
   type AuditRecord,
   type FreshnessSummary,
 } from "./vogtApi";
@@ -63,33 +69,27 @@ interface Props {
 // -- constants --------------------------------------------------------------
 
 /**
- * How many records one fetch asks for.
+ * How many records one page asks for, and therefore how many are rendered.
  *
- * `ListAuditParams.limit` is capped at 500 server-side and there is no offset
- * and no cursor, so the window is the only dial there is: `audit.list` always
- * answers with the newest `limit` records. Offering a size the server would
- * clamp would be the picker lying about what it did.
- */
-const WINDOW_SIZES = [50, 100, 200, 500] as const;
-const DEFAULT_WINDOW = 100;
-const MAX_WINDOW = 500;
-
-/**
- * Rows rendered at once (NFR-S5).
+ * One dial rather than two. `audit.list` takes `limit` and `offset` and
+ * answers with `total`, so a page here is a page of the log itself: there is
+ * no window to render a slice of, and no reason for the number fetched and
+ * the number shown to differ.
  *
- * The audit log is the largest table in the product and grows forever, so the
- * page is what is rendered rather than the window. Deliberately paged instead
- * of virtualized like the backlog: an audit row is variable-height — the
- * reason is a sentence somebody typed and is never truncated to fit a grid —
- * and a fixed row height is what the backlog's windowing arithmetic needs.
+ * 500 is the server-side cap on `ListAuditParams.limit`. Offering a larger
+ * size would be the picker lying about what the server did with it.
+ *
+ * Paged rather than virtualized like the backlog, for the reason it always
+ * was: an audit row is variable-height — the reason is a sentence somebody
+ * typed and is never truncated to fit a grid — and a fixed row height is what
+ * the backlog's windowing arithmetic needs (NFR-S5).
  */
-const PAGE_SIZE = 50;
+const PAGE_SIZES = [25, 50, 100, 200, 500] as const;
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 500;
 
 /** Notifications the inbox asks for per page. `NotificationsParams` pages properly. */
 const INBOX_PAGE_SIZE = 50;
-
-/** How many of a project's work items are resolved to scope the project filter. */
-const PROJECT_SCOPE_LIMIT = 500;
 
 /** The collector behind FR-N3. Its absence from a sweep is a real answer. */
 const NOTIFICATION_COLLECTOR = "gh-notifications";
@@ -107,7 +107,7 @@ const URL_KEYS = [
   "to",
   "nreason",
   "unread",
-  "window",
+  "size",
   "page",
 ] as const;
 
@@ -124,9 +124,16 @@ interface Filter {
   entity: string;
   /** A work item ref, resolved to that item's entity id. */
   ref: string;
-  /** A project slug. Server-side in the inbox; page-local in the audit view. */
+  /** A project slug. Pushed to the server by both views. */
   project: string;
-  /** `datetime-local` text, in this browser's time zone. */
+  /**
+   * `datetime-local` text, in this browser's time zone, sent as an instant.
+   *
+   * `from` becomes `since` and `to` becomes `until`. The interval is
+   * half-open the way the server's is — `since` inclusive, `until` exclusive
+   * — so two ranges that share a boundary tile the log rather than both
+   * claiming the write made exactly at the seam.
+   */
   from: string;
   to: string;
   /** GitHub's notification reason. Named apart from an audit record's reason. */
@@ -152,10 +159,12 @@ const EMPTY_FILTER: Filter = {
 // `vogtApi.ts` types each response with what its first reader needed, and
 // widening those interfaces is a decision for a file this branch does not own.
 // The wire carries more than they say: an actor arrives with the `id` that
-// `audit.list` filters by, a project arrives with the id its audit rows carry.
-// Both are read through local views that make them optional, so a field the
-// server stops sending becomes a filter that says it could not be pushed
-// rather than a query with `undefined` in it.
+// `audit.list` filters by. It is read through a local view that makes the
+// field optional, so a server that stopped sending it becomes a filter that
+// says it could not be pushed rather than a query with `undefined` in it.
+//
+// A project needs no such treatment: `audit.list` takes the slug, which is
+// what the picker already offers and what a link already carries.
 
 interface ActorRow {
   identity_ref: string;
@@ -166,7 +175,6 @@ interface ActorRow {
 interface ProjectRow {
   slug: string;
   name: string;
-  id?: string;
 }
 
 /** One collected notification (`NotificationView`), as the inbox renders it. */
@@ -226,7 +234,13 @@ async function attempt<T>(work: () => Promise<T>): Promise<Loaded<T>> {
   }
 }
 
-// -- time, which the server does not filter by ------------------------------
+// -- time, in the reader's zone and on the wire as an instant ----------------
+//
+// The controls are `datetime-local`, so what a reader types is wall-clock time
+// where they are sitting. `since`/`until` are instants, and the server reads a
+// bound without a zone as UTC — so the conversion happens here, once, and a
+// query written at 09:00 in Lisbon and 09:00 in New York are different
+// questions rather than the same one answered differently.
 
 function pad(value: number): string {
   return String(value).padStart(2, "0");
@@ -245,6 +259,20 @@ function parseLocalInput(value: string): number | null {
   if (!value) return null;
   const at = new Date(value);
   return Number.isNaN(at.valueOf()) ? null : at.valueOf();
+}
+
+/** The same bound as the instant `audit.list` takes, or null. */
+function toInstant(value: string): string | null {
+  const ms = parseLocalInput(value);
+  return ms === null ? null : new Date(ms).toISOString();
+}
+
+/** Midnight this morning, in this browser's zone. */
+function startOfDay(daysAgo = 0): Date {
+  const at = new Date();
+  at.setHours(0, 0, 0, 0);
+  at.setDate(at.getDate() - daysAgo);
+  return at;
 }
 
 /**
@@ -273,11 +301,31 @@ function describeAge(seconds: number | null | undefined): string {
   return `${Math.round(seconds / 86400)}d`;
 }
 
-const RANGE_PRESETS: { label: string; seconds: number }[] = [
-  { label: "Last hour", seconds: 3600 },
-  { label: "Last 24 hours", seconds: 86400 },
-  { label: "Last 7 days", seconds: 604800 },
-  { label: "Last 30 days", seconds: 2592000 },
+/**
+ * The shortcuts, and why they are day-aligned.
+ *
+ * `Yesterday` ends where `Today` begins, and the two are disjoint because
+ * `until` is exclusive: a write made at exactly midnight is in `Today` and in
+ * nothing else. Presets that both included the seam would let a reader add up
+ * two days and count one write twice, which is the arithmetic
+ * `test_consecutive_windows_tile_the_log_without_gap_or_overlap` exists to
+ * protect. The open-ended ones leave `to` empty rather than pinning it to
+ * "now", so the range keeps meaning the same thing as the log grows under it.
+ */
+const RANGE_PRESETS: { label: string; range: () => { from: string; to: string } }[] = [
+  { label: "Today", range: () => ({ from: toLocalInput(startOfDay()), to: "" }) },
+  {
+    label: "Yesterday",
+    range: () => ({
+      from: toLocalInput(startOfDay(1)),
+      to: toLocalInput(startOfDay()),
+    }),
+  },
+  { label: "Last 7 days", range: () => ({ from: toLocalInput(startOfDay(6)), to: "" }) },
+  {
+    label: "Last 30 days",
+    range: () => ({ from: toLocalInput(startOfDay(29)), to: "" }),
+  },
 ];
 
 // -- freshness and coverage, for the inbox ----------------------------------
@@ -350,10 +398,10 @@ function filterFromQuery(query: Query): Filter {
   };
 }
 
-function windowFromQuery(query: Query): number {
-  const parsed = Number.parseInt(one(query.window), 10);
-  if (!Number.isFinite(parsed)) return DEFAULT_WINDOW;
-  return Math.min(MAX_WINDOW, Math.max(1, parsed));
+function sizeFromQuery(query: Query): number {
+  const parsed = Number.parseInt(one(query.size), 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_PAGE_SIZE;
+  return Math.min(MAX_PAGE_SIZE, Math.max(1, parsed));
 }
 
 function pageFromQuery(query: Query): number {
@@ -378,7 +426,7 @@ function queryFor(
     to: filter.to || null,
     nreason: filter.nreason || null,
     unread: filter.unread ? "1" : null,
-    window: size === DEFAULT_WINDOW ? null : String(size),
+    size: size === DEFAULT_PAGE_SIZE ? null : String(size),
     page: page > 0 ? String(page) : null,
   };
 }
@@ -440,7 +488,7 @@ const AuditBrowser: Component<Props> = (props) => {
   // tab is mounted at once, so at mount the query may well be the board's.
   const initial: Query = location.pathname === ROUTE ? query : {};
   const [filter, setFilter] = createSignal<Filter>(filterFromQuery(initial));
-  const [windowSize, setWindowSize] = createSignal<number>(windowFromQuery(initial));
+  const [pageSize, setPageSize] = createSignal<number>(sizeFromQuery(initial));
   const [page, setPage] = createSignal<number>(pageFromQuery(initial));
 
   const [reloadKey, setReloadKey] = createSignal(0);
@@ -461,7 +509,7 @@ const AuditBrowser: Component<Props> = (props) => {
     // guard this surface would write its filter set into their URL and adopt
     // theirs as an instruction.
     if (location.pathname !== ROUTE) return;
-    const desired = encodeState(filter(), windowSize(), page());
+    const desired = encodeState(filter(), pageSize(), page());
     const current = encodeQuery(query);
     if (desired === current) {
       lastWritten = current;
@@ -472,12 +520,12 @@ const AuditBrowser: Component<Props> = (props) => {
       // empty: a pasted link, the back button, or the work item detail view
       // handing us `?ref=WI-7`. That is an instruction.
       setFilter(filterFromQuery(query));
-      setWindowSize(windowFromQuery(query));
+      setPageSize(sizeFromQuery(query));
       setPage(pageFromQuery(query));
       lastWritten = current;
       return;
     }
-    setQuery(queryFor(filter(), windowSize(), page()), { replace: true });
+    setQuery(queryFor(filter(), pageSize(), page()), { replace: true });
     lastWritten = desired;
   });
 
@@ -493,17 +541,23 @@ const AuditBrowser: Component<Props> = (props) => {
     setPage(0);
   };
 
+  /** Change the page size, and go back to the first one.
+   *
+   *  Keeping the page number would move the reader somewhere they did not ask
+   *  to be: page 4 of 25 and page 4 of 200 are different places in the log. */
   const resize = (size: number) => {
-    setWindowSize(size);
+    setPageSize(size);
     setPage(0);
   };
 
   // -- the facets -----------------------------------------------------------
   //
   // Loaded once. A facet list that fails is a smaller picker and a named note,
-  // not a broken surface — but here it is more than cosmetic: `audit.list`
-  // filters by `actor_id`, and the id lives on the actor list. A picker that
-  // cannot load is a filter that cannot be pushed, and the surface says so.
+  // not a broken surface — with one exception: `audit.list` filters by
+  // `actor_id`, and the id lives on the actor list. A picker that cannot load
+  // is an actor filter that cannot be pushed, and that stops the read rather
+  // than widening it (see `unpushable`). The project picker is only a picker:
+  // the server takes the slug, so a project filter survives the list failing.
 
   const [actors] = createResource(() => attempt(() => listActors()));
   const [projects] = createResource(() => attempt(() => listProjects({ limit: 200 })));
@@ -606,12 +660,63 @@ const AuditBrowser: Component<Props> = (props) => {
     () => Boolean(filter().ref) && !filter().entity && !refId(),
   );
 
+  // -- the time range, as the two instants the server takes ------------------
+
+  const since = createMemo(() => toInstant(filter().from));
+  const until = createMemo(() => toInstant(filter().to));
+
+  /**
+   * A bound that was asked for and cannot be sent.
+   *
+   * Only a URL can produce one — `?from=whenever` — but a URL is exactly how
+   * this surface is arrived at (FR-U11). Dropping the bound and querying
+   * anyway would answer a wider question under the narrower one's heading.
+   */
+  const badBound = createMemo<string | null>(() => {
+    if (filter().from && since() === null) return "From";
+    if (filter().to && until() === null) return "To";
+    return null;
+  });
+
+  /** A range whose end is not after its start. The server would agree — and
+   *  answer with nothing, which on this surface reads as "nothing happened". */
+  const emptyRange = createMemo(() => {
+    const from = parseLocalInput(filter().from);
+    const to = parseLocalInput(filter().to);
+    return from !== null && to !== null && to <= from;
+  });
+
   /** Waiting on a lookup a filter needs, rather than on the log itself. */
   const resolving = createMemo(
     () =>
       (refBlocked() && !refFailure()) ||
       (Boolean(filter().actor) && !actorsSettled()),
   );
+
+  /**
+   * A filter that was asked for and could not be pushed.
+   *
+   * Every one of these stops the read rather than widening it. An actor the
+   * picker could not turn into an id used to fall back to matching the loaded
+   * rows by identity — which was defensible when the loaded rows were the
+   * whole of what any filter could see, and is not now: it would filter one
+   * page of a query the server answered *without* the actor, under a page
+   * count and a total that describe that wider query. Two filters that mean
+   * different things must not share a heading.
+   */
+  const unpushable = createMemo<string | null>(() => {
+    if (actorUnresolved()) {
+      return (
+        `${filter().actor} is not in the actor list this page could read, so it ` +
+        "could not be turned into the actor id audit.list filters by."
+      );
+    }
+    const bound = badBound();
+    if (bound) {
+      return `The ${bound} bound could not be read as a time, so it could not be sent.`;
+    }
+    return null;
+  });
 
   /**
    * The read's parameters, or null when it must not fire yet.
@@ -625,12 +730,17 @@ const AuditBrowser: Component<Props> = (props) => {
     const current = filter();
     if (refBlocked()) return null;
     if (current.actor && !actorsSettled()) return null;
+    if (unpushable()) return null;
     return {
       reload: reloadKey(),
       actor: actorId() ?? "",
       operation: current.operation,
       entity: entityId() ?? "",
-      limit: windowSize(),
+      project: current.project,
+      since: since() ?? "",
+      until: until() ?? "",
+      limit: pageSize(),
+      offset: page() * pageSize(),
     };
   });
 
@@ -638,16 +748,34 @@ const AuditBrowser: Component<Props> = (props) => {
     attempt(() =>
       listAudit({
         limit: key.limit,
+        offset: key.offset || undefined,
         actor_id: key.actor || undefined,
         operation: key.operation || undefined,
         entity_id: key.entity || undefined,
+        project: key.project || undefined,
+        since: key.since || undefined,
+        until: key.until || undefined,
       }),
     ),
   );
 
-  const loaded = createMemo<AuditRecord[]>(() => {
+  const answer = createMemo(() => {
     const result = records();
-    return result && result.ok ? result.value.records : [];
+    return result && result.ok ? result.value : null;
+  });
+
+  const loaded = createMemo<AuditRecord[]>(() => answer()?.records ?? []);
+
+  /**
+   * How many records match the narrowing, ignoring limit and offset.
+   *
+   * `null` when the server did not say — an older core than this build, and
+   * the difference between "none match" and "how many match is not known" is
+   * exactly the kind of thing this surface must not smooth over.
+   */
+  const total = createMemo<number | null>(() => {
+    const value = answer()?.total;
+    return typeof value === "number" ? value : null;
   });
 
   const outage = createMemo(() => {
@@ -660,130 +788,50 @@ const AuditBrowser: Component<Props> = (props) => {
     if (failure) props.onError?.(`Audit log: ${failure.message}`);
   });
 
-  // -- the project filter, which the log cannot answer directly -------------
+  // -- paging the log, not a window over it ---------------------------------
   //
-  // An audit record names an entity, not a project: the row for a transition
-  // carries the work item's id and nothing about where that item lives. So the
-  // filter is resolved from the other side — the project's work items are
-  // listed (server-side, one bounded page) and rows are kept when their entity
-  // is one of them, or the project row itself. Everything about that is a
-  // narrowing, and the note under the filter says which.
+  // `total` is the number of records matching the narrowing, so the page count
+  // is arithmetic on the store rather than on what happens to be in hand. A
+  // server that did not send one leaves the count unknown, and the pager says
+  // "there is another page" only when this one came back full — a guess it is
+  // honest about rather than a number it invented.
 
-  // The key is a string rather than an object so the resource refetches when
-  // the slug or the resolved project id changes and not merely because a
-  // reactive read produced a new object.
-  const [scope] = createResource(
-    () => {
-      const slug = filter().project;
-      if (!slug) return null;
-      const known = projectRows().find((row) => row.slug === slug);
-      // Newline-separated because a slug cannot contain one; a space could.
-      return `${slug}\n${known?.id ?? ""}`;
-    },
-    (key) =>
-      attempt(async () => {
-        const split = key.indexOf("\n");
-        const slug = key.slice(0, split);
-        const projectId = key.slice(split + 1);
-        const work = await listWork({
-          project: slug,
-          limit: PROJECT_SCOPE_LIMIT,
-          include_finished: true,
-        });
-        const ids = new Set(work.items.map((item) => item.id));
-        if (projectId) ids.add(projectId);
-        return {
-          ids,
-          resolved: work.items.length,
-          total: work.total ?? work.items.length,
-          projectKnown: Boolean(projectId),
-        };
-      }),
-  );
-
-  const scopeIds = createMemo<Set<string> | null>(() => {
-    const result = scope();
-    return result && result.ok ? result.value.ids : null;
+  const pageCount = createMemo<number | null>(() => {
+    const matching = total();
+    if (matching === null) return null;
+    return Math.max(1, Math.ceil(matching / pageSize()));
   });
 
-  const scopeNote = createMemo<string | null>(() => {
-    if (!filter().project) return null;
-    const result = scope();
-    if (!result) return `Resolving which entities belong to ${filter().project}…`;
-    if (!result.ok) {
-      return (
-        `The project filter could not be resolved: ${result.message} — no rows ` +
-        "are hidden by it, because hiding rows on a failed lookup would be a filter " +
-        "pretending to have worked."
-      );
-    }
-    const parts = [
-      `Audit rows name an entity, not a project. ${result.value.resolved} of ` +
-        `${result.value.total} work items in ${filter().project} were resolved` +
-        (result.value.projectKnown ? ", plus the project row itself" : "") +
-        "; rows whose entity is not one of them are hidden.",
-    ];
-    if (result.value.total > result.value.resolved) {
-      parts.push(
-        `Only the first ${PROJECT_SCOPE_LIMIT} work items can be listed in one ` +
-          "call, so writes to items beyond that are hidden too.",
-      );
-    }
-    parts.push(
-      "Comments, sessions and sweeps carry their own ids and are never matched by " +
-        "this filter.",
-    );
-    return parts.join(" ");
+  const hasOlder = createMemo(() => {
+    const count = pageCount();
+    if (count === null) return loaded().length >= pageSize();
+    return page() < count - 1;
   });
-
-  // -- the filters the server does not take ---------------------------------
-
-  const fromMs = createMemo(() => parseLocalInput(filter().from));
-  const toMs = createMemo(() => parseLocalInput(filter().to));
-
-  const visible = createMemo<AuditRecord[]>(() => {
-    let rows = loaded();
-    const after = fromMs();
-    const before = toMs();
-    if (after !== null) {
-      rows = rows.filter((row) => {
-        const at = timeOf(row);
-        return at === null || at >= after;
-      });
-    }
-    if (before !== null) {
-      rows = rows.filter((row) => {
-        const at = timeOf(row);
-        return at === null || at <= before;
-      });
-    }
-    // The fallback for an actor the picker could not turn into an id: match the
-    // identity the records themselves carry. Narrower than the server's filter —
-    // it only sees the loaded window — and the note above the list says so.
-    if (actorUnresolved()) {
-      const wanted = filter().actor;
-      rows = rows.filter((row) => row.actor_identity_ref === wanted);
-    }
-    const ids = scopeIds();
-    if (ids) rows = rows.filter((row) => ids.has(row.entity_id));
-    return rows;
-  });
-
-  const pageCount = createMemo(() => Math.max(1, Math.ceil(visible().length / PAGE_SIZE)));
 
   // A page beyond the end of a freshly narrowed result is a blank screen with
   // rows above it; clamping is what a link to page 9 of a filter that now has
-  // two pages should do.
+  // two pages should do. It costs one extra read — the clamped page is fetched
+  // after the empty one — and the alternative is a reader looking at nothing
+  // and concluding there is nothing.
   createEffect(() => {
-    const last = pageCount() - 1;
+    const count = pageCount();
+    if (count === null) return;
+    const last = count - 1;
     if (page() > last) setPage(last);
   });
 
-  const pageRows = createMemo(() =>
-    visible().slice(page() * PAGE_SIZE, page() * PAGE_SIZE + PAGE_SIZE),
-  );
+  /** The rows on this page: what the server sent, unfiltered by this client. */
+  const pageRows = createMemo(() => loaded());
 
-  /** The span the loaded window covers, which is what bounds the time filter. */
+  /** The first and last record number on this page, counting from one. */
+  const shown = createMemo<{ first: number; last: number } | null>(() => {
+    const count = loaded().length;
+    if (!count) return null;
+    const first = page() * pageSize() + 1;
+    return { first, last: first + count - 1 };
+  });
+
+  /** What this page spans in time. The narrowing's span is `since`/`until`. */
   const span = createMemo<{ oldest: string; newest: string } | null>(() => {
     const rows = loaded();
     if (!rows.length) return null;
@@ -802,9 +850,9 @@ const AuditBrowser: Component<Props> = (props) => {
     };
   });
 
-  const windowFull = createMemo(() => loaded().length >= windowSize());
-
-  /** Operations offered by the picker: the ones this window contains. */
+  /** Operations offered by the picker: the ones this page happens to contain.
+   *  Which is not the set that exists, so the control is a `datalist` and
+   *  typing a name it did not offer is a legitimate query. */
   const operationOptions = createMemo(() => {
     const seen = new Set(loaded().map((row) => row.operation));
     if (filter().operation) seen.add(filter().operation);
@@ -822,12 +870,8 @@ const AuditBrowser: Component<Props> = (props) => {
       : null;
   });
 
-  const applyPreset = (seconds: number) => {
-    setFilter({
-      ...filter(),
-      from: toLocalInput(new Date(Date.now() - seconds * 1000)),
-      to: "",
-    });
+  const applyPreset = (range: { from: string; to: string }) => {
+    setFilter({ ...filter(), ...range });
     setPage(0);
   };
 
@@ -906,7 +950,7 @@ const AuditBrowser: Component<Props> = (props) => {
   //
   // The nudge bumps the reload key, which is the same thing the Refresh
   // button does, so there is one path to a re-read and the filter, the page
-  // and the window survive it.
+  // and the page size survive it.
   //
   // What arrives when: a notification is collected during a sweep, and a
   // sweep publishes `sweep.completed` onto the core's event feed, which the
@@ -967,12 +1011,12 @@ const AuditBrowser: Component<Props> = (props) => {
       {/* -- the audit browser (FR-U19) -------------------------------------- */}
       <Show when={filter().view === "audit"}>
         <p class="vab-provenance">
-          <strong>Actor, operation and entity</strong> are pushed to Vogt —{" "}
-          <span class="vab-mono">audit.list</span> takes those three and a limit.{" "}
-          <strong>Project and time range</strong> are applied to the{" "}
-          {loaded().length} record{loaded().length === 1 ? "" : "s"} this page
-          loaded, because the operation takes neither; they narrow the window, not
-          the log.
+          <strong>Every filter here is pushed to Vogt.</strong>{" "}
+          <span class="vab-mono">audit.list</span> takes the actor, the operation,
+          the entity, the project and a time range, and pages with a limit and an
+          offset — so what is below is one query's answer over the whole log, and
+          the count beside it is how many records match, not how many are on
+          screen.
         </p>
 
         <section class="vab-filters" aria-label="Audit filters">
@@ -1006,7 +1050,7 @@ const AuditBrowser: Component<Props> = (props) => {
                 onChange={(event) => update("operation", event.currentTarget.value.trim())}
               />
               {/* A list rather than a select: `audit.list` matches the operation
-                  exactly, and the names this window happens to contain are not
+                  exactly, and the names this page happens to contain are not
                   the set of operations that exist. Typing one that is not
                   offered is a legitimate query.
 
@@ -1055,7 +1099,7 @@ const AuditBrowser: Component<Props> = (props) => {
             </label>
 
             <label class="vab-field">
-              <span>From</span>
+              <span>From (included)</span>
               <input
                 type="datetime-local"
                 value={filter().from}
@@ -1064,7 +1108,7 @@ const AuditBrowser: Component<Props> = (props) => {
             </label>
 
             <label class="vab-field">
-              <span>To</span>
+              <span>To (excluded)</span>
               <input
                 type="datetime-local"
                 value={filter().to}
@@ -1073,15 +1117,15 @@ const AuditBrowser: Component<Props> = (props) => {
             </label>
 
             <label class="vab-field">
-              <span>Window</span>
+              <span>Records a page</span>
               <select
-                value={String(windowSize())}
+                value={String(pageSize())}
                 onInput={(event) =>
                   resize(Number.parseInt(event.currentTarget.value, 10))
                 }
               >
-                <For each={WINDOW_SIZES}>
-                  {(size) => <option value={String(size)}>newest {size}</option>}
+                <For each={PAGE_SIZES}>
+                  {(size) => <option value={String(size)}>{size} a page</option>}
                 </For>
               </select>
             </label>
@@ -1094,7 +1138,7 @@ const AuditBrowser: Component<Props> = (props) => {
                 <button
                   type="button"
                   class="vab-chip"
-                  onClick={() => applyPreset(preset.seconds)}
+                  onClick={() => applyPreset(preset.range())}
                 >
                   {preset.label}
                 </button>
@@ -1109,7 +1153,9 @@ const AuditBrowser: Component<Props> = (props) => {
               Any time
             </button>
             <span class="vab-muted">
-              in this browser's time zone, over the loaded window
+              read in this browser's time zone and sent as instants — the start is
+              included and the end is not, so Yesterday and Today tile the log
+              instead of both claiming midnight
             </span>
           </div>
 
@@ -1133,17 +1179,12 @@ const AuditBrowser: Component<Props> = (props) => {
             <p class="vab-note">{facetNote()}</p>
           </Show>
 
-          <Show when={actorUnresolved()}>
+          <Show when={emptyRange()}>
             <p class="vab-note">
-              {filter().actor} could not be resolved to the actor id{" "}
-              <span class="vab-mono">audit.list</span> filters by, so the filter was
-              applied to the loaded window instead of being pushed to Vogt. Writes by
-              this actor further back than the window are not shown.
+              This range ends where it starts or before it, so it contains no
+              instant at all — the end is excluded. Nothing below is a claim that
+              nothing happened.
             </p>
-          </Show>
-
-          <Show when={scopeNote()}>
-            <p class="vab-note">{scopeNote()}</p>
           </Show>
 
           <Show when={filter().ref && filter().entity}>
@@ -1155,10 +1196,11 @@ const AuditBrowser: Component<Props> = (props) => {
 
           <Show when={entityId()}>
             <p class="vab-note">
-              A per-item query returns the writes recorded{" "}
-              <em>against that entity</em>. A comment is audited against the comment
-              it created, not against the item, so comments on{" "}
-              {filter().ref || "this entity"} are not in this list.
+              A per-item query returns every write recorded against that entity,{" "}
+              <em>including what was said about it</em>: a comment is audited
+              against the comment it created, and the query follows that link, so
+              the trail of {filter().ref || "this entity"} is its creation, its
+              updates, its transitions and its conversation.
             </p>
           </Show>
         </section>
@@ -1171,6 +1213,24 @@ const AuditBrowser: Component<Props> = (props) => {
               <p class="vab-muted">
                 No records were read, so none are shown. An audit log with nothing in
                 it is a claim, and this is not one.
+              </p>
+              <button type="button" onClick={refresh}>
+                Try again
+              </button>
+            </div>
+          )}
+        </Show>
+
+        <Show when={unpushable()}>
+          {(message) => (
+            <div class="vab-outage" role="alert">
+              <h3>That filter could not be pushed to Vogt</h3>
+              <p>{message()}</p>
+              <p class="vab-muted">
+                Nothing was read, because the only query left to make is a wider
+                one — and a wider answer under this filter's heading would be the
+                surface showing writes the reader did not ask about and calling
+                them the ones they did.
               </p>
               <button type="button" onClick={refresh}>
                 Try again
@@ -1200,35 +1260,50 @@ const AuditBrowser: Component<Props> = (props) => {
           )}
         </Show>
 
-        <Show when={!outage() && !refFailure()}>
-          {/* The counts describe the loaded window, so they are withheld until
-              there is one: "0 matching" while a lookup is still in flight is a
-              number that means nothing and reads as an answer. */}
+        <Show when={!outage() && !refFailure() && !unpushable()}>
+          {/* Withheld while a lookup a filter needs is still in flight: "0 of 0"
+              before the query has been made is a number that means nothing and
+              reads as an answer. */}
           <Show when={!resolving()}>
             <div class="vab-count">
               <span>
-                {visible().length} matching
-                <Show when={visible().length !== loaded().length}>
-                  {" "}
-                  of {loaded().length} loaded
+                <Show
+                  when={shown()}
+                  fallback={
+                    <>no records on this page{total() === null ? "" : ` of ${total()} matching`}</>
+                  }
+                >
+                  {(range) => (
+                    <>
+                      records {range().first}–{range().last}
+                      <Show when={total() !== null} fallback=" (how many match in all, Vogt did not say)">
+                        {" "}
+                        of {total()} matching
+                      </Show>
+                    </>
+                  )}
                 </Show>
                 <Show when={span()}>
                   {(range) => (
                     <>
                       {" "}
-                      · window spans {range().oldest} → {range().newest}
+                      · this page spans {range().oldest} → {range().newest}
                     </>
                   )}
                 </Show>
               </span>
               <span class="vab-muted">
                 <Show
-                  when={windowFull()}
-                  fallback="the whole log matching the pushed filters is in this window"
+                  when={total() !== null}
+                  fallback="this build of Vogt did not report a total, so how much of the log this is cannot be said"
                 >
-                  {windowSize() >= MAX_WINDOW
-                    ? "this is the largest window audit.list serves — it has no offset and no cursor, so reaching further back needs a narrower actor, operation or entity"
-                    : "the window is full; older records exist beyond it — raise the window to reach them"}
+                  <Show
+                    when={hasOlder() || page() > 0}
+                    fallback="every record matching these filters is on this page"
+                  >
+                    counted over the whole log, not over what is on screen — page
+                    through to reach the rest
+                  </Show>
                 </Show>
               </span>
             </div>
@@ -1243,8 +1318,12 @@ const AuditBrowser: Component<Props> = (props) => {
                     ? "Resolving what this filter names before asking for the log…"
                     : records.loading
                       ? "Reading the audit log…"
-                      : loaded().length
-                        ? "No record in this window matches the project or time filter."
+                      : page() > 0
+                        ? // Reachable only while the total is unknown; with one
+                          // the page is clamped before it can be empty. Saying
+                          // "nothing matches" here would be the surface
+                          // answering for the whole query from one empty page.
+                          "This page is past the end of what matches — go back to reach the records that do."
                         : filtered()
                           ? "Vogt answered, and no audited write matches this query."
                           : "Vogt answered with no audit records at all."}
@@ -1344,11 +1423,13 @@ const AuditBrowser: Component<Props> = (props) => {
                 Newer
               </button>
               <span class="vab-muted">
-                page {page() + 1} of {pageCount()} · {PAGE_SIZE} rows a page
+                page {page() + 1}
+                <Show when={pageCount() !== null}> of {pageCount()}</Show> ·{" "}
+                {pageSize()} records a page, at offset {page() * pageSize()}
               </span>
               <button
                 type="button"
-                disabled={page() >= pageCount() - 1}
+                disabled={!hasOlder()}
                 onClick={() => setPage(page() + 1)}
               >
                 Older
