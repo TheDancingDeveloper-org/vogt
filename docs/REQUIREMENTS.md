@@ -1502,7 +1502,8 @@ similar, and the new entries are all of the same kind as the old ones.
     Every green run before this one was greener than it should have been.
 
 19. ~~**A cancelled run means a commit is checked by nothing, ever.**~~
-    **Resolved.** NFR-C1
+    **Resolved on the second attempt; the first was struck through here while
+    still broken.** NFR-C1
     classifies a push by `before..sha`, so each commit is examined by exactly
     one run and no later run looks at it again. `ci.yml` set
     `cancel-in-progress: true` for every trigger, so pushing twice in a few
