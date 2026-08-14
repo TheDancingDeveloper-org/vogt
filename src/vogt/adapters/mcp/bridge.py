@@ -25,7 +25,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
@@ -35,6 +35,9 @@ from vogt.adapters.mcp.stdio import SUPPORTED_PROTOCOL_VERSIONS
 
 URL_ENV = "VOGT_URL"
 TOKEN_FILE_ENV = "VOGT_TOKEN_FILE"
+#: Set by a coding session for the agent it starts, and by the container's
+#: auth broker for everything else. See `resolve_token` for which wins.
+HTTP_TOKEN_ENV = "VOGT_HTTP_TOKEN"
 DEFAULT_TIMEOUT_SECONDS = 30
 
 #: (url, headers, body) -> (status, body). Injected in tests; urllib live.
@@ -229,6 +232,30 @@ def read_token(path: str | None) -> str | None:
     return resolved.read_text(encoding="utf-8").strip() or None
 
 
+def resolve_token(env: Mapping[str, str]) -> str | None:
+    """The token this bridge should present, and which one wins.
+
+    Two sources, because two things provision one. A container brokers a
+    shared token into a *file* and points `VOGT_TOKEN_FILE` at it; a coding
+    session hands its own token to the process it starts, in
+    `VOGT_HTTP_TOKEN`, bound to an actor that exists for that session alone
+    (FR-S10).
+
+    Inside a session the session's token wins. It has to: the whole point of
+    minting one is that what the agent writes is attributable to *this*
+    session, and falling back to the shared container token would file every
+    session's work under one identity while looking like it worked. Outside
+    a session there is no `VOGT_SESSION_ID`, the file is the only source,
+    and nothing changes.
+    """
+    if env.get("VOGT_SESSION_ID") and env.get(HTTP_TOKEN_ENV):
+        return env[HTTP_TOKEN_ENV].strip() or None
+    from_file = read_token(env.get(TOKEN_FILE_ENV))
+    if from_file:
+        return from_file
+    return (env.get(HTTP_TOKEN_ENV) or "").strip() or None
+
+
 def main() -> int:  # pragma: no cover - exercised via the console script
     """Console-script entry point (`vogt-mcp-remote`).
 
@@ -242,7 +269,7 @@ def main() -> int:  # pragma: no cover - exercised via the console script
             f"(and {TOKEN_FILE_ENV} to a file holding a token)\n"
         )
         return 2
-    Bridge(url, token=read_token(os.environ.get(TOKEN_FILE_ENV))).serve()
+    Bridge(url, token=resolve_token(os.environ)).serve()
     return 0
 
 
