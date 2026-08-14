@@ -846,6 +846,54 @@ const App: Component = () => {
             >
               Tasks
             </button>
+            {/*
+              The Vogt surfaces. Shown only when this front door has a core
+              behind it — `/api/config` says so without anyone having to
+              authenticate or provoke a 503 — because a tab that opens and
+              then reports an outage is a worse answer than no tab (FR-U21).
+            */}
+            <Show when={publicCfg()?.vogt?.configured}>
+              <button
+                onClick={() => {
+                  openBoardTab();
+                  navigate("/board");
+                  setDrawerOpen(false);
+                }}
+                title="Work items by workflow state"
+              >
+                ▦ Board
+              </button>
+              <button
+                onClick={() => {
+                  openBacklogTab();
+                  navigate("/backlog");
+                  setDrawerOpen(false);
+                }}
+                title="The ranked backlog and bugs, with the reason for the ranking"
+              >
+                ☰ Backlog
+              </button>
+              <button
+                onClick={() => {
+                  openProjectsTab();
+                  navigate("/projects");
+                  setDrawerOpen(false);
+                }}
+                title="Per-project state, compliance and the drift inbox"
+              >
+                ▤ Projects
+              </button>
+              <button
+                onClick={() => {
+                  openAuditTab();
+                  navigate("/audit");
+                  setDrawerOpen(false);
+                }}
+                title="Who wrote what, and the reason they gave"
+              >
+                ⧉ Audit
+              </button>
+            </Show>
             <Show when={publicCfg()?.assistant_enabled}>
               <button
                 onClick={() => {

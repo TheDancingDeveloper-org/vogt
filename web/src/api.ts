@@ -703,6 +703,18 @@ export interface PublicConfig {
   session_templates?: SessionTemplate[];
   /** True when the server has an assistant backend key provisioned. */
   assistant_enabled?: boolean;
+  /**
+   * Whether this front door has a vogt-core behind it, and where its surfaces
+   * are mounted. Presence only — never a token. Read before offering a Vogt
+   * tab: one that opens and then reports an outage is a worse answer than no
+   * tab at all (FR-U21).
+   */
+  vogt?: {
+    configured: boolean;
+    api_prefix?: string;
+    mcp_prefix?: string;
+    legacy_gui_prefix?: string;
+  };
   assistant_model?: string | null;
 }
 
