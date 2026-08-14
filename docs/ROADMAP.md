@@ -2,8 +2,9 @@
 
 Status: **M0–M6 delivered — v1 is built** (2026-08-12); **M7 and M8 are
 post-v1**; **M9–M14 are v2** — the MyDevEnv2 merge, added by
-`REQUIREMENTS.md` revision r9 (2026-08-14). **M9–M12 are built**
-(2026-08-14); M11's demo is outstanding for want of a browser, and its "as
+`REQUIREMENTS.md` revision r9 (2026-08-14). **M9–M13 are built**
+(2026-08-14); M11's demo is outstanding for want of a browser, and M13's for
+want of a device, and its "as
 built" note says what that costs. M12–M14 are not started. Requirement IDs
 refer to `REQUIREMENTS.md`; per its §4, scope changes here must update that
 document in the same change.
@@ -939,6 +940,47 @@ Deliverables:
 **Demo**, from the phone: receive a push that a session is waiting for input,
 open it, unblock it — and see the session's outcome land as an observation
 against the work item afterwards.
+
+### M13 as built — three notes and a thing that was already wrong
+
+**Nothing was assembled or installed.** There is no Android SDK and no
+device here, so `cap sync` and Gradle never ran and no notification was ever
+delivered by either transport. What is tested is the configuration's four
+branches (under node, not under a build), the payload shaping, the cursor
+round-trip, and the default set. Treat the APK as unbuilt.
+
+1. **The shell was pointing at the wrong stack, and it looked like it
+   worked.** `capacitor.config.ts` hardcoded `mydevenv2.sprooty.com` — the
+   standalone engine, with no vogt-core behind it. An APK built on that
+   default reaches a front door where `/api/vogt` answers 503, `vogt.
+   configured` is false, and the four Vogt tabs are hidden or in their outage
+   state, while terminals and the assistant work perfectly. The build now
+   asks for the URL and fails without one, because the merged stack has no
+   settled name (§11.1) and NFR-D2 forbids inventing one. `cleartext` follows
+   the scheme rather than being hardcoded `false`, which the tailnet's plain
+   HTTP had turned into a runtime network error.
+
+2. **FR-M2's "and for nothing else by default" was already false.** Idle-stall
+   and agent-task-started notifications both defaulted on, and neither is in
+   the set the requirement names. Both default off now; the watchers still
+   run and the toggles still exist, and a device that already made a choice
+   keeps it. This is the requirement being read as a *list* rather than as a
+   direction, which is what it says.
+
+3. **Two readers of the core's event cursor, on purpose.** The follower
+   (M11, FR-U10) keeps clients current: head-start, in-memory cursor, republish
+   onto the SSE stream. The drift watcher wakes a phone: persisted cursor,
+   seeds on first run, coalesces a burst into one notification, and writes its
+   cursor *before* dispatch — so a crash costs a notification rather than
+   repeating one, and a proposal nobody was told about is still sitting in the
+   drift inbox. One cursor would force one behaviour onto the other: a UI that
+   replays history at boot, or a phone that goes quiet across a redeploy.
+
+**The breakpoint the surfaces had all missed**: the shell goes to phone
+layout at 768px and each of the five Vogt surfaces had picked 900, leaving a
+band where the shell was a phone and the surface inside it was not. Phone
+work is at 768 now, and a test fails if a sixth breakpoint narrower than
+that appears.
 
 ## M14 — Consolidation (S, ongoing)
 
