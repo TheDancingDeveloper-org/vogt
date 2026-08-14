@@ -476,3 +476,182 @@ describe("FR-U21 — an unreachable backlog is not an empty one", () => {
     expect(container.textContent).not.toContain("Vogt is not answering");
   });
 });
+
+// -- FR-U6, the explainable half -------------------------------------------
+//
+// §6.2a: "An assertion that the `why` panel renders the contributions
+// `GET /why` returned. The harness answers that route and no test looks at
+// what was drawn with it." The route was answered by the default estate with
+// an empty `contributions` array, so every existing mount opened the panel's
+// route and none of them could have noticed the panel drawing nothing.
+//
+// The point of `why` is that a rank is not a number taken on faith, so a
+// panel that renders the *total* and none of the inputs is the failure worth
+// catching: it looks like an explanation and explains nothing. Every
+// assertion below is against the numbers this test handed the route.
+
+/** One explanation, keyed by ref, as `GET /why` answers per entry. */
+const EXPLANATIONS: Record<string, Record<string, unknown>> = {
+  "WI-1": {
+    ref: "WI-1",
+    title: "Teach the board to say what it does not know",
+    total: 4.25,
+    contributions: [
+      {
+        input: "age",
+        detail: "open for 9 days",
+        value: 9,
+        weight: 0.25,
+        contribution: 2.25,
+      },
+      { input: "priority", detail: "p2", value: 2, weight: 1, contribution: 2 },
+    ],
+    inputs_not_yet_available: {},
+  },
+  "WI-2": {
+    ref: "WI-2",
+    title: "Another",
+    total: 1.5,
+    contributions: [
+      { input: "age", detail: "open for 2 days", value: 2, weight: 0.25, contribution: 0.5 },
+      { input: "priority", detail: "p3", value: 1, weight: 1, contribution: 1 },
+    ],
+    inputs_not_yet_available: {},
+  },
+};
+
+/** Answer `GET /why` from `EXPLANATIONS`, per the `ref` the client asked for. */
+const WHY = {
+  "GET /why": (call: { query: URLSearchParams }) => {
+    const ref = call.query.get("ref") ?? "";
+    const found = EXPLANATIONS[ref];
+    if (!found) return refusal(404, `no explanation for ${ref}`);
+    return { body: found };
+  },
+};
+
+/** Open the `why` panel for a ranked row by pressing its score. */
+async function openWhy(container: HTMLElement, ref: string): Promise<void> {
+  const row = rows(container).find((node) => node.textContent?.includes(ref));
+  if (!row) throw new Error(`no ranked row for ${ref}`);
+  const score = row.querySelector<HTMLButtonElement>(".vogt-backlog-score");
+  if (!score) throw new Error(`the row for ${ref} has no score to ask about`);
+  fireEvent.click(score);
+}
+
+/** The explanation panel, or a failure that says it never opened. */
+function explainPanel(container: HTMLElement): HTMLElement {
+  const found = container.querySelector<HTMLElement>(".vogt-backlog-explain");
+  if (!found) throw new Error("no ranking explanation is open");
+  return found;
+}
+
+/** The panel's rows, as `input` → the text of each entry's cell. */
+function explainRows(container: HTMLElement): Record<string, string[]> {
+  const table = explainPanel(container).querySelector("tbody");
+  const out: Record<string, string[]> = {};
+  for (const row of table?.querySelectorAll("tr") ?? []) {
+    const input = row.querySelector("th")?.textContent ?? "";
+    out[input] = [...row.querySelectorAll("td")].map((cell) => cell.textContent ?? "");
+  }
+  return out;
+}
+
+describe("FR-U6 — the `why` panel is the contributions, not a second copy of the score", () => {
+  it("draws one row per contribution Vogt returned, with the arithmetic behind it", async () => {
+    const vogt = fakeVogt({ ...TWO, ...WHY });
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    await openWhy(container, "WI-1");
+    await waitFor(() => expect(explainPanel(container).querySelector("tbody")).toBeTruthy());
+
+    // It asked about the row that was pressed, and only that row.
+    expect(vogt.matching("GET /why").map((call) => call.query.get("ref"))).toEqual(["WI-1"]);
+
+    // Every named input is a row, and no input the server did not name is.
+    const drawn = explainRows(container);
+    expect(Object.keys(drawn)).toEqual(["age", "priority"]);
+
+    // The contribution, and the value and weight it is made of — a panel
+    // showing only the total would pass an assertion about the total.
+    expect(drawn["age"]?.[0]).toContain("2.25");
+    expect(drawn["age"]?.[0]).toContain("9.00");
+    expect(drawn["age"]?.[0]).toContain("0.25");
+    expect(drawn["age"]?.[0]).toContain("open for 9 days");
+    expect(drawn["priority"]?.[0]).toContain("2.00");
+    expect(explainPanel(container).textContent).toContain("total 4.25");
+  });
+
+  it("compares two entries input by input, which is what makes an order explainable", async () => {
+    fakeVogt({ ...TWO, ...WHY });
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    await openWhy(container, "WI-1");
+    await openWhy(container, "WI-2");
+    await waitFor(() =>
+      expect(explainPanel(container).textContent).toContain("Difference"),
+    );
+    await waitFor(() => expect(explainRows(container)["age"]?.length).toBe(3));
+
+    const drawn = explainRows(container);
+    // WI-1's column, WI-2's column, and the gap between them per input —
+    // 2.25 − 0.50 on age and 2.00 − 1.00 on priority, which together are the
+    // whole of "why is this one above that one".
+    expect(drawn["age"]?.[0]).toContain("2.25");
+    expect(drawn["age"]?.[1]).toContain("0.50");
+    expect(drawn["age"]?.[2]).toBe("+1.75");
+    expect(drawn["priority"]?.[2]).toBe("+1.00");
+  });
+
+  it("says an input this build cannot compute is absent, and never scores it zero", async () => {
+    fakeVogt({
+      ...TWO,
+      "GET /why": {
+        body: {
+          ref: "WI-1",
+          title: "Teach the board to say what it does not know",
+          total: 4.25,
+          contributions: [
+            { input: "age", detail: "", value: 9, weight: 0.25, contribution: 2.25 },
+          ],
+          inputs_not_yet_available: {
+            blast_radius: "no dependency sweep has run against this project",
+          },
+        },
+      },
+    });
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    await openWhy(container, "WI-1");
+    await waitFor(() =>
+      expect(explainPanel(container).querySelector(".vogt-backlog-pending")).toBeTruthy(),
+    );
+
+    const panel = explainPanel(container);
+    expect(panel.textContent).toContain("blast_radius");
+    expect(panel.textContent).toContain("no dependency sweep has run against this project");
+    // Named as an absence, not folded into the table as a row worth 0.00.
+    expect(Object.keys(explainRows(container))).toEqual(["age"]);
+  });
+
+  it("reports an explanation Vogt refused instead of leaving a hole in the table", async () => {
+    fakeVogt({
+      ...TWO,
+      "GET /why": refusal(500, "why: the ranker has no inputs configured"),
+    });
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    await openWhy(container, "WI-1");
+    await waitFor(() =>
+      expect(explainPanel(container).textContent).toContain(
+        "why: the ranker has no inputs configured",
+      ),
+    );
+    // and it does not draw an explanation made of nothing beside the refusal
+    expect(explainPanel(container).querySelector("tbody")).toBeNull();
+  });
+});

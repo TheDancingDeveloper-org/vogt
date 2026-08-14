@@ -771,3 +771,249 @@ describe("FR-U21 — an outage is not an empty board", () => {
     expect(container.querySelector(".board-card")).toBeNull();
   });
 });
+
+// -- FR-U13, which was asserted as a filter value ---------------------------
+//
+// §6.2a: "The swimlane *mode* is asserted as a filter value and the grouping
+// it produces is not; `data-wip` is rendered and read by nobody." The mode
+// round-trips through the URL in the FR-U11 block above, and a board that
+// wrote `lanes=project` into its query and then drew every card in one lane
+// would pass every one of those tests.
+//
+// So these assert the grouping, the count, the collapse and the persistence —
+// each against something a reader of the board would see.
+
+/** Four items over two projects and two initiatives, in two states. */
+const LANED = {
+  "GET /projects": {
+    body: {
+      projects: [
+        { slug: "alpha", name: "Alpha" },
+        { slug: "beta", name: "Beta" },
+      ],
+    },
+  },
+  "GET /initiatives": {
+    body: {
+      initiatives: [
+        { id: "IN-1", slug: "merge", title: "The merge" },
+        { id: "IN-2", slug: "phone", title: "The phone" },
+      ],
+    },
+  },
+  "GET /work": {
+    body: {
+      items: [
+        workItem({ ref: "WI-1", project_slug: "alpha", initiative_id: "IN-1", state: "open" }),
+        workItem({ ref: "WI-2", project_slug: "alpha", initiative_id: "IN-2", state: "open" }),
+        workItem({
+          ref: "WI-3",
+          project_slug: "beta",
+          initiative_id: "IN-1",
+          state: "in_progress",
+        }),
+        workItem({ ref: "WI-4", project_slug: null, initiative_id: null, state: "open" }),
+      ],
+      total: 4,
+    },
+  },
+};
+
+/** The lane headings, in the order the board drew them. */
+function laneLabels(container: HTMLElement): string[] {
+  return [...container.querySelectorAll(".board-lane-label")].map(
+    (node) => node.textContent ?? "",
+  );
+}
+
+/** The lane heading button whose label reads `label`. */
+function laneHead(container: HTMLElement, label: string): HTMLButtonElement {
+  const found = [...container.querySelectorAll<HTMLButtonElement>(".board-lanehead")].find(
+    (node) => node.querySelector(".board-lane-label")?.textContent === label,
+  );
+  if (!found) throw new Error(`no lane called "${label}"; lanes: ${laneLabels(container)}`);
+  return found;
+}
+
+/** Every card ref drawn under the lane whose heading reads `label`.
+ *
+ *  A lane is a heading followed by its row, so this walks forward from the
+ *  heading to the row that belongs to it — which is how a reader tells which
+ *  lane a card is in, and the thing the grouping has to get right. */
+function cardsInLane(container: HTMLElement, label: string): string[] {
+  const row = laneHead(container, label).nextElementSibling;
+  if (!row || !row.classList.contains("board-row")) return [];
+  return [...row.querySelectorAll<HTMLElement>(".board-card")].map(
+    (node) => node.id.replace("board-card-", ""),
+  );
+}
+
+/** The WIP number the head row shows for a column. */
+function wipOf(container: HTMLElement, state: string): string {
+  return colHead(container, state).querySelector(".board-wip")?.textContent ?? "";
+}
+
+/** The column head whose name reads `state`. */
+function colHead(container: HTMLElement, state: string): HTMLElement {
+  const found = [...container.querySelectorAll<HTMLElement>(".board-colhead")].find(
+    (node) => node.querySelector(".board-colhead-name")?.textContent === state,
+  );
+  if (!found) throw new Error(`no column head for ${state}; columns: ${columnNames(container)}`);
+  return found;
+}
+
+describe("FR-U13 — a swimlane is a grouping, not a filter value", () => {
+  it("draws one lane per project and puts each card in its own", async () => {
+    const vogt = fakeVogt(LANED);
+    const { container } = board("/board?lanes=project");
+
+    await waitFor(() => expect(laneLabels(container)).toContain("Alpha"));
+
+    // The registry's display name, not the slug, and the unattached work
+    // named rather than dropped or folded into somebody else's lane.
+    expect(laneLabels(container)).toEqual(["Alpha", "Beta", "No project"]);
+    expect(cardsInLane(container, "Alpha").sort()).toEqual(["WI-1", "WI-2"]);
+    expect(cardsInLane(container, "Beta")).toEqual(["WI-3"]);
+    expect(cardsInLane(container, "No project")).toEqual(["WI-4"]);
+
+    // The count beside each heading is that lane's own, not the board's.
+    expect(laneHead(container, "Alpha").querySelector(".board-lane-count")?.textContent).toBe(
+      "2",
+    );
+    // Grouping is this client's arrangement of what it already loaded.
+    expect(vogt.matching("GET /work")).toHaveLength(1);
+  });
+
+  it("regroups by initiative on the same load, and asks Vogt nothing", async () => {
+    const vogt = fakeVogt(LANED);
+    const view = board("/board?lanes=project");
+    await waitFor(() => expect(laneLabels(view.container)).toContain("Alpha"));
+    const loads = vogt.matching("GET /work").length;
+
+    const field = [...view.container.querySelectorAll<HTMLElement>(".board-field")].find(
+      (node) => node.querySelector("span")?.textContent === "Swimlanes",
+    )!;
+    fireEvent.input(field.querySelector("select")!, { target: { value: "initiative" } });
+
+    await waitFor(() => expect(laneLabels(view.container)).toContain("The merge"));
+    // The same four cards, cut a different way: WI-1 and WI-3 share an
+    // initiative and do not share a project.
+    expect(laneLabels(view.container)).toEqual(["The merge", "The phone", "No initiative"]);
+    expect(cardsInLane(view.container, "The merge").sort()).toEqual(["WI-1", "WI-3"]);
+    expect(cardsInLane(view.container, "The phone")).toEqual(["WI-2"]);
+    expect(cardsInLane(view.container, "No initiative")).toEqual(["WI-4"]);
+    expect(vogt.matching("GET /work")).toHaveLength(loads);
+  });
+});
+
+describe("FR-U13 — the per-column WIP count is what is in the column", () => {
+  it("counts the cards in each column across every lane, and moves when one moves", async () => {
+    fakeVogt(LANED);
+    const { container } = board("/board?lanes=project");
+    await waitFor(() => expect(laneLabels(container)).toContain("Alpha"));
+
+    // Three open across two lanes and the unlaned one, one in progress, and
+    // a column nothing is in says nought rather than showing nothing.
+    expect(wipOf(container, "open")).toBe("3");
+    expect(wipOf(container, "in progress")).toBe("1");
+    expect(wipOf(container, "done")).toBe("0");
+
+    // The count is of what is drawn, so an optimistic move is counted where
+    // the card now is — the number and the cards never disagree.
+    fireEvent.dragStart(card(container, "WI-1"));
+    fireEvent.drop(
+      container.querySelectorAll<HTMLElement>('.board-cell[data-state="in progress"]')[0]!,
+    );
+    await waitFor(() => expect(wipOf(container, "in progress")).toBe("2"));
+    expect(wipOf(container, "open")).toBe("2");
+  });
+
+  it("marks the count a floor when the board did not load the whole estate", async () => {
+    fakeVogt({
+      ...LANED,
+      "GET /work": {
+        body: {
+          items: [workItem({ ref: "WI-1", project_slug: "alpha", state: "open" })],
+          total: 900,
+        },
+      },
+    });
+    const { container } = board("/board?lanes=project");
+
+    // "1+", not "1": a WIP number a reader trusts as a total while the board
+    // holds one page of nine hundred is the count lying quietly.
+    await waitFor(() => expect(wipOf(container, "open")).toBe("1+"));
+  });
+});
+
+describe("FR-U13 — lanes and columns collapse, and the layout is this client's", () => {
+  it("takes a collapsed lane's cards off the board and leaves the others", async () => {
+    fakeVogt(LANED);
+    const { container } = board("/board?lanes=project");
+    await waitFor(() => expect(laneLabels(container)).toContain("Alpha"));
+
+    fireEvent.click(laneHead(container, "Alpha"));
+
+    await waitFor(() => expect(cardsInLane(container, "Alpha")).toEqual([]));
+    // Collapsed, not filtered: the heading is still there to expand, the
+    // other lanes are untouched, and the column count still knows about the
+    // work that is merely out of sight.
+    expect(laneLabels(container)).toContain("Alpha");
+    expect(cardsInLane(container, "Beta")).toEqual(["WI-3"]);
+    expect(wipOf(container, "open")).toBe("3");
+
+    fireEvent.click(laneHead(container, "Alpha"));
+    await waitFor(() =>
+      expect(cardsInLane(container, "Alpha").sort()).toEqual(["WI-1", "WI-2"]),
+    );
+  });
+
+  it("collapses a column and offers to put it back", async () => {
+    fakeVogt(LANED);
+    const { container } = board("/board?lanes=project");
+    await waitFor(() => expect(laneLabels(container)).toContain("Alpha"));
+
+    const head = colHead(container, "done");
+    const toggle = head.querySelector<HTMLButtonElement>(".board-colhead-toggle")!;
+    expect(toggle.title).toBe("Collapse column");
+
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(head.classList.contains("collapsed")).toBe(true));
+    expect(toggle.title).toBe("Expand column");
+    // Every cell in that column narrows with it, in every lane at once.
+    const cells = [...container.querySelectorAll<HTMLElement>('.board-cell[data-state="done"]')];
+    expect(cells.length).toBeGreaterThan(1);
+    expect(cells.every((node) => node.classList.contains("collapsed"))).toBe(true);
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(head.classList.contains("collapsed")).toBe(false));
+  });
+
+  it("remembers what this client collapsed, and tells Vogt none of it", async () => {
+    const vogt = fakeVogt(LANED);
+    const first = board("/board?lanes=project");
+    await waitFor(() => expect(laneLabels(first.container)).toContain("Alpha"));
+
+    fireEvent.click(laneHead(first.container, "Alpha"));
+    fireEvent.click(
+      colHead(first.container, "done").querySelector<HTMLButtonElement>(
+        ".board-colhead-toggle",
+      )!,
+    );
+    await waitFor(() => expect(cardsInLane(first.container, "Alpha")).toEqual([]));
+
+    // A reload, not a re-render: the preference has to have left the surface.
+    first.unmount();
+    const second = board("/board?lanes=project");
+    await waitFor(() => expect(laneLabels(second.container)).toContain("Alpha"));
+
+    expect(cardsInLane(second.container, "Alpha")).toEqual([]);
+    expect(cardsInLane(second.container, "Beta")).toEqual(["WI-3"]);
+    expect(colHead(second.container, "done").classList.contains("collapsed")).toBe(true);
+
+    // Per client means per client: a layout preference is not an estate
+    // write, and nothing about it was sent to Vogt at all.
+    expect(vogt.calls.filter((call) => call.method !== "GET")).toEqual([]);
+  });
+});
