@@ -776,12 +776,11 @@ Named stretch goal, **not committed and not designed for**:
 
 ## 5. Delivery verification (v1, 2026-08-12)
 
-*This section verifies v1 and is not restated by r9. The IDs r9 appended —
-FR-E, FR-T, FR-M, FR-U4–U22, FR-S9/S10 and the six appended NFRs — are v2
-scope and unbuilt; the counts below are v1's and do not move because a later
-revision added requirements. `ROADMAP.md` M14 carries the §5-style
-verification of them, in the same style and by the same method (§5.4a
-included).*
+*This section verifies v1 and is not restated by r9. The counts below are
+v1's and do not move because a later revision added requirements. The IDs r9
+appended are verified separately in §6, which is written as the stages land
+rather than at the end — §5 was written after v1 in one pass, and doing it
+that way is how seven requirements went a year without anyone checking.*
 
 M0–M6 are built; 482 tests pass at 92% coverage. This section is the audit
 of the *delivered* system against every requirement above — read against
@@ -941,3 +940,68 @@ whole fix.
   port-allocated; its image reference is still a placeholder digest, so
   nothing has been deployed from it — which is NFR-D10 working as intended,
   not an omission.
+
+## 6. Delivery verification (v2 to date, 2026-08-14)
+
+The r9 IDs, checked against the build the same way §5 checked v1's: read
+against the source and the tests, not against the roadmap's claims. **M9,
+M10 and M11 are built; M12–M14 are not**, so this covers the IDs those
+three stages deliver and says so per row rather than reporting a fraction of
+a moving denominator.
+
+One caveat governs every GUI row below and is not repeated in each: **no
+Solid surface has been rendered in a browser** (`ROADMAP.md` M11 as built).
+Where a row says "delivered", it means the code does what the requirement
+says and a test asserts what can be asserted without a renderer.
+
+### 6.1 Delivered
+
+| ID | Evidence |
+|---|---|
+| NFR-D12 | `dev` builds `:dev` images, `main` builds `sha-` images, neither deploys (`.github/workflows/build.yml`) |
+| NFR-Q6 | CI's `core` job deletes `engine/`, `web/` and `mobile/` and runs the suite; the forge-less run is untouched |
+| FR-E1, FR-E2 | Adopted as-built from the engine; its own tests cover PTY lifecycle, scrollback and the activity machine |
+| FR-E4 | Brief written to a prompt file by the engine, session id recorded on the item as an audited write, `work.get` carries the sessions with live activity (`tests/test_sessions.py`, `tests/test_m10_demo.py`) |
+| FR-E8 | `session.start`, `session.list`, `session.stop` in the registry and driven on all three transports by `tests/test_parity.py` |
+| FR-E9 | `engine/server/tests/vogt_core.rs` boots the engine with no core and with an unreachable one: sessions serve, readiness stays green, the Vogt routes refuse with a named reason |
+| FR-S9 | Per-front-door-token pairing, injected by the proxy; verified live — `GET /api/vogt/status` answers `principal: agent:gui` |
+| FR-S10 | Per-session actor and token, revoked on stop; the demo reads the write back as `agent:session:<id>` |
+| FR-U8 | `tests/test_pwa.py` resolves every path in the bundle against the operation registry *and* the engine's router and contract |
+| FR-U12, FR-U13, FR-U14, FR-U15, FR-U17, FR-U18 | Built in the surfaces; the reason-collecting and no-bulk-accept rules are asserted in `tests/test_pwa.py` |
+| FR-U21 | Every surface distinguishes an outage from an empty answer and renders the server's own reason (asserted structurally) |
+
+### 6.2 Delivered differently, or short
+
+| ID | What is actually true | Severity |
+|---|---|---|
+| NFR-D11 | The process model is built and tested — one port, engine fronting, core on loopback, aggregate health. **The image has never been built**: no Docker daemon was reachable here, so `engine/Dockerfile` is parse-checked and no more. | The one thing to do before trusting the stack |
+| NFR-C6 | Both halves run on every push. **APK release signing is not carried over** — the keystore lives in the retired forge, so the APK builds unsigned and where a signed one is published is an untaken decision. | Low until M13 |
+| FR-U9 | Parity reached and asserted; the legacy GUI is **still serving**, deliberately, until the M11 demo runs in a browser. | By design, and recorded |
+| FR-E3 | Vogt never uses a path heuristic: `cwd` is the registry's path, and a work item with no project is refused rather than guessed. The engine's *own* template matching (`match_repo_names`, `match_path_prefixes`) is untouched and still applies to sessions started from the engine's own UI. | Satisfied for Vogt-started sessions; the clause's second half is the engine's to change |
+| FR-E5 | A session's agent authenticates as that session — after three separate places were found silently replacing its token with the pod's. Registration itself is still the container bootstrap's, not per-session: the session supplies the credential, the bootstrap supplies the endpoint. | Delivered in substance |
+| FR-U4, FR-U5, FR-U6, FR-U7, FR-U11 | Built; unrendered. FR-U6's **bulk label is absent** (the binding did not exist when the surface was written; it does now). FR-U5's audit panel **links** to the browser rather than embedding a second copy. | Pending the demo |
+| FR-U10 | **Not delivered as specified.** The requirement says live from the SSE stream; the engine's stream carries engine events only, and Vogt's `events.list` cursor is not multiplexed into it. The board polls, reports its own age, and says "Stale" rather than claiming to be live. Closing it is either a cursor poll of `events.list` or a proxied Vogt stream. | Medium — the surface is honest about it |
+| FR-U16 | The palette reaches every read *surface* and opens the view that collects a reason for a write (asserted by import). It does **not** reach individual work items by fuzzy name. | Low |
+| FR-U19 | Actor, operation and entity filter server-side; **time range and project are applied to the loaded window**, because `ListAuditParams` has no time bound — which is §5.1's FR-S6 gap, reappearing in the surface that needed it most. | Compounds FR-S6 |
+| FR-U20 | The work item shows its sessions and opens the terminal. **The return leg is missing**: the terminal surface does not link back to the work item it was opened for. | Medium |
+| FR-U22 | Focus movement, `Shift`+arrow to propose a move through the same reason composer, `Enter` to open. Not wired into the palette. | Low |
+| NFR-S5 | The backlog virtualizes above 60 rows; the audit browser pages; the board **caps** rendered cards per column with an explicit "+N more" and pages its reads with a truncation banner. Nothing fetches the estate to render a page — the requirement's load-bearing half. | Board virtualization outstanding |
+
+### 6.3 What this pass found that no requirement names
+
+Three defects, each of which produced *working behaviour and a false
+record*, which is the failure class this product exists to make visible:
+
+1. **A session's credential was silently replaced** by the pod's, in three
+   places (`ROADMAP.md` M10 as built). Writes succeeded; the audit named the
+   wrong actor.
+2. **Six columns in the legacy GUI were em dashes on every row** — field
+   names that were never right, and two columns removed from the product by
+   r2. An em dash is also how that GUI says "not collected".
+3. **ContextKeeper's two effectful posts were ungated**, so a read-only
+   token could start a terminal, while every other write in the engine was
+   capability-gated.
+
+None would have been found by reading the code, and none by a test that
+stubs its transport. All three were found by running the two halves together
+and looking at what came out.
