@@ -29,7 +29,16 @@ use crate::{
 };
 
 fn runtime(state: &AppState) -> Result<Arc<AssistantRuntime>> {
-    state.assistant.clone().ok_or(ApiError::NotFound)
+    let runtime = state.assistant.clone().ok_or(ApiError::NotFound)?;
+    // FR-T7: a configuration that would hang refuses here instead, with the
+    // sentence that says which model, which transport, and which setting
+    // overrides it. Refused rather than 404: the assistant *is* provisioned,
+    // and reporting it absent would send an operator looking for a missing
+    // API key.
+    if let Some(reason) = runtime.refusal() {
+        return Err(ApiError::Config(reason.to_string()));
+    }
+    Ok(runtime)
 }
 
 #[derive(Debug, Deserialize)]

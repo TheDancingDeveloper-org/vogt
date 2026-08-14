@@ -38,6 +38,7 @@ fn test_config() -> Config {
         assistant_base_url: "https://api.theclawbay.com/v1".into(),
         assistant_model: "gpt-5.4-mini".into(),
         assistant_max_tool_calls: 8,
+        assistant_allow_claude_proxy: false,
         assistant_reasoning_effort: None,
         contextkeeper_url: None,
         contextkeeper_token: None,
@@ -2763,4 +2764,46 @@ async fn collect_binary_until(
             }
         }
     }
+}
+
+// ── FR-T7: a configuration that would hang refuses instead ────────────────
+
+#[tokio::test]
+async fn a_claude_route_on_the_openai_backend_refuses_with_a_named_reason() {
+    // The recorded failure is that these proxy routes accept the request and
+    // never answer. Under a 60-second client timeout that reads as "the
+    // request took too long", which is a different sentence for the same
+    // silence and sends an operator looking in the wrong place.
+    let mut cfg = test_config();
+    cfg.assistant_api_key = Some("sk-test".into());
+    cfg.assistant_model = "claude-sonnet-4-5".into();
+    let (base, _h) = boot_with_config(cfg).await;
+
+    let res = reqwest::Client::new()
+        .get(format!("{base}/api/assistant/history"))
+        .headers(auth())
+        .send()
+        .await
+        .unwrap();
+    // Not 404: the assistant *is* provisioned, and reporting it absent would
+    // send somebody looking for a missing API key.
+    assert_ne!(res.status(), reqwest::StatusCode::NOT_FOUND);
+    let body = res.text().await.unwrap();
+    assert!(body.contains("claude-sonnet-4-5"), "{body}");
+    assert!(body.contains("assistant_allow_claude_proxy"), "{body}");
+}
+
+#[tokio::test]
+async fn the_assistant_answers_normally_for_a_model_this_transport_serves() {
+    let mut cfg = test_config();
+    cfg.assistant_api_key = Some("sk-test".into());
+    let (base, _h) = boot_with_config(cfg).await;
+
+    let res = reqwest::Client::new()
+        .get(format!("{base}/api/assistant/history"))
+        .headers(auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
 }

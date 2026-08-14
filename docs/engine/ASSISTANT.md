@@ -34,6 +34,7 @@ the terminal half works exactly as before (FR-T6, FR-E9).
 | `assistant_model` | `MYDEVENV2_ASSISTANT_MODEL` | `gpt-5.4-mini` |
 | `assistant_max_tool_calls` | `MYDEVENV2_ASSISTANT_MAX_TOOL_CALLS` | `8` |
 | `assistant_reasoning_effort` | `MYDEVENV2_ASSISTANT_REASONING_EFFORT` | unset |
+| `assistant_allow_claude_proxy` | `MYDEVENV2_ASSISTANT_ALLOW_CLAUDE_PROXY` | `false` |
 
 The Vogt half needs no assistant-specific key. It uses `vogt_core_url` — the
 same core the front door proxies — and the `vogt_core_token_file` pairing on
@@ -44,7 +45,19 @@ refusal on writes; pairing a token is how it opts that token in.
 The backend must be OpenAI-compatible (`POST {base_url}/chat/completions`
 with `tools` / `tool_calls`). Notes from validation against The Claw Bay
 (August 2026): GPT models respond quickly with correct tool calls; the
-`claude-*` proxy routes hung and should be avoided until understood.
+`claude-*` proxy routes hung and are **now refused rather than avoided by
+convention** (FR-T7). A `claude-*` model id on this transport makes every
+assistant route answer with a sentence naming the model, the transport and
+the setting that overrides it — because a hang is the worst failure a chat
+surface can have, being indistinguishable from thinking, and the 60-second
+client timeout that used to catch it reported "took too long" for something
+that was never going to answer.
+
+`assistant_allow_claude_proxy` turns the refusal off. It exists because the
+fault is a *proxy's* rather than the model's: a deployment whose proxy serves
+those routes correctly is entitled to say so and to own the result. The check
+is about the transport, so FR-T7's other clause — a native Anthropic backend,
+still unbuilt — would not be subject to it.
 
 ## Tools
 
@@ -184,10 +197,10 @@ instructions.
   The system prompt now tells the model that work items are referred to as
   `WI-7` and projects by slug, which is what a recognizer's output will have
   to survive.
-- **FR-T7 (provider portability)** — the loop is still OpenAI-compatible only,
-  and the `claude-*` proxy-route hang recorded above is still unexplained. No
-  native Anthropic backend exists yet, and no route is refused with a named
-  reason.
+- **FR-T7 (provider portability)** — the loop is still OpenAI-compatible only
+  and no native Anthropic backend exists yet. The `claude-*` proxy-route hang
+  is still unexplained, and is now **refused with a named reason**, which is
+  the second of the two ways the requirement offers out of it.
 
 ## Voice
 

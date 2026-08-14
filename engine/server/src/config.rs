@@ -190,6 +190,15 @@ pub struct Config {
     pub assistant_max_tool_calls: u32,
     /// Optional `reasoning_effort` forwarded to the backend (e.g. "minimal").
     pub assistant_reasoning_effort: Option<String>,
+    /// Send `claude-*` model ids to the OpenAI-compatible backend anyway.
+    ///
+    /// Off by default because those proxy routes hang rather than answer
+    /// (`ASSISTANT.md`, validated August 2026) and a hang is the worst
+    /// failure a chat surface can have: it looks like thinking. The escape
+    /// hatch exists because the fault is a *proxy's*, not the model's — a
+    /// deployment whose proxy serves them correctly is entitled to say so,
+    /// and to own the result.
+    pub assistant_allow_claude_proxy: bool,
     /// Base URL of the ContextKeeper sidecar. None disables every continuity
     /// surface: terminals still work and simply read as unprotected.
     pub contextkeeper_url: Option<String>,
@@ -245,6 +254,7 @@ struct FileConfig {
     assistant_api_key: Option<String>,
     assistant_base_url: Option<String>,
     assistant_model: Option<String>,
+    assistant_allow_claude_proxy: Option<bool>,
     assistant_max_tool_calls: Option<u32>,
     assistant_reasoning_effort: Option<String>,
     contextkeeper_url: Option<String>,
@@ -414,6 +424,14 @@ pub fn load(
             .assistant_reasoning_effort
             .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_REASONING_EFFORT").ok())
             .filter(|s| !s.trim().is_empty()),
+        assistant_allow_claude_proxy: from_file
+            .assistant_allow_claude_proxy
+            .or_else(|| {
+                std::env::var("MYDEVENV2_ASSISTANT_ALLOW_CLAUDE_PROXY")
+                    .ok()
+                    .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
+            })
+            .unwrap_or(false),
         // Unprefixed on purpose: these are ContextKeeper's own variable names,
         // and the same two values configure its CLI and hooks inside the
         // container. One name for one credential.

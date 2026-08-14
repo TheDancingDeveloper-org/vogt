@@ -254,6 +254,10 @@ pub struct AssistantRuntime {
     model: String,
     reasoning_effort: Option<String>,
     max_tool_calls: u32,
+    /// Set when this backend cannot serve this model, and why (FR-T7).
+    /// Computed once at construction: it is a fact about the configuration,
+    /// so re-deriving it per request would only invite it to drift.
+    refusal: Option<String>,
     /// Serializes turns: one user message / action resolution at a time.
     conversation: tokio::sync::Mutex<Conversation>,
 }
@@ -285,6 +289,39 @@ impl Turn {
     }
 }
 
+/// Why this backend cannot serve this model, if it cannot (FR-T7).
+///
+/// The requirement offers two ways out of the recorded hang — resolve it, or
+/// refuse the route with a named reason — and this is the second, because the
+/// first is not ours to do: the fault is in a proxy that accepts a `claude-*`
+/// route and then never answers (`ASSISTANT.md`, validated against The Claw
+/// Bay in August 2026).
+///
+/// A hang is the worst failure a chat surface can have, because it is
+/// indistinguishable from thinking. The client's 60-second timeout turned it
+/// into a timeout, which is a different sentence for the same silence: it
+/// says the request took too long, when what is true is that this
+/// combination never answers. A refusal that names the model, the transport
+/// and the setting that overrides it is the only one of the three a reader
+/// can act on.
+///
+/// Deliberately about the *transport*, not the model: this check belongs to
+/// the OpenAI-compatible backend, and a native Anthropic backend — FR-T7's
+/// other clause, still unbuilt — would not be subject to it.
+fn openai_route_refusal(model: &str, allowed: bool) -> Option<String> {
+    if allowed || !model.trim().to_ascii_lowercase().starts_with("claude-") {
+        return None;
+    }
+    Some(format!(
+        "the assistant is configured with model `{model}` on an \
+         OpenAI-compatible backend, and those proxy routes hang rather than \
+         answer — a request would look like thinking until it timed out. \
+         Configure a model this transport serves, or set \
+         `assistant_allow_claude_proxy` if your proxy serves `claude-*` \
+         correctly and you want to own the result."
+    ))
+}
+
 impl AssistantRuntime {
     /// Returns None when no API key is configured — the feature is disabled
     /// and the routes should 404.
@@ -309,8 +346,14 @@ impl AssistantRuntime {
             model: cfg.assistant_model.clone(),
             reasoning_effort: cfg.assistant_reasoning_effort.clone(),
             max_tool_calls: cfg.assistant_max_tool_calls,
+            refusal: openai_route_refusal(&cfg.assistant_model, cfg.assistant_allow_claude_proxy),
             conversation: tokio::sync::Mutex::new(Conversation::default()),
         }))
+    }
+
+    /// Why every route here refuses, if it does (FR-T7).
+    pub fn refusal(&self) -> Option<&str> {
+        self.refusal.as_deref()
     }
 
     /// Resolve the Vogt tools this caller gets this turn. A core that is
@@ -1179,6 +1222,7 @@ mod tests {
             assistant_base_url: "http://unused.invalid".into(),
             assistant_model: "test-model".into(),
             assistant_max_tool_calls: 8,
+            assistant_allow_claude_proxy: false,
             assistant_reasoning_effort: None,
             contextkeeper_url: None,
             contextkeeper_token: None,
@@ -1201,6 +1245,7 @@ mod tests {
             model: "test-model".into(),
             reasoning_effort: None,
             max_tool_calls: 8,
+            refusal: None,
             conversation: tokio::sync::Mutex::new(Conversation::default()),
         }
     }
@@ -1421,6 +1466,7 @@ mod tests {
         script.push(final_reply("capped"));
         let rt = AssistantRuntime {
             max_tool_calls: 3,
+            refusal: None,
             ..runtime_with_script(sessions, script)
         };
         let out = rt
@@ -1942,6 +1988,41 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|c| c.contains("needs a reason"))
         }));
+    }
+
+    #[test]
+    fn a_model_this_transport_hangs_on_is_refused_rather_than_awaited() {
+        // FR-T7. The recorded failure is a hang, and a hang is the worst
+        // thing a chat surface can do because it is indistinguishable from
+        // thinking. The refusal has to name all three of the model, the
+        // transport and the way out, or a reader cannot act on it.
+        let reason = openai_route_refusal("claude-sonnet-4-5", false)
+            .expect("a claude-* id on this transport is the documented hang");
+        assert!(reason.contains("claude-sonnet-4-5"), "{reason}");
+        assert!(reason.contains("OpenAI-compatible"), "{reason}");
+        assert!(reason.contains("assistant_allow_claude_proxy"), "{reason}");
+    }
+
+    #[test]
+    fn a_deployment_whose_proxy_serves_them_may_say_so() {
+        // The fault is a proxy's, not the model's. A deployment that has one
+        // that works is entitled to own the result — and if there were no way
+        // to say so, the honest response to this requirement would have been
+        // to leave the hang alone rather than to make a working setup
+        // unusable.
+        assert!(openai_route_refusal("claude-sonnet-4-5", true).is_none());
+    }
+
+    #[test]
+    fn every_other_model_is_left_alone() {
+        for model in ["gpt-5", "gpt-4o-mini", "llama-3.1-70b", "CLAUDE", "claude"] {
+            assert!(
+                openai_route_refusal(model, false).is_none(),
+                "{model} is not the documented case and must not be refused"
+            );
+        }
+        // Case is not what makes it the documented route.
+        assert!(openai_route_refusal("Claude-Opus-4", false).is_some());
     }
 
     #[tokio::test]

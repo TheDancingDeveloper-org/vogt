@@ -157,6 +157,7 @@ fn base_config() -> Config {
         assistant_base_url: "https://api.theclawbay.com/v1".into(),
         assistant_model: "gpt-5.4-mini".into(),
         assistant_max_tool_calls: 8,
+        assistant_allow_claude_proxy: false,
         assistant_reasoning_effort: None,
         contextkeeper_url: None,
         contextkeeper_token: None,
