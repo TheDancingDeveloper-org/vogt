@@ -952,11 +952,20 @@ imply otherwise.
 
 ### M13 as built — three notes and a thing that was already wrong
 
-**Nothing was assembled or installed.** There is no Android SDK and no
-device here, so `cap sync` and Gradle never ran and no notification was ever
-delivered by either transport. What is tested is the configuration's four
-branches (under node, not under a build), the payload shaping, the cursor
-round-trip, and the default set. Treat the APK as unbuilt.
+**The APK assembles; nothing was ever installed.** The first version of this
+note said there was no Android SDK here. That was wrong — `/opt/android-sdk`,
+Gradle 9.7 and Java 21 are in this image, and `cap sync` plus
+`./gradlew assembleDebug` produce a 5.5M debug APK whose manifest reads
+`application-label:'Vogt'`, `package: com.sprooty.mydevenv2`, pointing at
+`vogt.sprooty.com` with cleartext off. So the build is proven and the
+configuration's branches are proven against a real Gradle run rather than
+only under node.
+
+What is still unproven is everything after the build: **no APK has been
+installed on a device, and no notification has been delivered by either
+transport**. The drift path has never run against a live core. Release
+signing is also still absent — the keystore lives in the retired forge — so
+what CI produces is an unsigned debug artefact.
 
 1. **The shell was pointing at the wrong stack, and it looked like it
    worked.** `capacitor.config.ts` hardcoded `mydevenv2.sprooty.com` — the
