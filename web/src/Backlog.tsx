@@ -49,6 +49,7 @@ import {
   listProjects,
   listWorkflows,
   transitionWork,
+  updateWork,
   why,
   type RankedEntry,
   type RankedView,
@@ -869,6 +870,91 @@ const Backlog: Component<Props> = (props) => {
     refresh();
   };
 
+  // -- bulk label (FR-U6) ---------------------------------------------------
+  //
+  // FR-U6 says "bulk transition/label". Bulk transition was built and bulk
+  // label was not — `updateWork` existed in `vogtApi.ts` and no surface called
+  // it, which §6 records as the worse of the two possible failures: not a
+  // missing binding but an unused one.
+  //
+  // Everything about the shape is the bulk transition's, deliberately: one
+  // reason typed for this batch, recorded against every item in it, cleared
+  // afterwards so the next batch cannot inherit it; sequential rather than
+  // parallel, because each call is a separate audited write and a partial
+  // batch has to read as a partial batch; and the outcomes list is the same
+  // list, so a labelling and a transition report the same way.
+  //
+  // The reason field is this action's own rather than the transition's. One
+  // field serving two buttons would mean a reason typed for a state change
+  // could be submitted as the justification for a labelling, which is r6's
+  // rule kept in letter and lost in substance.
+
+  const [bulkLabel, setBulkLabel] = createSignal("");
+  const [bulkLabelMode, setBulkLabelMode] = createSignal<"add" | "remove">("add");
+  const [bulkLabelReason, setBulkLabelReason] = createSignal("");
+  const [bulkLabelRunning, setBulkLabelRunning] = createSignal(false);
+
+  /** What can be *removed* is what the selection actually carries; offering
+   *  the whole vocabulary would be offering writes that change nothing. */
+  const removableLabels = createMemo(() => {
+    const seen = new Set<string>();
+    for (const entry of visible()) {
+      if (!selectedSet().has(entry.ref)) continue;
+      for (const label of entry.labels ?? []) seen.add(label);
+    }
+    return [...seen].sort();
+  });
+
+  const bulkLabelOptions = createMemo(() =>
+    bulkLabelMode() === "remove" ? removableLabels() : labelOptions(),
+  );
+
+  const bulkLabelReady = createMemo(
+    () =>
+      selected().length > 0 &&
+      bulkLabel() !== "" &&
+      bulkLabelReason().trim().length > 0,
+  );
+
+  const submitBulkLabel = async (event: Event) => {
+    event.preventDefault();
+    const label = bulkLabel();
+    const reason = bulkLabelReason().trim();
+    const refs = selected();
+    const mode = bulkLabelMode();
+    if (!label || !reason || !refs.length || bulkLabelRunning()) return;
+    setBulkLabelRunning(true);
+    setBulkOutcomes([]);
+    const outcomes: BulkOutcome[] = [];
+    for (const ref of refs) {
+      try {
+        await updateWork({
+          ref,
+          reason,
+          ...(mode === "add" ? { add_labels: [label] } : { remove_labels: [label] }),
+        });
+        outcomes.push({
+          ref,
+          ok: true,
+          message: mode === "add" ? `+ ${label}` : `− ${label}`,
+        });
+      } catch (error) {
+        outcomes.push({ ref, ok: false, message: errorMessage(error) });
+      }
+      setBulkOutcomes([...outcomes]);
+    }
+    setBulkLabelRunning(false);
+    setBulkLabelReason("");
+    const failed = outcomes.filter((outcome) => !outcome.ok).length;
+    if (failed) {
+      props.onError?.(
+        `${failed} of ${outcomes.length} label writes were refused; each reason is listed.`,
+      );
+    }
+    setSelected(outcomes.filter((outcome) => !outcome.ok).map((outcome) => outcome.ref));
+    refresh();
+  };
+
   // -- virtualization (NFR-S5) ---------------------------------------------
 
   let scroller: HTMLDivElement | undefined;
@@ -1258,9 +1344,15 @@ const Backlog: Component<Props> = (props) => {
       </Show>
 
       <Show when={selected().length > 0 || bulkOutcomes().length > 0}>
-        <form class="vogt-backlog-bulk" onSubmit={(event) => void submitBulk(event)}>
+        {/* Two rows, two forms, two reasons. A single form with two submit
+            buttons would let a reason typed for a state change be recorded as
+            the justification for a labelling. */}
+        <div class="vogt-backlog-bulk">
           <Show when={selected().length > 0}>
-            <div class="vogt-backlog-bulk-row">
+            <form
+              class="vogt-backlog-bulk-row"
+              onSubmit={(event) => void submitBulk(event)}
+            >
               <strong>{selected().length} selected</strong>
               <label class="vogt-backlog-field">
                 <span>Transition to</span>
@@ -1294,7 +1386,62 @@ const Backlog: Component<Props> = (props) => {
               >
                 Deselect
               </button>
-            </div>
+            </form>
+
+            {/* Bulk label (FR-U6), on the same batch and under the same rule. */}
+            <form
+              class="vogt-backlog-bulk-row"
+              onSubmit={(event) => void submitBulkLabel(event)}
+            >
+              <label class="vogt-backlog-field">
+                <span>Label</span>
+                <select
+                  value={bulkLabelMode()}
+                  onInput={(event) =>
+                    setBulkLabelMode(
+                      event.currentTarget.value === "remove" ? "remove" : "add",
+                    )
+                  }
+                >
+                  <option value="add">Add</option>
+                  <option value="remove">Remove</option>
+                </select>
+              </label>
+              <label class="vogt-backlog-field">
+                <span>{bulkLabelMode() === "add" ? "To apply" : "To take off"}</span>
+                <select
+                  value={optionValue(bulkLabel(), bulkLabelOptions())}
+                  onInput={(event) => setBulkLabel(event.currentTarget.value)}
+                >
+                  <option value="">Pick a label</option>
+                  <For each={bulkLabelOptions()}>
+                    {(name) => <option value={name}>{name}</option>}
+                  </For>
+                </select>
+              </label>
+              <label class="vogt-backlog-field vogt-backlog-field-wide">
+                <span>Reason for this batch (recorded against every item in it)</span>
+                <input
+                  type="text"
+                  required
+                  value={bulkLabelReason()}
+                  placeholder="Why are these being labelled?"
+                  onInput={(event) => setBulkLabelReason(event.currentTarget.value)}
+                />
+              </label>
+              <button type="submit" disabled={!bulkLabelReady() || bulkLabelRunning()}>
+                {bulkLabelRunning()
+                  ? "Labelling…"
+                  : bulkLabelMode() === "add"
+                    ? "Add label"
+                    : "Remove label"}
+              </button>
+              <Show when={bulkLabelMode() === "remove" && removableLabels().length === 0}>
+                <span class="vogt-backlog-muted">
+                  nothing selected carries a label, so there is none to take off
+                </span>
+              </Show>
+            </form>
           </Show>
           {/* The outcomes outlive the selection: a batch that succeeded empties
               the selection, and the report of what was written to whom is the
@@ -1313,13 +1460,13 @@ const Backlog: Component<Props> = (props) => {
               <button
                 type="button"
                 onClick={() => setBulkOutcomes([])}
-                disabled={bulkRunning()}
+                disabled={bulkRunning() || bulkLabelRunning()}
               >
                 Dismiss
               </button>
             </div>
           </Show>
-        </form>
+        </div>
       </Show>
 
       <div class="vogt-backlog-count">

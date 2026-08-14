@@ -266,6 +266,25 @@ jobs:
         working-directory: web
         run: pnpm typecheck
 
+      # The PWA's own tests (`REQUIREMENTS.md` §6): the five Vogt surfaces
+      # mounted in jsdom against a fake front door, asserting the interaction
+      # contract that no amount of reading the source can see — an optimistic
+      # move reconciling against the server's answer, a refusal rolling back
+      # with Vogt's own reason, a form refusing to submit without one.
+      #
+      # In this job rather than its own, and gated by the same `engine` filter,
+      # because the classifier already treats `web/` as a build input to the
+      # Rust crate: `engine/server/src/assets.rs` embeds `web/dist/`, so a
+      # web-only change is already an engine change here and a second job with
+      # a second checkout and a second pnpm install would buy nothing on a
+      # runner pool this small.
+      #
+      # Before the bundle is built, because a failing test is a cheaper
+      # failure to reach than a bundle, and these need no `dist`.
+      - name: test the PWA
+        working-directory: web
+        run: pnpm test
+
       # Built *before* cargo, so the engine embeds the real bundle and the
       # compile is over what actually ships. The engine's pipeline built the
       # PWA only in its image stage and compiled Rust against a placeholder;

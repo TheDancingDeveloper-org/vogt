@@ -67,6 +67,7 @@ import { onVogtChanged } from "./store";
 import { openWorkItemTab } from "./tabs";
 import {
   VogtUnavailable,
+  createWork,
   listActors,
   listInitiatives,
   listLabels,
@@ -142,6 +143,182 @@ export function asPoll(value: string | undefined): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_POLL_SECONDS;
   return parsed;
+}
+
+/** The URL keys this surface owns. Anything else in the query is left alone. */
+const URL_KEYS = [
+  "project",
+  "kind",
+  "state",
+  "label",
+  "initiative",
+  "assignee",
+  "lanes",
+  "poll",
+] as const;
+
+export function filtersFromQuery(query: BoardParams): Filters {
+  return {
+    project: (query.project ?? "").trim(),
+    kinds: asList(query.kind),
+    states: asList(query.state),
+    label: (query.label ?? "").trim(),
+    initiative: (query.initiative ?? "").trim(),
+    assignee: (query.assignee ?? "").trim(),
+    lanes: asLaneMode(query.lanes),
+    poll: asPoll(query.poll),
+  };
+}
+
+/** `null` clears a key; every key this surface does not own is left alone. */
+function queryFor(
+  active: Filters,
+): Record<(typeof URL_KEYS)[number], string | string[] | null> {
+  return {
+    project: active.project || null,
+    kind: active.kinds.length ? active.kinds : null,
+    state: active.states.length ? active.states : null,
+    label: active.label || null,
+    initiative: active.initiative || null,
+    assignee: active.assignee || null,
+    lanes: active.lanes === "none" ? null : active.lanes,
+    poll:
+      active.poll === DEFAULT_POLL_SECONDS
+        ? null
+        : active.poll === 0
+          ? "off"
+          : String(active.poll),
+  };
+}
+
+/** The canonical text of this surface's slice of the query.
+ *
+ *  Both encoders walk `URL_KEYS` in the same order, so two equal states always
+ *  produce the same string — which is what lets one effect tell "the user
+ *  changed a filter" from "somebody handed us a different URL". `Backlog.tsx`
+ *  reasons this out at length; the board needs it for the same reason and did
+ *  not have it, which is why a link pasted into a mounted board used to be
+ *  ignored and a tab switch used to drop the query for good. */
+export function encodeFilters(active: Filters): string {
+  const params = new URLSearchParams();
+  const desired = queryFor(active);
+  for (const key of URL_KEYS) {
+    const value = desired[key];
+    if (value === null) continue;
+    for (const one of Array.isArray(value) ? value : [value]) params.append(key, one);
+  }
+  return params.toString();
+}
+
+export function encodeQuery(query: BoardParams): string {
+  const params = new URLSearchParams();
+  for (const key of URL_KEYS) {
+    const value = query[key];
+    if (value === undefined) continue;
+    for (const one of Array.isArray(value) ? value : [value]) params.append(key, one);
+  }
+  return params.toString();
+}
+
+/** A query string back into the shape `filtersFromQuery` reads. */
+export function queryFromSearch(search: string): BoardParams {
+  const params = new URLSearchParams(search);
+  // Built as a plain record and handed back as `BoardParams`: writing through
+  // the named keys asks TypeScript for the intersection of their types, and
+  // `kind` is a list where `project` is not.
+  const out: Record<string, string | string[]> = {};
+  for (const key of URL_KEYS) {
+    const all = params.getAll(key);
+    if (!all.length) continue;
+    out[key] = key === "kind" || key === "state" ? all : (all[0] as string);
+  }
+  return out as BoardParams;
+}
+
+// -- saved filters (FR-U14) -------------------------------------------------
+//
+// Per-client state in v2: server-side shared filters are deferred by name in
+// `REQUIREMENTS.md` §3, so this is `localStorage` and the row on screen says
+// so. The backlog and bugs views have had this since M11; the board — which
+// FR-U14 names first, and whose filter set is the more elaborate of the two —
+// had none.
+//
+// **A saved filter is stored as its query string.** Not as an object: the
+// encoder is already canonical, already the thing a link carries, and already
+// the thing `filtersFromQuery` can read back. So "save this view" and "copy
+// this link" preserve exactly the same set, a stored filter written by an
+// older build decodes under the same tolerances a pasted URL gets, and a key
+// this build stopped understanding is dropped rather than resurrected as
+// `undefined`.
+
+const SAVED_FILTERS_KEY = "mydevenv2.boardFilters.v1";
+
+/** Enough that a runaway list cannot be saved into a full storage quota. */
+const MAX_SAVED_FILTERS = 40;
+
+export interface SavedFilter {
+  name: string;
+  /** The filter set, encoded exactly as the URL encodes it. */
+  query: string;
+}
+
+export function readSavedFilters(): SavedFilter[] {
+  try {
+    const raw = window.localStorage.getItem(SAVED_FILTERS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((entry) => {
+        const record = (entry ?? {}) as Record<string, unknown>;
+        return {
+          name: typeof record.name === "string" ? record.name : "",
+          query: typeof record.query === "string" ? record.query : "",
+        };
+      })
+      .filter((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedFilters(entries: SavedFilter[]): SavedFilter[] {
+  const next = entries.slice(0, MAX_SAVED_FILTERS);
+  try {
+    window.localStorage.setItem(SAVED_FILTERS_KEY, JSON.stringify(next));
+  } catch {
+    // Private mode, quota, or no storage at all: the in-memory list still
+    // recalls for this session.
+  }
+  return next;
+}
+
+/** What a saved filter set says it is, for the recall button's tooltip. */
+export function describeFilters(active: Filters): string {
+  const parts: string[] = [];
+  if (active.project) parts.push(`project ${active.project}`);
+  if (active.kinds.length) parts.push(`type ${active.kinds.join("/")}`);
+  if (active.states.length) parts.push(`state ${active.states.join("/")}`);
+  if (active.label) parts.push(`label ${active.label}`);
+  if (active.initiative) parts.push(`initiative ${active.initiative}`);
+  if (active.assignee) parts.push(`assignee ${active.assignee}`);
+  if (active.lanes !== "none") parts.push(`lanes by ${active.lanes}`);
+  return parts.length ? parts.join(" · ") : "no filters — the whole board";
+}
+
+/**
+ * The value of a `<select>` whose options arrive asynchronously.
+ *
+ * Reading the option list is load-bearing rather than decorative, and this is
+ * `Backlog.tsx`'s helper moved to the surface that needed it just as much.
+ * Solid compiles `value={...}` into an effect that re-applies when *its own*
+ * dependencies change; a value applied before its `<option>` exists is
+ * silently dropped by the browser, and the control then reads "All projects"
+ * while a project filter is in force — which is a deep link restoring the
+ * query and lying about it (FR-U11).
+ */
+function optionValue(current: string, options: readonly string[]): string {
+  return options.find((option) => option === current) ?? current;
 }
 
 // -- workflow shapes --------------------------------------------------------
@@ -342,6 +519,26 @@ function humanState(state: string): string {
   return state.replace(/_/g, " ");
 }
 
+/**
+ * Trust, on every card (FR-U2, FR-U17).
+ *
+ * `unverified` rather than a blank, always — the legacy GUI's rule, which
+ * every other Vogt surface kept and this one did not: a blank cell says "no
+ * opinion", and the honest answer is "nobody has verified this". The board is
+ * an aggregated view of exactly the kind FR-U2 names, so a card that showed
+ * priority and kind and said nothing about whether anyone had checked the
+ * item was the aggregate quietly dropping the least convenient column.
+ */
+export function trustOf(item: Pick<WorkItem, "trust_state">): string {
+  const state = item.trust_state;
+  return typeof state === "string" && state ? state : "unverified";
+}
+
+/** Kinds are a closed set in Vogt (`WorkKind`), and quick-create needs one
+ *  before any workflow has loaded, so this is the fallback rather than the
+ *  source: the picker prefers the kinds `workflow.list` published. */
+const WORK_KINDS = ["feature", "bug", "chore", "question"] as const;
+
 interface Layout {
   columns: string[];
   lanes: string[];
@@ -406,16 +603,7 @@ const Board: Component<Props> = (props) => {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const [filters, setFilters] = createSignal<Filters>({
-    project: (searchParams.project ?? "").trim(),
-    kinds: asList(searchParams.kind),
-    states: asList(searchParams.state),
-    label: (searchParams.label ?? "").trim(),
-    initiative: (searchParams.initiative ?? "").trim(),
-    assignee: (searchParams.assignee ?? "").trim(),
-    lanes: asLaneMode(searchParams.lanes),
-    poll: asPoll(searchParams.poll),
-  });
+  const [filters, setFilters] = createSignal<Filters>(filtersFromQuery(searchParams));
   const patch = (next: Partial<Filters>) => setFilters({ ...filters(), ...next });
 
   const [workflows, setWorkflows] = createSignal<Workflow[] | null>(null);
@@ -473,31 +661,42 @@ const Board: Component<Props> = (props) => {
 
   // -- the URL is the filter set (FR-U11) -----------------------------------
   //
-  // The signal is the source of truth and the URL is written from it, guarded
-  // on this surface actually being the route: the shell navigates to a bare
-  // `/board` when its tab is re-selected, and this effect puts the query back
-  // rather than letting a tab switch silently drop the view.
+  // One effect, both directions, with the ambiguity resolved by remembering
+  // what this surface last asserted — the shape `Backlog.tsx` arrived at and
+  // explains, and which the board needed and did not have. Two things were
+  // broken without it, both of them FR-U11's actual subject:
+  //
+  //   * The shell navigates to a bare `/board` when its tab is re-selected,
+  //     which drops the query. The old effect read neither the pathname's
+  //     *value* nor the query, so nothing re-ran and the filters were gone
+  //     from the URL for good — the view survived, its address did not.
+  //   * A link pasted into an already-mounted board was ignored: the query
+  //     was read once, at construction, and never again.
+  //
+  // Guarded on the pathname because every tab in this shell is mounted at
+  // once and `project`, `label` and `assignee` are keys more than one Vogt
+  // surface owns.
+  let lastWritten = encodeQuery(searchParams);
+
   createEffect(() => {
     if (location.pathname !== "/board") return;
-    const active = filters();
-    setSearchParams(
-      {
-        project: active.project || null,
-        kind: active.kinds.length ? active.kinds : null,
-        state: active.states.length ? active.states : null,
-        label: active.label || null,
-        initiative: active.initiative || null,
-        assignee: active.assignee || null,
-        lanes: active.lanes === "none" ? null : active.lanes,
-        poll:
-          active.poll === DEFAULT_POLL_SECONDS
-            ? null
-            : active.poll === 0
-              ? "off"
-              : String(active.poll),
-      },
-      { replace: true, scroll: false },
-    );
+    const desired = encodeFilters(filters());
+    const current = encodeQuery(searchParams);
+    if (desired === current) {
+      lastWritten = current;
+      return;
+    }
+    if (current !== lastWritten && current !== "") {
+      // The query changed to something this surface did not write, and is not
+      // empty: a pasted link, or the back button. That is an instruction.
+      setFilters(filtersFromQuery(searchParams));
+      lastWritten = current;
+      return;
+    }
+    // Otherwise the signals are authoritative, which is also what restores
+    // the query after a tab switch emptied it.
+    setSearchParams(queryFor(filters()), { replace: true, scroll: false });
+    lastWritten = desired;
   });
 
   // -- loading --------------------------------------------------------------
@@ -890,6 +1089,87 @@ const Board: Component<Props> = (props) => {
     });
   };
 
+  // -- quick-create (FR-U15) ------------------------------------------------
+  //
+  // FR-U15 names the board *first* and the backlog second; the backlog had
+  // it and the board did not, which made half of a must-have clause an
+  // absence. The rule is the backlog's, unchanged, because it is r6's rule
+  // and it does not get a second dialect: title, type, project, and a reason
+  // the user typed, inline, without leaving the view — and no reason, no
+  // submit. Everything else is deferrable to the detail view.
+  //
+  // The reason is never prefilled. The board's *move* composer does prefill
+  // one, from the last reason this session accepted, and that is a different
+  // case with a different justification: a triage run is one decision applied
+  // to a sequence of cards. Raising an item is not a repetition of raising
+  // the previous one, so `stickyReason` deliberately does not reach here.
+
+  const [createOpen, setCreateOpen] = createSignal(false);
+  const [draftTitle, setDraftTitle] = createSignal("");
+  const [draftKind, setDraftKind] = createSignal("feature");
+  const [draftProject, setDraftProject] = createSignal("");
+  const [draftReason, setDraftReason] = createSignal("");
+  const [creating, setCreating] = createSignal(false);
+  const [created, setCreated] = createSignal<string | null>(null);
+  const [createError, setCreateError] = createSignal<string | null>(null);
+
+  // A plain function rather than a memo: `kindOptions` is declared below with
+  // the rest of the render helpers, and a memo body runs the moment it is
+  // created.
+  const kindChoices = (): string[] => {
+    const published = kindOptions();
+    return published.length ? published : [...WORK_KINDS];
+  };
+
+  /** The whole of FR-U15's refusal, in one place. `disabled` says it on
+   *  screen and the guard in `submitCreate` says it again for the keyboard. */
+  const createReady = createMemo(
+    () => draftTitle().trim().length > 0 && draftReason().trim().length > 0,
+  );
+
+  const openQuickCreate = () => {
+    if (writesDisabled()) return;
+    // The filters in force are a good guess at what is being raised; the
+    // reason never is.
+    const kinds = filters().kinds;
+    setDraftKind(kinds[0] ?? kindChoices()[0] ?? "feature");
+    setDraftProject(filters().project);
+    setCreated(null);
+    setCreateError(null);
+    setCreateOpen(true);
+  };
+
+  const submitCreate = async (event: Event) => {
+    event.preventDefault();
+    const title = draftTitle().trim();
+    const reason = draftReason().trim();
+    if (!title || !reason || creating()) return; // FR-W1, again for the keyboard.
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const answer = await createWork({
+        title,
+        kind: draftKind(),
+        project: draftProject() || undefined,
+        reason,
+      });
+      const item = answer?.item;
+      setCreated(item?.ref ?? null);
+      setDraftTitle("");
+      setDraftReason("");
+      // The new item belongs in its column now, not at the next poll.
+      if (item) applyItem(item);
+      else void loadItems(true);
+    } catch (e) {
+      if (e instanceof VogtUnavailable) setOutage(serverReason(e));
+      // Vogt's own sentence, where the form is — not a toast somewhere else.
+      setCreateError(serverReason(e));
+      props.onError?.(`Could not create the work item: ${serverReason(e)}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
   // -- keyboard (FR-U22, as far as it goes) --------------------------------
 
   const cardDomId = (ref: string) => `board-card-${ref}`;
@@ -932,6 +1212,25 @@ const Board: Component<Props> = (props) => {
   const openDetail = (ref: string) => {
     openWorkItemTab(ref);
     navigate(`/w/${encodeURIComponent(ref)}`);
+  };
+
+  /** FR-U22's last clause: quick-create has a binding, now that there is a
+   *  quick-create on this board to bind.
+   *
+   *  Scoped to the surface rather than to `document`: every tab in this shell
+   *  is mounted at once, so a document-level `n` would raise a work item
+   *  while somebody was reading a terminal. It listens on the board's own
+   *  root and ignores anything typed into a field, which is what makes it
+   *  reachable from a focused card, the toolbar, or the board's background
+   *  without stealing a keystroke from the composer. */
+  const onSurfaceKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== "n" || event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.isContentEditable) return;
+    if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+    if (createOpen()) return;
+    event.preventDefault();
+    openQuickCreate();
   };
 
   // -- rendering ------------------------------------------------------------
@@ -995,6 +1294,38 @@ const Board: Component<Props> = (props) => {
     });
   };
 
+  // -- saved filters (FR-U14) ----------------------------------------------
+
+  const [savedFilters, setSavedFilters] = createSignal<SavedFilter[]>(readSavedFilters());
+  const [saveName, setSaveName] = createSignal("");
+
+  const saveCurrent = () => {
+    const name = saveName().trim();
+    if (!name) return;
+    // The poll interval is a refresh preference, not a filter, so it is left
+    // out of what gets saved and left alone on recall: a named view should
+    // not change how often the reader's board refreshes.
+    const query = encodeFilters({ ...filters(), poll: DEFAULT_POLL_SECONDS });
+    setSavedFilters(
+      writeSavedFilters([
+        { name, query },
+        ...savedFilters().filter((entry) => entry.name !== name),
+      ]),
+    );
+    setSaveName("");
+  };
+
+  const recallSaved = (entry: SavedFilter) => {
+    setFilters({ ...filtersFromQuery(queryFromSearch(entry.query)), poll: filters().poll });
+  };
+
+  const forgetSaved = (name: string) => {
+    setSavedFilters(writeSavedFilters(savedFilters().filter((one) => one.name !== name)));
+  };
+
+  const describeSaved = (entry: SavedFilter) =>
+    describeFilters(filtersFromQuery(queryFromSearch(entry.query)));
+
   const filterCount = createMemo(() => {
     const active = filters();
     return (
@@ -1012,7 +1343,10 @@ const Board: Component<Props> = (props) => {
   );
 
   return (
-    <div class={`vogt-surface board${outage() ? " board--outage" : ""}`}>
+    <div
+      class={`vogt-surface board${outage() ? " board--outage" : ""}`}
+      onKeyDown={onSurfaceKeyDown}
+    >
       <header class="board-header">
         <div class="board-heading">
           <h2>Board</h2>
@@ -1033,6 +1367,18 @@ const Board: Component<Props> = (props) => {
           </p>
         </div>
         <div class="board-header-actions">
+          <button
+            type="button"
+            onClick={() => (createOpen() ? setCreateOpen(false) : openQuickCreate())}
+            disabled={writesDisabled()}
+            title={
+              writesDisabled()
+                ? "Vogt cannot be asked right now, so nothing can be raised"
+                : "Raise a work item without leaving the board (n)"
+            }
+          >
+            Quick create
+          </button>
           <label class="board-field board-field--tight">
             <span>Refresh</span>
             <select
@@ -1097,7 +1443,10 @@ const Board: Component<Props> = (props) => {
         <label class="board-field">
           <span>Project</span>
           <select
-            value={filters().project}
+            value={optionValue(
+              filters().project,
+              projects().map((one) => one.slug),
+            )}
             onInput={(event) => patch({ project: event.currentTarget.value })}
           >
             <option value="">All projects</option>
@@ -1113,7 +1462,10 @@ const Board: Component<Props> = (props) => {
         <label class="board-field">
           <span>Initiative</span>
           <select
-            value={filters().initiative}
+            value={optionValue(
+              filters().initiative,
+              initiatives().map((one) => one.slug),
+            )}
             onInput={(event) => patch({ initiative: event.currentTarget.value })}
           >
             <option value="">All initiatives</option>
@@ -1131,7 +1483,7 @@ const Board: Component<Props> = (props) => {
         <label class="board-field">
           <span>Label</span>
           <select
-            value={filters().label}
+            value={optionValue(filters().label, labels())}
             onInput={(event) => patch({ label: event.currentTarget.value })}
           >
             <option value="">All labels</option>
@@ -1145,7 +1497,10 @@ const Board: Component<Props> = (props) => {
         <label class="board-field">
           <span>Assignee</span>
           <select
-            value={filters().assignee}
+            value={optionValue(
+              filters().assignee,
+              actors().map((one) => one.identity_ref),
+            )}
             onInput={(event) => patch({ assignee: event.currentTarget.value })}
           >
             <option value="">Anyone</option>
@@ -1204,11 +1559,147 @@ const Board: Component<Props> = (props) => {
         </div>
       </div>
 
+      {/* FR-U14's second clause: a combined filter is nameable and recalled. */}
+      <div class="board-savedrow">
+        <input
+          type="text"
+          class="board-savedname"
+          placeholder="Name this filter set"
+          value={saveName()}
+          onInput={(event) => setSaveName(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            saveCurrent();
+          }}
+        />
+        <button type="button" onClick={saveCurrent} disabled={!saveName().trim()}>
+          Save filter
+        </button>
+        <For each={savedFilters()}>
+          {(entry) => (
+            <span class="board-saved">
+              <button
+                type="button"
+                class="board-saved-recall"
+                title={describeSaved(entry)}
+                onClick={() => recallSaved(entry)}
+              >
+                {entry.name}
+              </button>
+              <button
+                type="button"
+                class="board-saved-drop"
+                aria-label={`Forget the saved filter ${entry.name}`}
+                onClick={() => forgetSaved(entry.name)}
+              >
+                ×
+              </button>
+            </span>
+          )}
+        </For>
+        <span class="board-muted">
+          saved filters are kept in this browser · the URL above carries the
+          same set to somebody else
+        </span>
+      </div>
+
+      <Show when={createOpen()}>
+        <form class="board-create" onSubmit={(event) => void submitCreate(event)}>
+          <div class="board-create-grid">
+            <label class="board-field board-field--wide">
+              <span>Title</span>
+              <input
+                type="text"
+                required
+                value={draftTitle()}
+                placeholder="What needs doing"
+                ref={(element) => queueMicrotask(() => element.focus())}
+                onInput={(event) => setDraftTitle(event.currentTarget.value)}
+              />
+            </label>
+            <label class="board-field">
+              <span>Type</span>
+              <select
+                value={optionValue(draftKind(), kindChoices())}
+                onInput={(event) => setDraftKind(event.currentTarget.value)}
+              >
+                <For each={kindChoices()}>
+                  {(kind) => <option value={kind}>{kind}</option>}
+                </For>
+              </select>
+            </label>
+            <label class="board-field">
+              <span>Project</span>
+              <select
+                value={optionValue(
+                  draftProject(),
+                  projects().map((one) => one.slug),
+                )}
+                onInput={(event) => setDraftProject(event.currentTarget.value)}
+              >
+                <option value="">No project</option>
+                <For each={projects()}>
+                  {(project) => <option value={project.slug}>{project.name}</option>}
+                </For>
+              </select>
+            </label>
+            <label class="board-field board-field--wide">
+              <span>Reason (recorded in the audit trail)</span>
+              <input
+                type="text"
+                required
+                value={draftReason()}
+                placeholder="Why is this being raised?"
+                onInput={(event) => setDraftReason(event.currentTarget.value)}
+              />
+            </label>
+          </div>
+          <div class="board-create-actions">
+            <button type="submit" disabled={!createReady() || creating()}>
+              {creating() ? "Creating…" : "Create"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setCreateOpen(false)}
+              disabled={creating()}
+            >
+              Close
+            </button>
+            <span class="board-muted">
+              Body, priority, effort, labels and assignee are set on the item
+              itself.
+            </span>
+            <Show when={created()}>
+              {(ref) => (
+                <span class="board-created">
+                  Created{" "}
+                  <button
+                    type="button"
+                    class="board-card-ref"
+                    onClick={() => openDetail(ref())}
+                  >
+                    {ref()}
+                  </button>
+                </span>
+              )}
+            </Show>
+          </div>
+          <Show when={createError()}>
+            {(message) => (
+              <p class="board-create-error" role="alert">
+                {message()}
+              </p>
+            )}
+          </Show>
+        </form>
+      </Show>
+
       <p class="board-keys">
         Keyboard: <kbd>Tab</kbd> to a card · <kbd>←</kbd> <kbd>→</kbd> across
         columns · <kbd>↑</kbd> <kbd>↓</kbd> within one · <kbd>Shift</kbd>+
         <kbd>←</kbd>/<kbd>→</kbd> proposes a move (same reason prompt as a drop)
-        · <kbd>Enter</kbd> opens the item.
+        · <kbd>Enter</kbd> opens the item · <kbd>n</kbd> raises one.
       </p>
 
       <Show
@@ -1518,6 +2009,15 @@ const Board: Component<Props> = (props) => {
                                             class={`board-pri board-pri--${item.priority}`}
                                           >
                                             {item.priority}
+                                          </span>
+                                          {/* FR-U17: never blank, and
+                                              `unverified` when nobody has
+                                              said otherwise. */}
+                                          <span
+                                            class={`board-trust trust-${trustOf(item)}`}
+                                            title={`trust: ${trustOf(item)}`}
+                                          >
+                                            {trustOf(item)}
                                           </span>
                                           <span class="board-kind">{item.kind}</span>
                                         </div>

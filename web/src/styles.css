@@ -3403,6 +3403,25 @@ textarea {
   border-color: var(--bd-strong);
 }
 
+/* An inline edit that has been submitted and not yet answered (FR-U12). The
+   page reads as the change; this is the part that says it is not yet true. */
+.wid-chip--unsaved {
+  color: var(--activity-running);
+  border-color: var(--activity-running);
+}
+
+.wid-edit {
+  border-color: var(--activity-running);
+}
+
+/* The rollback, stated. `ReasonForm` renders Vogt's own sentence just below
+   this; the two are different things and neither replaces the other. */
+.wid-rolledback {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
 /* Trust is never blank: an unset trust state renders as `unverified`, the
    same word the legacy GUI shows, so the two front ends cannot disagree. */
 .wid-trust {
@@ -3964,6 +3983,87 @@ textarea {
   color: var(--fg-muted);
 }
 
+/* Naming a combined filter, and recalling one (FR-U14). Per-client state, as
+   §3 defers the shared kind, and the row says so. */
+.board-savedrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.board-savedname {
+  font-size: 12px;
+  min-width: 180px;
+}
+
+.board-saved {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--bd-strong);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.board-saved-recall {
+  border: none;
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.board-saved-drop {
+  border: none;
+  border-left: 1px solid var(--bd-strong);
+  padding: 0 6px;
+  color: var(--fg-muted);
+  line-height: 1;
+}
+
+/* Quick-create, inline (FR-U15). Laid out like the toolbar above it rather
+   than as a dialog: the requirement's words are "inline, without leaving the
+   view", and a modal over the board is leaving the view. */
+.board-create {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--activity-running);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+
+.board-create-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.board-create-grid input,
+.board-create-grid select {
+  font-size: 12px;
+}
+
+.board-create-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.board-created {
+  font-size: 12px;
+  color: var(--activity-done);
+}
+
+/* Vogt's own sentence, next to the form that caused it. */
+.board-create-error {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--activity-errored);
+  overflow-wrap: anywhere;
+}
+
 .board-keys {
   margin: 0;
   font-size: 12px;
@@ -4270,6 +4370,33 @@ textarea {
   color: var(--fg-muted);
 }
 
+/* Trust, on every card and never blank (FR-U17). The same three states the
+   backlog and the project pages colour, so one glance means one thing across
+   the surfaces. */
+.board-trust {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 8px;
+  border: 1px solid var(--bd-strong);
+  color: var(--fg-muted);
+}
+
+.board-trust.trust-verified {
+  color: var(--activity-done);
+  border-color: var(--activity-done);
+}
+
+.board-trust.trust-stale {
+  color: var(--activity-running);
+  border-color: var(--activity-running);
+}
+
+.board-trust.trust-disputed,
+.board-trust.trust-contested {
+  color: var(--activity-errored);
+  border-color: var(--activity-errored);
+}
+
 /* Where the reason is collected, and where the refusal comes back: the same
    slot in the same column the drop landed in. */
 .board-composer {
@@ -4412,6 +4539,12 @@ textarea {
 
   .board-field--wide {
     grid-column: span 1;
+  }
+
+  /* Quick-create is four columns of fields at desk width and one on a phone,
+     for the same reason the toolbar is. */
+  .board-create-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   /* The horizontal scroll the column layout needed, undone. `min-content` on
@@ -4739,6 +4872,13 @@ textarea {
   align-items: flex-end;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+/* Two acts on one batch, each with its own reason (FR-U6). The rule is drawn
+   because the fields would otherwise read as one long row of one form. */
+.vogt-backlog-bulk-row + .vogt-backlog-bulk-row {
+  border-top: 1px dashed var(--bd);
+  padding-top: 8px;
 }
 
 .vogt-backlog-bulk-row .vogt-backlog-field {
