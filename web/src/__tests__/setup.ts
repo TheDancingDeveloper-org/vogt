@@ -14,6 +14,14 @@ class StubResizeObserver implements ResizeObserver {
   disconnect(): void {}
 }
 
+// jsdom has no layout, so it refuses `scrollTo` loudly. `@solidjs/router`
+// calls it on every navigation that does not pass `scroll: false`, which is a
+// real thing the surfaces do and not something to route around — so the
+// method exists and does nothing, rather than printing a paragraph per test.
+if (typeof window !== "undefined") {
+  window.scrollTo = () => {};
+}
+
 if (!("ResizeObserver" in globalThis)) {
   (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver =
     StubResizeObserver as unknown as typeof ResizeObserver;
