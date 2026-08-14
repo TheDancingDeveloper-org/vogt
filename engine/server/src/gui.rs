@@ -173,6 +173,12 @@ pub struct PublicConfig {
     /// Whether the conversational assistant is provisioned (key present).
     /// Presence only — never the key itself.
     pub assistant_enabled: bool,
+    /// Whether this front door has a vogt-core behind it, and where its
+    /// surfaces are mounted. Presence only, never a token: a client that has
+    /// to provoke a 503 to find out whether Vogt exists cannot render an
+    /// honest absent state (FR-U21), and a Vogt tab that appears and then
+    /// errors is worse than one that says why it is disabled.
+    pub vogt: serde_json::Value,
     /// Model id the assistant uses, for display. None when disabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant_model: Option<String>,
@@ -184,6 +190,7 @@ pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicCon
         version: env!("CARGO_PKG_VERSION"),
         features: load_features(),
         session_templates: state.config.session_templates.clone(),
+        vogt: crate::vogt_core::public_status(&state),
         assistant_enabled: state.assistant.is_some(),
         assistant_model: state.assistant.as_ref().map(|a| a.model().to_string()),
     })

@@ -400,6 +400,15 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     if path.starts_with("/api/history/") && (*method == Method::DELETE || *method == Method::POST) {
         return Some(TokenCapability::HistoryWrite);
     }
+    // ContextKeeper's two effectful posts. `launch` starts a terminal and
+    // `approve` is what permits it to, so they are session control by another
+    // name — and until this arm existed any valid token could reach them,
+    // including a read-only one, while every other write in this server was
+    // capability-gated. The gap was silent: nothing failed, a token simply
+    // did more than it was granted.
+    if path.starts_with("/api/contextkeeper/") && *method == Method::POST {
+        return Some(TokenCapability::Sessions);
+    }
     // Everything under the Vogt front door that is not a read. The core
     // enforces its own rules on top of this — a reason on every write, the
     // scopes on the injected token — so this gate is about which front-door

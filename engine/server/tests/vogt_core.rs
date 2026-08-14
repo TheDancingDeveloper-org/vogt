@@ -30,6 +30,9 @@ use serde_json::{json, Value};
 const TEST_TOKEN: &str = "test-token-1234567890abcdef";
 const CORE_TOKEN: &str = "core-token-abcdef1234567890";
 const READ_ONLY_TOKEN: &str = "read-only-token-0987654321fedcba";
+/// Holds one capability, and not the ones the refusals below are about — so a
+/// rejection means "not granted this", never "not a token I know".
+const HISTORY_ONLY_TOKEN: &str = "history-only-token-13579086420abc";
 
 /// Two more front-door tokens, each with a core token of its own, so the
 /// mapping has two actors to tell apart rather than one to confirm (FR-S9).
@@ -100,6 +103,14 @@ fn base_config() -> Config {
         token: TEST_TOKEN.to_string(),
         token_mutating_request_limit_per_minute: 600,
         extra_tokens: vec![
+            ScopedTokenConfig {
+                name: "history-only".to_string(),
+                token: HISTORY_ONLY_TOKEN.to_string(),
+                capabilities: vec![TokenCapability::HistoryWrite],
+                mutating_requests_per_minute: 600,
+                vogt_core_token_file: None,
+                vogt_core_token: None,
+            },
             ScopedTokenConfig {
                 name: "read-only".to_string(),
                 token: READ_ONLY_TOKEN.to_string(),
@@ -694,4 +705,80 @@ fn find_check<'a>(body: &'a Value, name: &str) -> &'a Value {
         .iter()
         .find(|check| check["name"] == name)
         .unwrap_or_else(|| panic!("no {name} check in {body}"))
+}
+
+// -- what a client can learn before it asks (FR-U21) -----------------------
+
+#[tokio::test]
+async fn the_public_config_says_whether_a_core_is_configured() {
+    let (base, _log) = front_door().await;
+    let res = client()
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["vogt"]["configured"], true);
+    assert_eq!(body["vogt"]["api_prefix"], "/api/vogt");
+    assert_eq!(body["vogt"]["legacy_gui_prefix"], "/ui-legacy");
+    assert!(
+        !body.to_string().contains(CORE_TOKEN),
+        "this endpoint is unauthenticated; presence only, never a credential"
+    );
+}
+
+#[tokio::test]
+async fn the_public_config_says_when_there_is_no_core() {
+    let base = boot(base_config()).await;
+    let body: Value = client()
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        body["vogt"]["configured"], false,
+        "a client that must provoke a 503 to discover this cannot render an \
+         honest absent state; it renders a tab that appears and then errors"
+    );
+}
+
+// -- ContextKeeper's writes are session control (auth) ---------------------
+
+#[tokio::test]
+async fn approving_a_recovery_needs_the_sessions_capability() {
+    // Lives here rather than in `contextkeeper.rs` because what is asserted is
+    // the capability gate, not the sidecar: until this arm existed, any valid
+    // token could approve and launch a recovery — which starts a terminal —
+    // while every other write in this server was gated.
+    let base = boot(base_config()).await;
+    let refused = client()
+        .post(format!("{base}/api/contextkeeper/sessions/abc/approve"))
+        .headers(bearer(HISTORY_ONLY_TOKEN))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+
+    let launch = client()
+        .post(format!("{base}/api/contextkeeper/sessions/abc/launch"))
+        .headers(bearer(HISTORY_ONLY_TOKEN))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(launch.status(), StatusCode::FORBIDDEN);
+
+    // A read stays open to a read-only token — the gate is about the act.
+    let read = client()
+        .get(format!("{base}/api/contextkeeper/health"))
+        .headers(bearer(HISTORY_ONLY_TOKEN))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(read.status(), StatusCode::FORBIDDEN);
 }

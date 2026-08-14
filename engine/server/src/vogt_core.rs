@@ -40,7 +40,7 @@ use std::{sync::Arc, time::Duration};
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
+    http::{header, HeaderName, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Redirect, Response},
     Json,
 };
@@ -357,14 +357,4 @@ pub fn public_status(state: &AppState) -> serde_json::Value {
         "mcp_prefix": MCP_PREFIX,
         "legacy_gui_prefix": LEGACY_GUI_PREFIX,
     })
-}
-
-/// The header map a proxied request should not carry onward. Exposed for the
-/// tests, which assert the list rather than trusting it.
-pub fn strip_hop_by_hop(headers: &HeaderMap) -> Vec<String> {
-    headers
-        .keys()
-        .filter(|name| is_hop_by_hop(name))
-        .map(|name| name.to_string())
-        .collect()
 }

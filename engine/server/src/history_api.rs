@@ -59,15 +59,17 @@ fn default_retention_days() -> u32 {
     30
 }
 
-/// List archived sessions with pagination
+/// List archived sessions with pagination.
+///
+/// A disabled history answers 404, not 500 — as the assistant and continuity
+/// routes already do when unprovisioned. `Internal` said the server was
+/// broken when the truth was that a feature had not been turned on, and the
+/// difference matters to whoever is paged about it.
 pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<SessionMetadata>>> {
-    let history = state
-        .history
-        .as_ref()
-        .ok_or_else(|| ApiError::Internal("history not enabled".into()))?;
+    let history = state.history.as_ref().ok_or(ApiError::NotFound)?;
 
     let sessions = history.list_sessions(q.limit, q.offset).await?;
     Ok(Json(sessions))
@@ -78,10 +80,7 @@ pub async fn search_sessions(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResult>>> {
-    let history = state
-        .history
-        .as_ref()
-        .ok_or_else(|| ApiError::Internal("history not enabled".into()))?;
+    let history = state.history.as_ref().ok_or(ApiError::NotFound)?;
 
     let results = history.search(&q.q, q.limit).await?;
     Ok(Json(results))
@@ -92,10 +91,7 @@ pub async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SessionMetadata>> {
-    let history = state
-        .history
-        .as_ref()
-        .ok_or_else(|| ApiError::Internal("history not enabled".into()))?;
+    let history = state.history.as_ref().ok_or(ApiError::NotFound)?;
 
     let session = history.get_session(id).await?;
     Ok(Json(session))
@@ -107,10 +103,7 @@ pub async fn get_session_log(
     Path(id): Path<Uuid>,
     Query(q): Query<LogQuery>,
 ) -> Result<Json<SessionLogPreview>> {
-    let history = state
-        .history
-        .as_ref()
-        .ok_or_else(|| ApiError::Internal("history not enabled".into()))?;
+    let history = state.history.as_ref().ok_or(ApiError::NotFound)?;
 
     let preview = history.read_log_preview(id, q.tail_bytes).await?;
     Ok(Json(preview))
@@ -121,10 +114,7 @@ pub async fn download_session_log(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Response<Body>> {
-    let history = state
-        .history
-        .as_ref()
-        .ok_or_else(|| ApiError::Internal("history not enabled".into()))?;
+    let history = state.history.as_ref().ok_or(ApiError::NotFound)?;
     let session = history.get_session(id).await?;
     let path = history.log_path(id);
     let meta = tokio::fs::metadata(&path)
@@ -179,10 +169,7 @@ pub async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
-    let history = state
-        .history
-        .as_ref()
-        .ok_or_else(|| ApiError::Internal("history not enabled".into()))?;
+    let history = state.history.as_ref().ok_or(ApiError::NotFound)?;
 
     if !history.delete_session(id).await? {
         return Err(ApiError::NotFound);
@@ -195,10 +182,7 @@ pub async fn cleanup_sessions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CleanupReq>,
 ) -> Result<Json<serde_json::Value>> {
-    let history = state
-        .history
-        .as_ref()
-        .ok_or_else(|| ApiError::Internal("history not enabled".into()))?;
+    let history = state.history.as_ref().ok_or(ApiError::NotFound)?;
 
     let removed = history.cleanup_old_sessions(req.retention_days).await?;
     Ok(Json(serde_json::json!({
