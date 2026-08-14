@@ -56,7 +56,7 @@ operation the stage added.
 | M11 | GUI uplift *(v2)* | The Solid PWA becomes the single front end, specified to interaction depth | FR-U4–U8, FR-U10–U22, NFR-S5 |
 | M12 | AI layer & voice *(v2)* | The assistant learns the Vogt domain; voice is validated rather than assumed | FR-T1–T4, FR-T6; FR-T5 validated, FR-T7 attempted |
 | M13 | Mobile MVP1 *(v2)* | The phone is a first-class surface | FR-M1–M3, FR-E6, FR-E7 |
-| M14 | Consolidation *(ongoing)* | Old stacks retired, names settled, r9 verified against the build | — (no new IDs) |
+| M14 | Consolidation *(ongoing)* | Old stacks retired, names settled, r9 verified against the build | NFR-I6 (unclaimed by any other stage) |
 
 Deferred and withdrawn requirement IDs (FR-G2, FR-G5–G10, FR-D7) appear in
 no stage by design — see `REQUIREMENTS.md` §3.
@@ -1006,7 +1006,14 @@ Deliverables:
 - **The r9 as-built reconciliation**: `REQUIREMENTS.md` and `DESIGN.md`
   brought back against what was actually built, in the usual style —
   including a §5-style delivery verification of every ID r9 added, by §5.5's
-  method and §5.4a's per-conjunct rule.
+  method and §5.4a's per-conjunct rule. *(Done: `REQUIREMENTS.md` §6, and
+  `DESIGN.md` §4's merged-tree section.)*
+- **NFR-I6** — backup and restore covering the whole product as one act: the
+  core's SQLite, the engine's `state_dir`, and enough metadata to
+  re-establish FR-E3's path agreement after a restore. It appears in no
+  other milestone's `Delivers` line, which is why nobody built it; §6 records
+  it as absent. It lands here because retiring the standalone stacks is
+  exactly when somebody will need to restore one.
 
 **Demo**: there is none, and that is honest — the acceptance test for this
 stage is `REQUIREMENTS.md` §5 agreeing with the build, which is the same bar

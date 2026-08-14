@@ -191,8 +191,15 @@ vogt_core_listen() {
     fi
 
     if [[ -z "$port" ]]; then
-        echo "vogt-core: VOGT_CORE_URL has no port; not starting a core" >&2
-        return 1
+        # Not a topology, a typo. The engine will proxy to this URL whatever
+        # happens here, so carrying on means a front door pointed at a port
+        # nothing is listening on — and because an absent core is deliberately
+        # not fatal to readiness (FR-E9), the stack would come up, pass its
+        # healthcheck, and answer 502 on every Vogt request. Fail at boot
+        # instead, where somebody is reading.
+        echo "vogt-core: VOGT_CORE_URL (${1}) has no port — refusing to start" \
+             "a front door that can never reach a core" >&2
+        exit 78  # EX_CONFIG
     fi
 
     case "$host" in
@@ -202,6 +209,11 @@ vogt_core_listen() {
             printf '%s %s\n' "${host//[\[\]]/}" "$port"
             ;;
         *)
+            # A legitimate topology (§5.2's two-service fallback), and the one
+            # case in this function that is not an error: the core lives
+            # elsewhere and this container is only its front door. Said at
+            # boot anyway, because "no core started" and "core started
+            # elsewhere" look identical in a process list.
             echo "vogt-core: VOGT_CORE_URL names ${host}, not loopback —" \
                  "proxying to a core this container does not run" >&2
             return 1
