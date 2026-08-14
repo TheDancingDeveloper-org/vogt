@@ -715,6 +715,50 @@ and read the write in the audit log attributed to *that session's* actor —
 not to the proxy and not to a shared assistant. Then stop vogt-core and
 confirm the terminal is still usable.
 
+### M10 as built — the demo, and what running it found
+
+The demo runs as `tests/test_m10_demo.py` and was also run live, against
+vogt-core and the engine as two processes: a work item, a real PTY opened in
+the registry's tree, the brief on disk where the engine put it, an agent
+inside that terminal posting a comment with the credential its session was
+given, and the audit reading
+`agent:session:ses_01KZZ1XPW5GMG6NMKG6BV7Q7RE` beside a `session.start` from
+`local:sprooty`.
+
+**Running it live is what found the requirement failing.** Three
+independent places overwrote a session's token with the pod's shared one,
+and every one of them failed silently — the agent authenticated, wrote,
+and got a 200, while the audit log recorded the wrong actor:
+
+1. `mydevenv2-agent-auth` fetched the pod's Vogt token unconditionally, and
+   with `MYDEVENV2_AUTO_AGENT_AUTH=1` — the deployed setting — it is what
+   launches every session's shell.
+2. The MCP wrapper Claude Code and OpenCode are registered with re-brokers
+   through that same helper before running the bridge.
+3. The stdio bridge read only `VOGT_TOKEN_FILE`, which the broker rewrites.
+
+All three now defer to a session's own token when `VOGT_SESSION_ID` is set,
+and the bridge states the precedence in one place. Codex was already correct
+by accident: it registers the URL natively with `--bearer-token-env-var
+VOGT_HTTP_TOKEN` and reads what the session set.
+
+The class of bug is worth naming, because M11–M13 can reintroduce it: **a
+credential that is silently replaced produces working writes and a false
+audit trail.** Nothing errors, no test that stubs the transport can see it,
+and the only signal is an actor name nobody reads until they need to. Two
+smaller notes from the same session:
+
+- The engine has **no environment override for `workspace_root`**; it comes
+  from the config file, else `$HOME/Working`. An hour went to a session
+  refusing to open in a path that was, as far as the operator was
+  concerned, configured.
+- Vogt sends the registry's **absolute** path as the session's `cwd`, which
+  the engine accepts via `resolve_existing_allow_absolute` — the path must
+  still resolve inside the engine's workspace root after symlinks. Estates
+  mounted somewhere other than that root will be refused, correctly, and
+  §6.3's "the import root and the engine's workspace root shall be the same
+  tree" is what prevents it.
+
 ## M11 — GUI uplift (L)
 
 **Objective**: the Solid PWA becomes the single front end, specified to
