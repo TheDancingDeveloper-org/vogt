@@ -98,10 +98,11 @@ apps" enabled for the source app once.
 
 ### Native desktop client
 
-The GPUI desktop client under `client/` is deprecated as of July 7, 2026. It
-remains in-tree only as historical reference while the supported product
-surfaces are the PWA and the Android shell. No active release workflow remains
-for Linux or Windows builds.
+The GPUI desktop client was deprecated as of July 7, 2026 and did not come
+across in the merge into Vogt: its `client/` tree stayed behind in the
+MyDevEnv2 repo, which remains its archive. The supported product surfaces are
+the PWA and the Android shell. No active release workflow remains for Linux or
+Windows builds.
 
 ### GUI layer (Sway + Selkies)
 

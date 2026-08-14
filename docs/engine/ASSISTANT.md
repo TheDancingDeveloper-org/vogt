@@ -7,10 +7,10 @@ typed messages from any browser.
 
 ## Architecture
 
-- `server/src/assistant.rs` — runtime: in-memory conversation, OpenAI-compatible
+- `engine/server/src/assistant.rs` — runtime: in-memory conversation, OpenAI-compatible
   tool-use loop against the configured backend, tool dispatch, pending-action
   gate.
-- `server/src/assistant_api.rs` — HTTP surface (see `docs/API_CONTRACT.md`).
+- `engine/server/src/assistant_api.rs` — HTTP surface (see `docs/engine/API_CONTRACT.md`).
 - `web/src/Assistant.tsx` — PWA tab: transcript, composer, mic (APK only),
   TTS toggle, approve/deny cards.
 
@@ -43,7 +43,7 @@ with `tools` / `tool_calls`). Notes from validation against The Claw Bay
 
 ## Threat model
 
-Extends the rule in `docs/AGENT_TASKS.md`: external content must never become
+Extends the rule in `docs/engine/AGENT_TASKS.md`: external content must never become
 instructions.
 
 - **Terminal output is untrusted.** Sessions run arbitrary programs, including

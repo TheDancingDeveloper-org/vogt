@@ -68,13 +68,38 @@ and freshness on every aggregate. Served at `/ui` from the same single port,
 consuming only the public REST API — asserted by reading the shipped
 JavaScript and resolving every URL in it against the operation registry.
 
+**MyDevEnv2 has been merged in as Vogt's session engine.** The point of the
+merge is that a work item should be able to *open a coding session* — a PTY
+running your chosen agent in that project's working tree, watchable and
+steerable from a browser or a phone — rather than being a card you read about
+work happening somewhere else. What that adds to the tree:
+
+- `engine/` — a Rust/Axum workspace (`engine/server`, `engine/contract`) that
+  owns PTY sessions, WebSocket attach with scrollback replay, an SSE event
+  stream, workspace-scoped file and git APIs, and a server-side assistant loop.
+  It is its own Cargo workspace and carries its own `Dockerfile`, `deploy/` and
+  `.woodpecker/`. Needs `cargo`; run it from `engine/`.
+- `web/` — a Solid/Vite PWA, which becomes the product's GUI. Needs `pnpm`; run
+  it from `web/`. The Rust binary embeds `web/dist/` at compile time.
+- `mobile/` — a Capacitor 8 Android shell that loads the deployed PWA.
+- `docs/engine/` — the engine's own documents, describing the engine only.
+
+**The Python core is unchanged.** It remains the domain — entities, workflow,
+ranking, storage, audit — and the single authority for the operation registry
+from which the CLI, REST, MCP and GUI surfaces are generated. Keeping both
+languages was a decision, not an accident: `docs/MERGE_MYDEVENV2.md` §4 weighs
+it against porting either half and explains why a narrow interface between two
+processes is the cheaper join.
+
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the outline,
 [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered baseline and
 what has been deliberately deferred, [`docs/ROADMAP.md`](docs/ROADMAP.md) for
 the stages (MVP = M0–M2) and what M0 actually shipped,
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the topologies, and
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the topologies,
 [`docs/CONFIG.md`](docs/CONFIG.md) for the (generated) configuration
-reference.
+reference, [`docs/MERGE_MYDEVENV2.md`](docs/MERGE_MYDEVENV2.md) for the merge
+that brought the engine in, and [`engine/README.md`](engine/README.md) for the
+engine's own status, protocol notes and smoke tests.
 
 ```console
 $ uv run vogt init
@@ -150,11 +175,17 @@ ungranted tools are absent rather than present-and-refusing.
 
 ## Stack
 
-Python 3.11+ · SQLite (single-node, zero-dependency self-hosting) · FastAPI ·
-MCP (stdio + streamable HTTP) · a buildless ES-module GUI (no Node
+**Core:** Python 3.11+ · SQLite (single-node, zero-dependency self-hosting) ·
+FastAPI · MCP (stdio + streamable HTTP) · a buildless ES-module GUI (no Node
 toolchain, no bundler output in version control — see `ROADMAP.md` M6) ·
 optional GitHub + GitHub Actions integration (the only forge targeted in
 v1). Self-hosted, open source.
+
+**Session engine:** Rust 1.80+ / Axum · a Solid + Vite + TypeScript PWA
+embedded into the Rust binary via `rust-embed` · Capacitor 8 for the Android
+shell. `cargo` is needed only under `engine/`, `pnpm` only under `web/` and
+`mobile/`; neither is needed to run or test the Python core, which is why the
+"no Node toolchain" line above still holds for it.
 
 Vogt self-hosts anywhere Docker runs. *This* estate's deployment (from M4)
 is a Compose stack on Node B, deployed by Komodo from `indexarr/ops`, from

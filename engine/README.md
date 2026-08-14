@@ -1,43 +1,56 @@
-# MyDevEnv2
+# MyDevEnv2 — Vogt's session engine
 
-From-scratch redesign of [MyDevEnv](../MyDevEnv). Same goal — a centrally-hosted, Tailscale-accessible dev environment driven from any browser — built cleanly without the accumulated surface area of v1 (code-server fork, multiple half-finished native clients).
+From-scratch redesign of MyDevEnv v1 (a separate checkout in the estate, not
+part of this repository). Same goal — a centrally-hosted, Tailscale-accessible
+dev environment driven from any browser — built cleanly without the accumulated
+surface area of v1 (code-server fork, multiple half-finished native clients).
+
+MyDevEnv2 has since been merged into Vogt as its session engine and now lives
+in this repo's `engine/` subtree; `web/` and `mobile/` sit beside it at the
+repository root, and its own documents live under `docs/engine/`. **Paths in
+this file are relative to the repository root, not to `engine/`** — the tree it
+was written against no longer exists, and half-relative paths are how a merged
+document quietly stops being true.
 
 ## Documentation map
 
 Use each project doc for one job:
 
-- `README.md`
+- `engine/README.md`
   Product status, local development, smoke tests, and protocol notes.
-- `AGENTS.md`
+- `engine/AGENTS.md`
   Project-specific workflow rules for coding agents.
-- `TOOLING.md`
+- `docs/engine/TOOLING.md`
   Source of truth for the runtime/dev-pod toolchain inventory.
-- `deploy/KOMODO.md`
+- `engine/deploy/KOMODO.md`
   Source of truth for production stack shape, environment, rollout, and recovery.
-- `uplift.md`
+- `docs/engine/uplift.md`
   Only open backlog for remaining uplift work.
-- **[INTENT.md](INTENT.md)** — what I'm trying to achieve and why a rewrite
-- **[PLAN.md](PLAN.md)** — architecture, components, build order
-- **[TOOLING.md](TOOLING.md)** — required tools/toolchains for the dev pod (derived from v1 Dockerfile)
-- **[client/README.md](client/README.md)** — archived notes for the deprecated native desktop client
-- **[deploy/KOMODO.md](deploy/KOMODO.md)** — production stack and deploy notes
+- **[`docs/engine/INTENT.md`](../docs/engine/INTENT.md)** — what I'm trying to achieve and why a rewrite
+- **[`docs/engine/PLAN.md`](../docs/engine/PLAN.md)** — architecture, components, build order
+- **[`docs/engine/TOOLING.md`](../docs/engine/TOOLING.md)** — required tools/toolchains for the dev pod (derived from v1 Dockerfile)
+- **[`engine/deploy/KOMODO.md`](deploy/KOMODO.md)** — production stack and deploy notes
+
+The archived GPUI desktop client's notes are not here: `client/` was not carried
+across in the merge and stayed behind in the MyDevEnv2 repo, which is now its
+archive.
 
 ## Current status
 
 MyDevEnv2 is live at `https://mydevenv2.sprooty.com`. Production stack details,
 health endpoints, Komodo flow, and required environment now live in
-`deploy/KOMODO.md` rather than being duplicated here.
+`engine/deploy/KOMODO.md` rather than being duplicated here.
 
-The repository now has four active repo components plus one archived codebase,
-and two supported product surfaces:
+The engine has four active components and two supported product surfaces:
 
-- `contract/` — shared Rust wire DTOs used by the server and retained legacy
-  native client code.
-- `server/` — Rust/Axum server plus embedded Solid PWA.
+- `engine/contract/` — shared Rust wire DTOs used by the server.
+- `engine/server/` — Rust/Axum server plus embedded Solid PWA.
 - `web/` — Solid/Vite PWA served by the Rust binary.
 - `mobile/` — Capacitor 8 Android shell that loads the deployed PWA.
-- `client/` — archived GPUI desktop client source, retained only as legacy
-  reference while the supported product remains the PWA and Android shell.
+
+`engine/` is its own Cargo workspace (`engine/Cargo.toml` declares `server` and
+`contract` as members); the repository root is not a Rust workspace, so every
+`cargo` invocation below runs from `engine/`.
 
 Supported product surfaces:
 
@@ -48,13 +61,13 @@ August 2026: a conversational assistant landed on `dev` — a server-side
 tool-use loop with read access to all sessions and confirmation-gated
 keystroke injection, surfaced as an Assistant tab with push-to-talk STT (APK)
 and spoken replies. Disabled unless `MYDEVENV2_ASSISTANT_API_KEY` is set; see
-`docs/ASSISTANT.md`.
+`docs/engine/ASSISTANT.md`.
 
-CI is split across `.woodpecker/`:
+CI is split across `engine/.woodpecker/`:
 
-- `.woodpecker/server.yml` runs server fmt/clippy/test, web typecheck, debug
-  APK build, Docker buildx, and Komodo deploy for non-`client/**` pushes to
-  `main`.
+- `engine/.woodpecker/server.yml` runs server fmt/clippy/test, web typecheck,
+  debug APK build, Docker buildx, and Komodo deploy for non-`client/**` pushes
+  to `main`.
 
 As of July 7, 2026, the native desktop client is deprecated. No client CI or
 release workflow remains active; `client-v0.1.4` is the last verified native
@@ -62,7 +75,8 @@ client release kept in Forgejo for historical reference.
 
 ## Server + PWA phases
 
-**Phase 1 (server foundation) — complete.** Single Axum binary at `server/`:
+**Phase 1 (server foundation) — complete.** Single Axum binary at
+`engine/server/`:
 
 - Bearer-token gated HTTP API for session lifecycle (create / list / get / rename / kill / delete)
 - Per-session PTY with a ring-buffer scrollback (default 4 MiB)
@@ -95,9 +109,9 @@ client release kept in Forgejo for historical reference.
 
 - Server: `POST /api/gui/launch`, `GET /api/gui/processes`, `POST /api/gui/kill?pid=`. Optional `via_sway` prefixes with `swaymsg exec --`. `GET /api/config` (public) returns `gui_stream_url` and build feature flags for the web UI.
 - Client: `gui` tab kind iframing the configured stream URL; toolbar to launch arbitrary GUI commands; running-processes list with kill buttons. Deep-link `/#/gui`.
-- Packaging: `Dockerfile` builds a single runtime image with the embedded PWA.
-  Tool inventory lives in `TOOLING.md`; production compose/runtime details live
-  in `deploy/KOMODO.md`.
+- Packaging: `engine/Dockerfile` builds a single runtime image with the embedded
+  PWA. Tool inventory lives in `docs/engine/TOOLING.md`; production
+  compose/runtime details live in `engine/deploy/KOMODO.md`.
 - Production: the Komodo stack exists and is deployed. `START_SWAY=0` and `GUI_STREAM_URL=""` keep the GUI stream off until Selkies is wired and verified inside the pod.
 
 **Phase 6 (push + Android Capacitor APK) — code-complete; runtime push delivery pending real-device verification.**
@@ -107,7 +121,7 @@ client release kept in Forgejo for historical reference.
 - Activity watcher: fires push to all subscriptions when any session enters `waiting-for-input`.
 - Web: `/sw.js` + `/manifest.webmanifest` for PWA install + push event handling. Installed PWAs show an explicit offline fallback page instead of pretending to support disconnected use. Settings modal gains "Enable push" / "Send test" with current-permission visibility.
 - Mobile: `mobile/` Capacitor 8 Android wrap (`com.sprooty.mydevenv2`). WebView loads `https://mydevenv2.sprooty.com` directly so UI updates ship without rebuilding the APK. `@capacitor/push-notifications` registers a native FCM token at first launch; the same `/api/push/subscribe` endpoint accepts both transports.
-- CI: `mobile-apk` builds a signed release APK on pushes handled by `.woodpecker/server.yml`, derives Android `versionName` / `versionCode` from `mobile/package.json` plus the built commit, and uploads it to the Forgejo release tag `apk-latest` under a versioned asset name.
+- CI: `mobile-apk` builds a signed release APK on pushes handled by `engine/.woodpecker/server.yml`, derives Android `versionName` / `versionCode` from `mobile/package.json` plus the built commit, and uploads it to the Forgejo release tag `apk-latest` under a versioned asset name.
 
 Phase 7 (Android emulator KVM VM) remains.
 
@@ -131,16 +145,15 @@ Phase 7 (Android emulator KVM VM) remains.
 
 ## Native desktop client
 
-The GPUI desktop client under `client/` is deprecated as of July 7, 2026.
-MyDevEnv2 now treats the browser/PWA as the primary desktop experience, with
-the Android app remaining a thin native shell over the same web surface.
+The GPUI desktop client was deprecated as of July 7, 2026. MyDevEnv2 now treats
+the browser/PWA as the primary desktop experience, with the Android app
+remaining a thin native shell over the same web surface.
 
-The `client/` tree is kept only as legacy reference while a future thin Windows
-wrapper decision remains open. It is no longer released, no longer covered by
-active Woodpecker workflows, and should not be treated as a supported product
-surface.
-
-See [client/README.md](client/README.md) for the archived native-client notes.
+Its `client/` tree was **not** carried into this repository by the merge — it
+stayed behind in the MyDevEnv2 repo, which is now its archive, along with its
+`client/README.md` notes. Nothing here builds, releases, or tests it, and a
+future thin Windows wrapper would start from that archive rather than from this
+tree.
 
 ## Running the server
 
@@ -160,7 +173,8 @@ export MYDEVENV2_EXTRA_TOKENS_JSON='[
   }
 ]'
 
-# 2. Run
+# 2. Run — from engine/, which is the Cargo workspace root
+cd engine
 cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
 # or via env:
 MYDEVENV2_BIND=127.0.0.1:8910 cargo run -p mydevenv2-server
@@ -214,7 +228,7 @@ Recommended production token policy:
 
 Runtime/deploy details such as Docker socket access, Komodo overlays, agent
 auth bootstrap, and production health endpoints are intentionally documented in
-`deploy/KOMODO.md` and `TOOLING.md` instead of repeated here.
+`engine/deploy/KOMODO.md` and `docs/engine/TOOLING.md` instead of repeated here.
 
 ## Rust LSP for agents
 
@@ -330,27 +344,27 @@ If the client falls too far behind the broadcast buffer the server sends `{"type
 ## Tests
 
 ```bash
+cd engine                        # the Cargo workspace root
 cargo fmt --check
 cargo clippy -- -D warnings
 cargo test                       # server unit + integration tests
 cargo test -p mydevenv2-contract # shared wire-contract tests
-cd web && pnpm typecheck         # PWA TypeScript check
 
-# Legacy native client checks (deprecated surface; no active CI):
-cd client
-cargo fmt --check
-cargo clippy --no-default-features --all-targets -- -D warnings
-cargo test --no-default-features
+cd ../web && pnpm typecheck      # PWA TypeScript check
 ```
+
+The legacy native client's checks are gone with its source: `client/` stayed in
+the MyDevEnv2 repo and no longer has a build here.
 
 ## Building the embedded PWA
 
 The Rust server `cargo build` embeds whatever is in `web/dist/` at compile
-time. To refresh:
+time — the repository-root `web/`, one level above the Cargo workspace. To
+refresh:
 
 ```bash
 cd web && pnpm install && pnpm build
-cd .. && cargo build --release
+cd ../engine && cargo build --release
 ```
 
 For UI development, run the server on its native port and Vite dev server
@@ -358,6 +372,7 @@ in parallel — Vite proxies `/api` and the WS endpoint to the backend:
 
 ```bash
 # terminal 1
+cd engine
 MYDEVENV2_TOKEN=$(openssl rand -hex 24) cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
 
 # terminal 2

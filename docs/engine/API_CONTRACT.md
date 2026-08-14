@@ -4,8 +4,10 @@ This file is the source-of-truth summary for MyDevEnv2's shared wire contract.
 
 ## Contract crate
 
-Rust DTOs shared by the server and retained legacy native-client code live in
-`contract/` (`mydevenv2-contract`). Those types cover:
+Rust DTOs live in `engine/contract/` (`mydevenv2-contract`). They were shared
+with the legacy native client, which the merge into Vogt left behind in the
+MyDevEnv2 repo, so the server is now the only consumer in this tree. Those
+types cover:
 
 - session lifecycle payloads
 - SSE event payloads
@@ -46,7 +48,7 @@ the session was created with; absent for default-shell sessions.
 
 All routes 404 unless the server has `MYDEVENV2_ASSISTANT_API_KEY`
 provisioned. Mutating routes require the `assistant` token capability. See
-`docs/ASSISTANT.md` for the threat model and behavior.
+`docs/engine/ASSISTANT.md` for the threat model and behavior.
 
 - `POST /api/assistant/message` `{"text": "..."}` ->
   `{"reply": string|null, "pending_action"?: PendingAction, "tool_trace"?: string[]}`
