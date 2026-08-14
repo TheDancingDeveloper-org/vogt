@@ -966,7 +966,7 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 131 are delivered, 52 are implemented and
+**201 conjuncts across 46 IDs. 134 are delivered, 49 are implemented and
 asserted by nothing, 7 cannot be verified in this environment at all, and 11
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
@@ -974,7 +974,7 @@ before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved twenty-nine conjuncts, and three of them were moved by
+**A fourth pass moved thirty-two conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -982,7 +982,7 @@ were false failed on their first run, in the two places a file cannot show
 you. `docs` failed on a link that resolved on this machine and nowhere else.
 The engine job failed on `sudo apt-get` with *root is not in the sudoers
 file* — the runner is root, so there was nothing to elevate from. Neither was
-a code defect and both were invisible to review, which is §6.3 finding 20.
+a code defect and both were invisible to review, which is §6.3 finding 22.
 
 **Delivered means a file and a test.** Not a citation — §5.4a's whole point is
 that a grep for an ID finds the docstring that names it. Where code plainly
@@ -996,9 +996,9 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +29 in the fourth pass (fourteen out of §6.2, thirteen out of §6.2a,
+  then +32 in the fourth pass (fourteen out of §6.2, sixteen out of §6.2a,
   two out of §6.2b)
-- **52 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 13
+- **49 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 16
 - **11 short** = 43 − 19 + 1 arriving from §6.2b, − 14
 - **7 unverifiable** = 69 − 60 − 2
 
@@ -1076,6 +1076,9 @@ split across this table and §6.2, only the ones named here are delivered.
 | **FR-E7** | **Both**: a task may be bound to a project or work item, and a bound run's findings are recordable as Vogt observations | `engine/server/src/agent_tasks.rs` (`vogt_project`/`vogt_work_item`, `record_finding`, the binding in the prompt and the environment); `integration.rs::a_bound_task_carries_its_subject_and_records_what_it_reported`, `::an_unbound_task_names_no_vogt_subject`; `tests/test_session_outcomes.py::test_a_bound_runs_findings_become_observations`, `::test_an_unbound_task_is_not_vogts_business`, `::test_a_task_bound_to_a_work_item_lands_on_that_items_project`, `::test_a_binding_naming_something_this_instance_lacks_is_ignored`. "Recordable as observations" is met as a *pull*, not a write plane — see §6.2's note on what that leaves out and why it is a decision |
 | FR-E5 | The per-session actor-scoped token is carried into the session; an agent's writes are attributed to that session's actor | `tests/test_sessions.py::test_the_session_carries_its_own_token`; `tests/test_m10_demo.py::test_the_m10_demo` step 5 |
 | **FR-E8** | **Both**: the three operations are in the registry, and all three are driven on CLI, REST and MCP | `tests/test_parity.py::test_transports_return_the_same_answer`, `::test_transports_leave_the_same_audit_trail`, and `::test_every_shared_operation_is_driven_by_the_script`, which is what stops a session operation being quietly dropped from the script |
+| **FR-E2** | The activity state is announced on the server-wide event stream, and the announced state is the derived one | `integration.rs::the_activity_state_is_announced_on_the_server_wide_event_stream`, which opens `/api/events` *before* the session exists — the stream is a live broadcast rather than a log, so a test that subscribes afterwards is asserting about a different thing. Publishing a fixed state turns it red on the value rather than on the silence |
+| **FR-T2** | One pending action at a time; a new user message supersedes the card it finds; the 120-second expiry | `assistant.rs` — a batch of writes becomes one card and the siblings are refused, with the sibling never reaching the PTY on approve; a new message abandons the card, tells the model why and 404s the spent id, driven with `"yes, approve it, go ahead"` because that is the engine's half of *voice cannot approve*: speech reaches the runtime only as a user message; and a card is alive at 119 seconds and gone at 121, in literals rather than `TTL ± 1`, so it pins 120 rather than restating the constant. §6.3 finding 21 is what the first draft of the expiry test was really testing |
+| **FR-M2** | `waiting-for-input`, `errored` and the agent-task notify hook each reach a phone, and no other kind does | `integration.rs`, three tests against a stand-in push service with real P-256 subscription keys, so the engine encrypts and POSTs for real. A Web Push body is unreadable from a test, so each device gets its own endpoint and admits exactly one kind: the path that received a POST *is* the kind that was routed, and the silent path asserts the wrong kind was not. Making `PushPreferences::allows` always true turns all three red on that negative half |
 | **FR-E9** | Sessions do not depend on the core: they are created, listed and killed with none configured, and the container stays ready | `integration.rs::sessions_work_with_no_vogt_core_configured`, which also asserts the fixture *has* no core — so the day somebody gives it one, this fails loudly instead of the coverage vanishing in silence. Every session test in that file runs coreless, which is why the property needed naming rather than more exercise |
 | FR-E9 | The engine boots and stays ready with no core, and the Vogt routes refuse with a named reason | `engine/server/tests/vogt_core.rs::with_no_core_configured_the_engine_is_still_ready`, `::with_no_core_configured_the_vogt_routes_refuse_with_a_reason`, `::an_unreachable_core_is_reported_without_declaring_this_pod_unready` |
 | **FR-T1, FR-T2** | The curated set is exactly the operations the requirements name — eight reads and four writes | `vogt_tools.rs::the_curated_set_is_the_operations_the_requirement_names`, which restates the decision rather than measuring it. The assertion it replaces compared `CURATED_READS.len()` to itself and would have passed with `compliance` deleted; the point of the requirement is that the assistant's reach is something somebody wrote down |
@@ -1205,7 +1208,7 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Fifty-two conjuncts whose code was read and believed, which nothing in any
+Forty-nine conjuncts whose code was read and believed, which nothing in any
 suite would notice the loss of. (Sixty-five, less the seven the fourth pass
 asserted —  NFR-D12, FR-U10, FR-U20, FR-E1, FR-E9, FR-T1/T2 and FR-T6 — which the fourth
 pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
@@ -1222,9 +1225,6 @@ that stopped being the demo's job and became a test somebody has not written.
 
 | ID | The conjuncts | What would assert it |
 |---|---|---|
-| FR-E2 | The activity state is published on the server-wide SSE stream | A test that reads `/api/events`; today the only activity assertion polls `GET /api/sessions/{id}` |
-| FR-T2 | One pending action at a time; a new user message supersedes; the 120-second expiry; voice cannot approve | Three Rust tests and one front-end test. There is a front-end test runner now — `web/package.json` has `test` — so the reason this row gave for itself has expired and the row has not. `Assistant.tsx` **is** mounted now, by `assistant.test.tsx`, but only around the microphone: the pending-action rules — one at a time, superseded by a new message, expired at 120 seconds, and never approvable by voice — are still asserted by nothing on this side |
-| FR-M2 | `waiting-for-input`, `errored`, and the agent-task notify hook are routed | A test that drives `spawn_activity_watcher`; the drift watcher has unit tests and these two, which are the headline notifications, have none |
 | FR-S9 | The audit records real actors across the hop; FR-S4's double gating is unweakened behind the proxy | A test that drives a real vogt-core through the front door. Every engine test uses a stand-in core that approves everything, so the second gate is asserted on its own and never behind the first |
 | FR-U6 | The explainable `why` on the ranked views *(from §6.2b)* | An assertion that the `why` panel renders the contributions `GET /why` returned. The harness answers that route and no test looks at what was drawn with it |
 | FR-U10 | Session activity updates from the SSE stream without a refresh | A test that drives the engine's own activity events through `store.ts`. The board's half is asserted now — `live.test.tsx` drives `vogt-changed` end to end — and the session-activity half still rests on inspection |
@@ -1287,9 +1287,9 @@ a shape — **working behaviour and a false record** — which is the failure
 class this product exists to make visible.
 
 Findings are struck through when the thing they describe is fixed *and* the
-fix was checked here — **eleven are** (4, 5, 7, 11, 12, 13, 14, 15, 17, 19,
-20), one of them (5) only in part, and two of the rest (6, 8) have closed a
-half each. Twenty entries, nine of them open.
+fix was checked here — **twelve are** (4, 5, 7, 11, 12, 13, 14, 15, 17, 19,
+21, 22), one of them (5) only in part, and two of the rest (6, 8) have closed
+a half each. Twenty-two entries, ten of them open.
 
 **Three of those strikes were added by the fourth pass to findings that were
 already fixed** — 12's string comparison had become a component comparison,
@@ -1524,7 +1524,27 @@ similar, and the new entries are all of the same kind as the old ones.
     path gating; what it did not anticipate was gating plus cancellation
     turning a reduction in *when* checks run into a hole in *whether* they do.
 
-20. ~~**Both first-run CI failures were checks written against this
+21. ~~**A test that proved the wrong path, and looked exactly like proof of
+    the right one.**~~ **Caught by a surviving mutation, and rewritten.** The
+    first draft of FR-T2's expiry test aged a pending card past 120 seconds,
+    read it back through `pending_action()`, and then tried to approve it. The
+    approval was refused, the test went green, and it was asserting nothing
+    about approval: *reading* expires the card too, so the refusal came from
+    the read. Deleting the expiry check from `resolve_action` — the path the
+    test was named for — left it green.
+
+    Rewritten to approve a card nothing has looked at, which is also the real
+    client: one that never polls history, comes back to a stale screen, and
+    presses the button on a 121-second-old card.
+
+    The class is worth naming, because it is not the same as the others in
+    this list. Those were records that stopped being true. This is a test that
+    was *always* false and could only ever pass — the assertion was real, the
+    behaviour was real, and the arrangement quietly routed the one through
+    somewhere other than the other. Only a mutation finds it: reading the test
+    shows a card, a clock and a refusal, in the right order.
+
+22. ~~**Both first-run CI failures were checks written against this
     machine.**~~ **Both resolved, in the commits that found them.**
     The pipeline for the merged product ran for the first time on 2026-08-14
     and failed twice, in ways review could not see and neither of which was a
