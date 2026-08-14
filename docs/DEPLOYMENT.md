@@ -46,6 +46,61 @@ Split-mode (separate MCP process/port) is not a v1 topology. The door stays
 open — transports are thin adapters — but it is not built, documented, or
 defaulted.
 
+### 1.1 The merged product: two processes, still one port *(r9)*
+
+From M9 the repository also contains the session engine (`engine/`, merged
+from MyDevEnv2's `dev` branch at `2214a7d`), and the deployed shape gains a
+second process — not a second port (NFR-D11):
+
+```
+one container, one published port
+  ├── engine (Rust/Axum) ← the only listener
+  │     ├── /                     the PWA
+  │     ├── /api/sessions|files|git|assistant|…   its own surface
+  │     ├── /api/sessions/{id}/attach             WebSocket
+  │     ├── /api/vogt/...   → core /api/...   (core token injected)
+  │     ├── /mcp            → core /mcp       (caller's own token)
+  │     ├── /ui-legacy/...  → core /ui/...    (FR-U9)
+  │     └── /healthz, /readyz  ← aggregate, incl. a probe of the core
+  └── vogt-core (`vogt serve`) ← loopback only, never published
+```
+
+Everything §1 says about the core is still true of the core; what changed
+is which process the world reaches first. The engine fronts rather than the
+core because it already embeds and serves the PWA and already speaks
+WebSocket on the hottest path there is — terminal I/O — and proxying that
+through FastAPI would add a fragile hop to it.
+
+Three properties are load-bearing, and each is asserted in
+`engine/server/tests/vogt_core.rs`:
+
+- **The core token never leaves the process.** A caller presents a
+  *front-door* token; the engine swaps in the core token it was configured
+  with, so Vogt's audit rows name a real actor rather than "the proxy"
+  (FR-S9). `VOGT_CORE_TOKEN_FILE` is the preferred form and takes
+  precedence over `VOGT_CORE_TOKEN` — a deployment that brokered the value
+  into a file meant to keep it out of the environment.
+- **`/mcp` is a pass-through, deliberately.** An MCP client already holds a
+  core token bound to an actor (`vogt token issue`) — that is how agents in
+  a MyDevEnv2 container reach Vogt today, §7 — so rewriting its credential
+  would replace a real actor with a shared one. The M9 front door injects
+  one configured token on `/api/vogt` only; per-token actor mapping and the
+  per-session tokens of FR-S10 arrive in M10.
+- **An absent core does not make the container unready.** `/readyz` reports
+  the core's state in full — including its applied schema version, read
+  from the core's own `/health/ready` — and excludes it from the verdict,
+  because restarting the engine cannot revive the core and would kill every
+  live PTY doing it (FR-E9). The Vogt routes then answer 503 naming the
+  reason rather than an empty result (FR-U21). Do not "fix" a red
+  `vogt_core` check by making it fatal; fix the core.
+
+A wildcard route segment matches at least one character, so each proxied
+prefix is registered in three shapes — bare, trailing-slash, and wildcard.
+Missing the middle one sent `/ui-legacy/` to the PWA's catch-all, which
+answered with the engine's "web bundle not present" placeholder: a 404 that
+mentions neither Vogt nor the proxy, and reads like a front-door
+misconfiguration rather than a routing miss.
+
 ## 2. Topologies
 
 ### 2.1 Topology A — local single-user (dev box / laptop)
