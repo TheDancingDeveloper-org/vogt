@@ -966,16 +966,16 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 112 are delivered, 63 are implemented and
-asserted by nothing, 8 cannot be verified in this environment at all, and 18
+**201 conjuncts across 46 IDs. 113 are delivered, 63 are implemented and
+asserted by nothing, 8 cannot be verified in this environment at all, and 17
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
 before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved ten conjuncts, and three of them were moved by nothing
-being written.** The pipeline ran. Every claim this section made about the merged image, the two
+**A fourth pass moved eleven conjuncts, and three of them were moved by
+nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
 were false failed on their first run, in the two places a file cannot show
@@ -996,10 +996,10 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +10 in the fourth pass (seven out of §6.2, two out of §6.2a, one out
+  then +11 in the fourth pass (eight out of §6.2, two out of §6.2a, one out
   of §6.2b)
 - **63 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 2
-- **18 short** = 43 − 19 + 1 arriving from §6.2b, − 7
+- **17 short** = 43 − 19 + 1 arriving from §6.2b, − 8
 - **8 unverifiable** = 69 − 60 − 1
 
 One bookkeeping correction, since it is the kind of thing this section exists
@@ -1106,6 +1106,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-U22 | Focus moves across and within columns; `Shift`+arrow proposes a move and still collects the reason; `Enter` opens the item at its own URL; `n` opens quick-create and is announced on the board's own keyboard line | `board.test.tsx`'s two FR-U22 blocks (five), including the one asserting that an `n` typed into the move composer is not stolen by the shortcut |
 | FR-U18 | Bulk accept does not exist, and cannot arrive by accident | `tests/test_pwa.py::test_drift_is_resolved_one_proposal_at_a_time` (one call site, and no multi-select) |
 | FR-U21 | Every Vogt surface can tell an outage from an empty answer and renders the server's own reason; the core-absent half — terminals, files, git keep working | `tests/test_pwa.py::test_every_vogt_surface_distinguishes_an_outage_from_emptiness` asserts the structural half and says in its own docstring that it cannot judge the copy; `web/src/__tests__/absentStates.test.tsx` and the outage blocks in the other three files now judge it, on all five surfaces — the server's sentence verbatim, the sentence that says what the absence *means*, nothing rendered as data, writes disabled, and a 500 called a failure rather than an outage. `contextkeeper.rs::a_contextkeeper_outage_leaves_terminals_working_and_unprotected` is the core-absent half. **One panel is thinner than the rest**: the item page's Sessions panel renders Vogt's sentence and nothing asserts it does — found while mutation-testing FR-U17, when a mutation that should have gone red survived because the same literal appears first in `sessionsFailure`. The conjunct is delivered on all five surfaces; that one panel is where a regression would be quiet |
+| **FR-M1** | A session waiting for input is answered from the item page, without a terminal — MVP1's "session start/approve", as MERGE §14's M12 demo defines it | `web/src/__tests__/workItemDetail.test.tsx`'s FR-M1 block (six). The control shows the session's own scrollback tail before it offers any way to answer, and offers none at all when the engine cannot be asked. The other reading of "approve" — a Vogt approval *operation* — is deliberately not built, and §6.2 no longer carries a row implying it is owed |
 | FR-M2 | New drift is summarised, coalesced and cursored; the default set is exactly the four FR-M2 names, and no more | `engine/server/src/vogt_drift.rs` (`one_drift_is_named`, `a_burst_is_one_notification_that_counts`, `a_cursor_survives_a_round_trip`); `push.rs::only_the_kinds_fr_m2_names_are_on_by_default` |
 | FR-M3 | The board's list layout at phone width, in the three rules that make it one: `display: block` on the row, the head row hidden, and the state name grown out of `attr(data-state)` | `tests/test_pwa.py::test_the_board_is_a_list_below_the_narrow_breakpoint`, `::test_the_board_cells_carry_what_the_hidden_head_row_said`, `::test_the_vogt_surfaces_share_the_engine_s_narrow_breakpoint` |
 | NFR-D11 | The engine's native APIs; the WebSocket attach path; `/api/vogt` proxied under its own prefix with the query string intact; `/mcp` proxied with the caller's credential unchanged; aggregate health with a non-fatal core check | `engine/server/tests/vogt_core.rs` (`a_vogt_read_reaches_the_core_under_its_own_prefix`, `a_query_string_survives_the_hop`, `mcp_forwards_the_callers_credential_unchanged`, `a_reachable_core_is_reported_with_its_schema_state`); `integration.rs::readyz_is_public_and_returns_checks` |
@@ -1126,7 +1127,7 @@ half-present, because nothing about it had to be argued with first.
 
 ### 6.2 Delivered differently, or short — per conjunct
 
-Eighteen conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
+Seventeen conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
 is one claim that the requirement makes and the build does not, which is why
 this table's rows can be counted and the other three tables' cannot.
 
@@ -1155,7 +1156,6 @@ the file.
 | FR-T5 — "a validation pass against domain vocabulary … before v2 ships" | Not run, and nothing was built that would let it be: the recognizer's best match goes straight into the composer and is auto-sent. No project list, no slug normalisation, no `WI-\d+` repair. What was done instead is that the prompt now states items are `WI-7` and projects are slugs. The requirement says voice "shall not be presumed working", and it is still presumed. | **The requirement's own words** |
 | FR-T7 — a native Anthropic backend | `ChatBackend` has two variants, `Http` and a test mock. Nothing in the repository speaks the Anthropic API. | Known, priority C |
 | FR-T7 — "the hang shall be resolved or the route refused with a named reason" | Neither. No code inspects the model name; the nearest mitigation is a 60-second client timeout, which turns a hang into a timeout without naming it. | Known, priority C |
-| FR-M1 — "session start/approve" | **Read against the plan rather than against the phrase, and built.** MERGE §14's M12 demo says what "approve" meant here: *receive a push that a session is waiting for input, open it, unblock it.* The first two parts existed — FR-M2 routes the notification, FR-U20 opens the terminal — and the third meant a PTY under a phone keyboard to type one character. The item page now answers a waiting session in place: it reads that session's own scrollback, shows the tail, and only then offers a field and, when the prompt reads like a yes/no question, two one-tap answers. Six tests, five mutations. **What is still absent is the phrase's other reading**: there is no Vogt *approval operation* — no registry entry, no binding — and this does not invent one, because a write plane for approving sessions is a design decision and not a gap. Session *start* remains three taps deep through a work item. | Low, down from Medium |
 | FR-U5 — "state history" | The panel renders the workflow's states with the current one marked, and says in as many words that the transitions belong in the audit trail. That is the machine, not the item's history: a reader cannot see when this item entered this state or what it came from without leaving the surface. | Low, and honestly labelled on the surface itself |
 | FR-U5 — "per-item audit trail" | **The silent omission is closed.** An item's trail now includes the writes audited against its comments, by semi-join through `comments.work_item_id` — chosen over denormalising a work item id onto `audit`, because back-filling `audit` means editing the record of what happened. What remains is the same division as before: a link to the audit browser rather than an embedded trail, which is FR-U19's second clause working. | Low, down from Medium — the trail no longer omits a kind of write, which was the part that mattered |
 | FR-U16 — "every GUI-exposed mutating verb by opening the view that collects its reason" | One of them. `New Work Item…` opens the backlog's quick-create; transition, comment, drift resolve, import and session start/stop have no palette entry. The board's own quick-create arrived without a palette entry too, so the ratio is unchanged by a surface gaining one. The rule the clause exists to keep — never execute, only open — is kept perfectly by the one entry that exists. | Low |
