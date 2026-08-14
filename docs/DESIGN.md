@@ -366,6 +366,35 @@ gui/           static ES modules consuming the HTTP adapter only (M6 chose
 storage/       SQLite x2 (declared.sqlite3, observed.sqlite3), migrations
 ```
 
+**The merged tree, from r9.** The repository also carries the session engine
+and the front ends it brought, and the layer rules above still describe the
+Python core rather than the whole product:
+
+```
+engine/        the Rust session engine (server + contract crates): PTYs,
+               scrollback, activity, agent tasks, push, the assistant —
+               and, from M9, the front door: the only listening process,
+               proxying /api/vogt and /mcp to vogt-core on loopback
+web/           the Solid PWA, the product's front end from M11; consumes
+               the engine's API and, through /api/vogt, the same public
+               operations the CLI and MCP see
+mobile/        the Capacitor shell that loads that PWA
+src/vogt/      unchanged, and still the only definition of an operation
+```
+
+Two properties hold the shape together, and both are asserted rather than
+described. **The registry is still the single definition**: the PWA's route
+table resolves against it, and so do the assistant's Vogt tools, which are
+fetched from the core's own MCP `tools/list` rather than written out again.
+**The core is still complete alone**: it serves its own port, its own GUI
+and its own MCP when no engine is present, and CI runs the suite with
+`engine/`, `web/` and `mobile/` deleted to keep that true (NFR-Q6).
+
+The direction of dependency is the thing to preserve. The engine calls the
+core, and the core calls the engine only for sessions — four operations
+across a loopback boundary, which is what makes two processes worth having
+instead of one language argument (`MERGE_MYDEVENV2.md` §4).
+
 - **Transport parity tests**: for each use-case, a matrix test drives it via
   CLI, REST, and MCP and asserts identical results and identical audit rows.
   Two explicit exclusion lists exist and are checked for staleness in both
