@@ -20,11 +20,24 @@ name: build
 #
 # Images are signed here as they are in a release. A build that reaches
 # production unsigned would be a worse hole than the one this closes.
+#
+# Two branches build, and they build into two streams that cannot collide
+# (NFR-D12, adopted from `docs/engine/uplift.md`):
+#
+#   main → `sha-<commit>`      the commit images a prod deploy pins
+#   dev  → `dev` + `dev-<sha>` the images a dev stack runs, for the merge
+#                              stages — mobile, voice, push — that are only
+#                              verifiable against something live
+#
+# `dev` can never become `sha-<commit>` and never becomes `latest`, so
+# "which build is that?" stays answerable and a dev image cannot be picked
+# up by anything following the prod stream by accident.
 
 on:
   push:
     branches:
       - main
+      - dev
     # Documentation cannot change what an image contains.
     paths-ignore:
       - "docs/**"
@@ -38,8 +51,9 @@ env:
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
 
 concurrency:
-  # Only the newest commit on main is worth an image; older ones in flight
-  # are already superseded.
+  # Only the newest commit on a branch is worth an image; older ones in
+  # flight are already superseded. Keyed by ref, so a dev build and a main
+  # build never cancel each other.
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
@@ -68,12 +82,18 @@ jobs:
         id: meta
         with:
           images: ${{ env.IMAGE }}
-          # `sha-<commit>` and nothing else. No semver, and explicitly no
-          # `latest`: a moving alias is what makes "which build is that?"
-          # unanswerable, and deployed references are digest-pinned anyway
-          # (NFR-PO4).
+          # A commit and nothing else. No semver, and explicitly no `latest`:
+          # a moving alias is what makes "which build is that?" unanswerable,
+          # and deployed references are digest-pinned anyway (NFR-PO4).
+          #
+          # `dev` is the one alias that does move, and it moves inside its own
+          # stream: it names "whatever the dev stack should be running", which
+          # is the whole point of having a dev stack. It is never `latest` and
+          # never carries a version, so nothing following releases sees it.
           tags: |
-            type=sha
+            type=sha,enable=${{ github.ref != 'refs/heads/dev' }}
+            type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
           flavor: |
             latest=false
 
@@ -124,13 +144,18 @@ jobs:
       - name: report what to pin
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
+          REF: ${{ github.ref }}
         run: |
+          if [ "$REF" = "refs/heads/dev" ]; then
+            stack="the dev stack"
+          else
+            stack="production"
+          fi
           {
             echo "### Built from \`${GITHUB_SHA:0:7}\`"
             echo
-            echo "Nothing has been deployed. To move production, pin this in"
-            echo "\`indexarr/ops\` at \`personal/vogt/docker-compose.yml\` and run"
-            echo "\`DeployStack\`:"
+            echo "Nothing has been deployed. To move ${stack}, pin this in"
+            echo "\`indexarr/ops\` and run \`DeployStack\`:"
             echo
             echo '```yaml'
             echo "    image: ${IMAGE}@${DIGEST}"

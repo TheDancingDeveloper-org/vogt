@@ -1,17 +1,33 @@
 name: ci
 
-# Runs on every push and PR, but does the expensive work only when code
-# changed (NFR-C1). `ci` — the gate job at the bottom — is the single
-# required status check: it succeeds trivially on a docs-only diff and fails
-# whenever the build failed, so the docs path is never a bypass (NFR-C2).
+# One pipeline for a product with four halves (NFR-C6): the Python core, the
+# Rust engine that fronts it, the Solid PWA the engine embeds, and the
+# Capacitor shell that points at it. Everything the engine's Woodpecker
+# pipeline guaranteed is guaranteed here — see "What did not come over" at
+# the bottom of this file for the parts that deliberately did not.
+#
+# Runs on every push and PR, but does the expensive work only when the tree
+# it belongs to changed (NFR-C1). A change to anything *shared* runs
+# everything: path filters are a cost saving on isolated changes, never a way
+# for a change that could affect any half to be checked by less than all of
+# them.
+#
+# `ci` — the gate job at the bottom — is the single required status check: it
+# succeeds trivially on a docs-only diff and fails whenever any half failed,
+# so the docs path is never a bypass (NFR-C2).
 
 on:
-  # Branch pushes gate main only. Without the filter, every pushed branch that
-  # also has a PR open runs the matrix twice — once for `push`, once for
-  # `pull_request` — which is what buries the small self-hosted pool.
+  # Branch pushes gate main and dev only. Without the filter, every pushed
+  # branch that also has a PR open runs the matrix twice — once for `push`,
+  # once for `pull_request` — which is what buries the small self-hosted pool.
+  #
+  # `dev` is here because NFR-D12 makes it a real environment: it builds the
+  # `:dev` images a dev stack runs, so it has to be gated like main.
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
+  # The Woodpecker pipeline had `event: manual`; this is its equivalent.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -29,7 +45,10 @@ jobs:
     # does not carry `node-b`.
     runs-on: [self-hosted, node-b, linux, x64]
     outputs:
-      code: ${{ steps.classify.outputs.code }}
+      python: ${{ steps.classify.outputs.python }}
+      engine: ${{ steps.classify.outputs.engine }}
+      mobile: ${{ steps.classify.outputs.mobile }}
+      any: ${{ steps.classify.outputs.any }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,6 +66,15 @@ jobs:
         run: |
           set -euo pipefail
 
+          everything() {
+            {
+              echo "python=true"
+              echo "engine=true"
+              echo "mobile=true"
+              echo "any=true"
+            } >> "$GITHUB_OUTPUT"
+          }
+
           if [ "$EVENT_NAME" = "pull_request" ]; then
             git fetch --no-tags origin "$BASE_REF"
             base="$(git merge-base "origin/$BASE_REF" HEAD)"
@@ -54,8 +82,8 @@ jobs:
           elif [ -z "$BEFORE" ] \
             || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
             || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            echo "no usable base commit; treating as a code change"
-            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "no usable base commit; treating as a change to everything"
+            everything
             exit 0
           else
             range="$BEFORE..$SHA"
@@ -65,17 +93,55 @@ jobs:
           echo "changed files:"
           echo "$files"
 
-          if printf '%s\n' "$files" | grep -Eq \
-            '^(src/|tests/|scripts/|\.github/workflows/|pyproject\.toml|uv\.lock)'; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
+          matches() {
+            printf '%s\n' "$files" | grep -Eq "$1"
+          }
+
+          # The workflows, the image, the stack and the ignore rules belong to
+          # no single half; a change to any of them can change what every half
+          # is built or checked with.
+          if matches '^(\.github/workflows/|Dockerfile$|\.dockerignore$|deploy/|\.gitignore$)'; then
+            echo "a shared file changed; running every half"
+            everything
+            exit 0
+          fi
+
+          python=false
+          engine=false
+          mobile=false
+
+          # `config.example.toml` is generated from the config schema and the
+          # drift check asserts on it (NFR-Q4); editing it by hand was
+          # previously classified as no change at all, and `docs.yml` does not
+          # trigger on it either, so the one file whose whole purpose is to be
+          # checked for staleness was the one nothing checked.
+          matches '^(src/|tests/|scripts/|pyproject\.toml$|uv\.lock$|config\.example\.toml$)' && python=true
+          # `engine/server/src/assets.rs` embeds `../../web/dist/` with
+          # rust-embed, so the PWA is a *build input* to the Rust crate rather
+          # than a neighbour of it: a web-only change changes what the engine
+          # serves, and is checked by rebuilding the engine.
+          matches '^(engine/|web/)' && engine=true
+          # The shell wraps a remote URL, not the PWA bundle — `webDir` is
+          # `mobile/web/`, a one-file offline fallback — so a `web/` change
+          # does not imply an APK rebuild.
+          matches '^mobile/' && mobile=true
+
+          {
+            echo "python=$python"
+            echo "engine=$engine"
+            echo "mobile=$mobile"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$python" = false ] && [ "$engine" = false ] && [ "$mobile" = false ]; then
+            echo "any=false" >> "$GITHUB_OUTPUT"
           else
-            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "any=true" >> "$GITHUB_OUTPUT"
           fi
 
   build:
     name: lint, type-check, test (py${{ matrix.python-version }})
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.python == 'true'
     runs-on: [self-hosted, node-b, linux, x64]
     env:
       UV_PYTHON: ${{ matrix.python-version }}
@@ -121,35 +187,282 @@ jobs:
           git diff --exit-code -- docs/CONFIG.md config.example.toml
 
       # Includes the coverage gate (NFR-Q2), the transport-parity matrix
-      # (FR-A3) and the M0 demo acceptance test.
+      # (FR-A3) and the M0 demo acceptance test. Forge-less by construction:
+      # nothing here provisions a token or a network, which is the first of
+      # the two absence-modes NFR-Q6 requires (NFR-PO1–PO3).
       - name: pytest
         run: uv run --no-sync pytest
 
+  core:
+    name: the core alone, with no engine present
+    needs: changes
+    if: needs.changes.outputs.any == 'true'
+    runs-on: [self-hosted, node-b, linux, x64]
+    env:
+      UV_PYTHON: "3.13"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9.0.0
+
+      - name: install Python
+        run: uv python install 3.13
+
+      # NFR-Q6, second absence-mode: vogt-core remains fully testable alone.
+      # Asserted by deletion rather than by inspection — a grep for `engine`
+      # would have passed all along and would keep passing the day someone
+      # adds a fixture that shells out to `cargo` or reads `web/dist`. This
+      # runs on any code change, not just a Python one, because the coupling
+      # that would break it gets introduced from the other side.
+      - name: delete every tree the core is not allowed to need
+        run: rm -rf engine web mobile
+
+      - run: uv sync --locked
+
+      - name: pytest, with three quarters of the repository missing
+        run: uv run --no-sync pytest
+
+  engine:
+    name: fmt, clippy, test (engine) and the PWA it embeds
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    runs-on: [self-hosted, node-b, linux, x64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Replaces the Woodpecker pipeline's sccache-over-Redis. See the note at
+      # the bottom of this file.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      # First: it needs nothing built, so it is the cheapest failure to reach.
+      - name: cargo fmt
+        working-directory: engine
+        run: cargo fmt --all -- --check
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: install the PWA's dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      # `pnpm build` runs `tsc --noEmit` itself; this is kept as its own step
+      # so a type error is reported as a type error rather than as a failed
+      # bundle, which is how the engine's pipeline reported it.
+      - name: typecheck the PWA
+        working-directory: web
+        run: pnpm typecheck
+
+      # Built *before* cargo, so the engine embeds the real bundle and the
+      # compile is over what actually ships. The engine's pipeline built the
+      # PWA only in its image stage and compiled Rust against a placeholder;
+      # here the bundle is a few seconds of work, so there is no reason to
+      # check the engine against assets it will never serve.
+      - name: build the PWA
+        working-directory: web
+        run: pnpm build
+
+      - name: web/dist exists even when the PWA was not built
+        run: |
+          set -euo pipefail
+          # `engine/server/src/assets.rs` embeds `../../web/dist/`. That
+          # file's own comment says a missing directory yields an empty asset
+          # set; it does not. The derive fails to expand, `WebAssets` never
+          # gets its `Embed` impl, and the crate dies on three E0599s about a
+          # `get` that no trait in scope provides — so a fresh checkout cannot
+          # compile the engine at all. The engine's Woodpecker pipeline
+          # created this same placeholder before its clippy and test steps.
+          # Nothing above should leave it missing; this is the guard for the
+          # day someone makes the PWA build conditional.
+          if [ ! -d web/dist ]; then
+            echo "web/dist is missing; creating the rust-embed placeholder"
+            mkdir -p web/dist
+            touch web/dist/.placeholder
+          fi
+
+      - name: ripgrep and git are present
+        run: |
+          set -eu
+          # `server/src/files.rs` shells out to `rg` and `server/src/git.rs`
+          # to `git`, and the integration tests exercise both — so these are
+          # *test* dependencies, not merely runtime ones. The engine's
+          # pipeline apt-installed them into its Rust container for exactly
+          # this reason; the self-hosted image makes no promise about either.
+          missing=""
+          command -v git >/dev/null || missing="$missing git"
+          command -v rg >/dev/null || missing="$missing ripgrep"
+          if [ -n "$missing" ]; then
+            echo "installing:$missing"
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends $missing
+          fi
+          git --version
+          rg --version
+
+      # `-D warnings` because the engine's pipeline denied them, and a lint
+      # that does not fail is a lint nobody reads.
+      - name: cargo clippy
+        working-directory: engine
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: engine
+        run: cargo test --workspace
+
+  android:
+    name: the Android shell assembles
+    needs: changes
+    if: needs.changes.outputs.mobile == 'true'
+    runs-on: [self-hosted, node-b, linux, x64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+
+      - name: install the shell's dependencies
+        working-directory: mobile
+        run: pnpm install --frozen-lockfile
+
+      # `android/settings.gradle` includes `:capacitor-cordova-android-plugins`,
+      # which `cap sync` generates — the Gradle build cannot configure without
+      # this having run first.
+      - name: capacitor sync
+        working-directory: mobile
+        run: npx cap sync android
+
+      # A *debug* APK: it is signed with Gradle's generated debug key, so it
+      # needs no secret and proves what CI is here to prove — that the shell
+      # still assembles. Release signing and publishing did not come over;
+      # see the note at the bottom of this file.
+      - name: assemble
+        working-directory: mobile/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vogt-android-debug-${{ github.sha }}
+          path: mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
   ci:
     name: ci
-    needs: [changes, build]
+    needs: [changes, build, core, engine, android]
     if: always()
     runs-on: [self-hosted, node-b, linux, x64]
     steps:
       - name: gate
         env:
           CHANGES: ${{ needs.changes.result }}
-          BUILD: ${{ needs.build.result }}
+          PYTHON: ${{ needs.build.result }}
+          CORE: ${{ needs.core.result }}
+          ENGINE: ${{ needs.engine.result }}
+          ANDROID: ${{ needs.android.result }}
         run: |
           set -euo pipefail
           if [ "$CHANGES" != "success" ]; then
             echo "change classification did not succeed: $CHANGES"
             exit 1
           fi
-          case "$BUILD" in
-            success)
-              echo "build passed"
-              ;;
-            skipped)
-              echo "docs-only change: no code paths touched, nothing to build"
-              ;;
-            *)
-              echo "build result: $BUILD"
-              exit 1
-              ;;
-          esac
+
+          failed=0
+          for half in \
+            "python:$PYTHON" \
+            "core-alone:$CORE" \
+            "engine:$ENGINE" \
+            "android:$ANDROID"
+          do
+            name="${half%%:*}"
+            result="${half#*:}"
+            case "$result" in
+              success)
+                echo "$name: passed"
+                ;;
+              skipped)
+                echo "$name: nothing it owns changed, nothing to check"
+                ;;
+              *)
+                echo "$name: $result"
+                failed=1
+                ;;
+            esac
+          done
+
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+          echo "every half that had something to check passed"
+
+# ---------------------------------------------------------------------------
+# What did not come over from `engine/.woodpecker/server.yml`
+#
+# The engine arrived with a Woodpecker pipeline against a Forgejo instance
+# (`repo.indexarr.net`). Its *checks* are all above. These parts were dropped
+# deliberately, and each is a decision rather than an oversight:
+#
+#   * The custom `clone:` step authenticating to `repo.indexarr.net` with
+#     `git_auth_token`. This repository's remote is GitHub; `actions/checkout`
+#     replaces it, and the token it existed to work around is gone with it.
+#
+#   * sccache against `redis://100.92.54.45:6380`, with a reachability probe
+#     and a no-cache fallback. Replaced by `Swatinem/rust-cache`, which caches
+#     where this CI already keeps state. The Redis is a Node B service that
+#     OOM-crash-looped and blocked that pipeline (`docs/engine/uplift.md`);
+#     a build cache that can take CI down is a worse trade here, where the
+#     runners are the scarce resource, not the compile.
+#
+#   * `build-and-push` / `build-and-push-dev` to
+#     `repo.indexarr.net/indexarr/mydevenv2`. Vogt publishes to GHCR, from
+#     `build.yml` (commit images) and `release.yml` (releases); the `:dev` /
+#     `sha-` split those steps established is carried over there instead
+#     (NFR-D12, NFR-C3). Their `INSTALL_AI_CLIENTS` / `INSTALL_FLUTTER` build
+#     args are properties of the engine's Dockerfile, not of a workflow.
+#
+#   * `komodo-deploy` / `komodo-deploy-dev`. Vogt has never deployed from CI
+#     and does not start here: publishing is not deploying (NFR-D10).
+#     Production moves when a digest pinned in `indexarr/ops` changes.
+#
+#   * `mobile-apk` / `mobile-apk-dev` *release signing and publishing* — four
+#     `MYDEVENV2_ANDROID_*` keystore secrets, and upload to the Forgejo
+#     `apk-latest` / `apk-dev-latest` release tags through `indexarr/ops`'s
+#     `forgejo-api.sh`. The keystore and the registry both live in the forge
+#     the merge left behind. The `android` job above still *builds* the APK
+#     (NFR-C6), unsigned, so a broken shell is caught; where a signed APK
+#     gets published in the merged product is a release decision that has not
+#     been taken, and inventing one here would have been worse than saying so.
+#
+#   * `discord-success` / `discord-failure` webhooks. No webhook secret exists
+#     in this repository, and a notification step that silently `|| true`s is
+#     indistinguishable from one that was never wired up.
+#
+#   * The `client/**` path exclusion. That tree — the archived GPUI desktop
+#     client — was not carried over by the merge, so there is nothing to
+#     exclude (MERGE §5.1).
+# ---------------------------------------------------------------------------
