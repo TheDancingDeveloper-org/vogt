@@ -814,7 +814,12 @@ mod tests {
         // adding one has to be a deliberate edit of this list too.
         assert_eq!(
             CURATED_WRITES,
-            ["work.create", "work.transition", "work.comment", "session.start"]
+            [
+                "work.create",
+                "work.transition",
+                "work.comment",
+                "session.start"
+            ]
         );
     }
 

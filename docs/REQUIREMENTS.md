@@ -966,7 +966,7 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 121 are delivered, 62 are implemented and
+**201 conjuncts across 46 IDs. 125 are delivered, 58 are implemented and
 asserted by nothing, 7 cannot be verified in this environment at all, and 11
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
@@ -974,7 +974,7 @@ before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved nineteen conjuncts, and three of them were moved by
+**A fourth pass moved twenty-three conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,9 +996,9 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +19 in the fourth pass (fourteen out of §6.2, three out of §6.2a, two
+  then +23 in the fourth pass (fourteen out of §6.2, seven out of §6.2a, two
   out of §6.2b)
-- **62 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 3
+- **58 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 7
 - **11 short** = 43 − 19 + 1 arriving from §6.2b, − 14
 - **7 unverifiable** = 69 − 60 − 2
 
@@ -1065,6 +1065,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | ID | Conjuncts delivered | The test that says so |
 |---|---|---|
 | FR-E1 | PTY with ring-buffer scrollback; WebSocket attach with snapshot replay; all six lifecycle verbs | `engine/server/src/scrollback.rs` (`drops_oldest_on_overflow`, `snapshots_only_bytes_after_a_retained_cursor`); `engine/server/tests/integration.rs` (`ws_attach_echoes_input_and_replays_on_reattach`, `create_list_and_kill_session`, `rename_session`, `get_session_returns_typed_detail_shape`) |
+| **FR-E1** | Multiple concurrent clients per session — both attached at once, each seeing what the other typed | `integration.rs::two_clients_watch_one_session_at_once`. The multi-attach test beside it closes the first socket before opening the second, which exercises re-attachment rather than concurrency: a second attach that silently displaced the first would pass it and lose somebody's terminal. Writing this found nothing wrong with the engine and one thing about the shape of the test — see the comment on its teardown |
 | FR-E2 | The four activity states; derived from output heuristics | `engine/server/src/activity.rs` (`detects_yn_prompt`, `nonzero_exit_becomes_errored`, `quiet_window_collapses_to_idle`, `recent_output_is_running`) |
 | FR-E3 | `cwd` is the path the project registry records, and a work item with no project is refused rather than guessed | `tests/test_sessions.py::test_a_session_opens_in_the_path_the_registry_records`, `::test_a_work_item_with_no_project_has_no_tree_to_open_in`; engine-side `integration.rs::session_cwd_must_stay_under_workspace_root` |
 | FR-E3 | The import root and the engine's workspace root are the same tree — co-located by the compose stack, and now *reported* by the front door rather than assumed | `api.rs::check_workspace_agreement` publishes a `workspace_agreement` readiness check; `vogt_core.rs` asserts the disagreeing branch (`ok: false`, a detail that says what it costs, `fatal: false`, and the container still ready) and the nothing-to-compare branch. Deliberately non-fatal: some projects being invisible is a bad answer, not a dead server (FR-E9). The comparison is by path component, not by string prefix — §6.3 finding 12, resolved, and `a_sibling_directory_is_not_inside_the_workspace` is the test that would have caught it |
@@ -1074,7 +1075,9 @@ split across this table and §6.2, only the ones named here are delivered.
 | **FR-E7** | **Both**: a task may be bound to a project or work item, and a bound run's findings are recordable as Vogt observations | `engine/server/src/agent_tasks.rs` (`vogt_project`/`vogt_work_item`, `record_finding`, the binding in the prompt and the environment); `integration.rs::a_bound_task_carries_its_subject_and_records_what_it_reported`, `::an_unbound_task_names_no_vogt_subject`; `tests/test_session_outcomes.py::test_a_bound_runs_findings_become_observations`, `::test_an_unbound_task_is_not_vogts_business`, `::test_a_task_bound_to_a_work_item_lands_on_that_items_project`, `::test_a_binding_naming_something_this_instance_lacks_is_ignored`. "Recordable as observations" is met as a *pull*, not a write plane — see §6.2's note on what that leaves out and why it is a decision |
 | FR-E5 | The per-session actor-scoped token is carried into the session; an agent's writes are attributed to that session's actor | `tests/test_sessions.py::test_the_session_carries_its_own_token`; `tests/test_m10_demo.py::test_the_m10_demo` step 5 |
 | **FR-E8** | **Both**: the three operations are in the registry, and all three are driven on CLI, REST and MCP | `tests/test_parity.py::test_transports_return_the_same_answer`, `::test_transports_leave_the_same_audit_trail`, and `::test_every_shared_operation_is_driven_by_the_script`, which is what stops a session operation being quietly dropped from the script |
+| **FR-E9** | Sessions do not depend on the core: they are created, listed and killed with none configured, and the container stays ready | `integration.rs::sessions_work_with_no_vogt_core_configured`, which also asserts the fixture *has* no core — so the day somebody gives it one, this fails loudly instead of the coverage vanishing in silence. Every session test in that file runs coreless, which is why the property needed naming rather than more exercise |
 | FR-E9 | The engine boots and stays ready with no core, and the Vogt routes refuse with a named reason | `engine/server/tests/vogt_core.rs::with_no_core_configured_the_engine_is_still_ready`, `::with_no_core_configured_the_vogt_routes_refuse_with_a_reason`, `::an_unreachable_core_is_reported_without_declaring_this_pod_unready` |
+| **FR-T1, FR-T2** | The curated set is exactly the operations the requirements name — eight reads and four writes | `vogt_tools.rs::the_curated_set_is_the_operations_the_requirement_names`, which restates the decision rather than measuring it. The assertion it replaces compared `CURATED_READS.len()` to itself and would have passed with `compliance` deleted; the point of the requirement is that the assistant's reach is something somebody wrote down |
 | FR-T1 | Server-side tool loop; `list_sessions`; `read_session_tail`; the schemas are the core's, forwarded verbatim | `engine/server/src/assistant.rs` (`plain_reply_round_trip`, `list_then_tail_then_reply`, `tools_come_from_the_core_not_from_a_literal_in_this_file`); `vogt_tools.rs::conversion_forwards_the_served_schema_verbatim` |
 | FR-T2 | Every Vogt write passes the gate unconditionally; the card carries the exact payload and target, and the approved payload is the one the core receives; approval is an authenticated on-screen act and nothing else | `assistant.rs::a_vogt_write_waits_for_approval_and_then_uses_the_approver_pairing`, `::a_write_without_a_reason_is_refused_before_it_becomes_a_card`; `auth.rs::maps_mutating_routes_to_capabilities` |
 | FR-T2 | `send_input` passes the same gate, with no setting that turns it off | `assistant.rs::send_input_pauses_and_approve_delivers`, which no longer takes an `auto_type` argument because there is none: `assistant_auto_type` is removed rather than defaulted, and the dispatcher's `send_input` arm refuses instead of delivering, so an edit that loses the interception fails closed |
@@ -1082,6 +1085,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-T4 | Both delimiters exist; terminal output is delimited; every Vogt read and every approved write's answer is delimited | `assistant.rs::list_then_tail_then_reply`, `::a_vogt_read_arrives_delimited_as_untrusted_data` (instruction-shaped text from the core arrives inside the tags) |
 | FR-T4 | Forge-derived text and imported issue bodies arrive as data — structurally, because every string from the core reaches the model through a core answer and every core answer is wrapped where it arrives | `assistant.rs::every_place_the_core_answers_this_loop_delimits_what_it_said`, which reads the source and asserts the `Ok` arm of every `vogt.call` site delimits; `::an_imported_issue_body_arrives_as_data_like_any_other_stored_text`. There is no forge-aware path in the loop and there does not need to be — but "every" was a fact about two call sites rather than a rule, and a third added tomorrow would have been undelimited with nothing failing. Deleting the wrapping at one site now turns three tests red |
 | FR-T4 | The system prompt names the delimiters as untrusted, and names all four the loop now uses | `assistant.rs::every_delimiter_the_loop_emits_is_one_the_prompt_names` and `::the_prompt_names_no_delimiter_that_nothing_emits`, over `emitted_delimiters`, which reads the tags out of the source of both emitting files rather than holding a list of them. Both directions, so a tag added to the loop and not the prompt fails, and so does a rule about a boundary that never arrives. §6.3 finding 13 is what the previous version of this test missed |
+| **FR-T6** | Absent the API key, every assistant route answers 404 — the feature is invisible rather than broken | `integration.rs::without_an_api_key_every_assistant_route_is_absent`, over all three routes. A 500 or an empty transcript would make a deployment that never configured an assistant look like one whose assistant is broken |
 | FR-S9 | The front door holds one token namespace carrying Vogt capabilities; the proxy strips the caller's credential and injects the paired core token; the proxy never pre-approves — a refusal forwards nothing | `engine/server/src/auth.rs::scoped_tokens_limit_capabilities`; `vogt_core.rs::the_core_is_handed_the_core_token_not_the_callers`, `::two_front_door_tokens_reach_the_core_as_two_actors`, `::a_write_needs_the_vogt_write_capability` and `::an_unauthenticated_caller_never_reaches_the_core`, both of which assert nothing was proxied |
 | **FR-S10** | **All four**: the token is per-session and actor-scoped, minted at start, revoked at stop, and its writes are distinguishable in the audit log | `tests/test_sessions.py::test_the_session_carries_its_own_token`, `::test_stopping_a_session_revokes_what_it_held`; `tests/test_m10_demo.py` step 5, which asserts the comment's actor is `agent:session:<id>` *and* differs from the `session.start` actor |
 | **FR-U8** | **All three**: the PWA reaches Vogt only through the front door and no other origin; every path resolves against the operation registry; every engine path resolves against `app.rs`'s router *and* `API_CONTRACT.md` | `tests/test_pwa.py::test_every_vogt_path_in_the_pwa_is_a_registered_operation`, `::test_the_pwa_reaches_vogt_only_through_the_front_door`, `::test_every_engine_path_in_the_pwa_is_a_route_the_engine_serves`, `::test_every_engine_path_in_the_pwa_is_in_the_engine_s_api_contract`, `::test_no_vogt_surface_opens_its_own_door`. Read against source rather than a built bundle, because no bundle is built here — the sources are what a bundle is built from, and a second call site would fail the check |
@@ -1195,9 +1199,9 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Sixty-two conjuncts whose code was read and believed, which nothing in any
-suite would notice the loss of. (Sixty-five, less NFR-D12's, FR-U10's and
-FR-U20's, which the fourth
+Fifty-eight conjuncts whose code was read and believed, which nothing in any
+suite would notice the loss of. (Sixty-five, less the seven the fourth pass
+asserted —  NFR-D12, FR-U10, FR-U20, FR-E1, FR-E9, FR-T1/T2 and FR-T6 — which the fourth
 pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
 core-only job *and* the merged one, so the branch split is now checked for
 both images rather than for neither.) They are not defects; they are the places a
@@ -1212,13 +1216,9 @@ that stopped being the demo's job and became a test somebody has not written.
 
 | ID | The conjuncts | What would assert it |
 |---|---|---|
-| FR-E1 | Multiple concurrent clients per session | A second `ws_attach` that does not close the first — the one multi-attach test closes the first socket before opening the second, so concurrency is exercised nowhere |
 | FR-E2 | The activity state is published on the server-wide SSE stream | A test that reads `/api/events`; today the only activity assertion polls `GET /api/sessions/{id}` |
 | FR-E4 | The brief carries the item's relations | An assertion in `test_the_work_items_brief_travels_with_the_session`, which today checks the ref, title, body, session id and token variable |
-| FR-E9 | The engine degrades to plain sessions; session availability is never lost | A test that names the property. Every session test in `integration.rs` runs with `vogt_core_url: None`, so it is exercised on every run and would fail loudly if it broke — but a reader looking for the requirement finds nothing, and the day someone gives that fixture a core the coverage vanishes silently |
-| FR-T1 | The curated set is the eight operations FR-T1 names | A test that names them. The existing one compares `CURATED_READS.len()` to itself and would pass if `compliance` were deleted |
 | FR-T2 | One pending action at a time; a new user message supersedes; the 120-second expiry; voice cannot approve | Three Rust tests and one front-end test. There is a front-end test runner now — `web/package.json` has `test` — so the reason this row gave for itself has expired and the row has not. `Assistant.tsx` **is** mounted now, by `assistant.test.tsx`, but only around the microphone: the pending-action rules — one at a time, superseded by a new message, expired at 120 seconds, and never approvable by voice — are still asserted by nothing on this side |
-| FR-T6 | Absent the API key the assistant routes answer 404 | One request to `/api/assistant/*` in a test that already boots with `assistant_api_key: None` and never asks |
 | FR-T6 | Every GUI hides the surface, the route included *(from §6.2)* | A mount of `App.tsx` at `#/assistant` with `assistant_enabled` false. The route is gated now — the same condition the drawer button carries, read reactively so a deep link still opens once the config resolves — and the gate that was missing was found by an audit rather than by a test, which is the second time in this product for this exact shape (§6.3 findings 3 and 7) |
 | FR-M2 | `waiting-for-input`, `errored`, and the agent-task notify hook are routed | A test that drives `spawn_activity_watcher`; the drift watcher has unit tests and these two, which are the headline notifications, have none |
 | FR-S9 | The audit records real actors across the hop; FR-S4's double gating is unweakened behind the proxy | A test that drives a real vogt-core through the front door. Every engine test uses a stand-in core that approves everything, so the second gate is asserted on its own and never behind the first |

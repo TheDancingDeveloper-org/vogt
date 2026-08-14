@@ -1086,6 +1086,13 @@ for the first time and all three had been asserted in prose:
    was failing — so the first green engine run was also the first APK the
    pipeline has ever built. It still points at `127.0.0.1:8910` and is still
    signed with Gradle's debug key.
+4. **A cancelled run was a check that never ran.** Path gating classifies a
+   push by `before..sha`, so each commit is examined by exactly one run — and
+   `cancel-in-progress` was true for every trigger, so pushing twice within a
+   few minutes cancelled the first run and the next run's range began after
+   it. A lint error reached `dev` and sat there green; it was found by
+   running `ruff` by hand. Cancellation is now pull-requests-only, whose runs
+   classify against the merge base. `REQUIREMENTS.md` §6.3 finding 19.
 
 Still open, and each is somebody's decision rather than unfinished work: the
 standalone stacks are retired only after the merged stack carries load

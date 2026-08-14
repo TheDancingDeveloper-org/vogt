@@ -2922,7 +2922,13 @@ async fn two_clients_watch_one_session_at_once() {
         .to_string();
 
     let mut first = ws_attach(&base, &id).await;
-    let mut second = ws_attach(&base, &id).await;
+    // Bounded, because the failure this is looking for is a *hang*: if the
+    // server cannot accept a second socket while the first is attached, the
+    // upgrade never completes and an unbounded await would take the suite
+    // down with it rather than reporting.
+    let mut second = tokio::time::timeout(Duration::from_secs(10), ws_attach(&base, &id))
+        .await
+        .expect("a second client must be able to attach while the first is attached");
 
     // Both are still attached, so both see the same output — the first is
     // asserted *after* the second connected, which is the whole point.
@@ -2931,9 +2937,8 @@ async fn two_clients_watch_one_session_at_once() {
         .await
         .unwrap();
 
-    let contains = |haystack: &[u8], needle: &[u8]| {
-        haystack.windows(needle.len()).any(|w| w == needle)
-    };
+    let contains =
+        |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
     let seen_by_first =
         collect_binary_until(&mut first, b"shared-line", Duration::from_secs(3)).await;
     let seen_by_second =
@@ -2959,4 +2964,22 @@ async fn two_clients_watch_one_session_at_once() {
         contains(&back, b"from-the-second"),
         "the first client must see what the second typed"
     );
+
+    // Close both sockets before the session goes. Every assertion above
+    // passes without this and the test then hangs on teardown, which is worth
+    // recording because a hang after the last assertion reads exactly like a
+    // failure of the thing being tested — it had somebody looking for a
+    // concurrency defect in the engine that was never there.
+    //
+    // The cause is ordinary refcounting, and it is why two sockets differ
+    // from one: a socket's handler ends when its client disconnects or the
+    // session's broadcast closes, and that broadcast cannot close while a
+    // handler is holding the session alive. Killing the child is not enough;
+    // the clients have to leave.
+    let _ = first.close(None).await;
+    let _ = second.close(None).await;
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
 }
