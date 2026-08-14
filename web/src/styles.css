@@ -4924,3 +4924,392 @@ textarea {
     display: none;
   }
 }
+
+/* -- Vogt: the audit browser and the notification inbox (FR-U19, FR-N3) ----
+ *
+ * Prefixed `vab-` for the reason the backlog block gives: the Vogt surfaces
+ * are built in parallel and a shared `.vogt-*` vocabulary would be several
+ * authors editing the same rules.
+ *
+ * Two things here are load-bearing rather than decorative. The reason on a
+ * record is never clamped, truncated or ellipsised — it is the sentence a
+ * human typed to justify a write, and this view exists to show it, so the row
+ * is variable-height by design (which is also why this list pages rather than
+ * virtualizing like the backlog's fixed grid). And every note that explains
+ * where a filter was applied is styled to be read, not to be dismissed: an
+ * unreadable caveat is the same as a missing one.
+ */
+
+.vab {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px;
+  gap: 10px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.vab-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.vab-views {
+  display: flex;
+  gap: 4px;
+}
+
+.vab-viewtab {
+  padding: 6px 14px;
+  border-radius: 6px;
+  color: var(--fg-muted);
+}
+
+.vab-viewtab.active {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: var(--bg-elev);
+}
+
+.vab-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Which half of the filter set the server applied. Rendered always, not only
+ * when a page-local filter is in force: a reader has to be able to tell what
+ * the numbers below mean before deciding whether to trust them. */
+.vab-provenance,
+.vab-scope {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--bd);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: var(--bg-elev);
+}
+
+.vab-provenance strong {
+  color: var(--fg);
+}
+
+/* Freshness is shown even when it is good news, so that "the collector did
+ * not run" and "there is nothing to say" stop looking alike (FR-U2, FR-N3). */
+.vab-freshness {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--bd);
+  border-left-width: 3px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: var(--bg-elev);
+}
+
+.vab-freshness.fresh {
+  border-left-color: var(--activity-done);
+}
+
+.vab-freshness.partial {
+  border-left-color: var(--activity-running);
+}
+
+.vab-freshness.never_swept,
+.vab-freshness.unknown {
+  border-left-color: var(--activity-waiting);
+}
+
+.vab-collectors {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: 10px;
+}
+
+.vab-collector {
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  padding: 0 6px;
+}
+
+.vab-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  padding: 10px;
+}
+
+.vab-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.vab-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.vab-field > span {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.vab-field-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  align-self: end;
+  padding-bottom: 6px;
+}
+
+.vab-field-check > span {
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.vab-field select,
+.vab-field input[type="text"],
+.vab-field input[type="datetime-local"] {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.vab-chiprow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.vab-chiplabel {
+  color: var(--fg-muted);
+  margin-right: 4px;
+}
+
+.vab-chip {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.vab-chip:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--bd-strong);
+}
+
+.vab-muted {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.vab-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.vab-link {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+/* A caveat about what a filter actually did. Bordered on the warning colour
+ * because it changes what the list below means. */
+.vab-note {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--bd);
+  border-left: 3px solid var(--activity-running);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: var(--bg);
+}
+
+.vab-note em {
+  color: var(--fg);
+  font-style: normal;
+  font-weight: 600;
+}
+
+/* Vogt unreachable, or a read that failed: what is missing is stated, and
+ * nothing below pretends to be data (FR-U21). */
+.vab-outage {
+  border: 1px solid var(--activity-waiting);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  background: var(--bg-elev);
+}
+
+.vab-outage h3 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--activity-errored);
+}
+
+.vab-outage p {
+  margin: 0;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.vab-count {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.vab-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+}
+
+.vab-empty {
+  margin: 0;
+  padding: 16px;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
+.vab-records {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.vab-record {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--bd);
+}
+
+.vab-record:last-child {
+  border-bottom: none;
+}
+
+.vab-record.unread {
+  border-left: 3px solid var(--accent);
+}
+
+.vab-record-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.vab-when {
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 150px;
+}
+
+/* Who, what: each one is also the filter that isolates it, so a reader who
+ * spots something can narrow to it without retyping an id. */
+.vab-who,
+.vab-op,
+.vab-entity {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vab-op {
+  color: var(--accent);
+}
+
+.vab-entity {
+  color: var(--fg-muted);
+}
+
+.vab-unread {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+/* The why. Never clamped and never rewritten: this is the sentence Vogt
+ * refused to accept the write without, and the reason this view exists. */
+.vab-reason {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.vab-reason a {
+  color: var(--accent);
+}
+
+/* A record with no reason on it. Written out, because a blank line here would
+ * read as "this write needed no explanation". */
+.vab-absent {
+  margin: 0;
+  font-size: 12px;
+  color: var(--activity-running);
+}
+
+.vab-record-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.vab-pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+@media (max-width: 900px) {
+  .vab-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .vab-when {
+    min-width: 0;
+  }
+}
