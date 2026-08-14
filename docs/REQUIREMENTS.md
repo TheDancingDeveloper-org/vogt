@@ -966,7 +966,7 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 136 are delivered, 47 are implemented and
+**201 conjuncts across 46 IDs. 138 are delivered, 45 are implemented and
 asserted by nothing, 7 cannot be verified in this environment at all, and 11
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
@@ -974,7 +974,7 @@ before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved thirty-four conjuncts, and three of them were moved by
+**A fourth pass moved thirty-six conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,9 +996,9 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +34 in the fourth pass (fourteen out of §6.2, eighteen out of §6.2a,
+  then +36 in the fourth pass (fourteen out of §6.2, twenty out of §6.2a,
   two out of §6.2b)
-- **47 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 18
+- **45 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 20
 - **11 short** = 43 − 19 + 1 arriving from §6.2b, − 14
 - **7 unverifiable** = 69 − 60 − 2
 
@@ -1091,6 +1091,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-T4 | The system prompt names the delimiters as untrusted, and names all four the loop now uses | `assistant.rs::every_delimiter_the_loop_emits_is_one_the_prompt_names` and `::the_prompt_names_no_delimiter_that_nothing_emits`, over `emitted_delimiters`, which reads the tags out of the source of both emitting files rather than holding a list of them. Both directions, so a tag added to the loop and not the prompt fails, and so does a rule about a boundary that never arrives. §6.3 finding 13 is what the previous version of this test missed |
 | **FR-T6** | Absent the API key, every assistant route answers 404 — the feature is invisible rather than broken | `integration.rs::without_an_api_key_every_assistant_route_is_absent`, over all three routes. A 500 or an empty transcript would make a deployment that never configured an assistant look like one whose assistant is broken |
 | FR-S9 | The front door holds one token namespace carrying Vogt capabilities; the proxy strips the caller's credential and injects the paired core token; the proxy never pre-approves — a refusal forwards nothing | `engine/server/src/auth.rs::scoped_tokens_limit_capabilities`; `vogt_core.rs::the_core_is_handed_the_core_token_not_the_callers`, `::two_front_door_tokens_reach_the_core_as_two_actors`, `::a_write_needs_the_vogt_write_capability` and `::an_unauthenticated_caller_never_reaches_the_core`, both of which assert nothing was proxied |
+| **FR-S9** | The audit records the real actor across the hop, and FR-S4's double gating is unweakened behind the proxy | `tests/test_front_door.py` — **the only test in this repository that runs both processes**. It boots `vogt serve` on a real socket and the engine binary in front of it, with two front-door tokens paired to two different core tokens; two, because one actor proves nothing (a proxy that hard-coded an identity would attribute a single actor correctly). Both gates are asserted in the arrangement that ships: a token with no capability is refused by the front door *before* the core is asked, though the core token behind it could write; a token that clears the front door is refused by the core when its own scopes do not allow the write; and neither refusal writes anything. Verified by mutation on both sides — pairing both tokens to one actor fails the first, and opening the front door's gate in `auth.rs` (rebuilt) fails the second. Skipped where the engine binary is absent, which is NFR-Q6's core-only run |
 | **FR-S10** | **All four**: the token is per-session and actor-scoped, minted at start, revoked at stop, and its writes are distinguishable in the audit log | `tests/test_sessions.py::test_the_session_carries_its_own_token`, `::test_stopping_a_session_revokes_what_it_held`; `tests/test_m10_demo.py` step 5, which asserts the comment's actor is `agent:session:<id>` *and* differs from the `session.start` actor |
 | **FR-U8** | **All three**: the PWA reaches Vogt only through the front door and no other origin; every path resolves against the operation registry; every engine path resolves against `app.rs`'s router *and* `API_CONTRACT.md` | `tests/test_pwa.py::test_every_vogt_path_in_the_pwa_is_a_registered_operation`, `::test_the_pwa_reaches_vogt_only_through_the_front_door`, `::test_every_engine_path_in_the_pwa_is_a_route_the_engine_serves`, `::test_every_engine_path_in_the_pwa_is_in_the_engine_s_api_contract`, `::test_no_vogt_surface_opens_its_own_door`. Read against source rather than a built bundle, because no bundle is built here — the sources are what a bundle is built from, and a second call site would fail the check |
 | FR-U9 | The legacy GUI keeps serving, and parity is asserted rather than assumed — in both directions | `tests/test_pwa.py::test_the_pwa_renders_everything_the_legacy_gui_did` (an exact set, so a view added to the wrong front end fails too) |
@@ -1209,7 +1210,7 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Forty-seven conjuncts whose code was read and believed, which nothing in any
+Forty-five conjuncts whose code was read and believed, which nothing in any
 suite would notice the loss of. (Sixty-five, less the seven the fourth pass
 asserted —  NFR-D12, FR-U10, FR-U20, FR-E1, FR-E9, FR-T1/T2 and FR-T6 — which the fourth
 pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
@@ -1226,7 +1227,6 @@ that stopped being the demo's job and became a test somebody has not written.
 
 | ID | The conjuncts | What would assert it |
 |---|---|---|
-| FR-S9 | The audit records real actors across the hop; FR-S4's double gating is unweakened behind the proxy | A test that drives a real vogt-core through the front door. Every engine test uses a stand-in core that approves everything, so the second gate is asserted on its own and never behind the first |
 | FR-U6 | The explainable `why` on the ranked views *(from §6.2b)* | An assertion that the `why` panel renders the contributions `GET /why` returned. The harness answers that route and no test looks at what was drawn with it |
 | FR-U10 | Session activity updates from the SSE stream without a refresh | A test that drives the engine's own activity events through `store.ts`. The board's half is asserted now — `live.test.tsx` drives `vogt-changed` end to end — and the session-activity half still rests on inspection |
 | FR-U13 | Swimlanes by project or initiative; per-column WIP counts; collapse/expand of lanes and columns; layout persisted per client *(from §6.2b)* | Four assertions on the board, which is already mounted twenty-eight times in `board.test.tsx`. The swimlane *mode* is asserted as a filter value and the grouping it produces is not; `data-wip` is rendered and read by nobody |
