@@ -67,12 +67,28 @@ backlog and bugs, drift inbox, dependency graph and audit browser, with trust
 and freshness on every aggregate. Served at `/ui` from the same single port,
 consuming only the public REST API — asserted by reading the shipped
 JavaScript and resolving every URL in it against the operation registry.
+The Solid PWA reached parity with it at M11 and the same assertion now
+covers both; the vanilla GUI keeps serving, at `/ui-legacy` behind the front
+door, until its replacement has been used by a person in a browser rather
+than only tested.
 
-**MyDevEnv2 has been merged in as Vogt's session engine.** The point of the
-merge is that a work item should be able to *open a coding session* — a PTY
+**MyDevEnv2 has been merged in as Vogt's session engine, and the capability
+it was merged for is built.** A work item can *open a coding session* — a PTY
 running your chosen agent in that project's working tree, watchable and
 steerable from a browser or a phone — rather than being a card you read about
-work happening somewhere else. What that adds to the tree:
+work happening somewhere else.
+
+As of M9–M12: the engine is the front door and holds the only published port,
+proxying `/api/vogt` and `/mcp` to the Python core on loopback; a session
+opens in the path the project registry records, carries its work item's brief
+in a prompt file, and writes to Vogt as **its own actor**, so the audit log
+says which session did what; the Solid PWA carries the board, the ranked
+views, work item detail, project pages with the drift inbox, and the audit
+browser; and the assistant reads Vogt through tool schemas fetched from the
+core's own registry, with every write behind an on-screen approval that uses
+the *approver's* credential.
+
+What that adds to the tree:
 
 - `engine/` — a Rust/Axum workspace (`engine/server`, `engine/contract`) that
   owns PTY sessions, WebSocket attach with scrollback replay, an SSE event
@@ -176,7 +192,8 @@ ungranted tools are absent rather than present-and-refusing.
 ## Stack
 
 **Core:** Python 3.11+ · SQLite (single-node, zero-dependency self-hosting) ·
-FastAPI · MCP (stdio + streamable HTTP) · a buildless ES-module GUI (no Node
+FastAPI · MCP (stdio + streamable HTTP) · a Solid/Vite PWA, and the
+buildless ES-module GUI it replaces (no Node
 toolchain, no bundler output in version control — see `ROADMAP.md` M6) ·
 optional GitHub + GitHub Actions integration (the only forge targeted in
 v1). Self-hosted, open source.
