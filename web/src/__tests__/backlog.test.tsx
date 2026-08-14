@@ -223,6 +223,79 @@ describe("FR-U6 — bulk label, which was the half of the clause nothing called"
   });
 });
 
+describe("FR-U6 — bulk transition, which was built and asserted by nothing", () => {
+  it("transitions every selected item with the batch's reason", async () => {
+    const vogt = fakeVogt({
+      ...TWO,
+      "POST /work/transition": { body: { item: workItem(), comments: [], sessions: [] } },
+    });
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    await selectAll(container);
+    const form = bulkFormFor(container, "Transition");
+    fireEvent.input(field(form, "Transition to"), { target: { value: "done" } });
+    fireEvent.input(field(form, "Reason"), { target: { value: "closing out the sprint" } });
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(vogt.matching("POST /work/transition")).toHaveLength(2));
+    expect(vogt.matching("POST /work/transition").map((call) => call.body)).toEqual([
+      { ref: "WI-1", to_state: "done", reason: "closing out the sprint" },
+      { ref: "WI-2", to_state: "done", reason: "closing out the sprint" },
+    ]);
+  });
+
+  it("will not transition without a target state or a reason", async () => {
+    const vogt = fakeVogt(TWO);
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    await selectAll(container);
+    const form = bulkFormFor(container, "Transition");
+    const submit = button(form, "Transition");
+
+    expect(submit.disabled).toBe(true);
+    fireEvent.input(field(form, "Transition to"), { target: { value: "done" } });
+    expect(submit.disabled).toBe(true);
+    fireEvent.input(field(form, "Reason"), { target: { value: " " } });
+    expect(submit.disabled).toBe(true);
+
+    fireEvent.submit(form);
+    expect(vogt.matching("POST /work/transition")).toHaveLength(0);
+  });
+
+  it("leaves the refused items selected and the rest not", async () => {
+    fakeVogt({
+      ...TWO,
+      "POST /work/transition": (call) =>
+        call.body?.ref === "WI-2"
+          ? refusal(409, "transition.not_allowed: feature has no open -> done edge")
+          : { body: { item: workItem(), comments: [], sessions: [] } },
+    });
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    await selectAll(container);
+    const form = bulkFormFor(container, "Transition");
+    fireEvent.input(field(form, "Transition to"), { target: { value: "done" } });
+    fireEvent.input(field(form, "Reason"), { target: { value: "closing out the sprint" } });
+    fireEvent.submit(form);
+
+    // A partial batch reads as a partial batch: the refusal is quoted, and
+    // the item it belongs to is the one still selected to try again.
+    await waitFor(() =>
+      expect(container.querySelector(".vogt-backlog-outcomes li.failed")?.textContent).toContain(
+        "transition.not_allowed",
+      ),
+    );
+    await waitFor(() =>
+      expect(container.querySelector(".vogt-backlog-bulk strong")?.textContent).toBe(
+        "1 selected",
+      ),
+    );
+  });
+});
+
 describe("FR-U6 / FR-U15 — quick-create refuses to submit without a typed reason", () => {
   it("takes the title, type, project and reason, and sends only those", async () => {
     const vogt = fakeVogt({

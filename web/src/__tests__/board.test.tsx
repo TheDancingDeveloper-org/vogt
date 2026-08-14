@@ -233,6 +233,39 @@ describe("FR-U12 — optimistic, then whatever the server said", () => {
 });
 
 describe("FR-U22 — the same move, from the keyboard", () => {
+  it("moves focus across columns and within one", async () => {
+    fakeVogt({
+      "GET /work": {
+        body: {
+          items: [
+            workItem({ ref: "WI-1", state: "open", priority: "p1" }),
+            workItem({ ref: "WI-2", state: "open", priority: "p2" }),
+            workItem({ ref: "WI-3", state: "in_progress" }),
+          ],
+          total: 3,
+        },
+      },
+    });
+    const { container } = board();
+    await waitFor(() => card(container, "WI-3"));
+
+    card(container, "WI-1").focus();
+    fireEvent.keyDown(card(container, "WI-1"), { key: "ArrowDown" });
+    await waitFor(() => expect(document.activeElement).toBe(card(container, "WI-2")));
+
+    fireEvent.keyDown(card(container, "WI-2"), { key: "ArrowRight" });
+    await waitFor(() => expect(document.activeElement).toBe(card(container, "WI-3")));
+  });
+
+  it("opens the item with Enter, at the item's own URL", async () => {
+    fakeVogt();
+    const view = board();
+    await waitFor(() => card(view.container, "WI-1"));
+
+    fireEvent.keyDown(card(view.container, "WI-1"), { key: "Enter" });
+    await waitFor(() => expect(view.url()).toBe("/w/WI-1"));
+  });
+
   it("proposes a move with Shift+Arrow and still collects the reason", async () => {
     const vogt = fakeVogt({
       "POST /work/transition": { body: { item: workItem({ state: "in_progress" }) } },
@@ -284,6 +317,21 @@ describe("FR-U17 — trust on every card, and never blank", () => {
         "unverified",
       );
     }
+  });
+
+  it("says how old the view is, and never calls a polled view current", async () => {
+    fakeVogt();
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    // FR-U2's freshness half, on the board: the requirement asks for trust
+    // *and* freshness, and a board with neither is an aggregate presenting
+    // itself as current.
+    const line = container.querySelector(".board-freshness");
+    expect(line?.textContent).toMatch(/Polling — updated \d+s ago/);
+    expect(container.textContent).toContain(
+      "Vogt does not yet publish a change stream to this client",
+    );
   });
 
   it("puts one on every card, so the aggregate cannot drop the awkward column", async () => {
@@ -480,10 +528,18 @@ describe("FR-U22 — quick-create has a binding, now that there is one to bind",
 });
 
 describe("FR-U11 — the filter set is the URL", () => {
-  it("restores every filter from a pasted link", async () => {
-    fakeVogt();
+  it("restores every one of the six filters from a pasted link", async () => {
+    fakeVogt({
+      "GET /initiatives": {
+        body: { initiatives: [{ id: "IN-1", slug: "merge", title: "The merge" }] },
+      },
+      "GET /actors": {
+        body: { actors: [{ identity_ref: "user:sam", display_name: "Sam" }] },
+      },
+    });
     const { container } = board(
-      "/board?project=beta&label=infra&lanes=project&kind=bug&state=open",
+      "/board?project=beta&label=infra&initiative=merge&assignee=user:sam" +
+        "&lanes=project&kind=bug&state=open",
     );
 
     await waitFor(() => expect(columnNames(container).length).toBeGreaterThan(0));
@@ -494,8 +550,12 @@ describe("FR-U11 — the filter set is the URL", () => {
       );
       return field?.querySelector<HTMLSelectElement>("select")?.value;
     };
+    // FR-U14 names six: project, workflow state, type, label, initiative,
+    // actor. All six, plus the swimlane mode, combinable and in the URL.
+    await waitFor(() => expect(value("Initiative")).toBe("merge"));
     expect(value("Project")).toBe("beta");
     expect(value("Label")).toBe("infra");
+    expect(value("Assignee")).toBe("user:sam");
     expect(value("Swimlanes")).toBe("project");
     // The kind chip named in the URL is the active one.
     const active = [...container.querySelectorAll(".board-chip.active")].map(
