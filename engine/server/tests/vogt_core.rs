@@ -1130,3 +1130,64 @@ async fn a_single_half_deployment_is_not_called_misconfigured() {
         "and it should say what a backup taken here would claim"
     );
 }
+
+// ── NFR-D11: one port, two protocols, and the front end on it ─────────────
+
+#[tokio::test]
+async fn the_port_that_serves_mcp_also_answers_plain_http_health() {
+    // The requirement is a deployment claim: one published port, so a
+    // healthcheck and an MCP client reach the same place. `personal-vogt`'s
+    // probe speaks plain HTTP for exactly this reason — nothing outside a
+    // real MCP client sends `initialize`, and a probe that did would pin a
+    // protocol version to a container's liveness.
+    let (base, _log) = front_door().await;
+
+    let mcp = client()
+        .post(format!("{base}/mcp"))
+        .headers(bearer("an-agents-own-core-token"))
+        .json(&json!({"jsonrpc": "2.0", "method": "tools/list", "id": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mcp.status(), StatusCode::OK);
+
+    // Same origin, no credential, no JSON-RPC.
+    let health = client()
+        .get(format!("{base}/healthz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    let body: Value = health.json().await.unwrap();
+    assert_eq!(body["ok"], true);
+}
+
+#[tokio::test]
+async fn the_engine_serves_the_front_end_from_that_same_port() {
+    // NFR-D11's first clause. `assets.rs` embeds `web/dist/` with rust-embed,
+    // so the bundle is compiled in rather than mounted — this asserts the
+    // route exists and answers HTML, which is what makes "one published
+    // port" true of the *product* and not only of its API.
+    //
+    // The test suite builds against a placeholder `web/dist/`, so what is
+    // asserted is the serving, not the contents: a real bundle differs from
+    // this one in every byte except the shape.
+    let (base, _log) = front_door().await;
+    let res = client().get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the engine serves the PWA at its root; a 404 here means the front \
+         door has an API and no front end"
+    );
+    let content_type = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        content_type.starts_with("text/html"),
+        "the root is a document, not JSON: {content_type}"
+    );
+}

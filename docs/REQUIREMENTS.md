@@ -966,7 +966,7 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 134 are delivered, 49 are implemented and
+**201 conjuncts across 46 IDs. 136 are delivered, 47 are implemented and
 asserted by nothing, 7 cannot be verified in this environment at all, and 11
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
@@ -974,7 +974,7 @@ before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved thirty-two conjuncts, and three of them were moved by
+**A fourth pass moved thirty-four conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,9 +996,9 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +32 in the fourth pass (fourteen out of §6.2, sixteen out of §6.2a,
+  then +34 in the fourth pass (fourteen out of §6.2, eighteen out of §6.2a,
   two out of §6.2b)
-- **49 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 16
+- **47 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 18
 - **11 short** = 43 − 19 + 1 arriving from §6.2b, − 14
 - **7 unverifiable** = 69 − 60 − 2
 
@@ -1127,6 +1127,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-M2 | New drift is summarised, coalesced and cursored; the default set is exactly the four FR-M2 names, and no more | `engine/server/src/vogt_drift.rs` (`one_drift_is_named`, `a_burst_is_one_notification_that_counts`, `a_cursor_survives_a_round_trip`); `push.rs::only_the_kinds_fr_m2_names_are_on_by_default` |
 | FR-M3 | The board's list layout at phone width, in the three rules that make it one: `display: block` on the row, the head row hidden, and the state name grown out of `attr(data-state)` | `tests/test_pwa.py::test_the_board_is_a_list_below_the_narrow_breakpoint`, `::test_the_board_cells_carry_what_the_hidden_head_row_said`, `::test_the_vogt_surfaces_share_the_engine_s_narrow_breakpoint` |
 | NFR-D11 | The engine's native APIs; the WebSocket attach path; `/api/vogt` proxied under its own prefix with the query string intact; `/mcp` proxied with the caller's credential unchanged; aggregate health with a non-fatal core check | `engine/server/tests/vogt_core.rs` (`a_vogt_read_reaches_the_core_under_its_own_prefix`, `a_query_string_survives_the_hop`, `mcp_forwards_the_callers_credential_unchanged`, `a_reachable_core_is_reported_with_its_schema_state`); `integration.rs::readyz_is_public_and_returns_checks` |
+| **NFR-D11** | The engine serves the front end from the same port that serves MCP, and that port answers plain HTTP health | `vogt_core.rs::the_port_that_serves_mcp_also_answers_plain_http_health` (one origin, an MCP call and an unauthenticated `/healthz`, no JSON-RPC) and `::the_engine_serves_the_front_end_from_that_same_port`. The second asserts the serving rather than the contents — the suite compiles against a placeholder `web/dist/`, and a real bundle differs from it in every byte except the shape. Removing either route turns one red. The loopback and single-published-port halves are asserted in `tests/test_deploy.py` |
 | **NFR-I6** | **All four**: the core's SQLite; the engine's `state_dir`; enough metadata to re-establish FR-E3's path agreement; and one act that covers them | `tests/test_lifecycle.py` — nine for the stores, and six more: `test_a_backup_carries_the_engines_state_and_says_so`, `test_a_backup_without_the_engine_says_which`, `test_a_backup_survives_an_unreadable_engine_directory`, `test_a_restore_puts_the_engine_state_back`, `test_a_restore_reports_an_estate_that_moved`, `test_an_older_manifest_still_restores`. The manifest is version 2 and carries `engine_state` — a sentence on *every* branch, so a backup that covered two thirds of the product is distinguishable from one that covered all of it before somebody restores it — and `import_root`, which with the restored `projects.root_path` values and the front door's `workspace_agreement` check is what re-establishing the path agreement needs. The restore **reports** a moved estate (`import_root_then` / `import_root_now`) and does not rewrite the stored paths, which is the right division — the requirement asks for the metadata, not for a silent rewrite of every project's root — but it is worth knowing that nothing enumerates which projects are now unresolvable. §6.3 finding 14, resolved: the merged compose sets `VOGT_ENGINE_STATE_DIR`, and because two configurations now name one directory, `api.rs::check_backup_agreement` publishes a `backup_agreement` readiness check that says either which directory the backup covers or what the archive would silently omit (`vogt_core.rs`, three tests) |
 | **NFR-S5** | Long lists virtualize on all three surfaces that should, and the board's filter and drag paths do not degrade with backlog size | `web/src/__tests__/boardScale.test.tsx` (fifteen). The board's 60-card cap is gone: 60 is now where windowing *starts*, following `Backlog.tsx`'s mechanism rather than a second idea of what virtualization means, and the audit browser pages deliberately because an audit row is variable-height and a reason is never truncated. The second clause is evidenced by **counting, not timing** — jsdom has no layout, so the tests instrument `JSON.parse` to count reads of the one field the projection walks, which keeps the counter out of the product. Tripling the columns adds no pass; four times the estate in four times the lanes costs no more per item; eight keystrokes in the reason composer cost exactly zero, because `placement` compares on ref and target alone. `tests/test_pwa.py` holds the cross-file guard neither suite can: the CSS card height and the windowing constant must agree, or what is drawn and what is under the scrollbar drift apart silently |
 | NFR-Q6 | The forge-less run; the core run with no engine present, produced by deleting `engine/`, `web/` and `mobile/` rather than by inspection | `.github/workflows/ci.yml` job `core`; `tests/test_pwa.py`'s skip guard is what lets it pass. **Run for real on 2026-08-14** — the job passed on a self-hosted runner, so "the core alone still works" is now an observation rather than a workflow file |
@@ -1208,7 +1209,7 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Forty-nine conjuncts whose code was read and believed, which nothing in any
+Forty-seven conjuncts whose code was read and believed, which nothing in any
 suite would notice the loss of. (Sixty-five, less the seven the fourth pass
 asserted —  NFR-D12, FR-U10, FR-U20, FR-E1, FR-E9, FR-T1/T2 and FR-T6 — which the fourth
 pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
@@ -1233,7 +1234,6 @@ that stopped being the demo's job and became a test somebody has not written.
 | FR-U18 | Both sides of a disagreement, with provenance and age, rendered open before any act is possible *(from §6.2b)* | A mount of the drift inbox against a proposal carrying an evidence snapshot. That bulk accept cannot arrive is asserted from source; that the evidence is *shown first* is not asserted anywhere |
 | FR-U19 | Actor and operation filtered server-side; every row shows who, what and why; the item page links in pre-filtered *(from §6.2b)* | A mount of `AuditBrowser`, which `absentStates.test.tsx` already does for its outage states and never with records in it |
 | FR-U21 | Engine unavailable → Vogt views keep answering and session controls disable with the named reason *(from §6.2b)* | The mirror of the outage tests that exist. Every one of them takes Vogt away; none takes the engine away, which in a test is no harder and in the product is the only half a person can reach |
-| NFR-D11 | The engine serves the PWA; a port that serves MCP also serves plain HTTP health | A test that fetches the bundle from the engine and `/healthz` from the port that answers `/mcp`. **The loopback half is no longer here** — `tests/test_deploy.py::test_only_a_loopback_core_is_started_by_this_container` asserts the case arm, and `::test_the_engine_is_the_only_published_port_in_the_merged_image` asserts the image exposes 8910 and nothing else, so a compose file written by somebody else cannot publish the core by accident |
 | NFR-Q6 | Both suites pass in the merged repository | They are separately path-gated, so "both" is jointly checked only on a change that touches both trees or a shared file |
 | NFR-S5 | No view fetches the whole estate to render a page of it | True on inspection of all four surfaces, and the board's 2,000-item bulk read across four sequential requests is the weakest case rather than a clean one |
 
