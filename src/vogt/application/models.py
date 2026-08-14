@@ -610,14 +610,49 @@ class EventListResult(Result):
 
 
 class ListAuditParams(Params):
+    """How the audit log is narrowed (FR-S6, FR-U19).
+
+    `limit`/`offset`/`total` rather than a cursor, which is the idiom every
+    other filtered list here uses (`work.list`, `observations.list`). The
+    events feed's `after` cursor is the exception and earns it: that feed is
+    read forwards by a poller, while the audit log is read newest-first by a
+    person, and a cursor cannot answer "how many records match at all" —
+    which is what tells a reader whether they are looking at the whole story.
+    """
+
     limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Records to skip. Paging a log that is being written to "
+        "can repeat a record, because new rows arrive at the front.",
+    )
     actor_id: str | None = None
     operation: str | None = None
-    entity_id: str | None = None
+    entity_id: str | None = Field(
+        default=None,
+        description="An entity's id. A work item's trail also carries the "
+        "writes audited against that item's comments.",
+    )
+    project: str | None = Field(
+        default=None,
+        description="Project slug. Keeps the writes this instance can "
+        "attribute to that project; see the operation's docstring for the "
+        "kinds that carry one.",
+    )
+    since: datetime | None = Field(
+        default=None, description="Inclusive lower bound on the write's time."
+    )
+    until: datetime | None = Field(
+        default=None, description="Exclusive upper bound on the write's time."
+    )
 
 
 class AuditListResult(Result):
     records: list[AuditRecord]
+    total: int = Field(
+        description="Records matching the filters, ignoring limit and offset."
+    )
 
 
 # -- collection ------------------------------------------------------------

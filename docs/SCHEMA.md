@@ -91,9 +91,37 @@ Authorization decisions are their own table rather than audit rows: a denial
 changes nothing, so it has no entity and no revision to hang from.
 
 `audit` is indexed on `actor_id`, `(entity_kind, entity_id)` and `at`. The
-time index exists and is unused — the audit query exposes actor, operation
-and entity filters but no time bound (the FR-S6 gap, `REQUIREMENTS.md`
-§5.1), so closing that gap is a parameter, not a schema change.
+time index is now used: `audit.list` takes `since` (inclusive) and `until`
+(exclusive), which closed the FR-S6 gap exactly as this section predicted —
+a parameter, not a schema change. It also takes `offset`, so the log is
+readable past its newest page, and `total`, so a reader can tell whether it
+is showing all of it.
+
+Two queries against this table are worth writing down, because both are
+joins and neither is a column:
+
+- **An entity's trail.** Filtering by `entity_id` returns the writes audited
+  against that entity *and*, when it is a work item, the writes audited
+  against its comments — a comment is audited against the comment
+  (`entity_kind = 'comment'`), so an exact match would report that nothing
+  had ever been said about it. The link is `comments.work_item_id`, which is
+  already indexed. No `work_item_id` is denormalised onto `audit`: answering
+  for rows written before such a column existed would mean back-filling the
+  one table that may only be appended to.
+- **A project's trail.** Filtering by project selects, per entity kind, the
+  ids that kind's own table attributes to that project — `projects`,
+  `work_items.project_id`, `comments` through their item,
+  `coding_sessions.project_id`, `drift_proposals.project_id` and
+  `suppressions.scope_project_id`. Those are every audited kind that carries
+  a project; `instance`, `actor`, `label`, `initiative` and `token` writes
+  belong to the instance, so no project's trail is missing them.
+
+What remains unindexed is the *order*: the log is read newest-first by
+`(revision, at, id)` and no index covers that, so every audit query sorts the
+rows its filters selected. That was true of the unfiltered query before any
+of these filters existed, and it is the next thing to measure if the table
+gets big enough to notice — an index on the sort key, or paging by `at`
+through `idx_audit_at`, would both fix it without changing what is stored.
 
 ### 2.2 Project
 
