@@ -609,6 +609,77 @@ query. Both suites pass in the merged repository, including the engine-less
 core run; a push to `dev` produces a `:dev` image that deploys to the dev
 stack, and no push to `dev` moves prod.
 
+### M9 as built — one deviation and five notes
+
+**The deviation: the demo ran against two processes, not against the
+stack.** vogt-core and the engine were started by hand on loopback and
+driven through the engine's port — the backlog answered at `/api/vogt`,
+`/ui-legacy` served the vanilla GUI, `POST /api/sessions` opened a PTY, an
+MCP `initialize` completed byte-identically to the core's own answer, and a
+work item created through the front door landed in the audit log as
+`agent:m9demo` with the reason its caller typed. What has *not* run is the
+merged image: no Docker daemon was reachable from the environment this was
+built in, so `engine/Dockerfile` parses and every `COPY` resolves, and
+nothing more can honestly be claimed. The riskiest unproven step is copying
+uv's standalone CPython between build stages. **Build the image before
+trusting the stack.**
+
+1. **`ReadinessCheck` grew a `fatal` flag, and the core's probe is not
+   fatal.** Aggregate health was specified; what it should *do* was not. If
+   an absent core made the container unready, a healthcheck would restart
+   the engine — which cannot revive the core and would kill every live PTY
+   doing it, the exact cost FR-E9 says an absent core must never have. So
+   the four engine-owned checks keep the verdict and the core's outage is
+   reported beside them. Do not "fix" a red `vogt_core` check by making it
+   fatal.
+
+2. **Supervision is the entrypoint, not a framework.** s6-overlay and
+   supervisord were both weighed and rejected: this container is a
+   development pod that already sequences optional daemons in an ordered
+   script, runs as `sprooty` rather than root, and gets tini as PID 1 from
+   the compose. A second init system would have displaced that tini, put
+   PID 1 back to root, and split startup order across two places — for two
+   long-lived processes. The core is a backoff respawn loop; the engine
+   stays what `exec` replaces the shell with, so the container's lifetime is
+   the front door's lifetime. The core's listen address is *derived from*
+   `VOGT_CORE_URL`, so "loopback only, never published" is enforced rather
+   than commented, and §5.2's two-service fallback still works unchanged.
+
+3. **`vogt init` now runs before every `serve`.** `DEPLOYMENT.md` §5
+   records that nothing migrates — `serve` does not, and there is no `vogt
+   migrate` — leaving a manual "run `vogt init` after a digest bump" step
+   that a deploy would eventually skip. The supervisor runs it in the retry
+   loop. The gap in the *product* is still open (FR-L1); what closed is the
+   gap in this deployment.
+
+4. **What the merged CI does not carry over from Woodpecker**, each for a
+   reason and each written into the workflow: sccache-over-Redis (that
+   Redis OOM-crash-looped and blocked the pipeline — `Swatinem/rust-cache`
+   replaces it), the Forgejo registry pushes and Komodo deploy steps (Vogt
+   does not deploy from CI, NFR-D10), and **APK release signing**, whose
+   keystore lives in the retired forge — the APK builds unsigned, and where
+   a signed one gets published is an untaken release decision, not an
+   oversight.
+
+5. **Three bugs the merge surfaced, two of them older than it.** The CLI
+   had been dead on Python 3.13 and later since `serve` grew `--no-auth`:
+   `BooleanOptionalAction` refuses an option name starting with `--no-`, at
+   parser construction, so *every* command including `--help` raised — and
+   the suite never saw it because it ran on 3.11, while `requires-python`
+   says 3.11 *or later*. An engine integration test was flaky about one run
+   in five. And `/ui-legacy/` — with the trailing slash a browser sends —
+   fell through to the PWA's catch-all, because a wildcard route segment
+   matches at least one character; it answered 404 with the engine's "web
+   bundle not present" placeholder, which reads like a broken front door
+   rather than a route that never matched.
+
+**Still open after M9**: the merged image has no TLS (the engine has none;
+where the core terminated TLS in-process, the merged port speaks plain HTTP
+over WireGuard, and whether Caddy or `tailscale serve` fronts it is the
+ingress decision §11.1 leaves open), CI does not yet build
+`engine/Dockerfile` with a repository-root context, and the merged image's
+registry name is a placeholder awaiting that decision.
+
 ## M10 — Coding sessions (M) *(merge-MVP)*
 
 **Objective**: the capability the reversal exists for — a work item can open
