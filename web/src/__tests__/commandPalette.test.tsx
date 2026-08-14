@@ -9,11 +9,12 @@
 // reason. What it cannot check is whether the reads are *reachable by name*,
 // which is the clause this file covers.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { fireEvent, render, waitFor } from "@solidjs/testing-library";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import CommandPalette from "../CommandPalette";
-import { fakeVogt, settle, workItem } from "./harness";
+import { refreshSessions } from "../store";
+import { fakeVogt, settle, workItem, type FakeVogt } from "./harness";
 
 function palette() {
   const history = createMemoryHistory();
@@ -156,5 +157,108 @@ describe("FR-U16 — a mutating verb opens the view that collects its reason", (
     view.click("Resolve Drift...");
     await waitFor(() => expect(view.url()).toContain("view=drift"));
     expect(vogt.calls.filter((call) => call.method !== "GET")).toEqual([]);
+  });
+});
+
+// -- FR-U16's fourth read surface -------------------------------------------
+//
+// §6.2a: "A palette test with a populated session store. `commandPalette.
+// test.tsx` asserts projects, work items and views, and the session entries
+// come from the engine's store, which no test seeds."
+//
+// The store is the engine's, not Vogt's: `store.ts` fills it from
+// `GET /api/sessions` on the engine's own API, which `harness.tsx` answers
+// through its second argument. Seeding it is the whole difficulty, and it is
+// not much of one — but until something does, the "sessions" in FR-U16's
+// "projects, work items, sessions, views" is a clause with an empty list
+// behind it, and a palette that stopped offering sessions altogether would
+// pass every test above this one.
+//
+// `sessionsStore` is module state that outlives a mount, so this block empties
+// it again afterwards: a leaked session is the next test's phantom row.
+
+/** Two engine sessions, as `GET /api/sessions` returns them. */
+const SESSIONS = [
+  {
+    id: "ses_alpha",
+    name: "alpha-refactor",
+    activity: "running",
+    exit_code: null,
+    scrollback_bytes: 0,
+    cwd: "/srv/alpha",
+    created_at: "2026-08-01T00:00:00Z",
+  },
+  {
+    id: "ses_beta",
+    name: "beta-deploy",
+    activity: "idle",
+    exit_code: null,
+    scrollback_bytes: 0,
+    cwd: "/srv/beta",
+    created_at: "2026-08-01T00:00:00Z",
+  },
+];
+
+/** Fill the engine's session store the way the shell does, from the engine. */
+async function seedSessions(sessions: unknown[] = SESSIONS): Promise<FakeVogt> {
+  const vogt = fakeVogt(ESTATE, { "GET /api/sessions": { body: sessions } });
+  await refreshSessions();
+  return vogt;
+}
+
+describe("FR-U16 — sessions are a read surface, and reachable by name", () => {
+  afterEach(async () => {
+    // The store is module state; the next test would inherit these.
+    await seedSessions([]);
+  });
+
+  it("offers every session the engine has, under the name it carries", async () => {
+    await seedSessions();
+    const view = palette();
+
+    await waitFor(() => expect(view.text()).toContain("alpha-refactor"));
+    expect(view.text()).toContain("beta-deploy");
+    // Named with where it is running, which is what tells two shells apart.
+    expect(view.text()).toContain("/srv/alpha");
+  });
+
+  it("finds a session by a fuzzy fragment of its name", async () => {
+    await seedSessions();
+    const view = palette();
+    await waitFor(() => expect(view.text()).toContain("alpha-refactor"));
+
+    view.type("arfc");
+
+    await waitFor(() => expect(view.text()).toContain("alpha-refactor"));
+    // A fragment matching one session does not drag the other in with it.
+    expect(view.text()).not.toContain("beta-deploy");
+  });
+
+  it("opens the session's terminal rather than doing anything to it", async () => {
+    const vogt = await seedSessions();
+    const view = palette();
+    await waitFor(() => expect(view.text()).toContain("beta-deploy"));
+    const before = vogt.engineCalls.length;
+
+    view.click("beta-deploy");
+
+    await waitFor(() => expect(view.url()).toBe("/t/ses_beta"));
+    expect(view.closed()).toBe(1);
+    // Reaching a session is a read. The palette starts nothing, kills
+    // nothing, and writes nowhere — to Vogt or to the engine.
+    expect(vogt.calls.filter((call) => call.method !== "GET")).toEqual([]);
+    expect(vogt.engineCalls.slice(before).filter((call) => call.method !== "GET")).toEqual(
+      [],
+    );
+  });
+
+  it("offers no sessions when the engine has none to offer", async () => {
+    await seedSessions([]);
+    const view = palette();
+
+    // The views are still there, so this is an empty engine and not a
+    // palette that failed to build its list at all.
+    await waitFor(() => expect(view.text()).toContain("Open Board"));
+    expect(view.text()).not.toContain("Jump to session");
   });
 });
