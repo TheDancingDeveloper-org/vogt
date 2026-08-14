@@ -54,8 +54,8 @@ function assistantRequests(): string[] {
     .filter((url) => url.includes("/api/assistant"));
 }
 
-async function mountAssistant() {
-  fakeVogt();
+async function mountAssistant(engine: Record<string, unknown> = {}) {
+  fakeVogt({}, engine as Parameters<typeof fakeVogt>[1]);
   const errors: string[] = [];
   const mounted = render(() => <Assistant onError={(m) => errors.push(m)} />);
   await settle();
@@ -174,5 +174,130 @@ describe("the assistant's microphone", () => {
     expect(
       assistantRequests().filter((url) => url.includes("message")),
     ).toHaveLength(0);
+  });
+});
+
+
+// -- FR-T5's spoken replies, and the half a speaker cannot check -----------
+//
+// §6.2b lists "spoken replies" as needing "a device with a speaker". That is
+// true of the sound and false of everything else: whether the app asks for
+// speech, with what text, and — most of all — whether it ever offers a voice
+// route to approving something, are decided here and were asserted nowhere.
+// A speaker is the worst instrument for the last one, because what is being
+// checked is the absence of a sentence.
+
+const TTS_KEY = "mydevenv2.assistant.tts";
+
+function captureSpeech(): { spoken: () => string[]; cancels: () => number } {
+  const spoken: string[] = [];
+  let cancels = 0;
+  class Utterance {
+    text: string;
+    constructor(text: string) {
+      this.text = text;
+    }
+  }
+  vi.stubGlobal("SpeechSynthesisUtterance", Utterance);
+  vi.stubGlobal("speechSynthesis", {
+    speak: (u: { text: string }) => spoken.push(u.text),
+    cancel: () => {
+      cancels += 1;
+    },
+  });
+  return { spoken: () => spoken.filter((t) => t.trim()), cancels: () => cancels };
+}
+
+/** Say something, and let the engine answer it. */
+async function say(container: HTMLElement, text: string): Promise<void> {
+  const input = container.querySelector<HTMLInputElement>('input[type="text"]')!;
+  fireEvent.input(input, { target: { value: text } });
+  fireEvent.submit(container.querySelector("form")!);
+  await settle();
+}
+
+describe("FR-T5 — replies are spoken, and approval is never one of them", () => {
+  it("speaks a reply in sentences when the toggle is on", async () => {
+    const speech = captureSpeech();
+    localStorage.setItem(TTS_KEY, "1");
+    const { container } = await mountAssistant({
+      "POST /api/assistant/message": {
+        body: {
+          reply: "The forge adapter is on top. It has been for a week.",
+          pending_action: null,
+          tool_trace: [],
+        },
+      },
+    });
+    await say(container, "what is on top?");
+    // Sentence chunks, not one utterance: the synth stays responsive and
+    // interruptible, which is what makes a spoken answer stoppable.
+    expect(speech.spoken()).toEqual([
+      "The forge adapter is on top.",
+      "It has been for a week.",
+    ]);
+  });
+
+  it("says nothing when the toggle is off", async () => {
+    const speech = captureSpeech();
+    localStorage.setItem(TTS_KEY, "0");
+    const { container } = await mountAssistant({
+      "POST /api/assistant/message": {
+        body: { reply: "Nothing is on top.", pending_action: null, tool_trace: [] },
+      },
+    });
+    await say(container, "what is on top?");
+    expect(speech.spoken()).toHaveLength(0);
+  });
+
+  it("announces a pending action in words no voice can answer", async () => {
+    // FR-T2: approval is an on-screen act, so a misheard "yes" authorises
+    // nothing. The announcement says what is about to happen and where to
+    // approve it, and offers no spoken answer at all.
+    const speech = captureSpeech();
+    localStorage.setItem(TTS_KEY, "1");
+    const { container } = await mountAssistant({
+      "POST /api/assistant/message": {
+        body: {
+          reply: null,
+          pending_action: {
+            id: "act_01",
+            kind: "vogt_write",
+            operation: "work.transition",
+            target: "WI-7",
+            reason: "the migration landed",
+            payload: "{}",
+          },
+          tool_trace: [],
+        },
+      },
+    });
+    await say(container, "move WI-7 to done");
+
+    const said = speech.spoken().join(" ");
+    // Whole, rather than "work." then "transition on WI-7": the operation is
+    // the one word in that sentence that says what is about to happen, and
+    // the chunker used to break it at its own full stop.
+    expect(said).toContain("work.transition");
+    expect(said).toContain("Approve on screen");
+    for (const invitation of ["say yes", "say approve", "yes or no", "say ok"]) {
+      expect(said.toLowerCase()).not.toContain(invitation);
+    }
+  });
+
+  it("stops speaking when the next thing is said", async () => {
+    // A reply still being read aloud while the user is already asking
+    // something else is the phone talking over its owner.
+    const speech = captureSpeech();
+    localStorage.setItem(TTS_KEY, "1");
+    const { container } = await mountAssistant({
+      "POST /api/assistant/message": {
+        body: { reply: "A long answer.", pending_action: null, tool_trace: [] },
+      },
+    });
+    await say(container, "first");
+    const before = speech.cancels();
+    await say(container, "second");
+    expect(speech.cancels()).toBeGreaterThan(before);
   });
 });

@@ -32,7 +32,13 @@ interface AssistantProps {
 function speakSentences(text: string) {
   if (!("speechSynthesis" in window) || !text.trim()) return;
   // Sentence-level chunks keep the synth responsive and interruptible.
-  const sentences = text.match(/[^.!?\n]+[.!?]?/g) ?? [text];
+  //
+  // Split only where a terminator is followed by space or line end, so an
+  // identifier keeps its full stop: the old pattern broke `work.transition`
+  // into "work." and "transition on WI-7", which a screen reader renders as
+  // two sentences and a speaker reads with a pause in the middle of the one
+  // word that says what is about to happen.
+  const sentences = text.split(/(?<=[.!?])\s+|\n+/).filter((part) => part.trim());
   for (const sentence of sentences) {
     const trimmed = sentence.trim();
     if (!trimmed) continue;

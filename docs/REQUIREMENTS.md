@@ -966,8 +966,8 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 115 are delivered, 62 are implemented and
-asserted by nothing, 8 cannot be verified in this environment at all, and 16
+**201 conjuncts across 46 IDs. 116 are delivered, 62 are implemented and
+asserted by nothing, 7 cannot be verified in this environment at all, and 16
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
 before delivered. So a conjunct counted "unverifiable here" is one whose
@@ -996,11 +996,11 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +13 in the fourth pass (nine out of §6.2, three out of §6.2a, one out
+  then +14 in the fourth pass (nine out of §6.2, three out of §6.2a, two out
   of §6.2b)
 - **62 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 3
 - **16 short** = 43 − 19 + 1 arriving from §6.2b, − 9
-- **8 unverifiable** = 69 − 60 − 1
+- **7 unverifiable** = 69 − 60 − 2
 
 One bookkeeping correction, since it is the kind of thing this section exists
 to catch in others: §6.2's FR-T2 row was marked **Closed** when
@@ -1103,6 +1103,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-U14 | A combined filter is nameable, recalled in full, survives a reload as per-client state, and a refresh interval is not part of what a name means | `board.test.tsx`'s FR-U14 block (five), including `keeps the multi-valued filters intact through the round trip` and `does not let a named view change how often the board refreshes`; `backlog.test.tsx::saves a named filter set and recalls it` |
 | **FR-U17** | A claim backed by a still-running session is marked provisional, not fresh — read from the observed store itself, not from a ranking over it | `web/src/WorkItemDetail.tsx`'s "Observed evidence" panel, through the new `observations.list` binding in `vogtApi.ts`; ten tests in `workItemDetail.test.tsx`. Three states, not two: an observation whose payload does not carry the flag at all is `unverified` rather than settled, in the same words the trust badge uses, because a blank says "no opinion" when the honest answer is "nobody checked". `settlement()` reads the collector's own `provisional` flag rather than re-deriving liveness — a surface deciding for itself what "still running" means is a second copy of a rule the collector already keeps, and the two would eventually disagree. There is no work-item parameter on the operation, so the panel matches on the payload's `work_item`, which `session_outcomes.py` writes for both kinds it produces |
 | FR-U17 | Trust state is on every card and every ranked row, and an absent one reads as `unverified` rather than as blank; the aggregate says how old it is | `board.test.tsx`'s FR-U17 block (four — including `puts one on every card, so the aggregate cannot drop the awkward column`); `backlog.test.tsx::reads an absent trust state as unverified`. A blank badge says "no opinion"; the honest answer is "nobody checked" |
+| **FR-T5** | Replies are spoken in sentence chunks when the toggle is on and not when it is off; a pending action is announced in words that offer no spoken way to approve it; a new message stops the previous answer mid-sentence | `web/src/__tests__/assistant.test.tsx`'s FR-T5 block (four), driving real replies through a stubbed engine and a stubbed synth. The announcement test asserts an *absence* — no "say yes", no "yes or no" — which is FR-T2's voice clause and the one thing a device demo cannot check, since it can tell you what was said and not what was carefully left unsaid. Writing it found that the chunker split `work.transition` at its own full stop, so the one word saying what was about to happen was read as two |
 | FR-U22 | Focus moves across and within columns; `Shift`+arrow proposes a move and still collects the reason; `Enter` opens the item at its own URL; `n` opens quick-create and is announced on the board's own keyboard line | `board.test.tsx`'s two FR-U22 blocks (five), including the one asserting that an `n` typed into the move composer is not stolen by the shortcut |
 | FR-U18 | Bulk accept does not exist, and cannot arrive by accident | `tests/test_pwa.py::test_drift_is_resolved_one_proposal_at_a_time` (one call site, and no multi-select) |
 | **FR-U20** | Both legs: the live activity badge and the open-terminal control on the item, and the terminal's link back to the work item it was opened for | `workItemDetail.test.tsx`'s FR-U20 block (four) and `terminalLink.test.tsx` (four). The forward leg asserts the engine's activity is what is shown, that an unasked session reads `unknown` rather than `idle`, that the control addresses the *engine's* session id, and that a stopped session gets no control to a PTY that is gone. The return leg asserts the link, that the read includes stopped sessions because a finished run still had a subject, that a PTY Vogt did not start says nothing, and that an unreachable Vogt costs the badge and never the terminal (FR-E9). The blocker §6.2a recorded was smaller than it looked: xterm asks for `matchMedia` at mount and jsdom has none, so `Terminal.tsx` could not be mounted at all — `setup.ts` stubs it the way it already stubs `ResizeObserver` |
@@ -1240,7 +1241,7 @@ that stopped being the demo's job and became a test somebody has not written.
 
 ### 6.2b Unverifiable in this environment
 
-**Eight conjuncts, down from sixty-nine.** Not doubted — read, and believed,
+**Seven conjuncts, down from sixty-nine.** Not doubted — read, and believed,
 and unprovable here. Each row names what would settle it, because "run the
 demo" is not a plan and a list of what the demo has to show is.
 
@@ -1267,8 +1268,8 @@ a person choosing to deploy.
 | ID | The conjuncts | What would verify them |
 |---|---|---|
 | FR-M1 | The Capacitor shell loading the merged PWA, and MVP1's terminals, assistant with voice, push, and backlog/board read | An APK, built against a real `VOGT_ANDROID_SERVER_URL`, installed on a device. **The APK is no longer the missing part**: `cap sync` and Gradle have both run — locally as validation, then on a self-hosted runner, where `the Android shell assembles` passed on 2026-08-14. What it points at is `127.0.0.1:8910`, so what is missing is a build against the deployed URL and a phone to install it on |
+| FR-T5 | That a **speaker makes sound** | A device. Everything else about spoken replies moved to §6.1: whether the app asks for speech, with what text, and whether it ever offers a voice route to approving something are decided in `Assistant.tsx` and are now asserted there. A speaker was always the worst instrument for the last of those, because what is being checked is the absence of a sentence |
 | FR-M3 | The Vogt surfaces at phone width | The same APK, or a browser at 375px. jsdom loads no stylesheet, so `test_pwa.py`'s three assertions about the board's narrow-breakpoint rules remain assertions about `styles.css` as text |
-| FR-T5 | Spoken replies | A device with a speaker |
 | NFR-D11 | One stack — the two processes coming up together, under one supervisor, in one container | **The image half is settled.** `build.yml`'s `stack-image` job ran, so `docker build -f engine/Dockerfile .` is no longer hypothetical: it builds, and the step that was called the riskiest unproven one — copying uv's standalone CPython between build stages — holds, because `vogt --version` runs in the built image and could not without it. `mydevenv2-server --help` runs too, so both halves are present. The published-port claim moved to §6.1 when a test began reading the compose file. What is left is the thing neither a build nor a file can show: `entrypoint.sh` starting vogt-core beside the engine, the engine finding it on loopback, and `/readyz` reporting a core it actually reached — which needs the compose stack up (`DEPLOYMENT.md` §9.4) and `scripts/smoke_merged_stack.sh` pointed at it |
 
 ### 6.3 What this pass found that no requirement names
