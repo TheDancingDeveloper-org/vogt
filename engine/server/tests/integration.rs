@@ -1,7 +1,11 @@
 //! End-to-end integration tests: start the real Axum server on an OS-assigned
 //! port, talk to it over HTTP + WebSocket the same way a client would.
 
-use std::{os::unix::fs::PermissionsExt, time::Duration};
+use std::{
+    os::unix::fs::PermissionsExt,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
@@ -2982,4 +2986,388 @@ async fn two_clients_watch_one_session_at_once() {
         .delete(format!("{base}/api/sessions/{id}"))
         .send()
         .await;
+}
+
+// ── FR-E2: the activity state reaches the server-wide event stream ────────
+
+/// Read the SSE stream until an event satisfies `want`, or give up.
+///
+/// SSE frames are `data: <json>` lines; keep-alive comments start with `:`
+/// and are skipped. A chunk boundary can fall anywhere, so the partial line
+/// is carried across reads rather than assumed to end on one.
+async fn event_matching(
+    stream: &mut (impl futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Unpin),
+    want: impl Fn(&Value) -> bool,
+) -> Value {
+    let mut partial = String::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let chunk = stream
+                .next()
+                .await
+                .expect("the event stream ended")
+                .expect("the event stream failed");
+            partial.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(idx) = partial.find('\n') {
+                let line: String = partial.drain(..=idx).collect();
+                let Some(raw) = line.trim_end().strip_prefix("data: ") else {
+                    continue;
+                };
+                let Ok(event) = serde_json::from_str::<Value>(raw) else {
+                    continue;
+                };
+                if want(&event) {
+                    return event;
+                }
+            }
+        }
+    })
+    .await
+    .expect("no matching event arrived on /api/events")
+}
+
+#[tokio::test]
+async fn the_activity_state_is_announced_on_the_server_wide_event_stream() {
+    // FR-E2 has two halves — the state is *derived from output heuristics*,
+    // and it is *published on the server-wide SSE stream*. `activity.rs` owns
+    // the first and asserts it four ways. The second was asserted by nothing:
+    // the one activity test in this file polls `GET /api/sessions/{id}`, and
+    // a bus publish that stopped happening would leave that test green and
+    // every client on the stream showing a stale badge until it refreshed.
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // Subscribe first. The stream is a live broadcast rather than a log, so a
+    // reader that opens after the session has already spoken sees nothing and
+    // would fail this test for the wrong reason.
+    let stream_res = client
+        .get(format!("{base}/api/events"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream_res.status(), StatusCode::OK);
+    assert_eq!(
+        stream_res
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.split(';').next().unwrap_or(value).trim().to_string()),
+        Some("text/event-stream".to_string())
+    );
+    let mut stream = stream_res.bytes_stream();
+
+    // A prompt the heuristics recognise, then a wait — so the state the
+    // stream carries is one `activity.rs` derived from output rather than a
+    // lifecycle state every session passes through.
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "sse-activity",
+            "command": ["/bin/sh", "-lc", "printf 'Continue? [y/N]'; sleep 30"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let want_id = id.clone();
+    let event = event_matching(&mut stream, move |event| {
+        event["type"] == "activity" && event["id"] == want_id.as_str()
+    })
+    .await;
+    assert_eq!(
+        event["state"], "waiting-for-input",
+        "the first activity this session announced was not the state its \
+         output implies: {event}"
+    );
+
+    // And the stream and the polled detail are the same fact, not two. A
+    // stream that announced a state the session does not hold would be worse
+    // than one that announced nothing.
+    let detail: Value = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["summary"]["activity"], event["state"]);
+
+    // Let go of the stream before the session goes: the handler holds a
+    // subscriber until its client leaves.
+    drop(stream);
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+// ── FR-M2: the notifications that are worth a phone interruption ──────────
+
+/// Deliveries a stand-in push service received, by the path they arrived on.
+type PushLog = Arc<Mutex<Vec<String>>>;
+
+/// A stand-in push service — an HTTP server that records the path of every
+/// delivery, and nothing else.
+///
+/// It records the path because it cannot record anything better: a Web Push
+/// body is encrypted to the subscription's key, so what a delivery *says* is
+/// unreadable from here by design. Each subscription in the tests below
+/// therefore gets an endpoint of its own and preferences that admit exactly
+/// one `NotificationKind`, which makes the path that received a POST the kind
+/// that was routed — and makes the endpoint that stayed empty an assertion
+/// that the wrong kind was not.
+async fn start_stand_in_push_service() -> (PushLog, String) {
+    use axum::{extract::State, routing::post, Router};
+
+    async fn record(State(log): State<PushLog>, uri: axum::http::Uri) -> &'static str {
+        log.lock().unwrap().push(uri.path().to_string());
+        ""
+    }
+
+    let log: PushLog = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/{*rest}", post(record))
+        .with_state(Arc::clone(&log));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (log, format!("http://{addr}"))
+}
+
+/// A real P-256 subscription keypair. The engine encrypts to it for real —
+/// an invalid key would fail inside `web-push` and never reach the wire, so
+/// a test with a made-up one would be asserting that nothing was sent.
+fn web_push_keys() -> (String, String) {
+    let rng = ring::rand::SystemRandom::new();
+    let private =
+        ring::agreement::EphemeralPrivateKey::generate(&ring::agreement::ECDH_P256, &rng).unwrap();
+    let public = private.compute_public_key().unwrap();
+    let mut auth = [0u8; 16];
+    ring::rand::SecureRandom::fill(&rng, &mut auth).unwrap();
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    (b64.encode(public.as_ref()), b64.encode(auth))
+}
+
+/// Preferences that admit one kind and refuse the other five. Written out in
+/// full rather than partially, because every one of these fields defaults to
+/// the value FR-M2 gives it and an omitted `errored` would silently be `true`.
+fn admitting_only(kind: &str) -> Value {
+    let mut prefs = json!({
+        "waiting_for_input": false,
+        "errored": false,
+        "idle_stall": false,
+        "agent_task_started": false,
+        "agent_task_notify": false,
+        "drift": false,
+    });
+    prefs[kind] = json!(true);
+    prefs
+}
+
+/// Register a device that will accept exactly one kind of interruption.
+async fn subscribe_for_kind(client: &reqwest::Client, base: &str, push_base: &str, kind: &str) {
+    let (p256dh, auth_secret) = web_push_keys();
+    let subscribed: Value = client
+        .post(format!("{base}/api/push/subscribe"))
+        .json(&json!({
+            "kind": "web-push",
+            "endpoint": format!("{push_base}/{kind}"),
+            "p256dh": p256dh,
+            "auth": auth_secret,
+            "label": kind,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = subscribed["id"].as_str().expect("a subscription id");
+    let updated: Value = client
+        .post(format!("{base}/api/push/update"))
+        .json(&json!({ "id": id, "prefs": admitting_only(kind) }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(updated["ok"], true, "{updated}");
+    assert_eq!(updated["prefs"][kind], true, "{updated}");
+}
+
+/// Wait for a delivery on `path`, and report what the whole log holds if none
+/// arrives — a bare timeout would say only that the wait ended.
+async fn delivered_to(log: &PushLog, path: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if log.lock().unwrap().iter().any(|seen| seen == path) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "nothing was pushed to {path}; the service saw {:?}",
+            log.lock().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn nothing_delivered_to(log: &PushLog, path: &str) {
+    let seen = log.lock().unwrap();
+    assert!(
+        !seen.iter().any(|got| got == path),
+        "a notification was routed to {path}, which asked for a different \
+         kind entirely; the service saw {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_session_that_starts_waiting_for_input_wakes_a_phone() {
+    // FR-M2's headline case, and the one the drift watcher's unit tests do
+    // not touch: `spawn_activity_watcher` reads the bus and turns a state
+    // change into a push. Driven end to end because the routing is the
+    // requirement — a watcher that stopped subscribing, a `notify` that lost
+    // its kind, or a preference that stopped meaning what it says would each
+    // leave a phone silent, and none of them is visible from inside the
+    // heuristic that produced the state.
+    let (log, push_base) = start_stand_in_push_service().await;
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    subscribe_for_kind(&client, &base, &push_base, "waiting_for_input").await;
+    subscribe_for_kind(&client, &base, &push_base, "errored").await;
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "asks-a-question",
+            "command": ["/bin/sh", "-lc", "printf 'Continue? [y/N]'; sleep 30"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    delivered_to(&log, "/waiting_for_input").await;
+    // The session is alive and waiting, so nothing has errored — and the
+    // device that only asked about errors must not have been woken.
+    nothing_delivered_to(&log, "/errored");
+
+    // Killing it here would error the session and push again, so every
+    // assertion is made before the cleanup rather than after it.
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn a_session_that_exits_badly_wakes_a_phone() {
+    let (log, push_base) = start_stand_in_push_service().await;
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    subscribe_for_kind(&client, &base, &push_base, "waiting_for_input").await;
+    subscribe_for_kind(&client, &base, &push_base, "errored").await;
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "falls-over",
+            "command": ["/bin/sh", "-lc", "printf 'it went wrong\\n'; exit 3"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    delivered_to(&log, "/errored").await;
+    // Nothing about that output looks like a prompt, so the other device
+    // stays quiet: the two are routed by the state a session reached, not by
+    // the fact that something happened to it.
+    nothing_delivered_to(&log, "/waiting_for_input");
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn the_agent_task_notify_hook_wakes_a_phone() {
+    // The third of FR-M2's named events, and the only one that comes from a
+    // task rather than from a session's state. A run's finding is asserted
+    // elsewhere; that the finding also *interrupts somebody* is this, and it
+    // is the half an unattended task exists for.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+
+    let (log, push_base) = start_stand_in_push_service().await;
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    subscribe_for_kind(&client, &base, &push_base, "agent_task_notify").await;
+    subscribe_for_kind(&client, &base, &push_base, "waiting_for_input").await;
+
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "Nightly sweep",
+            "prompt": "Look for unresolved internal references.",
+            "schedule": { "kind": "manual" },
+            // The sleep is not decoration: the watcher subscribes just after
+            // the session is created, and a `printf` that finished first
+            // would be a race rather than a test.
+            "command": ["/bin/sh", "-lc",
+                "sleep 0.3; printf 'MYDEVENV2_NOTIFY: two references are dangling\\n'"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap().to_string();
+
+    let run = client
+        .post(format!("{base}/api/agent-tasks/{task_id}/run"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(run.status(), StatusCode::OK);
+
+    delivered_to(&log, "/agent_task_notify").await;
+    // The task's session never asked a question, so the device watching for
+    // that was not woken — the hook is routed as its own kind.
+    nothing_delivered_to(&log, "/waiting_for_input");
 }
