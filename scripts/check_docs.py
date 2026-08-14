@@ -53,6 +53,14 @@ def broken_links(path: Path) -> list[str]:
     problems: list[str] = []
     for match in LINK.finditer(path.read_text(encoding="utf-8")):
         target = match.group(1)
+        if target.startswith("/"):
+            # An absolute filesystem path is not a relative link, and checking
+            # whether it exists asks about *this* machine. One such link —
+            # `/home/sprooty/Working/AGENTS.md` — passed here for a day and
+            # failed on the first CI run, because the estate guide is outside
+            # this repository and the runner has no such directory.
+            problems.append(f"{target} (an absolute path is not a link)")
+            continue
         if target.startswith(EXTERNAL) or target.startswith("#"):
             continue
         relative, _, _ = target.partition("#")

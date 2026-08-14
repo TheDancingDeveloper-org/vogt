@@ -9,7 +9,8 @@ old relative paths is a document that lies quietly.
 
 Above this file sits [`AGENTS.md`](../AGENTS.md) at the repository root, which
 owns the Python core and the repo-wide rules, and
-[`/home/sprooty/Working/AGENTS.md`](/home/sprooty/Working/AGENTS.md), which owns
+`/home/sprooty/Working/AGENTS.md` — not linked, because it is a path on one
+machine and a link that resolves nowhere else is worse than a name — which owns
 the estate. There is no `CLAUDE.md` anywhere in this repository — the merge did
 not carry MyDevEnv2's pointer file across, and the estate's `~/Working/CLAUDE.md`
 exists only to redirect to `AGENTS.md`.
