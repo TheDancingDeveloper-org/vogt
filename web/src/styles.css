@@ -3438,6 +3438,30 @@ textarea {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* FR-M3, in the engine's own idiom at the engine's own breakpoint: shrink the
+   container padding, and turn the rows that are only rows because there was
+   room into columns. The work item's two panes already stacked at 900px
+   above; what is left at phone width is chrome that was assuming a line
+   wide enough for a heading and its buttons side by side. */
+@media (max-width: 768px) {
+  .wid-view {
+    padding: 12px;
+  }
+
+  .wid-header,
+  .wid-form-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  /* A write's buttons stop sitting beside the reason box and sit under it,
+     full width. The reason is the point of the form (FR-W1) and it is what
+     should get the line. */
+  .wid-form-actions button {
+    width: 100%;
+  }
+}
 .wid-main,
 .wid-aside {
   display: flex;
@@ -4354,15 +4378,113 @@ textarea {
   }
 }
 
-@media (max-width: 600px) {
+/* -- FR-M3: below the narrow breakpoint the board is a list ---------------
+ *
+ * 768px, which is the width the engine's own tabs collapse at — the drawer
+ * goes off-canvas, the tab strip becomes a sheet, and the git and history
+ * panes stop being two columns. A board that kept its columns for another
+ * 130px would be the one surface disagreeing with the shell around it, and a
+ * second breakpoint is a second thing to keep true.
+ *
+ * The mechanism is worth stating, because it looks like less than it is.
+ * `.board-row` carries `grid-template-columns` as an *inline* style computed
+ * from the loaded workflow states, and no stylesheet can outrank that. It
+ * does not have to: `display: block` makes the property inert, so the cells
+ * stop being grid tracks and stack in source order without anything here
+ * fighting the value Board.tsx sets. The column head row is then hidden and
+ * each cell grows its own heading out of `data-state` / `data-wip`, which
+ * `Board.tsx` puts there for exactly this rule.
+ *
+ * What this deliberately does not do is drop anything. Every state still
+ * appears, in workflow order, including the empty ones — a list that hid
+ * empty columns would quietly stop being a picture of the workflow, and
+ * "there is nothing in review" is a thing a reader came to find out. Empty
+ * cells collapse to a heading and a line instead.
+ */
+@media (max-width: 768px) {
   .vogt-surface.board {
     padding: 10px;
   }
+
   .board-toolbar {
     grid-template-columns: minmax(0, 1fr);
   }
+
   .board-field--wide {
     grid-column: span 1;
+  }
+
+  /* The horizontal scroll the column layout needed, undone. `min-content` on
+     these three is what made the board wider than the phone. */
+  .board-grid,
+  .board-headrow,
+  .board-row {
+    min-width: 0;
+  }
+
+  .board-scroll {
+    overflow-x: hidden;
+  }
+
+  /* The column heads move onto the cells; see `.board-cell::before`. */
+  .board-headrow {
+    display: none;
+  }
+
+  .board-row {
+    display: block;
+    padding-bottom: 0;
+  }
+
+  .board-cell {
+    min-height: 0;
+    margin-bottom: 8px;
+    border-style: solid;
+    border-color: var(--bd);
+  }
+
+  /* The heading the hidden head row used to carry. `attr()` is enough here
+     because both halves are plain text on the element already. */
+  .board-cell::before {
+    content: attr(data-state) " · " attr(data-wip);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--fg-muted);
+  }
+
+  /* A collapsed column keeps its heading and its count and says nothing
+     more, which is all it can honestly do: the cards are not in the DOM to
+     reveal — `Board.tsx` renders a count *instead of* them — and the toggle
+     that would bring them back lives in the head row this rule hid. So it
+     reads as a named state with a number rather than as an empty one, and
+     the difference between "nothing here" and "not showing you" survives.
+     Collapsing is a desk-width act; nothing on a phone can enter this
+     state, only inherit it. */
+  .board-cell.collapsed {
+    min-height: 0;
+    padding: 8px;
+    align-items: stretch;
+    flex-direction: row;
+    gap: 6px;
+  }
+
+  .board-cell.collapsed .board-cell-collapsed::after {
+    content: " hidden — widen the window to open this column";
+  }
+
+  /* Lane heads stop needing to survive a horizontal scroll. */
+  .board-lanehead {
+    position: static;
+  }
+}
+
+/* Keyboard hints on a device with no keyboard. The engine hides secondary
+   chrome the same way; gated on the pointer rather than the width so a narrow
+   desktop window keeps its shortcuts. */
+@media (pointer: coarse) {
+  .board-keys {
+    display: none;
   }
 }
 
@@ -4922,6 +5044,57 @@ textarea {
   .vogt-backlog-cell-project,
   .vogt-backlog-cell-updated {
     display: none;
+  }
+}
+
+/* FR-M3 at the engine's breakpoint. The row keeps five columns and loses
+   `state`, and the choice of which five is the whole content of this rule:
+   ref and title say which item, score says why it is here at all — this is
+   the *ranked* backlog — and trust is never dropped, because FR-U15 exists
+   to stop a blank cell reading as "no opinion" and hiding the column would
+   do the same thing more thoroughly. The select box stays so bulk actions
+   remain possible.
+
+   `--vogt-row-h` is deliberately untouched: `Backlog.tsx` computes the
+   virtualizer's window from `ROW_HEIGHT`, and a row that is 40px to the
+   scroller and something else on screen renders a list that skips and
+   repeats. Phone-width work here is column count, never row height. */
+@media (max-width: 768px) {
+  .vogt-backlog {
+    padding: 10px;
+  }
+
+  .vogt-backlog-header,
+  .vogt-backlog-create-actions,
+  .vogt-backlog-bulk-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .vogt-backlog-filter-grid,
+  .vogt-backlog-create-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vogt-backlog-field-wide {
+    grid-column: span 1;
+  }
+
+  .vogt-backlog-headrow,
+  .vogt-backlog-row {
+    grid-template-columns: 24px 76px minmax(0, 1fr) 58px 60px;
+    gap: 6px;
+    padding: 0 8px;
+  }
+
+  .vogt-backlog-cell-state {
+    display: none;
+  }
+
+  /* The bulk-action fields were given minimums that assume a desk. */
+  .vogt-backlog-bulk-row .vogt-backlog-field,
+  .vogt-backlog-bulk-row .vogt-backlog-field-wide {
+    min-width: 0;
   }
 }
 
@@ -5685,6 +5858,27 @@ textarea {
   }
 }
 
+/* FR-M3. The 900px block above already stacked the two sides of a drift
+   disagreement, which is the one thing on this surface that must never be
+   shrunk instead (FR-U18) — so what is left here is the engine's ordinary
+   phone pass: less padding, and rows that were rows only because there was
+   room. The breadcrumbs wrap rather than scroll, because a crumb trail you
+   have to drag sideways is one nobody reads to the end of. */
+@media (max-width: 768px) {
+  .vogt-projects {
+    padding: 10px;
+  }
+
+  .vogt-projects-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .vogt-projects-crumbs {
+    flex-wrap: wrap;
+  }
+}
+
 /* -- Vogt: the audit browser and the notification inbox (FR-U19, FR-N3) ----
  *
  * Prefixed `vab-` for the reason the backlog block gives: the Vogt surfaces
@@ -6071,5 +6265,35 @@ textarea {
 
   .vab-when {
     min-width: 0;
+  }
+}
+
+/* FR-M3. The record rows need nothing: they are variable-height by design so
+   the reason a human typed is never clipped, and that design is already the
+   right one on a phone — the reason is the reason this surface exists, and it
+   wraps rather than truncating at any width. So this is the filter chrome and
+   the header, and nothing touches `.vab-reason`. */
+@media (max-width: 768px) {
+  .vab {
+    padding: 10px;
+  }
+
+  .vab-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  /* `.vab-record-head` is left alone on purpose. It already wraps, and its
+     parts are the filter chips that isolate a record — stacking them would
+     turn four short chips into four full-width rows above every entry and
+     push the reason off the screen. Wrapping is the better answer here and
+     it is already the rule. */
+
+  .vab-filter-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vab-pager {
+    flex-wrap: wrap;
   }
 }

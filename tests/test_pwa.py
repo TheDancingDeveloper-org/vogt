@@ -445,3 +445,111 @@ def test_no_vogt_surface_opens_its_own_door() -> None:
             f"{name} calls fetch directly, so its URL is not in the route "
             "table the registry check reads"
         )
+
+
+# -- FR-M3: the surfaces are usable at phone widths ------------------------
+
+STYLES = WEB_SRC / "styles.css"
+
+#: The width the engine's own tabs collapse at — the drawer goes off-canvas,
+#: the tab strip becomes a sheet, git and history stop being two columns. The
+#: Vogt surfaces join it rather than keeping a breakpoint of their own,
+#: because two narrow breakpoints is two things to keep true and the shell
+#: would visibly disagree with the surface inside it between them.
+NARROW_BREAKPOINT = "@media (max-width: 768px)"
+
+
+def narrow_blocks() -> str:
+    """Every phone-width rule in the stylesheet, concatenated.
+
+    Brace-counted rather than regexed to a closing `}`: these blocks contain
+    nested rules, and a non-greedy match would stop at the first one.
+    """
+    css = STYLES.read_text(encoding="utf-8")
+    out: list[str] = []
+    for match in re.finditer(re.escape(NARROW_BREAKPOINT) + r"\s*\{", css):
+        i = match.end()
+        depth = 1
+        while depth and i < len(css):
+            depth += {"{": 1, "}": -1}.get(css[i], 0)
+            i += 1
+        out.append(css[match.end() : i])
+    assert out, "the stylesheet has no phone-width rules at all"
+    return "\n".join(out)
+
+
+def test_the_board_is_a_list_below_the_narrow_breakpoint() -> None:
+    """FR-M3 names this one explicitly, so it is asserted explicitly.
+
+    The board is a CSS grid whose `grid-template-columns` is an *inline*
+    style computed from the workflow states, which no stylesheet can outrank.
+    What makes it a list is therefore `display: block` on the row — which
+    makes the inline property inert — plus hiding the column head row. Both
+    are load-bearing and neither is obvious, which is exactly the kind of
+    rule that gets "tidied" away.
+    """
+    narrow = narrow_blocks()
+    assert re.search(r"\.board-row\s*\{[^}]*display:\s*block", narrow), (
+        "the board still lays its rows out as grid tracks at phone width, so "
+        "it is columns and not a list (FR-M3)"
+    )
+    assert re.search(r"\.board-headrow\s*\{[^}]*display:\s*none", narrow), (
+        "the column head row is still drawn, but a list has no columns for "
+        "it to head"
+    )
+    assert "attr(data-state)" in narrow, (
+        "nothing carries the state name onto the cells, so a list of cards "
+        "no longer says which column each group is"
+    )
+
+
+def test_the_board_cells_carry_what_the_hidden_head_row_said() -> None:
+    """The other half of the rule above, in the file that has to supply it."""
+    text = source(WEB_SRC / "Board.tsx")
+    assert "data-state=" in text, (
+        "styles.css grows the list's headings out of data-state, and Board "
+        "no longer sets it"
+    )
+
+
+def test_every_vogt_surface_has_a_phone_width_pass() -> None:
+    """FR-M3 covers all five, not only the board.
+
+    A surface with no rule at the narrow breakpoint has not been considered
+    at phone width — which is not proof it is unusable, but it is the
+    strongest thing checkable without a browser, and the five were written
+    without one.
+    """
+    narrow = narrow_blocks()
+    prefixes = {
+        "Board": ".board-",
+        "Backlog": ".vogt-backlog",
+        "WorkItemDetail": ".wid-",
+        "Projects": ".vogt-projects",
+        "AuditBrowser": ".vab",
+    }
+    for surface, prefix in prefixes.items():
+        assert prefix in narrow, (
+            f"{surface} has no rule at {NARROW_BREAKPOINT}, so nobody has "
+            "looked at it on a phone"
+        )
+
+
+def test_the_vogt_surfaces_share_the_engine_s_narrow_breakpoint() -> None:
+    """One phone width for the whole shell.
+
+    The engine's tabs collapse at 768px. A Vogt surface that collapsed at its
+    own width would leave a band where the drawer is a slide-in sheet and the
+    board is still six columns wide.
+    """
+    css = STYLES.read_text(encoding="utf-8")
+    widths = set(re.findall(r"@media \(max-width:\s*(\d+)px\)", css))
+    assert "768" in widths, "the engine's own phone breakpoint has moved"
+    # 900 and 1024 are the intermediate steps that collapse a two-pane split
+    # before phone width; anything narrower than 768 would be a third phone
+    # breakpoint, which is the thing this guards.
+    narrower = {w for w in widths if int(w) < 768}
+    assert not narrower, (
+        f"a second phone breakpoint appeared at {sorted(narrower)}px; the "
+        "shell has one, and it is 768"
+    )
