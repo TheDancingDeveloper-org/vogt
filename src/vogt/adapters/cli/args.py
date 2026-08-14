@@ -80,6 +80,22 @@ def add_model_arguments(
     for name, field in model.model_fields.items():
         spec = spec_for(name, field)
         if spec.is_bool:
+            # A field already phrased as a negative — `no_auth` — has no
+            # sensible `--no-no-auth`, and argparse says so: since 3.13,
+            # `BooleanOptionalAction` raises `ValueError` on an option name
+            # that starts with `--no-`, at parser-construction time. That is
+            # every command, not just the one flag, so on a new enough
+            # interpreter the CLI did not run at all. Such a field takes the
+            # plain switch it always meant.
+            if spec.flag.startswith("--no-"):
+                parser.add_argument(
+                    spec.flag,
+                    dest=spec.dest,
+                    action="store_true",
+                    default=None,
+                    help=spec.help_text or None,
+                )
+                continue
             parser.add_argument(
                 spec.flag,
                 dest=spec.dest,
