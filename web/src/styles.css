@@ -3697,6 +3697,64 @@ textarea {
   flex-wrap: wrap;
   gap: 6px;
 }
+
+/* Observed evidence (FR-O2, FR-U17). The badge is the whole point of the
+   panel: `provisional` is a claim still in flight and must not be able to be
+   mistaken for a settled one, so it takes the running colour and a dashed
+   edge rather than differing by a word alone. `unverified` is the absent
+   case, and it is a *state* — never a blank cell. */
+.wid-observations {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wid-observation {
+  border: 1px solid var(--bd);
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wid-observation--provisional {
+  border-left-color: var(--activity-running);
+}
+.wid-observation--settled {
+  border-left-color: var(--activity-done);
+}
+.wid-observation--unverified {
+  border-left-color: var(--accent);
+  border-left-style: dashed;
+}
+.wid-settlement {
+  border: 1px solid var(--bd-strong);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.wid-settlement--provisional {
+  color: var(--activity-running);
+  border-color: var(--activity-running);
+  border-style: dashed;
+}
+.wid-settlement--settled {
+  color: var(--activity-done);
+  border-color: var(--activity-done);
+}
+.wid-settlement--unverified {
+  color: var(--accent);
+  border-color: var(--accent);
+  border-style: dashed;
+}
 .wid-missing {
   display: flex;
   flex-direction: column;

@@ -7,7 +7,15 @@
 import { describe, expect, it } from "vitest";
 import { fireEvent, waitFor } from "@solidjs/testing-library";
 import WorkItemDetail from "../WorkItemDetail";
-import { fakeVogt, held, mountAt, refusal, unavailable, workItem } from "./harness";
+import {
+  fakeVogt,
+  held,
+  mountAt,
+  observation,
+  refusal,
+  unavailable,
+  workItem,
+} from "./harness";
 
 function detail(itemRef = "WI-1") {
   return mountAt(`/w/${itemRef}`, `/w/${itemRef}`, () => (
@@ -34,6 +42,20 @@ function field(form: HTMLElement, label: string): HTMLInputElement | HTMLSelectE
   );
   if (!control) throw new Error(`the editor has no ${label} field`);
   return control;
+}
+
+/** The observed-evidence panel, or a failure that says it is missing. */
+function observed(container: HTMLElement): HTMLElement {
+  const found = container.querySelector<HTMLElement>(".wid-observed");
+  if (!found) throw new Error("the item page has no observed-evidence panel");
+  return found;
+}
+
+/** The badge words the panel put on each observation, in order. */
+function settlements(container: HTMLElement): string[] {
+  return [...observed(container).querySelectorAll(".wid-settlement")].map(
+    (node) => node.textContent ?? "",
+  );
 }
 
 async function openEditor(container: HTMLElement): Promise<HTMLElement> {
@@ -252,6 +274,213 @@ describe("FR-U12 — an inline edit renders optimistically and the server decide
     expect(submit.disabled).toBe(true);
     fireEvent.submit(form.querySelector("form")!);
     expect(vogt.matching("POST /work/update")).toHaveLength(0);
+  });
+});
+
+// FR-U17's second clause, which §6.2 recorded as newly checkable and not met:
+// "a claim backed by a still-running session is marked provisional, not
+// fresh". `session_outcomes.py` writes the judgement into the evidence and
+// `tests/test_session_outcomes.py` asserts it is written; until this panel
+// existed nothing read it back, so the rule had nowhere to be kept and
+// nowhere to be broken. These are what stops it going back to that.
+
+describe("FR-U17 — observed evidence says whether it has settled", () => {
+  it("asks the observed store, scoped to this item's project", async () => {
+    const vogt = fakeVogt();
+    detail();
+    await waitFor(() => expect(vogt.matching("GET /observations")).toHaveLength(1));
+
+    const asked = vogt.matching("GET /observations")[0]!;
+    expect(asked.query.get("project")).toBe("alpha");
+    expect(asked.query.get("latest_only")).toBe("true");
+  });
+
+  it("marks a claim backed by a still-running session provisional, not fresh", async () => {
+    fakeVogt({
+      "GET /observations": {
+        body: {
+          observations: [
+            observation(
+              { id: "01JLIVE", subject_key: "session:01JLIVE" },
+              // What the collector writes for a session that has not
+              // finished: running, provisional, and no exit code at all.
+              { state: "running", provisional: true, exit_code: undefined },
+            ),
+          ],
+          total: 1,
+        },
+      },
+    });
+    const { container } = detail();
+
+    await waitFor(() => expect(settlements(container)).toEqual(["provisional"]));
+    const panel = observed(container);
+    // The distinction is carried by a class, not only by a word, so it is
+    // visible at a glance and not only to a reader of the sentence.
+    expect(panel.querySelector(".wid-observation--provisional")).toBeTruthy();
+    expect(panel.querySelector(".wid-observation--settled")).toBeNull();
+    expect(panel.querySelector(".wid-freshness--provisional")).toBeTruthy();
+    // And it says what provisional means, rather than leaving it a label.
+    expect(panel.textContent).toContain("had not finished when it was observed");
+    expect(panel.textContent).toContain("no exit code — it had not exited");
+  });
+
+  it("does not call a finished session's outcome provisional", async () => {
+    fakeVogt({
+      "GET /observations": {
+        body: { observations: [observation()], total: 1 },
+      },
+    });
+    const { container } = detail();
+
+    await waitFor(() => expect(settlements(container)).toEqual(["settled"]));
+    const panel = observed(container);
+    expect(panel.querySelector(".wid-observation--provisional")).toBeNull();
+    expect(panel.querySelector(".wid-freshness--provisional")).toBeNull();
+    expect(panel.textContent).toContain("exit 0");
+  });
+
+  it("reads evidence that does not say as unverified, never as blank", async () => {
+    // An older sweep, or a collector whose kind carries no such flag. The
+    // honest answer is "nobody checked", and a blank badge would say "no
+    // opinion" — the rule the board and the backlog already keep.
+    fakeVogt({
+      "GET /observations": {
+        body: {
+          observations: [
+            observation(
+              { id: "01JQUIET", kind: "marker", collector: "markers" },
+              { provisional: undefined, state: undefined, exit_code: undefined },
+            ),
+          ],
+          total: 1,
+        },
+      },
+    });
+    const { container } = detail();
+
+    await waitFor(() => expect(settlements(container)).toEqual(["unverified"]));
+    const panel = observed(container);
+    expect(panel.querySelector(".wid-observation--unverified")).toBeTruthy();
+    expect(panel.textContent).toContain(
+      "does not say whether what produced it had finished",
+    );
+    // Not settled by omission: "unknown" and "settled" are different answers.
+    expect(settlements(container)).not.toContain("settled");
+  });
+
+  it("keeps one provisional row visible among settled ones", async () => {
+    fakeVogt({
+      "GET /observations": {
+        body: {
+          observations: [
+            observation({ id: "01JA", subject_key: "session:01JA" }),
+            observation(
+              { id: "01JB", subject_key: "session:01JB" },
+              { state: "running", provisional: true, exit_code: undefined },
+            ),
+          ],
+          total: 2,
+        },
+      },
+    });
+    const { container } = detail();
+
+    await waitFor(() =>
+      expect(settlements(container)).toEqual(["settled", "provisional"]),
+    );
+    // One mid-flight claim makes the whole panel provisional. Averaging it
+    // away would be the panel deciding the exception does not matter.
+    expect(observed(container).querySelector(".wid-freshness--provisional")).toBeTruthy();
+  });
+
+  it("shows only the evidence that names this item", async () => {
+    fakeVogt({
+      "GET /observations": {
+        body: {
+          observations: [
+            observation({ id: "01JMINE", subject_key: "session:01JMINE" }),
+            observation(
+              { id: "01JTHEIRS", subject_key: "session:01JTHEIRS" },
+              { work_item: "WI-9", state: "running", provisional: true },
+            ),
+          ],
+          total: 2,
+        },
+      },
+    });
+    const { container } = detail();
+
+    await waitFor(() => expect(settlements(container)).toEqual(["settled"]));
+    // Another item's still-running session must not make this item's evidence
+    // read as provisional, which is the same lie in the other direction.
+    expect(observed(container).textContent).not.toContain("session:01JTHEIRS");
+    expect(observed(container).querySelector(".wid-freshness--provisional")).toBeNull();
+  });
+
+  it("says nothing has been observed rather than showing an empty panel", async () => {
+    fakeVogt();
+    const { container } = detail();
+
+    await waitFor(() => expect(observed(container).querySelector(".wid-absent")).toBeTruthy());
+    expect(observed(container).textContent).toContain(
+      "No collector has recorded anything about WI-1",
+    );
+    expect(observed(container).textContent).toContain('"nobody has looked"');
+    expect(settlements(container)).toHaveLength(0);
+  });
+
+  it("says the list is cut when the store had more than it asked for", async () => {
+    // `total` equal to the limit means the store had at least that many. A
+    // panel that showed the cut list as though it were all there is would be
+    // claiming completeness it cannot have.
+    fakeVogt({
+      "GET /observations": {
+        body: { observations: [observation()], total: 200 },
+      },
+    });
+    const { container } = detail();
+
+    await waitFor(() => expect(settlements(container)).toEqual(["settled"]));
+    expect(observed(container).textContent).toContain("a cut list rather than all");
+  });
+});
+
+describe("FR-U21 — the observed panel tells an outage from no evidence", () => {
+  it("renders Vogt's own reason instead of an empty evidence panel", async () => {
+    const NO_CORE = "vogt-core is not configured for this front door";
+    fakeVogt({ "GET /observations": unavailable(NO_CORE) });
+    const { container } = detail();
+
+    await waitFor(() =>
+      expect(observed(container).querySelector(".wid-failure")).toBeTruthy(),
+    );
+    const panel = observed(container);
+    expect(panel.textContent).toContain("Vogt cannot be reached");
+    expect(panel.textContent).toContain(NO_CORE);
+    expect(panel.textContent).toContain("not because nothing has been observed");
+    // Nothing is rendered as data, and nothing claims the item has no evidence.
+    expect(settlements(container)).toHaveLength(0);
+    expect(panel.querySelector(".wid-absent")).toBeNull();
+    // The rest of the page is still the page: this is one panel's outage.
+    expect(container.querySelector(".wid-outage")).toBeNull();
+    expect(container.textContent).toContain("Collected evidence");
+  });
+
+  it("calls a refused read a failed read, not an outage", async () => {
+    fakeVogt({
+      "GET /observations": refusal(500, "observations.list: the store is locked"),
+    });
+    const { container } = detail();
+
+    await waitFor(() =>
+      expect(observed(container).querySelector(".wid-failure")).toBeTruthy(),
+    );
+    const panel = observed(container);
+    expect(panel.textContent).toContain("The observed evidence could not be read");
+    expect(panel.textContent).toContain("observations.list: the store is locked");
+    expect(panel.textContent).not.toContain("Vogt cannot be reached");
+    expect(settlements(container)).toHaveLength(0);
   });
 });
 

@@ -165,6 +165,44 @@ export function rankedEntry(over: Record<string, unknown> = {}): Record<string, 
   };
 }
 
+/** One row of the observed store, as `observations.list` returns it.
+ *
+ *  The default is a *finished* session's outcome, so a test that wants the
+ *  provisional case has to say so — the same reason the default estate is not
+ *  empty. `payload.work_item` is how an observation is tied back to an item:
+ *  the operation has no work-item parameter, because an observation is filed
+ *  under its own subject key. */
+export function observation(
+  over: Record<string, unknown> = {},
+  payload: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: "01JOBS1",
+    sweep_id: "01JSWEEP",
+    collector: "session-outcomes",
+    kind: "session.outcome",
+    project_id: "01JPROJECT",
+    subject_key: "session:01JSESSION",
+    content_digest: "sha256:abc",
+    source_url: null,
+    promoted: false,
+    observed_at: "2026-08-01T00:00:00Z",
+    ...over,
+    payload: {
+      session: "01JSESSION",
+      engine_session_id: "eng-1",
+      project: "alpha",
+      work_item: "WI-1",
+      cwd: "/srv/alpha",
+      started_at: "2026-08-01T00:00:00Z",
+      state: "finished",
+      provisional: false,
+      exit_code: 0,
+      ...payload,
+    },
+  };
+}
+
 export function freshness(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     status: "fresh",
@@ -203,6 +241,7 @@ function defaults(): Routes {
       body: { project: "alpha", status: "compliant", contract_version: "1", failing: [] },
     },
     "GET /audit": { body: { records: [] } },
+    "GET /observations": { body: { observations: [], total: 0 } },
     "GET /sessions": { body: { sessions: [], engine: null } },
     "GET /notifications": { body: { notifications: [], unread: 0, freshness: freshness() } },
     "GET /status": { body: { ok: true } },

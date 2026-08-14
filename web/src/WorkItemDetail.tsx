@@ -10,7 +10,10 @@
 //   2. **Not swept is not empty.** Freshness is rendered even when it is
 //      fine, so that "nothing has looked yet" and "there is nothing" stop
 //      looking alike — and a claim backed by a session that is *still
-//      running* is marked provisional rather than fresh (FR-U17).
+//      running* is marked provisional rather than fresh (FR-U17). That rule
+//      is about evidence, so it is kept where the evidence is: the "Observed
+//      evidence" panel reads the observed store through `observations.list`
+//      and badges every row provisional / settled / unverified.
 //   3. **Unasked is not stopped.** `activity` is null when the engine could
 //      not be asked. That is not "idle" and it is certainly not "finished";
 //      it is "we do not know", and it renders that way (FR-E2, FR-E9).
@@ -36,6 +39,7 @@ import {
   backlog,
   commentWork,
   getWork,
+  listObservations,
   listSessions,
   listWorkflows,
   startSession,
@@ -43,6 +47,7 @@ import {
   updateWork,
   why,
   type FreshnessSummary,
+  type Observation,
   type SessionSummary,
   type WhyResult,
   type WorkDetail,
@@ -272,6 +277,94 @@ function formatWhen(value: string | null | undefined): string {
   return Number.isNaN(at.valueOf()) ? String(value) : at.toLocaleString();
 }
 
+// -- observed evidence, and whether it has settled -------------------------
+//
+// `observations.list` returns the observed store itself — what a collector
+// saw, before any ranking made anything of it. The item page reads it for one
+// reason: FR-U17's second clause is a rule about *evidence*, and until this
+// panel existed the rule had nowhere to be broken and nowhere to be kept.
+//
+// There is no work-item parameter on the operation, because an observation is
+// filed under its own subject key (`session:01J…`). The link back to an item
+// is the payload's `work_item`, which `session_outcomes.py` writes for both
+// kinds it produces, so that is what this matches on.
+
+/** How many observations one read asks for. Equal to `total` means the store
+ *  had at least this many and the panel says the list is cut. */
+const OBSERVED_LIMIT = 200;
+
+type Settlement = {
+  /** The badge word. `unverified` is a real answer, and never a blank. */
+  label: string;
+  /** provisional / settled / unverified */
+  tone: string;
+  title: string;
+};
+
+function payloadOf(observation: Observation): Record<string, unknown> {
+  return observation.payload ?? {};
+}
+
+function payloadText(observation: Observation, key: string): string | null {
+  const value = payloadOf(observation)[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+/**
+ * Whether an observation is a settled fact or a snapshot taken mid-flight.
+ *
+ * FR-U17: *a claim backed by a still-running session is marked provisional,
+ * not fresh.* `session_outcomes.py` writes that judgement into the evidence
+ * as `provisional`, so this reads it rather than re-deriving it — a surface
+ * deciding for itself what "still running" means is a second copy of a rule
+ * the collector already keeps, and the two would eventually disagree.
+ *
+ * The third branch is the load-bearing one. An observation whose payload does
+ * not carry the flag at all — an older sweep, another collector's kind — is
+ * *not* settled and is not provisional: nobody said. That renders as
+ * `unverified`, in the same words the trust badge uses, because a blank says
+ * "no opinion" when the honest answer is "nobody checked".
+ */
+function settlement(observation: Observation): Settlement {
+  const flag = payloadOf(observation).provisional;
+  if (flag === true) {
+    return {
+      label: "provisional",
+      tone: "provisional",
+      title:
+        "The session behind this had not finished when it was observed, so " +
+        "this is a snapshot taken mid-flight and not a settled outcome. It " +
+        "is provisional, not fresh.",
+    };
+  }
+  if (flag === false) {
+    return {
+      label: "settled",
+      tone: "settled",
+      title:
+        "The session behind this had finished when it was observed, so what " +
+        "it says is what the run left behind.",
+    };
+  }
+  return {
+    label: "unverified",
+    tone: "unverified",
+    title:
+      "This evidence does not say whether what produced it had finished, so " +
+      "whether it has settled is unknown — which is not the same as settled.",
+  };
+}
+
+/** What the row says about how the run ended, including when it says nothing. */
+function exitText(observation: Observation): string {
+  const code = payloadOf(observation).exit_code;
+  if (typeof code === "number") return `exit ${code}`;
+  if (payloadOf(observation).provisional === true) {
+    return "no exit code — it had not exited";
+  }
+  return "no exit code recorded";
+}
+
 // -- the form every write appears through ----------------------------------
 
 /**
@@ -452,6 +545,21 @@ const WorkItemDetail: Component<Props> = (props) => {
     ),
   );
 
+  // The observed store, scoped to this item's project. Asked for only once
+  // the item has been read, because the project is the scope and an unscoped
+  // read of every project's evidence would be a different question.
+  const [observed, { refetch: refetchObserved }] = createResource(
+    sweepScope,
+    (scope) =>
+      attempt(() =>
+        listObservations(
+          scope.slug
+            ? { project: scope.slug, latest_only: true, limit: OBSERVED_LIMIT }
+            : { latest_only: true, limit: OBSERVED_LIMIT },
+        ),
+      ),
+  );
+
   const [workflows] = createResource(() => attempt(() => listWorkflows()));
 
   // The engine's own template list, so the start form offers the templates
@@ -468,6 +576,7 @@ const WorkItemDetail: Component<Props> = (props) => {
     void refetchWork();
     void refetchSessions();
     void refetchEvidence();
+    void refetchObserved();
   };
 
   createEffect(() => {
@@ -568,6 +677,97 @@ const WorkItemDetail: Component<Props> = (props) => {
 
   const contributions = createMemo(() => contributionsOf(evidenceRaw()));
   const missingInputs = createMemo(() => missingInputsOf(evidenceRaw()));
+
+  // -- the observed store, for this item (FR-U17) ---------------------------
+
+  /** Every observation whose payload names this item, newest per subject. */
+  const observedRows = createMemo<Observation[]>(() => {
+    const loaded = observed();
+    if (!loaded || !loaded.ok) return [];
+    return loaded.value.observations.filter(
+      (row) => payloadText(row, "work_item") === props.itemRef,
+    );
+  });
+
+  const provisionalRows = createMemo(() =>
+    observedRows().filter((row) => settlement(row).tone === "provisional"),
+  );
+
+  const unverifiedRows = createMemo(() =>
+    observedRows().filter((row) => settlement(row).tone === "unverified"),
+  );
+
+  const observedFailure = createMemo<string | null>(() => {
+    const loaded = observed();
+    if (!loaded || loaded.ok) return null;
+    return loaded.absent
+      ? `Vogt cannot be reached: ${loaded.message}`
+      : `The observed evidence could not be read: ${loaded.message}`;
+  });
+
+  /** True when the store had at least `OBSERVED_LIMIT` rows, so this list is
+   *  cut rather than complete and must not be read as all there is. */
+  const observedTruncated = createMemo(() => {
+    const loaded = observed();
+    return Boolean(loaded && loaded.ok && loaded.value.total >= OBSERVED_LIMIT);
+  });
+
+  /**
+   * The panel's tone, by FR-U17's rule rather than by the clock.
+   *
+   * One provisional row makes the whole panel provisional: the reader is
+   * being shown a set of claims and one of them is mid-flight, and averaging
+   * that away would be the panel deciding the exception does not matter.
+   */
+  const observedTone = createMemo(() => {
+    if (observedFailure()) return "unknown";
+    if (provisionalRows().length > 0) return "provisional";
+    if (observedRows().length === 0) return "never_swept";
+    if (unverifiedRows().length > 0) return "partial";
+    return "fresh";
+  });
+
+  /** The sentence under the heading. Never empty, in any of the five states. */
+  const observedSummary = createMemo<string>(() => {
+    if (observedFailure()) {
+      return (
+        "nothing is summarised here because nothing was read — that is a " +
+        "failed read, not an item with no evidence behind it"
+      );
+    }
+    if (!observed()) return "reading the observed store…";
+    const rows = observedRows();
+    if (rows.length === 0) {
+      return (
+        `nothing has been observed about ${props.itemRef} — that is "not ` +
+        `collected", not "nothing found"`
+      );
+    }
+    const live = provisionalRows().length;
+    const unsure = unverifiedRows().length;
+    const parts = [`${rows.length} observed`];
+    parts.push(
+      live > 0
+        ? `${live} backed by a session that had not finished when it was ` +
+          `observed, so ${live === 1 ? "it is a snapshot" : "they are snapshots"} ` +
+          "taken mid-flight and not a settled outcome"
+        : "every session behind this evidence had finished when it was observed",
+    );
+    if (unsure > 0) {
+      parts.push(
+        `${unsure} unverified — the evidence does not say whether what ` +
+          "produced it had finished",
+      );
+    }
+    if (observedTruncated()) {
+      parts.push(
+        `this is the newest ${OBSERVED_LIMIT} rows in the project and the ` +
+          "store has at least that many, so it is a cut list rather than all " +
+          "there is",
+      );
+    }
+    return parts.join(" · ");
+  });
 
   const workflowForKind = createMemo(() => {
     const current = item();
@@ -1125,6 +1325,89 @@ const WorkItemDetail: Component<Props> = (props) => {
                           )}
                         </For>
                       </div>
+                    </Show>
+                  </Show>
+                </section>
+
+                {/* The observed store itself (FR-O2, FR-U17). The panel above
+                    is the *ranking's* view of this item — inputs, weights, a
+                    score — which is a thing computed from evidence and not the
+                    evidence. This is what was seen. It is separate because a
+                    reader asking "what did anything actually observe about
+                    this item?" was, until it existed, being answered with a
+                    scoring table. */}
+                <section class="wid-panel wid-observed">
+                  <div class="wid-panel-head">
+                    <h3>Observed evidence</h3>
+                    <span class="wid-hint">
+                      what collectors saw, before any ranking made anything of it
+                    </span>
+                  </div>
+
+                  <p class={`wid-freshness wid-freshness--${observedTone()}`}>
+                    <Show when={provisionalRows().length > 0}>
+                      <strong>provisional</strong> —{" "}
+                    </Show>
+                    {observedSummary()}
+                  </p>
+
+                  <Show when={observedFailure()}>
+                    {(message) => (
+                      <p class="wid-failure" role="alert">
+                        {message()} — nothing is listed below because nothing
+                        could be read, not because nothing has been observed
+                        about {props.itemRef}.
+                      </p>
+                    )}
+                  </Show>
+
+                  <Show when={!observedFailure() && observed()}>
+                    <Show
+                      when={observedRows().length > 0}
+                      fallback={
+                        <p class="wid-absent">
+                          No collector has recorded anything about{" "}
+                          {props.itemRef}. Evidence appears here once a sweep
+                          has looked — an empty panel here is "nobody has
+                          looked", not "there is nothing".
+                        </p>
+                      }
+                    >
+                      <ul class="wid-observations">
+                        <For each={observedRows()}>
+                          {(row) => {
+                            const state = createMemo(() => settlement(row));
+                            return (
+                              <li
+                                class={`wid-observation wid-observation--${state().tone}`}
+                              >
+                                <div class="wid-session-head">
+                                  <span
+                                    class={`wid-settlement wid-settlement--${state().tone}`}
+                                    title={state().title}
+                                  >
+                                    {state().label}
+                                  </span>
+                                  <span class="wid-mono">{row.kind}</span>
+                                  <span class="wid-hint">
+                                    observed {formatWhen(row.observed_at)}
+                                  </span>
+                                </div>
+                                <div class="wid-session-meta">
+                                  <span class="wid-mono">{row.subject_key}</span>
+                                  <span>by {row.collector}</span>
+                                  <span>
+                                    {payloadText(row, "state") ??
+                                      "state not recorded"}
+                                  </span>
+                                  <span>{exitText(row)}</span>
+                                </div>
+                                <p class="wid-hint">{state().title}</p>
+                              </li>
+                            );
+                          }}
+                        </For>
+                      </ul>
                     </Show>
                   </Show>
                 </section>
