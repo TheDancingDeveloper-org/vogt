@@ -35,6 +35,24 @@ beforeEach(() => {
   localStorage.clear();
 });
 
+// xterm asks the window whether the reader prefers reduced motion before it
+// draws anything, and jsdom has no `matchMedia` — the same shape of gap as
+// the `ResizeObserver` above. Stubbed to "no preference" rather than left
+// undefined, because a terminal that cannot mount cannot be tested at all,
+// and FR-U20's return leg lives in one.
+if (!window.matchMedia) {
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+}
+
 afterEach(() => {
   localStorage.clear();
 });

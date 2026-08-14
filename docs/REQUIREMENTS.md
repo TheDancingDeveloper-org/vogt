@@ -966,7 +966,7 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 114 are delivered, 63 are implemented and
+**201 conjuncts across 46 IDs. 115 are delivered, 62 are implemented and
 asserted by nothing, 8 cannot be verified in this environment at all, and 16
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
@@ -996,9 +996,9 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +12 in the fourth pass (nine out of §6.2, two out of §6.2a, one out
+  then +13 in the fourth pass (nine out of §6.2, three out of §6.2a, one out
   of §6.2b)
-- **63 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 2
+- **62 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 3
 - **16 short** = 43 − 19 + 1 arriving from §6.2b, − 9
 - **8 unverifiable** = 69 − 60 − 1
 
@@ -1105,6 +1105,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-U17 | Trust state is on every card and every ranked row, and an absent one reads as `unverified` rather than as blank; the aggregate says how old it is | `board.test.tsx`'s FR-U17 block (four — including `puts one on every card, so the aggregate cannot drop the awkward column`); `backlog.test.tsx::reads an absent trust state as unverified`. A blank badge says "no opinion"; the honest answer is "nobody checked" |
 | FR-U22 | Focus moves across and within columns; `Shift`+arrow proposes a move and still collects the reason; `Enter` opens the item at its own URL; `n` opens quick-create and is announced on the board's own keyboard line | `board.test.tsx`'s two FR-U22 blocks (five), including the one asserting that an `n` typed into the move composer is not stolen by the shortcut |
 | FR-U18 | Bulk accept does not exist, and cannot arrive by accident | `tests/test_pwa.py::test_drift_is_resolved_one_proposal_at_a_time` (one call site, and no multi-select) |
+| **FR-U20** | Both legs: the live activity badge and the open-terminal control on the item, and the terminal's link back to the work item it was opened for | `workItemDetail.test.tsx`'s FR-U20 block (four) and `terminalLink.test.tsx` (four). The forward leg asserts the engine's activity is what is shown, that an unasked session reads `unknown` rather than `idle`, that the control addresses the *engine's* session id, and that a stopped session gets no control to a PTY that is gone. The return leg asserts the link, that the read includes stopped sessions because a finished run still had a subject, that a PTY Vogt did not start says nothing, and that an unreachable Vogt costs the badge and never the terminal (FR-E9). The blocker §6.2a recorded was smaller than it looked: xterm asks for `matchMedia` at mount and jsdom has none, so `Terminal.tsx` could not be mounted at all — `setup.ts` stubs it the way it already stubs `ResizeObserver` |
 | FR-U21 | Every Vogt surface can tell an outage from an empty answer and renders the server's own reason; the core-absent half — terminals, files, git keep working | `tests/test_pwa.py::test_every_vogt_surface_distinguishes_an_outage_from_emptiness` asserts the structural half and says in its own docstring that it cannot judge the copy; `web/src/__tests__/absentStates.test.tsx` and the outage blocks in the other three files now judge it, on all five surfaces — the server's sentence verbatim, the sentence that says what the absence *means*, nothing rendered as data, writes disabled, and a 500 called a failure rather than an outage. `contextkeeper.rs::a_contextkeeper_outage_leaves_terminals_working_and_unprotected` is the core-absent half. **One panel is thinner than the rest**: the item page's Sessions panel renders Vogt's sentence and nothing asserts it does — found while mutation-testing FR-U17, when a mutation that should have gone red survived because the same literal appears first in `sessionsFailure`. The conjunct is delivered on all five surfaces; that one panel is where a regression would be quiet |
 | **FR-M1** | A session waiting for input is answered from the item page, without a terminal — MVP1's "session start/approve", as MERGE §14's M12 demo defines it | `web/src/__tests__/workItemDetail.test.tsx`'s FR-M1 block (six). The control shows the session's own scrollback tail before it offers any way to answer, and offers none at all when the engine cannot be asked. The other reading of "approve" — a Vogt approval *operation* — is deliberately not built, and §6.2 no longer carries a row implying it is owed |
 | **FR-T7** | The recorded hang is refused with a named reason — the second of the two ways the requirement offers out of it | `assistant.rs::openai_route_refusal` and three unit tests, plus `integration.rs::a_claude_route_on_the_openai_backend_refuses_with_a_named_reason`, which drives the route and asserts the answer is *not* a 404 — reporting the assistant absent would send an operator looking for a missing API key when the key is fine. The sentence names the model, the transport and the setting that overrides it, because a hang is indistinguishable from thinking and the 60-second client timeout that used to catch it reported "took too long" about something that was never going to answer. `assistant_allow_claude_proxy` turns it off: the fault is a proxy's, not the model's, and a deployment whose proxy serves those routes is entitled to own the result. The check is on the transport, so FR-T7's other clause — a native Anthropic backend, still unbuilt — is untouched by it |
@@ -1195,8 +1196,9 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Sixty-three conjuncts whose code was read and believed, which nothing in any
-suite would notice the loss of. (Sixty-five, less NFR-D12's and FR-U10's, which the fourth
+Sixty-two conjuncts whose code was read and believed, which nothing in any
+suite would notice the loss of. (Sixty-five, less NFR-D12's, FR-U10's and
+FR-U20's, which the fourth
 pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
 core-only job *and* the merged one, so the branch split is now checked for
 both images rather than for neither.) They are not defects; they are the places a
@@ -1230,7 +1232,6 @@ that stopped being the demo's job and became a test somebody has not written.
 | FR-U16 | Sessions by fuzzy name *(from §6.2b)* | A palette test with a populated session store. `commandPalette.test.tsx` asserts projects, work items and views, and the session entries come from the engine's store, which no test seeds |
 | FR-U18 | Both sides of a disagreement, with provenance and age, rendered open before any act is possible *(from §6.2b)* | A mount of the drift inbox against a proposal carrying an evidence snapshot. That bulk accept cannot arrive is asserted from source; that the evidence is *shown first* is not asserted anywhere |
 | FR-U19 | Actor and operation filtered server-side; every row shows who, what and why; the item page links in pre-filtered *(from §6.2b)* | A mount of `AuditBrowser`, which `absentStates.test.tsx` already does for its outage states and never with records in it |
-| FR-U20 | The live activity badge, the open-terminal control, and the terminal's link back to the item *(from §6.2b)* | A work item with a session on it. The harness deliberately 404s engine paths, so a test of this one has to stub the engine as well as Vogt — which is a fixture nobody has written, not an environment nobody has |
 | FR-U21 | Engine unavailable → Vogt views keep answering and session controls disable with the named reason *(from §6.2b)* | The mirror of the outage tests that exist. Every one of them takes Vogt away; none takes the engine away, which in a test is no harder and in the product is the only half a person can reach |
 | NFR-D11 | The engine serves the PWA; vogt-core binds loopback only; a port that serves MCP also serves plain HTTP health | The loopback binding is enforced in `engine/deploy/entrypoint.sh`, which no test reads and which does not fail on a non-loopback URL — it silently declines to start a core. The Rust side does no validation of `vogt_core_url` at all |
 | NFR-C6 | fmt, clippy, `cargo test`, `pnpm typecheck`, `pnpm test`, the APK build and pytest are all in the pipeline | The only test that reads `ci.yml` checks `runs-on:` lines. `pnpm test` runs in the `engine` job, before the bundle is built and gated by the same path filter, on the argument that `assets.rs` already makes a `web/`-only change an engine change |

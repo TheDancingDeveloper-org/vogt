@@ -704,3 +704,93 @@ describe("FR-M1 — a session waiting for input can be answered from the item", 
     ).toContain("y");
   });
 });
+
+
+// -- FR-U20: the item, its session's liveness, and the way to the terminal --
+//
+// §6.2a said this needed "a fixture nobody has written" — an engine stub
+// beside the Vogt one — which the FR-M1 work above now provides. The badge
+// and the control are the forward leg; the terminal's link back is the
+// return leg and is asserted in `terminalLink.test.tsx`.
+
+describe("FR-U20 — a work item shows what its session is doing, and how to reach it", () => {
+  it("shows the engine's activity for the session, not Vogt's record of it", async () => {
+    fakeVogt({
+      "GET /work/get": {
+        body: { item: workItem(), comments: [], sessions: [WAITING_SESSION] },
+      },
+      "GET /sessions": {
+        body: {
+          sessions: [{ ...WAITING_SESSION, activity: "running" }],
+          engine: null,
+        },
+      },
+    });
+    const { container } = detail();
+    const badge = await waitFor(() => {
+      const el = container.querySelector(".wid-activity");
+      expect(el).toBeTruthy();
+      return el!;
+    });
+    expect(badge.textContent).toContain("running");
+  });
+
+  it("says the activity is unknown rather than idle when the engine was not asked", async () => {
+    // The distinction this file exists for: `activity: null` is "we do not
+    // know", and rendering it as idle would be a plausible screen that is a
+    // lie.
+    const unasked = { ...WAITING_SESSION, activity: null, alive: null };
+    fakeVogt({
+      "GET /work/get": {
+        body: { item: workItem(), comments: [], sessions: [unasked] },
+      },
+      "GET /sessions": { body: { sessions: [unasked], engine: null } },
+    });
+    const { container } = detail();
+    const badge = await waitFor(() => {
+      const el = container.querySelector(".wid-activity");
+      expect(el).toBeTruthy();
+      return el!;
+    });
+    expect(badge.textContent).toContain("unknown");
+    expect(badge.textContent).not.toContain("idle");
+  });
+
+  it("offers a control that navigates to the terminal attached to that session", async () => {
+    fakeVogt({
+      "GET /work/get": {
+        body: { item: workItem(), comments: [], sessions: [WAITING_SESSION] },
+      },
+      "GET /sessions": { body: { sessions: [WAITING_SESSION], engine: null } },
+    });
+    const { container } = detail();
+    const link = await waitFor(() => {
+      const el = container.querySelector<HTMLAnchorElement>(".wid-open-terminal");
+      expect(el).toBeTruthy();
+      return el!;
+    });
+    // The engine's session id, not Vogt's — they are different identifiers
+    // and only one of them addresses a PTY.
+    expect(link.getAttribute("href")).toBe("#/t/eng-1");
+  });
+
+  it("offers no terminal control for a session Vogt has stopped", async () => {
+    // A stopped session has no PTY to attach to, so a control that led there
+    // would quietly do nothing — which is worse than saying the terminal is
+    // closed.
+    const stopped = {
+      ...WAITING_SESSION,
+      activity: null,
+      stopped_at: "2026-08-02T00:00:00Z",
+    };
+    fakeVogt({
+      "GET /work/get": {
+        body: { item: workItem(), comments: [], sessions: [stopped] },
+      },
+      "GET /sessions": { body: { sessions: [stopped], engine: null } },
+    });
+    const { container } = detail();
+    await waitFor(() => expect(container.textContent).toContain("terminal closed"));
+    expect(container.querySelector("a.wid-open-terminal")).toBeNull();
+  });
+});
