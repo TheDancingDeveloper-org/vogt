@@ -278,3 +278,156 @@ def test_both_build_stages_use_the_same_base() -> None:
     digests = re.findall(r"FROM \S+@(sha256:[0-9a-f]{64})", dockerfile)
     assert len(digests) >= 2
     assert len(set(digests)) == 1, f"stages disagree on the base image: {set(digests)}"
+
+
+# ── The merged stack (NFR-D11, NFR-D12, NFR-C6) ───────────────────────────
+#
+# Until this section existed, no test in the repository read
+# `deploy/vogt-stack.compose.yml` or either `stack-image` job — which is how
+# the compose file kept a placeholder digest of zeros through four stages
+# while the documentation around it described a pinned image. The artefact
+# these assert on has now been built, smoke-tested, signed and published by
+# CI, so every claim below is about something that exists.
+
+STACK_COMPOSE = REPO_ROOT / "deploy" / "vogt-stack.compose.yml"
+ENGINE_PORT = "8910"
+CORE_PORT = "8911"
+
+
+@pytest.fixture(scope="module")
+def stack() -> str:
+    return _without_comments(STACK_COMPOSE.read_text(encoding="utf-8"))
+
+
+def test_the_merged_stack_pins_a_published_digest(stack: str) -> None:
+    """NFR-PO4, and the placeholder that outlived its TODO.
+
+    A digest of zeros is not a pin — it is a deploy that fails at pull time,
+    which is the good case, and a line that reads as pinned to anyone
+    skimming, which is the bad one.
+    """
+    pins = re.findall(r"image:\s+(\S+)", stack)
+    assert pins, "the merged stack names an image"
+    for pin in pins:
+        assert "@sha256:" in pin, f"digest-pinned, never alias-tracking: {pin}"
+        digest = pin.split("@sha256:")[1]
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), pin
+        assert set(digest) != {"0"}, (
+            "this is the placeholder, not a pin: the merged pipeline has "
+            "published an image, so this line has a real digest to carry"
+        )
+    assert "vogt-stack@" in stack, (
+        "the merged stack runs the merged image, not the core-only one — "
+        "two registries so that pinning the wrong artefact is visible"
+    )
+
+
+def test_the_merged_stack_publishes_the_engine_and_only_the_engine(
+    stack: str,
+) -> None:
+    """NFR-D11: the engine is the front door on the only published port.
+
+    vogt-core is reachable from inside the container and from nowhere else.
+    A second published port would not break anything visibly — it would just
+    quietly restore the two-front-doors shape the merge exists to end.
+    """
+    block = re.search(r"^\s+ports:\n((?:\s+- .*\n)+)", stack, re.MULTILINE)
+    assert block, "the merged stack publishes a port"
+    published = re.findall(r'- "([^"]+)"', block.group(1))
+    assert len(published) == 1, f"exactly one published port, got {published}"
+    assert published[0].endswith(f":{ENGINE_PORT}"), (
+        f"the published port maps to the engine ({ENGINE_PORT}): {published[0]}"
+    )
+    assert f":{CORE_PORT}:" not in stack, "vogt-core is never published"
+    assert f'VOGT_CORE_URL: "http://127.0.0.1:{CORE_PORT}"' in stack, (
+        "the front door reaches the core over loopback"
+    )
+
+
+def test_the_merged_stack_takes_its_core_token_from_a_file(stack: str) -> None:
+    """FR-S9: a token in the environment is a token in `docker inspect`."""
+    assert "VOGT_CORE_TOKEN_FILE:" in stack
+    assert not re.search(r"^\s+VOGT_CORE_TOKEN:", stack, re.MULTILINE), (
+        "the paired core token is brokered as a file, never as a value"
+    )
+
+
+@pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
+def test_the_merged_image_is_built_from_the_engine_dockerfile(workflow: str) -> None:
+    """The context is the repository, not `engine/`.
+
+    `engine/Dockerfile` reaches for `web/dist`, `pyproject.toml` and `src/`
+    as well as the crates, so a job that sets `context: engine` builds an
+    engine and calls it a stack.
+    """
+    raw = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+    assert "stack-image:" in raw, f"{workflow} builds the merged image"
+    job = raw[raw.index("  stack-image:") :]
+    assert "file: engine/Dockerfile" in job, workflow
+    assert re.search(r"^\s+context: \.$", job, re.MULTILINE), (
+        f"{workflow}: the repository root is the build context"
+    )
+
+
+@pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
+def test_the_pwa_is_built_before_the_merged_image(workflow: str) -> None:
+    """`rust-embed` reads `web/dist/` at compile time.
+
+    An image built without this step compiles, starts, serves a placeholder
+    where the product's front end should be, and passes every check that
+    asks whether it is running.
+    """
+    job = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+    job = job[job.index("  stack-image:") :]
+    assert job.index("pnpm build") < job.index("file: engine/Dockerfile"), (
+        f"{workflow}: the bundle is a build input, not a later artefact"
+    )
+
+
+@pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
+def test_both_halves_run_before_the_merged_image_is_pushed(workflow: str) -> None:
+    """The failure this catches is a stack missing the half nobody looked at.
+
+    Both entrypoints are exercised in the candidate image, and the push step
+    comes after — so an image that builds and cannot run one of its two
+    products never reaches the registry.
+    """
+    job = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+    job = job[job.index("  stack-image:") :]
+    smoke_vogt = job.index("--entrypoint vogt")
+    smoke_engine = job.index("--entrypoint mydevenv2-server")
+    push = job.index("push: true")
+    assert max(smoke_vogt, smoke_engine) < push, (
+        f"{workflow}: smoke-test the candidate, then push it"
+    )
+
+
+def test_the_merged_image_keeps_the_two_streams_apart() -> None:
+    """NFR-D12: `dev` images can never be mistaken for commit images.
+
+    `dev` and `dev-<sha>` on one branch, `sha-<commit>` on the other, and no
+    tag either can move — so "which build is that?" stays answerable and a
+    dev image cannot be picked up by anything following the prod stream.
+    """
+    raw = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
+    job = raw[raw.index("  stack-image:") :]
+    assert "type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}" in job
+    assert "type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}" in job
+    assert "type=sha,enable=${{ github.ref != 'refs/heads/dev' }}" in job
+    assert "type=semver" not in job, "a build must not assign a version"
+    assert "value=latest" not in job, "a build must not move an alias"
+
+
+def test_a_tag_can_release_the_merged_image() -> None:
+    """NFR-C6's second clause, which was vacuous until `release.yml` had one.
+
+    "A push builds `sha-` images, only a tag releases" was true of the merged
+    image in its first half and meaningless in its second: no tag could
+    produce one. A release now assigns it a version and signs its digest.
+    """
+    raw = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    job = raw[raw.index("  stack-image:") :]
+    assert "type=semver,pattern={{version}}" in job, "a release assigns a version"
+    assert 'cosign sign --yes "${STACK_IMAGE}@${DIGEST}"' in job, (
+        "sign the digest, never a tag: a tag can be moved after signing"
+    )

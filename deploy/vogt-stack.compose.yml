@@ -97,9 +97,8 @@
 
 services:
   vogt:
-    # TODO: replace with the digest the merged pipeline publishes. Production
-    # moves on this line changing plus DeployStack — publishing an image moves
-    # nothing (NFR-D10).
+    # Production moves on this line changing plus DeployStack — publishing an
+    # image moves nothing (NFR-D10).
     #
     # The name is settled (M14): the core-only image keeps
     # `ghcr.io/thedancingdeveloper-org/vogt` and this one is `vogt-stack`,
@@ -112,7 +111,14 @@ services:
     # MyDevEnv2's `repo.indexarr.net/indexarr/mydevenv2`. Two artifacts, told
     # apart by registry rather than by tag, because they are not
     # interchangeable — one is hardened and minimal, the other is a dev pod.
-    image: ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    #
+    # **This is a `dev`-stream digest**, and deliberately: it is `dev-ee18adc`,
+    # the first merged image the pipeline ever built, and this stack's first
+    # job is the dev stack of NFR-D12 — the place mobile, voice and push become
+    # verifiable at all. A prod pin is a `sha-<commit>` digest from `main` and
+    # replaces this line; the two streams never share a tag, so which one is
+    # pinned here is answerable by reading it (`build.yml`).
+    image: ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:bcca1d9d5d7eb671fa25e9cb3d1f29c536d4fee30f0b977feeb3ff2d6a5b7840
     container_name: vogt
     hostname: vogt
     restart: unless-stopped
