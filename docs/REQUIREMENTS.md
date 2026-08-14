@@ -966,7 +966,7 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 126 are delivered, 57 are implemented and
+**201 conjuncts across 46 IDs. 127 are delivered, 56 are implemented and
 asserted by nothing, 7 cannot be verified in this environment at all, and 11
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
@@ -974,7 +974,7 @@ before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved twenty-four conjuncts, and three of them were moved by
+**A fourth pass moved twenty-five conjuncts, and three of them were moved by
 nothing being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,9 +996,9 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +24 in the fourth pass (fourteen out of §6.2, eight out of §6.2a, two
+  then +25 in the fourth pass (fourteen out of §6.2, nine out of §6.2a, two
   out of §6.2b)
-- **57 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 8
+- **56 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 9
 - **11 short** = 43 − 19 + 1 arriving from §6.2b, − 14
 - **7 unverifiable** = 69 − 60 − 2
 
@@ -1200,7 +1200,7 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Fifty-seven conjuncts whose code was read and believed, which nothing in any
+Fifty-six conjuncts whose code was read and believed, which nothing in any
 suite would notice the loss of. (Sixty-five, less the seven the fourth pass
 asserted —  NFR-D12, FR-U10, FR-U20, FR-E1, FR-E9, FR-T1/T2 and FR-T6 — which the fourth
 pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
@@ -1233,7 +1233,7 @@ that stopped being the demo's job and became a test somebody has not written.
 | FR-U19 | Actor and operation filtered server-side; every row shows who, what and why; the item page links in pre-filtered *(from §6.2b)* | A mount of `AuditBrowser`, which `absentStates.test.tsx` already does for its outage states and never with records in it |
 | FR-U21 | Engine unavailable → Vogt views keep answering and session controls disable with the named reason *(from §6.2b)* | The mirror of the outage tests that exist. Every one of them takes Vogt away; none takes the engine away, which in a test is no harder and in the product is the only half a person can reach |
 | NFR-D11 | The engine serves the PWA; vogt-core binds loopback only; a port that serves MCP also serves plain HTTP health | The loopback binding is enforced in `engine/deploy/entrypoint.sh`, which no test reads and which does not fail on a non-loopback URL — it silently declines to start a core. The Rust side does no validation of `vogt_core_url` at all |
-| NFR-C6 | fmt, clippy, `cargo test`, `pnpm typecheck`, `pnpm test`, the APK build and pytest are all in the pipeline | The only test that reads `ci.yml` checks `runs-on:` lines. `pnpm test` runs in the `engine` job, before the bundle is built and gated by the same path filter, on the argument that `assets.rs` already makes a `web/`-only change an engine change |
+| **NFR-C6** | fmt, clippy, `cargo test`, `pnpm typecheck`, `pnpm test`, the APK build and pytest are all in the pipeline | `tests/test_deploy.py::test_every_gate_nfr_c6_names_is_in_the_pipeline`, which restates the requirement's seven and asserts each against `ci.yml`; `::test_the_local_check_runs_what_ci_runs` holds `scripts/check.sh` to the same list from the other side. Presence, not gating — §6.2's row records that each half runs only when its own paths changed, with the argument in the workflow. A step present and skipped is a decision; a step absent is an accident, and until now nothing would have noticed one |
 | NFR-Q6 | Both suites pass in the merged repository | They are separately path-gated, so "both" is jointly checked only on a change that touches both trees or a shared file |
 | NFR-S5 | No view fetches the whole estate to render a page of it | True on inspection of all four surfaces, and the board's 2,000-item bulk read across four sequential requests is the weakest case rather than a clean one |
 

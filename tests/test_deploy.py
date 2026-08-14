@@ -578,3 +578,30 @@ def test_the_local_check_runs_what_ci_runs() -> None:
             f"scripts/check.sh runs {label}, and `ci.yml` no longer contains "
             f"{fragment!r} — one of the two has moved and they must not drift"
         )
+
+
+def test_every_gate_nfr_c6_names_is_in_the_pipeline() -> None:
+    """NFR-C6 lists what CI shall run for the merged product.
+
+    The requirement names seven things. Until this, the only test that read
+    `ci.yml` checked its `runs-on:` lines — so the pipeline could have lost
+    `cargo clippy` or the APK build entirely and nothing here would have
+    noticed, which is a strange gap in a repository whose whole argument is
+    that an unrun check and a passing check look identical.
+
+    This asserts presence, not the gating: §6.2's NFR-C6 row records that each
+    half runs only when its own paths changed, deliberately and with the
+    argument written in the workflow. A step that is present and skipped is a
+    decision; a step that is absent is an accident.
+    """
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    for gate, fragment in (
+        ("cargo fmt", "cargo fmt --all -- --check"),
+        ("cargo clippy", "cargo clippy --workspace --all-targets -- -D warnings"),
+        ("cargo test", "cargo test --workspace"),
+        ("pnpm typecheck", "pnpm typecheck"),
+        ("pnpm test", "pnpm test"),
+        ("the APK build", "./gradlew assembleDebug"),
+        ("pytest", "uv run --no-sync pytest"),
+    ):
+        assert fragment in ci, f"NFR-C6 names {gate}; `ci.yml` no longer runs it"
