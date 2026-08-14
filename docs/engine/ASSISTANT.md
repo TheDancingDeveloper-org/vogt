@@ -193,9 +193,15 @@ instructions.
 
 - **STT** — `@capacitor-community/speech-recognition` (on-device Android
   recognizer), only inside the APK; browsers fall back to typing. Push-to-talk
-  via the mic button, partial results land in the composer, final result
-  auto-sends. `RECORD_AUDIO` is declared in the manifest; the plugin prompts
-  at first use.
+  via the mic button — **held**, not tapped: press to open the microphone,
+  release to send. Partial results land in the composer and the release sends
+  what the recognizer settled on. Held rather than toggled because the take
+  auto-sends: a toggle left on in a room with other people does not merely
+  listen, it eventually speaks. It is also holdable from the keyboard with
+  space or enter, since a control only pointers can work is one some people
+  cannot use. This paragraph said "push-to-talk" for two revisions while the
+  button was a toggle; now it is one. `RECORD_AUDIO` is declared in the
+  manifest; the plugin prompts at first use.
 - **TTS** — Web Speech `speechSynthesis`, sentence-chunked, toggle persisted
   in localStorage. The synth is primed on the toggle gesture because the
   Android WebView requires a user gesture before the first utterance.

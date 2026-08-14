@@ -145,7 +145,9 @@ export default function Assistant(props: AssistantProps) {
 
   onCleanup(() => {
     stopSpeaking();
-    if (listening()) void stopListening();
+    // Abandoned, not sent: leaving the surface mid-sentence must not put
+    // half an utterance into the conversation on the way out.
+    if (listening()) void abandonTake();
   });
 
   const applyReply = (reply: AssistantReply) => {
@@ -214,7 +216,13 @@ export default function Assistant(props: AssistantProps) {
     }
   };
 
-  const stopListening = async () => {
+  // One take: from the press that opens the microphone to the release, or to
+  // the recognizer stopping first because the speaker went quiet. Both ends
+  // can arrive, and either can arrive first, so ending a take is idempotent —
+  // a double send is one thing said once and answered twice.
+  let takeOpen = false;
+
+  const closeRecognizer = async () => {
     setListening(false);
     try {
       const { SpeechRecognition } = await import(
@@ -227,11 +235,34 @@ export default function Assistant(props: AssistantProps) {
     }
   };
 
+  /** End the take and send what was said. */
+  const stopListening = async () => {
+    if (!takeOpen) return;
+    takeOpen = false;
+    await closeRecognizer();
+    // Sent here rather than from the recognizer's own "stopped" event,
+    // because releasing the button removes that listener and the release is
+    // now the ordinary way a take ends. Under the toggle this lived in the
+    // listener and worked because the recognizer usually stopped itself.
+    const text = draft().trim();
+    if (text) void send(text);
+  };
+
+  /** End the take and send nothing — for leaving the surface mid-sentence. */
+  const abandonTake = async () => {
+    takeOpen = false;
+    await closeRecognizer();
+  };
+
+  // Push-to-talk, and it is held rather than toggled for the reason the name
+  // says (FR-T5). A toggle in a room with other people leaves a microphone
+  // open until somebody remembers it is open, and the recognizer auto-sends
+  // whatever it settled on — so a forgotten toggle does not merely listen, it
+  // speaks. Holding makes the open microphone exactly as long as the
+  // deliberate act. `docs/engine/ASSISTANT.md` has called this push-to-talk
+  // since before it was.
   const startListening = async () => {
-    if (listening()) {
-      await stopListening();
-      return;
-    }
+    if (listening()) return;
     try {
       const { SpeechRecognition } = await import(
         "@capacitor-community/speech-recognition"
@@ -242,6 +273,7 @@ export default function Assistant(props: AssistantProps) {
         return;
       }
       stopSpeaking();
+      takeOpen = true;
       setListening(true);
       await SpeechRecognition.removeAllListeners();
       await SpeechRecognition.addListener("partialResults", (data) => {
@@ -249,12 +281,10 @@ export default function Assistant(props: AssistantProps) {
         if (best) setDraft(best);
       });
       await SpeechRecognition.addListener("listeningState", (data) => {
-        if (data.status === "stopped") {
-          setListening(false);
-          // Auto-send whatever the recognizer settled on.
-          const text = draft().trim();
-          if (text) void send(text);
-        }
+        // The other end of the take: the recognizer gave up before the
+        // button was released, usually because the speaker went quiet. Same
+        // path, so what was said is sent once and only once.
+        if (data.status === "stopped") void stopListening();
       });
       await SpeechRecognition.start({
         partialResults: true,
@@ -424,9 +454,43 @@ export default function Assistant(props: AssistantProps) {
         <Show when={sttAvailable()}>
           <button
             type="button"
-            title={listening() ? "Stop listening" : "Speak"}
-            style={listening() ? { background: "#da3633", color: "#fff" } : {}}
-            onClick={() => void startListening()}
+            data-testid="mic"
+            data-listening={listening() ? "yes" : "no"}
+            title={listening() ? "Release to send" : "Hold to speak"}
+            aria-label="Hold to speak"
+            style={{
+              // A held button must not also be a drag handle or a scroll
+              // start: on a phone the gesture that opens the microphone is
+              // the same one that scrolls the transcript.
+              "touch-action": "none",
+              ...(listening() ? { background: "#da3633", color: "#fff" } : {}),
+            }}
+            onPointerDown={(e) => {
+              // Capture, so releasing off the button still ends the take. A
+              // finger that slides while speaking is ordinary; a microphone
+              // that stays open because of it is not.
+              e.currentTarget.setPointerCapture?.(e.pointerId);
+              void startListening();
+            }}
+            onPointerUp={() => void stopListening()}
+            onPointerCancel={() => void stopListening()}
+            onLostPointerCapture={() => void stopListening()}
+            onKeyDown={(e) => {
+              // Hold-to-talk is a pointer idiom, and a button that only
+              // answers to pointers is a button some people cannot use. Space
+              // and Enter hold; the repeat guard is what stops the key's own
+              // auto-repeat from restarting the recognizer every 30ms.
+              if ((e.key === " " || e.key === "Enter") && !e.repeat) {
+                e.preventDefault();
+                void startListening();
+              }
+            }}
+            onKeyUp={(e) => {
+              if (e.key === " " || e.key === "Enter") {
+                e.preventDefault();
+                void stopListening();
+              }
+            }}
           >
             🎙
           </button>

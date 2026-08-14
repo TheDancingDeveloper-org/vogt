@@ -966,15 +966,15 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 107 are delivered, 64 are implemented and
-asserted by nothing, 8 cannot be verified in this environment at all, and 22
+**201 conjuncts across 46 IDs. 108 are delivered, 64 are implemented and
+asserted by nothing, 8 cannot be verified in this environment at all, and 21
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
 before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
 
-**A fourth pass moved five conjuncts, and three of them were moved by nothing
+**A fourth pass moved six conjuncts, and three of them were moved by nothing
 being written.** The pipeline ran. Every claim this section made about the merged image, the two
 image streams and the Android shell was a claim about a workflow file that had
 never once executed, and three of them turned out to be true; the two that
@@ -996,10 +996,10 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +5 in the fourth pass (three out of §6.2, one each out of §6.2a and
+  then +6 in the fourth pass (four out of §6.2, one each out of §6.2a and
   §6.2b)
 - **64 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 1
-- **22 short** = 43 − 19 + 1 arriving from §6.2b, − 3
+- **21 short** = 43 − 19 + 1 arriving from §6.2b, − 4
 - **8 unverifiable** = 69 − 60 − 1
 
 One bookkeeping correction, since it is the kind of thing this section exists
@@ -1087,6 +1087,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | **FR-U8** | **All three**: the PWA reaches Vogt only through the front door and no other origin; every path resolves against the operation registry; every engine path resolves against `app.rs`'s router *and* `API_CONTRACT.md` | `tests/test_pwa.py::test_every_vogt_path_in_the_pwa_is_a_registered_operation`, `::test_the_pwa_reaches_vogt_only_through_the_front_door`, `::test_every_engine_path_in_the_pwa_is_a_route_the_engine_serves`, `::test_every_engine_path_in_the_pwa_is_in_the_engine_s_api_contract`, `::test_no_vogt_surface_opens_its_own_door`. Read against source rather than a built bundle, because no bundle is built here — the sources are what a bundle is built from, and a second call site would fail the check |
 | FR-U9 | The legacy GUI keeps serving, and parity is asserted rather than assumed — in both directions | `tests/test_pwa.py::test_the_pwa_renders_everything_the_legacy_gui_did` (an exact set, so a view added to the wrong front end fails too) |
 | FR-U6, FR-U15, FR-U18 | r6's rule, on the surface most likely to erode it: no exported write can be called without a reason, and quick-create will not submit without one | `tests/test_pwa.py::test_every_vogt_write_the_pwa_offers_collects_a_reason` |
+| **FR-T5** | Push-to-talk: the microphone is open exactly as long as the button is held, from a pointer or from the keyboard, and the release sends what was said | `web/src/__tests__/assistant.test.tsx` (six), the first thing in this repository to mount `Assistant.tsx`. Held rather than toggled because the take auto-sends — a toggle left on in a room with other people does not merely listen, it eventually speaks — and a pointer that ends off the button still ends the take. Two of the six were rewritten after the mutations they were meant to catch survived: one now asserts the take is *closed* once rather than that one message was sent, because sending clears the draft and the message count stays right for the wrong reason, and the other says in its own body that the behaviour it pins has a spare mechanism holding it |
 | FR-U16 | Every read *view* is reachable from the palette; the palette can never execute a write, checked by import | `tests/test_pwa.py::test_the_palette_reaches_every_vogt_surface`, `::test_the_command_palette_never_writes_to_vogt` |
 | FR-U16 | Projects and work items are reachable *by name*, fuzzily, and a project's entry opens the deep link a shared URL uses | `web/src/__tests__/commandPalette.test.tsx` (`offers each registered project by name`, `finds a project by a fuzzy fragment of its name` — `rstnz` finds `rustnzb` and does not drag in `Vogt` — `opens the project's own deep link`, `still reaches work items and every view by name`, and `contributes nothing when Vogt cannot be asked`, which is the palette declining to fail open) |
 | FR-U4 | The columns are the union of `workflow.list`'s states, walked from each machine's initial state, and are never written down | `web/src/__tests__/board.test.tsx` (`draws one column per state the server published`, `changes shape when the workflow does` — a different machine and not one previous name survives — and `gives a state no machine mentions a column, and says no machine mentions it`) |
@@ -1123,7 +1124,7 @@ half-present, because nothing about it had to be argued with first.
 
 ### 6.2 Delivered differently, or short — per conjunct
 
-Twenty-two conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
+Twenty-one conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
 is one claim that the requirement makes and the build does not, which is why
 this table's rows can be counted and the other three tables' cannot.
 
@@ -1149,7 +1150,6 @@ the file.
 | FR-E3 — "template selection shall consult the registry" | Vogt performs no template selection at all. `start_session` passes the caller's `template` through as the command (`src/vogt/application/services/sessions.py`); there is no per-project template, no registry lookup, and nothing to consult. The clause is satisfied only in the sense that a heuristic it forbids is also absent. The engine's own template matching is untouched and still applies to sessions the engine starts. | Low — the failure it forbids cannot happen; the capability it implies does not exist |
 | FR-E5 — "shall register the Vogt MCP server for agents running inside them" | **Delivered differently, and the previous description of it was wrong in a way that hid a defect.** Registration is not "run out of band by the container bootstrap": `agent-auth.sh` runs `mcp-bootstrap` *in the session's own startup*, per session, which is why sessions have had a Vogt MCP server all along. Believing otherwise is what stopped anyone asking the next question — **which Vogt it registered.** The answer was: not this one. The bootstrap read only its own `VOGT_MCP_URL`, defaulting to `winrarhost:18094`, so every session's agent was pointed at the *core-only stack this merge replaces* — the one `DEPLOYMENT.md` §9.5 turns off — while `start_session` exported the session's real endpoint and had it discarded. The opencode registration was worse: it pinned `VOGT_URL` at registration time, overriding the session's, and is written once and reused by every session after — the exact lesson the cadastre `:18081 → :18092` move taught, recorded in a comment two functions above it and not applied. Now: explicit override, then the session's own `VOGT_URL`, then the front door on loopback, which needs no DNS or certificate and cannot name a retired deployment (NFR-D11). Three tests in `tests/test_deploy.py`. **What is still short is only portability**: the wrappers and the script live in the image, so a session started against an engine built another way has no Vogt MCP server. | Low, down from Medium — and the row is a reminder that a wrong description of a working mechanism is more dangerous than a missing one, because it retires the question |
 | FR-T3 — "a `why` derived from the conversational context" | Still short, and less so. The `why` is whatever the model puts in the tool argument, and **nothing can verify that a sentence was derived from anything** — that half is not a gap to be closed but a claim no code can make. What was a gap is that the two failures the prompt names by name went unenforced, so the phrasing the instructions single out was the one that always got through. `assistant.rs::contentless_reason` now refuses them: a reason that only says who asked, and a reason that restates the act. It refuses by *removal*, so "the user asked for this after the sprint scope changed" passes and "as requested" does not — the refusal must not teach the model to hide the provenance, which would trade a useless audit row for a misleading one. The refusal returns to the model as a tool error and the loop continues, so the ordinary outcome is a second attempt before any card reaches a person. Three tests, one of which asserts the refusal reaches the model rather than only that no card appeared. | Medium — an unverifiable reason in an audit row is the failure mode FR-W1 exists against, and this narrows the class it can be *contentless* in without pretending to settle whether it is true |
-| FR-T5 — "push-to-talk STT" | It is tap-to-toggle. The mic button is `onClick`, and `startListening` toggles off if already listening; there is no press-and-hold handler anywhere. `docs/engine/ASSISTANT.md` calls it push-to-talk. | Low as a defect, and it is a documented behaviour that does not exist |
 | FR-T5 — "a validation pass against domain vocabulary … before v2 ships" | Not run, and nothing was built that would let it be: the recognizer's best match goes straight into the composer and is auto-sent. No project list, no slug normalisation, no `WI-\d+` repair. What was done instead is that the prompt now states items are `WI-7` and projects are slugs. The requirement says voice "shall not be presumed working", and it is still presumed. | **The requirement's own words** |
 | FR-T7 — a native Anthropic backend | `ChatBackend` has two variants, `Http` and a test mock. Nothing in the repository speaks the Anthropic API. | Known, priority C |
 | FR-T7 — "the hang shall be resolved or the route refused with a named reason" | Neither. No code inspects the model name; the nearest mitigation is a 60-second client timeout, which turns a hang into a timeout without naming it. | Known, priority C |
@@ -1217,7 +1217,7 @@ that stopped being the demo's job and became a test somebody has not written.
 | FR-E4 | The brief carries the item's relations | An assertion in `test_the_work_items_brief_travels_with_the_session`, which today checks the ref, title, body, session id and token variable |
 | FR-E9 | The engine degrades to plain sessions; session availability is never lost | A test that names the property. Every session test in `integration.rs` runs with `vogt_core_url: None`, so it is exercised on every run and would fail loudly if it broke — but a reader looking for the requirement finds nothing, and the day someone gives that fixture a core the coverage vanishes silently |
 | FR-T1 | The curated set is the eight operations FR-T1 names | A test that names them. The existing one compares `CURATED_READS.len()` to itself and would pass if `compliance` were deleted |
-| FR-T2 | One pending action at a time; a new user message supersedes; the 120-second expiry; voice cannot approve | Three Rust tests and one front-end test. There is a front-end test runner now — `web/package.json` has `test`, and 75 tests run under it in CI — so the reason this row gave for itself has expired and the row has not. `Assistant.tsx` is mounted by nothing |
+| FR-T2 | One pending action at a time; a new user message supersedes; the 120-second expiry; voice cannot approve | Three Rust tests and one front-end test. There is a front-end test runner now — `web/package.json` has `test` — so the reason this row gave for itself has expired and the row has not. `Assistant.tsx` **is** mounted now, by `assistant.test.tsx`, but only around the microphone: the pending-action rules — one at a time, superseded by a new message, expired at 120 seconds, and never approvable by voice — are still asserted by nothing on this side |
 | FR-T6 | Absent the API key the assistant routes answer 404 | One request to `/api/assistant/*` in a test that already boots with `assistant_api_key: None` and never asks |
 | FR-T6 | Every GUI hides the surface, the route included *(from §6.2)* | A mount of `App.tsx` at `#/assistant` with `assistant_enabled` false. The route is gated now — the same condition the drawer button carries, read reactively so a deep link still opens once the config resolves — and the gate that was missing was found by an audit rather than by a test, which is the second time in this product for this exact shape (§6.3 findings 3 and 7) |
 | FR-M2 | `waiting-for-input`, `errored`, and the agent-task notify hook are routed | A test that drives `spawn_activity_watcher`; the drift watcher has unit tests and these two, which are the headline notifications, have none |
