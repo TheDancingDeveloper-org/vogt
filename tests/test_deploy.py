@@ -790,3 +790,42 @@ def test_the_template_does_not_leave_a_dev_stack_on_production_paths() -> None:
         "a dev stack must not mount the MyDevEnv2 stack's volumes: two "
         "engines opening PTYs in one set of working trees"
     )
+
+
+def test_a_release_apk_is_signed_or_the_job_stops() -> None:
+    """NFR-C6's signed APK, and the failure it must not produce.
+
+    Gradle produces a release APK with *no* signature when the signing config
+    is absent — silently, because an unsigned release build is a legitimate
+    thing to want. Publishing that under a release tag is the failure this
+    job exists against, so it refuses to start without a keystore and
+    verifies the artefact afterwards rather than trusting the build.
+
+    The keystore is the one in the retired forge (§9.6). A new key is a
+    different app identity and cannot upgrade an existing install, which is
+    why the job names the missing secrets instead of generating one.
+    """
+    release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    assert "\n  android:" in release, "release.yml builds the signed APK"
+    job = release[release.index("\n  android:") :]
+
+    assert "MYDEVENV2_ANDROID_KEYSTORE_B64" in job, "the keystore is a secret"
+    assert "exit 1" in job, "a missing keystore stops the job"
+    assert "assembleRelease" in job, "a release build, not a debug one"
+    assert "apksigner" in job and "verify" in job, (
+        "the signature is verified after the build; Gradle's silence about a "
+        "missing signing config is the whole risk"
+    )
+    assert "rm -f" in job, (
+        "the keystore is removed from the runner whether the build succeeded "
+        "or not — a shared self-hosted runner is a shared filesystem"
+    )
+    # `ci.yml` keeps building the *debug* APK on every push, and must not
+    # start signing: a build proves the shell assembles, and signing is what
+    # makes an artefact somebody installs. The pipeline this replaced
+    # conflated them.
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    assert "assembleRelease" not in ci, (
+        "signing belongs to a release, not to every push (NFR-C3's rule "
+        "applied to the APK)"
+    )

@@ -321,3 +321,114 @@ jobs:
             echo "Publishing is not deploying (NFR-D10). See"
             echo "\`docs/DEPLOYMENT.md\` §9 before the first one."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── The signed APK (NFR-C6) ───────────────────────────────────────────────
+  #
+  # A *release* job, not a per-push one, and that is the whole shape of the
+  # decision: `ci.yml` builds a debug APK on every push to prove the shell
+  # still assembles, and signing is what turns a build into something a person
+  # installs. The two acts were conflated in the pipeline this replaced.
+  #
+  # **Inert until the keystore exists.** It lives in the forge the merge left
+  # behind and recovering it is somebody's errand with a deadline attached —
+  # when that forge goes, so does the ability to ship an upgrade to any device
+  # already carrying this app, because a new key is a different app identity
+  # and Android will refuse the upgrade. Until the four secrets are set this
+  # job says which are missing and stops, rather than quietly shipping a
+  # debug-signed artifact under a release tag.
+  #
+  # `mobile/android/app/build.gradle` already reads all four from the
+  # environment and only wires `signingConfigs.release` when every one is
+  # present, so nothing here needs a Gradle change.
+  android:
+    name: build and sign the Android shell
+    needs: distribution
+    runs-on: [self-hosted, node-b, linux, x64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - id: keystore
+        name: is there a keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.MYDEVENV2_ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.MYDEVENV2_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MYDEVENV2_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MYDEVENV2_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${KEYSTORE_B64:-}" ]      || missing="$missing MYDEVENV2_ANDROID_KEYSTORE_B64"
+          [ -n "${KEYSTORE_PASSWORD:-}" ] || missing="$missing MYDEVENV2_ANDROID_KEYSTORE_PASSWORD"
+          [ -n "${KEY_ALIAS:-}" ]         || missing="$missing MYDEVENV2_ANDROID_KEY_ALIAS"
+          [ -n "${KEY_PASSWORD:-}" ]      || missing="$missing MYDEVENV2_ANDROID_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::No release keystore configured; missing:$missing. The keystore is the one in the retired forge — a new one is a different app identity and cannot upgrade an existing install. See docs/DEPLOYMENT.md §9.6."
+            exit 1
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: the release URL is named
+        env:
+          SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
+        run: |
+          set -euo pipefail
+          # FR-M1: the shell wraps a remote URL and has no default, on purpose
+          # — an APK pointing at the wrong front door looks like a working app
+          # whose Vogt tabs are all in their outage state.
+          if [ -z "${SERVER_URL:-}" ]; then
+            echo "::error::VOGT_ANDROID_SERVER_URL is not set. A release APK must name the front door it wraps; there is deliberately no default (FR-M1)."
+            exit 1
+          fi
+
+      - name: install the shell's dependencies
+        working-directory: mobile
+        run: pnpm install --frozen-lockfile
+
+      - name: capacitor sync
+        working-directory: mobile
+        env:
+          VOGT_ANDROID_SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
+        run: npx cap sync android
+
+      - name: assemble and sign
+        working-directory: mobile/android
+        env:
+          VOGT_ANDROID_SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
+          MYDEVENV2_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.MYDEVENV2_ANDROID_KEYSTORE_PASSWORD }}
+          MYDEVENV2_ANDROID_KEY_ALIAS: ${{ secrets.MYDEVENV2_ANDROID_KEY_ALIAS }}
+          MYDEVENV2_ANDROID_KEY_PASSWORD: ${{ secrets.MYDEVENV2_ANDROID_KEY_PASSWORD }}
+          KEYSTORE_B64: ${{ secrets.MYDEVENV2_ANDROID_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          # Written under the runner's workspace and removed on the way out,
+          # signed or not: a keystore left on a shared self-hosted runner is a
+          # signing key anybody with a job on that runner can take.
+          umask 077
+          keystore="$RUNNER_TEMP/release.keystore"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$keystore"
+          trap 'rm -f "$keystore"' EXIT
+          export MYDEVENV2_ANDROID_KEYSTORE_PATH="$keystore"
+          ./gradlew assembleRelease --no-daemon
+
+      - name: the artifact is actually signed
+        working-directory: mobile/android
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/release -name '*.apk' | head -1)"
+          test -n "$apk"
+          # `apksigner` is in the SDK's build-tools. Verifying here rather than
+          # trusting the build: Gradle silently produces an *unsigned* release
+          # APK when the signing config is absent, which is the exact artefact
+          # this job exists to stop being published under a release tag.
+          verifier="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner | sort | tail -1)"
+          "$verifier" verify --print-certs "$apk"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vogt-android-release-${{ github.ref_name }}
+          path: mobile/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

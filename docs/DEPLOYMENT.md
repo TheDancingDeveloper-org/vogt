@@ -893,6 +893,40 @@ Rollback at every step is the digest line in the ops repo plus `DeployStack`,
 with §5's caveat: a rollback across a migration needs a restore, not an older
 image.
 
+### 9.6 The signing keystore, and why it is an errand with a deadline
+
+`release.yml`'s `android` job builds and signs a release APK, verifies the
+signature with `apksigner` rather than trusting Gradle — an absent signing
+config produces a silently *unsigned* release APK, which is the artefact the
+job exists to stop — and uploads it. It is inert until four secrets exist, and
+says which are missing rather than shipping a debug-signed build under a
+release tag.
+
+| Secret | What it is |
+|---|---|
+| `MYDEVENV2_ANDROID_KEYSTORE_B64` | the keystore, `base64 -w0` |
+| `MYDEVENV2_ANDROID_KEYSTORE_PASSWORD` | store password |
+| `MYDEVENV2_ANDROID_KEY_ALIAS` | key alias |
+| `MYDEVENV2_ANDROID_KEY_PASSWORD` | key password |
+| `VOGT_ANDROID_SERVER_URL` | the front door the shell wraps — no default, on purpose (FR-M1) |
+
+**The keystore is the one in the retired forge, and that is a deadline rather
+than a task.** A new key is a different app identity: Android refuses to
+upgrade an install signed by the old one, so every device already carrying
+this app would need an uninstall and a reinstall. Recovering the existing
+keystore before that forge goes away preserves the upgrade path; losing it
+does not stop signing, it stops *upgrading*, permanently and for every device
+at once.
+
+Store it wherever the other stack secrets live, and treat the base64 as what
+it is — a signing key that anybody with a job on the runner can read while the
+job holds it. The job writes it under `RUNNER_TEMP`, `umask 077`, and removes
+it on the way out whether the build succeeded or not.
+
+Where a signed APK is *published* is still an untaken decision. The job
+uploads it as a workflow artifact, which is a place to get one from without
+inventing a release channel this product has not chosen.
+
 ## 8. Known: every write costs a WAL checkpoint
 
 Measured against the deployed data volume on Node B, one declared write
