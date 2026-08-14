@@ -405,3 +405,43 @@ def test_the_palette_reaches_every_vogt_surface() -> None:
         "openAuditTab",
     ):
         assert opener in text, f"the palette cannot reach {opener}"
+
+
+# -- FR-U21: every surface has a designed absent state ---------------------
+
+VOGT_SURFACES = ("Board", "Backlog", "WorkItemDetail", "Projects", "AuditBrowser")
+
+
+def test_every_vogt_surface_distinguishes_an_outage_from_emptiness() -> None:
+    """FR-U21, checked at the one place it can be checked without a browser.
+
+    The requirement is about what a person sees, and nothing here renders. So
+    this asserts the structural precondition instead: a surface that never
+    imports `VogtUnavailable` cannot tell "Vogt could not be asked" from
+    "Vogt says there is nothing", and will draw an empty board or an empty
+    audit log — which, on these surfaces above all, reads as a claim.
+
+    What it cannot check is whether the resulting copy is any good. That is
+    in the M11 demo, and the demo needs a browser.
+    """
+    for name in VOGT_SURFACES:
+        path = WEB_SRC / f"{name}.tsx"
+        assert path.is_file(), f"{name}.tsx is missing"
+        text = source(path)
+        assert "VogtUnavailable" in text, (
+            f"{name} cannot distinguish an outage from an empty answer"
+        )
+        assert re.search(r"\.message\b", text), (
+            f"{name} never renders the server's own reason; a client-authored "
+            "'something went wrong' is the thing FR-U21 is against"
+        )
+
+
+def test_no_vogt_surface_opens_its_own_door() -> None:
+    """One transport, one route table, one place the rule can be kept."""
+    for name in VOGT_SURFACES:
+        text = source(WEB_SRC / f"{name}.tsx")
+        assert not re.search(r"\bfetch\(", text), (
+            f"{name} calls fetch directly, so its URL is not in the route "
+            "table the registry check reads"
+        )

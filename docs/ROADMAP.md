@@ -793,6 +793,70 @@ filters restores its exact view after reload; killing the engine mid-demo
 disables session controls with a named reason while every Vogt view keeps
 answering.
 
+### M11 as built — the demo did not run, and what that costs
+
+**The deviation, stated first because it governs everything else: none of
+the five surfaces has been rendered in a browser.** This environment has
+none. What is proven is structural — they call the operations the registry
+serves, they collect a reason before every write, they distinguish an outage
+from an empty answer, they build and typecheck — and every one of those is
+asserted in `tests/test_pwa.py`. What is *not* proven is anything a person
+would notice: no drag has been dragged, no deep link has round-tripped
+through the router, no refusal has bounced a card, no layout has been seen.
+The M11 demo above is the acceptance test and it is outstanding.
+
+That is also why the legacy GUI is still here. FR-U9's condition — every
+operation it exposes is rendered by a PWA surface — was reached, and a test
+now asserts it stays reached. Removing a verified front end in favour of an
+unverified one is not what the requirement was asking for. `test_pwa.py`
+carries the reminder and the order of operations: run the demo, then delete
+`src/vogt/gui/`, the `/ui-legacy` routes and both tests together.
+
+1. **Parity was nearly declared by a spelling.** The first parity check
+   compared route *tables*: the client listed `notifications` and no surface
+   asked for it, and the check said parity was met. Parity now means a
+   surface calls the operation. The general form is worth keeping: a
+   requirement about what a user can reach, tested against what a client
+   could theoretically call, is satisfied by writing a constant.
+
+2. **The client's types were wrong in three ways, and every surface had
+   quietly routed around them** — a `swept_at` the server never sends, edge
+   pairs where the server sends adjacency, `Record<string, unknown>` where
+   the server has always been precise. Each surface had written a defensive
+   parser, and each parser hid the mismatch instead of surviving it. The
+   types now come from `models.py` and the parsers are gone.
+
+3. **Deep links did not work at all** until the surfaces were integrated:
+   routes and tab kinds existed with no branch in the URL→tabs effect, so a
+   cold load opened nothing and the tabs only appeared because the shell
+   persists them. Activating a tab also dropped its query string, which on
+   these surfaces *is* the view. Two surfaces had independently grown a
+   workaround for that.
+
+4. **Six columns in the legacy GUI had been em dashes on every row**, found
+   while building their replacements: field names that were never right, and
+   two columns (`ecosystem`, `constraint`) removed from the product by r2
+   along with lockfiles. Nothing failed, because an em dash is also how that
+   GUI renders "not collected" — so a typo and an honest absence looked
+   identical in the one product whose argument is that you can tell those
+   apart. `tests/test_gui.py` now reads the accessors off the models.
+
+5. **Deliberate readings, recorded so they are decisions.** A board drop
+   pre-fills the reason with the last one the server accepted; r6 permits it
+   — "a form with a required field" — and the alternative considered, one
+   armed reason per session, is how fifty audit rows end up saying "triage".
+   The board caps rendered cards per column with an explicit "+N more"
+   rather than virtualizing, and pages its reads with a truncation banner;
+   NFR-S5's "does not fetch the estate to render a page" holds, true
+   virtualization does not. Bulk drift accept does not exist, by §3.
+
+**Open after M11**: the browser demo; comments are audited against the
+comment rather than the work item, so a per-item audit filter shows creates,
+transitions and updates but not comments (a server-side fix, either an
+`entity_kind`/parent filter on `audit.list` or a change to what a comment
+write audits); and `backlog`/`bugs` have no `offset`, so there is no way to
+page past the top 200 of a ranked view.
+
 ## M12 — AI layer & voice validation (M–L)
 
 **Objective**: the assistant learns the Vogt domain — and voice, adopted
