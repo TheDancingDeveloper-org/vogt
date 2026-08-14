@@ -265,3 +265,36 @@ def test_the_api_prefix_matches_what_the_front_door_strips() -> None:
     """`/api/vogt/backlog` reaches the core's `/api/backlog`, not `/backlog`."""
     assert API_PREFIX == "/api"
     assert f"{API_PREFIX}/vogt" == FRONT_DOOR_PREFIX
+
+
+# -- FR-U9: the legacy GUI leaves when the PWA has caught up ---------------
+
+LEGACY_APP_JS = REPO_ROOT / "src" / "vogt" / "gui" / "static" / "app.js"
+
+#: Operations the vanilla GUI exposes and the PWA does not yet.
+#:
+#: FR-U9 lets the legacy surface keep serving at `/ui-legacy` until every
+#: operation it exposed is reachable in the PWA, and requires that parity be
+#: *asserted, not assumed*. This is that assertion, and it is written as an
+#: exact set rather than a `<=` so it fails in both directions: closing the
+#: last gap fails this test, and the fix is to retire the legacy GUI —
+#: which is the point. Growing a new gap fails it too.
+LEGACY_ONLY = {"project.import"}
+
+
+def legacy_routes() -> set[str]:
+    block = re.search(
+        r"const ROUTES = \{(.*?)\n\};", LEGACY_APP_JS.read_text("utf-8"), re.S
+    )
+    assert block, "the legacy GUI's route table was not found"
+    return set(re.findall(r'"?([a-z][a-z._]*)"?:\s*"/api/', block.group(1)))
+
+
+def test_the_legacy_gui_can_be_retired_when_the_pwa_reaches_parity() -> None:
+    gaps = legacy_routes() - set(client_routes())
+    assert gaps == LEGACY_ONLY, (
+        "the PWA's coverage of the legacy GUI changed. If this list is now "
+        f"empty ({sorted(gaps)}), FR-U9's condition is met: remove "
+        "`src/vogt/gui/`, the `/ui-legacy` routes in the engine, and this "
+        "test. If it grew, a view was added to the wrong front end."
+    )
