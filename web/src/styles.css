@@ -3346,3 +3346,401 @@ textarea {
   text-align: left;
   font-size: 12px;
 }
+
+/* -- Vogt work item detail (M11, FR-U5/U17/U20) ---------------------------
+   Scoped under `wid-` so the sibling Vogt surfaces can style the shared
+   `.vogt-surface` shell without colliding with anything here. */
+.wid-view {
+  height: 100%;
+  overflow: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.wid-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.wid-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.wid-heading h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.wid-ref {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wid-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wid-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.wid-chip {
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.wid-chip--state {
+  color: var(--fg);
+  border-color: var(--bd-strong);
+}
+
+/* Trust is never blank: an unset trust state renders as `unverified`, the
+   same word the legacy GUI shows, so the two front ends cannot disagree. */
+.wid-trust {
+  border: 1px solid var(--bd-strong);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  text-transform: lowercase;
+  color: var(--fg-muted);
+}
+.wid-trust--verified {
+  color: var(--activity-done);
+  border-color: var(--activity-done);
+}
+.wid-trust--unverified {
+  color: var(--activity-running);
+  border-color: var(--activity-running);
+}
+.wid-trust--contested,
+.wid-trust--stale {
+  color: var(--activity-errored);
+  border-color: var(--activity-errored);
+}
+
+.wid-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .wid-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.wid-main,
+.wid-aside {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.wid-panel {
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.wid-panel h3 {
+  margin: 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+.wid-panel h4 {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wid-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.wid-body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.wid-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wid-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+/* Absent states are written, never blank (FR-U21). */
+.wid-absent {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-style: italic;
+}
+.wid-outage,
+.wid-failure {
+  margin: 0;
+  border: 1px solid var(--activity-errored);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 13px;
+  color: var(--activity-errored);
+}
+.wid-engine-note {
+  margin: 0;
+  border: 1px solid var(--activity-running);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+  color: var(--activity-running);
+}
+.wid-blocked {
+  font-size: 12px;
+  color: var(--activity-running);
+}
+
+.wid-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.wid-rail-state {
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.wid-rail-state.is-current {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.wid-sessions,
+.wid-comments,
+.wid-relations {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wid-session {
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wid-session-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wid-session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wid-session-reason {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+/* The activity badge is the liveness indicator (FR-U17, FR-U20). `unknown`
+   is deliberately its own colour: it is not `idle` and not `stopped`. */
+.wid-activity {
+  border: 1px solid var(--bd-strong);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.wid-activity--idle {
+  color: var(--activity-idle);
+  border-color: var(--activity-idle);
+}
+.wid-activity--running {
+  color: var(--activity-running);
+  border-color: var(--activity-running);
+}
+.wid-activity--waiting-for-input {
+  color: var(--activity-waiting);
+  border-color: var(--activity-waiting);
+}
+.wid-activity--errored {
+  color: var(--activity-errored);
+  border-color: var(--activity-errored);
+}
+.wid-activity--stopped,
+.wid-activity--gone {
+  color: var(--fg-muted);
+  border-style: dashed;
+}
+.wid-activity--unknown {
+  color: var(--accent);
+  border-color: var(--accent);
+  border-style: dashed;
+}
+
+.wid-open-terminal {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  border: 1px solid var(--bd-strong);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+.wid-open-terminal:hover {
+  border-color: var(--accent);
+}
+.wid-inline-btn {
+  align-self: flex-start;
+  font-size: 12px;
+}
+
+/* Freshness is shown even when it is fine, so "not collected" and "nothing
+   found" stop looking alike; `provisional` is the still-running case. */
+.wid-freshness {
+  margin: 0;
+  border-left: 3px solid var(--bd-strong);
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wid-freshness--fresh {
+  border-left-color: var(--activity-done);
+}
+.wid-freshness--partial,
+.wid-freshness--provisional {
+  border-left-color: var(--activity-running);
+  color: var(--activity-running);
+}
+.wid-freshness--never_swept,
+.wid-freshness--unknown {
+  border-left-color: var(--activity-errored);
+  color: var(--activity-errored);
+}
+.wid-collectors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.wid-missing {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.wid-table th,
+.wid-table td {
+  border-bottom: 1px solid var(--bd);
+  padding: 4px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+.wid-table th {
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+
+.wid-comment {
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wid-comment-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.wid-relations li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.wid-relations a {
+  color: var(--accent);
+}
+
+/* Every write is a form, because a reason has to be typed (FR-W1). */
+.wid-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--bd);
+  padding-top: 8px;
+}
+.wid-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wid-field input,
+.wid-field select,
+.wid-field textarea {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+}
+.wid-field textarea {
+  resize: vertical;
+}
+.wid-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wid-start {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
