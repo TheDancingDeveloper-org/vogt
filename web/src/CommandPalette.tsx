@@ -9,6 +9,7 @@ import {
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { createSession, sessionsStore } from "./store";
+import { listWork, type WorkItem as VogtWorkItem } from "./vogtApi";
 import {
   focusTab,
   openAuditTab,
@@ -17,6 +18,7 @@ import {
   openGitTab,
   openProjectsTab,
   openTerminalTab,
+  openWorkItemTab,
   openHistoryTab,
   openEditorTab,
   openGuiTab,
@@ -178,6 +180,7 @@ const CommandPalette: Component<Props> = (props) => {
   const [symbolMessage, setSymbolMessage] = createSignal<string | null>(null);
   const [agentTasks, setAgentTasks] = createSignal<AgentTask[]>([]);
   const [projectCommands, setProjectCommands] = createSignal<Command[]>([]);
+  const [workItems, setWorkItems] = createSignal<VogtWorkItem[]>([]);
   const [savedLayouts, setSavedLayouts] = createSignal<SavedWorkspaceLayout[]>([]);
   let inputRef: HTMLInputElement | undefined;
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -193,6 +196,15 @@ const CommandPalette: Component<Props> = (props) => {
         props.onError?.(`Failed to load agent tasks: ${(e as Error).message}`);
       });
     void loadProjectCommands();
+    // Work items, so the palette reaches them by name and not only the
+    // surfaces that list them (FR-U16). Loaded once per opening: the list is
+    // small, the filter is local, and a keystroke-per-request palette is how
+    // a tracker becomes slow. A Vogt that cannot be asked simply contributes
+    // nothing here — the surfaces are where an outage is reported, not a
+    // command list somebody is typing into.
+    void listWork({ limit: 200 })
+      .then((answer) => setWorkItems(answer.items ?? []))
+      .catch(() => setWorkItems([]));
   });
 
   const activeEditorTab = () => {
@@ -948,6 +960,20 @@ const CommandPalette: Component<Props> = (props) => {
     return [
       ...baseCommands(),
       ...projectCommands(),
+      ...workItems().map<Command>((item) => ({
+        id: `vogt-work-${item.ref}`,
+        label: `${item.ref} — ${item.title}`,
+        description: [item.kind, item.state, item.project_slug]
+          .filter(Boolean)
+          .join(" · "),
+        icon: "✦",
+        action: () => {
+          openWorkItemTab(item.ref);
+          navigate(`/w/${encodeURIComponent(item.ref)}`);
+          props.onClose();
+        },
+        category: "Vogt",
+      })),
       ...tabCommands(),
       ...recentFileCommands(),
       ...sessionCommands(),
