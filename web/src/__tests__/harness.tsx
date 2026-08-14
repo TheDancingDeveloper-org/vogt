@@ -237,6 +237,28 @@ export function workItem(over: Record<string, unknown> = {}): Record<string, unk
   };
 }
 
+/** One row of the audit log, as `audit.list` returns it.
+ *
+ *  Every field is rendered by `AuditBrowser`, `reason` most of all: Vogt
+ *  refuses a write without one so that this row can answer "why did this
+ *  change" months later, and a fixture with none tests the absent case. */
+export function auditRecord(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "01JAUDIT1",
+    txn_id: "01JTXN1",
+    revision: 12,
+    actor_id: "01JACTOR1",
+    actor_identity_ref: "local:ana",
+    operation: "work.transition",
+    entity_kind: "work_item",
+    entity_id: "01JWORKITEM",
+    reason: "the board said it was started",
+    payload_digest: "sha256:abc",
+    at: "2026-08-01T00:00:00Z",
+    ...over,
+  };
+}
+
 export function rankedEntry(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     origin: "declared",
@@ -357,7 +379,7 @@ function defaults(): Routes {
     "GET /compliance": {
       body: { project: "alpha", status: "compliant", contract_version: "1", failing: [] },
     },
-    "GET /audit": { body: { records: [] } },
+    "GET /audit": { body: { records: [], total: 0 } },
     "GET /observations": { body: { observations: [], total: 0 } },
     "GET /sessions": { body: { sessions: [], engine: null } },
     "GET /notifications": { body: { notifications: [], unread: 0, freshness: freshness() } },

@@ -1559,11 +1559,12 @@ const WorkItemDetail: Component<Props> = (props) => {
                   >
                     Open the audit trail for {props.itemRef}
                   </a>
-                  <p class="wid-absent">
-                    Comments are audited against the comment, not the item, so
-                    that view shows creates, transitions and updates — not the
-                    comment history above it. Closing that gap is a server-side
-                    change, not a filter this link is missing.
+                  <p class="wid-note">
+                    A comment is audited against the comment rather than against
+                    the item, and the query follows that link — so this trail is
+                    the creates, the updates, the transitions{" "}
+                    <em>and</em> the conversation above, and not three quarters
+                    of the story.
                   </p>
                 </section>
               </aside>
