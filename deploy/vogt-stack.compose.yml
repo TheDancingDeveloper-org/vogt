@@ -101,12 +101,18 @@ services:
     # moves on this line changing plus DeployStack — publishing an image moves
     # nothing (NFR-D10).
     #
-    # The name is a decision CI has to ratify: the core-only image keeps the
-    # GHCR name `ghcr.io/thedancingdeveloper-org/vogt`, and this one succeeds
+    # The name is settled (M14): the core-only image keeps
+    # `ghcr.io/thedancingdeveloper-org/vogt` and this one is `vogt-stack`,
+    # published by `build.yml`'s `stack-image` job from `engine/Dockerfile`
+    # with the repository as its context. Two repositories rather than two
+    # kinds of tag in one, because they are different artefacts for different
+    # deployments and one repository is how somebody eventually pins the
+    # wrong one. This line still carries a placeholder digest: it moves when
+    # the first merged image is published, and this one succeeds
     # MyDevEnv2's `repo.indexarr.net/indexarr/mydevenv2`. Two artifacts, told
     # apart by registry rather than by tag, because they are not
     # interchangeable — one is hardened and minimal, the other is a dev pod.
-    image: repo.indexarr.net/indexarr/vogt@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:0000000000000000000000000000000000000000000000000000000000000000
     container_name: vogt
     hostname: vogt
     restart: unless-stopped

@@ -49,6 +49,13 @@ permissions:
 
 env:
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
+  # The merged product — the Python core *and* the session engine in one
+  # container, which is what `deploy/vogt-stack.compose.yml` runs. A separate
+  # repository rather than a tag on the one above, because they are different
+  # artefacts for different deployments: `vogt` is the supported install of
+  # Vogt alone (NFR-PO4), and this is the estate's own stack. One repository
+  # with two kinds of tag in it is how somebody eventually pins the wrong one.
+  STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
 
 concurrency:
   # Only the newest commit on a branch is worth an image; older ones in
@@ -163,4 +170,110 @@ jobs:
             echo
             echo "This is a build, not a release: no version was assigned, no"
             echo "semver tag was created, and \`latest\` did not move."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  stack-image:
+    name: build and publish the merged image
+    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: build the PWA
+        # `rust-embed` reads `web/dist/` at compile time, so the bundle is a
+        # build input to the Rust half rather than a separate artefact. An
+        # image built without this step compiles — and serves a placeholder
+        # where the product's front end should be.
+        run: |
+          set -euo pipefail
+          corepack enable
+          cd web
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.STACK_IMAGE }}
+          tags: |
+            type=sha,enable=${{ github.ref != 'refs/heads/dev' }}
+            type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+          flavor: |
+            latest=false
+
+      - uses: docker/build-push-action@v6
+        id: candidate
+        with:
+          # The repository root, not `engine/`: the Dockerfile reaches for
+          # `web/dist`, `pyproject.toml` and `src/` as well as the crates.
+          context: .
+          file: engine/Dockerfile
+          load: true
+          tags: ${{ env.STACK_IMAGE }}:smoke-test
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: the merged image runs both halves
+        env:
+          CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
+        run: |
+          set -euo pipefail
+          # The same lesson the core-only smoke test records: two releases
+          # shipped images that had never been started. This one has two
+          # processes, so it is asked about both — and about the seam, which
+          # is the part that cannot be checked by reading.
+          docker run --rm --entrypoint vogt "$CANDIDATE" --version
+          docker run --rm --entrypoint mydevenv2-server "$CANDIDATE" --help >/dev/null
+          echo "both halves are present and start"
+
+      - uses: docker/build-push-action@v6
+        id: push
+        with:
+          context: .
+          file: engine/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: sign the image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${STACK_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Merged stack image from \`${GITHUB_SHA:0:7}\`"
+            echo
+            echo "Nothing has been deployed. \`deploy/vogt-stack.compose.yml\`"
+            echo "pins this line:"
+            echo
+            echo '```yaml'
+            echo "    image: ${STACK_IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "See \`docs/DEPLOYMENT.md\` §9 before the first deploy: the"
+            echo "smoke test above proves the halves start, not that the front"
+            echo "door reaches a core."
           } >> "$GITHUB_STEP_SUMMARY"

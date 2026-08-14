@@ -791,11 +791,17 @@ cd web && pnpm install --frozen-lockfile && pnpm build && cd ..
 docker build -f engine/Dockerfile -t <registry>/vogt:<sha> .
 ```
 
-**The registry is a decision to take now.** GHCR is the one CI already
-authenticates to and where the core-only image lives; the Forgejo reference
-in the compose is inherited from the engine's own stack and is a placeholder.
-Whichever is chosen, the compose's `image:` line and the CI job that publishes
-it have to agree, and until one publishes there is nothing to digest-pin.
+**The registry is settled (M14).** `build.yml`'s `stack-image` job publishes
+the merged image to `ghcr.io/thedancingdeveloper-org/vogt-stack` — a separate
+repository from the core-only `vogt`, because they are different artefacts for
+different deployments and one repository holding both is how somebody
+eventually pins the wrong one. So step 9.1 is only needed for a build made
+*before* that job has run once; after that, pin what the job reports.
+
+The job also smoke-tests both halves before pushing, for the reason the
+core-only job records: two releases shipped images that had never been
+started. It proves the halves start. It does **not** prove the front door
+reaches a core — that is §9.2, and it needs a running pair.
 
 ### 9.2 Smoke-test it locally, before any stack sees it
 
