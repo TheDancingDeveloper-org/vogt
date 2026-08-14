@@ -301,10 +301,10 @@ async function driftView(query) {
           "tr",
           {},
           el("td", { class: "mono" }, proposal.kind),
-          el("td", {}, proposal.subject_key || proposal.entity_id || "—"),
+          el("td", { class: "mono small" }, proposal.subject_id || "—"),
           el("td", {}, proposal.status),
           el("td", { class: "mono small" }, JSON.stringify(proposal.proposed_change || {})),
-          el("td", {}, when(proposal.raised_at)),
+          el("td", {}, when(proposal.opened_at)),
           // Why a human must answer this one, quoted from the API rather than
           // restated here — two copies of a policy is one copy too many.
           el("td", { class: "small" }, gated[proposal.kind] || "auto-acceptable"),
@@ -339,16 +339,35 @@ async function depsView(slug) {
 }
 
 function depsTable(refs) {
+  // The columns are what a dependency reference actually carries. Ecosystem
+  // and constraint were here once and never had a source: r2 removed
+  // lockfiles and resolved versions from the product (FR-D1), so a reference
+  // is a path or a git URL between projects and nothing more. The columns
+  // rendered an em dash on every row for every estate — which reads as
+  // "not collected", the one thing this GUI is careful never to say by
+  // accident.
   return table(
-    ["From", "To", "Ecosystem", "Constraint", "Resolved"],
+    ["From", "To", "Kind", "Reference", "Resolved"],
     refs.map((ref) =>
       el(
         "tr",
         {},
-        el("td", {}, ref.from_slug ? link(`/project/${ref.from_slug}`, ref.from_slug) : "—"),
-        el("td", {}, ref.to_slug ? link(`/project/${ref.to_slug}`, ref.to_slug) : ref.name || "—"),
-        el("td", {}, ref.ecosystem || "—"),
-        el("td", { class: "mono" }, ref.constraint || "—"),
+        el(
+          "td",
+          {},
+          ref.from_project_slug
+            ? link(`/project/${ref.from_project_slug}`, ref.from_project_slug)
+            : "—",
+        ),
+        el(
+          "td",
+          {},
+          ref.to_project_slug
+            ? link(`/project/${ref.to_project_slug}`, ref.to_project_slug)
+            : "—",
+        ),
+        el("td", {}, ref.ref_kind || "—"),
+        el("td", { class: "mono small" }, ref.raw_target || "—"),
         // An unresolved reference is a real answer: the thing is depended on
         // and is not in the estate. Blank would read as a missing field.
         el("td", {}, ref.to_project_id ? "in estate" : "outside the estate"),

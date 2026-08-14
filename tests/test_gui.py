@@ -407,3 +407,46 @@ def test_the_route_table_is_valid_json_shaped() -> None:
     table = dict(entries)
     assert json.loads(json.dumps(table)) == table
     assert set(table.values()) <= registered_paths()
+
+
+# -- the fields it renders are fields that exist ---------------------------
+
+
+def test_every_field_the_gui_reads_off_a_result_exists() -> None:
+    """Three columns were em dashes on every row, in every estate.
+
+    `depsTable` read `ecosystem` and `constraint`, which r2 removed from the
+    product when it removed lockfiles and resolved versions (FR-D1), and
+    `from_slug`/`to_slug`, which were never the field names. `driftView` read
+    `subject_key` and `raised_at` for the same kind of reason. Nothing failed:
+    the GUI renders a missing field as `—`, which is also how it renders "not
+    collected" — so a typo and an honest absence looked identical, and the
+    typo won for months.
+
+    Checked against the models rather than by eye, over the accessors that
+    read a *result object*. The loop variables are named after what they hold
+    (`proposal`, `ref`, `record`), which is what makes this checkable at all.
+    """
+    from vogt.application import models
+
+    source_text = code(APP_JS)
+    # `item` holds either shape depending on the view — a ranked entry in the
+    # backlog and bugs tables, a work item elsewhere — so it is checked
+    # against both. The others hold one thing each.
+    subjects = {
+        "proposal": (models.DriftProposal,),
+        "ref": (models.DepRef,),
+        "record": (models.AuditRecord,),
+        "item": (models.RankedItem, models.WorkItem),
+    }
+    unknown: list[str] = []
+    for name, candidates in subjects.items():
+        fields = {field for model in candidates for field in model.model_fields}
+        for attribute in set(re.findall(rf"\b{name}\.([a-z_]+)\b", source_text)):
+            if attribute not in fields:
+                unknown.append(f"{name}.{attribute}")
+
+    assert not unknown, (
+        f"the GUI reads {sorted(unknown)}, which no model carries — every one "
+        "of those renders as an em dash, indistinguishable from 'not collected'"
+    )
