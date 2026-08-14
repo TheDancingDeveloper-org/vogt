@@ -116,3 +116,33 @@ def test_the_short_count_matches_the_rows_that_carry_it() -> None:
         f"§6.2 says {named} conjuncts, carries {rows} rows, and §6's summary "
         f"says {stated.group(1)} are short — these three are the same number"
     )
+
+
+def test_no_delivered_row_is_filed_under_untested() -> None:
+    """A bold ID means delivered, and §6.2a is what is *not*.
+
+    Written after making the mistake: an NFR-C6 row marked delivered was
+    inserted into §6.2a, because it was anchored on a neighbouring row that
+    happened to live there. The counts still summed — the arithmetic guard
+    above is blind to which table a row is in — and the section read as
+    claiming a conjunct was both asserted and asserted by nothing.
+
+    §6.2b likewise: a conjunct that cannot be verified here cannot
+    simultaneously be delivered.
+    """
+    text = audit()
+    for heading, until in (
+        ("### 6.2a", "### 6.2b"),
+        ("### 6.2b", "### 6.3"),
+    ):
+        block = section(text, heading, until)
+        misfiled = [
+            row.split("|")[1].strip()
+            for row in block.splitlines()
+            if row.startswith("| **")
+        ]
+        assert not misfiled, (
+            f"{misfiled} are marked delivered and filed under {heading}; a bold "
+            "ID is this section's mark for a conjunct with a file and a test "
+            "behind it, and these tables are for the ones without"
+        )
