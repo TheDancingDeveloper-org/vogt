@@ -146,3 +146,70 @@ def test_no_delivered_row_is_filed_under_untested() -> None:
             "ID is this section's mark for a conjunct with a file and a test "
             "behind it, and these tables are for the ones without"
         )
+
+
+def test_every_file_6_1_cites_exists() -> None:
+    """§6.1's rule is "a file and a test", so the file has to be there.
+
+    Written after finding 24: FR-M2's delivered row named
+    `engine/server/src/vogt_drift.rs` and three tests inside it, and no such
+    file has ever existed. The citation was specific enough to look
+    trustworthy and survived four passes, because nothing ran the grep.
+
+    Paths only. Test *names* are checked by the test below, and the two are
+    separate because a renamed test and a deleted file are different
+    mistakes with different fixes.
+    """
+    text = audit()
+    delivered = section(text, "### 6.1 Delivered", "### 6.2 ")
+    #: Generated, and absent until something generates it. `web/dist/` is the
+    #: PWA bundle `rust-embed` compiles into the engine; citing it is correct,
+    #: and requiring it to exist would make this test demand a build.
+    generated = {"web/dist/"}
+    cited = set(
+        re.findall(r"`((?:src|tests|web|engine|scripts|deploy)/[\w./-]+)`", delivered)
+    )
+    assert cited, "§6.1 cites files in backticks; the pattern no longer matches any"
+    cited -= generated
+    missing = sorted(
+        path for path in cited if not (REQUIREMENTS.parents[1] / path).exists()
+    )
+    assert not missing, (
+        f"§6.1 cites {missing}, which do not exist. A delivered row names a "
+        "file and a test; a file that is not there means the row is about "
+        "something else, or about nothing"
+    )
+
+
+def test_every_test_name_6_1_cites_exists_somewhere() -> None:
+    """The other half of finding 24: the names, not the paths.
+
+    Searched across the whole repository rather than inside the file the row
+    happens to name, because a test that moved is a stale citation and a test
+    that never existed is a false one — and only the second is worth failing
+    a build over. Both are worth knowing about; this catches the second.
+    """
+    import subprocess
+
+    text = audit()
+    delivered = section(text, "### 6.1 Delivered", "### 6.2 ")
+    #: `::name` and `` `name` `` forms both appear; take the unambiguous one.
+    names = set(re.findall(r"::([a-z_][a-z0-9_]{8,})", delivered))
+    assert len(names) > 20, f"expected many cited test names, found {len(names)}"
+
+    found = subprocess.run(
+        ["git", "grep", "-h", "-o", "-E", r"fn [a-z_][a-z0-9_]*|def [a-z_][a-z0-9_]*"],
+        cwd=REQUIREMENTS.parents[1],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    defined = {line.split()[-1] for line in found.splitlines() if line.strip()}
+    # Vitest names are strings rather than identifiers, so anything not found
+    # as a definition is checked as a literal instead.
+    missing = sorted(name for name in names if name not in defined)
+    assert not missing, (
+        f"§6.1 cites tests that are defined nowhere: {missing}. Finding 24 is "
+        "what this exists for — three such names sat in the delivered table "
+        "through four passes"
+    )

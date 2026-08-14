@@ -966,7 +966,7 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 145 are delivered, 39 are implemented and
+**201 conjuncts across 46 IDs. 143 are delivered, 41 are implemented and
 asserted by nothing, 7 cannot be verified in this environment at all, and 10
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
@@ -996,9 +996,10 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 therefore checkable without re-deriving all 201:
 
 - **106 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
-  then +43 in the fourth pass (fifteen out of §6.2, twenty-six out of §6.2a,
-  two out of §6.2b)
-- **39 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 26
+  then +41 in the fourth pass (fifteen out of §6.2, twenty-six out of §6.2a,
+  two out of §6.2b, less two returned to §6.2a by finding 24)
+- **41 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 26, + 2
+  returned from §6.1 by finding 24
 - **10 short** = 43 − 19 + 1 arriving from §6.2b, − 15
 - **7 unverifiable** = 69 − 60 − 2
 
@@ -1131,7 +1132,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-U21 | Every Vogt surface can tell an outage from an empty answer and renders the server's own reason; the core-absent half — terminals, files, git keep working | `tests/test_pwa.py::test_every_vogt_surface_distinguishes_an_outage_from_emptiness` asserts the structural half and says in its own docstring that it cannot judge the copy; `web/src/__tests__/absentStates.test.tsx` and the outage blocks in the other three files now judge it, on all five surfaces — the server's sentence verbatim, the sentence that says what the absence *means*, nothing rendered as data, writes disabled, and a 500 called a failure rather than an outage. `contextkeeper.rs::a_contextkeeper_outage_leaves_terminals_working_and_unprotected` is the core-absent half. **One panel is thinner than the rest**: the item page's Sessions panel renders Vogt's sentence and nothing asserts it does — found while mutation-testing FR-U17, when a mutation that should have gone red survived because the same literal appears first in `sessionsFailure`. The conjunct is delivered on all five surfaces; that one panel is where a regression would be quiet |
 | **FR-M1** | A session waiting for input is answered from the item page, without a terminal — MVP1's "session start/approve", as MERGE §14's M12 demo defines it | `web/src/__tests__/workItemDetail.test.tsx`'s FR-M1 block (six). The control shows the session's own scrollback tail before it offers any way to answer, and offers none at all when the engine cannot be asked. The other reading of "approve" — a Vogt approval *operation* — is deliberately not built, and §6.2 no longer carries a row implying it is owed |
 | **FR-T7** | The recorded hang is refused with a named reason — the second of the two ways the requirement offers out of it | `assistant.rs::openai_route_refusal` and three unit tests, plus `integration.rs::a_claude_route_on_the_openai_backend_refuses_with_a_named_reason`, which drives the route and asserts the answer is *not* a 404 — reporting the assistant absent would send an operator looking for a missing API key when the key is fine. The sentence names the model, the transport and the setting that overrides it, because a hang is indistinguishable from thinking and the 60-second client timeout that used to catch it reported "took too long" about something that was never going to answer. `assistant_allow_claude_proxy` turns it off: the fault is a proxy's, not the model's, and a deployment whose proxy serves those routes is entitled to own the result. The check is on the transport, so FR-T7's other clause — a native Anthropic backend, still unbuilt — is untouched by it |
-| FR-M2 | New drift is summarised, coalesced and cursored; the default set is exactly the four FR-M2 names, and no more | `engine/server/src/vogt_drift.rs` (`one_drift_is_named`, `a_burst_is_one_notification_that_counts`, `a_cursor_survives_a_round_trip`); `push.rs::only_the_kinds_fr_m2_names_are_on_by_default` |
+| FR-M2 | The default set is exactly the four FR-M2 names and no more; only newly-raised drift notifies; the core's changes are republished on this server's stream from a cursor that does not replay history at boot | `push.rs::only_the_kinds_fr_m2_names_are_on_by_default`; `push_api.rs::only_newly_raised_drift_notifies`, `::a_new_core_event_kind_does_not_opt_itself_in`, `::session_events_are_not_drift`; `vogt_core.rs::the_core_s_changes_are_republished_on_this_server_s_stream`, `::the_follower_does_not_replay_history_at_boot`. **This row previously cited a `vogt_drift.rs` under the engine's `src`, and three tests in it. No such file exists and none of those three tests exist anywhere** — see §6.3 finding 24. The summarising and coalescing conjuncts moved to §6.2a in the same correction |
 | FR-M3 | The board's list layout at phone width, in the three rules that make it one: `display: block` on the row, the head row hidden, and the state name grown out of `attr(data-state)` | `tests/test_pwa.py::test_the_board_is_a_list_below_the_narrow_breakpoint`, `::test_the_board_cells_carry_what_the_hidden_head_row_said`, `::test_the_vogt_surfaces_share_the_engine_s_narrow_breakpoint` |
 | NFR-D11 | The engine's native APIs; the WebSocket attach path; `/api/vogt` proxied under its own prefix with the query string intact; `/mcp` proxied with the caller's credential unchanged; aggregate health with a non-fatal core check | `engine/server/tests/vogt_core.rs` (`a_vogt_read_reaches_the_core_under_its_own_prefix`, `a_query_string_survives_the_hop`, `mcp_forwards_the_callers_credential_unchanged`, `a_reachable_core_is_reported_with_its_schema_state`); `integration.rs::readyz_is_public_and_returns_checks` |
 | **NFR-D11** | The engine serves the front end from the same port that serves MCP, and that port answers plain HTTP health | `vogt_core.rs::the_port_that_serves_mcp_also_answers_plain_http_health` (one origin, an MCP call and an unauthenticated `/healthz`, no JSON-RPC) and `::the_engine_serves_the_front_end_from_that_same_port`. The second asserts the serving rather than the contents — the suite compiles against a placeholder `web/dist/`, and a real bundle differs from it in every byte except the shape. Removing either route turns one red. The loopback and single-published-port halves are asserted in `tests/test_deploy.py` |
@@ -1216,7 +1217,7 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Thirty-nine conjuncts whose code was read and believed, which nothing in any
+Forty-one conjuncts whose code was read and believed, which nothing in any
 suite would notice the loss of. (Sixty-five, less the seven the fourth pass
 asserted —  NFR-D12, FR-U10, FR-U20, FR-E1, FR-E9, FR-T1/T2 and FR-T6 — which the fourth
 pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
@@ -1233,6 +1234,7 @@ that stopped being the demo's job and became a test somebody has not written.
 
 | ID | The conjuncts | What would assert it |
 |---|---|---|
+| FR-M2 | New drift is *summarised* and *coalesced* — a burst inside the window becomes one notification titled "N new drift proposals" | A test that drives `spawn_vogt_drift_watcher`'s bus. The window, the count and the title are in `push_api.rs` and nothing reads them; the three tests beside them are all about which kinds notify. Recorded here by §6.3 finding 24, which found them cited in §6.1 as tests that do not exist |
 | FR-U10 | Session activity updates from the SSE stream without a refresh | A test that drives the engine's own activity events through `store.ts`. The board's half is asserted now — `live.test.tsx` drives `vogt-changed` end to end — and the session-activity half still rests on inspection |
 | FR-U19 | Actor and operation filtered server-side; every row shows who, what and why; the item page links in pre-filtered *(from §6.2b)* | A mount of `AuditBrowser`, which `absentStates.test.tsx` already does for its outage states and never with records in it |
 | NFR-S5 | No view fetches the whole estate to render a page of it | True on inspection of all four surfaces, and the board's 2,000-item bulk read across four sequential requests is the weakest case rather than a clean one |
@@ -1289,7 +1291,7 @@ class this product exists to make visible.
 Findings are struck through when the thing they describe is fixed *and* the
 fix was checked here — **thirteen are** (4, 5, 7, 11, 12, 13, 14, 15, 17,
 19, 21, 22, 23), one of them (5) only in part, and two of the rest (6, 8)
-have closed a half each. Twenty-three entries, ten of them open.
+have closed a half each. Twenty-four entries, eleven of them open.
 
 **Three of those strikes were added by the fourth pass to findings that were
 already fixed** — 12's string comparison had become a component comparison,
@@ -1549,6 +1551,28 @@ similar, and the new entries are all of the same kind as the old ones.
     turning a reduction in *when* checks run into a hole in *whether* they
     do. What I did not anticipate is that fixing it wrongly would look
     identical to fixing it.
+
+24. **§6.1 cited a file that does not exist.** FR-M2's delivered row named
+    `engine/server/src/vogt_drift.rs` and three tests in it —
+    `one_drift_is_named`, `a_burst_is_one_notification_that_counts`,
+    `a_cursor_survives_a_round_trip`. There is no such file. None of those
+    three test names appears anywhere in the engine. The drift watcher is
+    `spawn_vogt_drift_watcher` in `push_api.rs`, and the three tests beside
+    it are about which event kinds notify.
+
+    This is the worst entry in this list, and it is in the *delivered* table.
+    §6.1's own rule is "a file and a test" — not a citation, because §5.4a's
+    whole point is that a grep for an ID finds the docstring naming it. The
+    row named a file and tests specifically enough to look trustworthy and
+    nobody, through four passes, ran the grep. **The summarising and
+    coalescing conjuncts were counted as delivered on the strength of tests
+    that were never written**; they are in §6.2a now, and the row cites what
+    exists.
+
+    What makes it findable at all is mechanical: every path and test name in
+    §6.1 can be checked against the filesystem, and that check now runs in
+    `tests/test_requirements_audit.py`. It should have existed the first time
+    this section claimed a test by name.
 
 23. ~~**An assertion against a class that exists nowhere.**~~ **Found by a
     survivor, fixed before it landed.** A new FR-U21 test asserted the board
