@@ -3403,6 +3403,25 @@ textarea {
   border-color: var(--bd-strong);
 }
 
+/* An inline edit that has been submitted and not yet answered (FR-U12). The
+   page reads as the change; this is the part that says it is not yet true. */
+.wid-chip--unsaved {
+  color: var(--activity-running);
+  border-color: var(--activity-running);
+}
+
+.wid-edit {
+  border-color: var(--activity-running);
+}
+
+/* The rollback, stated. `ReasonForm` renders Vogt's own sentence just below
+   this; the two are different things and neither replaces the other. */
+.wid-rolledback {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
 /* Trust is never blank: an unset trust state renders as `unverified`, the
    same word the legacy GUI shows, so the two front ends cannot disagree. */
 .wid-trust {

@@ -40,6 +40,7 @@ import {
   listWorkflows,
   startSession,
   stopSession,
+  updateWork,
   why,
   type FreshnessSummary,
   type SessionSummary,
@@ -123,6 +124,11 @@ interface Contribution {
   weight: number;
   contribution: number;
 }
+
+/** Vogt's priority scale (`core/entities.py`: `Priority`). A closed set, so
+ *  the editor offers it rather than deriving it from whatever this item
+ *  happens to be. */
+const PRIORITIES = ["p0", "p1", "p2", "p3", "p4"] as const;
 
 function relationsOf(item: WorkItem): RelationView[] {
   return (item.relations ?? []) as RelationView[];
@@ -370,9 +376,60 @@ const WorkItemDetail: Component<Props> = (props) => {
     (ref) => attempt(() => why(ref)),
   );
 
-  const item = createMemo<WorkItem | null>(() => {
+  // -- inline edit (FR-U12) -------------------------------------------------
+  //
+  // FR-U12's subject is "a drag **or inline edit**", and there was no inline
+  // edit anywhere: `updateWork` was exported by `vogtApi.ts` and called by
+  // nothing. Title and priority are the honest minimum — the two fields a
+  // reader looking at this page most often finds wrong — and the same three
+  // rules govern them as govern the board's drag:
+  //
+  //   1. The edit renders optimistically, so the page reads as the change
+  //      the moment it is submitted.
+  //   2. The server's answer is authoritative and replaces it, field for
+  //      field: `accepted` holds what Vogt sent back, never what was typed.
+  //   3. A refusal discards the optimistic value outright and shows Vogt's
+  //      own sentence beside the field. Nothing remembers the refused value —
+  //      reopening the editor reads the server's state again, which is
+  //      FR-U12's "never persist, cache, or re-derive".
+  //
+  // And it is a *view that collects a reason*: the editor is a `ReasonForm`
+  // like every other write on this surface, so an edit with no typed reason
+  // cannot submit (FR-W1, r6).
+
+  /** Vogt's answer to the last accepted edit, kept only until the refetch
+   *  lands so the page does not flicker back through the stale value. */
+  const [accepted, setAccepted] = createSignal<{ ref: string; item: WorkItem } | null>(
+    null,
+  );
+  /** What was submitted and is not yet answered. Discarded on refusal. */
+  const [optimistic, setOptimistic] = createSignal<{
+    ref: string;
+    title: string;
+    priority: string;
+  } | null>(null);
+
+  const serverItem = createMemo<WorkItem | null>(() => {
     const loaded = work();
-    return loaded && loaded.ok ? loaded.value.item : null;
+    const read = loaded && loaded.ok ? loaded.value.item : null;
+    const answer = accepted();
+    // The accepted answer only stands in for the item it was an answer about,
+    // and only until a read of that item comes back.
+    if (answer && answer.ref === props.itemRef && !read) return answer.item;
+    if (answer && read && answer.ref === props.itemRef) {
+      return Date.parse(answer.item.updated_at) >= Date.parse(read.updated_at)
+        ? answer.item
+        : read;
+    }
+    return read;
+  });
+
+  const item = createMemo<WorkItem | null>(() => {
+    const server = serverItem();
+    if (!server) return null;
+    const draft = optimistic();
+    if (!draft || draft.ref !== props.itemRef) return server;
+    return { ...server, title: draft.title, priority: draft.priority };
   });
 
   const comments = createMemo<CommentView[]>(() => {
@@ -531,6 +588,63 @@ const WorkItemDetail: Component<Props> = (props) => {
   const [sessionName, setSessionName] = createSignal("");
   const [stopping, setStopping] = createSignal<string | null>(null);
 
+  // -- the inline editor's own state ---------------------------------------
+
+  const [editing, setEditing] = createSignal(false);
+  const [draftTitle, setDraftTitle] = createSignal("");
+  const [draftPriority, setDraftPriority] = createSignal("p2");
+  /** What the server refused, so the rollback can be *stated* and not merely
+   *  performed. Holds no value the server rejected as a live field value. */
+  const [rolledBack, setRolledBack] = createSignal<string | null>(null);
+
+  const openEditor = () => {
+    const current = serverItem();
+    if (!current) return;
+    // Always the server's state, never the last thing that was typed: a
+    // refused value must not come back when the editor is reopened.
+    setDraftTitle(current.title);
+    setDraftPriority(current.priority);
+    setRolledBack(null);
+    setEditing(true);
+  };
+
+  const editChanged = () => {
+    const current = serverItem();
+    if (!current) return false;
+    return draftTitle().trim() !== current.title || draftPriority() !== current.priority;
+  };
+
+  const editReady = () => draftTitle().trim().length > 0 && editChanged();
+
+  const submitEdit = async (reason: string) => {
+    const current = serverItem();
+    if (!current || !editReady()) return;
+    const ref = props.itemRef;
+    const title = draftTitle().trim();
+    const priority = draftPriority();
+    setRolledBack(null);
+    // Optimistic: the page reads as the change while Vogt is deciding.
+    setOptimistic({ ref, title, priority });
+    try {
+      const answer = await updateWork({ ref, title, priority, reason });
+      const updated = answer?.item;
+      setOptimistic(null);
+      // The server's answer, not what was typed. If Vogt normalised the
+      // title, the page shows Vogt's version.
+      if (updated) setAccepted({ ref, item: updated });
+      setEditing(false);
+      void refetchWork();
+    } catch (error) {
+      // FR-U12: the optimistic value is discarded here and remembered
+      // nowhere. `ReasonForm` renders the server's own sentence; this says
+      // what the item went back to, so the rollback is seen and not merely
+      // true.
+      setOptimistic(null);
+      setRolledBack(`${ref} is unchanged: still “${current.title}” at ${current.priority}.`);
+      throw error;
+    }
+  };
+
   const submitComment = async (reason: string) => {
     const result = await commentWork(props.itemRef, commentBody().trim(), reason);
     setCommentBody("");
@@ -574,6 +688,18 @@ const WorkItemDetail: Component<Props> = (props) => {
           >
             {trustLabel(item()?.trust_state)}
           </span>
+          <button
+            type="button"
+            class="wid-edit-open"
+            disabled={!item() || Boolean(vogtWritesBlocked())}
+            title={
+              vogtWritesBlocked() ??
+              "Change the title or priority, through a form that collects a reason"
+            }
+            onClick={() => (editing() ? setEditing(false) : openEditor())}
+          >
+            {editing() ? "Cancel edit" : "Edit"}
+          </button>
           <button type="button" onClick={refreshAll}>
             Refresh
           </button>
@@ -615,7 +741,62 @@ const WorkItemDetail: Component<Props> = (props) => {
               </span>
               <span class="wid-chip">origin: {current().origin ?? "created"}</span>
               <span class="wid-chip">updated {formatWhen(current().updated_at)}</span>
+              <Show when={optimistic()}>
+                <span class="wid-chip wid-chip--unsaved">unsaved — Vogt is deciding</span>
+              </Show>
             </div>
+
+            {/* Inline edit (FR-U12), through a view that collects a reason
+                (FR-W1, r6). Optimistic above, authoritative below. */}
+            <Show when={editing()}>
+              <section class="wid-panel wid-edit">
+                <div class="wid-panel-head">
+                  <h3>Edit this item</h3>
+                  <span class="wid-hint">
+                    The change renders straight away and is replaced by whatever
+                    Vogt answers. A refusal puts it back.
+                  </span>
+                </div>
+                <ReasonForm
+                  submitLabel="Save"
+                  busyLabel="Saving…"
+                  placeholder="Why is this changing?"
+                  blockedBy={vogtWritesBlocked()}
+                  ready={editReady}
+                  onSubmit={submitEdit}
+                  onFailure={props.onError}
+                >
+                  <label class="wid-field">
+                    <span>Title</span>
+                    <input
+                      type="text"
+                      value={draftTitle()}
+                      disabled={Boolean(vogtWritesBlocked())}
+                      onInput={(event) => setDraftTitle(event.currentTarget.value)}
+                    />
+                  </label>
+                  <label class="wid-field">
+                    <span>Priority</span>
+                    <select
+                      value={draftPriority()}
+                      disabled={Boolean(vogtWritesBlocked())}
+                      onInput={(event) => setDraftPriority(event.currentTarget.value)}
+                    >
+                      <For each={PRIORITIES}>
+                        {(priority) => <option value={priority}>{priority}</option>}
+                      </For>
+                    </select>
+                  </label>
+                  <Show when={rolledBack()}>
+                    {(note) => (
+                      <p class="wid-rolledback" role="status">
+                        {note()}
+                      </p>
+                    )}
+                  </Show>
+                </ReasonForm>
+              </section>
+            </Show>
 
             <div class="wid-columns">
               <div class="wid-main">

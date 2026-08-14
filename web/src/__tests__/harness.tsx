@@ -44,7 +44,34 @@ export interface Reply {
   text?: string;
 }
 
-export type Handler = Reply | ((call: RecordedCall) => Reply);
+/** A handler may return a promise, so a test can hold the answer open and
+ *  look at what the surface drew in the meantime — which is the only way to
+ *  see an optimistic render at all. */
+export type Handler = Reply | ((call: RecordedCall) => Reply | Promise<Reply>);
+
+/** An answer the test decides when to give. */
+export function held(): {
+  handler: Handler;
+  answer(reply: Reply): void;
+  asked: Promise<RecordedCall>;
+} {
+  let release: (reply: Reply) => void = () => {};
+  let arrived: (call: RecordedCall) => void = () => {};
+  const asked = new Promise<RecordedCall>((resolve) => {
+    arrived = resolve;
+  });
+  const pending = new Promise<Reply>((resolve) => {
+    release = resolve;
+  });
+  return {
+    handler: (call) => {
+      arrived(call);
+      return pending;
+    },
+    answer: (reply) => release(reply),
+    asked,
+  };
+}
 
 /** `"GET /work"`, `"POST /work/transition"` — the key a handler is filed under. */
 export type Routes = Record<string, Handler>;
@@ -226,7 +253,7 @@ export function fakeVogt(routes: Routes = {}): FakeVogt {
       );
     }
 
-    const reply = typeof handler === "function" ? handler(call) : handler;
+    const reply = await (typeof handler === "function" ? handler(call) : handler);
     const text = reply.text ?? (reply.body === undefined ? "" : JSON.stringify(reply.body));
     return new Response(text, { status: reply.status ?? 200 });
   });
