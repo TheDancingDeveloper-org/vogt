@@ -186,6 +186,20 @@ async fn front_door() -> (String, Log) {
     (boot(cfg).await, log)
 }
 
+/// What the core was asked *on behalf of a client*.
+///
+/// The front door also follows the core's event feed in the background
+/// (FR-U10), so a bare "the core saw nothing" assertion would be racing a
+/// poll that has nothing to do with the request under test.
+fn proxied(log: &Log) -> Vec<Seen> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|seen| seen.path != "/api/events")
+        .cloned()
+        .collect()
+}
+
 fn bearer(token: &str) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -269,7 +283,7 @@ async fn an_unauthenticated_caller_never_reaches_the_core() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     assert!(
-        log.lock().unwrap().is_empty(),
+        proxied(&log).is_empty(),
         "the request was refused, so nothing should have been forwarded"
     );
 }
@@ -285,7 +299,7 @@ async fn a_write_needs_the_vogt_write_capability() {
         .await
         .unwrap();
     assert_eq!(refused.status(), StatusCode::FORBIDDEN);
-    assert!(log.lock().unwrap().is_empty());
+    assert!(proxied(&log).is_empty());
 
     let allowed = client()
         .post(format!("{base}/api/vogt/work"))
@@ -781,4 +795,156 @@ async fn approving_a_recovery_needs_the_sessions_capability() {
         .await
         .unwrap();
     assert_ne!(read.status(), StatusCode::FORBIDDEN);
+}
+
+// -- the core's changes arrive on this server's stream (FR-U10) ------------
+
+/// A stand-in core with an event feed the test drives.
+async fn stand_in_core_with_events(
+    events: Arc<Mutex<Vec<Value>>>,
+) -> (String, Arc<Mutex<Vec<i64>>>) {
+    let cursors: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&cursors);
+    let feed = Arc::clone(&events);
+    let app = Router::new().route(
+        "/{*path}",
+        any(move |uri: Uri| {
+            let feed = Arc::clone(&feed);
+            let seen = Arc::clone(&seen);
+            async move {
+                let query = uri.query().unwrap_or_default().to_string();
+                let after: i64 = query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("after="))
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0);
+                let wants_none = query.contains("limit=1");
+                let rows = feed.lock().unwrap().clone();
+                let head = rows
+                    .iter()
+                    .filter_map(|row| row.get("seq").and_then(|v| v.as_i64()))
+                    .max()
+                    .unwrap_or(0);
+                let visible: Vec<Value> = if wants_none {
+                    Vec::new()
+                } else {
+                    rows.into_iter()
+                        .filter(|row| row.get("seq").and_then(|v| v.as_i64()).unwrap_or(0) > after)
+                        .collect()
+                };
+                // Recorded *after* the answer is computed. Recording first
+                // opens a window in which a test that waits for this signal
+                // can change the feed before the handler has read it — which
+                // is exactly the race this comment is paying for.
+                seen.lock().unwrap().push(after);
+                Json(json!({ "events": visible, "next_cursor": head }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (format!("http://{addr}"), cursors)
+}
+
+fn core_event(seq: i64, kind: &str) -> Value {
+    json!({
+        "seq": seq,
+        "kind": kind,
+        "entity_kind": "work_item",
+        "entity_id": "wrk_01J8",
+    })
+}
+
+#[tokio::test]
+async fn the_core_s_changes_are_republished_on_this_server_s_stream() {
+    let feed = Arc::new(Mutex::new(vec![core_event(1, "work.created")]));
+    let (core_url, cursors) = stand_in_core_with_events(Arc::clone(&feed)).await;
+
+    let mut cfg = base_config();
+    cfg.vogt_core_url = Some(core_url);
+    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    let (router, state) = mydevenv2_server::app::router(cfg).await;
+    drop(router);
+
+    let mut stream = state.bus.subscribe();
+
+    // Wait until the follower has taken its starting cursor before making
+    // anything happen. Without this the test races the boot read and ends up
+    // asserting that history *is* replayed — the opposite of the design.
+    for _ in 0..200 {
+        if !cursors.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !cursors.lock().unwrap().is_empty(),
+        "the follower must actually have asked the core"
+    );
+
+    // Now something happens in the core, after the follower started.
+    feed.lock()
+        .unwrap()
+        .push(core_event(2, "work.transitioned"));
+
+    let event = tokio::time::timeout(Duration::from_secs(20), stream.recv())
+        .await
+        .expect("the follower should publish within a poll interval")
+        .expect("the bus should deliver");
+
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "vogt-changed");
+    assert_eq!(json["kind"], "work.transitioned");
+    assert_eq!(json["seq"], 2);
+}
+
+#[tokio::test]
+async fn the_follower_does_not_replay_history_at_boot() {
+    // An estate with a past. Replaying it into a live UI would be
+    // indistinguishable from everything changing at once.
+    let feed = Arc::new(Mutex::new(vec![
+        core_event(1, "work.created"),
+        core_event(2, "work.transitioned"),
+        core_event(3, "drift.opened"),
+    ]));
+    let (core_url, _cursors) = stand_in_core_with_events(Arc::clone(&feed)).await;
+
+    let mut cfg = base_config();
+    cfg.vogt_core_url = Some(core_url);
+    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    let (router, state) = mydevenv2_server::app::router(cfg).await;
+    drop(router);
+
+    let mut stream = state.bus.subscribe();
+    let nothing = tokio::time::timeout(Duration::from_secs(8), stream.recv()).await;
+    assert!(
+        nothing.is_err(),
+        "three events existed before the follower started; none is news"
+    );
+}
+
+#[tokio::test]
+async fn no_core_token_means_no_follower_and_no_401_every_five_seconds() {
+    let feed = Arc::new(Mutex::new(vec![core_event(1, "work.created")]));
+    let (core_url, cursors) = stand_in_core_with_events(feed).await;
+
+    let mut cfg = base_config();
+    cfg.vogt_core_url = Some(core_url);
+    cfg.vogt_core_token = None;
+    for token in &mut cfg.extra_tokens {
+        token.vogt_core_token = None;
+        token.vogt_core_token_file = None;
+    }
+    let (router, _state) = mydevenv2_server::app::router(cfg).await;
+    drop(router);
+
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert!(
+        cursors.lock().unwrap().is_empty(),
+        "a feed that cannot be read must not be asked once a second forever"
+    );
 }

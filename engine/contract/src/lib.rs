@@ -139,6 +139,23 @@ pub enum ServerEvent {
         id: Uuid,
         state: ActivityState,
     },
+    /// Something changed in vogt-core.
+    ///
+    /// Republished onto this stream by the front door so that a client with
+    /// one event source has both halves of the product on it (FR-U10). The
+    /// payload is deliberately thin — kind, what changed, and the core's own
+    /// sequence number — because a client that wants the change reads it
+    /// from Vogt; this says only that there is something to read, which is
+    /// what stops a board from polling.
+    VogtChanged {
+        /// The core's event kind, e.g. `work.transitioned`, `drift.opened`.
+        kind: String,
+        /// What the change was about, as the core names it.
+        entity_kind: String,
+        entity_id: String,
+        /// The core's sequence number, so a client can tell order and gaps.
+        seq: i64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

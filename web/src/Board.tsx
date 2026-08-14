@@ -62,6 +62,7 @@ import {
 } from "solid-js";
 import { useLocation, useNavigate, useSearchParams } from "@solidjs/router";
 import { ApiError } from "./api";
+import { onVogtChanged } from "./store";
 import { openWorkItemTab } from "./tabs";
 import {
   VogtUnavailable,
@@ -668,6 +669,22 @@ const Board: Component<Props> = (props) => {
     };
     document.addEventListener("visibilitychange", onVisible);
     onCleanup(() => document.removeEventListener("visibilitychange", onVisible));
+  });
+
+  // Vogt's own changes, pushed. The front door follows the core's event
+  // cursor and republishes onto the stream this client already has open
+  // (FR-U10), so a transition somebody else made arrives here rather than
+  // waiting for the next poll. The poll stays as the floor: this stream can
+  // drop, and a board that stopped refreshing because a socket died would be
+  // stale while looking current — which is the thing the requirement is
+  // actually about.
+  onMount(() => {
+    const stop = onVogtChanged(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      if (pending()) return; // never race a write the user is composing
+      void loadItems(true);
+    });
+    onCleanup(stop);
   });
 
   // -- the model the board draws -------------------------------------------

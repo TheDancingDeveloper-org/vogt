@@ -139,6 +139,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // never fired).
     push_api::spawn_idle_stall_watcher(Arc::clone(&state));
     push_api::spawn_digest_flusher(Arc::clone(&state));
+    // Background task: follow vogt-core's event feed and republish onto this
+    // server's stream, so a client with one event source has both halves of
+    // the product on it (FR-U10). No-op when no core is configured.
+    vogt_core::spawn_event_follower(Arc::clone(&state));
     state.agent_tasks.spawn_scheduler();
     state.agent_tasks.spawn_run_watcher(state.bus.clone());
 

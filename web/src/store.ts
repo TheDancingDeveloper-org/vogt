@@ -117,6 +117,26 @@ function nextReconnectDelay(): number {
   return Math.floor(base + jitter);
 }
 
+/** Callers waiting to hear that vogt-core changed (FR-U10). */
+const vogtListeners = new Set<(seq: number) => void>();
+
+/**
+ * Subscribe to vogt-core's changes, as republished on the engine's stream.
+ *
+ * A surface gets a nudge and re-reads what it cares about; the event carries
+ * no state, so there is nothing here for a view to render stale. Returns its
+ * own unsubscribe, which every caller must use on cleanup — a board that
+ * outlives its tab and keeps refetching is the failure this shape invites.
+ */
+export function onVogtChanged(listener: (seq: number) => void): () => void {
+  vogtListeners.add(listener);
+  return () => vogtListeners.delete(listener);
+}
+
+function notifyVogtChanged(seq: number): void {
+  for (const listener of vogtListeners) listener(seq);
+}
+
 export function startEventStream(): void {
   streamStarted = true;
   if (unsubscribeEvents) return;
@@ -153,6 +173,13 @@ export function startEventStream(): void {
           break;
         case "activity":
           updateActivity(ev.id, ev.state);
+          break;
+        case "vogt-changed":
+          // The Vogt surfaces subscribe to this themselves; the session store
+          // has no opinion about a work item. Recorded here so the switch is
+          // exhaustive and a future reader is not left wondering whether the
+          // event was forgotten or ignored.
+          notifyVogtChanged(ev.seq);
           break;
       }
     },

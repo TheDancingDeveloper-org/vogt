@@ -49,6 +49,7 @@ use serde_json::json;
 use crate::app::AppState;
 use crate::auth::AuthorizedIdentity;
 use crate::config::Config;
+use crate::events::ServerEvent;
 
 /// Front-door mount points. Public so the router and its tests name the same
 /// strings, and so a change to one is a change to both.
@@ -357,4 +358,141 @@ pub fn public_status(state: &AppState) -> serde_json::Value {
         "mcp_prefix": MCP_PREFIX,
         "legacy_gui_prefix": LEGACY_GUI_PREFIX,
     })
+}
+
+// -- republishing the core's changes onto this stream (FR-U10) -------------
+
+/// How often the front door asks vogt-core what has changed.
+///
+/// A poll and not a subscription, because the core's feed is a cursor
+/// (`events.list`, `after` + `limit`) and not a stream. The client-side
+/// difference is what matters: one poll here, in one process, replaces every
+/// open board polling on its own, and what reaches the browser is a push on
+/// the event stream it already has open. A surface can then say "live"
+/// without it being a lie.
+const EVENT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The most events one poll will republish.
+///
+/// A burst larger than this is a sweep or an import, and a client that has
+/// been told a hundred times that something changed learns nothing it did
+/// not learn on the first. The cursor still advances past all of them, so
+/// nothing is replayed later.
+const EVENT_POLL_LIMIT: usize = 50;
+
+/// Follow vogt-core's event feed and republish onto the engine's bus.
+///
+/// Starts from the core's *current* head rather than from zero: an event
+/// stream is for what happens next, and replaying an estate's history into a
+/// live UI at boot would be indistinguishable from everything changing at
+/// once. A restart therefore misses whatever happened while the engine was
+/// down — which is correct for a notification, and is why nothing in the
+/// product treats this stream as a record. `events.list` is the record.
+pub fn spawn_event_follower(state: Arc<AppState>) {
+    let Some(core) = state.vogt_core.clone() else {
+        return;
+    };
+    if core.fallback_token.is_none() {
+        // Without a core token the feed cannot be read, and asking anyway
+        // would produce a 401 every five seconds for as long as the process
+        // lives.
+        tracing::info!("vogt event follower not started: no core token configured");
+        return;
+    }
+    tokio::spawn(async move {
+        let mut cursor = match core.event_head().await {
+            Some(seq) => seq,
+            None => {
+                tracing::info!("vogt event follower: core unreachable at start, following from 0");
+                0
+            }
+        };
+        loop {
+            tokio::time::sleep(EVENT_POLL_INTERVAL).await;
+            match core.events_after(cursor).await {
+                Some(events) => {
+                    for event in events {
+                        cursor = cursor.max(event.seq);
+                        state.bus.publish(ServerEvent::VogtChanged {
+                            kind: event.kind,
+                            entity_kind: event.entity_kind,
+                            entity_id: event.entity_id,
+                            seq: event.seq,
+                        });
+                    }
+                }
+                // A core that is down is not an error here: the surfaces
+                // report their own outage, and the cursor is kept so the
+                // first successful poll after it returns catches up.
+                None => continue,
+            }
+        }
+    });
+}
+
+/// One event, as the core describes it and as this process needs it.
+struct CoreEvent {
+    seq: i64,
+    kind: String,
+    entity_kind: String,
+    entity_id: String,
+}
+
+impl VogtCore {
+    /// The core's current event head, or `None` if it cannot be asked.
+    async fn event_head(&self) -> Option<i64> {
+        // `after` far in the past with a limit of one would return the
+        // *oldest* event; the head is what the core reports as the next
+        // cursor when asked from zero with no rows wanted.
+        let body = self.get_json("/api/events?after=0&limit=1").await?;
+        body.get("next_cursor").and_then(|v| v.as_i64())
+    }
+
+    async fn events_after(&self, cursor: i64) -> Option<Vec<CoreEvent>> {
+        let path = format!("/api/events?after={cursor}&limit={EVENT_POLL_LIMIT}");
+        let body = self.get_json(&path).await?;
+        let rows = body.get("events")?.as_array()?;
+        Some(
+            rows.iter()
+                .filter_map(|row| {
+                    Some(CoreEvent {
+                        seq: row.get("seq")?.as_i64()?,
+                        kind: row.get("kind")?.as_str()?.to_string(),
+                        entity_kind: row
+                            .get("entity_kind")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        entity_id: row
+                            .get("entity_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    async fn get_json(&self, path: &str) -> Option<serde_json::Value> {
+        let mut request = self
+            .client
+            .get(format!("{}{path}", self.base))
+            .timeout(Duration::from_secs(5));
+        if let Some(token) = self.fallback_token.as_deref() {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = match request.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(path = %path, error = %e, "vogt event poll failed");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            tracing::debug!(path = %path, status = %response.status(), "vogt event poll refused");
+            return None;
+        }
+        response.json::<serde_json::Value>().await.ok()
+    }
 }

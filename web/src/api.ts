@@ -85,7 +85,21 @@ export type ServerEvent =
   | { type: "session-created"; id: string; name: string }
   | { type: "session-renamed"; id: string; name: string }
   | { type: "session-killed"; id: string; exit_code: number | null }
-  | { type: "activity"; id: string; state: ActivityState };
+  | { type: "activity"; id: string; state: ActivityState }
+  /**
+   * Something changed in vogt-core, republished by the front door.
+   *
+   * Deliberately thin: it says there is something to read, not what. A
+   * surface that wants the change reads it from Vogt — this is what lets a
+   * board stop polling and still be honest about being current (FR-U10).
+   */
+  | {
+      type: "vogt-changed";
+      kind: string;
+      entity_kind: string;
+      entity_id: string;
+      seq: number;
+    };
 
 const TOKEN_KEY = "mydevenv2.token";
 const BASE_KEY = "mydevenv2.base";
