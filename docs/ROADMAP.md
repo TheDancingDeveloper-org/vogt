@@ -621,12 +621,28 @@ driven through the engine's port — the backlog answered at `/api/vogt`,
 `/ui-legacy` served the vanilla GUI, `POST /api/sessions` opened a PTY, an
 MCP `initialize` completed byte-identically to the core's own answer, and a
 work item created through the front door landed in the audit log as
-`agent:m9demo` with the reason its caller typed. What has *not* run is the
+`agent:m9demo` with the reason its caller typed. What had *not* run was the
 merged image: no Docker daemon was reachable from the environment this was
-built in, so `engine/Dockerfile` parses and every `COPY` resolves, and
-nothing more can honestly be claimed. The riskiest unproven step is copying
-uv's standalone CPython between build stages. **Build the image before
-trusting the stack.**
+built in, so `engine/Dockerfile` parsed, every `COPY` resolved, and nothing
+more could honestly be claimed.
+
+**The deviation is closed, on 2026-08-14, and by a runner rather than by
+this container.** `build.yml`'s `stack-image` job ran for the first time:
+28m53s, `engine/Dockerfile` built with the repository as its context, `vogt
+--version` and `mydevenv2-server --help` both run *inside* the candidate
+before it was pushed, the digest signed, and `dev` plus `dev-ee18adc`
+published to `ghcr.io/thedancingdeveloper-org/vogt-stack` — which
+`deploy/vogt-stack.compose.yml` now pins in place of the placeholder digest
+of zeros it had carried since this note was written. The riskiest unproven
+step, copying uv's standalone CPython between build stages, holds: `vogt
+--version` cannot run in that image without it.
+
+What is still unproven is the *stack*, as opposed to the image — the two
+processes coming up together under `entrypoint.sh`, the engine finding the
+core on loopback, and `/readyz` reporting a core it actually reached. That
+needs the compose stack up (`DEPLOYMENT.md` §9.4) and
+`scripts/smoke_merged_stack.sh` pointed at it, and it is a deploy, which is
+a human act (NFR-D10).
 
 1. **`ReadinessCheck` grew a `fatal` flag, and the core's probe is not
    fatal.** Aggregate health was specified; what it should *do* was not. If
@@ -961,6 +977,12 @@ Gradle 9.7 and Java 21 are in this image, and `cap sync` plus
 configuration's branches are proven against a real Gradle run rather than
 only under node.
 
+The build is now also proven where it counts: `the Android shell assembles`
+passed on a self-hosted runner on 2026-08-14, in the job gated behind the
+engine job, so the first green engine run was also the first APK this
+pipeline has ever produced. Local Gradle was validation; the runner is the
+build (that is the standing rule for everything here).
+
 What is still unproven is everything after the build: **no APK has been
 installed on a device, and no notification has been delivered by either
 transport**. The drift path has never run against a live core. Release
@@ -1037,6 +1059,39 @@ Deliverables:
 **Demo**: there is none, and that is honest — the acceptance test for this
 stage is `REQUIREMENTS.md` §5 agreeing with the build, which is the same bar
 v1 was held to.
+
+### M14 as built, so far — what the pipeline settled
+
+**The merge reached `main` on 2026-08-14**, 328 commits fast-forwarded after
+a green `dev`, which is NFR-D12's route taken rather than described. Both
+image streams exist and are signed: `dev`/`dev-<sha>` on the dev branch and
+`sha-<commit>` from main, in `vogt-stack` beside the core-only `vogt`.
+
+Three things worth recording, because none of them was visible before CI ran
+for the first time and all three had been asserted in prose:
+
+1. **Two first-run failures, both checks written against this machine.**
+   `docs` failed on a link that resolved here because the file exists on this
+   filesystem; `check_docs.py` now rejects absolute paths outright. The engine
+   job failed on `sudo apt-get` with *root is not in the sudoers file* — the
+   runner is root, so there was nothing to elevate from. Neither was a code
+   defect and neither was findable by reading. `REQUIREMENTS.md` §6.3 finding
+   16.
+2. **"Needs hardware" was wrong, and is retired from the documents.** It
+   described this container. The runners have the Docker daemon and the
+   Android SDK it lacks, and on the same day they produced the merged image
+   and an assembled APK. What genuinely remains needs a phone, a speaker, a
+   browser with a layout engine, and somebody choosing to deploy.
+3. **The APK assembles in CI**, in the job gated behind the engine job that
+   was failing — so the first green engine run was also the first APK the
+   pipeline has ever built. It still points at `127.0.0.1:8910` and is still
+   signed with Gradle's debug key.
+
+Still open, and each is somebody's decision rather than unfinished work: the
+standalone stacks are retired only after the merged stack carries load
+(§9.5); the `MYDEVENV2_*` aliases sunset after their transition period; and
+the APK keystore lives in the retired forge, so where a signed APK is
+published is an untaken decision.
 
 ---
 
