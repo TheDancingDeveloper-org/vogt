@@ -507,6 +507,141 @@ async fn agent_task_create_run_and_records_prompt_file() {
     assert!(sessions.iter().any(|s| s["id"] == session_id));
 }
 
+/// FR-E7, both halves in one run.
+///
+/// The binding reaches the run — the command prints the two environment
+/// variables back, so a run that was told nothing would print a blank line —
+/// and the notify phrase becomes a *recorded* finding on the run rather than
+/// only a push. The whole point of the requirement is that a finding
+/// survives the notification, so the assertion is that it is still there
+/// afterwards, on the task, where a sweep can collect it.
+#[tokio::test]
+async fn a_bound_task_carries_its_subject_and_records_what_it_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "Nightly dependency audit",
+            "prompt": "Look for unresolved internal references.",
+            "schedule": { "kind": "manual" },
+            "vogt_project": "vogt",
+            "vogt_work_item": "WI-7",
+            // The sleep is not decoration: the watcher subscribes just after
+            // the session is created, and a `printf` that finished first
+            // would be a race rather than a test.
+            "command": ["/bin/sh", "-lc",
+                "sleep 0.3; printf 'MYDEVENV2_NOTIFY: bound to %s in %s\\n' \"$VOGT_WORK_ITEM\" \"$VOGT_PROJECT\""],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["vogt_project"], "vogt");
+    assert_eq!(created["vogt_work_item"], "WI-7");
+
+    let run: Value = client
+        .post(format!("{base}/api/agent-tasks/{task_id}/run"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let prompt_text = std::fs::read_to_string(run["prompt_file"].as_str().unwrap()).unwrap();
+    assert!(
+        prompt_text.contains("Vogt subject: WI-7 (project vogt)"),
+        "the run's own prompt must name what it is about: {prompt_text}"
+    );
+
+    let detail = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let detail: Value = client
+                .get(format!("{base}/api/agent-tasks/{task_id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if detail["runs"][0]["findings"]
+                .as_array()
+                .is_some_and(|f| !f.is_empty())
+            {
+                break detail;
+            }
+        }
+    })
+    .await
+    .expect("the notify phrase should have produced a finding");
+
+    let finding = &detail["runs"][0]["findings"][0];
+    assert_eq!(finding["text"], "bound to WI-7 in vogt");
+    assert_eq!(finding["source"], "notify-phrase");
+    assert!(finding["at"].as_str().is_some());
+}
+
+/// An unbound task is the engine's own business, and says nothing about Vogt.
+#[tokio::test]
+async fn an_unbound_task_names_no_vogt_subject() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "Unbound",
+            "prompt": "Do something for its own sake.",
+            "schedule": { "kind": "manual" },
+            "command": ["/bin/sh", "-lc", "true"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(created.get("vogt_project").is_none());
+    assert!(created.get("vogt_work_item").is_none());
+
+    let run: Value = client
+        .post(format!(
+            "{base}/api/agent-tasks/{}/run",
+            created["id"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let prompt_text = std::fs::read_to_string(run["prompt_file"].as_str().unwrap()).unwrap();
+    assert!(!prompt_text.contains("Vogt subject"));
+}
+
 #[tokio::test]
 async fn gui_launch_lists_and_kills() {
     let (base, _h) = boot().await;

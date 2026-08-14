@@ -49,10 +49,10 @@ class GitLocalCollector:
             )
             return
 
-        branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
-        head = _git(root, "rev-parse", "HEAD")
-        status = _git(root, "status", "--porcelain")
-        describe = _git(root, "describe", "--tags", "--abbrev=0")
+        branch = git_output(root, "rev-parse", "--abbrev-ref", "HEAD")
+        head = git_output(root, "rev-parse", "HEAD")
+        status = git_output(root, "status", "--porcelain")
+        describe = git_output(root, "describe", "--tags", "--abbrev=0")
 
         yield finding(
             kind=KIND_CHECKOUT,
@@ -80,11 +80,17 @@ class GitLocalCollector:
             )
 
 
-def _git(root: Path, *args: str) -> str:
+def git_output(root: Path, *args: str) -> str:
     """Run one git command, returning "" for anything that does not work.
 
     Deliberately forgiving: a repository with no commits, no tags, or a
     detached HEAD is a normal thing to observe, not a failure to report.
+
+    Public, and shared with `session_outcomes.py`, because both collectors
+    ask the same *kind* of question — what does this checkout, which already
+    exists, say — and the rule about running git in a collector is that it
+    reads and never writes (`AGENTS.md`). Two copies of this function would
+    be two places for that rule to be forgotten in.
     """
     try:
         completed = subprocess.run(  # fixed argv, never a shell

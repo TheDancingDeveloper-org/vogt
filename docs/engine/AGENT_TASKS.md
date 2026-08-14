@@ -30,6 +30,19 @@ recurring agents such as price monitors and recurring workspace checks.
 - The default notification hook is output-driven: if an agent prints a line
   beginning with `MYDEVENV2_NOTIFY:`, the server fans out a push notification
   linking back to that run's session.
+- The same line is now **recorded on the run** as a finding — `{at, text,
+  source}` on `AgentTaskRun.findings` — before the push is sent. A push is a
+  delivery, not a record: if nothing was subscribed, or the phone was off, or
+  the push service was down, what the agent found used to be gone. The push is
+  unchanged; this is the durable copy beside it.
+- A task may name a **Vogt subject** it is about: `vogt_project` (a slug) or
+  `vogt_work_item` (a ref like `WI-7`), or both. The engine does not resolve
+  either — it exports them into the run as `VOGT_PROJECT` / `VOGT_WORK_ITEM`
+  and names the subject in the run's prompt file, so the agent knows what it
+  is reporting on. vogt-core's `session-outcomes` collector reads the bound
+  tasks and files their runs' findings as observations against that subject
+  (Vogt FR-E7). Nothing is pushed from here into Vogt's stores: the binding
+  makes the run *collectable*, and collection stays Vogt's own act.
 
 Example task payload for the Hisense PX3 monitor:
 
