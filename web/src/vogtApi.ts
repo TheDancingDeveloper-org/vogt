@@ -212,6 +212,43 @@ export interface WhyResult {
   inputs_not_yet_available: Record<string, string>;
 }
 
+/** One row of the ordered notification feed, as `events.list` returns it.
+ *
+ *  `Event` in `core/entities.py`. Three of these fields are what make a work
+ *  item's state history answerable at all, and none of them is decoration:
+ *
+ *  - `summary` is the payload the audit log deliberately does not keep. A
+ *    `work.transitioned` event carries `{ref, from, to}` there, which is the
+ *    only place the state an item *came from* is recorded — `audit` holds a
+ *    `payload_digest`, so it can prove a transition happened and cannot say
+ *    what it was. Typed loosely because its shape is the event kind's: a
+ *    reader has to say what it expects and cope with it not being there.
+ *  - `audit_id` names the audit row that explains this event, which is the
+ *    join between "what the state was" and "why somebody changed it".
+ *  - `actor_id` is an id, not an identity. It says *that* an actor did this;
+ *    the readable name lives on the audit row this event points at.
+ *
+ *  `seq` is the cursor. Nothing prunes this table, so an entity's slice of
+ *  the feed is complete rather than recent — which is the property that lets
+ *  a surface page it to the end and say it has the whole story. */
+export interface VogtEvent {
+  seq: number;
+  kind: string;
+  entity_kind: string;
+  entity_id: string;
+  actor_id?: string | null;
+  audit_id?: string | null;
+  summary?: Record<string, unknown>;
+  at: string;
+}
+
+export interface EventListResult {
+  events: VogtEvent[];
+  /** The seq of the last row returned, or the caller's own cursor when the
+   *  page was empty — so a poller never rewinds. */
+  next_cursor: number;
+}
+
 export interface AuditRecord {
   id: string;
   txn_id: string;
@@ -474,14 +511,26 @@ export const listObservations = (params: Record<string, unknown> = {}) =>
 export const compliance = (project: string) =>
   call<ComplianceResult>("compliance", { project });
 
-export const listEvents = (after: number, limit = 100) =>
-  // The cursor feed behind FR-U10. A surface that polls this and reports how
-  // old its answer is tells the truth; one that re-lists and calls itself
-  // live does not.
-  call<{ events: Record<string, unknown>[]; next_cursor: number }>(
-    "events.list",
-    { after, limit },
-  );
+/** The ordered feed, from a cursor and optionally about one entity (FR-N1).
+ *
+ *  The cursor feed behind FR-U10: a surface that polls this and reports how
+ *  old its answer is tells the truth; one that re-lists and calls itself live
+ *  does not.
+ *
+ *  `entity_id` is the second thing it is for, and the parameter is the id
+ *  rather than the ref — the same shape `audit.list` takes, so the two feeds
+ *  narrow alike. Narrowed, this is a work item's *state history*: the server
+ *  applies the filter in SQL, so paging a narrowed feed walks that item's
+ *  events and not whichever slice of the whole feed happened to contain some
+ *  of them. A caller that filtered a page itself would decide the history
+ *  ended at the first quiet stretch, which on a busy estate is immediately.
+ *
+ *  Takes a bag rather than positional arguments because there are now three
+ *  of them and two are optional; a signature where `entity_id` came third
+ *  would be one where narrowing meant restating the defaults. */
+export const listEvents = (
+  params: { after?: number; limit?: number; entity_id?: string } = {},
+) => call<EventListResult>("events.list", params);
 
 export const listSessions = (params: Record<string, unknown> = {}) =>
   call<{ sessions: SessionSummary[]; engine?: string | null }>(

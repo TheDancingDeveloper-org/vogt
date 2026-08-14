@@ -8,7 +8,9 @@ import { describe, expect, it } from "vitest";
 import { fireEvent, waitFor } from "@solidjs/testing-library";
 import WorkItemDetail from "../WorkItemDetail";
 import {
+  auditRecord,
   fakeVogt,
+  feedEvent,
   held,
   mountAt,
   observation,
@@ -247,6 +249,354 @@ describe("FR-U5 — one item, one page, and everything about it on it", () => {
       expect(panelNamed(container, heading)).toBeTruthy();
     }
     expect(container.querySelector(".wid-start")).toBeTruthy();
+  });
+});
+
+// -- FR-U5's "state history" ------------------------------------------------
+//
+// §6.2 recorded this as the one clause of FR-U5 the page did not answer: the
+// server could, and the surface did not ask. The obstacle it names is why
+// these fixtures are shaped the way they are — `audit` keeps a
+// `payload_digest` rather than the payload, so the audit row can say a
+// transition happened and never which state it came from. The `from` is in
+// the *event*, the reason and the readable identity are on the *audit row*,
+// and the event names that row in `audit_id`. Every test below is about the
+// join between them, or about what the panel says when it does not close.
+
+/** The state-history panel, or a failure that says it is missing. */
+function history(container: HTMLElement): HTMLElement {
+  const found = container.querySelector<HTMLElement>(".wid-history");
+  if (!found) throw new Error("the item page has no state-history panel");
+  return found;
+}
+
+/** Each move as "open → in_progress", in the order the panel put them. */
+function movesShown(container: HTMLElement): string[] {
+  return [...history(container).querySelectorAll(".wid-move-states")].map((node) =>
+    (node.textContent ?? "").replace(/\s+/g, " ").trim(),
+  );
+}
+
+/** Who each move says moved it. Never blank, in any of its three forms. */
+function moversShown(container: HTMLElement): string[] {
+  return [...history(container).querySelectorAll(".wid-move-actor")].map(
+    (node) => node.textContent ?? "",
+  );
+}
+
+/** The reasons quoted inline — not the ones linked to. */
+function reasonsShown(container: HTMLElement): string[] {
+  return [...history(container).querySelectorAll(".wid-move-reason")].map((node) =>
+    (node.textContent ?? "").replace(/[“”]/g, ""),
+  );
+}
+
+const CREATED = feedEvent({
+  seq: 1,
+  kind: "work.created",
+  audit_id: "01JAUDIT0",
+  summary: { ref: "WI-1", kind: "feature", title: "Teach the board" },
+  at: "2026-08-01T00:00:00Z",
+});
+
+const STARTED = feedEvent({
+  seq: 2,
+  audit_id: "01JAUDIT1",
+  summary: { ref: "WI-1", from: "open", to: "in_progress" },
+  at: "2026-08-02T00:00:00Z",
+});
+
+const FINISHED = feedEvent({
+  seq: 3,
+  actor_id: "01JACTOR2",
+  audit_id: "01JAUDIT2",
+  summary: { ref: "WI-1", from: "in_progress", to: "done" },
+  at: "2026-08-03T00:00:00Z",
+});
+
+/** A comment on the item. In the same slice of the feed and not a move — the
+ *  feed is every write about this entity, not only the ones that changed its
+ *  state. */
+const COMMENTED = feedEvent({
+  seq: 4,
+  kind: "work.commented",
+  audit_id: "01JAUDIT3",
+  summary: { ref: "WI-1", comment: "01JCOMMENT" },
+  at: "2026-08-04T00:00:00Z",
+});
+
+const TRAIL = [
+  auditRecord({
+    id: "01JAUDIT0",
+    operation: "work.create",
+    reason: "raised from the sweep",
+  }),
+  auditRecord({ id: "01JAUDIT1", reason: "picked up in Monday's planning" }),
+  auditRecord({
+    id: "01JAUDIT2",
+    actor_id: "01JACTOR2",
+    actor_identity_ref: "local:bo",
+    reason: "merged in #218",
+  }),
+];
+
+function withHistory(events: unknown[], records: unknown[] = TRAIL) {
+  return fakeVogt({
+    "GET /events": { body: { events, next_cursor: events.length } },
+    "GET /audit": { body: { records, total: records.length } },
+  });
+}
+
+describe("FR-U5 — the item's own state history, on the item page", () => {
+  it("asks the feed for this item's history, by the id the feed is keyed on", async () => {
+    // The ref is what a person can read; the entity id is what both feeds are
+    // filed under. An unnarrowed read would be the whole estate's feed, which
+    // is a different question, and a read narrowed in the client would decide
+    // the history ended at the first quiet stretch of it.
+    const vogt = withHistory([CREATED, STARTED]);
+    detail();
+
+    await waitFor(() => expect(vogt.matching("GET /events")).toHaveLength(1));
+    expect(vogt.matching("GET /events")[0]?.query.get("entity_id")).toBe(
+      "01JWORKITEM",
+    );
+  });
+
+  it("shows what each move came from, in the order the moves happened", async () => {
+    // The `from` is the whole point: the audit log keeps a digest rather than
+    // the payload, so without the feed a reader can be told the item moved
+    // and never what it moved out of.
+    //
+    // The comment in the middle is in this item's slice of the feed and is
+    // not a move. An entry for it would be a state change that never
+    // happened — and it would sort into the middle of the ones that did.
+    withHistory([CREATED, STARTED, COMMENTED, FINISHED]);
+    const { container } = detail();
+
+    await waitFor(() =>
+      expect(movesShown(container)).toEqual([
+        "created in open",
+        "open → in_progress",
+        "in_progress → done",
+      ]),
+    );
+  });
+
+  it("names who moved it readably, from the audit row the event points at", async () => {
+    // An event names its actor by id. `01JACTOR2` is technically who and is
+    // not an answer, so the panel joins through `audit_id` for the identity —
+    // which is the reason the audit row is fetched at all.
+    withHistory([STARTED, FINISHED]);
+    const { container } = detail();
+
+    await waitFor(() =>
+      expect(moversShown(container)).toEqual(["by local:ana", "by local:bo"]),
+    );
+    expect(history(container).textContent).not.toContain("01JACTOR2");
+  });
+
+  it("quotes the reason recorded against each move", async () => {
+    withHistory([STARTED, FINISHED]);
+    const { container } = detail();
+
+    await waitFor(() =>
+      expect(reasonsShown(container)).toEqual([
+        "picked up in Monday's planning",
+        "merged in #218",
+      ]),
+    );
+  });
+
+  it("links to the audit trail rather than leaving a reason blank", async () => {
+    // The audit row this move names is not among the ones the page holds.
+    // There *is* a reason — Vogt refuses a write without one — so a blank
+    // would say nobody gave one, which is a claim and a false one.
+    withHistory([STARTED, FINISHED], [TRAIL[0]!, TRAIL[1]!]);
+    const { container } = detail();
+
+    await waitFor(() => expect(movesShown(container)).toHaveLength(2));
+    expect(reasonsShown(container)).toEqual(["picked up in Monday's planning"]);
+
+    const link = history(container).querySelector<HTMLAnchorElement>(".wid-move-why");
+    expect(link, "a move with no reason in hand rendered nothing at all").toBeTruthy();
+    expect(link!.getAttribute("href")).toBe("#/audit?ref=WI-1&op=work.transition");
+    // And it is counted on the surface, so a reader is not left to notice.
+    expect(history(container).textContent).toContain(
+      "an audit row this page does not hold",
+    );
+    // Who still gets answered, by the id the event does carry.
+    expect(moversShown(container)).toEqual(["by local:ana", "by actor 01JACTOR2"]);
+  });
+
+  it("says an item that has never moved has never moved", async () => {
+    // FR-U21's rule on this panel: the absence is designed. A creation and no
+    // transitions is a complete history, and rendering it as an empty list
+    // under a heading would read as the moves having been lost.
+    withHistory([CREATED]);
+    const { container } = detail();
+
+    await waitFor(() => expect(movesShown(container)).toEqual(["created in open"]));
+    expect(history(container).textContent).toContain(
+      "WI-1 has not been moved since it was created",
+    );
+    expect(history(container).textContent).not.toContain("transitions");
+  });
+
+  it("claims the whole history, because the feed it reads is never pruned", async () => {
+    withHistory([CREATED, STARTED]);
+    const { container } = detail();
+
+    await waitFor(() => expect(movesShown(container)).toHaveLength(2));
+    expect(history(container).textContent).toContain("1 transition");
+    expect(history(container).textContent).toContain(
+      "this is the whole of its history and not a recent window",
+    );
+  });
+
+  it("says the list is cut when the feed had more than it walked", async () => {
+    // The panel must not imply a completeness it does not have. Five full
+    // pages and the feed still going means there are later moves it is not
+    // showing — and the later ones are the ones that matter most.
+    const vogt = fakeVogt({
+      // A feed that keeps answering, and answers from wherever it is asked.
+      "GET /events": (call) => {
+        const after = Number(call.query.get("after") ?? 0);
+        return {
+          body: {
+            events: Array.from({ length: 200 }, (_, index) =>
+              feedEvent({ seq: after + index + 1, audit_id: null }),
+            ),
+            next_cursor: after + 200,
+          },
+        };
+      },
+    });
+    const { container } = detail();
+
+    await waitFor(() =>
+      expect(history(container).textContent).toContain(
+        "this is the first 1000 events recorded",
+      ),
+    );
+    expect(history(container).textContent).toContain(
+      "later moves are missing from the list below",
+    );
+    expect(history(container).textContent).not.toContain("the whole of its history");
+
+    // Five pages, each asked for from where the last one ended. A walk that
+    // did not carry the cursor forward would read the first page five times
+    // and then claim it had read a thousand events.
+    const walked = vogt.matching("GET /events");
+    expect(walked.map((call) => call.query.get("after"))).toEqual([
+      "0",
+      "200",
+      "400",
+      "600",
+      "800",
+    ]);
+    expect(walked.map((call) => call.query.get("limit"))).toEqual(
+      Array(5).fill("200"),
+    );
+  });
+
+  it("says the audit log was longer than the reasons it holds", async () => {
+    // The second read caps too, and the cap has to be said for the same
+    // reason the first one's does: some of these moves link for their reason
+    // because the log was long, not because nobody gave one.
+    fakeVogt({
+      "GET /events": { body: { events: [STARTED, FINISHED], next_cursor: 3 } },
+      "GET /audit": { body: { records: [TRAIL[1]!], total: 600 } },
+    });
+    const { container } = detail();
+
+    await waitFor(() => expect(movesShown(container)).toHaveLength(2));
+    expect(history(container).textContent).toContain(
+      "the log being longer than 500 rows",
+    );
+  });
+
+  it("re-reads both feeds when the page is refreshed", async () => {
+    // The page reports its own age beside the Refresh, and a panel that
+    // Refresh did not reach would be the one part of it the badge was lying
+    // about.
+    const vogt = withHistory([STARTED], [TRAIL[1]!]);
+    const { container } = detail();
+    await waitFor(() => expect(movesShown(container)).toEqual(["open → in_progress"]));
+
+    vogt.route("GET /events", {
+      body: { events: [STARTED, FINISHED], next_cursor: 3 },
+    });
+    vogt.route("GET /audit", { body: { records: TRAIL, total: TRAIL.length } });
+    fireEvent.click(
+      [...container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Refresh",
+      )!,
+    );
+
+    await waitFor(() =>
+      expect(movesShown(container)).toEqual([
+        "open → in_progress",
+        "in_progress → done",
+      ]),
+    );
+    expect(reasonsShown(container)).toEqual([
+      "picked up in Monday's planning",
+      "merged in #218",
+    ]);
+  });
+
+  it("renders Vogt's own sentence and no moves when the history cannot be read", async () => {
+    const NO_CORE = "vogt-core is not configured for this front door";
+    fakeVogt({ "GET /events": unavailable(NO_CORE) });
+    const { container } = detail();
+
+    await waitFor(() =>
+      expect(history(container).querySelector(".wid-failure")).toBeTruthy(),
+    );
+    const panel = history(container);
+    expect(panel.textContent).toContain("Vogt cannot be reached");
+    expect(panel.textContent).toContain(NO_CORE);
+    expect(panel.textContent).toContain("not because WI-1 has never moved");
+    expect(movesShown(container)).toHaveLength(0);
+    // Nothing claims the item has never moved, and the page is still the page.
+    expect(panel.querySelector(".wid-absent")).toBeNull();
+    expect(container.querySelector(".wid-outage")).toBeNull();
+    expect(container.textContent).toContain("Collected evidence");
+    expect(container.textContent).toContain("Comments");
+  });
+
+  it("keeps the moves when only the reasons could not be read", async () => {
+    // Two reads, and the one that fails must not take the other's answer with
+    // it: what the item did is knowable from the feed alone.
+    fakeVogt({
+      "GET /events": { body: { events: [STARTED, FINISHED], next_cursor: 3 } },
+      "GET /audit": refusal(500, "audit.list: the store is locked"),
+    });
+    const { container } = detail();
+
+    await waitFor(() =>
+      expect(movesShown(container)).toEqual(["open → in_progress", "in_progress → done"]),
+    );
+    const panel = history(container);
+    expect(panel.textContent).toContain("the reasons could not be read");
+    expect(panel.textContent).toContain("audit.list: the store is locked");
+    expect(reasonsShown(container)).toHaveLength(0);
+    expect(panel.querySelectorAll(".wid-move-why")).toHaveLength(2);
+    expect(moversShown(container)).toEqual(["by actor 01JACTOR1", "by actor 01JACTOR2"]);
+  });
+
+  it("no longer sends a reader to the audit trail for the transitions", async () => {
+    // The State panel used to say the transitions "belong in the audit trail
+    // below, not in a second story told by this panel". They are told here
+    // now, and a sentence saying otherwise would be the surface disagreeing
+    // with itself.
+    withHistory([CREATED, STARTED]);
+    const { container } = detail();
+
+    await waitFor(() => expect(movesShown(container)).toHaveLength(2));
+    expect(panelNamed(container, "State").textContent).not.toContain(
+      "not in a second story told by this panel",
+    );
   });
 });
 
