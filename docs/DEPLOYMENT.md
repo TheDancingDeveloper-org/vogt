@@ -845,6 +845,22 @@ the stack up without it, `docker exec` a `vogt token issue`, store it, and
 redeploy. Until then `/api/vogt` answers 401 and everything else works, which
 is FR-E9 rather than an outage.
 
+**Two files carry the rest**: `deploy/vogt-stack.env.example` is the paste-in
+environment with every value the compose gates or defaults, and
+`deploy/vogt-stack.komodo.md` is the stack's shape — ops path, file paths, the
+`pre_deploy` hook, the socket-overlay trust decision, and the first-deploy
+order the chicken-and-egg forces.
+
+**Read the template's header before filling it in.** The compose file's
+defaults are production's: port `18094` is what `personal/vogt` is serving on,
+and the three bind mounts point at the volumes the running MyDevEnv2 stack
+owns. Those defaults are correct for the file they are in — §4.1 says an
+allocation carries a default so a deploy cannot fail on an unset variable —
+and wrong for a second instance of the same product, which would not stand
+beside production but on top of it. The template sets each one explicitly, and
+`tests/test_deploy.py` fails if it stops doing so or if a newly-required value
+never reaches it.
+
 ### 9.4 Dev stack first, and what "carried the load" means
 
 NFR-D12 exists because mobile, voice and push are verifiable nowhere else:

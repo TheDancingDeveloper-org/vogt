@@ -730,3 +730,63 @@ def test_a_workflow_may_cancel_only_when_a_later_run_covers_the_same_ground() ->
         "if docs.yml ever classifies by diff range, cancelling its runs loses "
         "coverage the way ci.yml's did"
     )
+
+
+STACK_ENV = REPO_ROOT / "deploy" / "vogt-stack.env.example"
+
+
+def test_the_env_template_covers_every_value_the_stack_requires() -> None:
+    """A required value missing from the template is a failed deploy.
+
+    `${X:?}` in the compose file means the stack refuses to start without it,
+    and the template is the only place an operator is told it exists —
+    Komodo's environment field is a text box. A value added to the compose and
+    not to the template is discovered at deploy time, which is the moment
+    `DEPLOYMENT.md` §4.1 records as having cost cadastre every deploy after
+    #42.
+    """
+    compose = STACK_COMPOSE.read_text(encoding="utf-8")
+    template = STACK_ENV.read_text(encoding="utf-8")
+    required = set(re.findall(r"\$\{([A-Z_]+):\?", compose))
+    assert required, "the compose file gates some values as required"
+    missing = sorted(name for name in required if name not in template)
+    assert not missing, (
+        f"{missing} are required by the compose file and named nowhere in the "
+        "env template; the stack would refuse to start and the operator would "
+        "have had no way to know"
+    )
+
+
+def test_the_template_does_not_leave_a_dev_stack_on_production_paths() -> None:
+    """The compose defaults are production's, and this template is a dev one.
+
+    `vogt-stack.compose.yml` defaults the port to the one `personal/vogt` is
+    serving on and the three bind mounts to the volumes the running MyDevEnv2
+    stack owns. Those defaults are right for the file they are in — §4.1 says
+    an allocation value carries a default so a deploy cannot fail on an unset
+    variable — and wrong for a second instance of the same product, which
+    would not stand beside production but on top of it.
+
+    So the template sets them explicitly, and this fails if it stops.
+    """
+    # Comments stripped, as everywhere else in this file: the template's own
+    # header explains the danger by naming the production paths, and a check
+    # that cannot tell a rule from a description of one is not a check. That
+    # is the same mistake `_without_comments` was written for, made here on
+    # its first run.
+    template = _without_comments(STACK_ENV.read_text(encoding="utf-8"))
+    for name in (
+        "VOGT_PORT",
+        "VOGT_WORKSPACE_DIR",
+        "VOGT_HOME_DIR",
+        "VOGT_TAILSCALE_DIR",
+        "TAILSCALE_HOSTNAME",
+    ):
+        assert re.search(rf"^{name}=\S", template, re.MULTILINE), (
+            f"{name} must be set explicitly in the template, not left to the "
+            "compose default, which points at the running production stack"
+        )
+    assert "/volumes/mydevenv2/" not in template, (
+        "a dev stack must not mount the MyDevEnv2 stack's volumes: two "
+        "engines opening PTYs in one set of working trees"
+    )
