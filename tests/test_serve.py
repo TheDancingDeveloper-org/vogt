@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from vogt.adapters.http.server import ServeOptions, build_server
+from vogt.adapters.mcp.stdio import SUPPORTED_PROTOCOL_VERSIONS
 from vogt.application.context import AppContext
 from vogt.application.models import CreateActorParams, IssueTokenParams
 from vogt.application.services import create_actor, issue_token
@@ -207,12 +208,17 @@ def test_mcp_initialize_over_http(authed: TestClient, secrets: dict[str, str]) -
     assert result["protocolVersion"]
 
 
-def test_an_unsupported_protocol_version_is_refused_with_the_list(
+def test_an_unknown_protocol_version_negotiates_down(
     authed: TestClient, secrets: dict[str, str]
 ) -> None:
-    """FR-A6, on the HTTP transport as well as stdio."""
-    response = _rpc(authed, "initialize", secrets["read"], protocolVersion="1999-01-01")
-    assert response["error"]["data"]["supported"]
+    """FR-A6 as revised (r8), on HTTP as well as stdio.
+
+    This is the transport Claude Code actually uses through the bridge, and
+    the one that refused 2025-11-25 in production.
+    """
+    response = _rpc(authed, "initialize", secrets["read"], protocolVersion="2999-01-01")
+    assert "error" not in response, response
+    assert response["result"]["protocolVersion"] == SUPPORTED_PROTOCOL_VERSIONS[0]
 
 
 def test_ungranted_tools_are_invisible_not_erroring(

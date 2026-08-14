@@ -21,8 +21,8 @@ from fastapi.responses import JSONResponse
 from vogt.adapters.mcp.stdio import (
     INVALID_PARAMS,
     METHOD_NOT_FOUND,
-    SUPPORTED_PROTOCOL_VERSIONS,
     MessageId,
+    negotiate_protocol_version,
 )
 from vogt.adapters.mcp.surface import McpSurface
 from vogt.application.context import AppContext
@@ -92,18 +92,12 @@ def _handle(
         return None
 
     if method == "initialize":
-        requested = params.get("protocolVersion")
-        if requested is not None and requested not in SUPPORTED_PROTOCOL_VERSIONS:
-            return _error(
-                message_id,
-                INVALID_PARAMS,
-                f"unsupported MCP protocol version {requested!r}",
-                data={"supported": list(SUPPORTED_PROTOCOL_VERSIONS)},
-            )
         return _result(
             message_id,
             {
-                "protocolVersion": str(requested or SUPPORTED_PROTOCOL_VERSIONS[0]),
+                "protocolVersion": negotiate_protocol_version(
+                    params.get("protocolVersion")
+                ),
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": "vogt", "version": _version()},
             },
