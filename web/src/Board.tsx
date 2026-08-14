@@ -66,6 +66,7 @@ import { onVogtChanged } from "./store";
 import { openWorkItemTab } from "./tabs";
 import {
   VogtUnavailable,
+  createWork,
   listActors,
   listInitiatives,
   listLabels,
@@ -430,6 +431,26 @@ function formatClock(at: number): string {
 function humanState(state: string): string {
   return state.replace(/_/g, " ");
 }
+
+/**
+ * Trust, on every card (FR-U2, FR-U17).
+ *
+ * `unverified` rather than a blank, always — the legacy GUI's rule, which
+ * every other Vogt surface kept and this one did not: a blank cell says "no
+ * opinion", and the honest answer is "nobody has verified this". The board is
+ * an aggregated view of exactly the kind FR-U2 names, so a card that showed
+ * priority and kind and said nothing about whether anyone had checked the
+ * item was the aggregate quietly dropping the least convenient column.
+ */
+export function trustOf(item: Pick<WorkItem, "trust_state">): string {
+  const state = item.trust_state;
+  return typeof state === "string" && state ? state : "unverified";
+}
+
+/** Kinds are a closed set in Vogt (`WorkKind`), and quick-create needs one
+ *  before any workflow has loaded, so this is the fallback rather than the
+ *  source: the picker prefers the kinds `workflow.list` published. */
+const WORK_KINDS = ["feature", "bug", "chore", "question"] as const;
 
 interface Layout {
   columns: string[];
@@ -981,6 +1002,87 @@ const Board: Component<Props> = (props) => {
     });
   };
 
+  // -- quick-create (FR-U15) ------------------------------------------------
+  //
+  // FR-U15 names the board *first* and the backlog second; the backlog had
+  // it and the board did not, which made half of a must-have clause an
+  // absence. The rule is the backlog's, unchanged, because it is r6's rule
+  // and it does not get a second dialect: title, type, project, and a reason
+  // the user typed, inline, without leaving the view — and no reason, no
+  // submit. Everything else is deferrable to the detail view.
+  //
+  // The reason is never prefilled. The board's *move* composer does prefill
+  // one, from the last reason this session accepted, and that is a different
+  // case with a different justification: a triage run is one decision applied
+  // to a sequence of cards. Raising an item is not a repetition of raising
+  // the previous one, so `stickyReason` deliberately does not reach here.
+
+  const [createOpen, setCreateOpen] = createSignal(false);
+  const [draftTitle, setDraftTitle] = createSignal("");
+  const [draftKind, setDraftKind] = createSignal("feature");
+  const [draftProject, setDraftProject] = createSignal("");
+  const [draftReason, setDraftReason] = createSignal("");
+  const [creating, setCreating] = createSignal(false);
+  const [created, setCreated] = createSignal<string | null>(null);
+  const [createError, setCreateError] = createSignal<string | null>(null);
+
+  // A plain function rather than a memo: `kindOptions` is declared below with
+  // the rest of the render helpers, and a memo body runs the moment it is
+  // created.
+  const kindChoices = (): string[] => {
+    const published = kindOptions();
+    return published.length ? published : [...WORK_KINDS];
+  };
+
+  /** The whole of FR-U15's refusal, in one place. `disabled` says it on
+   *  screen and the guard in `submitCreate` says it again for the keyboard. */
+  const createReady = createMemo(
+    () => draftTitle().trim().length > 0 && draftReason().trim().length > 0,
+  );
+
+  const openQuickCreate = () => {
+    if (writesDisabled()) return;
+    // The filters in force are a good guess at what is being raised; the
+    // reason never is.
+    const kinds = filters().kinds;
+    setDraftKind(kinds[0] ?? kindChoices()[0] ?? "feature");
+    setDraftProject(filters().project);
+    setCreated(null);
+    setCreateError(null);
+    setCreateOpen(true);
+  };
+
+  const submitCreate = async (event: Event) => {
+    event.preventDefault();
+    const title = draftTitle().trim();
+    const reason = draftReason().trim();
+    if (!title || !reason || creating()) return; // FR-W1, again for the keyboard.
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const answer = await createWork({
+        title,
+        kind: draftKind(),
+        project: draftProject() || undefined,
+        reason,
+      });
+      const item = answer?.item;
+      setCreated(item?.ref ?? null);
+      setDraftTitle("");
+      setDraftReason("");
+      // The new item belongs in its column now, not at the next poll.
+      if (item) applyItem(item);
+      else void loadItems(true);
+    } catch (e) {
+      if (e instanceof VogtUnavailable) setOutage(serverReason(e));
+      // Vogt's own sentence, where the form is — not a toast somewhere else.
+      setCreateError(serverReason(e));
+      props.onError?.(`Could not create the work item: ${serverReason(e)}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
   // -- keyboard (FR-U22, as far as it goes) --------------------------------
 
   const cardDomId = (ref: string) => `board-card-${ref}`;
@@ -1023,6 +1125,25 @@ const Board: Component<Props> = (props) => {
   const openDetail = (ref: string) => {
     openWorkItemTab(ref);
     navigate(`/w/${encodeURIComponent(ref)}`);
+  };
+
+  /** FR-U22's last clause: quick-create has a binding, now that there is a
+   *  quick-create on this board to bind.
+   *
+   *  Scoped to the surface rather than to `document`: every tab in this shell
+   *  is mounted at once, so a document-level `n` would raise a work item
+   *  while somebody was reading a terminal. It listens on the board's own
+   *  root and ignores anything typed into a field, which is what makes it
+   *  reachable from a focused card, the toolbar, or the board's background
+   *  without stealing a keystroke from the composer. */
+  const onSurfaceKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== "n" || event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.isContentEditable) return;
+    if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+    if (createOpen()) return;
+    event.preventDefault();
+    openQuickCreate();
   };
 
   // -- rendering ------------------------------------------------------------
@@ -1103,7 +1224,10 @@ const Board: Component<Props> = (props) => {
   );
 
   return (
-    <div class={`vogt-surface board${outage() ? " board--outage" : ""}`}>
+    <div
+      class={`vogt-surface board${outage() ? " board--outage" : ""}`}
+      onKeyDown={onSurfaceKeyDown}
+    >
       <header class="board-header">
         <div class="board-heading">
           <h2>Board</h2>
@@ -1124,6 +1248,18 @@ const Board: Component<Props> = (props) => {
           </p>
         </div>
         <div class="board-header-actions">
+          <button
+            type="button"
+            onClick={() => (createOpen() ? setCreateOpen(false) : openQuickCreate())}
+            disabled={writesDisabled()}
+            title={
+              writesDisabled()
+                ? "Vogt cannot be asked right now, so nothing can be raised"
+                : "Raise a work item without leaving the board (n)"
+            }
+          >
+            Quick create
+          </button>
           <label class="board-field board-field--tight">
             <span>Refresh</span>
             <select
@@ -1304,11 +1440,102 @@ const Board: Component<Props> = (props) => {
         </div>
       </div>
 
+      <Show when={createOpen()}>
+        <form class="board-create" onSubmit={(event) => void submitCreate(event)}>
+          <div class="board-create-grid">
+            <label class="board-field board-field--wide">
+              <span>Title</span>
+              <input
+                type="text"
+                required
+                value={draftTitle()}
+                placeholder="What needs doing"
+                ref={(element) => queueMicrotask(() => element.focus())}
+                onInput={(event) => setDraftTitle(event.currentTarget.value)}
+              />
+            </label>
+            <label class="board-field">
+              <span>Type</span>
+              <select
+                value={optionValue(draftKind(), kindChoices())}
+                onInput={(event) => setDraftKind(event.currentTarget.value)}
+              >
+                <For each={kindChoices()}>
+                  {(kind) => <option value={kind}>{kind}</option>}
+                </For>
+              </select>
+            </label>
+            <label class="board-field">
+              <span>Project</span>
+              <select
+                value={optionValue(
+                  draftProject(),
+                  projects().map((one) => one.slug),
+                )}
+                onInput={(event) => setDraftProject(event.currentTarget.value)}
+              >
+                <option value="">No project</option>
+                <For each={projects()}>
+                  {(project) => <option value={project.slug}>{project.name}</option>}
+                </For>
+              </select>
+            </label>
+            <label class="board-field board-field--wide">
+              <span>Reason (recorded in the audit trail)</span>
+              <input
+                type="text"
+                required
+                value={draftReason()}
+                placeholder="Why is this being raised?"
+                onInput={(event) => setDraftReason(event.currentTarget.value)}
+              />
+            </label>
+          </div>
+          <div class="board-create-actions">
+            <button type="submit" disabled={!createReady() || creating()}>
+              {creating() ? "Creating…" : "Create"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setCreateOpen(false)}
+              disabled={creating()}
+            >
+              Close
+            </button>
+            <span class="board-muted">
+              Body, priority, effort, labels and assignee are set on the item
+              itself.
+            </span>
+            <Show when={created()}>
+              {(ref) => (
+                <span class="board-created">
+                  Created{" "}
+                  <button
+                    type="button"
+                    class="board-card-ref"
+                    onClick={() => openDetail(ref())}
+                  >
+                    {ref()}
+                  </button>
+                </span>
+              )}
+            </Show>
+          </div>
+          <Show when={createError()}>
+            {(message) => (
+              <p class="board-create-error" role="alert">
+                {message()}
+              </p>
+            )}
+          </Show>
+        </form>
+      </Show>
+
       <p class="board-keys">
         Keyboard: <kbd>Tab</kbd> to a card · <kbd>←</kbd> <kbd>→</kbd> across
         columns · <kbd>↑</kbd> <kbd>↓</kbd> within one · <kbd>Shift</kbd>+
         <kbd>←</kbd>/<kbd>→</kbd> proposes a move (same reason prompt as a drop)
-        · <kbd>Enter</kbd> opens the item.
+        · <kbd>Enter</kbd> opens the item · <kbd>n</kbd> raises one.
       </p>
 
       <Show
@@ -1618,6 +1845,15 @@ const Board: Component<Props> = (props) => {
                                             class={`board-pri board-pri--${item.priority}`}
                                           >
                                             {item.priority}
+                                          </span>
+                                          {/* FR-U17: never blank, and
+                                              `unverified` when nobody has
+                                              said otherwise. */}
+                                          <span
+                                            class={`board-trust trust-${trustOf(item)}`}
+                                            title={`trust: ${trustOf(item)}`}
+                                          >
+                                            {trustOf(item)}
                                           </span>
                                           <span class="board-kind">{item.kind}</span>
                                         </div>

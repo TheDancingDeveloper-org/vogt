@@ -250,6 +250,235 @@ describe("FR-U22 — the same move, from the keyboard", () => {
   });
 });
 
+describe("FR-U17 — trust on every card, and never blank", () => {
+  it("renders the trust state the server gave", async () => {
+    fakeVogt({
+      "GET /work": { body: { items: [workItem({ trust_state: "disputed" })], total: 1 } },
+    });
+    const { container } = board();
+
+    await waitFor(() => card(container, "WI-1"));
+    const badge = card(container, "WI-1").querySelector(".board-trust");
+    expect(badge?.textContent).toBe("disputed");
+    expect(badge?.className).toContain("trust-disputed");
+  });
+
+  it("reads an absent trust state as unverified rather than as nothing", async () => {
+    fakeVogt({
+      "GET /work": {
+        body: {
+          items: [
+            workItem({ ref: "WI-2", trust_state: undefined }),
+            workItem({ ref: "WI-3", trust_state: "" }),
+          ],
+          total: 2,
+        },
+      },
+    });
+    const { container } = board();
+
+    await waitFor(() => card(container, "WI-2"));
+    // A blank badge says "no opinion"; the honest answer is "nobody checked".
+    for (const ref of ["WI-2", "WI-3"]) {
+      expect(card(container, ref).querySelector(".board-trust")?.textContent).toBe(
+        "unverified",
+      );
+    }
+  });
+
+  it("puts one on every card, so the aggregate cannot drop the awkward column", async () => {
+    fakeVogt({
+      "GET /work": {
+        body: {
+          items: [
+            workItem({ ref: "WI-2", state: "open" }),
+            workItem({ ref: "WI-3", state: "in_progress", trust_state: "stale" }),
+            workItem({ ref: "WI-4", state: "done", trust_state: undefined }),
+          ],
+          total: 3,
+        },
+      },
+    });
+    const { container } = board();
+
+    await waitFor(() => card(container, "WI-4"));
+    const cards = container.querySelectorAll(".board-card");
+    expect(cards).toHaveLength(3);
+    expect(container.querySelectorAll(".board-card .board-trust")).toHaveLength(3);
+  });
+});
+
+describe("FR-U15 — quick-create on the board, which is the half that was missing", () => {
+  function quickCreate(container: HTMLElement): HTMLFormElement {
+    const form = container.querySelector<HTMLFormElement>(".board-create");
+    if (!form) throw new Error("the board has no quick-create form open");
+    return form;
+  }
+
+  function field(form: HTMLElement, label: string): HTMLInputElement | HTMLSelectElement {
+    const found = [...form.querySelectorAll<HTMLElement>(".board-field")].find((node) =>
+      (node.querySelector("span")?.textContent ?? "").startsWith(label),
+    );
+    const control = found?.querySelector<HTMLInputElement | HTMLSelectElement>(
+      "input, select",
+    );
+    if (!control) throw new Error(`quick-create has no ${label} field`);
+    return control;
+  }
+
+  async function open(container: HTMLElement): Promise<HTMLFormElement> {
+    const button = [...container.querySelectorAll("button")].find(
+      (node) => node.textContent === "Quick create",
+    );
+    if (!button) throw new Error("the board has no quick-create control");
+    fireEvent.click(button);
+    await waitFor(() => quickCreate(container));
+    return quickCreate(container);
+  }
+
+  it("raises an item without leaving the board", async () => {
+    const vogt = fakeVogt({
+      "POST /work": { body: { item: workItem({ ref: "WI-77", title: "Raised here" }) } },
+    });
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    const form = await open(container);
+    fireEvent.input(field(form, "Title"), { target: { value: "Raised here" } });
+    fireEvent.input(field(form, "Reason"), { target: { value: "found while triaging" } });
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(vogt.matching("POST /work")).toHaveLength(1));
+    expect(vogt.matching("POST /work")[0]?.body).toEqual({
+      title: "Raised here",
+      kind: "feature",
+      reason: "found while triaging",
+    });
+    // Still the board: the new card is in its column, and no navigation
+    // happened.
+    await waitFor(() => card(container, "WI-77"));
+    expect(cell(container, "open").contains(card(container, "WI-77"))).toBe(true);
+  });
+
+  it("will not submit without the reason the user typed", async () => {
+    const vogt = fakeVogt();
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    const form = await open(container);
+    const submit = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+
+    expect(submit.disabled).toBe(true);
+    fireEvent.input(field(form, "Title"), { target: { value: "Raised here" } });
+    expect(submit.disabled).toBe(true); // a title is not a reason
+
+    fireEvent.input(field(form, "Reason"), { target: { value: "   " } });
+    expect(submit.disabled).toBe(true); // and whitespace is not one either
+
+    // The keyboard path is guarded separately, so submitting round the
+    // disabled button must not write.
+    fireEvent.submit(form);
+    expect(vogt.matching("POST /work")).toHaveLength(0);
+  });
+
+  it("will not submit without a title", async () => {
+    const vogt = fakeVogt();
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    const form = await open(container);
+    fireEvent.input(field(form, "Reason"), { target: { value: "seemed worth raising" } });
+    fireEvent.submit(form);
+    expect(vogt.matching("POST /work")).toHaveLength(0);
+  });
+
+  it("never prefills the reason, however convenient the last one was", async () => {
+    fakeVogt({
+      "POST /work/transition": { body: { item: workItem({ state: "in_progress" }) } },
+    });
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    // A move whose reason the board *does* remember, deliberately, for the
+    // next drop.
+    await dragTo(container, "WI-1", "in progress");
+    await giveReason(container, "in progress", "picked up in today's triage");
+    await waitFor(() =>
+      expect(container.textContent).toContain("WI-1 moved to in progress."),
+    );
+
+    const form = await open(container);
+    expect((field(form, "Reason") as HTMLInputElement).value).toBe("");
+  });
+
+  it("guesses the type and project from the filters in force, and only those", async () => {
+    fakeVogt();
+    const { container } = board("/board?project=beta&kind=bug");
+    await waitFor(() => expect(columnNames(container).length).toBeGreaterThan(0));
+
+    const form = await open(container);
+    expect((field(form, "Type") as HTMLSelectElement).value).toBe("bug");
+    expect((field(form, "Project") as HTMLSelectElement).value).toBe("beta");
+    expect((field(form, "Reason") as HTMLInputElement).value).toBe("");
+  });
+
+  it("renders Vogt's refusal beside the form rather than swallowing it", async () => {
+    fakeVogt({ "POST /work": refusal(422, "work.create: project 'ghost' is not registered") });
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    const form = await open(container);
+    fireEvent.input(field(form, "Title"), { target: { value: "Raised here" } });
+    fireEvent.input(field(form, "Reason"), { target: { value: "found while triaging" } });
+    fireEvent.submit(form);
+
+    await waitFor(() =>
+      expect(container.querySelector(".board-create-error")?.textContent).toContain(
+        "work.create: project 'ghost' is not registered",
+      ),
+    );
+  });
+
+  it("is unreachable while Vogt cannot be asked", async () => {
+    fakeVogt({
+      "GET /work": unavailable("upstream vogt-core did not answer"),
+      "GET /workflows": unavailable("upstream vogt-core did not answer"),
+    });
+    const { container } = board();
+    await waitFor(() => expect(container.querySelector(".board-banner--outage")).toBeTruthy());
+
+    const button = [...container.querySelectorAll("button")].find(
+      (node) => node.textContent === "Quick create",
+    ) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+  });
+});
+
+describe("FR-U22 — quick-create has a binding, now that there is one to bind", () => {
+  it("opens on `n`, and is announced on the board's own keyboard line", async () => {
+    fakeVogt();
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    expect(container.querySelector(".board-keys")?.textContent).toContain("raises one");
+
+    fireEvent.keyDown(card(container, "WI-1"), { key: "n" });
+    await waitFor(() => expect(container.querySelector(".board-create")).toBeTruthy());
+  });
+
+  it("does not steal an `n` typed into the move composer", async () => {
+    fakeVogt();
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    await dragTo(container, "WI-1", "in progress");
+    const composer = cell(container, "in progress").querySelector("textarea")!;
+    fireEvent.keyDown(composer, { key: "n" });
+
+    expect(container.querySelector(".board-create")).toBeNull();
+  });
+});
+
 describe("FR-U11 — the filter set is the URL", () => {
   it("restores every filter from a pasted link", async () => {
     fakeVogt();
