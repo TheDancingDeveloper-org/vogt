@@ -311,6 +311,9 @@ export interface PushPreferences {
   idle_stall: boolean;
   agent_task_started: boolean;
   agent_task_notify: boolean;
+  // New drift raised in vogt-core (FR-M2). Absent from any subscription
+  // stored before the engine grew the kind; the server defaults it on.
+  drift: boolean;
   quiet_hours: PushQuietHours;
 }
 

@@ -139,6 +139,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // never fired).
     push_api::spawn_idle_stall_watcher(Arc::clone(&state));
     push_api::spawn_digest_flusher(Arc::clone(&state));
+    // Background task: poll vogt-core's event cursor for newly raised drift
+    // (FR-M2). A no-op when no core is configured, which is a supported
+    // deployment (FR-E9) rather than a misconfiguration.
+    crate::vogt_drift::spawn_drift_watcher(Arc::clone(&state));
     state.agent_tasks.spawn_scheduler();
     state.agent_tasks.spawn_run_watcher(state.bus.clone());
 

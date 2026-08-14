@@ -24,6 +24,7 @@ pub mod push_fcm;
 pub mod scrollback;
 pub mod sessions;
 pub mod vogt_core;
+pub mod vogt_drift;
 pub mod workspace_path;
 pub mod ws;
 

@@ -154,6 +154,61 @@ impl VogtCore {
         }
     }
 
+    /// One page of the core's `events.list` feed, on the engine's own behalf.
+    ///
+    /// Unlike everything else here this is not a proxy: no browser asked for
+    /// it, so there is no caller identity to map and the deployment-wide
+    /// `vogt_core_token` is the only credential available. A front door with
+    /// no fallback token configured cannot read the feed at all, and says so
+    /// rather than sending an unauthenticated request the core will refuse.
+    ///
+    /// Returns `(events, next_cursor)`. The core orders by `seq` ascending
+    /// and returns the caller's own cursor when the page is empty, so a
+    /// poller built on this never rewinds — see `list_events` in
+    /// `services/history.py`, which is where that guarantee is made.
+    pub async fn events_after(
+        &self,
+        cursor: u64,
+        limit: u32,
+    ) -> std::result::Result<(Vec<serde_json::Value>, u64), String> {
+        let token = self
+            .fallback_token
+            .as_deref()
+            .ok_or("no vogt_core_token is configured for this front door")?;
+        let url = format!(
+            "{}{CORE_API_PREFIX}/events?after={cursor}&limit={limit}",
+            self.base
+        );
+        let response = self
+            .client
+            .get(&url)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| terse(&e).to_string())?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("the core answered {status}"));
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("the core's answer did not parse: {}", terse(&e)))?;
+        let events = body
+            .get("events")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        // Falling back to the cursor we sent, never to 0: a malformed answer
+        // must not rewind the feed and replay every event as new.
+        let next = body
+            .get("next_cursor")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(cursor);
+        Ok((events, next))
+    }
+
     /// Forward one request to `upstream_path`, streaming both ways.
     ///
     /// `inject` is the core token to present as this request's credential, or
