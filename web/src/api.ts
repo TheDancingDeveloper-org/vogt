@@ -738,13 +738,37 @@ export interface AssistantTranscriptEntry {
   tool_trace?: string[];
 }
 
-export interface AssistantPendingAction {
+/** Keystrokes the assistant wants to type into a terminal. */
+export interface AssistantSendInputAction {
+  kind: "send_input";
   id: string;
   session_id: string;
   session_name: string;
   text: string;
   submit: boolean;
 }
+
+/**
+ * A Vogt write the assistant wants to make. `reason` is what Vogt records in
+ * its audit log, so it is approved as deliberately as the payload is.
+ */
+export interface AssistantVogtWriteAction {
+  kind: "vogt_write";
+  id: string;
+  operation: string;
+  target: string;
+  reason: string;
+  payload: string;
+}
+
+/**
+ * Discriminated because the two effectors have nothing in common but the gate:
+ * a card that renders one as the other would ask for approval of the wrong
+ * thing.
+ */
+export type AssistantPendingAction =
+  | AssistantSendInputAction
+  | AssistantVogtWriteAction;
 
 export interface AssistantReply {
   reply: string | null;
