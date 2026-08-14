@@ -1,0 +1,66 @@
+[package]
+name = "mydevenv2-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mydevenv2-server"
+path = "src/main.rs"
+
+[lib]
+name = "mydevenv2_server"
+path = "src/lib.rs"
+
+[dependencies]
+mydevenv2-contract = { path = "../contract" }
+axum = { version = "0.8", features = ["macros", "ws"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
+hyper = "1"
+
+portable-pty = "0.9"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+futures-util = "0.3"
+bytes = "1"
+dashmap = "6"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+regex = "1"
+once_cell = "1"
+parking_lot = "0.12"
+subtle = "2"
+time = { version = "0.3", features = ["serde", "formatting"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+
+# Session history
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# Phase 6 — push notifications
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+web-push = "0.11"
+jsonwebtoken = "9"
+base64 = "0.22"
+sha2 = "0.10"
+ring = "0.17"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+tempfile = "3"

@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["server", "contract"]
+# The native desktop client is its own workspace (heavy GPUI/FluentGUI graph).
+# Keep it out of the server build/CI so `cargo test --all` here stays fast.
+exclude = ["client"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://repo.indexarr.net/indexarr/MyDevEnv2"
+rust-version = "1.80"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

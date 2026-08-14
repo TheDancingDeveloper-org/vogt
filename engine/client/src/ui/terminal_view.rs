@@ -1,0 +1,865 @@
+//! GPUI terminal view: attaches to a server PTY session over WebSocket and
+//! renders the live grid.
+//!
+//! Pattern mirrors `rdpapp`'s `LocalTermView`: a `fontdue`-rasterized BGRA
+//! frame painted onto a `canvas`, plus `on_key_down`/`on_scroll_wheel`/mouse
+//! listeners for input. Server output arrives on the background tokio runtime
+//! and is fed into the parser from a GPUI async task via `weak.update`.
+
+use std::sync::{Arc, Mutex};
+
+use gpui::{
+    canvas, div, prelude::*, px, Bounds, ClipboardItem, Context, Corners, FocusHandle, FontWeight,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage,
+    ScrollDelta, ScrollWheelEvent, Window,
+};
+use image::{Frame, ImageBuffer, Rgba};
+use tokio::sync::mpsc::UnboundedSender;
+use uuid::Uuid;
+
+use mydevenv2_client::{
+    bridge,
+    terminal::{
+        key_to_bytes, KeyInput, TermProcessor, TermRenderer, DEFAULT_COLS, DEFAULT_FONT_SIZE,
+        DEFAULT_ROWS, MAX_FONT_SIZE, MIN_FONT_SIZE,
+    },
+    ws::{self, AttachEvent, AttachInput},
+};
+
+/// Default pixel size used for the very first frame before layout reports the
+/// real canvas bounds.
+const DEFAULT_PX_W: u32 = 960;
+const DEFAULT_PX_H: u32 = 600;
+const PAGE_SCROLL_SENTINEL: f32 = u32::MAX as f32;
+/// Font-size step applied per Ctrl+wheel notch / zoom button press.
+const ZOOM_STEP: f32 = 1.0;
+/// Reconnect backoff bounds for an unexpectedly dropped attach (#7).
+const RECONNECT_MIN_SECS: u64 = 1;
+const RECONNECT_MAX_SECS: u64 = 15;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Status {
+    Connecting,
+    Live,
+    /// Dropped unexpectedly; an automatic reconnect is scheduled (#7).
+    Reconnecting,
+    /// Closed deliberately (user killed/closed); no auto-reconnect.
+    Closed,
+}
+
+pub struct TerminalView {
+    ws_url: String,
+    token: String,
+    term: TermProcessor,
+    renderer: TermRenderer,
+    last_frame: Option<Arc<RenderImage>>,
+    /// Old frame handles whose GPUI sprite-atlas entries need to be evicted on
+    /// the next paint before a replacement terminal image is uploaded.
+    stale_frames: Vec<Arc<RenderImage>>,
+    focus_handle: FocusHandle,
+    bounds_arc: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    last_size_px: (u32, u32),
+    input: Option<UnboundedSender<AttachInput>>,
+    status: Status,
+    error: Option<String>,
+    search_query: String,
+    search_count: usize,
+    wheel_remainder_lines: f32,
+    /// Current terminal font size; changed by Ctrl+wheel and zoom buttons (#3).
+    font_size: f32,
+    /// True once the user has deliberately closed this view; suppresses the
+    /// auto-reconnect path so a killed session does not respawn (#7).
+    user_closed: bool,
+    /// Bumped on each (re)attach so a stale attach loop from a prior generation
+    /// stops feeding this view after a reconnect or manual reattach.
+    attach_gen: u64,
+    /// Consecutive auto-reconnect attempts, for backoff.
+    reconnect_attempts: u32,
+}
+
+impl TerminalView {
+    /// Attach to `session_id` on the given server and start streaming.
+    pub fn new(
+        ws_url: String,
+        token: String,
+        _session_id: Uuid,
+        font_size: f32,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let font_size = font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        let mut view = Self {
+            ws_url,
+            token,
+            term: TermProcessor::new(DEFAULT_COLS, DEFAULT_ROWS),
+            renderer: TermRenderer::new(font_size),
+            last_frame: None,
+            stale_frames: Vec::new(),
+            focus_handle: cx.focus_handle(),
+            bounds_arc: Arc::new(Mutex::new(None)),
+            last_size_px: (0, 0),
+            input: None,
+            status: Status::Connecting,
+            error: None,
+            search_query: String::new(),
+            search_count: 0,
+            wheel_remainder_lines: 0.0,
+            font_size,
+            user_closed: false,
+            attach_gen: 0,
+            reconnect_attempts: 0,
+        };
+
+        view.start_attach(cx);
+        view
+    }
+
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    /// Apply a new font size: re-rasterize, recompute the grid for the current
+    /// viewport, and resize the PTY so the server matches (#3).
+    pub fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        if self.renderer.set_font_size(size) {
+            self.font_size = self.renderer.font_size();
+            // Force a reflow against the existing pixel viewport.
+            self.last_size_px = (0, 0);
+            self.invalidate_frame();
+            cx.notify();
+        }
+    }
+
+    /// Step the font size by `delta` (Ctrl+wheel notches / +/- buttons).
+    pub fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let target = self.font_size + delta;
+        self.set_font_size(target, cx);
+    }
+
+    pub fn zoom_reset(&mut self, cx: &mut Context<Self>) {
+        self.set_font_size(DEFAULT_FONT_SIZE, cx);
+    }
+
+    /// Scroll the viewport into scrollback history by `lines` (positive = up
+    /// toward older output). Returns true if the offset changed.
+    pub fn scroll_lines(&mut self, lines: isize, cx: &mut Context<Self>) -> bool {
+        if self.term.grid.scroll_by(lines) {
+            self.invalidate_frame();
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Jump straight to the oldest retained scrollback line.
+    pub fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
+        let max = self.term.grid.history.len() as isize;
+        self.scroll_lines(max, cx);
+    }
+
+    /// Snap back to the live tail (offset 0).
+    pub fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+        let cur = self.term.grid.scroll_offset as isize;
+        if cur > 0 {
+            self.scroll_lines(-cur, cx);
+        }
+    }
+
+    /// Current scroll position: (offset, history_len). offset 0 == live tail.
+    pub fn scroll_state(&self) -> (usize, usize) {
+        (self.term.grid.scroll_offset, self.term.grid.history.len())
+    }
+
+    /// Force a fresh attach now (manual "Reconnect" button / post-lag). Clears
+    /// the grid and supersedes any in-flight attach or pending auto-reconnect.
+    pub fn reattach(&mut self, cx: &mut Context<Self>) {
+        if let Some(tx) = &self.input {
+            let _ = tx.send(AttachInput::Close);
+        }
+        self.input = None;
+        self.attach_gen += 1;
+        self.reconnect_attempts = 0;
+        self.user_closed = false;
+        self.term.clear_all();
+        self.status = Status::Connecting;
+        self.error = None;
+        self.invalidate_frame();
+        self.start_attach(cx);
+        cx.notify();
+    }
+
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.user_closed = true;
+        self.attach_gen += 1;
+        if let Some(tx) = &self.input {
+            let _ = tx.send(AttachInput::Close);
+        }
+        self.input = None;
+        self.drop_cached_frames(cx);
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.term.clear_all();
+        self.invalidate_frame();
+        self.search_count = 0;
+        cx.notify();
+    }
+
+    pub fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
+        self.search_query = query;
+        self.search_count = self.term.match_count(&self.search_query);
+        self.invalidate_frame();
+        cx.notify();
+    }
+
+    fn scroll_terminal_by_wheel(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        // Ctrl+wheel zooms the font instead of scrolling, like a browser (#3).
+        if ev.modifiers.control {
+            let dir = wheel_zoom_direction(ev.delta);
+            if dir != 0.0 {
+                cx.stop_propagation();
+                self.zoom_by(dir * ZOOM_STEP, cx);
+            }
+            return;
+        }
+
+        let lines = wheel_delta_to_lines(ev.delta, self.renderer.cell_h(), self.term.grid.rows);
+        if !lines.is_finite() || lines == 0.0 {
+            return;
+        }
+        cx.stop_propagation();
+
+        self.wheel_remainder_lines += lines;
+        let whole_lines = self.wheel_remainder_lines.trunc() as isize;
+        if whole_lines == 0 {
+            return;
+        }
+        self.wheel_remainder_lines -= whole_lines as f32;
+
+        if self.term.grid.scroll_by(whole_lines) {
+            self.invalidate_frame();
+            cx.notify();
+        }
+    }
+
+    fn start_attach(&mut self, cx: &mut Context<Self>) {
+        // Spawn the attach on the tokio runtime (its internal `tokio::spawn`
+        // needs a runtime context), then pump its events into the parser from a
+        // GPUI async task so all terminal mutation stays on the foreground
+        // thread.
+        let handle = bridge::handle();
+        let ws_url = self.ws_url.clone();
+        let token = self.token.clone();
+        self.attach_gen += 1;
+        let generation = self.attach_gen;
+
+        cx.spawn(
+            move |weak: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let mut cx = cx.clone();
+                async move {
+                    // Establish the attach inside the tokio runtime.
+                    let attach = handle
+                        .spawn(async move { ws::spawn_attach(ws_url, token) })
+                        .await;
+                    let mut attach = match attach {
+                        Ok(a) => a,
+                        Err(e) => {
+                            let _ = weak.update(&mut cx, |v, cx| {
+                                if v.attach_gen == generation {
+                                    v.error = Some(format!("attach task failed: {e}"));
+                                    v.schedule_reconnect(cx);
+                                }
+                            });
+                            return;
+                        }
+                    };
+                    // Hand the input channel to the view so keystrokes can be sent.
+                    let input_tx = attach.input_tx.clone();
+                    let superseded = weak
+                        .update(&mut cx, |v, cx| {
+                            if v.attach_gen != generation {
+                                return true;
+                            }
+                            v.input = Some(input_tx);
+                            cx.notify();
+                            false
+                        })
+                        .unwrap_or(true);
+                    if superseded {
+                        return;
+                    }
+
+                    // Stream events; drain greedily to batch bursts.
+                    while let Some(ev) = attach.event_rx.recv().await {
+                        let mut batch = vec![ev];
+                        while let Ok(next) = attach.event_rx.try_recv() {
+                            batch.push(next);
+                        }
+                        let stop = weak
+                            .update(&mut cx, |v, cx| {
+                                // A newer attach generation owns the view now;
+                                // stop applying this stale stream's events.
+                                if v.attach_gen != generation {
+                                    return true;
+                                }
+                                let mut closed = false;
+                                for ev in batch {
+                                    match ev {
+                                        AttachEvent::Output(bytes) => {
+                                            v.term.process(&bytes);
+                                            if !v.search_query.trim().is_empty() {
+                                                v.search_count =
+                                                    v.term.match_count(&v.search_query);
+                                            }
+                                        }
+                                        AttachEvent::SnapshotReady => {
+                                            v.status = Status::Live;
+                                            // A clean snapshot means the link is
+                                            // healthy; reset backoff.
+                                            v.reconnect_attempts = 0;
+                                        }
+                                        AttachEvent::Lag(note) => {
+                                            v.error = Some(format!("lagged: {note}"));
+                                        }
+                                        AttachEvent::Closed => closed = true,
+                                        AttachEvent::Error(e) => v.error = Some(e),
+                                    }
+                                }
+                                v.invalidate_frame();
+                                cx.notify();
+                                closed
+                            })
+                            .unwrap_or(true);
+                        if stop {
+                            break;
+                        }
+                    }
+
+                    // The socket ended. If this is still the active generation
+                    // and the user did not deliberately close it, auto-reconnect
+                    // (covers WS IO errors such as OS 10054). (#7)
+                    let _ = weak.update(&mut cx, |v, cx| {
+                        if v.attach_gen == generation {
+                            v.input = None;
+                            v.schedule_reconnect(cx);
+                        }
+                    });
+                }
+            },
+        )
+        .detach();
+    }
+
+    /// Schedule an automatic reconnect with bounded exponential backoff, unless
+    /// the user deliberately closed this view. (#7)
+    fn schedule_reconnect(&mut self, cx: &mut Context<Self>) {
+        if self.user_closed {
+            self.status = Status::Closed;
+            cx.notify();
+            return;
+        }
+        self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+        let backoff = RECONNECT_MIN_SECS
+            .saturating_mul(1 << (self.reconnect_attempts.min(4) - 1).min(31))
+            .min(RECONNECT_MAX_SECS);
+        self.status = Status::Reconnecting;
+        self.error = Some(format!(
+            "disconnected — reconnecting in {backoff}s (attempt {})",
+            self.reconnect_attempts
+        ));
+        self.invalidate_frame();
+        cx.notify();
+
+        let target_gen = self.attach_gen;
+        cx.spawn(
+            move |weak: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let mut cx = cx.clone();
+                async move {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(backoff))
+                        .await;
+                    let _ = weak.update(&mut cx, |v, cx| {
+                        // Only fire if nothing else re-attached in the meantime and
+                        // the user has not since closed the view.
+                        if v.attach_gen == target_gen && !v.user_closed {
+                            v.status = Status::Connecting;
+                            v.error = None;
+                            v.start_attach(cx);
+                            cx.notify();
+                        }
+                    });
+                }
+            },
+        )
+        .detach();
+    }
+
+    fn send_input(&self, bytes: Vec<u8>) {
+        if let Some(tx) = &self.input {
+            let _ = tx.send(AttachInput::Data(bytes));
+        }
+    }
+
+    fn cell_at(&self, pos: Point<Pixels>) -> Option<(usize, usize)> {
+        let slot = self.bounds_arc.lock().ok()?;
+        let bounds = (*slot)?;
+        let x = f32::from(pos.x - bounds.origin.x);
+        let y = f32::from(pos.y - bounds.origin.y);
+        let (row, col) = self.renderer.cell_at(x, y);
+        Some((
+            row.min(self.term.grid.rows.saturating_sub(1)),
+            col.min(self.term.grid.cols.saturating_sub(1)),
+        ))
+    }
+
+    fn invalidate_frame(&mut self) {
+        if let Some(frame) = self.last_frame.take() {
+            self.stale_frames.push(frame);
+        }
+    }
+
+    fn drop_cached_frames(&mut self, cx: &mut Context<Self>) {
+        if let Some(frame) = self.last_frame.take() {
+            cx.drop_image(frame, None);
+        }
+        for frame in self.stale_frames.drain(..) {
+            cx.drop_image(frame, None);
+        }
+    }
+
+    fn drop_stale_frames(&mut self, window: &mut Window) {
+        for frame in self.stale_frames.drain(..) {
+            let _ = window.drop_image(frame);
+        }
+    }
+
+    /// Recompute size, resize the PTY if needed, and re-rasterize if dirty.
+    fn refresh_frame(&mut self) {
+        let next_size = self
+            .bounds_arc
+            .lock()
+            .ok()
+            .and_then(|slot| slot.map(|bounds| bounds.size))
+            .map(|size| (u32::from(size.width), u32::from(size.height)))
+            .filter(|&(pw, ph)| pw > 0 && ph > 0 && (pw, ph) != self.last_size_px);
+
+        if let Some((pw, ph)) = next_size {
+            self.last_size_px = (pw, ph);
+            let (cols, rows) = self.renderer.cols_rows_for(pw, ph);
+            self.term.resize(cols, rows);
+            if let Some(tx) = &self.input {
+                let _ = tx.send(AttachInput::Resize {
+                    cols: cols as u16,
+                    rows: rows as u16,
+                });
+            }
+            self.invalidate_frame();
+        }
+
+        let (pw, ph) = if self.last_size_px.0 > 0 && self.last_size_px.1 > 0 {
+            self.last_size_px
+        } else {
+            (DEFAULT_PX_W, DEFAULT_PX_H)
+        };
+        if self.last_frame.is_none() {
+            let frame = self.renderer.render(&self.term.grid, pw, ph);
+            self.last_frame = Some(to_render_image(frame));
+        }
+    }
+}
+
+fn wheel_delta_to_lines(delta: ScrollDelta, cell_h: usize, rows: usize) -> f32 {
+    let lines = match delta {
+        ScrollDelta::Lines(p) => dominant_axis(p.x, p.y),
+        ScrollDelta::Pixels(p) => {
+            let cell_h = cell_h.max(1) as f32;
+            dominant_axis(f32::from(p.x), f32::from(p.y)) / cell_h
+        }
+    };
+    normalize_wheel_lines(lines, rows)
+}
+
+/// Direction (+1 zoom in, -1 zoom out, 0 none) for a Ctrl+wheel notch.
+fn wheel_zoom_direction(delta: ScrollDelta) -> f32 {
+    let v = match delta {
+        ScrollDelta::Lines(p) => dominant_axis(p.x, p.y),
+        ScrollDelta::Pixels(p) => dominant_axis(f32::from(p.x), f32::from(p.y)),
+    };
+    if v > 0.0 {
+        1.0
+    } else if v < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+fn dominant_axis(x: f32, y: f32) -> f32 {
+    if x.abs() > y.abs() {
+        x
+    } else {
+        y
+    }
+}
+
+fn normalize_wheel_lines(lines: f32, rows: usize) -> f32 {
+    if !lines.is_finite() || lines == 0.0 {
+        return 0.0;
+    }
+
+    let page = rows.saturating_sub(1).max(1) as f32;
+    if lines.abs() >= PAGE_SCROLL_SENTINEL / 2.0 {
+        return lines.signum() * page;
+    }
+
+    lines.clamp(-page, page)
+}
+
+/// A small absolutely-positioned status pill in the terminal's top-left.
+fn status_pill(text: &'static str, bg: u32, fg: u32) -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .px(px(8.0))
+        .py(px(4.0))
+        .bg(gpui::rgb(bg))
+        .text_color(gpui::rgb(fg))
+        .font_weight(FontWeight::MEDIUM)
+        .child(text)
+}
+
+fn to_render_image(frame: mydevenv2_client::terminal::TermFrame) -> Arc<RenderImage> {
+    let buf = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(frame.width, frame.height, frame.bgra)
+        .expect("terminal image buffer dimensions match");
+    Arc::new(RenderImage::new(vec![Frame::new(buf)]))
+}
+
+impl Render for TerminalView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.drop_stale_frames(window);
+        self.refresh_frame();
+
+        let last_frame = self.last_frame.clone();
+        let bounds_arc = Arc::clone(&self.bounds_arc);
+        let err_banner = self.error.clone();
+        let status = self.status;
+        let search_query = self.search_query.clone();
+        let search_count = self.search_count;
+        let (scroll_offset, scroll_history) = self.scroll_state();
+
+        let canvas_el = canvas(
+            move |bounds, window, _cx| {
+                if let Ok(mut slot) = bounds_arc.lock() {
+                    if slot.map_or(true, |prev| prev != bounds) {
+                        window.request_animation_frame();
+                    }
+                    *slot = Some(bounds);
+                }
+                last_frame
+            },
+            |bounds, frame, window, _cx| {
+                if let Some(frame) = frame {
+                    window
+                        .paint_image(bounds, Corners::default(), frame, 0, false)
+                        .ok();
+                }
+            },
+        )
+        .size_full();
+
+        let mut root = div()
+            .id("mydevenv2-terminal")
+            .size_full()
+            .overflow_hidden()
+            .relative()
+            .bg(gpui::rgb(0x1e1e2e))
+            .track_focus(&self.focus_handle)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, ev: &MouseDownEvent, window, cx| {
+                    window.focus(&view.focus_handle);
+                    if let Some((row, col)) = view.cell_at(ev.position) {
+                        view.term.grid.begin_selection(row, col);
+                        view.invalidate_frame();
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|view, _ev: &MouseDownEvent, window, cx| {
+                    window.focus(&view.focus_handle);
+                    if let Some(text) = view.term.selected_text() {
+                        if !text.is_empty() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            view.term.clear_selection();
+                            view.invalidate_frame();
+                            cx.notify();
+                            return;
+                        }
+                    }
+                    if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                        if !text.is_empty() {
+                            view.send_input(text.into_bytes());
+                        }
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|view, ev: &MouseMoveEvent, _window, cx| {
+                if ev.pressed_button == Some(MouseButton::Left) {
+                    if let Some((row, col)) = view.cell_at(ev.position) {
+                        view.term.grid.update_selection(row, col);
+                        view.invalidate_frame();
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|view, _ev: &MouseUpEvent, _window, cx| {
+                    view.invalidate_frame();
+                    cx.notify();
+                }),
+            )
+            .on_key_down(cx.listener(|view, ev: &gpui::KeyDownEvent, _, cx| {
+                let ks = &ev.keystroke;
+                let m = &ks.modifiers;
+                let key = ks.key.as_str();
+
+                // Ctrl+Shift+C → always copy the current selection.
+                // Must run BEFORE we clear the selection below.
+                if m.control && m.shift && !m.alt && !m.platform && key == "c" {
+                    if let Some(text) = view.term.selected_text() {
+                        if !text.is_empty() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            view.term.clear_selection();
+                            view.invalidate_frame();
+                            cx.notify();
+                        }
+                    }
+                    return;
+                }
+                // Plain Ctrl+C: copy when there is a selection (Windows
+                // Terminal / VS Code convention), otherwise fall through so it
+                // sends SIGINT (ETX) to the PTY as a terminal expects.
+                if m.control && !m.shift && !m.alt && !m.platform && key == "c" {
+                    if let Some(text) = view.term.selected_text() {
+                        if !text.is_empty() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            view.term.clear_selection();
+                            view.invalidate_frame();
+                            cx.notify();
+                            return;
+                        }
+                    }
+                    // No selection → fall through to key_to_bytes (Ctrl+C = ETX).
+                }
+                // Ctrl+Shift+V → paste clipboard text into the PTY.
+                if m.control && m.shift && !m.alt && !m.platform && key == "v" {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                        if !text.is_empty() {
+                            view.send_input(text.into_bytes());
+                        }
+                    }
+                    return;
+                }
+
+                // ── Zoom: Ctrl+= / Ctrl+- / Ctrl+0 (browser-style). (#3) ──
+                if m.control && !m.alt && !m.platform {
+                    match key {
+                        "=" | "+" => {
+                            view.zoom_by(ZOOM_STEP, cx);
+                            return;
+                        }
+                        "-" => {
+                            view.zoom_by(-ZOOM_STEP, cx);
+                            return;
+                        }
+                        "0" => {
+                            view.zoom_reset(cx);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // ── Scrollback navigation keys (do not reach the PTY). (#2/#4) ──
+                // Shift+PageUp/PageDown page through history; Ctrl+Home/End jump
+                // to the oldest line / live tail.
+                let page = view.term.grid.rows.saturating_sub(1).max(1) as isize;
+                if m.shift && !m.control && !m.alt && key == "pageup" {
+                    view.scroll_lines(page, cx);
+                    return;
+                }
+                if m.shift && !m.control && !m.alt && key == "pagedown" {
+                    view.scroll_lines(-page, cx);
+                    return;
+                }
+                if m.control && !m.alt && key == "home" {
+                    view.scroll_to_top(cx);
+                    return;
+                }
+                if m.control && !m.alt && key == "end" {
+                    view.scroll_to_bottom(cx);
+                    return;
+                }
+
+                // Any other key returns to the live tail and drops selection.
+                view.term.grid.scroll_offset = 0;
+                view.term.clear_selection();
+                let ki = KeyInput {
+                    key,
+                    key_char: ks.key_char.as_deref(),
+                    ctrl: m.control,
+                    alt: m.alt,
+                    shift: m.shift,
+                    platform: m.platform,
+                };
+                if let Some(bytes) = key_to_bytes(&ki) {
+                    view.send_input(bytes);
+                }
+                view.invalidate_frame();
+                cx.notify();
+            }))
+            .on_scroll_wheel(cx.listener(|view, ev: &ScrollWheelEvent, _, cx| {
+                view.scroll_terminal_by_wheel(ev, cx);
+            }))
+            .child(canvas_el);
+
+        match status {
+            Status::Connecting => {
+                root = root.child(status_pill("Connecting…", 0x223355, 0xc8ddff));
+            }
+            Status::Reconnecting => {
+                root = root.child(status_pill("Reconnecting…", 0x3a2d12, 0xffd9a0));
+            }
+            Status::Closed => {
+                root = root.child(status_pill("Disconnected", 0x3a1414, 0xffb4b4));
+            }
+            Status::Live => {}
+        }
+
+        // Scroll-position indicator while scrolled up into history (#2/#4).
+        if scroll_offset > 0 && scroll_history > 0 {
+            root = root.child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .right_0()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(gpui::rgb(0x2a2a3a))
+                    .text_color(gpui::rgb(0xc8c8d8))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(format!(
+                        "▲ {scroll_offset}/{scroll_history} (Ctrl+End → live)"
+                    )),
+            );
+        }
+
+        if !search_query.trim().is_empty() {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(gpui::rgb(0x25311f))
+                    .text_color(gpui::rgb(0xcde8ba))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(format!("{search_count} matches")),
+            );
+        }
+
+        if let Some(err) = err_banner {
+            root = root.child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(gpui::rgb(0x55_2222))
+                    .text_color(gpui::rgb(0xff_aaaa))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(err),
+            );
+        }
+
+        root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{point, px};
+
+    #[test]
+    fn ctrl_wheel_zoom_direction_matches_sign() {
+        assert_eq!(
+            wheel_zoom_direction(ScrollDelta::Lines(point(0.0, 2.0))),
+            1.0
+        );
+        assert_eq!(
+            wheel_zoom_direction(ScrollDelta::Lines(point(0.0, -2.0))),
+            -1.0
+        );
+        assert_eq!(
+            wheel_zoom_direction(ScrollDelta::Lines(point(0.0, 0.0))),
+            0.0
+        );
+        // Pixel deltas resolve by dominant axis too.
+        assert_eq!(
+            wheel_zoom_direction(ScrollDelta::Pixels(point(px(0.0), px(-9.0)))),
+            -1.0
+        );
+    }
+
+    #[test]
+    fn wheel_lines_use_vertical_delta() {
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Lines(point(0.0, 3.0)), 18, 50),
+            3.0
+        );
+    }
+
+    #[test]
+    fn wheel_lines_fall_back_to_horizontal_delta() {
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Lines(point(-3.0, 0.0)), 18, 50),
+            -3.0
+        );
+    }
+
+    #[test]
+    fn wheel_pixels_convert_by_cell_height() {
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Pixels(point(px(0.0), px(36.0))), 18, 50),
+            2.0
+        );
+    }
+
+    #[test]
+    fn wheel_page_sentinel_maps_to_one_viewport() {
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Lines(point(0.0, u32::MAX as f32)), 18, 50),
+            49.0
+        );
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Lines(point(0.0, -(u32::MAX as f32))), 18, 50),
+            -49.0
+        );
+    }
+
+    #[test]
+    fn wheel_delta_is_clamped_to_one_viewport() {
+        assert_eq!(
+            wheel_delta_to_lines(ScrollDelta::Lines(point(0.0, 500.0)), 18, 50),
+            49.0
+        );
+    }
+}

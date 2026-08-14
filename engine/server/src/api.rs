@@ -1,0 +1,486 @@
+use std::{convert::Infallible, path::Path as FsPath, sync::Arc, time::Duration};
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::{sse::Event, Sse},
+    Json,
+};
+use base64::Engine as _;
+use futures_util::Stream;
+use mydevenv2_contract::{OkResponse, SessionDetail, SessionSummary};
+use serde::{Deserialize, Serialize};
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use uuid::Uuid;
+
+use crate::{app::AppState, error::Result, pty::SessionSpec};
+
+/// Attach ContextKeeper's view of each terminal, when there is one.
+///
+/// This reads a cache the ContextKeeper runtime refreshes in the background, so
+/// a slow or dead sidecar costs a stale badge rather than a hung roster. With
+/// no ContextKeeper configured every summary is returned exactly as before.
+fn with_continuity(
+    state: &Arc<AppState>,
+    mut summaries: Vec<SessionSummary>,
+) -> Vec<SessionSummary> {
+    let Some(runtime) = state.contextkeeper.as_ref() else {
+        return summaries;
+    };
+    for summary in &mut summaries {
+        summary.continuity = runtime.continuity_for(&summary.id.to_string());
+    }
+    summaries
+}
+
+pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
+    let sessions = state.sessions.list();
+    Json(with_continuity(&state, sessions))
+}
+
+pub async fn create_session(
+    State(state): State<Arc<AppState>>,
+    Json(spec): Json<SessionSpec>,
+) -> Result<Json<SessionSummary>> {
+    let s = state.sessions.create(spec)?;
+    // A brand-new terminal has no agent session bound yet, and creating one
+    // must never wait on ContextKeeper, so this is deliberately unenriched.
+    Ok(Json(s.summary()))
+}
+
+pub async fn get_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SessionDetail>> {
+    let s = state.sessions.get(id)?;
+    let (snap, pos) = s.snapshot();
+    let summary = with_continuity(&state, vec![s.summary()])
+        .pop()
+        .expect("one summary in, one summary out");
+    Ok(Json(SessionDetail {
+        summary,
+        scrollback_pos: pos,
+        scrollback_base64: base64::engine::general_purpose::STANDARD.encode(&snap),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RenameReq {
+    pub name: String,
+}
+
+pub async fn rename_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<RenameReq>,
+) -> Result<Json<OkResponse>> {
+    state.sessions.rename(id, req.name)?;
+    Ok(Json(OkResponse::new(true)))
+}
+
+pub async fn delete_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<OkResponse>> {
+    state.sessions.remove(id)?;
+    Ok(Json(OkResponse::new(true)))
+}
+
+pub async fn kill_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<OkResponse>> {
+    state.sessions.kill(id)?;
+    Ok(Json(OkResponse::new(true)))
+}
+
+/// Mirrors the WebSocket input cap (`ws::MAX_INPUT_BYTES`).
+const MAX_HTTP_INPUT_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Deserialize)]
+pub struct SessionInputReq {
+    /// Text written verbatim to the PTY. Control sequences are allowed —
+    /// this is the same raw path as WebSocket binary frames.
+    pub text: String,
+    /// Append a carriage return after `text` (i.e. "press Enter").
+    #[serde(default)]
+    pub submit: bool,
+}
+
+pub async fn session_input(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SessionInputReq>,
+) -> Result<Json<OkResponse>> {
+    if req.text.len() > MAX_HTTP_INPUT_BYTES {
+        return Err(crate::error::ApiError::BadRequest(format!(
+            "input exceeds {MAX_HTTP_INPUT_BYTES} bytes"
+        )));
+    }
+    let session = state.sessions.get(id)?;
+    let mut bytes = req.text.into_bytes();
+    if req.submit {
+        bytes.push(b'\r');
+    }
+    session
+        .write_input(&bytes)
+        .map_err(|e| crate::error::ApiError::Pty(format!("write input: {e}")))?;
+    Ok(Json(OkResponse::new(true)))
+}
+
+pub async fn events_stream(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    let rx = state.bus.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
+        Ok(ev) => match serde_json::to_string(&ev) {
+            Ok(json) => Some(Ok(Event::default().data(json))),
+            Err(_) => None,
+        },
+        Err(_) => None, // lagging receiver — skip
+    });
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ka"),
+    )
+}
+
+pub async fn healthz() -> Json<OkResponse> {
+    Json(OkResponse::new(true))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReadinessResponse {
+    pub ok: bool,
+    pub checks: Vec<ReadinessCheck>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReadinessCheck {
+    pub name: &'static str,
+    pub ok: bool,
+    pub detail: String,
+}
+
+pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadinessResponse>) {
+    let mut checks = Vec::with_capacity(4);
+    checks.push(check_workspace_root(&state.config.workspace_root).await);
+    checks.push(check_state_dir(&state.config.state_dir).await);
+    checks.push(check_tailscale().await);
+    checks.push(check_gui(state.config.gui_stream_url.is_some()).await);
+
+    let ok = checks.iter().all(|check| check.ok);
+    let status = if ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(ReadinessResponse { ok, checks }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct OperationalStatus {
+    pub version: &'static str,
+    pub session_count: usize,
+    pub push_subscription_count: usize,
+    pub gui_process_count: usize,
+    pub gui_stream_configured: bool,
+    pub fcm_enabled: bool,
+    pub history: HistoryStatus,
+    pub agent_tasks: AgentTaskStorageStatus,
+    pub auth_broker: AuthBrokerStatus,
+    pub storage: ServerStorageStatus,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistoryStatus {
+    pub enabled: bool,
+    pub archived_session_count: Option<u64>,
+    pub log_file_count: Option<u64>,
+    pub log_bytes: Option<u64>,
+    pub db_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentTaskStorageStatus {
+    pub task_count: usize,
+    pub prompt_task_dir_count: u64,
+    pub prompt_file_count: u64,
+    pub context_file_count: u64,
+    pub prompt_bytes: u64,
+    pub orphan_task_dir_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthBrokerStatus {
+    pub auto_agent_auth: bool,
+    pub helper: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServerStorageStatus {
+    pub state_dir: String,
+    pub workspace_root: String,
+}
+
+pub async fn operational_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<OperationalStatus>> {
+    let history_stats = match state.history.as_ref() {
+        Some(history) => Some(history.storage_stats().await?),
+        None => None,
+    };
+    let task_artifacts = state.agent_tasks.prompt_artifact_stats()?;
+
+    Ok(Json(OperationalStatus {
+        version: env!("CARGO_PKG_VERSION"),
+        session_count: state.sessions.list().len(),
+        push_subscription_count: state.push.list().len(),
+        gui_process_count: state.gui.count_alive(),
+        gui_stream_configured: state.config.gui_stream_url.is_some(),
+        fcm_enabled: state.config.fcm_service_account_json.is_some(),
+        history: HistoryStatus {
+            enabled: history_stats.is_some(),
+            archived_session_count: history_stats
+                .as_ref()
+                .map(|stats| stats.archived_session_count),
+            log_file_count: history_stats.as_ref().map(|stats| stats.log_file_count),
+            log_bytes: history_stats.as_ref().map(|stats| stats.log_bytes),
+            db_bytes: history_stats.as_ref().map(|stats| stats.db_bytes),
+        },
+        agent_tasks: AgentTaskStorageStatus {
+            task_count: state.agent_tasks.list().len(),
+            prompt_task_dir_count: task_artifacts.task_dir_count,
+            prompt_file_count: task_artifacts.prompt_file_count,
+            context_file_count: task_artifacts.context_file_count,
+            prompt_bytes: task_artifacts.total_bytes,
+            orphan_task_dir_count: task_artifacts.orphan_task_dir_count,
+        },
+        auth_broker: AuthBrokerStatus {
+            auto_agent_auth: state.config.auto_agent_auth,
+            helper: state
+                .config
+                .agent_auth_helper
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| state.config.agent_auth_helper.display().to_string()),
+        },
+        storage: ServerStorageStatus {
+            state_dir: state.config.state_dir.display().to_string(),
+            workspace_root: state.config.workspace_root.display().to_string(),
+        },
+    }))
+}
+
+async fn check_workspace_root(path: &FsPath) -> ReadinessCheck {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.is_dir() => match tokio::fs::read_dir(path).await {
+            Ok(_) => ReadinessCheck {
+                name: "workspace_root",
+                ok: true,
+                detail: format!("readable directory at {}", path.display()),
+            },
+            Err(err) => ReadinessCheck {
+                name: "workspace_root",
+                ok: false,
+                detail: format!("cannot read {}: {err}", path.display()),
+            },
+        },
+        Ok(_) => ReadinessCheck {
+            name: "workspace_root",
+            ok: false,
+            detail: format!("{} is not a directory", path.display()),
+        },
+        Err(err) => ReadinessCheck {
+            name: "workspace_root",
+            ok: false,
+            detail: format!("cannot stat {}: {err}", path.display()),
+        },
+    }
+}
+
+async fn check_state_dir(path: &FsPath) -> ReadinessCheck {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.is_dir() => {
+            let probe = path.join(".readyz-writecheck");
+            match tokio::fs::write(&probe, b"ok").await {
+                Ok(()) => {
+                    let _ = tokio::fs::remove_file(&probe).await;
+                    ReadinessCheck {
+                        name: "state_dir",
+                        ok: true,
+                        detail: format!("writable directory at {}", path.display()),
+                    }
+                }
+                Err(err) => ReadinessCheck {
+                    name: "state_dir",
+                    ok: false,
+                    detail: format!("cannot write {}: {err}", probe.display()),
+                },
+            }
+        }
+        Ok(_) => ReadinessCheck {
+            name: "state_dir",
+            ok: false,
+            detail: format!("{} is not a directory", path.display()),
+        },
+        Err(err) => ReadinessCheck {
+            name: "state_dir",
+            ok: false,
+            detail: format!("cannot stat {}: {err}", path.display()),
+        },
+    }
+}
+
+async fn check_tailscale() -> ReadinessCheck {
+    if std::env::var("TAILSCALE_AUTH_KEY")
+        .ok()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        return ReadinessCheck {
+            name: "tailscale",
+            ok: true,
+            detail: "not configured".into(),
+        };
+    }
+
+    if !FsPath::new("/var/run/tailscale/tailscaled.sock").exists() {
+        return ReadinessCheck {
+            name: "tailscale",
+            ok: false,
+            detail: "tailscaled socket missing".into(),
+        };
+    }
+
+    let output = match tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::process::Command::new("tailscale")
+            .args(["status", "--json"])
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
+            return ReadinessCheck {
+                name: "tailscale",
+                ok: false,
+                detail: format!("tailscale status failed: {err}"),
+            };
+        }
+        Err(_) => {
+            return ReadinessCheck {
+                name: "tailscale",
+                ok: false,
+                detail: "tailscale status timed out".into(),
+            };
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return ReadinessCheck {
+            name: "tailscale",
+            ok: false,
+            detail: format!(
+                "tailscale status exited {}: {}",
+                output.status,
+                stderr.trim()
+            ),
+        };
+    }
+
+    let status: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(status) => status,
+        Err(err) => {
+            return ReadinessCheck {
+                name: "tailscale",
+                ok: false,
+                detail: format!("invalid tailscale status JSON: {err}"),
+            };
+        }
+    };
+
+    let backend_state = status
+        .get("BackendState")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let online = status
+        .get("Self")
+        .and_then(|value| value.get("Online"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if backend_state == "Running" && online {
+        ReadinessCheck {
+            name: "tailscale",
+            ok: true,
+            detail: "running and online".into(),
+        }
+    } else {
+        ReadinessCheck {
+            name: "tailscale",
+            ok: false,
+            detail: format!("backend_state={backend_state}, online={online}"),
+        }
+    }
+}
+
+async fn check_gui(gui_stream_configured: bool) -> ReadinessCheck {
+    let sway_enabled = std::env::var("START_SWAY")
+        .ok()
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false);
+    if !sway_enabled {
+        return ReadinessCheck {
+            name: "gui",
+            ok: true,
+            detail: if gui_stream_configured {
+                "stream configured without local sway".into()
+            } else {
+                "disabled".into()
+            },
+        };
+    }
+
+    let output = match tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::process::Command::new("swaymsg")
+            .args(["-t", "get_version"])
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
+            return ReadinessCheck {
+                name: "gui",
+                ok: false,
+                detail: format!("swaymsg failed: {err}"),
+            };
+        }
+        Err(_) => {
+            return ReadinessCheck {
+                name: "gui",
+                ok: false,
+                detail: "swaymsg timed out".into(),
+            };
+        }
+    };
+
+    if output.status.success() {
+        ReadinessCheck {
+            name: "gui",
+            ok: true,
+            detail: "sway responsive".into(),
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        ReadinessCheck {
+            name: "gui",
+            ok: false,
+            detail: format!("sway unavailable: {}", stderr.trim()),
+        }
+    }
+}

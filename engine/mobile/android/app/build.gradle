@@ -1,0 +1,131 @@
+import groovy.json.JsonSlurper
+
+apply plugin: 'com.android.application'
+
+int semverVersionCode(String version) {
+    def match = (version ?: '').trim() =~ /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/
+    if (!match.matches()) {
+        throw new GradleException("Unsupported package.json version '${version}'. Expected semver like 0.1.0")
+    }
+
+    int major = match[0][1] as int
+    int minor = match[0][2] as int
+    int patch = match[0][3] as int
+    int code = (major * 1_000_000) + (minor * 1_000) + patch
+    if (code <= 0) {
+        throw new GradleException("Computed Android versionCode '${code}' is invalid for version '${version}'")
+    }
+    return code
+}
+
+int parseVersionCodeOverride(String raw, int fallback) {
+    if (raw == null || raw.trim().isEmpty()) {
+        return fallback
+    }
+
+    try {
+        int code = Integer.parseInt(raw.trim())
+        if (code <= 0) {
+            throw new GradleException("MYDEVENV2_ANDROID_VERSION_CODE must be > 0, got '${raw}'")
+        }
+        return code
+    } catch (NumberFormatException ignored) {
+        throw new GradleException("MYDEVENV2_ANDROID_VERSION_CODE must be an integer, got '${raw}'")
+    }
+}
+
+def mobilePackage = new JsonSlurper().parse(file('../../package.json'))
+def packageVersion = (mobilePackage.version ?: '0.1.0').toString().trim()
+def androidVersionName = (System.getenv('MYDEVENV2_ANDROID_VERSION_NAME') ?: packageVersion).trim()
+def androidVersionCode = parseVersionCodeOverride(
+    System.getenv('MYDEVENV2_ANDROID_VERSION_CODE'),
+    semverVersionCode(packageVersion),
+)
+// Distinct applicationId lets a dev build install side by side with prod on
+// one device. `namespace` stays fixed — it's the Java/Kotlin source package
+// (MainActivity.java etc.), unrelated to which app the built APK installs
+// as. Keep in sync with capacitor.config.ts's MYDEVENV2_ANDROID_APP_ID.
+def androidApplicationId = (System.getenv('MYDEVENV2_ANDROID_APP_ID') ?: 'com.sprooty.mydevenv2').trim()
+
+def releaseKeystorePath = System.getenv('MYDEVENV2_ANDROID_KEYSTORE_PATH')
+def releaseKeystorePassword = System.getenv('MYDEVENV2_ANDROID_KEYSTORE_PASSWORD')
+def releaseKeyAlias = System.getenv('MYDEVENV2_ANDROID_KEY_ALIAS')
+def releaseKeyPassword = System.getenv('MYDEVENV2_ANDROID_KEY_PASSWORD')
+def hasReleaseSigning = [
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+].every { it != null && !it.trim().isEmpty() }
+
+android {
+    namespace "com.sprooty.mydevenv2"
+    compileSdk rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId androidApplicationId
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode androidVersionCode
+        versionName androidVersionName
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    if (hasReleaseSigning) {
+        signingConfigs {
+            release {
+                storeFile file(releaseKeystorePath)
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+    buildTypes {
+        release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+            // Capacitor discovers and invokes parts of its bridge and plugin surface
+            // dynamically. R8's optimizing pass merged BridgeActivity into our
+            // MainActivity in the published APK, which made the release build exit
+            // during startup on a real device. Keep release builds unoptimized until
+            // the complete native launch path is covered on-device.
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}
