@@ -11,7 +11,11 @@ import { useNavigate } from "@solidjs/router";
 import { createSession, sessionsStore } from "./store";
 import {
   focusTab,
+  openAuditTab,
+  openBacklogTab,
+  openBoardTab,
   openGitTab,
+  openProjectsTab,
   openTerminalTab,
   openHistoryTab,
   openEditorTab,
@@ -615,6 +619,73 @@ const CommandPalette: Component<Props> = (props) => {
 
   const baseCommands = (): Command[] => {
     const commands: Command[] = [
+      // -- Vogt (M11, FR-U16) ------------------------------------------
+      //
+      // Every entry here *navigates*. None of them writes: FR-U16 says the
+      // palette reaches a mutating verb by opening the view that collects
+      // its reason, and never by executing it — a palette entry cannot type
+      // a reason any more than a button can, and r6's rule is about where
+      // the reason comes from, not how the operation was reached.
+      {
+        id: "vogt-board",
+        label: "Open Board",
+        description: "Work items by workflow state",
+        icon: "▦",
+        action: () => {
+          openBoardTab();
+          navigate("/board");
+          props.onClose();
+        },
+        category: "Vogt",
+      },
+      {
+        id: "vogt-backlog",
+        label: "Open Backlog",
+        description: "The ranked backlog and bugs, with the reason for the order",
+        icon: "☰",
+        action: () => {
+          openBacklogTab();
+          navigate("/backlog");
+          props.onClose();
+        },
+        category: "Vogt",
+      },
+      {
+        id: "vogt-projects",
+        label: "Open Projects",
+        description: "Per-project state, compliance and the drift inbox",
+        icon: "▤",
+        action: () => {
+          openProjectsTab();
+          navigate("/projects");
+          props.onClose();
+        },
+        category: "Vogt",
+      },
+      {
+        id: "vogt-audit",
+        label: "Open Audit",
+        description: "Who wrote what, and the reason they gave",
+        icon: "⧉",
+        action: () => {
+          openAuditTab();
+          navigate("/audit");
+          props.onClose();
+        },
+        category: "Vogt",
+      },
+      {
+        id: "vogt-new-work",
+        label: "New Work Item...",
+        description: "Opens the backlog's quick-create, which collects a reason",
+        icon: "✚",
+        action: () => {
+          openBacklogTab();
+          navigate("/backlog?create=1");
+          props.onClose();
+        },
+        category: "Vogt",
+      },
       {
       id: "new-session",
       label: "New Terminal Session",

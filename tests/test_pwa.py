@@ -298,3 +298,50 @@ def test_the_legacy_gui_can_be_retired_when_the_pwa_reaches_parity() -> None:
         "`src/vogt/gui/`, the `/ui-legacy` routes in the engine, and this "
         "test. If it grew, a view was added to the wrong front end."
     )
+
+
+# -- FR-U16: the palette reaches writes, and never performs one ------------
+
+PALETTE = WEB_SRC / "CommandPalette.tsx"
+
+
+def test_the_command_palette_never_writes_to_vogt() -> None:
+    """FR-U16's second clause, and r6's rule reaching the keyboard.
+
+    The palette may name a mutating verb, but only by opening the view that
+    collects its reason. A palette entry cannot type a reason any more than a
+    button can — so an entry that called a write directly would be inventing
+    one, which is the failure r6 wrote its rule against.
+
+    Checked by import: the writes all live in `vogtApi.ts` and are named, so
+    a palette that imports one is a palette that can call it.
+    """
+    writes = {
+        "createWork",
+        "updateWork",
+        "transitionWork",
+        "commentWork",
+        "startSession",
+        "stopSession",
+    }
+    text = source(PALETTE)
+    imported = set()
+    for block in re.findall(r"import \{([^}]*)\} from \"\./vogtApi\";", text):
+        imported |= {name.strip().removeprefix("type ") for name in block.split(",")}
+    offenders = sorted(imported & writes)
+    assert not offenders, (
+        f"the command palette imports {offenders}; a palette entry that writes "
+        "is one that invented the reason"
+    )
+
+
+def test_the_palette_reaches_every_vogt_surface() -> None:
+    """Every read surface, by name, from the keyboard."""
+    text = source(PALETTE)
+    for opener in (
+        "openBoardTab",
+        "openBacklogTab",
+        "openProjectsTab",
+        "openAuditTab",
+    ):
+        assert opener in text, f"the palette cannot reach {opener}"
