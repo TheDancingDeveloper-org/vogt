@@ -512,6 +512,15 @@ export interface Mounted {
   /** Navigate as a pasted link would. */
   go(url: string): void;
   container: HTMLElement;
+  /**
+   * Tear the surface down.
+   *
+   * Needed by any test that compares two mounts rather than looking at one:
+   * two boards mounted at once are two polls, two clocks, and two sets of
+   * `document.getElementById` ids for the same refs — so a measurement taken
+   * across them would be a measurement of the overlap.
+   */
+  unmount(): void;
 }
 
 /**
@@ -536,6 +545,7 @@ export function mountAt(path: string, url: string, surface: () => JSX.Element): 
     url: () => history.get(),
     go: (next: string) => history.set({ value: next }),
     container: rendered.container,
+    unmount: () => rendered.unmount(),
   };
 }
 

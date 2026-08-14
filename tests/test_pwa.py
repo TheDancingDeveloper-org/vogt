@@ -531,6 +531,38 @@ def test_the_board_cells_carry_what_the_hidden_head_row_said() -> None:
     )
 
 
+def test_the_windowed_surfaces_and_the_stylesheet_agree_on_row_height() -> None:
+    """NFR-S5's one unguarded seam, and the only one no test in `web/` can see.
+
+    The backlog's list and the board's columns both window: they draw a slice
+    of a long list and place it by arithmetic, and that arithmetic is a row
+    height the *stylesheet* is responsible for producing. The two numbers live
+    in different files and nothing at runtime compares them. If they drift,
+    nothing throws — the surface scrolls, and the cards it draws are simply
+    not the cards under the scrollbar, by a margin that grows with how far
+    down the reader is.
+
+    The PWA's own tests cannot catch it: they run in a jsdom, which has no
+    layout, so a card is zero pixels tall there whatever this file says. So it
+    is checked as text, which is the only place the disagreement is visible.
+    """
+    css = STYLES.read_text(encoding="utf-8")
+    for name, constant, custom_property in (
+        ("Backlog.tsx", "ROW_HEIGHT", "--vogt-row-h"),
+        ("Board.tsx", "CARD_HEIGHT", "--board-card-h"),
+        ("Board.tsx", "CARD_GAP", "--board-card-gap"),
+    ):
+        declared = re.search(rf"\b{constant} = (\d+);", source(WEB_SRC / name))
+        assert declared, f"{name} no longer declares {constant}"
+        painted = re.search(rf"{re.escape(custom_property)}:\s*(\d+)px", css)
+        assert painted, f"styles.css no longer sets {custom_property}"
+        assert declared.group(1) == painted.group(1), (
+            f"{name} windows on {constant} = {declared.group(1)}px while "
+            f"styles.css paints {custom_property} at {painted.group(1)}px; "
+            "the slice on screen is not the slice under the scrollbar"
+        )
+
+
 def test_every_vogt_surface_has_a_phone_width_pass() -> None:
     """FR-M3 covers all five, not only the board.
 

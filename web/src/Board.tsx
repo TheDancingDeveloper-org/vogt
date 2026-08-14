@@ -50,6 +50,36 @@
 //     the filter is exhausted or a cap is reached, and if the cap wins the
 //     board says so and stops claiming its column counts are counts of the
 //     estate (NFR-S5).
+//
+//  6. **The columns window; they do not truncate, and they are projected
+//     once.** Two halves of NFR-S5, and they are the same decision.
+//
+//     A column used to draw its first 60 cards and count the rest into a
+//     "+N more" line. That is a truncation that admits it is truncating,
+//     which is better than a silent one and still worse than not truncating:
+//     the reader asked for a filter, the filter matched, and the 61st match
+//     was withheld with an instruction to narrow the filter until the tool
+//     agreed to show it. So the cell now *windows* — the same mechanism
+//     `Backlog.tsx` uses and for the same reason, because a second idea of
+//     what virtualization means on one product is two things to keep true:
+//     a fixed card height pinned by `styles.css`, a `ResizeObserver` on the
+//     cell's own scroller, and a slice of the list with overscan either
+//     side. Everything the filter matched is reachable, in the order it
+//     matched; only what is on screen is in the DOM.
+//
+//     Windowing is what made the projection's shape matter. The cards a cell
+//     draws used to be a `filter` over the lane, run once per cell, and the
+//     WIP count used to be a `filter` over the *whole loaded set*, run once
+//     per column head **and once per cell** — so a board with 2,000 items,
+//     eight columns and twenty lanes did about 340,000 comparisons per pass,
+//     and did them all again on every keystroke in the move composer,
+//     because the composer's reason lives in the same signal as the card's
+//     optimistic position. `projectBoard` below walks the loaded set once
+//     and returns every cell, every count and every card's index; the cells
+//     read a `Map`. Adding a column or a lane no longer adds a pass, and the
+//     composer no longer re-projects at all — `placement` is a memo over the
+//     part of the pending move a projection can see, so typing a reason is
+//     not a change to where the card is.
 
 import {
   Component,
@@ -93,8 +123,42 @@ const PAGE_SIZE = 500;
 /** How much of a filter the board will pull before it admits truncation. */
 const MAX_ITEMS = 2000;
 
-/** Cards drawn in one cell before the rest are counted instead (NFR-S5). */
-const CARDS_PER_CELL = 60;
+/**
+ * Card height in px, and the gap under it. Windowing needs them fixed; the
+ * CSS pins them too.
+ *
+ * `--board-card-h` and `--board-card-gap` in `styles.css` must match these,
+ * exactly as `--vogt-row-h` must match `Backlog.tsx`'s `ROW_HEIGHT`: the
+ * window's arithmetic is the only thing holding the scroll offset and the
+ * drawn cards in agreement, and it has no way to notice if the stylesheet
+ * disagrees with it.
+ */
+const CARD_HEIGHT = 116;
+const CARD_GAP = 8;
+
+/** What one card costs a column, top to top. Exported because it is the one
+ *  number a test can use to check that the scrollbar is as long as the whole
+ *  column rather than as long as the window. */
+export const CARD_SLOT = CARD_HEIGHT + CARD_GAP;
+
+/**
+ * Below this many cards a cell draws whole.
+ *
+ * `Backlog.tsx`'s reasoning, unchanged: windowing costs the browser's own
+ * find-in-page and costs a reader the ability to select across the list, and
+ * that is worth paying at length and not worth paying for a screenful. This
+ * is the number that used to be the *cap* — the same threshold, now the
+ * point at which the column starts windowing instead of the point at which
+ * it stopped showing you things.
+ */
+const VIRTUALIZE_ABOVE = 60;
+
+/** Cards drawn beyond each edge of the cell, so a fast scroll is not blank. */
+const OVERSCAN = 6;
+
+/** The window's height when nothing has measured the cell yet — a screenful
+ *  of cards, and the only thing a layout-free environment can assume. */
+const FALLBACK_CARDS = 8;
 
 const POLL_CHOICES = [10, 20, 60, 0] as const;
 const DEFAULT_POLL_SECONDS = 20;
@@ -551,10 +615,96 @@ function writeLayout(layout: Layout): void {
   }
 }
 
-interface Lane {
+export interface Lane {
   key: string;
   label: string;
   items: WorkItem[];
+}
+
+// -- the projection, which is the board's whole cost ------------------------
+//
+// Pure and exported for the same reason `columnsFor` is: this is the part of
+// the board most worth testing and the part least needing a browser. It is
+// also the part NFR-S5's second clause is about — "the board's filter and
+// drag paths do not degrade with backlog size" — so it is worth saying what
+// the shape is rather than only that it is fast.
+//
+// **One pass, whatever the board looks like.** Every card the board draws,
+// every WIP count in every column head, and every card's position within its
+// cell come out of a single walk of the loaded set. The cost is O(items) and
+// nothing multiplies it: a board with eight columns and a board with
+// twenty-four do the same work, and so do a board with one swimlane and a
+// board with fifty. That is the claim, and `__tests__/boardScale.test.tsx`
+// is written to fail if it stops being true — by counting, because jsdom has
+// no layout and a wall-clock number there would measure the test runner.
+//
+// It replaced two `filter`s that looked innocent and were not. The cards in
+// a cell were `lane.items.filter(...)`, run once per cell, which is one pass
+// over the whole set per *column*. The WIP count was `items().filter(...)`,
+// run once per column head and again for every cell's `data-wip` — which is
+// one pass over the whole set per *cell*, so the total was quadratic in the
+// board's own shape. At the sizes this surface loads (`MAX_ITEMS` is 2,000)
+// that is hundreds of thousands of comparisons for one render, and it ran
+// again on every keystroke in the move composer.
+
+/** The key a cell is filed under: one lane, one column.
+ *
+ *  `\u0000` because a lane key is a project slug or an initiative id and a
+ *  column is a workflow state, and neither is allowed to contain a NUL —
+ *  which a `-` or a `:` cannot promise, and a collision here would draw one
+ *  cell's cards in another. */
+export function cellKey(laneKey: string, state: string): string {
+  return `${laneKey}\u0000${state}`;
+}
+
+export interface BoardProjection {
+  /** `cellKey(lane, state)` → the cards drawn there, in the lane's order. */
+  cells: Map<string, WorkItem[]>;
+  /** A workflow state → how many loaded items are in it, across every lane. */
+  counts: Map<string, number>;
+  /** A ref → the cell its card is drawn in, and its index within that cell. */
+  where: Map<string, { cell: string; index: number }>;
+}
+
+/** No cell owns this; it is what an empty cell reads back.
+ *
+ *  One shared instance rather than a fresh `[]`, because `For` compares the
+ *  list it was handed and a new empty array every read is a new list. */
+export const NO_CARDS: readonly WorkItem[] = Object.freeze([]);
+
+/**
+ * Where every card goes, in one walk of the lanes.
+ *
+ * `placement` is the unsaved half of a drop: the card the user is composing a
+ * reason for is drawn in the column they dropped it on, not the one the
+ * server still says it is in (FR-U12's optimistic half). Only the ref and the
+ * target state are passed, deliberately — the reason the user is typing is
+ * part of the same signal on the surface and is *not* part of this, so a
+ * keystroke cannot invalidate the projection.
+ */
+export function projectBoard(
+  lanes: readonly Lane[],
+  placement: { ref: string; to: string } | null,
+): BoardProjection {
+  const cells = new Map<string, WorkItem[]>();
+  const counts = new Map<string, number>();
+  const where = new Map<string, { cell: string; index: number }>();
+  for (const lane of lanes) {
+    for (const item of lane.items) {
+      const state =
+        placement !== null && placement.ref === item.ref ? placement.to : item.state;
+      const key = cellKey(lane.key, state);
+      let cell = cells.get(key);
+      if (cell === undefined) {
+        cell = [];
+        cells.set(key, cell);
+      }
+      where.set(item.ref, { cell: key, index: cell.length });
+      cell.push(item);
+      counts.set(state, (counts.get(state) ?? 0) + 1);
+    }
+  }
+  return { cells, counts, where };
 }
 
 interface PendingMove {
@@ -586,7 +736,42 @@ const Board: Component<Props> = (props) => {
   const navigate = useNavigate();
 
   const [filters, setFilters] = createSignal<Filters>(filtersFromQuery(searchParams));
-  const patch = (next: Partial<Filters>) => setFilters({ ...filters(), ...next });
+
+  /**
+   * How far down each windowed column the reader has scrolled, held here
+   * rather than in the cell that owns it.
+   *
+   * `For` maps its rows by reference, and both `lanes()` and `items()` are
+   * rebuilt from scratch whenever `work.list` answers — so every cell on this
+   * board is destroyed and recreated on every load, which with the poll
+   * running is every twenty seconds. That never mattered while a cell was a
+   * plain stack of cards inside the board's own scroller. It matters now: a
+   * cell that kept its own offset would hand the reader back to the top of
+   * the column mid-read, on a timer, and it would look as though Vogt had
+   * changed something.
+   *
+   * Deliberately not a signal. Nothing renders from it — each cell has its
+   * own signal, seeded from this — and making it reactive would wake every
+   * cell on the board on every scroll of any one of them.
+   */
+  const cellScroll = new Map<string, number>();
+
+  /**
+   * Change the filter set, and forget where the old columns were scrolled to.
+   *
+   * The forgetting happens *here*, synchronously with the change, and not in
+   * an effect watching it. `filters()` is one signal, so changing any part of
+   * it invalidates `lanes()`, and `For` then tears down and rebuilds every
+   * cell before any effect of ours runs — a rebuilt cell would already have
+   * read the offset an effect was about to clear. A new filter set is a new
+   * column and the reader has not seen the top of it.
+   */
+  const applyFilters = (next: Filters) => {
+    if (encodeFilters(next) !== encodeFilters(filters())) cellScroll.clear();
+    setFilters(next);
+  };
+
+  const patch = (next: Partial<Filters>) => applyFilters({ ...filters(), ...next });
 
   const [workflows, setWorkflows] = createSignal<Workflow[] | null>(null);
   const [items, setItems] = createSignal<WorkItem[]>([]);
@@ -670,7 +855,7 @@ const Board: Component<Props> = (props) => {
     if (current !== lastWritten && current !== "") {
       // The query changed to something this surface did not write, and is not
       // empty: a pasted link, or the back button. That is an instruction.
-      setFilters(filtersFromQuery(searchParams));
+      applyFilters(filtersFromQuery(searchParams));
       lastWritten = current;
       return;
     }
@@ -938,11 +1123,39 @@ const Board: Component<Props> = (props) => {
     return move && move.ref === item.ref ? move.to : item.state;
   };
 
-  const cellItems = (lane: Lane, state: string) =>
-    lane.items.filter((item) => displayState(item) === state);
+  /**
+   * The part of an unsaved drop a projection can see.
+   *
+   * A memo with its own `equals` rather than a read of `pending()`, and this
+   * is the whole reason the composer does not re-project the board. The
+   * pending move carries the reason the user is typing in the same object as
+   * the card's optimistic position, so a projection that read `pending()`
+   * would be invalidated on every keystroke — over two thousand items, per
+   * cell, while somebody was mid-sentence. Where the card is drawn changes
+   * when the ref or the target changes and at no other time, and this says
+   * exactly that.
+   */
+  const placement = createMemo<{ ref: string; to: string } | null>(
+    () => {
+      const move = pending();
+      return move ? { ref: move.ref, to: move.to } : null;
+    },
+    null,
+    {
+      equals: (previous, next) =>
+        (previous?.ref ?? null) === (next?.ref ?? null) &&
+        (previous?.to ?? null) === (next?.to ?? null),
+    },
+  );
 
-  const columnCount = (state: string) =>
-    items().filter((item) => displayState(item) === state).length;
+  /** One walk of the loaded set, and every cell, count and index comes out of
+   *  it. See `projectBoard` for why this is not a per-cell `filter`. */
+  const projection = createMemo(() => projectBoard(lanes(), placement()));
+
+  const cellItems = (lane: Lane, state: string): readonly WorkItem[] =>
+    projection().cells.get(cellKey(lane.key, state)) ?? NO_CARDS;
+
+  const columnCount = (state: string) => projection().counts.get(state) ?? 0;
 
   const truncated = createMemo(() => total() > items().length);
 
@@ -1141,6 +1354,21 @@ const Board: Component<Props> = (props) => {
 
   const cardDomId = (ref: string) => `board-card-${ref}`;
 
+  /**
+   * Move focus to a card, whether or not it is currently drawn.
+   *
+   * `focusedRef` is set *first* and that is load-bearing, not bookkeeping:
+   * a windowed cell includes the focused card in its slice however far down
+   * the column it is (see `slice` below), so setting the signal is what puts
+   * the element in the DOM for `focus()` to find. Without it, keyboard
+   * navigation would stop at the bottom of the rendered window and the
+   * reader would have no way to know why — which is the failure FR-U22 and
+   * NFR-S5 have between them, and the reason the cap was easier.
+   *
+   * Nothing here scrolls: focusing an element inside a scroll container is
+   * what scrolls it into view, and the `scroll` handler then tells the cell
+   * where it is.
+   */
   const focusCard = (ref: string | null) => {
     if (!ref) return;
     setFocusedRef(ref);
@@ -1157,9 +1385,14 @@ const Board: Component<Props> = (props) => {
     }
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
-      const siblings = cellItems(lane, displayState(item));
-      const at = siblings.findIndex((one) => one.ref === item.ref);
-      const next = siblings[at + (event.key === "ArrowDown" ? 1 : -1)];
+      // The projection already knows which cell this card is in and where in
+      // it, so neither of those is a scan — and neither of them is a read of
+      // the DOM, which matters now that the cell is windowed: the card above
+      // this one may not be rendered yet, and it still has to be reachable.
+      const at = projection().where.get(item.ref);
+      if (!at) return;
+      const siblings = projection().cells.get(at.cell) ?? NO_CARDS;
+      const next = siblings[at.index + (event.key === "ArrowDown" ? 1 : -1)];
       focusCard(next?.ref ?? null);
       return;
     }
@@ -1271,7 +1504,10 @@ const Board: Component<Props> = (props) => {
   };
 
   const recallSaved = (entry: SavedFilter) => {
-    setFilters({ ...filtersFromQuery(queryFromSearch(entry.query)), poll: filters().poll });
+    applyFilters({
+      ...filtersFromQuery(queryFromSearch(entry.query)),
+      poll: filters().poll,
+    });
   };
 
   const forgetSaved = (name: string) => {
@@ -1737,8 +1973,81 @@ const Board: Component<Props> = (props) => {
                     >
                       <For each={columns()}>
                         {(column) => {
-                          const cellKey = `${lane.key}||${column.state}`;
+                          /** Which cell the pointer is over, for the drop
+                           *  highlight. Not `cellKey`: that one identifies a
+                           *  cell to the projection and this one identifies
+                           *  it to a drag, and they are allowed to differ. */
+                          const dropKey = `${lane.key}||${column.state}`;
+                          const mine = cellKey(lane.key, column.state);
                           const cards = createMemo(() => cellItems(lane, column.state));
+
+                          // -- windowing (NFR-S5) -------------------------
+                          //
+                          // `Backlog.tsx`'s mechanism, on a cell instead of
+                          // a page: a fixed card height, a `ResizeObserver`
+                          // on the cell's own scroller, and a slice with
+                          // overscan either side. The observer rather than a
+                          // window listener for the reason the backlog gives
+                          // — a board in an unselected tab is `display:none`
+                          // with a height of zero, and comes back without a
+                          // resize event ever firing.
+
+                          // Seeded from `cellScroll`, and that is the whole
+                          // reason `cellScroll` exists — see it for why a
+                          // cell cannot keep its own offset.
+                          const [scrollTop, setScrollTop] = createSignal(
+                            cellScroll.get(mine) ?? 0,
+                          );
+                          const [viewport, setViewport] = createSignal(0);
+
+                          const windowed = createMemo(
+                            () => cards().length > VIRTUALIZE_ABOVE,
+                          );
+
+                          /** Where the focused card sits in *this* cell, or
+                           *  -1. A `Map` read, so every cell on the board can
+                           *  ask it on every focus change. */
+                          const focusHere = createMemo(() => {
+                            const ref = focusedRef();
+                            if (!ref) return -1;
+                            const at = projection().where.get(ref);
+                            return at && at.cell === mine ? at.index : -1;
+                          });
+
+                          const slice = createMemo(() => {
+                            const all = cards();
+                            if (!windowed()) return { start: 0, end: all.length };
+                            const height = viewport() || CARD_SLOT * FALLBACK_CARDS;
+                            const count =
+                              Math.ceil(height / CARD_SLOT) + OVERSCAN * 2;
+                            const last = Math.max(0, all.length - count);
+                            let start = Math.min(
+                              last,
+                              Math.max(0, Math.floor(scrollTop() / CARD_SLOT) - OVERSCAN),
+                            );
+                            let end = Math.min(all.length, start + count);
+                            // FR-U22 through a windowed column: an element
+                            // that is not rendered cannot take focus, so the
+                            // card the keyboard is moving to is always in the
+                            // slice — even when the scroll offset says
+                            // otherwise, which it does until the browser has
+                            // scrolled it into view.
+                            const at = focusHere();
+                            if (at >= 0 && (at < start || at >= end)) {
+                              start = Math.max(0, Math.min(at - OVERSCAN, last));
+                              end = Math.min(all.length, start + count);
+                            }
+                            return { start, end };
+                          });
+
+                          const windowCards = createMemo(() => {
+                            const { start, end } = slice();
+                            const all = cards();
+                            return start === 0 && end === all.length
+                              ? all
+                              : all.slice(start, end);
+                          });
+
                           const move = createMemo(() => {
                             const current = pending();
                             return current &&
@@ -1762,7 +2071,7 @@ const Board: Component<Props> = (props) => {
                           return (
                             <div
                               class={`board-cell${collapsedColumn(column.state) ? " collapsed" : ""}${
-                                dragOver() === cellKey ? " dropping" : ""
+                                dragOver() === dropKey ? " dropping" : ""
                               }${dragRef() && unlisted() ? " unlisted" : ""}`}
                               // Below the narrow breakpoint the board is a
                               // list and the column head row is not rendered
@@ -1780,10 +2089,10 @@ const Board: Component<Props> = (props) => {
                                 if (event.dataTransfer) {
                                   event.dataTransfer.dropEffect = "move";
                                 }
-                                setDragOver(cellKey);
+                                setDragOver(dropKey);
                               }}
                               onDragLeave={() => {
-                                if (dragOver() === cellKey) setDragOver(null);
+                                if (dragOver() === dropKey) setDragOver(null);
                               }}
                               onDrop={(event) => {
                                 event.preventDefault();
@@ -1914,108 +2223,144 @@ const Board: Component<Props> = (props) => {
                                   )}
                                 </Show>
 
-                                <For each={cards().slice(0, CARDS_PER_CELL)}>
-                                  {(item) => {
-                                    const isPending = createMemo(
-                                      () => pending()?.ref === item.ref,
+                                <div
+                                  class="board-cell-cards"
+                                  ref={(node) => {
+                                    const observer = new ResizeObserver(() =>
+                                      setViewport(node.clientHeight),
                                     );
-                                    return (
-                                      <div
-                                        id={cardDomId(item.ref)}
-                                        class={`board-card${isPending() ? " board-card--pending" : ""}${
-                                          dragRef() === item.ref ? " board-card--dragging" : ""
-                                        }${focusedRef() === item.ref ? " board-card--focused" : ""}${
-                                          bounced() === item.ref ? " board-card--bounced" : ""
-                                        }`}
-                                        role="button"
-                                        tabindex={0}
-                                        draggable={!writesDisabled() && !pending()}
-                                        onFocus={() => setFocusedRef(item.ref)}
-                                        onDragStart={(event) => {
-                                          if (writesDisabled() || pending()) {
-                                            event.preventDefault();
-                                            return;
-                                          }
-                                          setDragRef(item.ref);
-                                          setRefusal(null);
-                                          if (event.dataTransfer) {
-                                            event.dataTransfer.effectAllowed = "move";
-                                            event.dataTransfer.setData(
-                                              "text/plain",
-                                              item.ref,
-                                            );
-                                          }
-                                        }}
-                                        onDragEnd={() => {
-                                          setDragRef(null);
-                                          setDragOver(null);
-                                        }}
-                                        onKeyDown={(event) =>
-                                          onCardKeyDown(event, item, lane)
-                                        }
-                                        onDblClick={() => openDetail(item.ref)}
-                                      >
-                                        <div class="board-card-top">
-                                          <button
-                                            type="button"
-                                            class="board-card-ref"
-                                            onClick={() => openDetail(item.ref)}
-                                          >
-                                            {item.ref}
-                                          </button>
-                                          <span
-                                            class={`board-pri board-pri--${item.priority}`}
-                                          >
-                                            {item.priority}
-                                          </span>
-                                          {/* FR-U17: never blank, and
-                                              `unverified` when nobody has
-                                              said otherwise. */}
-                                          <span
-                                            class={`board-trust trust-${trustOf(item)}`}
-                                            title={`trust: ${trustOf(item)}`}
-                                          >
-                                            {trustOf(item)}
-                                          </span>
-                                          <span class="board-kind">{item.kind}</span>
-                                        </div>
-                                        <div class="board-card-title">{item.title}</div>
-                                        <div class="board-card-meta">
-                                          <Show when={filters().lanes !== "project" && item.project_slug}>
-                                            <span>{item.project_slug}</span>
-                                          </Show>
-                                          <Show when={item.assignee_identity_ref}>
-                                            <span>{item.assignee_identity_ref}</span>
-                                          </Show>
-                                          <Show when={item.effort}>
-                                            <span>{item.effort}</span>
-                                          </Show>
-                                          <Show when={isPending()}>
-                                            <span class="board-card-unsaved">
-                                              unsaved — needs a reason
-                                            </span>
-                                          </Show>
-                                        </div>
-                                        <Show when={(item.labels ?? []).length > 0}>
-                                          <div class="board-card-labels">
-                                            <For each={item.labels ?? []}>
-                                              {(label) => (
-                                                <span class="board-label">{label}</span>
-                                              )}
-                                            </For>
-                                          </div>
-                                        </Show>
-                                      </div>
-                                    );
+                                    observer.observe(node);
+                                    queueMicrotask(() => {
+                                      // A rebuilt cell is a fresh element at
+                                      // the top of its list; put it back
+                                      // where the reader left it. Not before
+                                      // the microtask: an offset set on a
+                                      // node that is not in the document yet
+                                      // does not stick.
+                                      const at = cellScroll.get(mine) ?? 0;
+                                      if (at) node.scrollTop = at;
+                                      setViewport(node.clientHeight);
+                                    });
+                                    onCleanup(() => observer.disconnect());
                                   }}
-                                </For>
-
-                                <Show when={cards().length > CARDS_PER_CELL}>
-                                  <div class="board-more">
-                                    {cards().length - CARDS_PER_CELL} more here —
-                                    narrow the filters to see them
+                                  onScroll={(event) => {
+                                    const at = event.currentTarget.scrollTop;
+                                    cellScroll.set(mine, at);
+                                    setScrollTop(at);
+                                  }}
+                                >
+                                  {/* The full height of everything the filter
+                                      matched, so the scrollbar is the length
+                                      of the column and not the length of the
+                                      window. */}
+                                  <div
+                                    class="board-cell-run"
+                                    style={{
+                                      height: `${cards().length * CARD_SLOT}px`,
+                                    }}
+                                  >
+                                    <div
+                                      class="board-cell-window"
+                                      style={{ top: `${slice().start * CARD_SLOT}px` }}
+                                    >
+                                      <For each={windowCards()}>
+                                        {(item) => {
+                                          const isPending = createMemo(
+                                            () => pending()?.ref === item.ref,
+                                          );
+                                          return (
+                                            <div
+                                              id={cardDomId(item.ref)}
+                                              class={`board-card${isPending() ? " board-card--pending" : ""}${
+                                                dragRef() === item.ref ? " board-card--dragging" : ""
+                                              }${focusedRef() === item.ref ? " board-card--focused" : ""}${
+                                                bounced() === item.ref ? " board-card--bounced" : ""
+                                              }`}
+                                              role="button"
+                                              tabindex={0}
+                                              draggable={!writesDisabled() && !pending()}
+                                              onFocus={() => setFocusedRef(item.ref)}
+                                              onDragStart={(event) => {
+                                                if (writesDisabled() || pending()) {
+                                                  event.preventDefault();
+                                                  return;
+                                                }
+                                                setDragRef(item.ref);
+                                                setRefusal(null);
+                                                if (event.dataTransfer) {
+                                                  event.dataTransfer.effectAllowed = "move";
+                                                  event.dataTransfer.setData(
+                                                    "text/plain",
+                                                    item.ref,
+                                                  );
+                                                }
+                                              }}
+                                              onDragEnd={() => {
+                                                setDragRef(null);
+                                                setDragOver(null);
+                                              }}
+                                              onKeyDown={(event) =>
+                                                onCardKeyDown(event, item, lane)
+                                              }
+                                              onDblClick={() => openDetail(item.ref)}
+                                            >
+                                              <div class="board-card-top">
+                                                <button
+                                                  type="button"
+                                                  class="board-card-ref"
+                                                  onClick={() => openDetail(item.ref)}
+                                                >
+                                                  {item.ref}
+                                                </button>
+                                                <span
+                                                  class={`board-pri board-pri--${item.priority}`}
+                                                >
+                                                  {item.priority}
+                                                </span>
+                                                {/* FR-U17: never blank, and
+                                                    `unverified` when nobody has
+                                                    said otherwise. */}
+                                                <span
+                                                  class={`board-trust trust-${trustOf(item)}`}
+                                                  title={`trust: ${trustOf(item)}`}
+                                                >
+                                                  {trustOf(item)}
+                                                </span>
+                                                <span class="board-kind">{item.kind}</span>
+                                              </div>
+                                              <div class="board-card-title">{item.title}</div>
+                                              <div class="board-card-meta">
+                                                <Show when={filters().lanes !== "project" && item.project_slug}>
+                                                  <span>{item.project_slug}</span>
+                                                </Show>
+                                                <Show when={item.assignee_identity_ref}>
+                                                  <span>{item.assignee_identity_ref}</span>
+                                                </Show>
+                                                <Show when={item.effort}>
+                                                  <span>{item.effort}</span>
+                                                </Show>
+                                                <Show when={isPending()}>
+                                                  <span class="board-card-unsaved">
+                                                    unsaved — needs a reason
+                                                  </span>
+                                                </Show>
+                                              </div>
+                                              <Show when={(item.labels ?? []).length > 0}>
+                                                <div class="board-card-labels">
+                                                  <For each={item.labels ?? []}>
+                                                    {(label) => (
+                                                      <span class="board-label">{label}</span>
+                                                    )}
+                                                  </For>
+                                                </div>
+                                              </Show>
+                                            </div>
+                                          );
+                                        }}
+                                      </For>
+                                    </div>
                                   </div>
-                                </Show>
+                                </div>
 
                                 <Show when={cards().length === 0 && !move() && !refused()}>
                                   <div class="board-cell-empty">Nothing here</div>

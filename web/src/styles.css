@@ -3852,6 +3852,20 @@ textarea {
    server published — the stylesheet does not know how many columns there are,
    which is the point. */
 .vogt-surface.board {
+  /* NFR-S5. `--board-card-h` and `--board-card-gap` must match `CARD_HEIGHT`
+     and `CARD_GAP` in `Board.tsx`, exactly as `--vogt-row-h` must match the
+     backlog's `ROW_HEIGHT`: a windowed column computes which cards to draw
+     and where to put them from those two numbers, and has no way to notice
+     that this file disagrees. A card is therefore a tile — two lines of
+     title and no more — which is the price of showing every card the filter
+     matched instead of the first sixty of them. */
+  --board-card-h: 116px;
+  --board-card-gap: 8px;
+  /* How tall a column gets before it scrolls inside itself rather than
+     making the whole board taller. Viewport-relative so a big screen shows
+     more of a column, capped so a swimlane board is still several lanes of
+     scrollable columns rather than one lane and a scrollbar. */
+  --board-cell-h: 62vh;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -4352,16 +4366,48 @@ textarea {
   color: var(--activity-running);
 }
 
-.board-more {
-  font-size: 11px;
-  color: var(--fg-muted);
-  padding: 4px 2px;
+/* -- NFR-S5: a column windows, it does not truncate ----------------------
+ *
+ * The cell's own scroller. Three boxes, the same three the backlog's list
+ * uses: this one scrolls, `.board-cell-run` is as tall as *everything the
+ * filter matched* so the scrollbar tells the truth about the column's
+ * length, and `.board-cell-window` is the slice that is actually in the DOM,
+ * pushed down to where it belongs.
+ *
+ * Keeping the scroller inside the cell rather than scrolling the whole board
+ * is what makes the arithmetic honest: `scrollTop` on this element is an
+ * offset into this column's list, and nothing about the lane above it, the
+ * header, or the page can move it.
+ */
+.board-cell-cards {
+  flex: 1;
+  min-height: 0;
+  max-height: var(--board-cell-h);
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
+.board-cell-run {
+  position: relative;
+}
+
+.board-cell-window {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+/* A card is a fixed-height tile, because the window's arithmetic needs it to
+   be — see `--board-card-h` above. Overflow is hidden rather than left to
+   spill: a card that grew past its slot would draw over the one below it and
+   the scroll offset would stop matching what is on screen. */
 .board-card {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  height: var(--board-card-h);
+  margin-bottom: var(--board-card-gap);
+  overflow: hidden;
   padding: 8px 10px;
   border: 1px solid var(--bd);
   border-radius: 6px;
@@ -4424,19 +4470,32 @@ textarea {
   color: var(--fg-muted);
 }
 
+/* Two lines, and the height of two lines whether or not the title fills
+   them, so every card is the same height and the tile below it is where the
+   window says it is. The whole title is on the item, one click away. */
 .board-card-title {
   font-size: 13px;
   color: var(--fg);
   line-height: 1.35;
   overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  flex: 0 0 auto;
+  height: calc(1.35em * 2);
 }
 
 .board-card-meta {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   font-size: 11px;
   color: var(--fg-muted);
+  flex: 0 0 auto;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .board-card-unsaved {
@@ -4445,8 +4504,10 @@ textarea {
 
 .board-card-labels {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 4px;
+  flex: 0 0 auto;
+  overflow: hidden;
 }
 
 .board-label {
@@ -4618,6 +4679,12 @@ textarea {
 @media (max-width: 768px) {
   .vogt-surface.board {
     padding: 10px;
+    /* The columns are stacked here, so a column may take more of the screen
+       before it starts scrolling inside itself. It still does scroll rather
+       than growing without limit: the alternative on a phone is one column
+       being thousands of cards of page between the reader and the next
+       state, which is the list-of-everything the window exists to avoid. */
+    --board-cell-h: 70vh;
   }
 
   .board-toolbar {
