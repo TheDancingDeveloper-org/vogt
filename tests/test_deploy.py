@@ -605,3 +605,58 @@ def test_every_gate_nfr_c6_names_is_in_the_pipeline() -> None:
         ("pytest", "uv run --no-sync pytest"),
     ):
         assert fragment in ci, f"NFR-C6 names {gate}; `ci.yml` no longer runs it"
+
+
+ENTRYPOINT = REPO_ROOT / "engine" / "deploy" / "entrypoint.sh"
+
+
+@needs_engine
+def test_only_a_loopback_core_is_started_by_this_container() -> None:
+    """NFR-D11: vogt-core binds loopback and is never published.
+
+    The rule is enforced where the process is started, and §6.2a recorded
+    that no test read the file. It also recorded that a non-loopback URL is
+    declined *silently*, and that is not true — reading the script to write
+    this found it announces the case on stderr, deliberately, because "no
+    core started" and "core started elsewhere" look identical in a process
+    list. The row is corrected rather than the script.
+    """
+    script = ENTRYPOINT.read_text(encoding="utf-8")
+    body = _without_comments(script)
+
+    # The loopback set, exactly. A hostname that resolves to 127.0.0.1 is not
+    # in it, and should not be: this is about what the container starts, and
+    # the answer must not depend on a resolver.
+    assert "127.0.0.1|localhost|'[::1]')" in body, (
+        "the loopback set is the case arm; widening it widens what this "
+        "container will start on a published interface"
+    )
+
+    # Not silent, in either direction.
+    assert "proxying to a core this container does not run" in body, (
+        "a non-loopback URL is a legitimate topology and has to say so — "
+        "otherwise it is indistinguishable from no core at all"
+    )
+    assert "refusing to start" in body and "exit 78" in body, (
+        "a core URL with no port can never be reached, and a front door that "
+        "cannot reach its core should not come up claiming to be one"
+    )
+
+
+@needs_engine
+def test_the_engine_is_the_only_published_port_in_the_merged_image() -> None:
+    """NFR-D11 again, from the image rather than the compose file.
+
+    `test_the_merged_stack_publishes_the_engine_and_only_the_engine` asserts
+    the deployment; this asserts what the image itself offers, so a compose
+    file written by somebody else cannot expose the core by accident.
+    """
+    dockerfile = _without_comments(
+        (REPO_ROOT / "engine" / "Dockerfile").read_text(encoding="utf-8")
+    )
+    exposed = re.findall(r"^EXPOSE\s+(.+)$", dockerfile, re.MULTILINE)
+    ports = {port for line in exposed for port in line.split()}
+    assert ports <= {ENGINE_PORT}, (
+        f"the merged image exposes {sorted(ports)}; only the engine's "
+        f"{ENGINE_PORT} may be published (NFR-D11)"
+    )
