@@ -18,7 +18,9 @@ import {
   api,
   type AssistantPendingAction,
   type AssistantReply,
+  type AssistantSendInputAction,
   type AssistantTranscriptEntry,
+  type AssistantVogtWriteAction,
 } from "./api";
 
 const TTS_PREF_KEY = "mydevenv2.assistant.tts";
@@ -50,6 +52,50 @@ function visibleText(text: string): string {
     if (c === "\t") return "\\t";
     return `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`;
   });
+}
+
+/** Narrowings for the card, so each branch renders its own fields only. */
+function asSendInput(
+  action: AssistantPendingAction | null | undefined,
+): AssistantSendInputAction | undefined {
+  return action?.kind === "send_input" ? action : undefined;
+}
+
+function asVogtWrite(
+  action: AssistantPendingAction | null | undefined,
+): AssistantVogtWriteAction | undefined {
+  return action?.kind === "vogt_write" ? action : undefined;
+}
+
+/**
+ * The exact payload, whichever effector it is for. `display: block` and a
+ * scroll ceiling because a Vogt payload is several lines and must not push the
+ * approve button off screen — an approval you have to hunt for is worse than
+ * one you can read.
+ */
+const payloadStyle = {
+  display: "block",
+  "font-family": "monospace",
+  "white-space": "pre-wrap",
+  "word-break": "break-all",
+  padding: "6px 8px",
+  background: "rgba(0,0,0,0.25)",
+  "border-radius": "6px",
+  "max-height": "220px",
+  "overflow-y": "auto",
+} as const;
+
+/**
+ * What the assistant is asking permission for, spoken.
+ *
+ * Says what will happen and to what, and never offers a way to answer it:
+ * approval is an on-screen act, so a misheard "yes" authorises nothing
+ * (FR-T2).
+ */
+function announce(action: AssistantPendingAction): string {
+  return action.kind === "send_input"
+    ? `I'd like to type into session ${action.session_name}. Approve on screen.`
+    : `I'd like to make a Vogt change: ${action.operation} on ${action.target}. Approve on screen.`;
 }
 
 export default function Assistant(props: AssistantProps) {
@@ -112,9 +158,7 @@ export default function Assistant(props: AssistantProps) {
     }
     setPending(reply.pending_action ?? null);
     if (reply.pending_action && ttsOn()) {
-      speakSentences(
-        `I'd like to type into session ${reply.pending_action.session_name}. Approve on screen.`,
-      );
+      speakSentences(announce(reply.pending_action));
     }
   };
 
@@ -261,7 +305,9 @@ export default function Assistant(props: AssistantProps) {
         <Show when={transcript().length === 0 && !pending()}>
           <div style={{ opacity: 0.6, "font-size": "13px" }}>
             Ask about your terminal sessions — “what is the build doing?”,
-            “is any agent stuck?”, “answer yes to the prompt in session two”.
+            “is any agent stuck?”, “answer yes to the prompt in session two” —
+            or about your work: “what's the top bug?”, “why is WI-7 ranked
+            there?”, “start a session on it”.
           </div>
         </Show>
         <For each={transcript()}>
@@ -312,22 +358,37 @@ export default function Assistant(props: AssistantProps) {
                 background: "rgba(210, 153, 34, 0.08)",
               }}
             >
-              <div style={{ "font-size": "13px" }}>
-                Type into <strong>{action().session_name}</strong>
-                {action().submit ? " and press Enter" : ""}:
-              </div>
-              <code
-                style={{
-                  "font-family": "monospace",
-                  "white-space": "pre-wrap",
-                  "word-break": "break-all",
-                  padding: "6px 8px",
-                  background: "rgba(0,0,0,0.25)",
-                  "border-radius": "6px",
-                }}
-              >
-                {visibleText(action().text)}
-              </code>
+              <Show when={asSendInput(action())}>
+                {(send) => (
+                  <>
+                    <div style={{ "font-size": "13px" }}>
+                      Type into <strong>{send().session_name}</strong>
+                      {send().submit ? " and press Enter" : ""}:
+                    </div>
+                    <code style={payloadStyle}>{visibleText(send().text)}</code>
+                  </>
+                )}
+              </Show>
+              <Show when={asVogtWrite(action())}>
+                {(write) => (
+                  <>
+                    <div style={{ "font-size": "13px" }}>
+                      Write to Vogt: <strong>{write().operation}</strong> on{" "}
+                      <strong>{write().target}</strong>
+                    </div>
+                    {/*
+                      The reason gets its own line above the payload because
+                      Vogt stores it and someone reads it back later — it is
+                      the part of this card that outlives the approval.
+                    */}
+                    <div style={{ "font-size": "13px" }}>
+                      Recorded reason:{" "}
+                      <em style={{ opacity: 0.9 }}>{write().reason}</em>
+                    </div>
+                    <code style={payloadStyle}>{write().payload}</code>
+                  </>
+                )}
+              </Show>
               <div style={{ display: "flex", gap: "8px" }}>
                 <button type="button" disabled={busy()} onClick={() => void resolve(true)}>
                   ✓ Approve
@@ -356,7 +417,7 @@ export default function Assistant(props: AssistantProps) {
           type="text"
           value={draft()}
           disabled={busy()}
-          placeholder={listening() ? "listening…" : "Ask about your sessions"}
+          placeholder={listening() ? "listening…" : "Ask about sessions or work"}
           style={{ flex: 1 }}
           onInput={(e) => setDraft(e.currentTarget.value)}
         />

@@ -288,10 +288,23 @@ provisioned. Mutating routes require the `assistant` token capability. See
 - `GET /api/assistant/history` -> `{"transcript": [...], "pending_action"?: ...}`
 - `POST /api/assistant/reset` -> `OkResponse`
 
-`PendingAction` is `{"id": uuid, "session_id": uuid, "session_name": string,
-"text": string, "submit": bool}` — the exact bytes the assistant wants to type
-into a session, awaiting user approval. `GET /api/config` advertises
-`assistant_enabled` and `assistant_model` (presence only, never the key).
+`PendingAction` is tagged by `kind`, because the assistant has two effectors
+and a client must not render one as the other:
+
+- `{"kind": "send_input", "id": uuid, "session_id": uuid, "session_name":
+  string, "text": string, "submit": bool}` — the exact bytes the assistant
+  wants to type into a session.
+- `{"kind": "vogt_write", "id": uuid, "operation": string, "target": string,
+  "reason": string, "payload": string}` — a mutating Vogt operation (e.g.
+  `work.transition`), the arguments pretty-printed in `payload`, and the
+  `reason` Vogt will store in its audit log, surfaced on its own because it is
+  the part of the approval that outlives it (FR-T2, FR-T3).
+
+Both await approval at `POST /api/assistant/actions/:id`, one at a time. The
+identity on *that* request is the credential a Vogt write is made with: the
+approving user's paired core token, never a shared one. `GET /api/config`
+advertises `assistant_enabled` and `assistant_model` (presence only, never the
+key).
 
 A transcript entry is `{"role", "text", "tool_trace"?}`. `reply` is null when
 the turn paused on a pending action before the model produced any text, which
