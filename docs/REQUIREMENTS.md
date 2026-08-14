@@ -778,9 +778,12 @@ Named stretch goal, **not committed and not designed for**:
 
 *This section verifies v1 and is not restated by r9. The counts below are
 v1's and do not move because a later revision added requirements. The IDs r9
-appended are verified separately in §6, which is written as the stages land
-rather than at the end — §5 was written after v1 in one pass, and doing it
-that way is how seven requirements went a year without anyone checking.*
+appended are verified separately in §6. That section was first written as the
+stages landed, on the reasoning that §5 was written after v1 in one pass and
+that doing it that way is how seven requirements went a year without anyone
+checking. M14 replaced it with a single per-conjunct pass anyway, because
+writing a row the week you wrote the code turned out to swap one bias for
+another — §6's opening says what that cost.*
 
 M0–M6 are built; 482 tests pass at 92% coverage. This section is the audit
 of the *delivered* system against every requirement above — read against
@@ -943,64 +946,199 @@ whole fix.
 
 ## 6. Delivery verification (v2 to date, 2026-08-14)
 
-The r9 IDs, checked against the build the same way §5 checked v1's: read
-against the source and the tests, not against the roadmap's claims. **M9,
-M10 and M11 are built; M12–M14 are not**, so this covers the IDs those
-three stages deliver and says so per row rather than reporting a fraction of
-a moving denominator.
+*This section verifies the IDs revision r9 appended — **46 of them** — and
+counts them apart from §5's for the reason §5 gives: v1's numbers do not move
+because a later revision added requirements. M9–M13 are built; M14 is this
+document catching up with them.*
 
-One caveat governs every GUI row below and is not repeated in each: **no
-Solid surface has been rendered in a browser** (`ROADMAP.md` M11 as built).
-Where a row says "delivered", it means the code does what the requirement
-says and a test asserts what can be asserted without a renderer.
+The first pass at this section was written stage by stage as each landed, by
+the person who had just written the code. This one is the §5.4a pass: every
+requirement was **split into its conjuncts before anything was looked up**,
+and each conjunct was then read against the source and the tests rather than
+against `ROADMAP.md`'s claims or against the rows this section used to carry.
+Where a row here contradicts one of those, the contradiction is the finding.
+
+**201 conjuncts across 46 IDs. 61 are delivered, 28 are implemented and
+asserted by nothing, 69 cannot be verified in this environment at all, and 43
+are short or absent.** Each conjunct is in exactly one of those four, by this
+precedence: short before unverifiable, unverifiable before untested, untested
+before delivered. So a conjunct counted "unverifiable here" is one whose
+implementation was read and believed; a conjunct counted "short" was not
+believed, and §6.2 says why.
+
+**Delivered means a file and a test.** Not a citation — §5.4a's whole point is
+that a grep for an ID finds the docstring that names it. Where code plainly
+does the thing and nothing asserts it, the answer is *implemented, untested*,
+which §5 distinguishes and this section does too.
+
+**Two facts about this environment govern a third of the count and are not
+repeated in every row.** No Solid surface has ever been rendered in a browser
+(`ROADMAP.md` M11 as built) and no APK was ever assembled or installed
+(M13 as built) — there is no browser, no Android SDK and no device here, and
+no Docker daemon either, so the merged image has never been built (M9 as
+built). **Of the 93 conjuncts in FR-U4–U22, thirteen are delivered.** That is
+the single most important fact about this delivery: the GUI was specified to
+interaction depth precisely so it could be judged by its interactions, and
+almost none of its interactions have happened. What was proven is that the
+surfaces call the operations the registry serves, collect a reason before
+every write, and distinguish an outage from an empty answer. What was not
+proven is anything a person would notice.
+
+Three r9 IDs were **missing from this section entirely** before this pass:
+FR-E6 and FR-E7, which `ROADMAP.md` M13 names among its deliverables and did
+not build, and NFR-I6, which no stage names at all. All three are below.
 
 ### 6.1 Delivered
 
-| ID | Evidence |
-|---|---|
-| NFR-D12 | `dev` builds `:dev` images, `main` builds `sha-` images, neither deploys (`.github/workflows/build.yml`) |
-| NFR-Q6 | CI's `core` job deletes `engine/`, `web/` and `mobile/` and runs the suite; the forge-less run is untouched |
-| FR-E1, FR-E2 | Adopted as-built from the engine; its own tests cover PTY lifecycle, scrollback and the activity machine |
-| FR-E4 | Brief written to a prompt file by the engine, session id recorded on the item as an audited write, `work.get` carries the sessions with live activity (`tests/test_sessions.py`, `tests/test_m10_demo.py`) |
-| FR-E8 | `session.start`, `session.list`, `session.stop` in the registry and driven on all three transports by `tests/test_parity.py` |
-| FR-E9 | `engine/server/tests/vogt_core.rs` boots the engine with no core and with an unreachable one: sessions serve, readiness stays green, the Vogt routes refuse with a named reason |
-| FR-S9 | Per-front-door-token pairing, injected by the proxy; verified live — `GET /api/vogt/status` answers `principal: agent:gui` |
-| FR-S10 | Per-session actor and token, revoked on stop; the demo reads the write back as `agent:session:<id>` |
-| FR-U8 | `tests/test_pwa.py` resolves every path in the bundle against the operation registry *and* the engine's router and contract |
-| FR-U12, FR-U13, FR-U14, FR-U15, FR-U17, FR-U18 | Built in the surfaces; the reason-collecting and no-bulk-accept rules are asserted in `tests/test_pwa.py` |
-| FR-U21 | Every surface distinguishes an outage from an empty answer and renders the server's own reason (asserted structurally) |
-| FR-T1 | The assistant's Vogt tools are fetched from the core's own MCP `tools/list` and converted — `inputSchema` forwarded verbatim — so the schemas are the registry's, not a copy of it. Curation is an intersection: a curated name the core does not serve is logged and skipped, never fabricated |
-| FR-T2 | Every Vogt write goes through the same `PendingAction` gate as `send_input`; a write proposed without a reason is refused before it becomes a card |
-| FR-T3 | The credential is taken from the request that *approved* the action, not the one that proposed it, and a write has no shared fallback — an unpaired approver is refused by name. Tested against a stand-in core: proposed by an unpaired token with a fallback configured, approved by a different paired one, and the core saw the approver's token |
-| FR-T4 | Every Vogt result — reads and the core's answer to an approved write — is wrapped in `<vogt-data>`, with the system prompt naming both delimiters as untrusted; a test sends instruction-shaped text from the core and asserts it arrives delimited |
-| FR-T6 | As-built rule retained: no key, no assistant, and the Vogt tools are absent when no core is configured without disabling the assistant itself |
+The conjuncts with a file and a test behind them. Where an ID's conjuncts are
+split across this table and §6.2, only the ones named here are delivered.
 
-### 6.2 Delivered differently, or short
-
-| ID | What is actually true | Severity |
+| ID | Conjuncts delivered | The test that says so |
 |---|---|---|
-| NFR-D11 | The process model is built and tested — one port, engine fronting, core on loopback, aggregate health. **The image has never been built**: no Docker daemon was reachable here, so `engine/Dockerfile` is parse-checked and no more. | The one thing to do before trusting the stack |
-| NFR-C6 | Both halves run on every push. **APK release signing is not carried over** — the keystore lives in the retired forge, so the APK builds unsigned and where a signed one is published is an untaken decision. | Low until M13 |
-| FR-U9 | Parity reached and asserted; the legacy GUI is **still serving**, deliberately, until the M11 demo runs in a browser. | By design, and recorded |
-| FR-E3 | Vogt never uses a path heuristic: `cwd` is the registry's path, and a work item with no project is refused rather than guessed. The engine's *own* template matching (`match_repo_names`, `match_path_prefixes`) is untouched and still applies to sessions started from the engine's own UI. | Satisfied for Vogt-started sessions; the clause's second half is the engine's to change |
-| FR-E5 | A session's agent authenticates as that session — after three separate places were found silently replacing its token with the pod's. Registration itself is still the container bootstrap's, not per-session: the session supplies the credential, the bootstrap supplies the endpoint. | Delivered in substance |
-| FR-U4, FR-U5, FR-U6, FR-U7, FR-U11 | Built; unrendered. FR-U6's **bulk label is absent** (the binding did not exist when the surface was written; it does now). FR-U5's audit panel **links** to the browser rather than embedding a second copy. | Pending the demo |
-| FR-U10 | Delivered by multiplexing: the front door follows vogt-core's event cursor and republishes each change onto the engine's SSE stream as `vogt-changed`, so a client with one event source has both halves of the product on it. The board re-reads on the push and keeps its poll as a floor — a stream can drop, and a board that stopped refreshing because a socket died would be stale while looking current, which is what the requirement is actually about. The follower starts from the core's *current* head, so a restart does not replay an estate's history into a live UI. Verified live: a work item created through the core's own CLI arrived on the engine's `/api/events` stream as `{"type":"vogt-changed","kind":"work.created",…}` seconds later. | — |
-| FR-U16 | Delivered: every read surface, and work items by name — the list is read once per opening and filtered locally, so the palette does not become a request per keystroke. A write is reached by opening the view that collects its reason, asserted by import. | — |
-| FR-U19 | Actor, operation and entity filter server-side; **time range and project are applied to the loaded window**, because `ListAuditParams` has no time bound — which is §5.1's FR-S6 gap, reappearing in the surface that needed it most. | Compounds FR-S6 |
-| FR-U20 | Both directions: the work item shows its sessions with live activity and opens the terminal; the terminal carries a badge back to the item it was opened for. The badge asks Vogt (the engine knows the PTY, not why it exists) and stays silent when Vogt cannot be asked — a terminal must keep working whatever Vogt is doing. | — |
-| FR-U22 | Focus movement, `Shift`+arrow to propose a move through the same reason composer, `Enter` to open. Not wired into the palette. | Low |
-| FR-T5 | **Not validated.** Voice was adopted unproven and remains so — no domain-vocabulary pass was run, because it needs a device and a microphone. The prompt now tells the model that items are `WI-7` and projects are slugs, which is what a recognizer's output has to survive; whether it does is unknown. | The requirement says "shall not be presumed working" |
-| FR-M1 | The shell loads the merged PWA — but only once told where it is: the URL is required at build time with no default, because the merged stack has no settled public name and NFR-D2 forbids guessing one. Of MVP1's list, session *start* is three taps deep through a work item and there is no Vogt session-approval flow at all; the approvals that exist are the assistant's and ContextKeeper's. **No APK was built.** | Reachability is thin, and unbuilt |
-| FR-M2 | Delivered, and it corrected the default set: idle-stall and agent-task-started notifications had both defaulted on while being outside the set this requirement names. New drift is pushed from a watcher that persists its cursor and coalesces a burst. **No notification has ever been delivered** here, by either transport. | Untested against a device |
-| FR-M3 | The board renders as a list below 768px — the shell's own breakpoint, which all five surfaces had missed by picking 900. Asserted structurally (rows are `display: block`, the head row is hidden, all five carry a 768 rule); **nothing was rendered at any width**. | Pending a browser |
-| FR-T7 | **Not attempted.** Still OpenAI-compatible only; the documented `claude-*` proxy hang is still unexplained. Priority C. | Known |
-| NFR-S5 | The backlog virtualizes above 60 rows; the audit browser pages; the board **caps** rendered cards per column with an explicit "+N more" and pages its reads with a truncation banner. Nothing fetches the estate to render a page — the requirement's load-bearing half. | Board virtualization outstanding |
+| FR-E1 | PTY with ring-buffer scrollback; WebSocket attach with snapshot replay; all six lifecycle verbs | `engine/server/src/scrollback.rs` (`drops_oldest_on_overflow`, `snapshots_only_bytes_after_a_retained_cursor`); `engine/server/tests/integration.rs` (`ws_attach_echoes_input_and_replays_on_reattach`, `create_list_and_kill_session`, `rename_session`, `get_session_returns_typed_detail_shape`) |
+| FR-E2 | The four activity states; derived from output heuristics | `engine/server/src/activity.rs` (`detects_yn_prompt`, `nonzero_exit_becomes_errored`, `quiet_window_collapses_to_idle`, `recent_output_is_running`) |
+| FR-E3 | `cwd` is the path the project registry records, and a work item with no project is refused rather than guessed | `tests/test_sessions.py::test_a_session_opens_in_the_path_the_registry_records`, `::test_a_work_item_with_no_project_has_no_tree_to_open_in`; engine-side `integration.rs::session_cwd_must_stay_under_workspace_root` |
+| FR-E4 | The description reaches the brief; the brief is written through the agent-task prompt mechanism; the session id is recorded as an audited write; the item's views carry live activity | `tests/test_sessions.py::test_the_work_items_brief_travels_with_the_session`, `::test_the_session_is_linked_to_its_work_item`, `::test_the_work_item_view_shows_what_is_running_for_it`; `integration.rs::session_prompt_is_written_to_a_file_the_child_is_pointed_at` |
+| FR-E5 | The per-session actor-scoped token is carried into the session; an agent's writes are attributed to that session's actor | `tests/test_sessions.py::test_the_session_carries_its_own_token`; `tests/test_m10_demo.py::test_the_m10_demo` step 5 |
+| **FR-E8** | **Both**: the three operations are in the registry, and all three are driven on CLI, REST and MCP | `tests/test_parity.py::test_transports_return_the_same_answer`, `::test_transports_leave_the_same_audit_trail`, and `::test_every_shared_operation_is_driven_by_the_script`, which is what stops a session operation being quietly dropped from the script |
+| FR-E9 | The engine boots and stays ready with no core, and the Vogt routes refuse with a named reason | `engine/server/tests/vogt_core.rs::with_no_core_configured_the_engine_is_still_ready`, `::with_no_core_configured_the_vogt_routes_refuse_with_a_reason`, `::an_unreachable_core_is_reported_without_declaring_this_pod_unready` |
+| FR-T1 | Server-side tool loop; `list_sessions`; `read_session_tail`; the schemas are the core's, forwarded verbatim | `engine/server/src/assistant.rs` (`plain_reply_round_trip`, `list_then_tail_then_reply`, `tools_come_from_the_core_not_from_a_literal_in_this_file`); `vogt_tools.rs::conversion_forwards_the_served_schema_verbatim` |
+| FR-T2 | Every Vogt write passes the gate unconditionally; the card carries the exact payload and target, and the approved payload is the one the core receives; approval is an authenticated on-screen act and nothing else | `assistant.rs::a_vogt_write_waits_for_approval_and_then_uses_the_approver_pairing`, `::a_write_without_a_reason_is_refused_before_it_becomes_a_card`; `auth.rs::maps_mutating_routes_to_capabilities` |
+| FR-T3 | The credential is the *approver's*, taken from the request that pressed approve; a write has no shared fallback and an unpaired approver is refused by name | `assistant.rs::a_vogt_write_waits_for_approval_and_then_uses_the_approver_pairing` (proposed by an unpaired token, approved by a paired one, and the core saw the approver's), `::an_unpaired_approver_gets_a_refusal_rather_than_a_shared_actor`; `vogt_tools.rs::a_write_has_no_fallback_credential` |
+| FR-T4 | Both delimiters exist; terminal output is delimited; every Vogt read and every approved write's answer is delimited | `assistant.rs::list_then_tail_then_reply`, `::a_vogt_read_arrives_delimited_as_untrusted_data` (instruction-shaped text from the core arrives inside the tags) |
+| FR-S9 | The front door holds one token namespace carrying Vogt capabilities; the proxy strips the caller's credential and injects the paired core token; the proxy never pre-approves — a refusal forwards nothing | `engine/server/src/auth.rs::scoped_tokens_limit_capabilities`; `vogt_core.rs::the_core_is_handed_the_core_token_not_the_callers`, `::two_front_door_tokens_reach_the_core_as_two_actors`, `::a_write_needs_the_vogt_write_capability` and `::an_unauthenticated_caller_never_reaches_the_core`, both of which assert nothing was proxied |
+| **FR-S10** | **All four**: the token is per-session and actor-scoped, minted at start, revoked at stop, and its writes are distinguishable in the audit log | `tests/test_sessions.py::test_the_session_carries_its_own_token`, `::test_stopping_a_session_revokes_what_it_held`; `tests/test_m10_demo.py` step 5, which asserts the comment's actor is `agent:session:<id>` *and* differs from the `session.start` actor |
+| **FR-U8** | **All three**: the PWA reaches Vogt only through the front door and no other origin; every path resolves against the operation registry; every engine path resolves against `app.rs`'s router *and* `API_CONTRACT.md` | `tests/test_pwa.py::test_every_vogt_path_in_the_pwa_is_a_registered_operation`, `::test_the_pwa_reaches_vogt_only_through_the_front_door`, `::test_every_engine_path_in_the_pwa_is_a_route_the_engine_serves`, `::test_every_engine_path_in_the_pwa_is_in_the_engine_s_api_contract`, `::test_no_vogt_surface_opens_its_own_door`. Read against source rather than a built bundle, because no bundle is built here — the sources are what a bundle is built from, and a second call site would fail the check |
+| FR-U9 | The legacy GUI keeps serving, and parity is asserted rather than assumed — in both directions | `tests/test_pwa.py::test_the_pwa_renders_everything_the_legacy_gui_did` (an exact set, so a view added to the wrong front end fails too) |
+| FR-U6, FR-U15, FR-U18 | r6's rule, on the surface most likely to erode it: no exported write can be called without a reason, and quick-create will not submit without one | `tests/test_pwa.py::test_every_vogt_write_the_pwa_offers_collects_a_reason` |
+| FR-U16 | Every read *view* is reachable from the palette; the palette can never execute a write, checked by import | `tests/test_pwa.py::test_the_palette_reaches_every_vogt_surface`, `::test_the_command_palette_never_writes_to_vogt` |
+| FR-U18 | Bulk accept does not exist, and cannot arrive by accident | `tests/test_pwa.py::test_drift_is_resolved_one_proposal_at_a_time` (one call site, and no multi-select) |
+| FR-U21 | Every Vogt surface can tell an outage from an empty answer and renders the server's own reason; the core-absent half — terminals, files, git keep working | `tests/test_pwa.py::test_every_vogt_surface_distinguishes_an_outage_from_emptiness`; `engine/server/tests/contextkeeper.rs::a_contextkeeper_outage_leaves_terminals_working_and_unprotected` |
+| FR-M2 | New drift is summarised, coalesced and cursored; the default set is exactly the four FR-M2 names, and no more | `engine/server/src/vogt_drift.rs` (`one_drift_is_named`, `a_burst_is_one_notification_that_counts`, `a_cursor_survives_a_round_trip`); `push.rs::only_the_kinds_fr_m2_names_are_on_by_default` |
+| FR-M3 | The board's list layout at phone width, in the three rules that make it one: `display: block` on the row, the head row hidden, and the state name grown out of `attr(data-state)` | `tests/test_pwa.py::test_the_board_is_a_list_below_the_narrow_breakpoint`, `::test_the_board_cells_carry_what_the_hidden_head_row_said`, `::test_the_vogt_surfaces_share_the_engine_s_narrow_breakpoint` |
+| NFR-D11 | The engine's native APIs; the WebSocket attach path; `/api/vogt` proxied under its own prefix with the query string intact; `/mcp` proxied with the caller's credential unchanged; aggregate health with a non-fatal core check | `engine/server/tests/vogt_core.rs` (`a_vogt_read_reaches_the_core_under_its_own_prefix`, `a_query_string_survives_the_hop`, `mcp_forwards_the_callers_credential_unchanged`, `a_reachable_core_is_reported_with_its_schema_state`); `integration.rs::readyz_is_public_and_returns_checks` |
+| NFR-I6 | The core's SQLite, snapshotted with a manifest and refused on a mismatch | `tests/test_lifecycle.py` (nine tests, all of this third) |
+| NFR-Q6 | The forge-less run; the core run with no engine present, produced by deleting `engine/`, `web/` and `mobile/` rather than by inspection | `.github/workflows/ci.yml` job `core`; `tests/test_pwa.py`'s skip guard is what lets it pass |
+
+**Three IDs are delivered in every conjunct: FR-E8, FR-S10, FR-U8.** They are
+the three whose subject is a machine-checkable relationship — transport
+parity, an actor in an audit row, a URL in a route table — which is not a
+coincidence and is the shape of thing this product is good at proving.
+
+### 6.2 Delivered differently, or short — per conjunct
+
+§5.4a: the conjunct is the row, not the ID. Each row is one claim that the
+requirement makes and the build does not.
+
+| Conjunct | What is actually true | Severity |
+|---|---|---|
+| FR-E3 — "template selection shall consult the registry" | Vogt performs no template selection at all. `start_session` passes the caller's `template` through as the command (`src/vogt/application/services/sessions.py`); there is no per-project template, no registry lookup, and nothing to consult. The clause is satisfied only in the sense that a heuristic it forbids is also absent. The engine's own template matching is untouched and still applies to sessions the engine starts. | Low — the failure it forbids cannot happen; the capability it implies does not exist |
+| FR-E3 — "the import root and the engine's workspace root shall be the same tree" | Agreed by co-location in `deploy/vogt-stack.compose.yml` and by nothing else. `VogtConfig` has no knowledge of `workspace_root` and there is no cross-check; `tests/test_deploy.py::test_the_workspace_path_matches_where_projects_are_registered` asserts a mount string and never compares it to `VOGT_IMPORT_ROOT`. Two values that must agree, in two files, with no assertion joining them. | **Medium** — it is the one semantic join the merge rests on |
+| FR-E4 — the brief carries the item's `why` | It does not. `_brief.py` emits title, facts, Description, Relations, Comments and a note about recording findings. There is no `why` section, and `brief_for_work_item` never calls the `why` operation — which exists, is registered, and is the thing the ranked views are built on. An agent is told what the item says and not why it is worth doing. | Medium — it is the half of the brief that is Vogt's rather than the tracker's |
+| FR-E5 — "shall register the Vogt MCP server for agents running inside them" | The session start path registers nothing. It exports `VOGT_HTTP_TOKEN`, `VOGT_SESSION_ID` and `VOGT_URL`; registration is `engine/deploy/mcp-bootstrap.sh`, an image-level script run out of band by the container bootstrap. The session supplies the credential, the bootstrap supplies the endpoint — which works in the deployed pod and is not what the requirement says, and means a session started against an engine built any other way has no Vogt MCP server. | Medium, and stated as delivered-in-substance in the previous pass without naming what supplies the other half |
+| FR-E6 — exit code | Not built. `EngineSession` carries `exit_code` and `_summarize` drops it. | **The ID is unbuilt** |
+| FR-E6 — duration | Not built. | — |
+| FR-E6 — working-tree delta | Not built. Nothing computes one. | — |
+| FR-E6 — "collected as observations with freshness and trust" | There is no session observation kind and no session collector; every `PendingObservation` in the product comes from one of the seven registered collectors. `SCHEMA.md` §2.6 states the opposite — that outcomes *are* collected as observations, "which is why there is no outcome column here" — so the schema document documents a thing that does not exist. | **High for the document**, low for the product |
+| FR-E7 — "may be bound to a project or work item" | `AgentTask` has no project or work-item field. Nothing in `agent_tasks.rs` mentions Vogt. | **The ID is unbuilt** |
+| FR-E7 — "findings shall be recordable as Vogt observations" | There is no operation through which anything outside a collector can file an observation: the registry exposes `observations.list` and `observations.prune`, and `ObservedStore.append` is reachable only from `sweep`. This is `SCHEMA.md`'s observed-first rule working as designed, and it means FR-E7's second clause needs a new write plane, not a field. | Medium — it is a design decision the requirement did not know it was making |
+| FR-T2 — "every mutating assistant tool — `send_input` … shall pass the pending-action gate" | `send_input` is exempt when `assistant_auto_type` is true (`assistant.rs`, one branch). The default is off and Vogt writes have no equivalent switch, which is the distinction the code comment draws — but r9's revision note promoted this gate on the stated grounds that it is "a structural guarantee, not configuration", and for the one tool the requirement names first, it is configuration. | **Medium** — the requirement's own justification is the thing that is untrue |
+| FR-T3 — "a `why` derived from the conversational context" | The `why` is whatever the model puts in the tool argument. The engine requires it to be non-empty and forwards it untouched; the instruction to phrase it as the user's own justification is prompt text. Nothing derives, validates, or rejects — not even the "requested via assistant" the prompt forbids. | Medium — an unverifiable reason in an audit row is the failure mode FR-W1 exists against |
+| FR-T4 — "forge-derived text, imported issue bodies" | Covered only transitively: they are delimited if and only if they arrive inside a Vogt read's result, which they do today. No forge-specific path exists and no test exercises an imported body, so the coverage is a property of the current call graph rather than of the rule. | Low |
+| FR-T5 — "push-to-talk STT" | It is tap-to-toggle. The mic button is `onClick`, and `startListening` toggles off if already listening; there is no press-and-hold handler anywhere. `docs/engine/ASSISTANT.md` calls it push-to-talk. | Low as a defect, and it is a documented behaviour that does not exist |
+| FR-T5 — "a validation pass against domain vocabulary … before v2 ships" | Not run, and nothing was built that would let it be: the recognizer's best match goes straight into the composer and is auto-sent. No project list, no slug normalisation, no `WI-\d+` repair. What was done instead is that the prompt now states items are `WI-7` and projects are slugs. The requirement says voice "shall not be presumed working", and it is still presumed. | **The requirement's own words** |
+| FR-T6 — "every GUI hides the surface" | The drawer entry is gated on `assistant_enabled`. The route is not: `/assistant` opens the tab with no check, so with no API key the surface renders and its first read 404s into a toast. The chrome is hidden; the surface is one URL away. | Low, and it is the second time in this product that a gate on the nav bar was mistaken for a gate |
+| FR-T7 — a native Anthropic backend | `ChatBackend` has two variants, `Http` and a test mock. Nothing in the repository speaks the Anthropic API. | Known, priority C |
+| FR-T7 — "the hang shall be resolved or the route refused with a named reason" | Neither. No code inspects the model name; the nearest mitigation is a 60-second client timeout, which turns a hang into a timeout without naming it. | Known, priority C |
+| FR-M1 — "session start/approve" | There is no Vogt session-approval flow, on any surface. `vogtApi.ts` has no approval binding and the registry has no approval operation; the two approvals in the product are ContextKeeper's recovery bundle and the assistant's pending action, neither of which is this. Session *start* exists and is three taps deep through a work item. | Medium — it is a named MVP1 item that was never built |
+| FR-U5 — "state history" | The panel renders the workflow's states with the current one marked, and says in as many words that the transitions belong in the audit trail. That is the machine, not the item's history: a reader cannot see when this item entered this state or what it came from without leaving the surface. | Low, and honestly labelled on the surface itself |
+| FR-U5 — "per-item audit trail" | A link to the audit browser pre-filtered to the item, not an embedded trail — which is a reasonable division and is FR-U19's second clause working. What the link cannot show is comments: they are audited against the comment rather than the work item, so the per-item filter returns creates, transitions and updates only. The surface says so; the gap is server-side and open. | Medium — an audit trail that silently omits a kind of write is the failure this product exists to prevent |
+| FR-U6 — "bulk transition/label" | Bulk transition is built. **Bulk label is not**: `Backlog.tsx` imports `createWork` and `transitionWork` and not `updateWork`. The previous pass said the binding "did not exist when the surface was written; it does now" — the binding does exist, and no surface calls it, which is a different and worse statement. | Low |
+| FR-U10 — "drift arrivals … shall update live" | The drift inbox has no subscription and no poll. It re-reads when its filter key changes or when a person presses Refresh. | Medium |
+| FR-U10 — "notification counts … shall update live" | Same: the inbox reads `unread` once per query and never again. | Medium |
+| FR-U10 — "a stale view shall never present itself as current" | True of the board, which tracks when it loaded and says "Stale — updated N ago, retrying". The other four surfaces have no age indicator at all: a backlog tab left open all morning looks exactly like one loaded a second ago. | **Medium** — it is the clause the requirement is actually about, kept on one surface of five |
+| FR-U12 — "a drag **or inline edit** shall render optimistically and reconcile" | There is no inline edit. `updateWork` is exported by `vogtApi.ts` and called by nothing — the dead binding that `test_pwa.py`'s own parity docstring warns about. The drag half is built. | Low — an absent feature cannot lie about what the server accepted |
+| FR-U14 — "a combined filter shall be nameable and recalled as a saved filter" | Saved filters exist on the backlog and bugs views and nowhere else. The board — which the requirement names first, and whose filter set is the more elaborate of the two — has none. | Low |
+| FR-U15 — "quick-create shall exist on the board and backlog" | It exists on the backlog. The board has no quick-create and does not import `createWork`. | Medium — it is half of a must-have clause |
+| FR-U16 — "shall reach every read surface (projects, work items, sessions, views) by fuzzy name" | Views, sessions and work items, yes — work items by name, read once per opening and filtered locally, capped at 200. **Projects are not reachable by name**: the palette imports `listWork` and nothing else from `vogtApi.ts`, so "open project rustnzb" is not a thing the keyboard can do. | Low |
+| FR-U16 — "every GUI-exposed mutating verb by opening the view that collects its reason" | One of them. `New Work Item…` opens the backlog's quick-create; transition, comment, drift resolve, import and session start/stop have no palette entry. The rule the clause exists to keep — never execute, only open — is kept perfectly by the one entry that exists. | Low |
+| FR-U17 — "trust state … shall be displayed on every aggregated view" | The board displays none. Freshness it has, as an age on the view; a card carries no trust state, though `WorkItem` has one and every other surface renders it. | Low |
+| FR-U19 — "filter by … project" | Applied to the loaded window, not to the query: `ListAuditParams` takes actor, operation and entity and nothing else. The surface says so rather than implying otherwise, and resolves at most 500 of a project's items to scope the filter. | Compounds FR-S6 |
+| FR-U19 — "filter by … time range" | Same, and this is §5.1's FR-S6 reappearing in the surface that needed it most. With no offset and no cursor on `audit.list`, the browser also cannot see past the newest 500 records at all. | Compounds FR-S6 |
+| FR-U22 — "quick-create shall have a binding" | It cannot: there is no quick-create on the board to bind. Focus, `Shift`+arrow to propose a move, and `Enter` to open are built and discoverable from a `Keyboard:` line on the board itself, which is what the clause asks for. The previous pass said "not wired into the palette", which FR-U22 does not require and which is not the gap. | Low |
+| NFR-D12 — "deployed to a dev stack for live validation" | Nothing deploys, from any branch. `build.yml` says so in its own step summary, and `ci.yml` records the decision — Vogt has never deployed from CI (NFR-D10). Worse for the clause: the `:dev` stream publishes the **core-only** root `Dockerfile` to `ghcr.io/thedancingdeveloper-org/vogt`, while `deploy/vogt-stack.compose.yml` pins `repo.indexarr.net/indexarr/vogt`. The image a dev stack would run and the image `dev` builds are different artefacts in different registries. | **High** — mobile, voice and push are verifiable nowhere else, which is the reason this requirement exists |
+| NFR-D12 — "only `main` deploys to prod" | Vacuously true, per the row above. `main` builds a `sha-` image and publishes it; a human pins a digest and deploys. | — |
+| NFR-C6 — "shall run both halves on every push" | On pushes to `main` and `dev`, and on pull requests — a push to any other branch with no PR open runs nothing. Within that, each half runs only when its own paths changed: a `mobile/`-only push runs no Rust and no Python; a `web/`-only push runs no APK build. This is NFR-C1 working as intended and NFR-C6's literal sentence being false; the reduction is deliberate and argued in the workflow. | Low, and honestly documented in the file |
+| NFR-C6 — "shall govern the merged image" | It governs the core-only image. No workflow passes `file: engine/Dockerfile`; both `build.yml` and `release.yml` use the default root `Dockerfile`, which the smoke test confirms by running the Python CLI. The merged image is governed by nothing, because nothing builds it. | **High** — it is the artefact the whole merge is for |
+| NFR-C6 — a signed APK | The APK builds unsigned with Gradle's debug key, pointed at `127.0.0.1:8910`, and the workflow calls it "a build artifact [that] points at nothing". The keystore lives in the retired forge; where a signed APK is published is an untaken decision, not an oversight. | Low until there is somewhere to publish one |
+| NFR-I6 — the engine's `state_dir` | Not covered. `vogt backup` snapshots two SQLite files and writes a manifest; it has no reference to `state_dir`, VAPID keys, push subscriptions, prompt artefacts or session history. Those are named in a comment in `deploy/vogt-stack.compose.yml`, for an operator to act on by hand. | **Medium** |
+| NFR-I6 — "enough registry/workspace metadata to re-establish FR-E3's path agreement" | Not covered. `Manifest` records manifest version, instance id, vogt version, two schema versions and a timestamp — no import root, no workspace root, no project root paths. A restore therefore cannot tell whether the paths in `projects.root_path` still resolve, which is precisely the failure FR-E3's join exists to prevent. | **Medium** |
+| NFR-I6 — "as one act" | There is no such act. One third is an operation with nine tests; two thirds are prose in a compose file. | **Medium**, and it was never checked before this pass |
+| NFR-S5 — "long lists virtualize" | One of three does. The backlog truly windows — fixed row height, `ResizeObserver`, a sliced window with overscan. The audit browser pages, deliberately, because an audit row is variable-height and a reason is never truncated. The board **caps** at 60 cards per cell with an explicit "+N more"; all loaded items stay in memory and in the reactive graph. | Board virtualization outstanding, and named as such since M11 |
+| NFR-S5 — "the board's filter and drag paths do not degrade with backlog size" | Unevidenced, and there is reason to doubt it: the cell and column projections are linear scans over the whole loaded set, run per cell and per column, over as many as 2,000 items. `tests/test_benchmark.py` is a server-side query tripwire and says nothing about the DOM. | Medium — it is the clause with no test and no argument |
+
+### 6.2a Implemented, and asserted by nothing
+
+Twenty-eight conjuncts whose code was read and believed, which nothing in any
+suite would notice the loss of. They are not defects; they are the places a
+regression would be silent. Grouped by ID because the remedy is the same in
+each — a test, in the language the code is written in.
+
+| ID | The conjuncts | What would assert it |
+|---|---|---|
+| FR-E1 | Multiple concurrent clients per session | A second `ws_attach` that does not close the first — the one multi-attach test closes the first socket before opening the second, so concurrency is exercised nowhere |
+| FR-E2 | The activity state is published on the server-wide SSE stream | A test that reads `/api/events`; today the only activity assertion polls `GET /api/sessions/{id}` |
+| FR-E4 | The brief carries the item's relations | An assertion in `test_the_work_items_brief_travels_with_the_session`, which today checks the ref, title, body, session id and token variable |
+| FR-E9 | The engine degrades to plain sessions; session availability is never lost | A test that names the property. Every session test in `integration.rs` runs with `vogt_core_url: None`, so it is exercised on every run and would fail loudly if it broke — but a reader looking for the requirement finds nothing, and the day someone gives that fixture a core the coverage vanishes silently |
+| FR-T1 | The curated set is the eight operations FR-T1 names | A test that names them. The existing one compares `CURATED_READS.len()` to itself and would pass if `compliance` were deleted |
+| FR-T2 | One pending action at a time; a new user message supersedes; the 120-second expiry; voice cannot approve | Three Rust tests and a front-end test runner. There is no front-end test runner at all — `web/package.json` has `dev`, `build`, `preview`, `typecheck` and nothing else |
+| FR-T4 | The system prompt names both delimiters as untrusted | An assertion over `messages[0]` of a recorded request; the mock backend already records them |
+| FR-T6 | Absent the API key the assistant routes answer 404 | One request to `/api/assistant/*` in a test that already boots with `assistant_api_key: None` and never asks |
+| FR-M2 | `waiting-for-input`, `errored`, and the agent-task notify hook are routed | A test that drives `spawn_activity_watcher`; the drift watcher has unit tests and these two, which are the headline notifications, have none |
+| FR-S9 | The audit records real actors across the hop; FR-S4's double gating is unweakened behind the proxy | A test that drives a real vogt-core through the front door. Every engine test uses a stand-in core that approves everything, so the second gate is asserted on its own and never behind the first |
+| FR-U4 | The columns are the union of `workflow.list`'s states, ordered by walking each machine, and are never hard-coded | Anything at all: the PWA has no tests of its own, and `test_pwa.py` reads its source as text |
+| FR-U10 | Session activity updates from the SSE stream without a refresh | As above |
+| FR-U12 | A refused state is never persisted, cached or re-derived — the only thing the board writes to storage is which columns and lanes were collapsed | As above |
+| NFR-D11 | The engine serves the PWA; vogt-core binds loopback only; a port that serves MCP also serves plain HTTP health | The loopback binding is enforced in `engine/deploy/entrypoint.sh`, which no test reads and which does not fail on a non-loopback URL — it silently declines to start a core. The Rust side does no validation of `vogt_core_url` at all |
+| NFR-D12 | `dev` builds `:dev` images | `tests/test_deploy.py` reads `build.yml` for the sha/latest discipline and never for the branch split |
+| NFR-C6 | fmt, clippy, `cargo test`, `pnpm typecheck`, the APK build and pytest are all in the pipeline | The only test that reads `ci.yml` checks `runs-on:` lines |
+| NFR-Q6 | Both suites pass in the merged repository | They are separately path-gated, so "both" is jointly checked only on a change that touches both trees or a shared file |
+| NFR-S5 | No view fetches the whole estate to render a page of it | True on inspection of all four surfaces, and the board's 2,000-item bulk read across four sequential requests is the weakest case rather than a clean one |
+
+### 6.2b Unverifiable in this environment
+
+Sixty-nine conjuncts. Not doubted — read, and believed, and unprovable here.
+Each row names what would settle it, because "run the demo" is not a plan and
+a list of what the demo has to show is.
+
+| ID | The conjuncts | What would verify them |
+|---|---|---|
+| FR-U4, FR-U12 | A drag is a `work.transition`; it renders optimistically; a refusal rolls the card back visibly and surfaces Vogt's own sentence where the drop happened | The M11 demo: drag a card, and drag one the workflow forbids. The refusal path is written to discard the optimistic position outright and has never discarded one |
+| FR-U5 | Description, comments, relations, labels, collected evidence with freshness and trust, and the start-session control, all on one page | Open `#/w/WI-7` in a browser |
+| FR-U6, FR-U15 | The ranked views, the explainable `why`, quick-create and bulk transition, as things a person operates | Open the backlog; create an item; transition a batch |
+| FR-U7 | Brief, CI status, contract and compliance, drift inbox, dependency graph, import form | Open a project page. The "graph" is a one-hop neighbourhood list, as the legacy GUI's was — a deviation §5.2 already records for FR-U1 |
+| FR-U10 | A lost stream is indicated and reconciles on reconnect | Kill the engine mid-demo and watch the indicator, then bring it back |
+| FR-U11 | Project, work item, board with its filter set, session and audit query are addressable; deep links survive reload, are shareable, and restore the exact view | Reload every one of them. This is the clause M11 found broken for *every* surface — routes and tab kinds existed with no branch in the URL→tabs effect — so it is the one with the worst prior |
+| FR-U13 | Swimlanes by project or initiative, per-column WIP counts, collapse/expand, layout persisted per client | Collapse a lane, reload, and see it collapsed |
+| FR-U14 | Six filters on the board and on the ranked views, combinable, reflected in the URL | Combine three and share the link |
+| FR-U16 | Work items and sessions by fuzzy name | Open the palette and type |
+| FR-U17 | Freshness on every aggregated view; a claim backed by a still-running session marked provisional rather than fresh | Start a session on an item and look at its evidence panel |
+| FR-U18 | Both sides of a disagreement, with provenance and age, rendered open before any act is possible | Open the drift inbox against a proposal that has an evidence snapshot |
+| FR-U19 | Actor and operation filter server-side; every row shows who, what and why; the item page links in pre-filtered | Follow the link from a work item |
+| FR-U20 | The live activity badge, the open-terminal control, and the terminal's link back to the item it was opened for | Start a session from an item and follow it both ways |
+| FR-U21 | Engine unavailable → Vogt views keep answering and session controls disable with the named reason | Kill the engine with the app already loaded — which is the only way this half is reachable, since the engine is what serves the app |
+| FR-U22 | Focus, `Shift`+arrow to move, `Enter` to open, each discoverable | Use the board without a mouse |
+| FR-M1 | The Capacitor shell loading the merged PWA, and MVP1's terminals, assistant with voice, push, and backlog/board read | An APK, built against a real `VOGT_ANDROID_SERVER_URL`, installed on a device. `cap sync` and Gradle have never run here |
+| FR-M3 | The Vogt surfaces at phone width | The same APK, or a browser at 375px |
+| FR-T5 | Spoken replies | A device with a speaker |
+| NFR-D11 | One stack, one published port | `docker build -f engine/Dockerfile .`, then the compose stack. No Docker daemon was reachable here, so the Dockerfile is parse-checked and no more, the riskiest unproven step is copying uv's standalone CPython between build stages, and the compose file is read by no test in the repository |
 
 ### 6.3 What this pass found that no requirement names
 
-Three defects, each of which produced *working behaviour and a false
-record*, which is the failure class this product exists to make visible:
+The first three were found by running the two halves together and looking at
+what came out; the rest by this audit. All of them share a shape — **working
+behaviour and a false record** — which is the failure class this product
+exists to make visible.
 
 1. **A session's credential was silently replaced** by the pod's, in three
    places (`ROADMAP.md` M10 as built). Writes succeeded; the audit named the
@@ -1011,7 +1149,56 @@ record*, which is the failure class this product exists to make visible:
 3. **ContextKeeper's two effectful posts were ungated**, so a read-only
    token could start a terminal, while every other write in the engine was
    capability-gated.
-
-None would have been found by reading the code, and none by a test that
-stubs its transport. All three were found by running the two halves together
-and looking at what came out.
+4. **`SCHEMA.md` §2.6 documents FR-E6 as implemented.** It states that session
+   outcomes "are collected as observations with freshness and trust", and
+   gives that as the reason there is no outcome column — reasoning from a
+   thing that does not exist to a schema decision that does. Nothing in CI
+   reads that file, which is the same finding §5.3 made about it.
+5. **The `:dev` image stream and the merged stack are different artefacts.**
+   `build.yml` publishes the core-only root `Dockerfile` to
+   `ghcr.io/thedancingdeveloper-org/vogt`; `deploy/vogt-stack.compose.yml`
+   pins `repo.indexarr.net/indexarr/vogt` at a placeholder digest that
+   nothing pushes to. The tag NFR-D12 says a dev stack runs and the image
+   NFR-D11 describes are not the same thing and are not in the same registry:
+   `:dev` carries vogt-core alone, with no engine, no PWA and no front door,
+   and would come up healthy as exactly that. Nothing in the repository
+   builds the merged image, so the gap is not a stale digest — it is that no
+   artefact exists to pin.
+6. **`entrypoint.sh` does not fail on a non-loopback core URL.** It derives
+   the core's listen address from `VOGT_CORE_URL` so that "loopback only,
+   never published" is enforced rather than commented — but the non-loopback
+   branch declines to start a core and keeps proxying. The stack then serves
+   a front door with nothing behind it, reports the core as absent, and stays
+   ready, because the core's readiness check is deliberately not fatal
+   (M9 as built). Two correct decisions composing into a silent misconfigure.
+7. **The assistant tab is reachable with no API key.** `assistant_enabled`
+   gates the drawer entry and not the route, so `#/assistant` renders the
+   surface and 404s into a toast (FR-T6 above). The same shape as finding 3:
+   a gate on the way in, and a second door.
+8. **Three model-visible paths carry remote text outside the delimiters.**
+   `list_sessions` returns session names, commands and working directories as
+   raw JSON; tool errors and undelivered-write reasons are interpolated bare,
+   and for a Vogt read that text can be the core's own sentence. FR-T4's rule
+   is kept on the paths it was written for and not on the paths that grew
+   after it.
+9. **NFR-PO2's "separately marked layer" does not exist.** `pyproject.toml`
+   declares `--strict-markers` and no `markers` list, and no test carries a
+   forge marker. The forge-less run is forge-less by construction — nothing
+   provisions a token — which is a stronger property than the one the
+   requirement asks for and is not the one it asks for. §5 counted NFR-PO2
+   delivered.
+10. **`Board.tsx`'s header says Vogt's events cannot reach the client.** It
+    records, at length, that `events.list` "is not in `vogtApi.ts`'s route
+    table, and nothing proxies it into the SSE stream", so the board polls.
+    Both halves of that became false when the front door's follower landed:
+    `events.list` is in the route table, `vogt-changed` is republished onto
+    the stream, and the file's own `onMount` subscribes to it. The code is
+    right; the comment is the plan the code replaced, left standing above it.
+    It is the smallest possible instance of what §5.3 found in `SCHEMA.md` —
+    a document that tracked what was removed and never what was added.
+11. **NFR-I6 belongs to no milestone.** §4 requires each milestone to name
+    the requirement IDs it delivers, and every other r9 ID appears in some
+    stage's `Delivers` line. NFR-I6 appears in none — which is why nothing
+    built it, nothing claimed it, and this section had no row for it until
+    now. §4's rule is enforced by nobody: no test reads `ROADMAP.md`, and the
+    only check on the pairing is somebody sitting down to do this.
