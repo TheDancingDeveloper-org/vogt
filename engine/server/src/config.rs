@@ -135,6 +135,10 @@ pub struct Config {
     pub bind: SocketAddr,
     pub token: String,
     pub token_mutating_request_limit_per_minute: u32,
+    /// The front door's scoped tokens. Each may name the vogt-core token it is
+    /// paired with (FR-S9); by the time `load` returns, any
+    /// `vogt_core_token_file` on an entry has been read into its
+    /// `vogt_core_token`.
     pub extra_tokens: Vec<ScopedTokenConfig>,
     pub scrollback_bytes: usize,
     pub default_shell: String,
@@ -201,10 +205,11 @@ pub struct Config {
     /// pretending the core is empty (FR-U21). The engine itself keeps
     /// serving — sessions do not depend on the core (FR-E9).
     pub vogt_core_url: Option<String>,
-    /// The core token the front door injects on `/api/vogt` (FR-S9). Server-
-    /// side only: a browser holds a *front-door* token, never this one. The
-    /// core sees a real actor rather than "the proxy", which is what keeps
-    /// its audit rows worth reading.
+    /// The core token the front door injects on `/api/vogt` for the primary
+    /// token, and for any extra token with no pairing of its own (FR-S9).
+    /// Server-side only: a browser holds a *front-door* token, never this one.
+    /// The per-token pairings live on `extra_tokens`; this is what the proxy
+    /// falls back to.
     pub vogt_core_token: Option<String>,
 }
 
@@ -280,6 +285,7 @@ pub fn load(
         extra_tokens.extend(env_tokens);
     }
     validate_extra_tokens(&token, &extra_tokens)?;
+    resolve_paired_core_tokens(&mut extra_tokens)?;
 
     let workspace_root_raw = from_file.workspace_root.map(std::path::PathBuf::from);
     let workspace_root = workspace_root_raw
@@ -536,6 +542,44 @@ fn validate_extra_tokens(primary_token: &str, extra_tokens: &[ScopedTokenConfig]
     Ok(())
 }
 
+/// Turn each front-door token's `vogt_core_token_file` into the value the
+/// proxy will inject for it (FR-S9).
+///
+/// Read here, once, rather than per request: a credential that changes under a
+/// running process would make two requests from the same caller reach the core
+/// as two different actors, and the loader is where every other secret in this
+/// config is already resolved.
+///
+/// An unreadable or empty file is a boot failure, not a downgrade. The
+/// alternative — treating it as "no pairing" — silently falls back to the
+/// shared core token, which is precisely the actor confusion this mapping
+/// exists to end, and it would do so without anyone noticing.
+fn resolve_paired_core_tokens(extra_tokens: &mut [ScopedTokenConfig]) -> Result<()> {
+    for entry in extra_tokens.iter_mut() {
+        let Some(path) = entry.vogt_core_token_file.as_deref().map(str::trim) else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(path).map_err(|e| {
+            ApiError::Config(format!(
+                "reading vogt_core_token_file for extra token {} ({path}): {e}",
+                entry.name
+            ))
+        })?;
+        let value = raw.trim().to_string();
+        if value.is_empty() {
+            return Err(ApiError::Config(format!(
+                "vogt_core_token_file for extra token {} ({path}) is empty",
+                entry.name
+            )));
+        }
+        entry.vogt_core_token = Some(value);
+    }
+    Ok(())
+}
+
 fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<String> {
     if let Some(list) = file {
         return list
@@ -589,6 +633,59 @@ mod tests {
         std::env::remove_var(NAME);
 
         assert!(err.to_string().contains(NAME));
+    }
+
+    fn scoped(name: &str) -> ScopedTokenConfig {
+        ScopedTokenConfig {
+            name: name.to_string(),
+            token: "1234567890abcdef".to_string(),
+            capabilities: vec![],
+            mutating_requests_per_minute: 600,
+            vogt_core_token_file: None,
+            vogt_core_token: None,
+        }
+    }
+
+    #[test]
+    fn a_paired_core_token_file_is_read_and_wins_over_a_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("paired-core-token");
+        std::fs::write(&path, "  brokered-core-token\n").unwrap();
+
+        let mut tokens = vec![scoped("agent"), scoped("browser")];
+        tokens[0].vogt_core_token_file = Some(path.display().to_string());
+        tokens[0].vogt_core_token = Some("the-value-someone-also-left".into());
+        tokens[1].vogt_core_token = Some("config-file-core-token".into());
+
+        resolve_paired_core_tokens(&mut tokens).unwrap();
+
+        assert_eq!(
+            tokens[0].vogt_core_token.as_deref(),
+            Some("brokered-core-token")
+        );
+        assert_eq!(
+            tokens[1].vogt_core_token.as_deref(),
+            Some("config-file-core-token"),
+            "an entry with no file keeps the value it was configured with"
+        );
+    }
+
+    #[test]
+    fn an_empty_paired_core_token_file_fails_the_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty-token");
+        std::fs::write(&path, "\n").unwrap();
+
+        let mut tokens = vec![scoped("agent")];
+        tokens[0].vogt_core_token_file = Some(path.display().to_string());
+
+        let err = resolve_paired_core_tokens(&mut tokens).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("agent"), "{message}");
+        assert!(
+            message.contains("empty"),
+            "a silent fallback to the shared token is the failure this refuses: {message}"
+        );
     }
 
     #[test]

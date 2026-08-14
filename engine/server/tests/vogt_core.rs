@@ -31,6 +31,13 @@ const TEST_TOKEN: &str = "test-token-1234567890abcdef";
 const CORE_TOKEN: &str = "core-token-abcdef1234567890";
 const READ_ONLY_TOKEN: &str = "read-only-token-0987654321fedcba";
 
+/// Two more front-door tokens, each with a core token of its own, so the
+/// mapping has two actors to tell apart rather than one to confirm (FR-S9).
+const PAIRED_TOKEN: &str = "paired-front-door-token-1234567890";
+const PAIRED_CORE_TOKEN: &str = "core-token-for-the-paired-actor";
+const OTHER_PAIRED_TOKEN: &str = "other-paired-front-door-token-0987654321";
+const OTHER_PAIRED_CORE_TOKEN: &str = "core-token-for-the-other-actor";
+
 /// What the stand-in core saw. One request's worth is all these tests need.
 #[derive(Debug, Clone, Default)]
 struct Seen {
@@ -92,14 +99,35 @@ fn base_config() -> Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         token: TEST_TOKEN.to_string(),
         token_mutating_request_limit_per_minute: 600,
-        extra_tokens: vec![ScopedTokenConfig {
-            name: "read-only".to_string(),
-            token: READ_ONLY_TOKEN.to_string(),
-            // Every capability except the one the write path needs, so a
-            // refusal here is about `vogt-write` and not about being unknown.
-            capabilities: vec![TokenCapability::Sessions],
-            mutating_requests_per_minute: 600,
-        }],
+        extra_tokens: vec![
+            ScopedTokenConfig {
+                name: "read-only".to_string(),
+                token: READ_ONLY_TOKEN.to_string(),
+                // Every capability except the one the write path needs, so a
+                // refusal here is about `vogt-write` and not about being unknown.
+                capabilities: vec![TokenCapability::Sessions],
+                mutating_requests_per_minute: 600,
+                // No pairing: this one exercises the fallback.
+                vogt_core_token_file: None,
+                vogt_core_token: None,
+            },
+            ScopedTokenConfig {
+                name: "paired".to_string(),
+                token: PAIRED_TOKEN.to_string(),
+                capabilities: vec![TokenCapability::VogtWrite],
+                mutating_requests_per_minute: 600,
+                vogt_core_token_file: None,
+                vogt_core_token: Some(PAIRED_CORE_TOKEN.to_string()),
+            },
+            ScopedTokenConfig {
+                name: "other-paired".to_string(),
+                token: OTHER_PAIRED_TOKEN.to_string(),
+                capabilities: vec![TokenCapability::VogtWrite],
+                mutating_requests_per_minute: 600,
+                vogt_core_token_file: None,
+                vogt_core_token: Some(OTHER_PAIRED_CORE_TOKEN.to_string()),
+            },
+        ],
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
         default_cwd: std::env::temp_dir(),
@@ -273,6 +301,132 @@ async fn a_read_needs_no_capability_beyond_a_valid_token() {
     assert_eq!(res.status(), StatusCode::OK);
 }
 
+// -- each front-door token is its own actor at the core (FR-S9) -------------
+
+/// A front door whose only core token is the one paired with each front-door
+/// token: no deployment-wide fallback to fall back to.
+async fn front_door_without_a_fallback() -> (String, Log) {
+    let (core_url, log) = stand_in_core().await;
+    let mut cfg = base_config();
+    cfg.vogt_core_url = Some(core_url);
+    cfg.vogt_core_token = None;
+    (boot(cfg).await, log)
+}
+
+/// The whole point of the mapping: the core can tell the two callers apart,
+/// because it is handed two different credentials rather than one shared one.
+#[tokio::test]
+async fn two_front_door_tokens_reach_the_core_as_two_actors() {
+    let (base, log) = front_door().await;
+
+    for token in [PAIRED_TOKEN, OTHER_PAIRED_TOKEN] {
+        let res = client()
+            .get(format!("{base}/api/vogt/status"))
+            .headers(bearer(token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    let seen = log.lock().unwrap().clone();
+    let credentials: Vec<Option<String>> = seen
+        .iter()
+        .rev()
+        .take(2)
+        .rev()
+        .map(|s| s.authorization.clone())
+        .collect();
+    assert_eq!(
+        credentials,
+        vec![
+            Some(format!("Bearer {PAIRED_CORE_TOKEN}")),
+            Some(format!("Bearer {OTHER_PAIRED_CORE_TOKEN}")),
+        ],
+        "each front-door token must reach the core as the actor it is paired \
+         with — one shared credential is what FR-S9 replaces"
+    );
+    for credential in credentials.into_iter().flatten() {
+        assert!(
+            !credential.contains(PAIRED_TOKEN) && !credential.contains(OTHER_PAIRED_TOKEN),
+            "a front-door token still must not reach the core: {credential}"
+        );
+    }
+}
+
+/// The M9 deployment — one configured core token, no pairings — keeps working.
+#[tokio::test]
+async fn a_token_with_no_pairing_of_its_own_uses_the_configured_fallback() {
+    let (base, log) = front_door().await;
+    let res = client()
+        .get(format!("{base}/api/vogt/backlog"))
+        .headers(bearer(READ_ONLY_TOKEN))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let seen = log.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        seen.authorization.as_deref(),
+        Some(format!("Bearer {CORE_TOKEN}").as_str()),
+        "an unpaired token falls back to the single configured core token, so a \
+         deployment that has not provisioned pairings is unaffected"
+    );
+}
+
+/// A pairing is enough on its own: no deployment-wide token is required for a
+/// front door whose every token brings its own actor.
+#[tokio::test]
+async fn a_pairing_needs_no_fallback_beside_it() {
+    let (base, log) = front_door_without_a_fallback().await;
+    let res = client()
+        .get(format!("{base}/api/vogt/status"))
+        .headers(bearer(PAIRED_TOKEN))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        log.lock().unwrap().last().unwrap().authorization.as_deref(),
+        Some(format!("Bearer {PAIRED_CORE_TOKEN}").as_str())
+    );
+}
+
+/// Nothing to inject means nothing is forwarded. Sending the request on
+/// without a credential would return the core's 401 and read as the caller's
+/// mistake; the refusal names the pairing that was never provisioned.
+#[tokio::test]
+async fn no_pairing_and_no_fallback_is_refused_by_name() {
+    let (base, log) = front_door_without_a_fallback().await;
+    let res = client()
+        .get(format!("{base}/api/vogt/status"))
+        .headers(bearer(READ_ONLY_TOKEN))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body: Value = res.json().await.unwrap();
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("read-only"),
+        "the refusal names the front-door token that has no pairing: {message:?}"
+    );
+    assert!(
+        message.contains("vogt_core_token"),
+        "and names the setting that would fix it: {message:?}"
+    );
+    assert!(
+        !message.contains(READ_ONLY_TOKEN),
+        "the token's *name* is not its value: {message:?}"
+    );
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "an unauthenticated request must never be forwarded to the core"
+    );
+}
+
 // -- /mcp: the caller's own credential, untouched ---------------------------
 
 #[tokio::test]
@@ -295,6 +449,49 @@ async fn mcp_forwards_the_callers_credential_unchanged() {
         seen.authorization.as_deref(),
         Some("Bearer an-agents-own-core-token"),
         "rewriting an agent's credential would replace a real actor with a shared one"
+    );
+}
+
+/// The actor mapping is a property of `/api/vogt` alone. Even when the caller
+/// presents a front-door token that *has* a pairing, `/mcp` forwards what it
+/// was given: swapping in the paired token here would replace whichever actor
+/// the MCP client actually is with the browser's.
+#[tokio::test]
+async fn mcp_ignores_the_pairing_even_when_the_caller_has_one() {
+    let (base, log) = front_door().await;
+    client()
+        .post(format!("{base}/mcp"))
+        .headers(bearer(PAIRED_TOKEN))
+        .json(&json!({"jsonrpc": "2.0", "method": "tools/list", "id": 1}))
+        .send()
+        .await
+        .unwrap();
+
+    let seen = log.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        seen.authorization.as_deref(),
+        Some(format!("Bearer {PAIRED_TOKEN}").as_str()),
+        "/mcp is a pass-through; the core decides what that credential is worth"
+    );
+}
+
+/// And `/mcp` does not depend on there being any core token configured at all
+/// — it never needed one, and the refusal added for a missing pairing belongs
+/// to `/api/vogt`.
+#[tokio::test]
+async fn mcp_works_with_no_core_token_configured_at_all() {
+    let (base, log) = front_door_without_a_fallback().await;
+    let res = client()
+        .post(format!("{base}/mcp"))
+        .headers(bearer("an-agents-own-core-token"))
+        .json(&json!({"jsonrpc": "2.0", "method": "tools/list", "id": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        log.lock().unwrap().last().unwrap().authorization.as_deref(),
+        Some("Bearer an-agents-own-core-token")
     );
 }
 
@@ -469,6 +666,9 @@ async fn an_unreachable_core_is_reported_without_declaring_this_pod_unready() {
 async fn an_unreachable_core_answers_502_and_says_so() {
     let mut cfg = base_config();
     cfg.vogt_core_url = Some("http://127.0.0.1:1".to_string());
+    // A credential to inject, so this test is about the hop failing and not
+    // about the front door having nothing to present.
+    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
     let base = boot(cfg).await;
 
     let res = client()

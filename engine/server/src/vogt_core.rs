@@ -18,9 +18,12 @@
 //! *core* token already — that is how agents reach Vogt today, minted by
 //! `vogt token issue` and bound to an actor — so rewriting its credential
 //! would replace a real actor with a shared one and make the audit log worse.
-//! M8 injects a single configured core token; the per-front-door-token actor
-//! mapping FR-S9 describes in full, and the per-session actor tokens of
-//! FR-S10, land with the session work in M9.
+//! Which core token gets injected is now the caller's own: each front-door
+//! token may be paired with one (`vogt_core_token_file` on its `extra_tokens`
+//! entry), and the proxy injects the pairing belonging to the token that
+//! authenticated *this* request, so the core's audit names a real actor per
+//! front-door holder rather than one shared proxy identity. The per-session
+//! actor tokens of FR-S10 land with the session work.
 //!
 //! **Why the body is streamed rather than buffered.** `/mcp` is streamable
 //! HTTP: a response is an SSE stream that stays open. Reading it to completion
@@ -44,6 +47,7 @@ use axum::{
 use serde_json::json;
 
 use crate::app::AppState;
+use crate::auth::AuthorizedIdentity;
 use crate::config::Config;
 
 /// Front-door mount points. Public so the router and its tests name the same
@@ -75,7 +79,15 @@ const HOP_BY_HOP: [&str; 8] = [
 pub struct VogtCore {
     client: reqwest::Client,
     base: String,
-    token: Option<String>,
+    /// The core token to inject when the calling front-door token has no
+    /// pairing of its own. This is the single configured `vogt_core_token`,
+    /// and keeping it is a decision rather than an oversight: a deployment
+    /// that provisioned one shared core token and no per-token pairings — the
+    /// shape M9 shipped and the one `deploy/vogt-stack.compose.yml` still
+    /// describes — keeps working across this change without editing its
+    /// config. Pairings are how a deployment opts in to named actors, one
+    /// token at a time.
+    fallback_token: Option<String>,
 }
 
 impl VogtCore {
@@ -102,7 +114,7 @@ impl VogtCore {
         Some(Arc::new(Self {
             client,
             base,
-            token: cfg.vogt_core_token.clone(),
+            fallback_token: cfg.vogt_core_token.clone(),
         }))
     }
 
@@ -143,7 +155,16 @@ impl VogtCore {
     }
 
     /// Forward one request to `upstream_path`, streaming both ways.
-    async fn forward(&self, upstream_path: &str, inject_token: bool, request: Request) -> Response {
+    ///
+    /// `inject` is the core token to present as this request's credential, or
+    /// `None` to hand the core whatever the caller sent — which is what `/mcp`
+    /// and the legacy GUI want and what `/api/vogt` must never do.
+    async fn forward(
+        &self,
+        upstream_path: &str,
+        inject: Option<&str>,
+        request: Request,
+    ) -> Response {
         let query = request
             .uri()
             .query()
@@ -162,15 +183,13 @@ impl VogtCore {
             }
             // The core is told who to trust by us, not by the caller: a
             // front-door token in this header would only ever be rejected.
-            if inject_token && name == header::AUTHORIZATION {
+            if inject.is_some() && name == header::AUTHORIZATION {
                 continue;
             }
             outbound = outbound.header(name, value);
         }
-        if inject_token {
-            if let Some(token) = self.token.as_deref() {
-                outbound = outbound.header(header::AUTHORIZATION, format!("Bearer {token}"));
-            }
+        if let Some(token) = inject {
+            outbound = outbound.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
         outbound = outbound.body(body);
 
@@ -215,22 +234,57 @@ fn terse(error: &reqwest::Error) -> &'static str {
 
 // -- handlers ---------------------------------------------------------------
 
-/// `/api/vogt/*` → the core's `/api/*`, with the core token injected.
+/// `/api/vogt/*` → the core's `/api/*`, with the caller's paired core token
+/// injected (FR-S9).
+///
+/// The identity comes from the request extension `require_bearer` inserted
+/// after it authorized the caller; there is no second look at the incoming
+/// credential here, and there must not be one.
 pub async fn api(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let Some(core) = state.vogt_core.as_ref() else {
         return not_configured();
     };
+
+    let identity = request.extensions().get::<AuthorizedIdentity>().cloned();
+    // The caller's own pairing first, the deployment-wide token second. The
+    // fallback is what keeps an M9 deployment — one configured
+    // `vogt_core_token`, no pairings — working unchanged; it is deliberate,
+    // not a leftover.
+    let injected = identity
+        .as_ref()
+        .and_then(|caller| caller.vogt_core_token.clone())
+        .or_else(|| core.fallback_token.clone());
+
+    let Some(injected) = injected else {
+        // Neither, so there is nothing to inject. Forwarding anyway would send
+        // an unauthenticated request to the core and return its 401 as if the
+        // caller had got something wrong, so say what is actually missing.
+        return unavailable(&match identity.as_ref() {
+            Some(caller) => format!(
+                "front-door token \"{}\" has no paired vogt-core token, and no fallback \
+                 vogt_core_token is configured for this front door",
+                caller.token_name
+            ),
+            None => "this request carries no front-door identity, and no fallback \
+                     vogt_core_token is configured for this front door"
+                .to_string(),
+        });
+    };
+
     let path = map_prefix(request.uri(), API_PREFIX, CORE_API_PREFIX);
-    core.forward(&path, true, request).await
+    core.forward(&path, Some(&injected), request).await
 }
 
 /// `/mcp` → the core's `/mcp`, credential untouched.
+///
+/// Unchanged by the per-token mapping above, and deliberately: the credential
+/// on an MCP request is already a core token bound to an actor.
 pub async fn mcp(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let Some(core) = state.vogt_core.as_ref() else {
         return not_configured();
     };
     let path = map_prefix(request.uri(), MCP_PREFIX, MCP_PREFIX);
-    core.forward(&path, false, request).await
+    core.forward(&path, None, request).await
 }
 
 /// `/ui-legacy/*` → the core's `/ui/*` (FR-U9).
@@ -244,7 +298,7 @@ pub async fn legacy_gui(State(state): State<Arc<AppState>>, request: Request) ->
         return not_configured();
     };
     let path = map_prefix(request.uri(), LEGACY_GUI_PREFIX, CORE_GUI_PREFIX);
-    core.forward(&path, false, request).await
+    core.forward(&path, None, request).await
 }
 
 /// `/ui-legacy` → `/ui-legacy/`, the same redirect the core does at `/ui`.

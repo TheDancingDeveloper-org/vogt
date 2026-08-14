@@ -100,7 +100,14 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     match cfg.vogt_core_url.as_deref() {
         Some(url) => tracing::info!(
             url = %url,
-            token = cfg.vogt_core_token.is_some(),
+            // Whether a fallback exists, and how many front-door tokens reach
+            // the core as an actor of their own (FR-S9). Counts, never values.
+            fallback_token = cfg.vogt_core_token.is_some(),
+            paired_tokens = cfg
+                .extra_tokens
+                .iter()
+                .filter(|t| t.vogt_core_token.is_some())
+                .count(),
             "vogt-core front door enabled"
         ),
         // Logged at info, not warn: an engine with no core is a supported
