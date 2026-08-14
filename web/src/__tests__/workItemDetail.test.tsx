@@ -511,3 +511,196 @@ describe("FR-U21 — the item page tells an outage from an empty item", () => {
     expect(container.querySelector(".wid-outage")).toBeNull();
   });
 });
+
+
+// -- FR-M1: answering a session that is waiting for input -------------------
+//
+// MERGE §14's M12 demo ends "open it, unblock it", and until now unblocking
+// meant a terminal — a PTY under a phone keyboard, to type one character.
+// These mount the item page against *both* servers: Vogt for the session
+// record, the engine for what that session has on screen. The harness 404s
+// unstubbed engine paths, which is what makes the engine-is-away case the
+// default rather than something a test has to arrange.
+
+const WAITING_SESSION = {
+  id: "ses_01",
+  engine_session_id: "eng-1",
+  work_item_id: "WI-1",
+  project_id: "prj_01",
+  actor: "agent:session:ses_01",
+  reason: "start the migration",
+  cwd: "/srv/alpha",
+  template: "claude",
+  started_at: "2026-08-01T00:00:00Z",
+  stopped_at: null,
+  activity: "waiting-for-input",
+  alive: true,
+};
+
+function withWaitingSession(engine: Record<string, unknown> = {}) {
+  return fakeVogt(
+    {
+      "GET /work/get": {
+        body: { item: workItem(), comments: [], sessions: [WAITING_SESSION] },
+      },
+      "GET /sessions": { body: { sessions: [WAITING_SESSION], engine: null } },
+    },
+    engine as Parameters<typeof fakeVogt>[1],
+  );
+}
+
+/** A scrollback snapshot, encoded the way the engine encodes it. */
+function scrollback(text: string): string {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+}
+
+async function openAnswer(container: HTMLElement): Promise<void> {
+  const open = await waitFor(() => {
+    const button = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim() === "Answer…",
+    );
+    expect(button).toBeTruthy();
+    return button!;
+  });
+  fireEvent.click(open);
+}
+
+describe("FR-M1 — a session waiting for input can be answered from the item", () => {
+  it("offers no answer control for a session the engine does not report waiting", async () => {
+    const running = { ...WAITING_SESSION, activity: "running" };
+    fakeVogt({
+      "GET /work/get": {
+        body: { item: workItem(), comments: [], sessions: [running] },
+      },
+      "GET /sessions": { body: { sessions: [running], engine: null } },
+    });
+    const { container } = detail();
+    await waitFor(() => expect(container.textContent).toContain("running"));
+    expect(container.textContent).not.toContain("Answer…");
+  });
+
+  it("shows what the session is asking before there is anything to press", async () => {
+    withWaitingSession({
+      "GET /api/sessions/eng-1": {
+        body: {
+          summary: {},
+          scrollback_pos: 0,
+          scrollback_base64: scrollback(
+            "$ ./migrate.sh\nThis will drop 4 tables.\nProceed? (y/n) ",
+          ),
+        },
+      },
+    });
+    const { container } = detail();
+    await openAnswer(container);
+
+    const tail = await waitFor(() => {
+      const pre = container.querySelector('[data-testid="prompt-tail"]');
+      expect(pre).toBeTruthy();
+      return pre!;
+    });
+    // The prompt, and the line that gives it its meaning.
+    expect(tail.textContent).toContain("Proceed? (y/n)");
+    expect(tail.textContent).toContain("This will drop 4 tables.");
+  });
+
+  it("sends the typed answer to the engine, with the return that commits it", async () => {
+    const vogt = withWaitingSession({
+      "GET /api/sessions/eng-1": {
+        body: {
+          summary: {},
+          scrollback_pos: 0,
+          scrollback_base64: scrollback("Which branch? "),
+        },
+      },
+      "POST /api/sessions/eng-1/input": { body: { ok: true } },
+    });
+    const { container } = detail();
+    await openAnswer(container);
+    await waitFor(() => expect(container.textContent).toContain("Which branch?"));
+
+    const field = container.querySelector<HTMLInputElement>(
+      '[aria-label="Answer this session"]',
+    )!;
+    fireEvent.input(field, { target: { value: "main" } });
+    fireEvent.click(
+      [...container.querySelectorAll("button")].find(
+        (b) => b.textContent?.trim() === "Send",
+      )!,
+    );
+
+    const sent = await waitFor(() => {
+      const call = vogt.engineCalls.find(
+        (c) => c.method === "POST" && c.path === "/api/sessions/eng-1/input",
+      );
+      expect(call).toBeTruthy();
+      return call!;
+    });
+    expect(sent.body).toEqual({ text: "main", submit: true });
+  });
+
+  it("offers y and n only when the prompt reads like a yes/no question", async () => {
+    withWaitingSession({
+      "GET /api/sessions/eng-1": {
+        body: {
+          summary: {},
+          scrollback_pos: 0,
+          scrollback_base64: scrollback("Enter a commit message: "),
+        },
+      },
+    });
+    const { container } = detail();
+    await openAnswer(container);
+    await waitFor(() =>
+      expect(container.textContent).toContain("Enter a commit message:"),
+    );
+    const labels = [...container.querySelectorAll("button")].map((b) =>
+      b.textContent?.trim(),
+    );
+    expect(labels).not.toContain("y");
+    expect(labels).not.toContain("n");
+  });
+
+  it("answers nothing when the engine cannot say what is being asked", async () => {
+    // The engine path is unstubbed, so it 404s. A blank box above a Send
+    // button would invite somebody to answer a question they were never
+    // shown, which is the failure this control is arranged against.
+    withWaitingSession();
+    const { container } = detail();
+    await openAnswer(container);
+
+    await waitFor(() =>
+      expect(container.textContent).toContain("Open the terminal instead"),
+    );
+    expect(container.querySelector('[aria-label="Answer this session"]')).toBeNull();
+    expect(container.querySelector('[data-testid="prompt-tail"]')).toBeNull();
+  });
+
+  it("reads the prompt through terminal escape sequences", async () => {
+    withWaitingSession({
+      "GET /api/sessions/eng-1": {
+        body: {
+          summary: {},
+          scrollback_pos: 0,
+          scrollback_base64: scrollback(
+            "\x1b]0;migrate\x07\x1b[1;31mDanger\x1b[0m\r\nOverwrite? (y/n) ",
+          ),
+        },
+      },
+    });
+    const { container } = detail();
+    await openAnswer(container);
+    const tail = await waitFor(() => {
+      const pre = container.querySelector('[data-testid="prompt-tail"]');
+      expect(pre?.textContent).toContain("Overwrite?");
+      return pre!;
+    });
+    // The words, not the bytes a terminal would have eaten.
+    expect(tail.textContent).toContain("Danger");
+    expect(tail.textContent).not.toContain("1;31m");
+    expect(tail.textContent).not.toContain("migrate");
+    expect(
+      [...container.querySelectorAll("button")].map((b) => b.textContent?.trim()),
+    ).toContain("y");
+  });
+});

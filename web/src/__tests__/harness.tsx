@@ -98,6 +98,14 @@ export interface FakeVogt {
   matching(key: string): RecordedCall[];
   /** The engine's SSE stream, which FR-U10 is about. */
   stream: FakeStream;
+  /** Calls to the *engine's* own API, keyed by full pathname.
+   *
+   *  Separate from `calls` because they are a different server: this harness
+   *  is about Vogt, and the engine paths are answered only for the surfaces
+   *  that legitimately read both — a work item showing what a session is
+   *  waiting for reads Vogt for the session record and the engine for what
+   *  that session has on screen. */
+  engineCalls: RecordedCall[];
 }
 
 // -- the event stream (FR-U10) ----------------------------------------------
@@ -371,10 +379,11 @@ function defaults(): Routes {
  * `restoreMocks` in `vitest.config.ts` puts the real `fetch` back afterwards,
  * so there is nothing to undo here.
  */
-export function fakeVogt(routes: Routes = {}): FakeVogt {
+export function fakeVogt(routes: Routes = {}, engine: Routes = {}): FakeVogt {
   const table: Routes = { ...defaults(), ...routes };
   const calls: RecordedCall[] = [];
   const unhandled: RecordedCall[] = [];
+  const engineCalls: RecordedCall[] = [];
   const { stream, answer: openStream } = fakeStream();
 
   const stub = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -393,10 +402,29 @@ export function fakeVogt(routes: Routes = {}): FakeVogt {
     if (url.pathname === "/api/events") return openStream();
 
     if (!url.pathname.startsWith(VOGT_PREFIX)) {
-      // The engine's own API — sessions, files, git. A Vogt surface that
-      // reads one (WorkItemDetail asks the engine for a session's activity)
-      // gets a 404 rather than a hang: this harness is about Vogt.
-      return new Response("not a Vogt path", { status: 404 });
+      // The engine's own API — sessions, files, git. Recorded either way, so
+      // a test can assert what a surface asked the engine for and, just as
+      // importantly, that it asked nothing. Unstubbed engine paths keep
+      // answering 404, which is what makes FR-U21's "the engine is away"
+      // cases the default rather than a special arrangement.
+      const engineCall: RecordedCall = {
+        method,
+        path: url.pathname,
+        query: url.searchParams,
+        body,
+      };
+      engineCalls.push(engineCall);
+      const engineHandler = engine[`${method} ${url.pathname}`];
+      if (engineHandler === undefined) {
+        return new Response("not a Vogt path", { status: 404 });
+      }
+      const answer = await (typeof engineHandler === "function"
+        ? engineHandler(engineCall)
+        : engineHandler);
+      return new Response(
+        answer.text ?? (answer.body === undefined ? "" : JSON.stringify(answer.body)),
+        { status: answer.status ?? 200 },
+      );
     }
 
     const call: RecordedCall = {
@@ -426,6 +454,7 @@ export function fakeVogt(routes: Routes = {}): FakeVogt {
   return {
     calls,
     unhandled,
+    engineCalls,
     route(key, handler) {
       table[key] = handler;
     },

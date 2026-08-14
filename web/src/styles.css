@@ -6546,3 +6546,36 @@ textarea {
     flex-wrap: wrap;
   }
 }
+
+/* Answering a session that is waiting for input (FR-M1).
+   The tail is monospace and scrolls on its own: it is terminal output, and
+   a prompt that pushed the answer box off a phone screen would defeat the
+   control's whole purpose. */
+.wid-answer {
+  margin-top: 6px;
+}
+
+.wid-answer-tail {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  margin: 0 0 6px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 6px;
+}
+
+.wid-answer-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.wid-answer-form input {
+  flex: 1;
+  min-width: 8rem;
+}

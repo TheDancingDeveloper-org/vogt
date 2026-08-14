@@ -278,6 +278,61 @@ function formatWhen(value: string | null | undefined): string {
   return Number.isNaN(at.valueOf()) ? String(value) : at.toLocaleString();
 }
 
+// -- answering a session that is waiting for input (FR-M1, FR-E2) ----------
+//
+// MERGE §14's M12 demo is one sentence: *receive a push that a session is
+// waiting for input, open it, unblock it.* The first two parts existed —
+// FR-M2 routes the notification and FR-U20 opens the terminal — and the third
+// meant a keyboard over a PTY, which on a phone is the worst surface in the
+// product for typing one character into.
+//
+// The rule this encodes, and the only reason it is safe to answer a prompt
+// from a summary view: **nothing can be answered that has not been shown.**
+// The control fetches the session's own scrollback and renders the tail of
+// it first; the answer buttons do not exist until that text is on screen. A
+// one-tap "y" against a prompt nobody read is not unblocking a session, it is
+// approving something unseen — and this product's whole argument is that an
+// act with no visible subject is worse than no act.
+
+/** How much of the tail to show. Enough for a prompt and the lines that set
+ *  it up, not so much that the answer scrolls off a phone. */
+const TAIL_LINES = 12;
+
+/** The tail of a session's scrollback, decoded and stripped of the escape
+ *  sequences a terminal would have consumed. */
+function tailOf(scrollbackBase64: string): string {
+  let raw: string;
+  try {
+    const bytes = Uint8Array.from(atob(scrollbackBase64), (c) => c.charCodeAt(0));
+    raw = new TextDecoder().decode(bytes);
+  } catch {
+    return "";
+  }
+  const plain = raw
+    // CSI and OSC sequences: colour, cursor moves, title sets. A prompt
+    // rendered with them intact is unreadable in a <pre>.
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+  const lines = plain.split("\n");
+  while (lines.length && (lines[lines.length - 1] ?? "").trim() === "") lines.pop();
+  return lines.slice(-TAIL_LINES).join("\n");
+}
+
+/** Does the tail end in something that reads like a yes/no question?
+ *
+ *  Only used to *offer* the two one-tap answers beside the free-text box —
+ *  never to answer anything, and never to hide the prompt. A wrong guess
+ *  here costs a button that is not useful, which is the correct direction
+ *  for a guess about somebody else's prompt to fail in. */
+function looksLikeYesNo(tail: string): boolean {
+  const last = tail.trimEnd().slice(-200).toLowerCase();
+  return /\(y\/n\)|\[y\/n\]|\(yes\/no\)|\by\/n\b|\?\s*\(y[/|]n\)/.test(last);
+}
+
 // -- observed evidence, and whether it has settled -------------------------
 //
 // `observations.list` returns the observed store itself — what a collector
@@ -375,6 +430,144 @@ function exitText(observation: Observation): string {
  * without one could only fail at the user. The submit stays disabled until
  * the reason has been typed — the same rule quick-create keeps (FR-W1, r6).
  */
+/**
+ * Answer a session that is waiting for input, without opening a terminal.
+ *
+ * Two properties, and the second is the one that makes this safe to offer on
+ * a summary surface:
+ *
+ *   1. **It shows before it asks.** Opening the control reads the session's
+ *      own scrollback and renders the tail. Until that text is on screen
+ *      there is nothing to press: the answer field and the y/n shortcuts are
+ *      inside the `Show` that waits for it.
+ *   2. **A failed read is not an empty prompt.** If the engine cannot be
+ *      asked, this says so in the engine's words and offers no way to answer
+ *      — a blank box above a Send button would invite somebody to answer a
+ *      question they were never shown, which is the failure the whole control
+ *      is arranged against (FR-U21).
+ *
+ * `submit: true` appends the carriage return, so what is sent is the answer
+ * *and* the return that commits it — the thing a person would do at the
+ * terminal, in one act rather than two.
+ */
+const AnswerWaitingSession: Component<{
+  engineSessionId: string;
+  onDone: () => void;
+  onFailure?: (message: string) => void;
+}> = (props) => {
+  const [open, setOpen] = createSignal(false);
+  const [answer, setAnswer] = createSignal("");
+  const [sending, setSending] = createSignal(false);
+
+  const [tail, { refetch }] = createResource(open, async (isOpen) => {
+    if (!isOpen) return null;
+    return attempt(async () => {
+      const detail = await api.getSession(props.engineSessionId);
+      return tailOf(detail.scrollback_base64);
+    });
+  });
+
+  const send = async (text: string) => {
+    if (sending()) return;
+    setSending(true);
+    try {
+      await api.sessionInput(props.engineSessionId, text, true);
+      setAnswer("");
+      // Re-read rather than assume: what the session did with the answer is
+      // the only evidence that it took it, and "sent" is not "accepted".
+      await refetch();
+      props.onDone();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      props.onFailure?.(`the session did not take that input: ${message}`);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div class="wid-answer">
+      <Show
+        when={open()}
+        fallback={
+          <button
+            type="button"
+            class="wid-inline-btn"
+            onClick={() => setOpen(true)}
+          >
+            Answer…
+          </button>
+        }
+      >
+        <Show
+          when={tail()}
+          fallback={<p class="wid-hint">reading what it is asking…</p>}
+        >
+          {(loaded) => {
+            const outcome = loaded();
+            if (!outcome.ok) {
+              return (
+                <p class="wid-absent">
+                  {outcome.message} — so there is nothing to answer here. Open
+                  the terminal instead.
+                </p>
+              );
+            }
+            const text = outcome.value ?? "";
+            return (
+              <>
+                <pre class="wid-answer-tail" data-testid="prompt-tail">
+                  {text || "the session has produced no output to show"}
+                </pre>
+                <form
+                  class="wid-answer-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const typed = answer().trim();
+                    if (typed) void send(typed);
+                  }}
+                >
+                  <input
+                    type="text"
+                    value={answer()}
+                    disabled={sending()}
+                    placeholder="your answer"
+                    aria-label="Answer this session"
+                    onInput={(event) => setAnswer(event.currentTarget.value)}
+                  />
+                  <button type="submit" disabled={sending() || !answer().trim()}>
+                    {sending() ? "sending…" : "Send"}
+                  </button>
+                  {/* Offered only when the prompt reads like a yes/no
+                      question, and always beside the text it belongs to. A
+                      guess that is wrong costs an unhelpful button; a guess
+                      that hid the prompt would cost far more. */}
+                  <Show when={looksLikeYesNo(text)}>
+                    <button
+                      type="button"
+                      disabled={sending()}
+                      onClick={() => void send("y")}
+                    >
+                      y
+                    </button>
+                    <button
+                      type="button"
+                      disabled={sending()}
+                      onClick={() => void send("n")}
+                    >
+                      n
+                    </button>
+                  </Show>
+                </form>
+              </>
+            );
+          }}
+        </Show>
+      </Show>
+    </div>
+  );
+};
+
 const ReasonForm: Component<{
   submitLabel: string;
   busyLabel: string;
@@ -1161,6 +1354,29 @@ const WorkItemDetail: Component<Props> = (props) => {
                                 </Show>
                               </div>
                               <p class="wid-session-reason">“{session.reason}”</p>
+                              {/* FR-M1's "session start/approve", and MERGE
+                                  §14's M12 demo: a session waiting for input
+                                  is the one a push tells somebody about, and
+                                  answering it should not require a keyboard
+                                  over a PTY on a phone. Offered only while
+                                  the engine actually reports it waiting —
+                                  `activity` is null when the engine could not
+                                  be asked, and a control that answers a
+                                  question nobody established exists is the
+                                  thing this file's third distinction is
+                                  about. */}
+                              <Show
+                                when={
+                                  !session.stopped_at &&
+                                  session.activity === "waiting-for-input"
+                                }
+                              >
+                                <AnswerWaitingSession
+                                  engineSessionId={session.engine_session_id}
+                                  onDone={() => void refetchSessions()}
+                                  onFailure={(message) => props.onError?.(message)}
+                                />
+                              </Show>
                               <Show when={!session.stopped_at}>
                                 <Show
                                   when={stopping() === session.id}
