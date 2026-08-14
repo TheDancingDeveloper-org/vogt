@@ -864,6 +864,132 @@ fn untrusted(kind: &str, text: &str) -> String {
     format!("<{kind}>\n{text}\n</{kind}>")
 }
 
+/// Refuse a reason that says nothing, and name what is wrong with it.
+///
+/// FR-T3 asks for a `why` "derived from the conversational context", and it is
+/// worth being exact about what this does and does not do. Nothing here can
+/// verify that a sentence was derived from anything — the reason is whatever
+/// the model put in the argument, and a model determined to write a plausible
+/// lie will write one. What *can* be refused is the two failures the system
+/// prompt already names and nothing enforced:
+///
+///   * a reason that attributes the change to the assistant or to the fact
+///     that somebody asked, which is the phrasing the prompt rules out by
+///     name. It is the worst one because it is *true* and useless: a person
+///     reading the audit log months later learns only that this row exists.
+///   * a reason that restates the act. "update" on a `work.update` is a label,
+///     not a justification.
+///
+/// The refusal goes back to the model as a tool error and the loop continues,
+/// so the ordinary outcome is a second attempt with a real sentence — before
+/// any card reaches a person. That is the point: FR-W1 exists so an audit row
+/// answers "why", and a row nobody can learn from is the failure it was
+/// written against.
+fn contentless_reason(reason: &str) -> Option<String> {
+    let normalized = reason
+        .trim()
+        .trim_end_matches(['.', '!', ' '])
+        .to_ascii_lowercase();
+    let normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Attribution, in the forms that carry no other content. Matched by
+    // *removal* rather than by substring, because "the user asked for this
+    // after the sprint scope changed" is a real reason that happens to
+    // mention who asked, and refusing it would teach the model to hide the
+    // provenance rather than to add the justification.
+    const ATTRIBUTIONS: &[&str] = &[
+        "requested via the assistant",
+        "requested via assistant",
+        "requested by the assistant",
+        "requested by assistant",
+        "via the assistant",
+        "via assistant",
+        "assistant request",
+        "per the user's request",
+        "per user request",
+        "at the user's request",
+        "as the user requested",
+        "as requested",
+        "user requested",
+        "the user requested",
+        "user asked",
+        "the user asked",
+        "the user asked for this",
+        "requested",
+        "asked for",
+        "by request",
+        "on request",
+    ];
+    let mut residue = normalized.clone();
+    let mut attributed = false;
+    for phrase in ATTRIBUTIONS {
+        if residue.contains(phrase) {
+            attributed = true;
+            residue = residue.replace(phrase, " ");
+        }
+    }
+    let residue: String = residue
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || c.is_whitespace())
+        .collect();
+    let remaining_words = residue
+        .split_whitespace()
+        .filter(|word| {
+            !matches!(
+                *word,
+                "this" | "it" | "that" | "the" | "a" | "an" | "to" | "by"
+            )
+        })
+        .count();
+    if attributed && remaining_words < 3 {
+        return Some(format!(
+            "that reason says who asked, not why the change is right: \"{}\". \
+             Vogt stores it in the audit log and a person reads it months \
+             later, when the only thing they cannot recover is the \
+             justification. Write the user's own reason for the change",
+            reason.trim()
+        ));
+    }
+
+    // Restatement. Whole-string matches only: "fix" alone is a label, and
+    // "fix the import path the move broke" is a reason.
+    const LABELS: &[&str] = &[
+        "update",
+        "updated",
+        "updating",
+        "update it",
+        "change",
+        "changed",
+        "change it",
+        "edit",
+        "edited",
+        "fix",
+        "fixed",
+        "done",
+        "n/a",
+        "na",
+        "none",
+        "no reason",
+        "test",
+        "testing",
+        "cleanup",
+        "clean up",
+        "housekeeping",
+        "as discussed",
+        "see above",
+        "obvious",
+    ];
+    if LABELS.contains(&normalized.as_str()) {
+        return Some(format!(
+            "that reason restates the act rather than justifying it: \"{}\". \
+             Say what makes the change right — what changed, or what was \
+             found — in the user's own terms",
+            reason.trim()
+        ));
+    }
+    None
+}
+
 /// Turn a model's proposed Vogt write into a card a person can approve.
 ///
 /// Returns the trace line, the view, and the payload the approval will send.
@@ -890,6 +1016,12 @@ fn parse_vogt_write(
             ))
         })?
         .to_string();
+    if let Some(complaint) = contentless_reason(&reason) {
+        return Err(ApiError::BadRequest(format!(
+            "{}: {complaint}",
+            def.operation
+        )));
+    }
     let target = vogt_tools::describe_target(args);
     let payload = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
     let view = PendingActionView::VogtWrite(VogtWriteView {
@@ -1734,5 +1866,80 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|c| c.contains("needs a reason"))
         }));
+    }
+
+    #[tokio::test]
+    async fn a_reason_that_only_says_who_asked_never_becomes_a_card() {
+        // The phrase the system prompt rules out by name. Until this landed
+        // the prompt forbade it and nothing enforced it, so the one reason
+        // the instructions single out was the one that always got through.
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let rt = runtime_with_vogt(
+            test_registry(),
+            vec![
+                tool_call_reply(
+                    "vogt_session_start",
+                    json!({"work_item": "WI-7", "reason": "requested via assistant"}),
+                ),
+                final_reply("Let me say why instead"),
+            ],
+            &core.base_url,
+            None,
+        );
+        let out = rt
+            .handle_message(paired_caller(), "mark WI-7 done".into())
+            .await
+            .unwrap();
+        assert!(
+            out.pending_action.is_none(),
+            "a reason nobody can learn from must not reach a person as a card"
+        );
+        assert!(core.tool_calls().is_empty(), "and nothing is written");
+        let convo = rt.conversation.lock().await;
+        assert!(
+            convo.messages.iter().any(|m| {
+                m.get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|c| c.contains("says who asked"))
+            }),
+            "the refusal goes back to the model, which is what lets it try \
+             again before anyone is asked to approve anything"
+        );
+    }
+
+    #[test]
+    fn a_reason_that_mentions_who_asked_and_then_says_why_is_accepted() {
+        // The refusal must not teach the model to hide the provenance. A
+        // reason that names the user *and* gives the justification is a good
+        // reason, and rejecting it would trade a useless audit row for a
+        // misleading one.
+        assert!(contentless_reason(
+            "the user asked for this after the sprint scope changed and the \
+             item no longer belongs in this release"
+        )
+        .is_none());
+        assert!(contentless_reason("requested via assistant").is_some());
+        assert!(contentless_reason("as requested").is_some());
+        assert!(contentless_reason("Requested via the assistant.").is_some());
+    }
+
+    #[test]
+    fn a_reason_that_restates_the_act_is_not_a_reason() {
+        for label in ["update", "Done.", "cleanup", "n/a", "test"] {
+            assert!(
+                contentless_reason(label).is_some(),
+                "{label:?} is a label, not a justification"
+            );
+        }
+        for real in [
+            "fix the import path the module move broke",
+            "done — the migration ran on Tuesday and the column is gone",
+            "cleanup of the duplicate rows the importer created",
+        ] {
+            assert!(
+                contentless_reason(real).is_none(),
+                "{real:?} is a reason that happens to start with a label word"
+            );
+        }
     }
 }
