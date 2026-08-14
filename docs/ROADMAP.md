@@ -2,7 +2,9 @@
 
 Status: **M0–M6 delivered — v1 is built** (2026-08-12); **M7 and M8 are
 post-v1**; **M9–M14 are v2** — the MyDevEnv2 merge, added by
-`REQUIREMENTS.md` revision r9 (2026-08-14) and not started. Requirement IDs
+`REQUIREMENTS.md` revision r9 (2026-08-14). **M9, M10 and M11 are built**
+(2026-08-14); M11's demo is outstanding for want of a browser, and its "as
+built" note says what that costs. M12–M14 are not started. Requirement IDs
 refer to `REQUIREMENTS.md`; per its §4, scope changes here must update that
 document in the same change.
 
