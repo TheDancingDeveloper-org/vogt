@@ -8,14 +8,15 @@
 //! surface at the start of every turn and converted from the schemas the
 //! operation registry already generates (FR-T1); see `vogt_tools.rs`.
 //!
-//! Nothing that writes runs inline. `send_input` never reaches a PTY unless
-//! `assistant_auto_type` is enabled, and a Vogt write never reaches the core
-//! at all until approved — `assistant_auto_type` is about typing into a
-//! terminal and deliberately does not extend to Vogt (FR-T2). Both pause the
+//! Nothing that writes runs inline. `send_input` never reaches a PTY and a
+//! Vogt write never reaches the core until approved (FR-T2). Both pause the
 //! loop the same way: one pending action at a time, carrying the exact payload
 //! and target, expiring unapproved. That gate lives in the tool dispatcher —
 //! no model output, and no text a session or a work item carries, can bypass
-//! it.
+//! it, and there is no setting that turns it off. There was one,
+//! `assistant_auto_type`, and r9 removed it: the requirement promoting this
+//! gate did so on the grounds that it is a structural guarantee rather than
+//! configuration, which a switch made untrue.
 //!
 //! A Vogt write is executed with the core token paired to the front-door token
 //! that *approved* it, never a shared one (FR-T3). The caller travels into the
@@ -247,7 +248,6 @@ pub struct AssistantRuntime {
     backend: ChatBackend,
     model: String,
     reasoning_effort: Option<String>,
-    auto_type: bool,
     max_tool_calls: u32,
     /// Serializes turns: one user message / action resolution at a time.
     conversation: tokio::sync::Mutex<Conversation>,
@@ -303,7 +303,6 @@ impl AssistantRuntime {
             },
             model: cfg.assistant_model.clone(),
             reasoning_effort: cfg.assistant_reasoning_effort.clone(),
-            auto_type: cfg.assistant_auto_type,
             max_tool_calls: cfg.assistant_max_tool_calls,
             conversation: tokio::sync::Mutex::new(Conversation::default()),
         }))
@@ -614,7 +613,7 @@ impl AssistantRuntime {
                 // with auto-type on is the single exception, and it is a
                 // configured one about a PTY: no setting opens this path for a
                 // Vogt write (FR-T2).
-                let gated = if name == "send_input" && !self.auto_type {
+                let gated = if name == "send_input" {
                     Some(self.parse_send_input(&args).map(|view| {
                         (
                             format!(
@@ -795,11 +794,13 @@ impl AssistantRuntime {
                 ))
             }
             "send_input" => {
-                // Only reachable with assistant_auto_type enabled.
-                let view = self.parse_send_input(args)?;
-                tool_trace.push(format!("typed into \"{}\" (auto)", view.session_name));
-                self.deliver_input(&view)?;
-                Ok("input delivered".into())
+                // Unreachable: the gate above intercepts this before dispatch.
+                // Refused rather than asserted, for the same reason the Vogt
+                // writes are — an edit that loses the interception should fail
+                // closed, not start typing into somebody's terminal.
+                Err(ApiError::BadRequest(
+                    "send_input only runs after on-screen approval".into(),
+                ))
             }
             other => Err(ApiError::BadRequest(format!("unknown tool {other}"))),
         }
@@ -1015,7 +1016,6 @@ mod tests {
             assistant_api_key: None,
             assistant_base_url: "http://unused.invalid".into(),
             assistant_model: "test-model".into(),
-            assistant_auto_type: false,
             assistant_max_tool_calls: 8,
             assistant_reasoning_effort: None,
             contextkeeper_url: None,
@@ -1026,11 +1026,7 @@ mod tests {
         Arc::new(SessionRegistry::new(cfg, EventBus::default(), None))
     }
 
-    fn runtime_with_script(
-        sessions: Arc<SessionRegistry>,
-        script: Vec<Value>,
-        auto_type: bool,
-    ) -> AssistantRuntime {
+    fn runtime_with_script(sessions: Arc<SessionRegistry>, script: Vec<Value>) -> AssistantRuntime {
         AssistantRuntime {
             sessions,
             vogt: None,
@@ -1040,7 +1036,6 @@ mod tests {
             },
             model: "test-model".into(),
             reasoning_effort: None,
-            auto_type,
             max_tool_calls: 8,
             conversation: tokio::sync::Mutex::new(Conversation::default()),
         }
@@ -1055,7 +1050,7 @@ mod tests {
     ) -> AssistantRuntime {
         AssistantRuntime {
             vogt: Some(VogtTools::for_test(core_base_url, fallback_token)),
-            ..runtime_with_script(sessions, script, false)
+            ..runtime_with_script(sessions, script)
         }
     }
 
@@ -1118,7 +1113,7 @@ mod tests {
 
     #[tokio::test]
     async fn plain_reply_round_trip() {
-        let rt = runtime_with_script(test_registry(), vec![final_reply("hello there")], false);
+        let rt = runtime_with_script(test_registry(), vec![final_reply("hello there")]);
         let out = rt
             .handle_message(terminal_caller(), "hi".into())
             .await
@@ -1143,7 +1138,6 @@ mod tests {
                 tool_call_reply("read_session_tail", json!({"session_id": session.id})),
                 final_reply("your cat session shows marker-xyz"),
             ],
-            false,
         );
         let out = rt
             .handle_message(terminal_caller(), "what's going on?".into())
@@ -1182,7 +1176,6 @@ mod tests {
                 ),
                 final_reply("done, I typed it"),
             ],
-            false,
         );
         let out = rt
             .handle_message(terminal_caller(), "type it".into())
@@ -1230,7 +1223,6 @@ mod tests {
                 ),
                 final_reply("okay, I won't"),
             ],
-            false,
         );
         let out = rt
             .handle_message(terminal_caller(), "do the thing".into())
@@ -1265,7 +1257,7 @@ mod tests {
         script.push(final_reply("capped"));
         let rt = AssistantRuntime {
             max_tool_calls: 3,
-            ..runtime_with_script(sessions, script, false)
+            ..runtime_with_script(sessions, script)
         };
         let out = rt
             .handle_message(terminal_caller(), "loop forever".into())
@@ -1283,7 +1275,6 @@ mod tests {
                 tool_call_reply("read_session_tail", json!({"session_id": Uuid::new_v4()})),
                 final_reply("that session doesn't exist"),
             ],
-            false,
         );
         let out = rt
             .handle_message(terminal_caller(), "read it".into())
@@ -1377,7 +1368,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_core_configured_means_no_vogt_tools_and_a_working_assistant() {
-        let rt = runtime_with_script(test_registry(), vec![final_reply("hi")], false);
+        let rt = runtime_with_script(test_registry(), vec![final_reply("hi")]);
         let out = rt
             .handle_message(paired_caller(), "anything?".into())
             .await

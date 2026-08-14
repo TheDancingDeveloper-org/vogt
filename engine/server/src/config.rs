@@ -186,10 +186,6 @@ pub struct Config {
     pub assistant_base_url: String,
     /// Model id sent to the assistant backend.
     pub assistant_model: String,
-    /// When false (default), assistant `send_input` tool calls pause as a
-    /// pending action requiring explicit user approval before any bytes reach
-    /// a PTY. True bypasses confirmation — only for trusted setups.
-    pub assistant_auto_type: bool,
     /// Upper bound on tool-call rounds per user message.
     pub assistant_max_tool_calls: u32,
     /// Optional `reasoning_effort` forwarded to the backend (e.g. "minimal").
@@ -236,7 +232,6 @@ struct FileConfig {
     assistant_api_key: Option<String>,
     assistant_base_url: Option<String>,
     assistant_model: Option<String>,
-    assistant_auto_type: Option<bool>,
     assistant_max_tool_calls: Option<u32>,
     assistant_reasoning_effort: Option<String>,
     contextkeeper_url: Option<String>,
@@ -399,12 +394,6 @@ pub fn load(
             .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_MODEL").ok())
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
-        assistant_auto_type: match std::env::var("MYDEVENV2_ASSISTANT_AUTO_TYPE") {
-            Ok(v) => Some(parse_bool_env("MYDEVENV2_ASSISTANT_AUTO_TYPE", &v)?),
-            Err(_) => None,
-        }
-        .or(from_file.assistant_auto_type)
-        .unwrap_or(false),
         assistant_max_tool_calls: parse_u32_env("MYDEVENV2_ASSISTANT_MAX_TOOL_CALLS")?
             .or(from_file.assistant_max_tool_calls)
             .unwrap_or(8),

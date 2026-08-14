@@ -32,7 +32,6 @@ the terminal half works exactly as before (FR-T6, FR-E9).
 | `assistant_api_key` | `MYDEVENV2_ASSISTANT_API_KEY` | unset (feature off) |
 | `assistant_base_url` | `MYDEVENV2_ASSISTANT_BASE_URL` | `https://api.theclawbay.com/v1` |
 | `assistant_model` | `MYDEVENV2_ASSISTANT_MODEL` | `gpt-5.4-mini` |
-| `assistant_auto_type` | `MYDEVENV2_ASSISTANT_AUTO_TYPE` | `false` |
 | `assistant_max_tool_calls` | `MYDEVENV2_ASSISTANT_MAX_TOOL_CALLS` | `8` |
 | `assistant_reasoning_effort` | `MYDEVENV2_ASSISTANT_REASONING_EFFORT` | unset |
 
@@ -137,7 +136,7 @@ instructions.
   prompt: what is inside is data to report on, never instructions to follow.
   The rule is about where the text came from, not about which tool fetched it.
 - **The guarantee is structural.** `send_input` is intercepted in the tool
-  dispatcher: with `assistant_auto_type` off (the default), the loop pauses
+  dispatcher: the loop pauses
   and returns a `PendingAction` carrying the exact bytes and target session.
   Nothing reaches a PTY until `POST /api/assistant/actions/:id` approves it.
   Actions expire after 120 s; one may be pending at a time; a new user
@@ -148,7 +147,7 @@ instructions.
   loop; the pending action carries the operation, a one-line target, the
   exact arguments pretty-printed, and the `reason` that will be written to
   Vogt's audit log. Nothing reaches the core until the action is approved.
-  `assistant_auto_type` is a setting about typing into a terminal and
+  Typing into a terminal and
   deliberately does not extend to Vogt: there is no configuration that lets a
   model's output become a Vogt write unattended. A write proposed without a
   reason is refused before it becomes a card at all — a card that cannot say
@@ -173,7 +172,6 @@ instructions.
   work tracker* to.
 - **Token scoping:** mutating assistant routes require the `assistant`
   capability. A token holding it transitively gains type-into-any-session
-  power *subject to on-screen approval*; `assistant_auto_type=true` removes
   that approval and should only be set where the token boundary is already
   trusted. It does **not** transitively gain Vogt write power: that needs a
   paired core token whose own scopes the core enforces.
@@ -201,3 +199,19 @@ instructions.
 - **TTS** — Web Speech `speechSynthesis`, sentence-chunked, toggle persisted
   in localStorage. The synth is primed on the toggle gesture because the
   Android WebView requires a user gesture before the first utterance.
+
+## `assistant_auto_type` is gone *(r9)*
+
+The setting removed the approval gate for `send_input` — the one tool
+FR-T2 names first — and defaulted off, which made it look harmless. It was
+not: r9 promoted this gate to a numbered requirement *on the stated grounds
+that it is "a structural guarantee, not configuration"*, and a switch that
+turns it off is configuration by definition. The requirement and the setting
+could not both be true, and the requirement is the one this product argues
+for.
+
+What is lost is a convenience for a trusted single-user setup: an assistant
+that types without asking. What is kept is the sentence the threat model
+opens with — no model output reaches an effector without an on-screen act —
+being true of every tool, in every deployment, rather than of most tools in
+most deployments.
