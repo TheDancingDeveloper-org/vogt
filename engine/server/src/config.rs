@@ -196,6 +196,12 @@ pub struct Config {
     /// ContextKeeper's control token. Server-side only — the browser talks to
     /// same-origin MyDevEnv2 routes and never holds this.
     pub contextkeeper_token: Option<String>,
+    /// Where vogt-core imports repositories, when this container runs one.
+    /// Read from `VOGT_IMPORT_ROOT` — the core's own variable name,
+    /// unprefixed for the reason the ContextKeeper pair is: one name for one
+    /// thing. Read once here rather than per request, so a readiness check
+    /// reports the configuration the process started with.
+    pub vogt_import_root: Option<std::path::PathBuf>,
     /// Base URL of vogt-core on loopback. None disables `/api/vogt`, `/mcp`
     /// and `/ui-legacy`: they answer 503 with a named reason rather than
     /// pretending the core is empty (FR-U21). The engine itself keeps
@@ -420,6 +426,11 @@ pub fn load(
             .or_else(|| std::env::var("VOGT_CORE_URL").ok())
             .filter(|s| !s.trim().is_empty()),
         vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
+        vogt_import_root: std::env::var("VOGT_IMPORT_ROOT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from),
     })
 }
 

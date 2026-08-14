@@ -174,12 +174,19 @@ pub struct ReadinessCheck {
 }
 
 pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadinessResponse>) {
-    let mut checks = Vec::with_capacity(5);
+    let mut checks = Vec::with_capacity(6);
     checks.push(check_workspace_root(&state.config.workspace_root).await);
     checks.push(check_state_dir(&state.config.state_dir).await);
     checks.push(check_tailscale().await);
     checks.push(check_gui(state.config.gui_stream_url.is_some()).await);
     checks.push(check_vogt_core(&state).await);
+    checks.push(
+        check_workspace_agreement(
+            &state.config.workspace_root,
+            state.config.vogt_import_root.as_deref(),
+        )
+        .await,
+    );
 
     let ok = checks.iter().all(|check| check.ok || !check.fatal);
     let status = if ok {
@@ -538,5 +545,61 @@ async fn check_vogt_core(state: &Arc<AppState>) -> ReadinessCheck {
         ok,
         detail,
         fatal: false,
+    }
+}
+
+/// Do the two halves agree about where the estate is? (FR-E3, §6.3)
+///
+/// Vogt's import root and this server's `workspace_root` must be the same
+/// tree: a session opened "for" a project opens in the path the project
+/// registry recorded, and a project imported outside this root is a project
+/// no session can be opened in and no collector here can see.
+///
+/// The entrypoint already says this at boot, which is the moment nobody is
+/// reading it three weeks later. Reported here too, and deliberately not
+/// fatal: a disagreement makes some projects invisible, which is a bad
+/// answer rather than a dead server, and failing readiness over it would
+/// take the terminals down with it (FR-E9).
+async fn check_workspace_agreement(root: &FsPath, import_root: Option<&FsPath>) -> ReadinessCheck {
+    let Some(import_root) = import_root else {
+        // Absent is the ordinary case: the core is configured elsewhere, or
+        // it is using its own default under the data directory. Nothing to
+        // compare, and nothing to claim.
+        return ReadinessCheck {
+            name: "workspace_agreement",
+            ok: true,
+            detail: "VOGT_IMPORT_ROOT is not set here; nothing to compare".into(),
+            fatal: false,
+        };
+    };
+    // Compared canonically where possible: `/home/x/Working` and a symlink to
+    // it are the same tree, and a string comparison would call them different
+    // and send somebody looking for a misconfiguration that is not there.
+    let canonical = |path: &FsPath| {
+        path.canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
+    };
+    let ours = canonical(root);
+    let theirs = canonical(import_root);
+    if theirs.starts_with(&ours) {
+        ReadinessCheck {
+            name: "workspace_agreement",
+            ok: true,
+            detail: format!("vogt imports into {theirs}, inside {ours}"),
+            fatal: false,
+        }
+    } else {
+        ReadinessCheck {
+            name: "workspace_agreement",
+            ok: false,
+            detail: format!(
+                "vogt imports into {theirs}, which is outside this server's \
+                 workspace root {ours}: imported projects will be invisible to \
+                 sessions and to the collectors that run here (FR-E3)"
+            ),
+            fatal: false,
+        }
     }
 }

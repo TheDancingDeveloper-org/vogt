@@ -161,6 +161,7 @@ fn base_config() -> Config {
         contextkeeper_url: None,
         contextkeeper_token: None,
         vogt_core_url: None,
+        vogt_import_root: None,
         vogt_core_token: None,
     }
 }
@@ -946,4 +947,65 @@ async fn no_core_token_means_no_follower_and_no_401_every_five_seconds() {
         cursors.lock().unwrap().is_empty(),
         "a feed that cannot be read must not be asked once a second forever"
     );
+}
+
+// -- the two halves agree about where the estate is (FR-E3) ----------------
+
+#[tokio::test]
+async fn readiness_reports_a_workspace_the_core_imports_outside_of() {
+    let workspace = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    let mut cfg = base_config();
+    cfg.workspace_root = workspace.path().to_path_buf();
+    cfg.default_cwd = workspace.path().to_path_buf();
+    // Through config, not `std::env`: the value is read once at load, and two
+    // tests mutating one process's environment in parallel is a race that
+    // fails whichever of them the scheduler picks second.
+    cfg.vogt_import_root = Some(elsewhere.path().to_path_buf());
+    let base = boot(cfg).await;
+
+    let body: Value = client()
+        .get(format!("{base}/readyz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let check = find_check(&body, "workspace_agreement");
+    assert_eq!(check["ok"], false);
+    assert!(
+        check["detail"].as_str().unwrap().contains("invisible"),
+        "a disagreement has to say what it costs, not just that it exists: {:?}",
+        check["detail"]
+    );
+    assert_eq!(
+        check["fatal"], false,
+        "some projects being invisible is a bad answer, not a dead server — \
+         failing readiness here would take the terminals down with it"
+    );
+    assert_eq!(
+        body["ok"], true,
+        "and the container is still ready, for the same reason"
+    );
+}
+
+#[tokio::test]
+async fn readiness_says_nothing_when_there_is_nothing_to_compare() {
+    let base = boot(base_config()).await;
+    let body: Value = client()
+        .get(format!("{base}/readyz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let check = find_check(&body, "workspace_agreement");
+    assert_eq!(check["ok"], true);
+    assert!(check["detail"]
+        .as_str()
+        .unwrap()
+        .contains("nothing to compare"));
 }

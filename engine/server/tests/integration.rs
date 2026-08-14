@@ -42,6 +42,7 @@ fn test_config() -> Config {
         contextkeeper_url: None,
         contextkeeper_token: None,
         vogt_core_url: None,
+        vogt_import_root: None,
         vogt_core_token: None,
     }
 }
