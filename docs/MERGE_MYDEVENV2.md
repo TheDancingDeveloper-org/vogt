@@ -367,13 +367,26 @@ Both stacks already live on Node B, deployed by Komodo from
 5. **Vogt REQUIREMENTS.md amendment** — §12 drafts this as revision r9
    in the document's own format (numbered FR/NFR, append-only IDs); it
    must be folded into `REQUIREMENTS.md` proper before M9 starts, per
-   vogt's own working style.
+   vogt's own working style. **Resolved 2026-08-14**: folded as revision r9
+   of [`REQUIREMENTS.md`](REQUIREMENTS.md), with §13 into its §3, §14 into
+   [`ROADMAP.md`](ROADMAP.md) as M9–M14, and the `DESIGN.md` §1.2 reversal
+   recorded there in place.
 6. **Editor/Files/Git tabs vs vogt's forge view** — the PWA's git tab
    operates on working trees; vogt's project pages show forge state. They
    should cross-link (project page → open git tab in that tree), not
    merge.
 
 ## 12. Proposed requirements baseline (draft revision r9)
+
+> **Folded — no longer authoritative (2026-08-14).** This section and §13 are
+> now revision **r9** of [`REQUIREMENTS.md`](REQUIREMENTS.md): the revision
+> note and the appended IDs live in its §1/§2, and §13's deferrals in its §3.
+> `REQUIREMENTS.md` governs; the draft below is kept as the working record of
+> where r9 came from. Two things changed in the fold, both recorded in the r9
+> revision note: the NFR-S family was appended to without appearing in the
+> draft's list of family maxima (NFR-S5 is correct), and the stages the draft
+> calls M8–M13 are **M9–M14** in [`ROADMAP.md`](ROADMAP.md), because M8 was
+> already taken. Requirement IDs are unchanged.
 
 What follows is written in `REQUIREMENTS.md`'s own format so that, if the
 merge is adopted, this section folds into that document verbatim as
@@ -551,6 +564,13 @@ and are not re-litigated by the merge**.
   here precludes iOS, nobody builds for it in v2.
 
 ## 14. Stages (M8–M13)
+
+> **Folded — no longer authoritative (2026-08-14).** These stages are now
+> **M9–M14** in [`ROADMAP.md`](ROADMAP.md), which governs. They were
+> renumbered in the fold: M8 was already taken by *Reachable by an agent*
+> (FR-A8), so "M7 is the last stage" below was wrong. Read the roadmap for
+> the stage list, its cut lines, and the demos as written; this section is
+> kept as the working record.
 
 Continuing `ROADMAP.md`'s numbering (M7 is the last delivered stage).
 Each stage names the requirement IDs it delivers and ends in a demo that
