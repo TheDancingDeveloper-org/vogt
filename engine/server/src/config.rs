@@ -202,6 +202,13 @@ pub struct Config {
     /// thing. Read once here rather than per request, so a readiness check
     /// reports the configuration the process started with.
     pub vogt_import_root: Option<std::path::PathBuf>,
+    /// The directory vogt-core has been told is *this* server's `state_dir`,
+    /// read from `VOGT_ENGINE_STATE_DIR` — the core's own variable name, for
+    /// the same reason as the one above. It is what makes `vogt backup` cover
+    /// the product rather than the core (NFR-I6), and it is a second place
+    /// naming a path this process already knows: if the two drift, the backup
+    /// keeps succeeding and covers a directory the engine does not use.
+    pub vogt_engine_state_dir: Option<std::path::PathBuf>,
     /// Base URL of vogt-core on loopback. None disables `/api/vogt`, `/mcp`
     /// and `/ui-legacy`: they answer 503 with a named reason rather than
     /// pretending the core is empty (FR-U21). The engine itself keeps
@@ -427,6 +434,11 @@ pub fn load(
             .filter(|s| !s.trim().is_empty()),
         vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
         vogt_import_root: std::env::var("VOGT_IMPORT_ROOT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from),
+        vogt_engine_state_dir: std::env::var("VOGT_ENGINE_STATE_DIR")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())

@@ -614,10 +614,13 @@ impl AssistantRuntime {
                     .and_then(|raw| serde_json::from_str(raw).ok())
                     .unwrap_or_else(|| json!({}));
 
-                // Everything that mutates goes through one gate. `send_input`
-                // with auto-type on is the single exception, and it is a
-                // configured one about a PTY: no setting opens this path for a
-                // Vogt write (FR-T2).
+                // Everything that mutates goes through one gate, with no
+                // exception and no setting that makes one. `send_input` used
+                // to be the exception when `assistant_auto_type` existed; it
+                // was removed rather than defaulted to off, because a switch
+                // that can be turned on makes FR-T2's justification false
+                // while it is off. This branch is unconditional for that
+                // reason — see the header.
                 let gated = if name == "send_input" {
                     Some(self.parse_send_input(&args).map(|view| {
                         (
@@ -851,12 +854,6 @@ impl AssistantRuntime {
     }
 }
 
-/// Turn a model's proposed Vogt write into a card a person can approve.
-///
-/// Returns the trace line, the view, and the payload the approval will send.
-/// The `reason` is required here rather than left to the core: the core would
-/// reject a missing one, but by then the user has approved a card that could
-/// not say what would be recorded, and the card is the thing FR-T2 is about.
 /// Wrap text the model did not author, so it reads as data (FR-T4).
 ///
 /// The rule is about provenance, not about which tool produced the string:
@@ -867,6 +864,12 @@ fn untrusted(kind: &str, text: &str) -> String {
     format!("<{kind}>\n{text}\n</{kind}>")
 }
 
+/// Turn a model's proposed Vogt write into a card a person can approve.
+///
+/// Returns the trace line, the view, and the payload the approval will send.
+/// The `reason` is required here rather than left to the core: the core would
+/// reject a missing one, but by then the user has approved a card that could
+/// not say what would be recorded, and the card is the thing FR-T2 is about.
 fn parse_vogt_write(
     def: &VogtToolDef,
     args: &Value,
@@ -1049,6 +1052,7 @@ mod tests {
             contextkeeper_token: None,
             vogt_core_url: None,
             vogt_import_root: None,
+            vogt_engine_state_dir: None,
             vogt_core_token: None,
         });
         Arc::new(SessionRegistry::new(cfg, EventBus::default(), None))

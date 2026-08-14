@@ -824,6 +824,7 @@ What it asks, and why each one:
 | `GET /api/vogt/status` with a front-door token | answers with a `principal` that is the actor you paired, not a 401 or a 503 |
 | `POST /mcp` `initialize` with a core token | answers identically to the core's own port (not automated: it needs a *core* token, which the script deliberately does not take) |
 | `workspace_agreement` in `/readyz` | the import root is inside the engine's workspace root, or imported projects are invisible to sessions (FR-E3) |
+| `backup_agreement` in `/readyz` | `VOGT_ENGINE_STATE_DIR` and the engine's own `state_dir` are one directory, or `vogt backup` succeeds and contains no session history, push subscriptions or VAPID keypair (NFR-I6) |
 
 Two of those were wrong at some point during the merge and neither failed
 loudly: a missing pairing answers 503 naming the setting, and an unconfigured

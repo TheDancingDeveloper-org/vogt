@@ -5,7 +5,7 @@
 # passes its healthcheck and serves no Vogt — which happens because the core's
 # readiness probe is deliberately non-fatal (FR-E9), so `/readyz`'s top-level
 # `ok` can be true while the half of the product somebody just deployed is
-# absent. Four checks, each naming what its failure means.
+# absent. Six checks, each naming what its failure means.
 #
 #     scripts/smoke_merged_stack.sh https://vogt.sprooty.com "$FRONT_DOOR_TOKEN"
 #
@@ -69,6 +69,18 @@ if printf '%s' "$ready" | grep -q '"name":"workspace_agreement","ok":true'; then
 else
     fail "workspace_agreement is false: imported projects will be invisible to"
     fail "  sessions and to the collectors running here (FR-E3, §6.3)"
+fi
+
+# 3a. A backup taken here would cover the engine as well as the core (NFR-I6).
+#     The failure is invisible until a restore: `vogt backup` treats absent
+#     engine state as non-fatal, so a misconfigured pair produces an archive
+#     that looks complete and has no session history in it.
+if printf '%s' "$ready" | grep -q '"name":"backup_agreement","ok":true'; then
+    pass "a backup here would cover both halves"
+else
+    fail "backup_agreement is false: \`vogt backup\` would succeed and contain"
+    fail "  no session history, push subscriptions or VAPID keypair (NFR-I6)."
+    fail "  VOGT_ENGINE_STATE_DIR and the engine's state_dir must be one path"
 fi
 
 # 4. A client can discover Vogt without provoking a 503.

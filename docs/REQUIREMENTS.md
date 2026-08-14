@@ -966,13 +966,23 @@ against the source and the tests; no row was adjusted from a summary of what
 had landed. Where a commit's own subject line claims more than its code does,
 this section says so — three of them do.
 
-**201 conjuncts across 46 IDs. 102 are delivered, 65 are implemented and
-asserted by nothing, 9 cannot be verified in this environment at all, and 25
+**201 conjuncts across 46 IDs. 105 are delivered, 64 are implemented and
+asserted by nothing, 8 cannot be verified in this environment at all, and 24
 are short or absent.** Each conjunct is in exactly one of those four, by this
 precedence: short before unverifiable, unverifiable before untested, untested
 before delivered. So a conjunct counted "unverifiable here" is one whose
 implementation was read and believed; a conjunct counted "short" was not
 believed, and §6.2 says why.
+
+**A fourth pass moved three conjuncts, and what moved them was not code.** The
+pipeline ran. Every claim this section made about the merged image, the two
+image streams and the Android shell was a claim about a workflow file that had
+never once executed, and three of them turned out to be true; the two that
+were false failed on their first run, in the two places a file cannot show
+you. `docs` failed on a link that resolved on this machine and nowhere else.
+The engine job failed on `sudo apt-get` with *root is not in the sudoers
+file* — the runner is root, so there was nothing to elevate from. Neither was
+a code defect and both were invisible to review, which is §6.3 finding 16.
 
 **Delivered means a file and a test.** Not a citation — §5.4a's whole point is
 that a grep for an ID finds the docstring that names it. Where code plainly
@@ -985,10 +995,11 @@ own opening line says, so its arithmetic is countable by eye; §6.1, §6.2a and
 §6.2b group conjuncts by ID and their rows carry several each. The totals are
 therefore checkable without re-deriving all 201:
 
-- **102 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b
-- **65 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b
-- **25 short** = 43 − 19 + 1 arriving from §6.2b
-- **9 unverifiable** = 69 − 60
+- **105 delivered** = 61 + 18 out of §6.2 + 3 out of §6.2a + 20 out of §6.2b,
+  then +3 in the fourth pass (one each out of §6.2, §6.2a and §6.2b)
+- **64 untested** = 28 − 3 to §6.1 + 1 out of §6.2 + 39 out of §6.2b, − 1
+- **24 short** = 43 − 19 + 1 arriving from §6.2b, − 1
+- **8 unverifiable** = 69 − 60 − 1
 
 One bookkeeping correction, since it is the kind of thing this section exists
 to catch in others: §6.2's FR-T2 row was marked **Closed** when
@@ -1032,8 +1043,12 @@ rather than implying:
   restores its view, not that pasting that URL into the app opens it.
 - **Anything with a layout.** No CSS is loaded, so FR-M3's phone width,
   NFR-S5's virtualization at scale and every visual claim remain the demo's.
-- The engine's SSE stream, an APK, a device, a speaker, and a Docker daemon,
-  which is why the merged image has still never been built (M9 as built).
+- The engine's SSE stream, a device, and a speaker. **Not the merged image and
+  not the APK** — both were built by CI on 2026-08-14, on runners that have
+  the Docker daemon and the Android SDK this container does not. The merged
+  image ran both its entrypoints before it was pushed, and is pinned by
+  digest in `deploy/vogt-stack.compose.yml`. What no runner can supply is a
+  hand on a phone.
 
 Three r9 IDs were **missing from this section entirely** before the previous
 pass: FR-E6, FR-E7 and NFR-I6. All three are now built, and all three are
@@ -1051,7 +1066,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-E1 | PTY with ring-buffer scrollback; WebSocket attach with snapshot replay; all six lifecycle verbs | `engine/server/src/scrollback.rs` (`drops_oldest_on_overflow`, `snapshots_only_bytes_after_a_retained_cursor`); `engine/server/tests/integration.rs` (`ws_attach_echoes_input_and_replays_on_reattach`, `create_list_and_kill_session`, `rename_session`, `get_session_returns_typed_detail_shape`) |
 | FR-E2 | The four activity states; derived from output heuristics | `engine/server/src/activity.rs` (`detects_yn_prompt`, `nonzero_exit_becomes_errored`, `quiet_window_collapses_to_idle`, `recent_output_is_running`) |
 | FR-E3 | `cwd` is the path the project registry records, and a work item with no project is refused rather than guessed | `tests/test_sessions.py::test_a_session_opens_in_the_path_the_registry_records`, `::test_a_work_item_with_no_project_has_no_tree_to_open_in`; engine-side `integration.rs::session_cwd_must_stay_under_workspace_root` |
-| FR-E3 | The import root and the engine's workspace root are the same tree — co-located by the compose stack, and now *reported* by the front door rather than assumed | `api.rs::check_workspace_agreement` publishes a `workspace_agreement` readiness check; `vogt_core.rs` asserts the disagreeing branch (`ok: false`, a detail that says what it costs, `fatal: false`, and the container still ready) and the nothing-to-compare branch. Deliberately non-fatal: some projects being invisible is a bad answer, not a dead server (FR-E9). §6.3 finding 12 is the flaw in the comparison |
+| FR-E3 | The import root and the engine's workspace root are the same tree — co-located by the compose stack, and now *reported* by the front door rather than assumed | `api.rs::check_workspace_agreement` publishes a `workspace_agreement` readiness check; `vogt_core.rs` asserts the disagreeing branch (`ok: false`, a detail that says what it costs, `fatal: false`, and the container still ready) and the nothing-to-compare branch. Deliberately non-fatal: some projects being invisible is a bad answer, not a dead server (FR-E9). The comparison is by path component, not by string prefix — §6.3 finding 12, resolved, and `a_sibling_directory_is_not_inside_the_workspace` is the test that would have caught it |
 | FR-E4 | The description reaches the brief; the brief is written through the agent-task prompt mechanism; the session id is recorded as an audited write; the item's views carry live activity | `tests/test_sessions.py::test_the_work_items_brief_travels_with_the_session`, `::test_the_session_is_linked_to_its_work_item`, `::test_the_work_item_view_shows_what_is_running_for_it`; `integration.rs::session_prompt_is_written_to_a_file_the_child_is_pointed_at` |
 | FR-E4 | The brief carries the item's `why` — the ranking's per-input contributions, not a single score | `tests/test_sessions.py::test_the_brief_says_why_the_item_is_ranked_where_it_is` (which asserts the *contributions*, so a total on its own would fail it), `::test_a_brief_survives_a_ranking_that_cannot_be_computed` (the session starts either way, so a score never becomes a precondition for starting work) |
 | **FR-E6** | **All four**: exit code, duration, the working-tree delta, and all three collected as observations with the freshness and coverage every other kind carries | `src/vogt/collectors/session_outcomes.py`; `tests/test_session_outcomes.py` (twenty-one, including `test_a_finished_session_reports_its_exit_code_and_duration`, `test_the_delta_counts_what_the_tree_recorded_in_the_window`, `test_an_outcome_is_collected_and_never_declared`, `test_the_outcome_carries_the_sweeps_coverage`, `test_an_unchanged_outcome_does_not_grow_the_store`). The three shapes the previous pass called unbuilt are each asserted twice: once for the value, once for its absence — a session the engine has forgotten is `unknown`, never `finished` with a null code |
@@ -1064,7 +1079,7 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-T2 | `send_input` passes the same gate, with no setting that turns it off | `assistant.rs::send_input_pauses_and_approve_delivers`, which no longer takes an `auto_type` argument because there is none: `assistant_auto_type` is removed rather than defaulted, and the dispatcher's `send_input` arm refuses instead of delivering, so an edit that loses the interception fails closed |
 | FR-T3 | The credential is the *approver's*, taken from the request that pressed approve; a write has no shared fallback and an unpaired approver is refused by name | `assistant.rs::a_vogt_write_waits_for_approval_and_then_uses_the_approver_pairing` (proposed by an unpaired token, approved by a paired one, and the core saw the approver's), `::an_unpaired_approver_gets_a_refusal_rather_than_a_shared_actor`; `vogt_tools.rs::a_write_has_no_fallback_credential` |
 | FR-T4 | Both delimiters exist; terminal output is delimited; every Vogt read and every approved write's answer is delimited | `assistant.rs::list_then_tail_then_reply`, `::a_vogt_read_arrives_delimited_as_untrusted_data` (instruction-shaped text from the core arrives inside the tags) |
-| FR-T4 | The system prompt names the delimiters as untrusted, and names all four the loop now uses | `assistant.rs::every_delimiter_the_prompt_names_is_one_the_loop_emits`. Delivered because the prompt half is asserted — but the test is weaker than its own name, and §6.3 finding 13 says how |
+| FR-T4 | The system prompt names the delimiters as untrusted, and names all four the loop now uses | `assistant.rs::every_delimiter_the_loop_emits_is_one_the_prompt_names` and `::the_prompt_names_no_delimiter_that_nothing_emits`, over `emitted_delimiters`, which reads the tags out of the source of both emitting files rather than holding a list of them. Both directions, so a tag added to the loop and not the prompt fails, and so does a rule about a boundary that never arrives. §6.3 finding 13 is what the previous version of this test missed |
 | FR-S9 | The front door holds one token namespace carrying Vogt capabilities; the proxy strips the caller's credential and injects the paired core token; the proxy never pre-approves — a refusal forwards nothing | `engine/server/src/auth.rs::scoped_tokens_limit_capabilities`; `vogt_core.rs::the_core_is_handed_the_core_token_not_the_callers`, `::two_front_door_tokens_reach_the_core_as_two_actors`, `::a_write_needs_the_vogt_write_capability` and `::an_unauthenticated_caller_never_reaches_the_core`, both of which assert nothing was proxied |
 | **FR-S10** | **All four**: the token is per-session and actor-scoped, minted at start, revoked at stop, and its writes are distinguishable in the audit log | `tests/test_sessions.py::test_the_session_carries_its_own_token`, `::test_stopping_a_session_revokes_what_it_held`; `tests/test_m10_demo.py` step 5, which asserts the comment's actor is `agent:session:<id>` *and* differs from the `session.start` actor |
 | **FR-U8** | **All three**: the PWA reaches Vogt only through the front door and no other origin; every path resolves against the operation registry; every engine path resolves against `app.rs`'s router *and* `API_CONTRACT.md` | `tests/test_pwa.py::test_every_vogt_path_in_the_pwa_is_a_registered_operation`, `::test_the_pwa_reaches_vogt_only_through_the_front_door`, `::test_every_engine_path_in_the_pwa_is_a_route_the_engine_serves`, `::test_every_engine_path_in_the_pwa_is_in_the_engine_s_api_contract`, `::test_no_vogt_surface_opens_its_own_door`. Read against source rather than a built bundle, because no bundle is built here — the sources are what a bundle is built from, and a second call site would fail the check |
@@ -1088,8 +1103,11 @@ split across this table and §6.2, only the ones named here are delivered.
 | FR-M2 | New drift is summarised, coalesced and cursored; the default set is exactly the four FR-M2 names, and no more | `engine/server/src/vogt_drift.rs` (`one_drift_is_named`, `a_burst_is_one_notification_that_counts`, `a_cursor_survives_a_round_trip`); `push.rs::only_the_kinds_fr_m2_names_are_on_by_default` |
 | FR-M3 | The board's list layout at phone width, in the three rules that make it one: `display: block` on the row, the head row hidden, and the state name grown out of `attr(data-state)` | `tests/test_pwa.py::test_the_board_is_a_list_below_the_narrow_breakpoint`, `::test_the_board_cells_carry_what_the_hidden_head_row_said`, `::test_the_vogt_surfaces_share_the_engine_s_narrow_breakpoint` |
 | NFR-D11 | The engine's native APIs; the WebSocket attach path; `/api/vogt` proxied under its own prefix with the query string intact; `/mcp` proxied with the caller's credential unchanged; aggregate health with a non-fatal core check | `engine/server/tests/vogt_core.rs` (`a_vogt_read_reaches_the_core_under_its_own_prefix`, `a_query_string_survives_the_hop`, `mcp_forwards_the_callers_credential_unchanged`, `a_reachable_core_is_reported_with_its_schema_state`); `integration.rs::readyz_is_public_and_returns_checks` |
-| **NFR-I6** | **All four**: the core's SQLite; the engine's `state_dir`; enough metadata to re-establish FR-E3's path agreement; and one act that covers them | `tests/test_lifecycle.py` — nine for the stores, and six more: `test_a_backup_carries_the_engines_state_and_says_so`, `test_a_backup_without_the_engine_says_which`, `test_a_backup_survives_an_unreadable_engine_directory`, `test_a_restore_puts_the_engine_state_back`, `test_a_restore_reports_an_estate_that_moved`, `test_an_older_manifest_still_restores`. The manifest is version 2 and carries `engine_state` — a sentence on *every* branch, so a backup that covered two thirds of the product is distinguishable from one that covered all of it before somebody restores it — and `import_root`, which with the restored `projects.root_path` values and the front door's `workspace_agreement` check is what re-establishing the path agreement needs. The restore **reports** a moved estate (`import_root_then` / `import_root_now`) and does not rewrite the stored paths, which is the right division — the requirement asks for the metadata, not for a silent rewrite of every project's root — but it is worth knowing that nothing enumerates which projects are now unresolvable. §6.3 finding 14: the one deployment that could use `engine_state_dir` does not set it |
-| NFR-Q6 | The forge-less run; the core run with no engine present, produced by deleting `engine/`, `web/` and `mobile/` rather than by inspection | `.github/workflows/ci.yml` job `core`; `tests/test_pwa.py`'s skip guard is what lets it pass |
+| **NFR-I6** | **All four**: the core's SQLite; the engine's `state_dir`; enough metadata to re-establish FR-E3's path agreement; and one act that covers them | `tests/test_lifecycle.py` — nine for the stores, and six more: `test_a_backup_carries_the_engines_state_and_says_so`, `test_a_backup_without_the_engine_says_which`, `test_a_backup_survives_an_unreadable_engine_directory`, `test_a_restore_puts_the_engine_state_back`, `test_a_restore_reports_an_estate_that_moved`, `test_an_older_manifest_still_restores`. The manifest is version 2 and carries `engine_state` — a sentence on *every* branch, so a backup that covered two thirds of the product is distinguishable from one that covered all of it before somebody restores it — and `import_root`, which with the restored `projects.root_path` values and the front door's `workspace_agreement` check is what re-establishing the path agreement needs. The restore **reports** a moved estate (`import_root_then` / `import_root_now`) and does not rewrite the stored paths, which is the right division — the requirement asks for the metadata, not for a silent rewrite of every project's root — but it is worth knowing that nothing enumerates which projects are now unresolvable. §6.3 finding 14, resolved: the merged compose sets `VOGT_ENGINE_STATE_DIR`, and because two configurations now name one directory, `api.rs::check_backup_agreement` publishes a `backup_agreement` readiness check that says either which directory the backup covers or what the archive would silently omit (`vogt_core.rs`, three tests) |
+| NFR-Q6 | The forge-less run; the core run with no engine present, produced by deleting `engine/`, `web/` and `mobile/` rather than by inspection | `.github/workflows/ci.yml` job `core`; `tests/test_pwa.py`'s skip guard is what lets it pass. **Run for real on 2026-08-14** — the job passed on a self-hosted runner, so "the core alone still works" is now an observation rather than a workflow file |
+| **NFR-C6** | The pipeline governs the merged image: it is built from `engine/Dockerfile` with the repository as context, the PWA is built first because `rust-embed` reads `web/dist/` at compile time, both entrypoints run in the candidate before the push, the digest is signed, and a tag can release it | `tests/test_deploy.py::test_the_merged_image_is_built_from_the_engine_dockerfile`, `::test_the_pwa_is_built_before_the_merged_image`, `::test_both_halves_run_before_the_merged_image_is_pushed` (all three over both workflows), `::test_a_tag_can_release_the_merged_image`. The build half is more than asserted — it ran, on 2026-08-14, and published a signed `dev-ee18adc`. The release half is a path that exists and no tag has yet taken, which is why its test reads `release.yml` rather than a registry |
+| **NFR-D12** | `dev` builds `:dev` images and `main` builds `sha-<commit>`, for the core-only image **and** the merged stack, with no alias either can move | `tests/test_deploy.py::test_the_two_streams_are_kept_apart`, parametrized over both jobs — a rule kept by the core image and dropped by the merged one would leave the artefact the merge exists for as the unlabelled stream |
+| NFR-D11 | One published port, and it is the engine's: the merged stack publishes exactly one mapping, it maps to 8910, vogt-core's 8911 is published nowhere, and the front door reaches it over loopback | `tests/test_deploy.py::test_the_merged_stack_publishes_the_engine_and_only_the_engine`, `::test_the_merged_stack_pins_a_published_digest`, `::test_the_merged_stack_takes_its_core_token_from_a_file`. Asserted from the compose file, which until this pass no test in the repository read — which is how a placeholder digest of sixty-four zeros survived four stages under prose describing a pinned image. The *stack* half — two processes actually coming up together under `entrypoint.sh` — is still §6.2b's |
 
 **Six IDs are delivered in every conjunct: FR-E6, FR-E7, FR-E8, FR-S10,
 FR-U8, NFR-I6.** Three of them were the shape this product was already good
@@ -1102,15 +1120,26 @@ half-present, because nothing about it had to be argued with first.
 
 ### 6.2 Delivered differently, or short — per conjunct
 
-Twenty-five conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
+Twenty-four conjuncts. §5.4a: the conjunct is the row, not the ID. Each row
 is one claim that the requirement makes and the build does not, which is why
 this table's rows can be counted and the other three tables' cannot.
 
-Twenty rows left this table since the previous pass — nineteen of them
-counted, and the twentieth was FR-T2's, already closed and already counted
-elsewhere. One row arrived. It is FR-U17's, and it is the only kind of
-arrival that matters: a conjunct that was believed while it was unverifiable
-and did not survive becoming checkable.
+Twenty rows left this table in the third pass — nineteen of them counted, and
+the twentieth was FR-T2's, already closed and already counted elsewhere. One
+row arrived. It is FR-U17's, and it is the only kind of arrival that matters:
+a conjunct that was believed while it was unverifiable and did not survive
+becoming checkable.
+
+**The fourth pass removed one more**, NFR-C6's merged-image row, and it is
+worth saying why rather than only that it moved: the row asserted that
+`release.yml` was untouched and that no path existed by which a tag could
+produce a merged image. `release.yml` has had a `stack-image` job — semver
+tags, both entrypoints smoke-tested, `cosign sign` on the digest — since the
+commit that added `build.yml`'s. The row was describing the repository as it
+had been when its first half was written. That is the same failure this
+section exists to catch in `ROADMAP.md`, committed here, and the fix is the
+one this section always prescribes: it is now asserted by a test that reads
+the file.
 
 | Conjunct | What is actually true | Severity |
 |---|---|---|
@@ -1132,11 +1161,10 @@ and did not survive becoming checkable.
 | FR-U17 — "a claim backed by a still-running session is marked provisional, not fresh" | **Newly checkable, and short.** Until FR-E6 landed there was no session-derived evidence at all, so this clause was counted unverifiable. There is now: a running session's outcome carries `provisional: true` and no exit code, asserted in `tests/test_session_outcomes.py`. Nothing renders it. `vogtApi.ts` has no `observations` binding, so no PWA surface reads observations of any kind, and the item page's "Collected evidence" panel is the ranking's contributions rather than the observed store. The evidence is right and unreachable. | **Medium** — a requirement stopped being unverifiable and turned out not to be met, which is the whole reason for re-running this section |
 | FR-U19 — "filter by … project" | Applied to the loaded window, not to the query: `ListAuditParams` takes actor, operation and entity and nothing else. The surface says so rather than implying otherwise, and resolves at most 500 of a project's items to scope the filter. | Compounds FR-S6 |
 | FR-U19 — "filter by … time range" | Same, and this is §5.1's FR-S6 reappearing in the surface that needed it most. With no offset and no cursor on `audit.list`, the browser also cannot see past the newest 500 records at all. | Compounds FR-S6 |
-| NFR-D12 — "deployed to a dev stack for live validation" | Nothing deploys, from any branch. `build.yml` says so in its own step summary, and `ci.yml` records the decision — Vogt has never deployed from CI (NFR-D10). What changed is the artefact: `build.yml`'s new `stack-image` job builds `engine/Dockerfile` with the repository as its context, smoke-tests both entrypoints, signs it, and publishes `dev` and `dev-<sha>` to `ghcr.io/thedancingdeveloper-org/vogt-stack`, which `deploy/vogt-stack.compose.yml` now pins. So the image a dev stack would run and the image `dev` builds are the same artefact at last. The job has never run — the compose file still pins a placeholder digest of zeros — and no stack has been brought up from it. | **High** — mobile, voice and push are verifiable nowhere else, which is the reason this requirement exists. The pipeline existing changes what is *blocking*, not what is delivered |
+| NFR-D12 — "deployed to a dev stack for live validation" | Nothing deploys, from any branch. `build.yml` says so in its own step summary, and `ci.yml` records the decision — Vogt has never deployed from CI (NFR-D10). **The artefact now exists**: on 2026-08-14 the `stack-image` job ran for the first time, built `engine/Dockerfile` with the repository as its context, ran `vogt --version` and `mydevenv2-server --help` inside the candidate, signed the digest and published `dev` and `dev-ee18adc`; `deploy/vogt-stack.compose.yml` pins that digest rather than the placeholder it carried. So the image a dev stack would run and the image `dev` builds are the same artefact, and it is a real one. **What is left is one human act** — `docs/DEPLOYMENT.md` §9.4 — and until it happens no stack has run this image and mobile, voice and push remain unvalidated. | **High**, and now blocked on a deploy rather than on a build. Everything this section can do for it has been done |
 | NFR-D12 — "only `main` deploys to prod" | Vacuously true, per the row above. `main` builds a `sha-` image and publishes it; a human pins a digest and deploys. | — |
 | NFR-C6 — "shall run both halves on every push" | On pushes to `main` and `dev`, and on pull requests — a push to any other branch with no PR open runs nothing. Within that, each half runs only when its own paths changed: a `mobile/`-only push runs no Rust and no Python; a `web/`-only push runs no APK build. This is NFR-C1 working as intended and NFR-C6's literal sentence being false; the reduction is deliberate and argued in the workflow. | Low, and honestly documented in the file |
-| NFR-C6 — "shall govern the merged image" | Half of it now does, and the half is the build. `build.yml`'s `stack-image` job passes `file: engine/Dockerfile`, builds the PWA first because `rust-embed` reads `web/dist/` at compile time, runs both entrypoints before pushing, and publishes `sha-<commit>` signed and never `latest` — which is NFR-C3's build discipline exactly. **`release.yml` is untouched**: it still builds only the root `Dockerfile`, so no tag has ever produced a merged image and there is no path by which one could. "A push builds `sha-` images, only a tag releases" is therefore true of the merged image in its first clause and vacuous in its second. | **Medium**, down from High — the artefact the whole merge is for can now be built and pinned, and still cannot be released |
-| NFR-C6 — a signed APK | The APK builds unsigned with Gradle's debug key, pointed at `127.0.0.1:8910`, and the workflow calls it "a build artifact [that] points at nothing". The keystore lives in the retired forge; where a signed APK is published is an untaken decision, not an oversight. | Low until there is somewhere to publish one |
+| NFR-C6 — a signed APK | The APK builds unsigned with Gradle's debug key, pointed at `127.0.0.1:8910`, and the workflow calls it "a build artifact [that] points at nothing". **It does now build** — `the Android shell assembles` ran on a self-hosted runner on 2026-08-14, after the engine job it is gated behind stopped failing — so what is short is the signing, not the build. The keystore lives in the retired forge; where a signed APK is published is an untaken decision, not an oversight. | Low until there is somewhere to publish one |
 | NFR-S5 — "long lists virtualize" | One of three does. The backlog truly windows — fixed row height, `ResizeObserver`, a sliced window with overscan. The audit browser pages, deliberately, because an audit row is variable-height and a reason is never truncated. The board **caps** at 60 cards per cell with an explicit "+N more"; all loaded items stay in memory and in the reactive graph. | Board virtualization outstanding, and named as such since M11 |
 | NFR-S5 — "the board's filter and drag paths do not degrade with backlog size" | Unevidenced, and there is reason to doubt it: the cell and column projections are linear scans over the whole loaded set, run per cell and per column, over as many as 2,000 items. `tests/test_benchmark.py` is a server-side query tripwire, and the PWA's tests run in a jsdom with no layout and estates of one to three items, so neither says anything about this. | Medium — it is the clause with no test and no argument |
 
@@ -1167,8 +1195,11 @@ side, through an audited operation, with an actor and a reason.
 
 ### 6.2a Implemented, and asserted by nothing
 
-Sixty-five conjuncts whose code was read and believed, which nothing in any
-suite would notice the loss of. They are not defects; they are the places a
+Sixty-four conjuncts whose code was read and believed, which nothing in any
+suite would notice the loss of. (Sixty-five, less NFR-D12's, which the fourth
+pass asserted: `test_the_two_streams_are_kept_apart` is parametrized over the
+core-only job *and* the merged one, so the branch split is now checked for
+both images rather than for neither.) They are not defects; they are the places a
 regression would be silent. Grouped by ID because the remedy is the same in
 each — a test, in the language the code is written in.
 
@@ -1203,14 +1234,13 @@ that stopped being the demo's job and became a test somebody has not written.
 | FR-U20 | The live activity badge, the open-terminal control, and the terminal's link back to the item *(from §6.2b)* | A work item with a session on it. The harness deliberately 404s engine paths, so a test of this one has to stub the engine as well as Vogt — which is a fixture nobody has written, not an environment nobody has |
 | FR-U21 | Engine unavailable → Vogt views keep answering and session controls disable with the named reason *(from §6.2b)* | The mirror of the outage tests that exist. Every one of them takes Vogt away; none takes the engine away, which in a test is no harder and in the product is the only half a person can reach |
 | NFR-D11 | The engine serves the PWA; vogt-core binds loopback only; a port that serves MCP also serves plain HTTP health | The loopback binding is enforced in `engine/deploy/entrypoint.sh`, which no test reads and which does not fail on a non-loopback URL — it silently declines to start a core. The Rust side does no validation of `vogt_core_url` at all |
-| NFR-D12 | `dev` builds `:dev` images, of both the core-only image and the merged stack | `tests/test_deploy.py` reads `build.yml` for the sha/latest discipline and never for the branch split, and now reads neither for the `stack-image` job that publishes the artefact the compose file pins |
 | NFR-C6 | fmt, clippy, `cargo test`, `pnpm typecheck`, `pnpm test`, the APK build and pytest are all in the pipeline | The only test that reads `ci.yml` checks `runs-on:` lines. `pnpm test` runs in the `engine` job, before the bundle is built and gated by the same path filter, on the argument that `assets.rs` already makes a `web/`-only change an engine change |
 | NFR-Q6 | Both suites pass in the merged repository | They are separately path-gated, so "both" is jointly checked only on a change that touches both trees or a shared file |
 | NFR-S5 | No view fetches the whole estate to render a page of it | True on inspection of all four surfaces, and the board's 2,000-item bulk read across four sequential requests is the weakest case rather than a clean one |
 
 ### 6.2b Unverifiable in this environment
 
-**Nine conjuncts, down from sixty-nine.** Not doubted — read, and believed,
+**Eight conjuncts, down from sixty-nine.** Not doubted — read, and believed,
 and unprovable here. Each row names what would settle it, because "run the
 demo" is not a plan and a list of what the demo has to show is.
 
@@ -1223,15 +1253,23 @@ honest ratio and the one worth remembering when the next runner arrives. One
 went to §6.2 (FR-U17's provisional clause), because becoming checkable is how
 a believed thing gets found out.
 
-What is left needs hardware, a layout engine, or a daemon — nothing here is
+What is left needs a device, a layout engine, or a deploy — nothing here is
 waiting on somebody deciding to write a test.
+
+**"Needs hardware" was the wrong phrase, and the fourth pass retires it.** It
+described this container and quietly implied the estate. The Docker daemon
+and the Android SDK this environment lacks are both present on the
+self-hosted runners the product already builds on, and on 2026-08-14 they
+produced a merged image and an APK. What remains genuinely needs something no
+runner has: a phone in a hand, a speaker, a browser with a layout engine, and
+a person choosing to deploy.
 
 | ID | The conjuncts | What would verify them |
 |---|---|---|
-| FR-M1 | The Capacitor shell loading the merged PWA, and MVP1's terminals, assistant with voice, push, and backlog/board read | An APK, built against a real `VOGT_ANDROID_SERVER_URL`, installed on a device. `cap sync` and Gradle have never run here |
+| FR-M1 | The Capacitor shell loading the merged PWA, and MVP1's terminals, assistant with voice, push, and backlog/board read | An APK, built against a real `VOGT_ANDROID_SERVER_URL`, installed on a device. **The APK is no longer the missing part**: `cap sync` and Gradle have both run — locally as validation, then on a self-hosted runner, where `the Android shell assembles` passed on 2026-08-14. What it points at is `127.0.0.1:8910`, so what is missing is a build against the deployed URL and a phone to install it on |
 | FR-M3 | The Vogt surfaces at phone width | The same APK, or a browser at 375px. jsdom loads no stylesheet, so `test_pwa.py`'s three assertions about the board's narrow-breakpoint rules remain assertions about `styles.css` as text |
 | FR-T5 | Spoken replies | A device with a speaker |
-| NFR-D11 | One stack, one published port | `docker build -f engine/Dockerfile .`, then the compose stack. `build.yml`'s `stack-image` job now describes exactly that build and has never run; no Docker daemon was reachable here, so the Dockerfile is parse-checked and no more, the riskiest unproven step is copying uv's standalone CPython between build stages, and the compose file is read by no test in the repository |
+| NFR-D11 | One stack — the two processes coming up together, under one supervisor, in one container | **The image half is settled.** `build.yml`'s `stack-image` job ran, so `docker build -f engine/Dockerfile .` is no longer hypothetical: it builds, and the step that was called the riskiest unproven one — copying uv's standalone CPython between build stages — holds, because `vogt --version` runs in the built image and could not without it. `mydevenv2-server --help` runs too, so both halves are present. The published-port claim moved to §6.1 when a test began reading the compose file. What is left is the thing neither a build nor a file can show: `entrypoint.sh` starting vogt-core beside the engine, the engine finding it on loopback, and `/readyz` reporting a core it actually reached — which needs the compose stack up (`DEPLOYMENT.md` §9.4) and `scripts/smoke_merged_stack.sh` pointed at it |
 
 ### 6.3 What this pass found that no requirement names
 
@@ -1241,13 +1279,23 @@ a shape — **working behaviour and a false record** — which is the failure
 class this product exists to make visible.
 
 Findings are struck through when the thing they describe is fixed *and* the
-fix was checked here — four are, one of them (5) only in part, and two others
-(6, 8) have closed a half each. The last four are new, and every one of them
-arrived in a commit that closed an older one. That is worth saying plainly
-rather than burying: the rate at which this list is worked down and the rate
-at which it grows are currently similar, and the new entries are all of the
-same kind as the old ones — a record that stopped being true while the code
-around it improved.
+fix was checked here — **eight are** (4, 5, 7, 11, 12, 13, 14, 15), one of
+them (5) only in part, and two of the remaining eight (6, 8) have closed a
+half each. Sixteen entries.
+
+**Three of those strikes were added by the fourth pass to findings that were
+already fixed** — 12's string comparison had become a component comparison,
+13's delimiter test had been rewritten to read both source files, and 15's two
+comments had been corrected — and the list still described the code as broken.
+The §6.1 row citing 13 named a test that no longer exists under that name.
+That is this list committing the failure it is a list of, twice over: a record
+that stopped being true while the code improved, and a citation that would
+survive a grep because the *ID* is still there. It is the argument for the
+rule §5.4a already makes — check the conjunct against the source, never
+against the row that describes it, including when the row is in this file.
+
+The rate at which this list is worked down and the rate at which it grows are
+similar, and the new entries are all of the same kind as the old ones.
 
 1. **A session's credential was silently replaced** by the pod's, in three
    places (`ROADMAP.md` M10 as built). Writes succeeded; the audit named the
@@ -1345,43 +1393,66 @@ around it improved.
     argument for §4's rule rather than a coincidence. *§4's rule is still
     enforced by nobody*: no test reads `ROADMAP.md`, and the only check on the
     pairing is somebody sitting down to do this.
-12. **`workspace_agreement` compares two paths as strings.** The check that
-    settles FR-E3's one semantic join canonicalises both roots and then asks
-    `theirs.starts_with(&ours)` on the resulting `String`s. A workspace root
-    of `/srv/work` and an import root of `/srv/workspace` therefore agree, and
-    the check reports agreement in a case where every imported project is
-    invisible to every session — the exact failure it was written to catch.
-    `Path::starts_with` compares components and would not. Both tests use two
-    unrelated temporary directories, so neither has a name that is a prefix of
-    the other and neither notices. It is also
-    silent when `VOGT_IMPORT_ROOT` is unset — correctly, since there is
-    nothing to compare, but that is the shape of a misconfiguration too.
-13. **The delimiter test does not read the loop.**
-    `every_delimiter_the_prompt_names_is_one_the_loop_emits` asserts that
-    `SYSTEM_PROMPT` contains four literal tag strings and that `untrusted`
-    formats one of them. Nothing in it looks at what the loop emits, so a
-    fifth delimiter added tomorrow and named in no prompt would pass. It is
-    the same shape as the `CURATED_READS.len()` comparison §6.2a already
-    names: a test whose name states a relationship and whose body compares a
-    literal to itself. The tags it checks are also the prompt's bare forms —
-    the loop emits `<terminal-output session=… id=…>` and
-    `<vogt-data operation=…>` — so even the half it does check is checking a
-    different string from the one that ships.
-14. **The merged stack's backup is a core-only backup.** `engine_state_dir`
-    has no default, deliberately and rightly: its absence is what makes a
-    backup honest about covering one half. But nothing sets it —
-    `deploy/vogt-stack.compose.yml` has no such variable, `entrypoint.sh` does
-    not derive one, and the only occurrence in the repository is the commented
-    line in `config.example.toml`. In the one deployment where both halves run
-    in one container and this is trivially settable, `vogt backup` will write
-    `engine_state: "not configured"` and skip the VAPID keypair, the push
-    subscriptions, the agent-task prompts and the session history. That is the
-    designed behaviour and the manifest says so, so nothing is silent — but
-    the compose file's own header says, in bold, "**State is three things now
-    (NFR-I6), and a backup covers all three**", and as configured it covers
-    one. The third thing it names, the estate tree itself, is not covered by
-    `vogt backup` at all and never claimed to be.
-15. **Two comments in `assistant.rs` describe code that is no longer there.**
+12. ~~**`workspace_agreement` compares two paths as strings.**~~ **Resolved,
+    and the fix was the test.** The check compared canonicalised `String`s
+    with `starts_with`, so a workspace root of `/srv/work` and an import root
+    of `/srv/workspace` agreed — reporting agreement in exactly the case it
+    was written to catch. It now compares `Path`s, which compare by component,
+    and `a_sibling_directory_is_not_inside_the_workspace` builds those two
+    real directories under one parent and asserts the disagreement. That test
+    is the point: both original tests used unrelated temporary directories, so
+    neither had a name that was a prefix of the other and neither could have
+    noticed. It remains silent when `VOGT_IMPORT_ROOT` is unset — correctly,
+    since there is nothing to compare, though that is the shape of a
+    misconfiguration too, which is why `backup_agreement` (finding 14) says
+    what an unset variable would cost rather than only that it is unset.
+13. ~~**The delimiter test does not read the loop.**~~ **Resolved, in both
+    directions.** The old test asserted that `SYSTEM_PROMPT` contained four
+    literal tag strings and that `untrusted` formatted one of them, so a fifth
+    delimiter named in no prompt would have passed it — the same shape as the
+    `CURATED_READS.len()` comparison §6.2a still names: a test whose name
+    states a relationship and whose body compares a literal to itself. It is
+    now two tests over an extractor, `emitted_delimiters`, which reads the tags
+    out of the *source* of both files that emit them — `assistant.rs` for what
+    the loop wraps itself and `vogt_tools.rs` for what came from the core,
+    each split at its test module so the tests' own failure messages cannot be
+    scanned as evidence. `every_delimiter_the_loop_emits_is_one_the_prompt_names`
+    and `the_prompt_names_no_delimiter_that_nothing_emits` then compare the
+    two sets each way, so a tag added to either side without the other fails.
+    Scanning one file and asserting about both is how the first version passed
+    while missing a tag, and the extractor says so in its own comment.
+14. ~~**The merged stack's backup is a core-only backup.**~~ **Resolved, and
+    then given a check, because setting the variable was the smaller half.**
+    `deploy/vogt-stack.compose.yml` sets `VOGT_ENGINE_STATE_DIR` to
+    `/home/sprooty/.local/share/mydevenv2`, the path the engine's own default
+    resolves to under this container's home — so a backup taken in the merged
+    stack covers both halves. What that leaves is two configurations naming
+    one directory, which is the shape of every finding in this list: the day
+    one moves, `vogt backup` keeps succeeding and starts copying a directory
+    the engine does not use, and nobody finds out until a restore. So the
+    front door now reports it. `api.rs::check_backup_agreement` publishes a
+    `backup_agreement` readiness check — non-fatal, for FR-E9's reason —
+    saying either which directory the backup covers or, when they disagree,
+    what the archive would silently omit. Three tests in `vogt_core.rs` assert
+    the agreeing branch, the disagreeing one, and the single-half deployment
+    that must not be called misconfigured; `scripts/smoke_merged_stack.sh`
+    checks it before a deploy and `DEPLOYMENT.md` §9.2 lists it. The original
+    reasoning stands and is worth keeping: `engine_state_dir` has no default,
+    deliberately and rightly, because its absence is what makes a backup
+    honest about covering one half. Anywhere it is unset, `vogt backup` still
+    writes `engine_state: "not configured"` and skips the VAPID keypair, the
+    push subscriptions, the agent-task prompts and the session history — the
+    designed behaviour, and the manifest says so. What remains open is the
+    third thing the compose file's header names: the estate tree itself is not
+    covered by `vogt backup` at all, and never claimed to be.
+15. ~~**Two comments in `assistant.rs` describe code that is no longer
+    there.**~~ **Both resolved.** The gate's comment now says the branch is
+    unconditional and why `assistant_auto_type` was removed rather than
+    defaulted; `parse_vogt_write`'s doc comment is back above
+    `parse_vogt_write`, and `untrusted` keeps only the FR-T4 paragraph that
+    was always about it. Neither changed behaviour, which is the whole reason
+    they survived: nothing in a test suite reads a comment. What follows is
+    what they said.
     The tool dispatcher's gate still reads "`send_input` with auto-type on is
     the single exception, and it is a configured one about a PTY" — over a
     branch that is now unconditional, in the file whose header explains at
@@ -1392,3 +1463,30 @@ around it improved.
     because the new function was inserted between the old comment and the
     function it documented; `parse_vogt_write` now has no doc comment at all.
     Neither changes behaviour. Both are the failure this section is a list of.
+16. **Both first-run CI failures were checks written against this machine.**
+    The pipeline for the merged product ran for the first time on 2026-08-14
+    and failed twice, in ways review could not see and neither of which was a
+    code defect:
+
+    * `docs` failed on `engine/AGENTS.md`'s link to
+      `/home/sprooty/Working/AGENTS.md`. `scripts/check_docs.py` resolved it
+      happily *here*, because that file exists on this machine — the checker
+      answered a question about the filesystem it was running on rather than
+      about the repository. A link that resolves nowhere else is worse than a
+      name, so the link is now the name, and the checker rejects absolute
+      paths outright.
+    * The engine job failed on `sudo apt-get install ripgrep` with *root is
+      not in the sudoers file*. The step assumed a normal user; the runner is
+      root, so there was nothing to elevate from and no sudoers entry to
+      elevate with. It now elevates only when there is something to elevate
+      from.
+
+    The shared shape is the one this section keeps finding: **a check that
+    cannot fail where it is written.** Every assertion about CI in this
+    document — the merged image, both image streams, the APK, `pnpm test`
+    running at all — was, until that morning, an assertion about a file that
+    had never executed, and the value of running it was not the three that
+    turned out true but the two that could not have been read. It also
+    retires a phrase this section used: what was called "needs hardware" was
+    a description of *this container*, and the runners have the daemon and
+    the SDK it lacks.

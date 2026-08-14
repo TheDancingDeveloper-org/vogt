@@ -160,6 +160,7 @@ fn test_config(contextkeeper_url: Option<String>) -> Config {
         contextkeeper_token: contextkeeper_url_token(),
         vogt_core_url: None,
         vogt_import_root: None,
+        vogt_engine_state_dir: None,
         vogt_core_token: None,
     }
 }

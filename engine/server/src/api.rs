@@ -187,6 +187,13 @@ pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Rea
         )
         .await,
     );
+    checks.push(
+        check_backup_agreement(
+            &state.config.state_dir,
+            state.config.vogt_engine_state_dir.as_deref(),
+        )
+        .await,
+    );
 
     let ok = checks.iter().all(|check| check.ok || !check.fatal);
     let status = if ok {
@@ -598,6 +605,69 @@ async fn check_workspace_agreement(root: &FsPath, import_root: Option<&FsPath>) 
                  workspace root {ours}: imported projects will be invisible to \
                  sessions and to the collectors that run here (FR-E3)"
             ),
+            fatal: false,
+        }
+    }
+}
+
+/// Does the directory vogt-core would back up as "the engine's state" contain
+/// the engine's state? (NFR-I6, §6.3 finding 14.)
+///
+/// The failure is quiet and it is the worst kind this pair can produce. A
+/// backup that misses a directory does not fail — `vogt backup` treats an
+/// absent engine state as non-fatal by design, so it writes a manifest, says
+/// something true about what it copied, and produces an archive that restores
+/// a running product minus its session history, push subscriptions, VAPID
+/// keypair and agent-task prompts. Nobody finds out until a restore, which is
+/// the one moment nobody wants to be reading a manifest closely.
+///
+/// Two configurations name this path — the engine's `state_dir` and the
+/// core's `engine_state_dir` — because the two processes are configured
+/// separately even when they share a container. This is the check that says
+/// they still mean the same directory.
+async fn check_backup_agreement(
+    state_dir: &FsPath,
+    engine_state_dir: Option<&FsPath>,
+) -> ReadinessCheck {
+    let Some(engine_state_dir) = engine_state_dir else {
+        // Not set is the ordinary case away from the merged stack: an engine
+        // with no core beside it has nothing to agree with, and the core's own
+        // backup says `engine_state: "not configured"` rather than implying
+        // coverage. Claiming a disagreement here would make every single-half
+        // deployment look misconfigured.
+        return ReadinessCheck {
+            name: "backup_agreement",
+            ok: true,
+            detail: "VOGT_ENGINE_STATE_DIR is not set here; vogt backup, if one \
+                     runs, will say it covered no engine state"
+                .into(),
+            fatal: false,
+        };
+    };
+    let canonical = |path: &FsPath| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let ours = canonical(state_dir);
+    let theirs = canonical(engine_state_dir);
+    if ours == theirs {
+        ReadinessCheck {
+            name: "backup_agreement",
+            ok: true,
+            detail: format!("vogt backup covers {}", theirs.to_string_lossy()),
+            fatal: false,
+        }
+    } else {
+        ReadinessCheck {
+            name: "backup_agreement",
+            ok: false,
+            detail: format!(
+                "vogt would back up {}, which is not this server's state_dir \
+                 {}: backups will succeed and contain no session history, push \
+                 subscriptions or VAPID keypair (NFR-I6)",
+                theirs.to_string_lossy(),
+                ours.to_string_lossy()
+            ),
+            // Non-fatal for FR-E9's reason: a wrong backup path is a bad
+            // answer to a question nobody is asking yet, and killing the pod
+            // over it would take the terminals with it.
             fatal: false,
         }
     }

@@ -162,6 +162,7 @@ fn base_config() -> Config {
         contextkeeper_token: None,
         vogt_core_url: None,
         vogt_import_root: None,
+        vogt_engine_state_dir: None,
         vogt_core_token: None,
     }
 }
@@ -1040,5 +1041,91 @@ async fn a_sibling_directory_is_not_inside_the_workspace() {
         find_check(&body, "workspace_agreement")["ok"],
         false,
         "a name that starts the same is not a directory that contains it"
+    );
+}
+
+// ── The backup covers the engine, or says it does not (NFR-I6) ────────────
+
+#[tokio::test]
+async fn readiness_reports_a_backup_that_would_miss_the_engines_state() {
+    let state = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    let mut cfg = base_config();
+    cfg.state_dir = state.path().to_path_buf();
+    // Through config rather than `std::env`, for the reason the workspace
+    // pair above gives: one process, two tests, one environment.
+    cfg.vogt_engine_state_dir = Some(elsewhere.path().to_path_buf());
+    let base = boot(cfg).await;
+
+    let body: Value = client()
+        .get(format!("{base}/readyz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let check = find_check(&body, "backup_agreement");
+    assert_eq!(check["ok"], false);
+    let detail = check["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("session history"),
+        "a disagreement has to name what the backup would silently omit: \
+         {detail:?}"
+    );
+    assert_eq!(
+        check["fatal"], false,
+        "a wrong backup path is a bad answer to a question nobody is asking \
+         yet; killing the pod over it would take the terminals with it"
+    );
+    assert_eq!(body["ok"], true);
+}
+
+#[tokio::test]
+async fn readiness_confirms_the_backup_covers_this_servers_state() {
+    let state = tempfile::tempdir().unwrap();
+
+    let mut cfg = base_config();
+    cfg.state_dir = state.path().to_path_buf();
+    cfg.vogt_engine_state_dir = Some(state.path().to_path_buf());
+    let base = boot(cfg).await;
+
+    let body: Value = client()
+        .get(format!("{base}/readyz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let check = find_check(&body, "backup_agreement");
+    assert_eq!(check["ok"], true);
+    assert!(check["detail"].as_str().unwrap().contains("covers"));
+}
+
+#[tokio::test]
+async fn a_single_half_deployment_is_not_called_misconfigured() {
+    // No core beside this engine, so nothing names its state directory. The
+    // check has to stay quiet: every engine that ever ran alone would
+    // otherwise report a disagreement with a configuration that does not
+    // exist.
+    let base = boot(base_config()).await;
+    let body: Value = client()
+        .get(format!("{base}/readyz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let check = find_check(&body, "backup_agreement");
+    assert_eq!(check["ok"], true);
+    assert!(
+        check["detail"]
+            .as_str()
+            .unwrap()
+            .contains("covered no engine state"),
+        "and it should say what a backup taken here would claim"
     );
 }

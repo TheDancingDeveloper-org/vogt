@@ -402,15 +402,23 @@ def test_both_halves_run_before_the_merged_image_is_pushed(workflow: str) -> Non
     )
 
 
-def test_the_merged_image_keeps_the_two_streams_apart() -> None:
+@pytest.mark.parametrize("name", ["image", "stack-image"])
+def test_the_two_streams_are_kept_apart(name: str) -> None:
     """NFR-D12: `dev` images can never be mistaken for commit images.
 
     `dev` and `dev-<sha>` on one branch, `sha-<commit>` on the other, and no
     tag either can move — so "which build is that?" stays answerable and a
     dev image cannot be picked up by anything following the prod stream.
+
+    Both images, because the requirement says both and the merge added the
+    second: a rule kept by the core-only image and dropped by the merged one
+    would leave the artefact the merge exists for as the unlabelled stream.
     """
     raw = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
-    job = raw[raw.index("  stack-image:") :]
+    start = raw.index(f"\n  {name}:\n")
+    rest = raw[start + 1 :]
+    end = re.search(r"\n  [a-z][a-z-]*:\n", rest)
+    job = rest[: end.start()] if end else rest
     assert "type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}" in job
     assert "type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}" in job
     assert "type=sha,enable=${{ github.ref != 'refs/heads/dev' }}" in job
