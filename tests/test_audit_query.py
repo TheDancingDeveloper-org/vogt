@@ -28,6 +28,7 @@ from vogt.application.models import (
     CommentParams,
     CreateWorkParams,
     ListAuditParams,
+    ListEventsParams,
     RegisterProjectParams,
     SuppressParams,
     TransitionWorkParams,
@@ -37,6 +38,7 @@ from vogt.application.services import (
     comment_work,
     create_work,
     list_audit,
+    list_events,
     register_project,
     suppress,
     transition_work,
@@ -454,3 +456,82 @@ def test_a_time_bound_survives_a_timestamp_with_microseconds(
         )
 
     assert [record.entity_id for record in after] == ["thing_500000"]
+
+
+# ── The other half of an item's history (FR-U5, FR-N1) ────────────────────
+#
+# The audit says a transition happened, who made it and why, and keeps a
+# digest rather than the payload — so it cannot say which state the item came
+# from. The event can, and these assert that it does.
+
+
+def test_an_items_events_carry_the_states_it_moved_between(
+    instance: AppContext,
+) -> None:
+    _project(instance, "alpha")
+    ref = _item(instance, "Sweep drops a page", project="alpha")
+    transition_work(
+        instance, TransitionWorkParams(ref=ref, to_state="in_progress", reason=WHY)
+    )
+    transition_work(
+        instance, TransitionWorkParams(ref=ref, to_state="review", reason=WHY)
+    )
+
+    events = list_events(
+        instance, ListEventsParams(entity_id=_item_id(instance, ref))
+    ).events
+    moves = [e for e in events if e.kind == "work.transitioned"]
+    assert [(e.summary["from"], e.summary["to"]) for e in moves] == [
+        ("open", "in_progress"),
+        ("in_progress", "review"),
+    ], "the feed says what the audit's digest cannot: which state it came from"
+    assert all(e.audit_id for e in moves), (
+        "and each names the audit row that says why, so the two halves join"
+    )
+
+
+def test_an_items_history_excludes_every_other_items(instance: AppContext) -> None:
+    _project(instance, "alpha")
+    mine = _item(instance, "Mine", project="alpha")
+    theirs = _item(instance, "Theirs", project="alpha")
+    transition_work(
+        instance, TransitionWorkParams(ref=theirs, to_state="in_progress", reason=WHY)
+    )
+
+    events = list_events(
+        instance, ListEventsParams(entity_id=_item_id(instance, mine))
+    ).events
+    assert [e.kind for e in events] == ["work.created"]
+
+
+def test_the_cursor_still_walks_a_narrowed_feed(instance: AppContext) -> None:
+    """The filter is applied in SQL, not to a page of the whole feed.
+
+    A page filtered after the read would return whatever slice of the feed
+    happened to contain some of this item's events, and a caller paging it
+    would decide the history ended at the first quiet stretch — which, on a
+    busy estate, is immediately.
+    """
+    _project(instance, "alpha")
+    ref = _item(instance, "Mine", project="alpha")
+    noise = _item(instance, "Noise", project="alpha")
+    for state in ("in_progress", "review"):
+        transition_work(
+            instance, TransitionWorkParams(ref=ref, to_state=state, reason=WHY)
+        )
+        # Interleaved, so the item's events are sparse in the feed.
+        transition_work(
+            instance, TransitionWorkParams(ref=noise, to_state=state, reason=WHY)
+        )
+
+    mine = _item_id(instance, ref)
+    first = list_events(instance, ListEventsParams(entity_id=mine, limit=2))
+    assert len(first.events) == 2
+    rest = list_events(
+        instance, ListEventsParams(entity_id=mine, after=first.next_cursor, limit=2)
+    )
+    seqs = [e.seq for e in first.events + rest.events]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), (
+        "pages of one entity's history neither repeat nor go backwards"
+    )
+    assert all(e.entity_id == mine for e in rest.events)

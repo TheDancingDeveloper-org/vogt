@@ -865,10 +865,23 @@ class SqliteReadView:
             for row in rows
         ]
 
-    def list_events(self, *, after: int, limit: int) -> list[Event]:
+    def list_events(
+        self, *, after: int, limit: int, entity_id: str | None = None
+    ) -> list[Event]:
+        # Narrowed in SQL rather than after the read, because the feed is a
+        # single ordered table and an entity's history is a sparse slice of
+        # it: filtering a page would return a page of *the feed* that happens
+        # to contain some of this entity's events, and a caller paging that
+        # would conclude the history had ended at the first quiet stretch.
+        where = "seq > ?"
+        params: list[object] = [after]
+        if entity_id is not None:
+            where += " AND entity_id = ?"
+            params.append(entity_id)
+        params.append(limit)
         rows = self._conn.execute(
-            "SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
-            (after, limit),
+            f"SELECT * FROM events WHERE {where} ORDER BY seq LIMIT ?",
+            tuple(params),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 

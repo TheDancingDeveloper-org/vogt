@@ -222,6 +222,16 @@ is reported as the `mirrored_source` observation instead (FR-D8).
 
 `events.seq` **is** the `/events` cursor. Two producers, one table:
 
+`events.list` also takes `entity_id`, narrowing the feed to one thing's
+history, and that is what makes a work item's *state* history answerable.
+`audit` keeps a `payload_digest` rather than the payload — deliberately: it
+proves what changed without duplicating it — so the audit alone can say a
+transition happened, who made it and why, and not which state it came from.
+The event can: `work.transitioned` carries `{ref, from, to}` in its summary,
+nothing prunes this table, and the two rows name each other through
+`audit_id`. Read together they answer both halves; read apart, each is
+missing the other's.
+
 *Implementation note (M0)*: instance creation is the one audited write that
 emits **no** event. `vogt init` creates the instance rather than changing
 anything inside one, so it writes `meta`, the initiating actor, and an audit

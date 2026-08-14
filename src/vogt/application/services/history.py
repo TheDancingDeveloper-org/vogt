@@ -18,9 +18,24 @@ def list_events(ctx: AppContext, params: ListEventsParams) -> EventListResult:
     `next_cursor` is the seq of the last row returned — pass it back as
     `after`. When the feed is empty it is the caller's own cursor, so a
     polling client never rewinds.
+
+    **`entity_id` narrows it to one thing's history, and that is what makes a
+    work item's state history answerable at all.** The audit log records that
+    a transition happened, who made it and why, but keeps a `payload_digest`
+    rather than the payload — deliberately, since the audit proves what
+    changed without duplicating it — so the audit alone cannot say *which*
+    state an item came from. The event can: `work.transitioned` carries
+    `{ref, from, to}` in its summary, and this feed is never pruned, so an
+    entity's slice of it is complete rather than recent.
+
+    The two feeds answer different halves of the same question and are meant
+    to be read together: the event says what the state was, the audit row it
+    names in `audit_id` says why somebody changed it.
     """
     with ctx.declared.read() as view:
-        events = view.list_events(after=params.after, limit=params.limit)
+        events = view.list_events(
+            after=params.after, limit=params.limit, entity_id=params.entity_id
+        )
     next_cursor = events[-1].seq if events else params.after
     return EventListResult(events=events, next_cursor=next_cursor)
 

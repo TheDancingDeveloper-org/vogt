@@ -300,7 +300,9 @@ class ReadView(Protocol):
 
     # -- history -----------------------------------------------------------
 
-    def list_events(self, *, after: int, limit: int) -> list[Event]: ...
+    def list_events(
+        self, *, after: int, limit: int, entity_id: str | None = None
+    ) -> list[Event]: ...
 
     def list_audit(
         self,

@@ -602,6 +602,13 @@ class ListEventsParams(Params):
         default=0, ge=0, description="Cursor: return events with seq greater than this."
     )
     limit: int = Field(default=100, ge=1, le=1000)
+    entity_id: str | None = Field(
+        default=None,
+        description=(
+            "Only events about this entity. The id, not the ref — the same "
+            "shape audit.list takes, so the two feeds narrow alike."
+        ),
+    )
 
 
 class EventListResult(Result):
