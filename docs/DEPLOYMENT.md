@@ -751,6 +751,115 @@ writes and a false audit trail. Nothing errors, no test that stubs the
 transport can see it, and the only signal is an actor name nobody reads until
 they need it — which is exactly when it has to be right.
 
+## 9. Deploying the merged stack, the first time *(r9)*
+
+The merge is built and none of it has been deployed. This section is the
+sequence, in order, with what to check at each step — written before the
+first deploy rather than after it, because everything below is either a
+precondition somebody would otherwise discover at the wrong moment or a
+failure mode that reports success.
+
+### 9.0 Three things that are true before you start
+
+1. **No merged image exists anywhere.** `.github/workflows/build.yml`
+   publishes the *core-only* root `Dockerfile` to
+   `ghcr.io/thedancingdeveloper-org/vogt`. Nothing builds `engine/Dockerfile`,
+   which is the merged image. `deploy/vogt-stack.compose.yml` pins
+   `repo.indexarr.net/indexarr/vogt` at an all-zero placeholder digest that
+   nothing pushes to. **Step 9.1 is not optional and cannot be skipped by
+   pulling a tag.**
+2. **The image has never been built at all** — not in CI, not by hand. It
+   parses and every `COPY` resolves; that is the whole of what is known. The
+   riskiest step inside it is copying uv's standalone CPython between build
+   stages onto a different base.
+3. **A front door with nothing behind it reports itself ready.** The core's
+   readiness probe is deliberately non-fatal (§1.1, FR-E9), and
+   `entrypoint.sh` declines to start a core when `VOGT_CORE_URL` is not
+   loopback without failing. Those two are individually right and together
+   they mean `/readyz` can answer `ok` for a stack that serves no Vogt at
+   all. **Never accept `/readyz`'s top-level `ok` as proof; read the
+   `vogt_core` check.**
+
+### 9.1 Build the merged image
+
+From a host with a Docker daemon, at the repository root — the context is the
+root, not `engine/`, because `rust-embed` pulls `web/dist/` and the core is
+`pyproject.toml` and `src/`:
+
+```bash
+cd web && pnpm install --frozen-lockfile && pnpm build && cd ..
+docker build -f engine/Dockerfile -t <registry>/vogt:<sha> .
+```
+
+**The registry is a decision to take now.** GHCR is the one CI already
+authenticates to and where the core-only image lives; the Forgejo reference
+in the compose is inherited from the engine's own stack and is a placeholder.
+Whichever is chosen, the compose's `image:` line and the CI job that publishes
+it have to agree, and until one publishes there is nothing to digest-pin.
+
+### 9.2 Smoke-test it locally, before any stack sees it
+
+Run the image with a throwaway data directory and a core token, then check the
+four things that distinguish a working front door from a plausible one:
+
+| Check | What proves it |
+|---|---|
+| `GET /readyz` | `checks[].name == "vogt_core"` says `ready`, **not** the top-level `ok` |
+| `GET /api/config` | `vogt.configured` is `true` — this is what makes the GUI offer its Vogt tabs |
+| `GET /api/vogt/status` with a front-door token | answers with a `principal` that is the actor you paired, not a 401 or a 503 |
+| `POST /mcp` `initialize` with a core token | answers identically to the core's own port |
+
+Two of those were wrong at some point during the merge and neither failed
+loudly: a missing pairing answers 503 naming the setting, and an unconfigured
+core answers 503 naming `VOGT_CORE_URL`. Both are *correct* answers that look
+like outages if you are not expecting them.
+
+### 9.3 The stack environment
+
+Deploy-blocking, gated with `:?` in the compose: `MYDEVENV2_TOKEN`,
+`VOGT_PUBLIC_URL`, `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID`,
+`HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET`. New for the merged stack:
+`VOGT_CORE_TOKEN` (Infisical `HOMELAB_VOGT_CORE_TOKEN`), consumed by an
+extended `pre_deploy` hook that writes *two* files, both `chown 1000:1000` —
+not the core-only stack's `1000:0`. The compose header carries the exact hook.
+
+The core token is chicken-and-egg on a first deploy and that is fine: bring
+the stack up without it, `docker exec` a `vogt token issue`, store it, and
+redeploy. Until then `/api/vogt` answers 401 and everything else works, which
+is FR-E9 rather than an outage.
+
+### 9.4 Dev stack first, and what "carried the load" means
+
+NFR-D12 exists because mobile, voice and push are verifiable nowhere else:
+`dev` builds `:dev` images for a dev stack, and only `main` reaches prod. The
+merged image needs the same split before it deploys to anything that matters.
+
+Two acceptance tests are outstanding and both need this stack: **M11's demo**
+(a board drag round-tripping a `work.transition`, including a refused one
+rolling back with the server's reason; a filtered board URL restoring its view
+after reload) needs a browser, and **M13's** (a push arriving on a phone,
+opened, and the session unblocked) needs a device and the APK. Neither can be
+run from a build environment. They are the reason a dev stack is a
+prerequisite and not a nicety.
+
+### 9.5 Retiring the old stacks, in an order that matters
+
+Only after the merged stack has carried the load, and in this order:
+
+1. **Republish the APK against the new host first.** The Android build now
+   requires `VOGT_ANDROID_SERVER_URL` and has no default; an installed app
+   still points at whatever it was built with. Retiring the old host before
+   the new APK is out breaks every installed phone.
+2. Move DNS/ingress for `vogt.sprooty.com` and confirm the merged stack
+   answers on it (M14's naming decision, `MERGE_MYDEVENV2.md` §11.1).
+3. Retire `prod-mydevenv2` and `dev-mydevenv2`, then `personal/vogt`.
+4. **Then** alias and sunset the `MYDEVENV2_*` config names — a stack-env
+   migration, deliberately not done in the same cutover as the host move.
+
+Rollback at every step is the digest line in the ops repo plus `DeployStack`,
+with §5's caveat: a rollback across a migration needs a restore, not an older
+image.
+
 ## 8. Known: every write costs a WAL checkpoint
 
 Measured against the deployed data volume on Node B, one declared write
