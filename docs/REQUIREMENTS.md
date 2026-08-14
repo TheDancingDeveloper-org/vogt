@@ -1,6 +1,6 @@
 # Vogt — Requirements (v0.3)
 
-Status: **baseline, revision r7** (2026-08-13), distilled from `DESIGN.md`,
+Status: **baseline, revision r8** (2026-08-13), distilled from `DESIGN.md`,
 `SCHEMA.md`, `DEPLOYMENT.md` and the originating product discussion.
 **v1 (M0–M6) is built**; §5 is the requirement-by-requirement verification
 of the delivered system against this document, including the four
@@ -212,6 +212,38 @@ requirements that nothing implements. It cannot find a requirement whose
 implementation satisfies half its text, because one citation makes the ID
 look answered. Requirements joined by "and" shall be verified per conjunct.
 
+### Revision r8 — the handshake is a negotiation, not a gate
+
+**FR-A6 is revised in place, and it was wrong rather than merely incomplete.**
+It said unsupported MCP protocol versions "shall be refused with the supported
+list named". Vogt implemented that faithfully on both transports, and a test
+asserted it.
+
+The consequence showed up the first time a real client connected. Claude Code
+moved to protocol `2025-11-25`; Vogt supports `2025-06-18` and older, so it
+answered `-32602 unsupported MCP protocol version` and the client dropped the
+connection. Cadastre, reached from the same container by the same mechanism,
+carried on working. Vogt was registered, reachable, authenticated — and
+unusable, on the day the whole M8 exercise was about making it reachable.
+
+Refusing makes a server unusable by every client **newer** than itself, which
+is the direction clients always drift. The MCP specification says as much: a
+server that does not recognise the requested version must answer with one it
+does support, and the client decides whether to continue. FR-A6's own second
+clause had the right instinct already — bridge↔server skew "shall warn and
+never block" — and the first clause contradicted it for no reason anyone
+recorded.
+
+What is kept is the useful half: the client is still told what the server
+speaks. It is told by being *answered* in a version the server speaks, rather
+than by being handed a list alongside a refusal.
+
+Two tests changed with the requirement, which is the point of writing them
+against IDs: `test_an_unsupported_version_is_refused_with_the_supported_list`
+became `test_an_unknown_version_negotiates_down_rather_than_refusing`, and its
+HTTP counterpart likewise. A third was added, because negotiating down must
+not become ignoring what was asked for.
+
 ---
 
 ## 1. Functional requirements
@@ -329,7 +361,7 @@ by path or repository URL, and stops there.*
 | FR-A3 | Transport parity shall be enforced by tests whose exclusions are explicit named lists (`HTTP_ONLY`, `LOCAL_ONLY`) that fail when stale in either direction. | M | DESIGN §4.1 |
 | FR-A4 | The REST API shall publish a generated OpenAPI document. | M | DESIGN §4 |
 | FR-A5 | MCP shall be served over stdio (local, no server required) and streamable HTTP at `/mcp`; a stdio bridge shall serve clients that can only spawn local processes, discovering the remote tool list at startup rather than hardcoding it. | M | DESIGN §4.1 |
-| FR-A6 | Unsupported MCP protocol versions shall be refused with the supported list named; bridge↔server version skew shall warn on stderr and never block startup. | M | DESIGN §4.1 |
+| FR-A6 | *(revised r8)* An MCP `initialize` naming a protocol version the server does not recognise shall be answered with the newest version the server **does** support, leaving the client to continue or disconnect — the handshake is a negotiation, not a gate. A recognised version shall be answered with itself. Bridge↔server version skew shall warn on stderr and never block startup. | M | DESIGN §4.1 |
 | FR-A7 | The server shall expose plain-HTTP `/health/live`, `/health/ready`, `/version`, and `/connection-info` on every port that serves MCP. | M | DEPLOY §1 |
 | FR-A8 | *(r7)* **Connecting a client shall be a capability of the product, not an exercise for the reader.** The instance shall state the URL clients reach it at — configured, never inferred, and reported as absent when unset rather than guessed — and shall render client configuration from it (`connect`). A client that speaks streamable HTTP shall require no Vogt code installed; installation shall be a property of the stdio bridge alone, and shall be stated as its cost rather than assumed. | M | DEPLOY §4.3 |
 

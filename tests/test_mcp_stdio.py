@@ -57,16 +57,31 @@ def test_initialize_agrees_on_a_protocol_version(instance: AppContext) -> None:
     assert "tools" in result["capabilities"]
 
 
-def test_an_unsupported_version_is_refused_with_the_supported_list(
+def test_an_unknown_version_negotiates_down_rather_than_refusing(
     instance: AppContext,
 ) -> None:
-    """FR-A6: a client that guesses wrong is told what to guess."""
+    """FR-A6 as revised (r8): the handshake negotiates, it does not gate.
+
+    A server that refuses an unrecognised version is unusable by every
+    client newer than itself, which is the direction clients actually move.
+    Vogt disappeared from Claude Code the day it began asking for
+    2025-11-25; answering with our own newest keeps the session alive and
+    leaves the choice with the client, as the MCP spec requires.
+    """
     responses, _ = _session(
-        instance, _request(1, "initialize", protocolVersion="1999-01-01")
+        instance, _request(1, "initialize", protocolVersion="2999-01-01")
     )
-    error = responses[0]["error"]
-    assert error["code"] == INVALID_PARAMS
-    assert error["data"]["supported"] == list(SUPPORTED_PROTOCOL_VERSIONS)
+    assert "error" not in responses[0], responses[0]
+    assert responses[0]["result"]["protocolVersion"] == SUPPORTED_PROTOCOL_VERSIONS[0]
+
+
+def test_a_version_we_do_speak_is_answered_with_itself(
+    instance: AppContext,
+) -> None:
+    """Negotiating down must not mean ignoring what was asked for."""
+    older = SUPPORTED_PROTOCOL_VERSIONS[-1]
+    responses, _ = _session(instance, _request(1, "initialize", protocolVersion=older))
+    assert responses[0]["result"]["protocolVersion"] == older
 
 
 def test_a_client_that_states_no_version_gets_the_newest(

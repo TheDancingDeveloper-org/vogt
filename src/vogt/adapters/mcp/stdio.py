@@ -39,6 +39,27 @@ SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (
     "2024-11-05",
 )
 
+
+def negotiate_protocol_version(requested: object) -> str:
+    """Answer with a version both sides can speak (FR-A6, revised r8).
+
+    The MCP handshake is a negotiation, not a gate: a server that does not
+    recognise the requested version must answer with one it *does* support
+    and let the client decide whether to continue. Refusing instead makes
+    the server unusable by every client newer than itself, which is the
+    normal direction of drift — and it is how Vogt became unreachable from
+    Claude Code the day that client moved to 2025-11-25, while the estate's
+    other MCP server carried on.
+
+    The original reading of FR-A6 ("refuse with the supported list named")
+    is kept where it belongs: the list still travels, in the response, as
+    the version actually chosen.
+    """
+    if isinstance(requested, str) and requested in SUPPORTED_PROTOCOL_VERSIONS:
+        return requested
+    return SUPPORTED_PROTOCOL_VERSIONS[0]
+
+
 SERVER_NAME = "vogt"
 
 PARSE_ERROR = -32700
@@ -139,17 +160,7 @@ class StdioServer:
     def _initialize(
         self, message_id: MessageId, params: dict[str, Any]
     ) -> dict[str, Any]:
-        requested = params.get("protocolVersion")
-        if requested is not None and requested not in SUPPORTED_PROTOCOL_VERSIONS:
-            return _error(
-                message_id,
-                INVALID_PARAMS,
-                f"unsupported MCP protocol version {requested!r}",
-                data={"supported": list(SUPPORTED_PROTOCOL_VERSIONS)},
-            )
-        version = (
-            str(requested) if requested is not None else SUPPORTED_PROTOCOL_VERSIONS[0]
-        )
+        version = negotiate_protocol_version(params.get("protocolVersion"))
         self.report.protocol_version = version
         return _result(
             message_id,
