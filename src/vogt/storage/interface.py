@@ -17,6 +17,7 @@ from vogt.core.entities import (
     Actor,
     AuditRecord,
     AuthDecision,
+    CodingSession,
     Comment,
     DepRef,
     DriftProposal,
@@ -225,6 +226,18 @@ class ReadView(Protocol):
         self, *, include_revoked: bool = False, limit: int = 100
     ) -> list[Token]: ...
 
+    def tokens_for_actor(
+        self, actor_id: str, *, include_revoked: bool = False
+    ) -> list[Token]:
+        """Every token bound to one actor, newest first.
+
+        Unlimited on purpose, unlike `list_tokens`: this answers "which
+        credentials must be revoked now" — a session ending revokes the token
+        it ran with (FR-S10) — and a page limit there would leave live
+        credentials behind without saying so.
+        """
+        ...
+
     def list_auth_decisions(
         self, *, decision: str | None = None, limit: int = 100
     ) -> list[AuthDecision]: ...
@@ -253,6 +266,35 @@ class ReadView(Protocol):
 
         Read by retention, which refuses to prune them. Evidence must never
         become unreachable through retention.
+        """
+        ...
+
+    # -- sessions ----------------------------------------------------------
+
+    def session_by_id(self, session_id: str) -> CodingSession | None: ...
+
+    def session_by_engine_id(self, engine_session_id: str) -> CodingSession | None:
+        """The link for a terminal the engine named (FR-E4).
+
+        The engine speaks in its own ids — an SSE event, a session an
+        operator killed — so the link has to be findable from that side too.
+        """
+        ...
+
+    def list_sessions(
+        self,
+        *,
+        project_id: str | None = None,
+        work_item_id: str | None = None,
+        include_stopped: bool = False,
+        limit: int,
+        offset: int,
+    ) -> list[CodingSession]:
+        """Sessions Vogt started, newest first.
+
+        Live ones only unless `include_stopped`: "what is running for this
+        item" is the question almost every caller has, and a history that
+        answers it by default would bury it.
         """
         ...
 
@@ -332,6 +374,17 @@ class WriteTxn(ReadView, Protocol):
     def revoke_token(self, token_id: str, *, reason: str, at: datetime) -> bool: ...
 
     def insert_writeback(self, record: WriteBackRecord) -> None: ...
+
+    def insert_session(self, session: CodingSession) -> None: ...
+
+    def mark_session_stopped(self, session_id: str, *, at: datetime) -> None:
+        """Record that Vogt stopped this session.
+
+        Idempotent: a session already stopped keeps the time it first
+        stopped at, so a second `session.stop` — or the engine reporting an
+        end Vogt already recorded — does not rewrite history.
+        """
+        ...
 
     def insert_drift(self, proposal: DriftProposal) -> None: ...
 

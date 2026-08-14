@@ -21,6 +21,7 @@ from vogt.core.entities import (
     Actor,
     AuditRecord,
     AuthDecision,
+    CodingSession,
     Comment,
     DriftProposal,
     Event,
@@ -626,6 +627,18 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_token(row) for row in rows]
 
+    def tokens_for_actor(
+        self, actor_id: str, *, include_revoked: bool = False
+    ) -> list[Token]:
+        clause = "" if include_revoked else "AND t.revoked_at IS NULL"
+        rows = self._conn.execute(
+            "SELECT t.*, a.identity_ref AS actor_identity_ref FROM tokens t "
+            f"JOIN actors a ON a.id = t.actor_id WHERE t.actor_id = ? {clause} "
+            "ORDER BY t.created_at DESC, t.id DESC",
+            (actor_id,),
+        ).fetchall()
+        return [_row_to_token(row) for row in rows]
+
     def list_auth_decisions(
         self, *, decision: str | None = None, limit: int = 100
     ) -> list[AuthDecision]:
@@ -728,6 +741,50 @@ class SqliteReadView:
         if row is None:
             return None
         return self._hydrate([row])[0]
+
+    # -- sessions ----------------------------------------------------------
+
+    def session_by_id(self, session_id: str) -> CodingSession | None:
+        row = self._conn.execute(
+            "SELECT * FROM coding_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        return None if row is None else _row_to_session(row)
+
+    def session_by_engine_id(self, engine_session_id: str) -> CodingSession | None:
+        row = self._conn.execute(
+            "SELECT * FROM coding_sessions WHERE engine_session_id = ?",
+            (engine_session_id,),
+        ).fetchone()
+        return None if row is None else _row_to_session(row)
+
+    def list_sessions(
+        self,
+        *,
+        project_id: str | None = None,
+        work_item_id: str | None = None,
+        include_stopped: bool = False,
+        limit: int,
+        offset: int,
+    ) -> list[CodingSession]:
+        clauses: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("project_id", project_id),
+            ("work_item_id", work_item_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if not include_stopped:
+            clauses.append("stopped_at IS NULL")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.extend((limit, offset))
+        rows = self._conn.execute(
+            f"SELECT * FROM coding_sessions {where} "
+            "ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?",
+            tuple(params),
+        ).fetchall()
+        return [_row_to_session(row) for row in rows]
 
     # -- hydration ---------------------------------------------------------
 
@@ -1130,6 +1187,32 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def insert_session(self, session: CodingSession) -> None:
+        self._conn.execute(
+            "INSERT INTO coding_sessions (id, engine_session_id, project_id, "
+            "work_item_id, actor_id, cwd, template, reason, started_at, "
+            "stopped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session.id,
+                session.engine_session_id,
+                session.project_id,
+                session.work_item_id,
+                session.actor_id,
+                session.cwd,
+                session.template,
+                session.reason,
+                to_iso(session.started_at),
+                None if session.stopped_at is None else to_iso(session.stopped_at),
+            ),
+        )
+
+    def mark_session_stopped(self, session_id: str, *, at: datetime) -> None:
+        self._conn.execute(
+            "UPDATE coding_sessions SET stopped_at = ? "
+            "WHERE id = ? AND stopped_at IS NULL",
+            (to_iso(at), session_id),
+        )
+
     def insert_drift(self, proposal: DriftProposal) -> None:
         self._conn.execute(
             "INSERT INTO drift_proposals (id, kind, subject_kind, subject_id, "
@@ -1464,6 +1547,24 @@ def _row_to_writeback(row: sqlite3.Row) -> WriteBackRecord:
         reason=str(row["reason"]),
         detail=None if row["detail"] is None else str(row["detail"]),
         source_url=None if row["source_url"] is None else str(row["source_url"]),
+    )
+
+
+def _row_to_session(row: sqlite3.Row) -> CodingSession:
+    stopped = row["stopped_at"]
+    return CodingSession(
+        id=str(row["id"]),
+        engine_session_id=str(row["engine_session_id"]),
+        project_id=str(row["project_id"]),
+        work_item_id=(
+            None if row["work_item_id"] is None else str(row["work_item_id"])
+        ),
+        actor_id=str(row["actor_id"]),
+        cwd=str(row["cwd"]),
+        template=None if row["template"] is None else str(row["template"]),
+        reason=str(row["reason"]),
+        started_at=from_iso(str(row["started_at"])),
+        stopped_at=None if stopped is None else from_iso(str(stopped)),
     )
 
 
