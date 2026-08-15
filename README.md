@@ -30,9 +30,10 @@ test except two, which need a browser and a phone and are outstanding as such
 (`ROADMAP.md` M11 and M13).
 
 **Everything designed and not built is in one place**: `REQUIREMENTS.md` §7,
-the gap register, which separates what is *owed* — twelve items, each with a
-numbered requirement — from what was *withdrawn*. Nothing in it is a must-have.
-The design documents describe what exists; §7 is where the rest lives, and r11
+the gap register, which separates what is *owed* — ten items, each with a
+numbered requirement — from what was *withdrawn*. Nothing in it is a must-have
+except `migrate` (FR-L1), whose capability exists under another name. The
+design documents describe what exists; §7 is where the rest lives, and r11
 argues why that split is worth having.
 
 Vogt now sees work you did not type in. Collectors sweep your registered

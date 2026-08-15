@@ -446,25 +446,56 @@ them is how a decision turns back into a task:
   look like open work, which is exactly the failure r2 and r3 spent their
   revisions avoiding.
 
-**Seven IDs are appended**, each for a capability some document specified and
-no requirement had ever named. Per §4, IDs are append-only and each continues
-its family from its current maximum (FR-D8, FR-E9, FR-M3, FR-S10, FR-V4 as of
-r10):
+**Seven IDs were appended and one was withdrawn within the hour**, each for a
+capability some document specified and no requirement had ever named. Per §4,
+IDs are append-only and each continues its family from its current maximum
+(FR-D8, FR-E9, FR-M3, FR-S10, FR-V4 as of r10):
 
 | New ID | What it names | Pri |
 |---|---|---|
 | FR-D9 | Declared dependency edges — the `declared` `RefKind` nothing produces | C |
 | FR-E10 | GUI streaming operable where a deployment enables it | C |
 | FR-E11 | Two live sessions shall not silently share one working tree | C |
-| FR-M4 | Dev and prod mobile shells installable side by side | S |
+| FR-M4 | An FCM client entry for the dev shell's application id | S |
 | FR-S11 | The `writeback` scope shall gate the write-back it names | S |
-| FR-S12 | A work item's audit filter shall reach its comments | S |
+| ~~FR-S12~~ | ~~A work item's audit filter shall reach its comments~~ **Withdrawn (r11)** — already delivered; see below | — |
 | FR-V5 | Ranked views shall be pageable past their first page | S |
 
 None is a must-have, and that is the finding rather than an accident: every
 gap this pass turned up is a `C` or an `S`, so v2's shape is not in question.
 What was in question was whether anyone could enumerate them, and until now
 nobody could.
+
+**Three of this revision's own claims were wrong, and the method that caught
+them is §5.4a's.** The first draft of §7 was assembled from what the other
+documents *said* was missing rather than from the source, which is the exact
+mistake §6's opening warns about — and it produced three bad rows:
+
+- **FR-S6 was listed as owed. It is delivered.** §5.1's own row has said so,
+  struck through, since r7: `ListAuditParams` carries `since`, `until`,
+  `project` and `offset`, the interval is half-open so consecutive windows tile
+  the log exactly, and `tests/test_audit_query.py` has twenty-three tests. The
+  row was copied from `README.md`'s status paragraph, which was itself stale.
+- **FR-S12 was minted for something that exists.** `ROADMAP.md` M11 said a
+  per-item audit filter misses comments; `declared.py`'s trail query is a
+  semi-join — `a.entity_id = ? OR (a.entity_kind = 'comment' AND a.entity_id
+  IN (…))` — and `test_a_comment_appears_in_its_work_items_audit_trail` and
+  `test_one_items_comments_stay_out_of_another_items_trail` cover both
+  directions. The roadmap note was true when written and nobody revisited it.
+  The ID stays, struck through, per §4: it was published, and an ID that
+  silently disappears is worse than one that records a mistake.
+- **FR-M4 claimed three conjuncts and only one is short.** The distinct
+  `applicationId` is built — `build.gradle` reads `MYDEVENV2_ANDROID_APP_ID`
+  and says in a comment what it is for — and so is the per-build front door
+  (`VOGT_ANDROID_SERVER_URL`, no default). What is missing is the FCM client
+  entry for the dev id, because `google-services.json` is keyed to the
+  application id. The requirement is narrowed to that.
+
+The lesson is the one this document keeps relearning and is worth stating a
+third time: **a gap register assembled from other documents inherits their
+staleness.** Every row in §7 has now been read against the source. Where a
+document and the code disagreed, the code won, and the document was wrong three
+times out of twelve.
 
 **One correction of record.** `ROADMAP.md` M12 said FR-T7 "was not attempted".
 It was: `engine/server/src/assistant.rs` refuses a `claude-*` model id on the
@@ -615,7 +646,7 @@ by path or repository URL, and stops there.*
 | FR-S9 | *(r9)* The front door shall hold the single public token namespace, extended with Vogt capabilities; each front-door token shall map to a named Vogt actor whose paired core token the proxy injects — so audit records real actors, the proxy never pre-approves, and the double-gated writes of FR-S4 are not weakened. | M | MERGE §9 |
 | FR-S10 | *(r9)* A session started for a project or work item shall receive a per-session actor-scoped token, minted at start and revoked at session end; its writes shall be distinguishable in the audit log from every other actor's. | M | MERGE §6.1, §9 |
 | FR-S11 | *(r11)* Every scope the system issues shall gate at least one operation. `writeback` gates none: `forge.writeback` sets a project's policy under `project.write`, and the upstream write is a consequence of commenting or transitioning under `work.write` — so a token issued with `writeback` alone can only read, which is a trap for whoever issues one in good faith. Either the scope gates the write-back it names, or it is withdrawn and the issuer told why. | S | DESIGN §4.1 |
-| FR-S12 | *(r11)* An audit query filtered to one work item shall return every write about that item, comments included. Comments are currently audited against the comment's own entity, so a per-item filter returns creates, transitions and updates and silently omits the conversation — an audit view that is quietly partial is worse than one that refuses, because nothing on screen says a row is missing. | S | FR-S6, FR-U19 |
+| FR-S12 | ~~*(r11)* An audit query filtered to one work item shall return every write about that item, comments included.~~ **Withdrawn (r11), on the day it was raised** — the capability already exists. `declared.py`'s trail query is a semi-join over the comment ids belonging to the item, and `tests/test_audit_query.py` asserts both that a comment appears in its item's trail and that it stays out of another item's. It was raised from a stale `ROADMAP.md` note rather than from the source; the ID is kept struck through per §4 because it was published. | — | — |
 
 ### FR-B — Forge write-back (optional module)
 
@@ -708,7 +739,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | FR-M1 | *(r9)* The mobile app shall be the Capacitor shell loading the merged PWA. Its MVP1 feature set shall be: terminal sessions, assistant with voice, push, backlog/board read, and session start/approve. | M | MERGE §3; ROADMAP M13 |
 | FR-M2 | *(r9)* Push notifications shall be routed for events worth a phone interruption: a session entering `waiting-for-input` or `errored`, new drift, and the agent-task notify hook — and for nothing else by default. | S | MERGE §10 |
 | FR-M3 | *(r9)* Vogt surfaces shall be usable at phone widths; the board shall render as a list, not columns, below the narrow breakpoint. | S | MERGE §7 |
-| FR-M4 | *(r11)* A dev build of the mobile shell shall install alongside a prod build on one device: its own `applicationId`, its own FCM client entry, and its own configured front door. Android refuses two APKs sharing an id, so validating a mobile change today means uninstalling the working app first — which is why FR-M2's push routing and FR-T5's voice pass are both still unverified on hardware. The signing key may be shared. | S | §7 |
+| FR-M4 | *(r11)* A dev build of the mobile shell shall install alongside a prod build on one device **and register for push**. The id and the front door are already build inputs (`MYDEVENV2_ANDROID_APP_ID`, `VOGT_ANDROID_SERVER_URL`); what is missing is an FCM client entry for the dev id, since `google-services.json` is keyed to the application id. Until it exists, validating a mobile change means uninstalling the working app — which is why FR-M2's push routing and FR-T5's voice pass are both unverified on hardware. The signing key may be shared. | S | §7 |
 
 ---
 
@@ -1858,16 +1889,14 @@ the requirement's own.
 |---|---|---|---|
 | **FR-L1** | M | The `migrate` verb. `init` is idempotent and brings an instance forward, and `serve` migrates before reporting ready, so the capability exists under other names. | The verb an operator reaches for is absent. Compounds NFR-I3, which is the deploy path — see §5.1. |
 | **FR-G1** | M | The contract is a versioned constant in `core/contract.py`; `VogtConfig` has no contract keys. | A self-hoster cannot state a different contract without editing Python. The shape, the version and the named failing criteria are all delivered — only the sourcing is not. |
-| **FR-S6** | S | The audit log's time filter. | An audit query cannot be bounded by when; every other axis works. |
 | **FR-T5** | S | The voice validation pass against domain vocabulary — project slugs, `WI-7`, the word "backlog". | Voice was adopted unproven and is still unproven. The system prompt now tells the model the vocabulary, which is preparation, not evidence. Blocked on FR-M4. |
 | **FR-T7** | C | The native Anthropic backend. *The other half is delivered*: a `claude-*` id on the OpenAI-compatible transport is refused with a sentence naming the model, the transport and the setting that overrides it. | The loop is OpenAI-compatible only. The `claude-*` proxy hang is unexplained but no longer silent, which was the failure that mattered — a hang is indistinguishable from thinking. |
 | **FR-D9** | C | Any producer of a `declared` dependency edge. | A dependency expressed only in a deploy script or a person's head is invisible to `deps` and to the reverse lookup. |
 | **FR-S11** | S | Anything gated by the `writeback` scope. | A token issued with `writeback` alone can only read. The trap costs whoever issues one in good faith. |
-| **FR-S12** | S | Comments in a per-item audit filter. | A work item's audit view is quietly partial. Nothing on screen says a row is missing, which is the whole problem. |
-| **FR-V5** | S | An offset on `backlog` and `bugs`. | There is no way past the top 200 of a ranked view. The truncation is announced; it just cannot be continued. |
+| **FR-V5** | S | An offset on `backlog` and `bugs`. Both carry `limit` (max 200) and nothing else; `audit.list` and `work.list` do have one, so this is an inconsistency as well as a gap. | There is no way past the top 200 of a ranked view. The truncation is announced; it just cannot be continued. |
 | **FR-E10** | C | An operable GUI stream. The compositor and streamer are in the image, the launch and process APIs are built, production runs `START_SWAY=0` and `GUI_STREAM_URL=""`. | A surface exists that has never been shown to do anything. |
-| **FR-E11** | C | Any signal that two live sessions share a working tree. | Two agents can edit one checkout concurrently and neither is told. No audit row records the loss, because both writes are legitimate. |
-| **FR-M4** | S | Separate `applicationId` for the dev mobile build. | Validating a mobile change means uninstalling the working app. This is what blocks FR-M2's and FR-T5's hardware verification, so it is smaller than the two it holds up. |
+| **FR-E11** | C | Any signal that two live sessions share a working tree. Nothing in `sessions.py` or the engine's registry compares a new session's `cwd` against the live ones. | Two agents can edit one checkout concurrently and neither is told. No audit row records the loss, because both writes are legitimate. |
+| **FR-M4** | S | An FCM client entry in `google-services.json` for the dev build's application id. *The rest of this requirement is delivered*: `build.gradle` takes the id from `MYDEVENV2_ANDROID_APP_ID`, and the front door from `VOGT_ANDROID_SERVER_URL` with no default. | A dev APK installs beside prod but cannot register for push, because `google-services.json` is keyed to the application id. This is what blocks FR-M2's and FR-T5's hardware verification, so it is smaller than the two it holds up. |
 
 ### 7.2 Owed, and blocked on something that is not code
 

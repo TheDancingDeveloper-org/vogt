@@ -881,13 +881,18 @@ carries the reminder and the order of operations: run the demo, then delete
    NFR-S5's "does not fetch the estate to render a page" holds, true
    virtualization does not. Bulk drift accept does not exist, by §3.
 
-**Open after M11**, all three now carrying IDs so they are countable
-*(r11)*: the browser demo (`REQUIREMENTS.md` §7.2); comments audited against
-the comment rather than the work item, so a per-item audit filter shows
-creates, transitions and updates but not comments — a server-side fix, either
-an `entity_kind`/parent filter on `audit.list` or a change to what a comment
-write audits (**FR-S12**); and `backlog`/`bugs` having no `offset`, so there is
-no way to page past the top 200 of a ranked view (**FR-V5**).
+**Open after M11** — two of the three, since one was closed and this note did
+not notice *(corrected r11)*: the browser demo (`REQUIREMENTS.md` §7.2), and
+`backlog`/`bugs` having no `offset`, so there is no way to page past the top
+200 of a ranked view (**FR-V5**).
+
+The third said comments were audited against the comment rather than the work
+item, so a per-item audit filter would miss them. **That was fixed and this
+paragraph was not.** `declared.py`'s trail query is a semi-join over the item's
+comment ids, and `tests/test_audit_query.py` asserts both directions — a
+comment appears in its own item's trail, and stays out of another's. The stale
+note survived long enough to have a requirement minted from it in r11, which is
+the cost of a roadmap paragraph that outlives the thing it describes.
 
 ## M12 — AI layer & voice validation (M–L)
 
