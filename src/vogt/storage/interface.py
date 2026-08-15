@@ -460,6 +460,11 @@ class DeclaredStore(Protocol):
 
     def schema_version(self) -> int: ...
 
+    def bundled_schema_version(self) -> int:
+        """The version this build expects, against which `schema_version`
+        is only half an answer (NFR-I3)."""
+        ...
+
     def bootstrap(self, principal: Principal) -> BootstrapResult: ...
 
     def record_auth_decision(self, decision: AuthDecision) -> None:
@@ -512,6 +517,11 @@ class ObservedStore(Protocol):
     def is_initialized(self) -> bool: ...
 
     def schema_version(self) -> int: ...
+
+    def bundled_schema_version(self) -> int:
+        """The version this build expects, against which `schema_version`
+        is only half an answer (NFR-I3)."""
+        ...
 
     def bind_instance(self, instance_id: str) -> None:
         """Stamp this store with the instance it belongs to.

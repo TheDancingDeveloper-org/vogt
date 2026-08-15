@@ -24,6 +24,12 @@ LOCAL_ONLY: Mapping[str, str] = {
         "Creates the instance in a local data directory. A running server "
         "already has one, so there is no meaningful remote semantics."
     ),
+    "migrate": (
+        "Brings the schema of the local data directory forward. Over HTTP it "
+        "would be a request asking the server to change the ground it is "
+        "standing on mid-flight; the server already migrates at startup "
+        "(NFR-I3), so the remote case is served by restarting it."
+    ),
     "serve": (
         "Takes over this process to listen on a port. A running server being "
         "asked over its own API to start another one is not a meaningful "

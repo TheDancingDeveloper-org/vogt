@@ -24,6 +24,7 @@ from vogt.application.services.history import list_audit, list_events
 from vogt.application.services.imports import import_project
 from vogt.application.services.instance import (
     init_instance,
+    migrate_instance,
     serve,
     serve_mcp_stdio,
     status,
@@ -121,6 +122,7 @@ __all__ = [
     "list_work",
     "list_workflows",
     "list_write_backs",
+    "migrate_instance",
     "observations",
     "onboard",
     "prune",

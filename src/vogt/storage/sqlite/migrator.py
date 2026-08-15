@@ -106,6 +106,22 @@ class Migrator:
         row = conn.execute("SELECT id FROM migrations ORDER BY id DESC").fetchone()
         return 0 if row is None else int(str(row["id"]).split("_", 1)[0])
 
+    def bundled_version(self) -> int:
+        """Highest migration number *this build carries*, applied or not.
+
+        `applied_version` says what the database has; this says what the code
+        expects. NFR-I3 is the gap between them, and until r13 nothing
+        compared the two: readiness reported the applied number on its own,
+        which is a fact about the disk that answers no question a deployer
+        has. An image whose migration had not run looked exactly like one
+        whose migration had.
+
+        Read from the directory rather than cached, for the same reason
+        `load_migrations` is: the answer is a property of the files that
+        shipped, and a constant would be a second place to forget.
+        """
+        return max((m.number for m in load_migrations(self._directory)), default=0)
+
     def migrate(self, conn: sqlite3.Connection, *, now: datetime) -> MigrationReport:
         """Bring the database forward to the newest migration on disk."""
         self._ensure_framework(conn)

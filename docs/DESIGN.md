@@ -670,14 +670,17 @@ Deployment and network topologies: [`DEPLOYMENT.md`](DEPLOYMENT.md).
   migrations tables; observed store is append-only with a retention policy
   that never prunes the latest observation per subject, nor any observation
   a drift proposal references.
-- `vogt init | status | backup | restore | export | import`. Migration has no
-  verb of its own: `init` is idempotent and brings an existing instance
-  forward. **`serve` does not migrate**, and `/health/ready` reports the
-  *applied* schema versions without comparing them to the version the running
-  image expects — so a container started with `command: serve` on an image
-  carrying a new migration comes up green and fails afterwards. FR-L1 names
-  `migrate` and NFR-I3 names the gate; both are gaps rather than decisions,
-  and NFR-I3 is the most consequential row in `REQUIREMENTS.md` §7.
+- `vogt init | migrate | status | backup | restore | export | import`. `init`
+  creates and is idempotent; `migrate` moves an existing instance forward and
+  refuses a data directory that holds none, because collapsing the two would
+  make the destructive-sounding verb the safe one. **`serve` migrates before it
+  assembles anything**, and `/health/ready` compares each store's applied
+  version against the highest migration the build ships, answering `503` that
+  names the store, both numbers and the verb to run *(r13 — until then it
+  reported the applied number alone, so a container carrying an unrun migration
+  came up green and failed afterwards on a missing table)*. A store ahead of
+  the build stays green: `migrate` refuses that case with more diagnosis than a
+  probe can carry.
 - Config: pydantic settings schema is the single source of truth; example
   config and docs are generated from it in CI (drift between docs and
   defaults fails the build).

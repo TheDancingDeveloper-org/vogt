@@ -13,12 +13,15 @@ from vogt.application.models import (
     InitResult,
     McpStdioParams,
     McpStdioResult,
+    MigrateParams,
+    MigrateResult,
     ServeParams,
     ServeResult,
     StatusParams,
     StatusResult,
     StoreCounts,
 )
+from vogt.errors import InvalidRequest
 
 
 def init_instance(ctx: AppContext, params: InitParams) -> InitResult:
@@ -48,6 +51,44 @@ def init_instance(ctx: AppContext, params: InitParams) -> InitResult:
         created=created,
         declared_schema_version=declared_report.version,
         observed_schema_version=observed_report.version,
+        migrations_applied=[
+            *(f"declared:{name}" for name in declared_report.applied),
+            *(f"observed:{name}" for name in observed_report.applied),
+        ],
+    )
+
+
+def migrate_instance(ctx: AppContext, params: MigrateParams) -> MigrateResult:
+    """Bring both stores forward to this build's schema (FR-L1, NFR-I3).
+
+    `init` has always done this as part of creating an instance, and for a
+    year that was the whole answer — which meant the verb an operator reaches
+    for after a digest bump was `init`, a word that reads like "start over"
+    on a live data directory. Nobody is served by having to know it is
+    idempotent.
+
+    So this is the same act under the name it actually has. It does not
+    bootstrap and cannot create an instance: run it against an empty data
+    directory and it says so rather than quietly conjuring one, because the
+    two operations answer different questions and a `migrate` that silently
+    created an estate would be the more expensive surprise.
+    """
+    del params
+    if not ctx.declared.is_initialized():
+        msg = (
+            "no instance in this data directory to migrate — `vogt init` "
+            "creates one, and is idempotent against an existing instance"
+        )
+        raise InvalidRequest(msg)
+
+    declared_report = ctx.declared.migrate()
+    observed_report = ctx.observed.migrate()
+    return MigrateResult(
+        data_dir=str(ctx.config.resolved_data_dir),
+        declared_schema_version=declared_report.version,
+        observed_schema_version=observed_report.version,
+        declared_schema_expected=ctx.declared.bundled_schema_version(),
+        observed_schema_expected=ctx.observed.bundled_schema_version(),
         migrations_applied=[
             *(f"declared:{name}" for name in declared_report.applied),
             *(f"observed:{name}" for name in observed_report.applied),

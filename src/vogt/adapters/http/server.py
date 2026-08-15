@@ -87,6 +87,23 @@ def build_server(
     def context(principal: Principal | None = None) -> AppContext:
         return build_context(config=resolved_config, principal=principal)
 
+    # NFR-I3: migrate before anything can be served, not merely report on it.
+    # The deployed topology runs `command: serve` and never runs `init`, so
+    # until r13 an image carrying a new migration started against the old
+    # schema and failed at whatever first touched a missing table. Doing it
+    # here rather than in `run` means every path that assembles the app gets
+    # it, including the tests — a fix that only the production entrypoint
+    # exercises is one nothing can catch regressing.
+    #
+    # Idempotent and locked (`migrator.py`), so two containers starting
+    # together cannot both apply it, and a start against a current schema
+    # costs one lock acquisition. Failure is deliberately not swallowed: a
+    # server that could not migrate must not come up and answer with a schema
+    # nobody asked for.
+    _startup = context()
+    _startup.declared.migrate()
+    _startup.observed.migrate()
+
     #: A scheduled sweep has no human behind it. Attributing it to whoever
     #: started the process would put that person's name on evidence they
     #: never asked for, and provenance that says something untrue is worse

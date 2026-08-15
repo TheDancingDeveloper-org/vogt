@@ -540,24 +540,32 @@ artifact, not a hand-maintained parallel truth.
 - `vogt backup` produces a consistent snapshot (SQLite backup API,
   both stores + a manifest with schema versions); `restore` verifies the
   manifest before touching anything.
-- Upgrade path *(intended)*: bump the pinned digest in ops → `DeployStack`
-  → forward-only migrations run under `migration_lock` at startup →
-  `/health/ready` gates traffic until migration completes.
+- Upgrade path: bump the pinned digest in ops → `DeployStack` → forward-only
+  migrations run under `migration_lock` at startup → `/health/ready` gates
+  traffic until migration completes. **This is what happens, from r13**
+  (2026-08-15); before that it was the *intent*, and the paragraph describing
+  it was the one thing in this document that had never been true.
 
-  **As built, this does not happen, and it is the one deployment gap in
-  v1.** Migrations are applied by `init` — which is idempotent and brings an
-  existing instance forward — and by nothing else. `serve` does not migrate,
-  there is no `vogt migrate` verb (FR-L1), and `/health/ready` reports the
-  *applied* schema version without comparing it to the version the running
-  image expects, so it answers `ready` against a store that is behind
-  (NFR-I3's third clause). The compose `command:` is `serve`, so an image
-  carrying a new migration would come up, pass its healthcheck, and fail
-  later on a missing table — as a SQL error, at whatever operation touched
-  it first.
+  What was wrong, since a deployer who read the old text may still be carrying
+  the workaround: migrations were applied by `init` and by nothing else,
+  `serve` did not migrate, there was no `vogt migrate` verb, and
+  `/health/ready` reported the applied schema version without comparing it to
+  the version the image expects — so it answered `ready` against a store that
+  was behind. The compose `command:` is `serve`, so an image carrying a new
+  migration came up, passed its healthcheck, and failed later on a missing
+  table as a SQL error at whatever touched it first.
 
-  Until that is closed: after a digest bump that crosses a migration, run
-  `vogt init` in the container before trusting the stack. Both halves are
-  recorded in `REQUIREMENTS.md` §5.
+  **The `vogt init` workaround after a digest bump is no longer needed** and
+  can be dropped from any runbook that carries it. If you want to run it
+  anyway it stays idempotent and harmless; `vogt migrate` is the verb that now
+  says what it does, and it refuses a data directory holding no instance.
+
+  A store *ahead* of the build — a rollback across a migration — keeps
+  answering `ready`, and that is deliberate. `migrate` refuses it with the
+  forward-only message naming the migration; a probe going red there would
+  make a deliberate rollback look like a broken container, and would send an
+  operator to the healthcheck for a diagnosis only the migrator can give. The
+  next bullet is still the rule for that case.
 - Rollback is a revert of the digest line in ops plus a `DeployStack`.
   Forward-only migrations mean a rollback across a schema change needs a
   restore, not just an older image — check `SCHEMA.md` before assuming the

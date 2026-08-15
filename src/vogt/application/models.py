@@ -89,6 +89,27 @@ class InitResult(Result):
     migrations_applied: list[str]
 
 
+class MigrateParams(Params):
+    """`migrate` takes nothing: the data directory comes from configuration."""
+
+
+class MigrateResult(Result):
+    """What `migrate` moved, and whether anything is still behind.
+
+    Reports the expected versions beside the applied ones for the same reason
+    `/health/ready` does (NFR-I3): the applied number alone cannot answer
+    "is this instance current?", which is the only question the operator
+    running this has.
+    """
+
+    data_dir: str
+    declared_schema_version: int
+    observed_schema_version: int
+    declared_schema_expected: int
+    observed_schema_expected: int
+    migrations_applied: list[str]
+
+
 class McpStdioParams(Params):
     """`mcp stdio` takes nothing: the streams are this process's own."""
 

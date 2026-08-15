@@ -84,6 +84,10 @@ class SqliteObservedStore:
         finally:
             conn.close()
 
+    def bundled_schema_version(self) -> int:
+        """What this build expects (NFR-I3). Touches no database."""
+        return self._migrator.bundled_version()
+
     def is_initialized(self) -> bool:
         if not self._path.exists():
             return False

@@ -507,6 +507,47 @@ offers out of the hang. The native Anthropic backend, its first way, is still
 absent. The roadmap now says both halves, because "not attempted" understated
 the work by exactly the amount that would have caused someone to redo it.
 
+### Revision r13 — the schema gate closes, and `migrate` is a verb
+
+*2026-08-15. Two must-haves delivered: **NFR-I3** and **FR-L1**. Both had been
+open since M4.*
+
+NFR-I3 was the only row in §7 with operational consequence, and it was three
+holes wearing one ID:
+
+1. **`serve` did not migrate.** The deployed topology runs `command: serve` and
+   never runs `init`, so the one entrypoint production uses was the one that
+   left the schema alone. `build_server` now migrates both stores before it
+   assembles anything — in `build_server` rather than in `run`, because a fix
+   only the production entrypoint exercises is one nothing can catch
+   regressing.
+2. **`/health/ready` compared nothing.** It reported the *applied* schema
+   version, which is a fact about the disk that answers no question a deployer
+   has: an image whose migration had not run looked exactly like one whose
+   migration had. Stores now report `bundled_schema_version()` — read from the
+   migration files that shipped, never a constant somebody has to bump — and
+   the probe answers `503` when either store is behind, naming the store, both
+   numbers, and the verb to run.
+3. **There was no verb.** `init` had always done the work, so the thing an
+   operator reached for after a digest bump was a word that reads like "start
+   over" on a live data directory. `migrate` is now an operation
+   (`FR-L1`), local-only for the same reason `init` is, and it refuses an
+   empty data directory rather than conjuring an instance — `init` creates,
+   `migrate` moves forward, and collapsing them would make the
+   destructive-sounding verb the safe one.
+
+**A store *ahead* of the build stays green**, deliberately. `migrate` refuses
+that case with the forward-only message, which names the migration and says to
+restore a backup or deploy the newer build; a probe that also went red would
+send an operator to the healthcheck for a diagnosis only the migrator can give,
+and would make a rollback look like a broken container.
+
+`tests/test_schema_gate.py` (eleven) is the evidence, and both halves were
+mutation-checked: deleting the two `migrate` calls in `build_server` fails the
+server test, and disabling the comparison fails all three probe tests. The gate
+is parametrized over both stores, because a check that read only `declared`
+would pass a deploy whose observed migration had not run.
+
 ### Revision r12 — a second model vendor is a choice, not a capability
 
 *2026-08-15. One clause deferred. No behaviour changes.*
@@ -1052,8 +1093,8 @@ across CLI, REST and MCP by being consistently absent from every one.
 
 | ID | Pri | What is missing | Severity |
 |---|---|---|---|
-| FR-L1 | M | The CLI provides `init`, `status`, `serve`, `backup`, `restore`, `export`, `import` — **not `migrate`**. Migrations are applied by `init`, which is idempotent and brings an existing instance forward, so the capability exists under another name and no data is at risk locally. What is missing is the verb an operator would reach for, and the one the deployed stack needs (below). | Low alone; compounds NFR-I3 |
-| NFR-I3 | M | Migrations are forward-only ✅ and run under `migration_lock` ✅. They do **not gate readiness**: `/health/ready` reports the *applied* schema version without comparing it to the version the running image expects, and `serve` does not migrate. In the Node B topology (`command: serve`) an image carrying a new migration comes up, passes its healthcheck, and fails later on a missing table — as a SQL error at whatever touched it first, not as a red probe. See `DEPLOYMENT.md` §5. | **Highest of these** — it is the deploy path |
+| FR-L1 | M | ~~The CLI provides everything but `migrate`.~~ **Delivered (r13).** `migrate` is an operation in the registry and a CLI verb, local-only like `init`, reporting both stores' applied and expected versions. It refuses a data directory with no instance rather than creating one. `tests/test_schema_gate.py`. | — |
+| NFR-I3 | M | ~~Readiness does not gate on migration, and `serve` does not migrate.~~ **Delivered (r13).** `build_server` migrates both stores before assembling the app, and `/health/ready` compares each store's applied version against `bundled_schema_version()` — the highest migration the build ships — answering `503` naming the store, both numbers and `vogt migrate`. A store *ahead* of the build stays green, because `migrate` refuses that case with more diagnosis than a probe can carry. `tests/test_schema_gate.py`, mutation-checked on both halves. | — |
 | FR-S6 | M | ~~Not queryable by time.~~ **Delivered.** `ListAuditParams` now carries `since`, `until`, `project` and `offset`, and `AuditListResult` carries `total`. The interval is half-open — `since` inclusive, `until` exclusive — so consecutive windows tile the log exactly and a write made at midnight is counted once rather than in both weeks that touch it. A naive bound is read as UTC rather than the server's zone, since the stored `at` is always UTC and reinterpreting a bound locally would move a query's boundary by an hour on one host and not on another. `tests/test_audit_query.py` (twenty) and an `audit.list` step in the parity script, so the new parameters answer the same on CLI, REST and MCP. | — |
 | FR-G1 | M | The contract is declarative ✅, carries a version identifier ✅, and names every failing criterion ✅ — but it is **not sourced from configuration**. It is the constant `DEFAULT_CONTRACT` in `core/contract.py`; `VogtConfig` has no contract keys, `CONFIG.md` lists none, and `evaluate()` is only ever called with the default. Nobody self-hosting Vogt can state a contract other than this repository's own without editing Python. | Medium — it is the requirement's entire "sourced from configuration" clause, in a product meant for others to run |
 | FR-D2 | M | Edges record `path` and `git` ✅ with the manifest they came from ✅. The third reference kind, `declared`, **cannot be produced**: `DESIGN.md` §3.5's `project link A depends_on B` was never given an operation, no `project_dependencies` table exists, and `RefKind`'s third member is unreachable. A dependency no manifest expresses — a service calling another, a deploy script's assumption — cannot be recorded, so it is absent from `deps` and from the reverse lookup FR-D4 promises. | Medium |
@@ -1937,8 +1978,6 @@ the requirement's own.
 
 | ID | Pri | What is missing | What the absence costs |
 |---|---|---|---|
-| **NFR-I3** | M | **Readiness does not gate on migration.** Forward-only ✅, under `migration_lock` ✅ — but `/health/ready` reads the *applied* schema versions and answers `ready` whenever the stores respond, never comparing them against the version the running image expects, and `serve` does not migrate (only `init` and `restore` do). | **The worst gap in this register**, and the only must-have with operational consequence. In the Node B topology (`command: serve`) an image carrying a new migration starts, passes its healthcheck, and fails later on a missing table — as a SQL error at whatever touched it first, not as a red probe. `DEPLOYMENT.md` §5. |
-| **FR-L1** | M | The `migrate` verb. `init` is idempotent and brings an instance forward, so the capability exists under another name — but note the correction: **`serve` does not migrate**, which §5.1's row and `DESIGN.md` §7 both implied it did. | The verb an operator reaches for is absent. Compounds NFR-I3 above, and is most of the fix for it. |
 | **FR-G1** | M | The contract is a versioned constant in `core/contract.py`; `VogtConfig` has no contract keys. | A self-hoster cannot state a different contract without editing Python. The shape, the version and the named failing criteria are all delivered — only the sourcing is not. |
 | **FR-T5** | S | The voice validation pass against domain vocabulary — project slugs, `WI-7`, the word "backlog". | Voice was adopted unproven and is still unproven. The system prompt now tells the model the vocabulary, which is preparation, not evidence. Blocked on FR-M4. |
 | **FR-D9** | C | Any producer of a `declared` dependency edge. | A dependency expressed only in a deploy script or a person's head is invisible to `deps` and to the reverse lookup. |
