@@ -508,6 +508,7 @@ def test_a_tag_can_release_the_merged_image() -> None:
 
 MCP_BOOTSTRAP = REPO_ROOT / "engine" / "deploy" / "mcp-bootstrap.sh"
 VOGT_MCP_WRAPPER = REPO_ROOT / "engine" / "deploy" / "vogt-mcp-auth.sh"
+AGENT_AUTH = REPO_ROOT / "engine" / "deploy" / "agent-auth.sh"
 RETIRED_CORE_STACK = "winrarhost.tailc7d3c.ts.net:18094"
 
 #: These three read the *engine's* deploy scripts, which a core-only checkout
@@ -543,6 +544,65 @@ def test_a_sessions_own_endpoint_is_what_its_agent_is_registered_against() -> No
     )
     assert '--url "$VOGT_ENDPOINT"' in body, (
         "and the registration that pins a URL pins that one"
+    )
+
+
+@needs_engine
+def test_the_bootstrap_writes_nothing_to_the_protocol_stream() -> None:
+    """#28: stdout is the MCP transport, so a banner there is a bad frame.
+
+    `mydevenv2-agent-auth run` invokes this bootstrap on every launch, and two
+    of the things it launches are stdio MCP servers. `tests/test_bridge.py`
+    already forbids this of the bridge — "a diagnostic on stdout corrupts
+    framing and looks like a client bug" — and the bridge obeys it. The
+    launcher above it did not, so the rule held exactly where it was tested
+    and broke in the layer that wraps it.
+
+    Asserted on every `printf`/`echo`, not just the one that was wrong: the
+    next diagnostic added here is the next bad frame, and it would be found
+    the same way this one was — by a client, later, looking like something
+    else.
+    """
+    lines = MCP_BOOTSTRAP.read_text(encoding="utf-8").splitlines()
+    offenders: list[str] = []
+    for index, line in enumerate(lines):
+        if not re.match(r"\s*(printf|echo)\b", line):
+            continue
+        # A redirect may sit on a continuation line, which is how the four
+        # diagnostics here are written.
+        window = " ".join(lines[index : index + 3])
+        if ">&2" not in window and ">/dev/null" not in window:
+            offenders.append(line.strip())
+    assert not offenders, (
+        "these write to stdout, which for a stdio MCP server is the protocol "
+        f"stream: {offenders}"
+    )
+
+
+@needs_engine
+def test_the_access_check_probes_vogt_and_not_only_cadastre() -> None:
+    """#30: a check that skips one service converts unknown into assurance.
+
+    `agent-auth check` probed seven services and named Vogt only in the
+    bootstrap's banner — which reports that registrations were *written*, not
+    that anything answers. It was green while Vogt was completely unusable
+    from the pod, and the first evidence arrived later from a client (#29).
+
+    It is also the only thing that runs in the pod holding the credential a
+    client will use, against the endpoint that client will use, so it is the
+    one place that can catch a per-instance token mismatch.
+    """
+    body = _without_comments(AGENT_AUTH.read_text(encoding="utf-8"))
+    assert "ok: Vogt MCP" in body, (
+        "the check must probe Vogt and say so by name, as it does Cadastre"
+    )
+    assert '"method":"initialize"' in body, "probed the way a client connects"
+    # Absent is not broken: an instance may legitimately not be deployed, and
+    # agent auth has to keep working for git/gh regardless. The three states
+    # must stay distinguishable (FR-O4's rule, one layer out).
+    assert "skip: Vogt MCP" in body, (
+        "an unconfigured instance must read as 'not configured', never as a "
+        "failure and never as success"
     )
 
 
