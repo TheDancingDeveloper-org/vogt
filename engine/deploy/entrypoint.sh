@@ -79,7 +79,7 @@ if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
         >/tmp/tailscaled.log 2>&1'
     # Wait for the socket to appear before `tailscale up` — racing it gives
     # the "doesn't appear to be running" error.
-    for i in $(seq 1 30); do
+    for _ in $(seq 1 30); do
         [[ -S /var/run/tailscale/tailscaled.sock ]] && break
         sleep 0.2
     done
