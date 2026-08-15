@@ -20,7 +20,10 @@
 # job may legitimately do more — so this script is a floor, not a mirror.
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
+# `|| exit` because this script sets `-uo pipefail` and deliberately not
+# `-e`: without the guard a failed cd is silent, and every check below
+# then runs against whatever directory we happen to be in and passes.
+cd "$(dirname "$0")/.." || exit 1
 
 halves=("$@")
 if [ ${#halves[@]} -eq 0 ]; then

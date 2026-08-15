@@ -607,6 +607,31 @@ def test_the_access_check_probes_vogt_and_not_only_cadastre() -> None:
 
 
 @needs_engine
+def test_no_credential_is_fetched_in_a_way_that_hides_a_failure() -> None:
+    """`export X="$(cmd)"` takes `export`'s exit status, which is always 0.
+
+    `agent-auth.sh` runs under `set -euo pipefail`, so it reads as though a
+    failed `get_secret` would stop it. It does not: the status tested is
+    `export`'s, the substitution's failure is discarded, and the variable is
+    left as the empty string. Every service is then called with an empty
+    credential and answers 401 — which looks like a revoked token, a long way
+    from the secret store that was actually unavailable.
+
+    Five secrets were fetched that way with no emptiness check either. The two
+    GitHub ones already used assign-then-guard-then-export; this asserts all
+    of them do.
+    """
+    offenders: list[str] = []
+    for path in sorted((REPO_ROOT / "engine" / "deploy").glob("*.sh")):
+        for line in _without_comments(path.read_text(encoding="utf-8")).splitlines():
+            if re.match(r'\s*export\s+\w+="\$\(', line):
+                offenders.append(f"{path.name}: {line.strip()}")
+    assert not offenders, (
+        f"assign, check, then export — this form discards the failure: {offenders}"
+    )
+
+
+@needs_engine
 def test_no_vogt_registration_names_the_stack_this_product_replaces() -> None:
     """The core-only stack is retired by `DEPLOYMENT.md` §9.5.
 

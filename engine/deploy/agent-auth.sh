@@ -90,9 +90,27 @@ load_agent_environment() {
     require_command infisical
     access_token="$(mint_access_token)" || die "Infisical universal-auth login failed"
 
-    export GIT_AUTH_TOKEN="$(get_secret "$access_token" "$CICD_PROJECT_ID" GIT_AUTH_TOKEN)"
-    export FORGEJO_TOKEN="$(get_secret "$access_token" "$CICD_PROJECT_ID" FORGEJO_TOKEN)"
-    export WOODPECKER_TOKEN="$(get_secret "$access_token" "$INFRASTRUCTURE_PROJECT_ID" WOODPECKER_TOKEN)"
+    # Assigned, checked, then exported — never `export X="$(...)"`.
+    #
+    # `export` is a command with its own exit status, and it succeeds. Under
+    # `set -e` that status is the one tested, so a `get_secret` that fails
+    # inside the substitution does not stop the script: the variable is left
+    # empty and everything downstream runs with a credential that is the empty
+    # string. The failure then surfaces as a 401 from whichever service is
+    # asked first — a long way from the Infisical call that actually failed,
+    # and looking like a revoked token rather than an unavailable secret store.
+    #
+    # The two GitHub secrets below already did it this way. These five did
+    # not, and had no emptiness guard either.
+    GIT_AUTH_TOKEN="$(get_secret "$access_token" "$CICD_PROJECT_ID" GIT_AUTH_TOKEN || true)"
+    [[ -n "${GIT_AUTH_TOKEN}" ]] || die "Infisical secret GIT_AUTH_TOKEN is missing or empty"
+    export GIT_AUTH_TOKEN
+    FORGEJO_TOKEN="$(get_secret "$access_token" "$CICD_PROJECT_ID" FORGEJO_TOKEN || true)"
+    [[ -n "${FORGEJO_TOKEN}" ]] || die "Infisical secret FORGEJO_TOKEN is missing or empty"
+    export FORGEJO_TOKEN
+    WOODPECKER_TOKEN="$(get_secret "$access_token" "$INFRASTRUCTURE_PROJECT_ID" WOODPECKER_TOKEN || true)"
+    [[ -n "${WOODPECKER_TOKEN}" ]] || die "Infisical secret WOODPECKER_TOKEN is missing or empty"
+    export WOODPECKER_TOKEN
     # GITHUB_PAT / GH_RELEASE_TOKEN are retired release-automation names whose
     # values are revoked. They used to be exported here as GH_TOKEN, so every
     # `gh` call in an auto-agent-auth shell failed with "Bad credentials" and
@@ -114,13 +132,18 @@ load_agent_environment() {
     [[ -n "$github_source_token" ]] || die \
         "Infisical secret GITHUB_AUSAGENTSMITH_PAT is missing or empty"
     export GITHUB_AUSAGENTSMITH_PAT="$github_source_token"
-    export HOMELAB_KOMODO_API_KEY="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_KEY)"
-    export HOMELAB_KOMODO_API_SECRET="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_SECRET)"
+    HOMELAB_KOMODO_API_KEY="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_KEY || true)"
+    [[ -n "${HOMELAB_KOMODO_API_KEY}" ]] || die "Infisical secret HOMELAB_KOMODO_API_KEY is missing or empty"
+    export HOMELAB_KOMODO_API_KEY
+    HOMELAB_KOMODO_API_SECRET="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_SECRET || true)"
+    [[ -n "${HOMELAB_KOMODO_API_SECRET}" ]] || die "Infisical secret HOMELAB_KOMODO_API_SECRET is missing or empty"
+    export HOMELAB_KOMODO_API_SECRET
     # Cadastre is an agent-side dependency, not a container/server setting.
     # Keep the bearer in the child environment only; never persist or print it.
-    export CADASTRE_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$CADASTRE_SECRET_NAME")"
+    CADASTRE_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$CADASTRE_SECRET_NAME" || true)"
     [[ -n "$CADASTRE_HTTP_TOKEN" ]] || die \
         "Infisical secret $CADASTRE_SECRET_NAME is missing or empty"
+    export CADASTRE_HTTP_TOKEN
     # Vogt is the estate's backlog/project tracker, reached the same way for
     # the same reasons. Absent secret is not fatal, unlike cadastre's: an
     # instance may legitimately not be deployed yet, and agent auth must keep
@@ -137,7 +160,11 @@ load_agent_environment() {
         printf 'agent-auth: keeping the session token for %s\n' \
             "$VOGT_SESSION_ID" >&2
     else
-        export VOGT_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$VOGT_SECRET_NAME" || true)"
+        # Deliberately unguarded: absent is a supported state here — an
+        # instance may not be deployed yet — and `check` reports that as
+        # `skip`, never as success and never as failure.
+        VOGT_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$VOGT_SECRET_NAME" || true)"
+        export VOGT_HTTP_TOKEN
     fi
 
     umask 077
@@ -165,7 +192,7 @@ check_access() {
     require_command gh
     load_agent_environment
     response_file="$(mktemp)"
-    trap "rm -f '$response_file'" EXIT
+    trap 'rm -f "$response_file"' EXIT
 
     printf 'ok: Infisical universal auth\n'
     curl -fsS -H "Authorization: token $FORGEJO_TOKEN" \
