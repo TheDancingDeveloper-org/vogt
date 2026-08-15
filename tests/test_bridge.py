@@ -156,6 +156,36 @@ def test_an_unreachable_server_does_not_kill_the_bridge() -> None:
     assert "unreachable" in responses[0]["error"]["message"]
 
 
+def test_a_banner_that_is_not_json_is_a_warning_not_a_death() -> None:
+    """#25: the one discovery failure that was not guarded is the one that hit.
+
+    Behind the merged front door, `/connection-info` is answered by the PWA's
+    `index.html` at 200 (#24). `json.loads` raised out of `main()`, so
+    `vogt-mcp-remote` died at launch — while `/mcp` on the same host was
+    answering `initialize` and `tools/list` correctly. Every bridge client
+    lost a working server over an optional banner.
+
+    Discovery is a pre-flight, and its docstring already says so: "failures
+    here are warnings, not exits".
+    """
+
+    def transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
+        if url.endswith("/connection-info"):
+            return 200, b'<!doctype html>\n<html lang="en">\n  <head>\n'
+        return 200, json.dumps(
+            {"jsonrpc": "2.0", "id": json.loads(body)["id"], "result": {"ok": True}}
+        ).encode("utf-8")
+
+    _, responses, stderr = _run(
+        transport, {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+    )
+
+    assert "not JSON" in stderr, "the operator has to be told discovery was skipped"
+    assert responses[0]["result"] == {"ok": True}, (
+        "forwarding is the bridge's job and it works; discovery is not"
+    )
+
+
 def test_a_rejected_token_says_which_file_to_check() -> None:
     def transport(url: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
         if url.endswith("/connection-info"):

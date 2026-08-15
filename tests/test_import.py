@@ -20,7 +20,12 @@ from typing import Any
 
 import pytest
 
-from vogt.adapters.git import CloneOutcome, CloneRequest, clone_repository
+from vogt.adapters.git import (
+    CloneOutcome,
+    CloneRequest,
+    GitUnavailable,
+    clone_repository,
+)
 from vogt.application.context import AppContext, build_context
 from vogt.application.models import (
     ImportProjectParams,
@@ -381,6 +386,66 @@ def test_a_destination_holding_a_different_repository_is_refused(
             )
         )
     assert (destination / "README.md").exists(), "a refused import touched the tree"
+
+
+def test_an_instance_without_git_says_so_instead_of_blaming_the_checkout(
+    origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#21: the guard has to run before anything asks git a question.
+
+    Production shipped an image with no git. Importing into a checkout of
+    exactly the right remote failed as `conflict: ... is a clone of an
+    unknown remote`, because reading the origin URL came back empty and
+    empty was indistinguishable from "this checkout has no origin". The
+    message sent the reader to inspect a correct working tree.
+    """
+    destination = tmp_path / "cloned"
+    clone_repository(CloneRequest(remote=str(origin), destination=destination))
+
+    monkeypatch.setattr("vogt.adapters.git.clone.shutil.which", lambda _: None)
+
+    with pytest.raises(GitUnavailable, match="git is not installed"):
+        clone_repository(CloneRequest(remote=str(origin), destination=destination))
+
+
+def test_a_git_that_cannot_be_run_is_not_read_as_an_empty_answer(
+    origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#21, the other half: `_read` tolerated far more than it meant to.
+
+    Its contract is "a question the checkout has no answer to" — no commits,
+    no origin. git failing to execute is not that, and returning `None` for
+    it manufactures the same empty answer a real one produces. Modelled with
+    the error a missing binary actually raises, past the `which` guard, so
+    the tolerance is tested rather than the guard.
+    """
+    destination = tmp_path / "cloned"
+    clone_repository(CloneRequest(remote=str(origin), destination=destination))
+
+    def _no_binary(*_args: object, **_kwargs: object) -> None:
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr("vogt.adapters.git.clone.subprocess.run", _no_binary)
+
+    with pytest.raises(GitUnavailable):
+        clone_repository(CloneRequest(remote=str(origin), destination=destination))
+
+
+def test_a_checkout_with_no_origin_is_still_a_conflict(
+    origin: Path, tmp_path: Path
+) -> None:
+    """The tolerance #21 narrowed is still there for the case it was for.
+
+    Narrowing `_read` must not turn "git answered, and the answer is that
+    there is no origin" into an error. That answer is a real one, and it
+    still means the destination is not this remote's clone.
+    """
+    destination = tmp_path / "cloned"
+    clone_repository(CloneRequest(remote=str(origin), destination=destination))
+    _git(destination, "remote", "remove", "origin")
+
+    with pytest.raises(Conflict, match="unknown remote"):
+        clone_repository(CloneRequest(remote=str(origin), destination=destination))
 
 
 def test_a_destination_holding_unrelated_files_is_refused(tmp_path: Path) -> None:

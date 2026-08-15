@@ -57,6 +57,18 @@ class GitUnavailable(VogtError):
     http_status = 502
 
 
+class GitCommandFailed(GitUnavailable):
+    """git ran, and exited non-zero.
+
+    Separated from its parent because the two mean opposite things to a
+    caller asking a checkout a question. "git exited non-zero" is often the
+    answer — a repository with no commits has no HEAD, a clone with no origin
+    has no URL — while "git could not be run at all" is never an answer, and
+    treating it as one is what let a missing binary read as a checkout with
+    no origin (#21).
+    """
+
+
 @dataclass(frozen=True)
 class CloneRequest:
     """One repository to put on disk."""
@@ -88,13 +100,20 @@ Cloner = Callable[[CloneRequest], CloneOutcome]
 def clone_repository(request: CloneRequest) -> CloneOutcome:
     """Clone `request.remote` to `request.destination` (FR-P6, FR-P7)."""
     destination = request.destination.expanduser()
-    existing = _reuse_existing(destination, request.remote)
-    if existing is not None:
-        return existing
 
+    # Before anything reads a checkout, not after. `_reuse_existing` asks git
+    # what the destination's origin is; with no git that question comes back
+    # empty and is indistinguishable from a checkout that genuinely has no
+    # origin, so the import failed as "a clone of an unknown remote" against a
+    # checkout whose remote was exactly right (#21). The guard existed — it
+    # just sat downstream of the call that needed it.
     if shutil.which("git") is None:
         msg = "git is not installed, so a repository cannot be imported"
         raise GitUnavailable(msg)
+
+    existing = _reuse_existing(destination, request.remote)
+    if existing is not None:
+        return existing
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     with _AskPass(request.token) as env:
@@ -215,7 +234,7 @@ def _run_git(
         raise GitUnavailable(msg) from exc
     if completed.returncode != 0:
         msg = f"git {args[0]} failed: {_redact(completed.stderr.strip())}"
-        raise GitUnavailable(msg)
+        raise GitCommandFailed(msg)
     return completed.stdout.strip()
 
 
@@ -237,10 +256,16 @@ def _redact(message: str) -> str:
 
 
 def _read(destination: Path, *args: str) -> str | None:
-    """Ask an existing checkout something, tolerating an empty answer."""
+    """Ask an existing checkout something, tolerating an empty answer.
+
+    Only an answer is tolerated. A repository with no commits has no HEAD,
+    and a clone with no origin has no URL — git says so by exiting non-zero,
+    and both are facts. git being absent, unrunnable or hung is not a fact
+    about the checkout, and must not be reported as one: swallowing it here
+    is what turned "this instance has no git" into "that is a clone of an
+    unknown remote" (#21).
+    """
     try:
         return _run_git(list(args), cwd=destination) or None
-    except GitUnavailable:
-        # A repository with no commits has no HEAD, and a clone with no
-        # origin has no URL. Both are facts, not failures.
+    except GitCommandFailed:
         return None

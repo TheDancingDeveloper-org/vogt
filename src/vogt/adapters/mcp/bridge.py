@@ -102,7 +102,28 @@ class Bridge:
             self.warn(f"{self._url}/connection-info returned {status}")
             return
 
-        info = json.loads(body.decode("utf-8"))
+        # A 200 is not a promise that the body is ours. Behind the merged
+        # front door, `/connection-info` is answered by the PWA's index.html
+        # at 200 (#24), and this line raised straight out of `main()` — the
+        # bridge died at launch over a banner it did not need, while the
+        # `/mcp` endpoint two lines below was answering `initialize` and
+        # `tools/list` perfectly (#25). Discovery is a pre-flight; the same
+        # rule the two guards above follow applies here.
+        try:
+            info = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.warn(
+                f"{self._url}/connection-info returned 200 but not JSON; "
+                "skipping discovery and forwarding anyway"
+            )
+            return
+        if not isinstance(info, dict):
+            self.warn(
+                f"{self._url}/connection-info returned JSON that is not an "
+                "object; skipping discovery and forwarding anyway"
+            )
+            return
+
         self.report.remote_version = str(info.get("version", ""))
         if self.report.remote_version and self.report.remote_version != __version__:
             self.warn(

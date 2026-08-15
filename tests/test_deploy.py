@@ -142,6 +142,69 @@ def test_the_compose_owns_the_uid(compose: str) -> None:
     assert user.group(3) == "0", "gid stays 0; only the uid varies by host"
 
 
+def test_the_image_carries_git() -> None:
+    """git is a runtime dependency of import and of the git-local collector.
+
+    v0.2.0 shipped without it. Both builds were green: nothing in the test
+    suite runs the image, and every git call in the product is a subprocess
+    that fails at the point of use. Production therefore ran for days with
+    `project.import` unable to run at all, and with `git-local` recording a
+    clean checkout it had never read (#19, #20, #21).
+
+    This assertion is the cheap half. The half that actually proves it is
+    `docker run --entrypoint git "$CANDIDATE" --version` in `build.yml` and
+    `release.yml`, because a package can be named here and still not be in
+    the artefact — which is what NFR-Q7 now requires.
+    """
+    text = _without_comments(DOCKERFILE.read_text(encoding="utf-8"))
+    runtime = text.split("AS runtime", 1)
+    assert len(runtime) == 2, "the Dockerfile must have a named runtime stage"
+    assert re.search(r"apt-get install[^\n]*\bgit\b", runtime[1]), (
+        "the runtime stage must install git; the build stage having it is "
+        "not the same thing, and is what v0.2.0 relied on"
+    )
+
+
+def test_both_image_smoke_tests_run_git() -> None:
+    """NFR-Q7: the proof is running the artefact, so it is checked like code.
+
+    Reading a Dockerfile cannot catch a build that drops a package. Running
+    the binary in the built image can, and both publishing paths must do it —
+    a release that skips the check is exactly how this reached production.
+    """
+    for workflow in ("build.yml", "release.yml"):
+        text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+        assert 'docker run --rm --entrypoint git "$CANDIDATE" --version' in text, (
+            f"{workflow} must ask the built image for git, not the Dockerfile"
+        )
+
+
+def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
+    """A build arg nothing overrides is just a default (#23).
+
+    `engine/Dockerfile` gates `claude`, `codex` and Flutter behind args that
+    default to false, and pointed at `.woodpecker/server.yml`'s
+    `build-and-push-dev` as the build that turned them on. That pipeline was
+    retired with the move to Actions and nothing replaced it, so `vogt-dev`
+    ran with neither client while every build stayed green.
+
+    Both build steps must pass them — the candidate as well as the push, or
+    the image that gets smoke-tested is not the image that gets published.
+    """
+    text = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
+    on_dev = r"=\$\{\{ github\.ref == 'refs/heads/dev' \}\}"
+    for arg in ("INSTALL_AI_CLIENTS", "INSTALL_FLUTTER"):
+        wired = re.findall(arg + on_dev, text)
+        assert len(wired) == 2, (
+            f"{arg} must be passed to both the candidate and the pushed "
+            f"build of engine/Dockerfile; found {len(wired)}"
+        )
+    assert "for tool in claude codex flutter; do" in text, (
+        "the dev image's smoke test must ask the image for the clients "
+        "(NFR-Q7); a build arg nothing asserts is how #23 went unnoticed"
+    )
+
+
 def test_the_image_has_no_default_listen_address() -> None:
     """NFR-D2: the image must not silently bind anything."""
     text = _without_comments(DOCKERFILE.read_text(encoding="utf-8"))
@@ -786,10 +849,19 @@ def test_the_template_does_not_leave_a_dev_stack_on_production_paths() -> None:
             f"{name} must be set explicitly in the template, not left to the "
             "compose default, which points at the running production stack"
         )
-    assert "/volumes/mydevenv2/" not in template, (
-        "a dev stack must not mount the MyDevEnv2 stack's volumes: two "
-        "engines opening PTYs in one set of working trees"
-    )
+    # The estate is deliberately shared (#22): a dev instance with an empty
+    # workspace has nothing to collect, nothing to import into and no tree to
+    # open a session on, and a private copy would drift away from the trees
+    # anyone actually works in. Identity and state are what must stay apart —
+    # two pods writing one $HOME overwrite each other's shell history,
+    # credentials and agent state, and two hosts sharing a tailnet name
+    # resolve to whichever registered last.
+    for name in ("VOGT_HOME_DIR", "VOGT_TAILSCALE_DIR"):
+        value = re.search(rf"^{name}=(\S+)", template, re.MULTILINE)
+        assert value and "/volumes/mydevenv2/" not in value.group(1), (
+            f"{name} must be this stack's own; sharing MyDevEnv2's is how two "
+            "pods overwrite each other's sessions"
+        )
 
 
 def test_a_release_apk_is_signed_or_the_job_stops() -> None:

@@ -159,6 +159,7 @@ fn test_config(contextkeeper_url: Option<String>) -> Config {
         assistant_reasoning_effort: None,
         contextkeeper_url,
         contextkeeper_token: contextkeeper_url_token(),
+        public_url: None,
         vogt_core_url: None,
         vogt_import_root: None,
         vogt_engine_state_dir: None,

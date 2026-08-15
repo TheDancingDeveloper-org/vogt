@@ -12,6 +12,7 @@ from vogt.adapters.git.clone import (
     CloneOutcome,
     Cloner,
     CloneRequest,
+    GitCommandFailed,
     GitUnavailable,
     clone_repository,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "CloneOutcome",
     "CloneRequest",
     "Cloner",
+    "GitCommandFailed",
     "GitUnavailable",
     "clone_repository",
 ]

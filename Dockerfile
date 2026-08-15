@@ -74,6 +74,17 @@ LABEL org.opencontainers.image.title="vogt" \
 # common case; at any other uid the principal falls back to `$USER`, which
 # the compose file sets. Neither is load-bearing — provenance for anything
 # over the network comes from the token, never from the OS user (FR-S2).
+# `git` is a runtime dependency, not a build one. `project.import` shells out
+# to it to clone and to recognise an existing checkout (FR-P6, FR-P7), and the
+# `git-local` collector shells out to it to read branch, head and dirty state.
+# The first release of this image shipped without it, which left import unable
+# to run at all and the collector recording an observation it had never read
+# (#19, #20, #21) — so it is installed here, and `tests/test_deploy.py` asks
+# the built image for it rather than trusting this line.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --gid 1000 vogt \
     && useradd --uid 1000 --gid 0 --no-create-home --shell /usr/sbin/nologin vogt \
     && mkdir -p /var/lib/vogt \

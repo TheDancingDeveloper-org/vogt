@@ -218,6 +218,21 @@ pub struct Config {
     /// naming a path this process already knows: if the two drift, the backup
     /// keeps succeeding and covers a directory the engine does not use.
     pub vogt_engine_state_dir: Option<std::path::PathBuf>,
+    /// The URL clients reach *this* server at (FR-A8, MERGE §5.3).
+    ///
+    /// Configured, never inferred, and no default: the URL is an **exposure**
+    /// value under NFR-D2. This process binds a container port and is
+    /// published somewhere else entirely — a tailnet address, a reverse proxy,
+    /// a different port — and a URL it guessed would be wrong in exactly the
+    /// deployment the field exists for. From a client, a wrong URL and an
+    /// unreachable one look the same.
+    ///
+    /// r7 made that argument for the core, when the core was the door. r10
+    /// makes it one hop out, because it did not weaken on the way: a fronted
+    /// process can no more infer this door's published address than this door
+    /// could infer its own. `None` is reported as "nobody has said", never
+    /// filled in.
+    pub public_url: Option<String>,
     /// Base URL of vogt-core on loopback. None disables `/api/vogt`, `/mcp`
     /// and `/ui-legacy`: they answer 503 with a named reason rather than
     /// pretending the core is empty (FR-U21). The engine itself keeps
@@ -259,6 +274,7 @@ struct FileConfig {
     assistant_reasoning_effort: Option<String>,
     contextkeeper_url: Option<String>,
     contextkeeper_token: Option<String>,
+    public_url: Option<String>,
     vogt_core_url: Option<String>,
     vogt_core_token: Option<String>,
     vogt_core_token_file: Option<String>,
@@ -443,6 +459,17 @@ pub fn load(
             .contextkeeper_token
             .or_else(|| std::env::var("CONTEXTKEEPER_API_TOKEN").ok())
             .filter(|s| !s.trim().is_empty()),
+        // `MYDEVENV2_PUBLIC_URL` is this process's own address, and is not
+        // `VOGT_PUBLIC_URL`: that one is the *core's* view of where it is
+        // published, which in the merged shape is an internal detail no
+        // client sees. Two names because they are two facts — reusing one
+        // would force an operator to keep the inner and outer addresses in
+        // sync forever, and getting it wrong is silent (MERGE §5.3).
+        public_url: from_file
+            .public_url
+            .or_else(|| std::env::var("MYDEVENV2_PUBLIC_URL").ok())
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty()),
         // Unprefixed like the ContextKeeper pair above, and for the same
         // reason: these are vogt's own variable names, and the same values
         // configure its CLI inside the container. One name for one thing.

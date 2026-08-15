@@ -73,14 +73,21 @@ ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.1
 ARG ANDROID_PLATFORM_TOOLS_SHA256=d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
 ARG FLUTTER_VERSION=3.44.9
 ARG FLUTTER_SHA256=a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4efcb
-# Off by default (prod). The dev image build passes --build-arg
-# INSTALL_AI_CLIENTS=true (.woodpecker/server.yml build-and-push-dev) to
-# bake in codex + claude for pre-prod trial — see AGENTS.md "Codex and
-# Claude are deliberately not installed by container bootstrap" for why
-# prod stays opt-in/user-managed for these two specifically. Intentionally
-# unpinned (always latest at build time) per user direction — unlike every
-# other tool in this file, these two are expected to move fast and dev is
-# where that churn should be absorbed first.
+# Off by default (prod). `.github/workflows/build.yml` passes
+# INSTALL_AI_CLIENTS=true when the ref is the `dev` branch — the branch that
+# also produces the `:dev` and `dev-<sha>` tags — to bake in codex + claude
+# for pre-prod trial. See AGENTS.md "Codex and Claude are deliberately not
+# installed by container bootstrap" for why prod stays opt-in/user-managed
+# for these two specifically. Intentionally unpinned (always latest at build
+# time) per user direction — unlike every other tool in this file, these two
+# are expected to move fast and dev is where that churn should be absorbed
+# first.
+#
+# This comment used to name `.woodpecker/server.yml build-and-push-dev`. That
+# pipeline was retired in the move to Actions and nothing took over the build
+# arg, so the default stood and `vogt-dev` shipped with neither client (#23).
+# A default is only safe while something is documented to override it — and
+# the something has to exist.
 ARG INSTALL_AI_CLIENTS=false
 # Flutter is also dev-only: app CI pins this exact stable release, while the
 # production MyDevEnv2 runtime has no reason to carry the large mobile SDK.

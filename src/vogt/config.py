@@ -136,6 +136,24 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "exposure"},
     )
+    fronted: bool = Field(
+        default=False,
+        description=(
+            "Whether this instance runs behind a front door that publishes it "
+            "at a different address and different mount points — the merged "
+            "stack, where the Rust engine serves `/api/vogt` and `/mcp` and "
+            "this core is loopback-only. When true, `connect` and "
+            "`/connection-info` render against the identity the door states "
+            "per request (`X-Vogt-Public-Url`, `X-Vogt-Api-Path`, "
+            "`X-Vogt-Mcp-Path`), because the door is the only thing that "
+            "knows where clients arrive (FR-A8, FR-A9). Off by default and "
+            "never inferred: an instance that has not been told it is fronted "
+            "ignores those headers entirely, so nobody who can reach it can "
+            "make `connect` render a client configuration — a document meant "
+            "to be pasted next to a token — against an address they chose."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     log_level: LogLevel = Field(
         default="info",
         description="Verbosity of Vogt's own diagnostics.",

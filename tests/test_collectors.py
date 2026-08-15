@@ -23,7 +23,13 @@ from vogt.application.services import (
     sweep,
 )
 from vogt.collectors import CollectorContext, CollectorRegistry, Sweeper
-from vogt.collectors.base import Collector, Finding, finding, walk_project
+from vogt.collectors.base import (
+    Collector,
+    CollectorError,
+    Finding,
+    finding,
+    walk_project,
+)
 from vogt.collectors.dep_refs import DepRefCollector
 from vogt.collectors.git_local import GitLocalCollector
 from vogt.collectors.source_markers import SourceMarkerCollector
@@ -210,6 +216,60 @@ def test_a_real_repository_reports_branch_and_tag(
     assert checkout.payload["branch"] == "main"
     assert checkout.payload["latest_tag"] == "v1.2.3"
     assert any(f.kind == "git.tag" for f in found)
+
+
+def test_an_instance_without_git_reports_nothing_rather_than_a_clean_tree(
+    ctx: CollectorContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#20: the observation this used to emit was a fabricated one.
+
+    v0.2.0's image had no git. Every `subprocess.run` raised
+    `FileNotFoundError`, `git_output` swallowed it into "", and the collector
+    published `{"is_git_repository": true, "branch": "", "head": "",
+    "dirty": false, "dirty_files": 0}` for every registered project — a
+    positive claim that each working tree was clean, made without reading
+    one, and indistinguishable downstream from a real observation.
+
+    A collector that cannot read must say it could not read. `CollectorError`
+    is how this codebase already says that: the sweeper records the sweep as
+    partial and names the project.
+    """
+    (tmp_path / ".git").mkdir()
+
+    def _no_binary(*_args: object, **_kwargs: object) -> None:
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr("vogt.collectors.git_local.subprocess.run", _no_binary)
+
+    with pytest.raises(CollectorError):
+        list(GitLocalCollector().collect(ctx, _project(tmp_path)))
+
+
+def test_a_status_that_cannot_be_read_is_never_reported_as_clean(
+    ctx: CollectorContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same rule one level down, for git running but failing.
+
+    `dirty` is the only field in this payload that is a claim rather than a
+    value, so it is the only question asked with `required=True`. "no tags"
+    stays an absence and stays forgiving.
+    """
+    (tmp_path / ".git").mkdir()
+
+    def _status_fails(
+        args: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        # Only `status` fails, so the test proves the `required=True` call is
+        # the one that raises rather than any git call raising.
+        code = 128 if "status" in args else 0
+        stderr = "fatal: bad object" if code else ""
+        return subprocess.CompletedProcess(args, code, "", stderr)
+
+    monkeypatch.setattr("vogt.collectors.git_local.subprocess.run", _status_fails)
+
+    with pytest.raises(CollectorError, match="status"):
+        list(GitLocalCollector().collect(ctx, _project(tmp_path)))
 
 
 # -- the sweeper -----------------------------------------------------------

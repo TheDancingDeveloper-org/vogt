@@ -9,6 +9,7 @@
 //! | `/api/vogt/*` | `/api/*` | front-door token, core token injected |
 //! | `/mcp` | `/mcp` | the client's own core token, forwarded untouched |
 //! | `/ui-legacy/*` | `/ui/*` | none — static assets, as at the core |
+//! | `/version`, `/connection-info`, `/health/{ready,live}` | the same | none — these are the probes (FR-A7) |
 //!
 //! Three decisions a future reader will ask about:
 //!
@@ -62,6 +63,27 @@ const CORE_API_PREFIX: &str = "/api";
 const CORE_GUI_PREFIX: &str = "/ui";
 const CORE_READY_PATH: &str = "/health/ready";
 
+/// Vogt's unauthenticated probes (FR-A7). Served here, at the same paths, by
+/// the process that publishes the port — which is this one. Before r10 they
+/// were not routed at all and the PWA catch-all answered them with
+/// `index.html` at 200 (#24).
+pub const PROBE_PATHS: [&str; 4] = [
+    "/version",
+    "/connection-info",
+    "/health/ready",
+    "/health/live",
+];
+
+/// How this door tells the core where clients actually arrive (FR-A8).
+///
+/// The core renders `connect` and `/connection-info`; it cannot know this
+/// door's address or mount points, and inventing them is what made `connect`
+/// hand out an unreachable URL (#26). It honours these only when configured
+/// as `fronted` — and they are **stripped from every inbound request** below,
+/// so what reaches the core is what this process said and never what a caller
+/// claimed.
+const IDENTITY_HEADERS: [&str; 3] = ["x-vogt-public-url", "x-vogt-api-path", "x-vogt-mcp-path"];
+
 /// Headers that describe one hop and must not be copied to the next. Listed
 /// rather than derived because `reqwest` sets its own and a copied
 /// `content-length` or `transfer-encoding` contradicts the body we actually
@@ -89,6 +111,12 @@ pub struct VogtCore {
     /// config. Pairings are how a deployment opts in to named actors, one
     /// token at a time.
     fallback_token: Option<String>,
+    /// The address this door is published at, stated to the core on every
+    /// forwarded request (FR-A8). `None` when nobody has configured one, in
+    /// which case nothing is stated and the core answers for itself — an
+    /// exposure value carries no default (NFR-D2), and a URL this process
+    /// guessed would be wrong in exactly the deployment the field exists for.
+    public_url: Option<String>,
 }
 
 impl VogtCore {
@@ -116,6 +144,7 @@ impl VogtCore {
             client,
             base,
             fallback_token: cfg.vogt_core_token.clone(),
+            public_url: cfg.public_url.clone(),
         }))
     }
 
@@ -242,10 +271,24 @@ impl VogtCore {
             if inject.is_some() && name == header::AUTHORIZATION {
                 continue;
             }
+            // Where clients arrive is this process's fact, and a caller must
+            // not be able to state it: `connect` renders a document meant to
+            // be pasted beside a token, so a forwarded identity a caller chose
+            // is a phishing primitive. Dropped unconditionally, then set from
+            // configuration below.
+            if is_identity_header(name) {
+                continue;
+            }
             outbound = outbound.header(name, value);
         }
         if let Some(token) = inject {
             outbound = outbound.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        if let Some(url) = self.public_url.as_deref() {
+            outbound = outbound
+                .header("x-vogt-public-url", url)
+                .header("x-vogt-api-path", API_PREFIX)
+                .header("x-vogt-mcp-path", MCP_PREFIX);
         }
         outbound = outbound.body(body);
 
@@ -271,6 +314,12 @@ impl VogtCore {
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {
     HOP_BY_HOP.contains(&name.as_str())
+}
+
+/// Does this header claim to state where clients arrive? See `IDENTITY_HEADERS`
+/// for why a caller is never allowed to.
+fn is_identity_header(name: &HeaderName) -> bool {
+    IDENTITY_HEADERS.contains(&name.as_str())
 }
 
 /// `reqwest`'s `Display` includes the full URL, which carries the loopback
@@ -340,6 +389,32 @@ pub async fn mcp(State(state): State<Arc<AppState>>, request: Request) -> Respon
         return not_configured();
     };
     let path = map_prefix(request.uri(), MCP_PREFIX, MCP_PREFIX);
+    core.forward(&path, None, request).await
+}
+
+/// The probes of FR-A7, at the same paths, answered by the core.
+///
+/// `AGENTS.md` and `connect` both advertise these as the way to discover a
+/// Vogt instance without a credential, and behind this door they were not
+/// routed at all: the PWA catch-all answered them with `index.html` at **200**
+/// (#24). A caller could not tell from the status that it had been handed a
+/// web page, which is why FR-A7 now says a probe is served or refused and
+/// never answered by a fallback. It broke `vogt-mcp-remote` at launch and made
+/// a healthy `/mcp` look like a dead server.
+///
+/// Unauthenticated, like `/mcp` and `/ui-legacy` and for the plainer reason:
+/// a probe that needs a token is not a probe, and a compose healthcheck calls
+/// one.
+///
+/// `/connection-info` is not synthesised here. The core renders it — and
+/// `connect` with it — against the identity `forward` states on every request,
+/// so the hundred lines of prose and JSON that make up a client configuration
+/// live in one place rather than being mirrored into this language.
+pub async fn probe(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let Some(core) = state.vogt_core.as_ref() else {
+        return not_configured();
+    };
+    let path = request.uri().path().to_string();
     core.forward(&path, None, request).await
 }
 

@@ -147,6 +147,9 @@ jobs:
           set -euo pipefail
           # The entrypoint resolves and the interpreter behind it exists.
           docker run --rm "$CANDIDATE" --version
+          # git is a runtime dependency: `project.import` and the `git-local`
+          # collector both shell out to it. v0.2.0 released without it (#19).
+          docker run --rm --entrypoint git "$CANDIDATE" --version
           # `serve` still refuses to invent a listen address (NFR-D2).
           if docker run --rm "$CANDIDATE" serve 2>/dev/null; then
             echo "serve started without being told where to listen" >&2
