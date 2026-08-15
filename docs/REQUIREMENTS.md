@@ -461,10 +461,12 @@ IDs are append-only and each continues its family from its current maximum
 | ~~FR-S12~~ | ~~A work item's audit filter shall reach its comments~~ **Withdrawn (r11)** — already delivered; see below | — |
 | FR-V5 | Ranked views shall be pageable past their first page | S |
 
-None is a must-have, and that is the finding rather than an accident: every
-gap this pass turned up is a `C` or an `S`, so v2's shape is not in question.
-What was in question was whether anyone could enumerate them, and until now
-nobody could.
+None of the *new* IDs is a must-have. Two must-haves in the register are older
+than this revision and were carried in from §5.1 — **NFR-I3** and **FR-L1** —
+and NFR-I3 is the one row here with operational consequence: an image carrying
+a new migration passes its healthcheck and fails afterwards on a missing table.
+It was missing from the register's first draft, which is its own small lesson,
+since §5.1 has called it "the highest of these" since 2026-08-12.
 
 **Three of this revision's own claims were wrong, and the method that caught
 them is §5.4a's.** The first draft of §7 was assembled from what the other
@@ -1887,7 +1889,8 @@ the requirement's own.
 
 | ID | Pri | What is missing | What the absence costs |
 |---|---|---|---|
-| **FR-L1** | M | The `migrate` verb. `init` is idempotent and brings an instance forward, and `serve` migrates before reporting ready, so the capability exists under other names. | The verb an operator reaches for is absent. Compounds NFR-I3, which is the deploy path — see §5.1. |
+| **NFR-I3** | M | **Readiness does not gate on migration.** Forward-only ✅, under `migration_lock` ✅ — but `/health/ready` reads the *applied* schema versions and answers `ready` whenever the stores respond, never comparing them against the version the running image expects, and `serve` does not migrate (only `init` and `restore` do). | **The worst gap in this register**, and the only must-have with operational consequence. In the Node B topology (`command: serve`) an image carrying a new migration starts, passes its healthcheck, and fails later on a missing table — as a SQL error at whatever touched it first, not as a red probe. `DEPLOYMENT.md` §5. |
+| **FR-L1** | M | The `migrate` verb. `init` is idempotent and brings an instance forward, so the capability exists under another name — but note the correction: **`serve` does not migrate**, which §5.1's row and `DESIGN.md` §7 both implied it did. | The verb an operator reaches for is absent. Compounds NFR-I3 above, and is most of the fix for it. |
 | **FR-G1** | M | The contract is a versioned constant in `core/contract.py`; `VogtConfig` has no contract keys. | A self-hoster cannot state a different contract without editing Python. The shape, the version and the named failing criteria are all delivered — only the sourcing is not. |
 | **FR-T5** | S | The voice validation pass against domain vocabulary — project slugs, `WI-7`, the word "backlog". | Voice was adopted unproven and is still unproven. The system prompt now tells the model the vocabulary, which is preparation, not evidence. Blocked on FR-M4. |
 | **FR-T7** | C | The native Anthropic backend. *The other half is delivered*: a `claude-*` id on the OpenAI-compatible transport is refused with a sentence naming the model, the transport and the setting that overrides it. | The loop is OpenAI-compatible only. The `claude-*` proxy hang is unexplained but no longer silent, which was the failure that mattered — a hang is indistinguishable from thinking. |
@@ -1896,6 +1899,7 @@ the requirement's own.
 | **FR-V5** | S | An offset on `backlog` and `bugs`. Both carry `limit` (max 200) and nothing else; `audit.list` and `work.list` do have one, so this is an inconsistency as well as a gap. | There is no way past the top 200 of a ranked view. The truncation is announced; it just cannot be continued. |
 | **FR-E10** | C | An operable GUI stream. The compositor and streamer are in the image, the launch and process APIs are built, production runs `START_SWAY=0` and `GUI_STREAM_URL=""`. | A surface exists that has never been shown to do anything. |
 | **FR-E11** | C | Any signal that two live sessions share a working tree. Nothing in `sessions.py` or the engine's registry compares a new session's `cwd` against the live ones. | Two agents can edit one checkout concurrently and neither is told. No audit row records the loss, because both writes are legitimate. |
+| **NFR-S4** | S | The benchmark fixture asserts the interactive target at 500 projects and **5,000** work items, not the ~100k NFR-S1 names. The reduction is deliberate and argued in `tests/test_benchmark.py`. | It catches an accidental per-item query inside a ranked view; it is not evidence of the envelope. Low, and honestly documented in the test that makes the claim. |
 | **FR-M4** | S | An FCM client entry in `google-services.json` for the dev build's application id. *The rest of this requirement is delivered*: `build.gradle` takes the id from `MYDEVENV2_ANDROID_APP_ID`, and the front door from `VOGT_ANDROID_SERVER_URL` with no default. | A dev APK installs beside prod but cannot register for push, because `google-services.json` is keyed to the application id. This is what blocks FR-M2's and FR-T5's hardware verification, so it is smaller than the two it holds up. |
 
 ### 7.2 Owed, and blocked on something that is not code

@@ -672,9 +672,12 @@ Deployment and network topologies: [`DEPLOYMENT.md`](DEPLOYMENT.md).
   a drift proposal references.
 - `vogt init | status | backup | restore | export | import`. Migration has no
   verb of its own: `init` is idempotent and brings an existing instance
-  forward, and `serve` migrates before it reports ready. FR-L1 names `migrate`
-  explicitly, so the absence is a gap and not a decision —
-  `REQUIREMENTS.md` §7.
+  forward. **`serve` does not migrate**, and `/health/ready` reports the
+  *applied* schema versions without comparing them to the version the running
+  image expects — so a container started with `command: serve` on an image
+  carrying a new migration comes up green and fails afterwards. FR-L1 names
+  `migrate` and NFR-I3 names the gate; both are gaps rather than decisions,
+  and NFR-I3 is the most consequential row in `REQUIREMENTS.md` §7.
 - Config: pydantic settings schema is the single source of truth; example
   config and docs are generated from it in CI (drift between docs and
   defaults fails the build).
