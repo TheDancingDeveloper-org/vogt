@@ -18,8 +18,12 @@ on any surface.
 
 - `docs/DESIGN.md` — the design outline; source of truth for architecture,
   domain model, and roadmap. Update it when decisions change; don't fork
-  competing design docs.
-- `design/` — diagrams, mockups, exploratory notes (may be messy).
+  competing design docs. **It describes what exists** — a capability that was
+  designed and never built belongs in `docs/REQUIREMENTS.md` §7, not here, and
+  r11 says why at length.
+- `design/` — diagrams, mockups, exploratory notes (may be messy). Currently
+  empty apart from its `.gitkeep`; the project contract requires the directory,
+  and nothing has needed it yet.
 - `src/vogt/` — the implementation (M0 and M1 landed). Layer order is
   strict: `core` (entities, ids, time, digests, the workflow engine, the
   ranking function, the contract) → `storage` (interface + the SQLite
@@ -61,11 +65,15 @@ on any surface.
 - `mobile/` — the Capacitor 8 Android shell. Its WebView loads the deployed PWA
   directly, so UI changes ship without an APK rebuild; only native plumbing
   (plugins, manifest, FCM) needs one.
-- `docs/engine/` — MyDevEnv2's own documents (`API_CONTRACT.md`, `ASSISTANT.md`,
-  `AGENT_TASKS.md`, `PLAN.md`, `INTENT.md`, `TOOLING.md`, `USER_GUIDE.md`,
-  `uplift.md`). They describe the engine only. Vogt's numbered baseline is
-  still `docs/REQUIREMENTS.md`, and `docs/engine/uplift.md` is the engine's
-  backlog, not the product's — `docs/ROADMAP.md` is that.
+- `docs/ENGINE.md` — the engine's single reference: what it owns, how to run it,
+  its full wire contract (§5), the assistant (§6), agent tasks (§7). It replaced
+  `docs/engine/`, which held eight documents describing MyDevEnv2 as a separate
+  product. **There is no `docs/engine/` directory**; a path naming one is stale.
+- `docs/USER_GUIDE.md` — how a person drives the product, both halves of it.
+- `docs/REQUIREMENTS.md` §7 — the gap register: everything designed anywhere in
+  this documentation set and not built, split into what is owed (with an ID)
+  and what was withdrawn (deliberately without one). **The engine has no
+  separate backlog** — that is what §7 and `docs/ROADMAP.md` are for.
 - The archived GPUI desktop client was **not** carried across; the MyDevEnv2
   repo remains its archive. A reference to `client/` anywhere in this tree is a
   reference to something that is not here.

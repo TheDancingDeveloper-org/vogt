@@ -265,8 +265,8 @@ export default function Assistant(props: AssistantProps) {
   // open until somebody remembers it is open, and the recognizer auto-sends
   // whatever it settled on — so a forgotten toggle does not merely listen, it
   // speaks. Holding makes the open microphone exactly as long as the
-  // deliberate act. `docs/engine/ASSISTANT.md` has called this push-to-talk
-  // since before it was.
+  // deliberate act. `docs/ENGINE.md` §6 has called this push-to-talk since
+  // before it was.
   const startListening = async () => {
     if (listening()) return;
     try {

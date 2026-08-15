@@ -138,7 +138,7 @@ into `latest_dep_refs` (§3.2). The third kind survives in the `RefKind` type
 and in FR-D2's text, but nothing can produce one — `DESIGN.md` §3.5's
 `project link A depends_on B` was never given an operation, and the registry
 has no `project.link`. An edge no manifest expresses cannot be recorded.
-Tracked in `REQUIREMENTS.md` §5.1.
+Tracked as **FR-D9** in `REQUIREMENTS.md` §7.
 
 *r2 removals*: `contracts` — the contract carries a version string
 (`DESIGN.md` §5), so a table of versioned contract bodies bought nothing at
@@ -147,7 +147,7 @@ one contract per instance; the evaluated result lives in
 the contract is a versioned constant in `core/contract.py` rather than
 configuration, so there is no per-instance contract body anywhere — which is
 why removing the table cost nothing, and is also the FR-G1 gap
-(`REQUIREMENTS.md` §5.1).
+(`REQUIREMENTS.md` §7).
 `packages` — with dependency edges resolved by path and repo URL, published
 package identity is no longer needed to build the internal graph.
 

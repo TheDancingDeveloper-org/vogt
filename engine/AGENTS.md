@@ -1,11 +1,19 @@
-# MyDevEnv2 Agent Guide — the `engine/` subtree
+# Agent Guide — the `engine/` subtree
 
-This file is the canonical guidance for AI agents working on the session
-engine. MyDevEnv2 was merged into Vogt and now lives in this repository's
-`engine/` subtree, with `web/` and `mobile/` beside it at the repository root
-and its own documents under `docs/engine/`. **Paths here are relative to the
-repository root, not to `engine/`**, because a document that moved and kept its
-old relative paths is a document that lies quietly.
+This file is the canonical guidance for AI agents working on Vogt's session
+engine. It was MyDevEnv2, merged into Vogt, and it now lives in this
+repository's `engine/` subtree with `web/` and `mobile/` beside it at the
+repository root. **Paths here are relative to the repository root, not to
+`engine/`**, because a document that moved and kept its old relative paths is a
+document that lies quietly.
+
+**`docs/engine/` no longer exists** *(2026-08-15)*. The engine's eight
+documents were consolidated into [`docs/ENGINE.md`](../docs/ENGINE.md), with
+the runtime image in `docs/DEPLOYMENT.md` §10 and the stacks in §11. If a path
+below ever names `docs/engine/`, it is stale and this table is the map:
+`API_CONTRACT` → `ENGINE.md` §5, `ASSISTANT` → §6, `AGENT_TASKS` → §7,
+`INTENT`/`PLAN` → §1–§2, `TOOLING` → `DEPLOYMENT.md` §10, `KOMODO` → §11,
+`uplift` → `REQUIREMENTS.md` §7, `USER_GUIDE` → `docs/USER_GUIDE.md`.
 
 Above this file sits [`AGENTS.md`](../AGENTS.md) at the repository root, which
 owns the Python core and the repo-wide rules, and
@@ -17,11 +25,16 @@ exists only to redirect to `AGENTS.md`.
 
 Documentation ownership for the engine:
 
-- `engine/README.md` — product status, local development, smoke tests, protocol notes
-- `engine/AGENTS.md` — coding-agent workflow, guardrails, and project-specific rules
-- `docs/engine/TOOLING.md` — runtime/dev-pod toolchain inventory
-- `engine/deploy/KOMODO.md` — production stack, environment, rollout, and recovery
-- `docs/engine/uplift.md` — only open uplift backlog
+- `docs/ENGINE.md` — what the engine is, running it, the wire contract, the
+  assistant, agent tasks, the WebSocket protocol, smoke tests
+- `engine/AGENTS.md` — coding-agent workflow, guardrails, project-specific rules
+- `engine/README.md` — a pointer to the two above, and the two facts that bite
+  before anybody has read either
+- `docs/DEPLOYMENT.md` §10 — runtime/dev-pod toolchain inventory
+- `docs/DEPLOYMENT.md` §11 — the standalone stacks: environment, rollout, recovery
+- `docs/REQUIREMENTS.md` §7 — what was designed here and never built. **The
+  engine has no separate backlog**; an outstanding item needs a requirement
+  before it is anybody's plan.
 
 Before changing files here:
 
@@ -45,9 +58,9 @@ Before changing files here:
 | DB / state | None (Postgres-less by design). Sessions in-memory; push subscriptions persisted as JSON under `state_dir`. |
 | Secrets used at runtime | `MYDEVENV2_TOKEN` (primary API bearer), optional `MYDEVENV2_EXTRA_TOKENS_JSON` (scoped JSON token list), `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` (Tailscale userspace), `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` / `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` (required production agent service auth), optional `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` for native FCM, optional `CONTEXTKEEPER_URL` / `CONTEXTKEEPER_API_TOKEN` for continuity — all in Infisical `apps` and pasted into the Komodo stack `environment`. VAPID keys are generated and persisted under `state_dir`. |
 
-From-scratch rewrite of MyDevEnv v1 (a separate estate checkout, not part of this repository): same centrally-hosted, Tailscale-accessible dev environment goal, built without the v1 surface area of a code-server fork and multiple half-finished native clients. Active status: Phase 1-6 code-complete and deployed; legacy GPUI desktop client deprecated on July 7, 2026 and left behind in the MyDevEnv2 repo by the merge; Phase 7 (KVM-backed Android emulator VM) pending.
+From-scratch rewrite of MyDevEnv v1 (a separate estate checkout, not part of this repository): same centrally-hosted, Tailscale-accessible dev environment goal, built without the v1 surface area of a code-server fork and multiple half-finished native clients. Active status: everything the merged product depends on is built and deployed; the legacy GPUI desktop client was deprecated on July 7, 2026 and left behind in the MyDevEnv2 repo by the merge. The old plan's "Phase 7", a KVM-backed Android emulator VM, was **never built and is not owed** — it is a withdrawal recorded in `docs/REQUIREMENTS.md` §7.3, not pending work. Reviving it would be a new requirement.
 
-A pre-prod validation stack, `dev-mydevenv2`, also exists (`https://mydevenv2-dev.sprooty.com`, Komodo stack, desired state in ops's `personal/mydevenv2-dev/` on `main`) — see `engine/deploy/KOMODO.md` "Dev stack (dev-mydevenv2)" for its deploy flow and disk layout, and `docs/engine/uplift.md` "Environment Strategy: Dev vs Prod" for why it exists.
+A pre-prod validation stack, `dev-mydevenv2`, also exists (`https://mydevenv2-dev.sprooty.com`, Komodo stack, desired state in ops's `personal/mydevenv2-dev/` on `main`) — see `docs/DEPLOYMENT.md` §11 for its deploy flow, disk layout, and why it exists.
 
 ## 2. Architecture
 
@@ -68,7 +81,7 @@ Axum server (mydevenv2-server) — bind :8910
    `-- /                            embedded PWA (rust-embed)
 ```
 
-See `docs/engine/PLAN.md` and `docs/engine/INTENT.md` for design decisions and rationale.
+See `docs/ENGINE.md` §1-§2 for what the engine owns and how it is shaped, and `docs/MERGE_MYDEVENV2.md` for why it is a separate process at all.
 
 ## 3. Build / test / run
 
@@ -98,7 +111,7 @@ export MYDEVENV2_TOKEN="$(openssl rand -hex 24)"
 ```
 
 Optional TOML config at `mydevenv2.toml` (CLI > env > config); see
-`engine/README.md` for keys.
+`docs/ENGINE.md` §3 for keys.
 
 ## 4. Deployment
 
@@ -116,7 +129,7 @@ Pipeline non-standard bits:
   removed. A thin desktop wrapper, if ever reintroduced, starts from that
   archive, not from this tree.
 
-Runtime container: multi-stage `engine/Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `docs/engine/TOOLING.md` toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `engine/deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server. `docs/engine/TOOLING.md` owns the package/tool inventory; `engine/deploy/KOMODO.md` owns the production compose and overlay details.
+Runtime container: multi-stage `engine/Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `docs/DEPLOYMENT.md` §10 toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `engine/deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server. `docs/DEPLOYMENT.md` §10 owns the package/tool inventory; §11 owns the production compose and overlay details.
 
 Codex and Claude are deliberately not installed by the production container bootstrap. The dev image installs both; its system `codex` launcher deliberately disables Codex's nested approvals and sandbox so trusted agents have normal container-user filesystem and network access across the complete `/home/sprooty/Working` workspace. The `opencode` CLI is bundled in every image; other AI clients remain user-managed in production. Production default-shell sessions are authenticated through `mydevenv2-agent-auth`; explicit-command sessions can invoke the helper directly.
 
@@ -218,18 +231,21 @@ The sync mode is `two-way-safe`. VCS metadata, machine-local Claude settings, ge
 
 ## 8. Cross-refs
 
-- `engine/README.md` — phase status, server smoke test, WebSocket protocol details
-- `docs/engine/INTENT.md` — why a v2 rewrite, what's deliberately out of scope
-- `docs/engine/PLAN.md` — architecture, components, build order
-- `docs/engine/TOOLING.md` — toolchain set for the dev pod, including agent auth bootstrap expectations
-- `docs/engine/API_CONTRACT.md` — the wire types and where their mirrors live
-- `engine/deploy/KOMODO.md` — one-time Komodo stack creation steps
+- `docs/ENGINE.md` — everything about the engine: what it owns, running it, the
+  wire contract (§5), the assistant (§6), agent tasks (§7), the WebSocket
+  protocol and the smoke tests
+- `docs/DEPLOYMENT.md` §10 — toolchain set for the dev pod, including agent-auth
+  bootstrap expectations
+- `docs/DEPLOYMENT.md` §11 — one-time Komodo stack creation, overlays, recovery
+- `docs/MERGE_MYDEVENV2.md` — why the engine is a separate process in a separate
+  language, argued rather than assumed
 - `engine/deploy/docker-compose.yml`, `engine/deploy/entrypoint.sh` — runtime orchestration
 - `AGENTS.md` (repository root) — the Python core, the operation registry, and the repo-wide rules
 
 ## 9. Status / backlog
 
-Open backlog for the engine lives only in `docs/engine/uplift.md`.
-`engine/README.md` carries shipped status and phase notes. Vogt's own roadmap is
+The engine has no backlog of its own. What was designed here and never built is
+`docs/REQUIREMENTS.md` §7, where each gap is either a numbered requirement or a
+recorded withdrawal. Vogt's own roadmap is
 `docs/ROADMAP.md` and is a separate list; do not merge the two. Move backlog
 items to Forgejo issues if they become unwieldy.

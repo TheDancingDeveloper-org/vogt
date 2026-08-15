@@ -503,7 +503,8 @@ jobs:
 #   * sccache against `redis://100.92.54.45:6380`, with a reachability probe
 #     and a no-cache fallback. Replaced by `Swatinem/rust-cache`, which caches
 #     where this CI already keeps state. The Redis is a Node B service that
-#     OOM-crash-looped and blocked that pipeline (`docs/engine/uplift.md`);
+#     OOM-crash-looped and blocked that pipeline (the engine's pre-merge plan
+#     warned about exactly this, which is why the swap happened);
 #     a build cache that can take CI down is a worse trade here, where the
 #     runners are the scarce resource, not the compile.
 #

@@ -409,6 +409,71 @@ client-facing surface shall be verified **at each address that publishes
 it**, and a requirement about a runtime dependency shall be verified **in the
 artefact that ships**.
 
+### Revision r11 — a design document describes what exists
+
+*2026-08-15. No behaviour changes. What changes is where unbuilt things are
+allowed to be written down, and seven of them acquire IDs so they can be
+tracked instead of remembered.*
+
+The documentation pass that produced this revision consolidated MyDevEnv2's
+eight surviving documents into the Vogt set — the vendor was still describing
+itself as a separate product with its own name, its own backlog and its own
+deployment story, eighteen stages after it stopped being one. `ENGINE.md` is
+now the engine's single reference, `DEPLOYMENT.md` §10–§11 carry its image and
+its stacks, and `USER_GUIDE.md` documents one product rather than half of one.
+The full list of what moved where is §7's preamble.
+
+**The rule this revision adds.** A design document describes what the system
+*is*. A capability that was designed and never built does not belong in one,
+because a description of an unbuilt thing is indistinguishable from a
+description of a built one, and every reader after the author is the person who
+cannot tell. Such capabilities live in **§7**, this document's gap register,
+which is the single place to ask "what was designed and is not here".
+
+That is a rule about *placement*, not about candour: the design documents were
+in fact honest — they said *not built* and *as built* in place, which is how
+this pass could find them at all. What they could not do is let anyone count
+the gaps, because the gaps were scattered across five files in the middle of
+paragraphs about things that do exist.
+
+**Two kinds of gap, kept apart.** §7 distinguishes them, because conflating
+them is how a decision turns back into a task:
+
+- **Owed** — a numbered requirement no code meets. It keeps its ID, or gets
+  one here if the design specified a capability nobody had ever numbered.
+- **Withdrawn** — designed once, deliberately not adopted, and owed to nobody.
+  These carry no ID *on purpose*; minting one would make a closed decision
+  look like open work, which is exactly the failure r2 and r3 spent their
+  revisions avoiding.
+
+**Seven IDs are appended**, each for a capability some document specified and
+no requirement had ever named. Per §4, IDs are append-only and each continues
+its family from its current maximum (FR-D8, FR-E9, FR-M3, FR-S10, FR-V4 as of
+r10):
+
+| New ID | What it names | Pri |
+|---|---|---|
+| FR-D9 | Declared dependency edges — the `declared` `RefKind` nothing produces | C |
+| FR-E10 | GUI streaming operable where a deployment enables it | C |
+| FR-E11 | Two live sessions shall not silently share one working tree | C |
+| FR-M4 | Dev and prod mobile shells installable side by side | S |
+| FR-S11 | The `writeback` scope shall gate the write-back it names | S |
+| FR-S12 | A work item's audit filter shall reach its comments | S |
+| FR-V5 | Ranked views shall be pageable past their first page | S |
+
+None is a must-have, and that is the finding rather than an accident: every
+gap this pass turned up is a `C` or an `S`, so v2's shape is not in question.
+What was in question was whether anyone could enumerate them, and until now
+nobody could.
+
+**One correction of record.** `ROADMAP.md` M12 said FR-T7 "was not attempted".
+It was: `engine/server/src/assistant.rs` refuses a `claude-*` model id on the
+OpenAI-compatible transport with a sentence naming the model, the transport and
+the setting that overrides it — which is the second of the two ways FR-T7
+offers out of the hang. The native Anthropic backend, its first way, is still
+absent. The roadmap now says both halves, because "not attempted" understated
+the work by exactly the amount that would have caused someone to redo it.
+
 ---
 
 ## 1. Functional requirements
@@ -474,6 +539,7 @@ filesystem discovery.*
 | FR-V2 | Global backlog ordering shall be deterministic, from documented constant-weight inputs. | M | DESIGN §3.4 |
 | FR-V3 | `why <item>` shall return the per-input score contributions for any ranked item. | M | DESIGN §3.4 |
 | FR-V4 | Every aggregating answer (brief, backlog, bugs, deps) shall carry the freshness of the underlying sweeps (oldest relevant sweep timestamp). | M | DESIGN §6 |
+| FR-V5 | *(r11)* A ranked view shall be pageable past its first page: `backlog` and `bugs` shall accept an offset alongside their limit, so an estate with more open work than one page can hold is reachable rather than truncated. A view that truncates shall say so — which it already does; what it cannot currently do is continue. | S | §7 |
 
 ### FR-O — Observation & collection
 
@@ -508,6 +574,7 @@ by path or repository URL, and stops there.*
 | FR-D6 | *(moved r2)* Update-automation posture shall be tracked as independent facts (version-updates config / vulnerability alerts / security fixes), never one boolean. This is forge posture, delivered with the forge module (FR-O5b), not with dependency references. | M* | DESIGN §3.5 |
 | FR-D7 | ~~Advisory/vulnerability enrichment (RustSec, OSV, GitHub advisories).~~ **Withdrawn (r2)** — advisory matching requires resolved versions, which r2 removes. Deferred to §3. | — | — |
 | FR-D8 | *(r2)* Where the same source exists both as a path member of one project and as a separate registered project, the system shall report the `mirrored_source` relationship as an observation. It shall not compare contents and shall not assert divergence. | C | DESIGN §3.5 |
+| FR-D9 | *(r11)* An operation shall record a dependency edge no manifest expresses — a service that calls another, a pipeline that consumes a schema — with reference kind `declared`. `RefKind` has carried the member since M2 and nothing produces it, so an edge that lives only in a deploy script is invisible to `deps` and to the reverse lookup. | C | DESIGN §3.5 |
 
 ### FR-R — Drift & reconciliation
 
@@ -547,6 +614,8 @@ by path or repository URL, and stops there.*
 | FR-S8 | *(r6)* Credentials used to clone a repository (FR-P6) shall be supplied to `git` out of band — never in the remote URL, never in argv, and never written into the clone's own configuration. A project's stored `repo_url` shall never contain credentials. | M* | DEPLOY §2.2 |
 | FR-S9 | *(r9)* The front door shall hold the single public token namespace, extended with Vogt capabilities; each front-door token shall map to a named Vogt actor whose paired core token the proxy injects — so audit records real actors, the proxy never pre-approves, and the double-gated writes of FR-S4 are not weakened. | M | MERGE §9 |
 | FR-S10 | *(r9)* A session started for a project or work item shall receive a per-session actor-scoped token, minted at start and revoked at session end; its writes shall be distinguishable in the audit log from every other actor's. | M | MERGE §6.1, §9 |
+| FR-S11 | *(r11)* Every scope the system issues shall gate at least one operation. `writeback` gates none: `forge.writeback` sets a project's policy under `project.write`, and the upstream write is a consequence of commenting or transitioning under `work.write` — so a token issued with `writeback` alone can only read, which is a trap for whoever issues one in good faith. Either the scope gates the write-back it names, or it is withdrawn and the issuer told why. | S | DESIGN §4.1 |
+| FR-S12 | *(r11)* An audit query filtered to one work item shall return every write about that item, comments included. Comments are currently audited against the comment's own entity, so a per-item filter returns creates, transitions and updates and silently omits the conversation — an audit view that is quietly partial is worse than one that refuses, because nothing on screen says a row is missing. | S | FR-S6, FR-U19 |
 
 ### FR-B — Forge write-back (optional module)
 
@@ -617,6 +686,8 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | FR-E7 | *(r9)* A scheduled agent task may be bound to a project or work item; a bound run's findings shall be recordable as Vogt observations, not only as push notifications. The schedule remains one a person created (§3). | S | MERGE §6.1 |
 | FR-E8 | *(r9)* `session.start`, `session.list`, and `session.stop` shall be operations in the registry, and therefore present with parity on CLI, REST, and MCP (FR-A1). | M | MERGE §6.2 |
 | FR-E9 | *(r9)* The engine shall remain bootable with vogt-core absent, degrading to plain sessions — absence of the core costs Vogt features, never session availability (the ContextKeeper degrade rule, applied inward). | S | MERGE §11.2 |
+| FR-E10 | *(r11)* Where a deployment enables GUI streaming, it shall work: a launched process shall render and its stream shall be viewable from the GUI surface. The compositor and the streamer are installed in the image and the launch and process APIs are built; production runs with the stream switched off and unverified, so the surface is present and cannot be shown to do anything. Either it is operable in a deployment that asks for it, or the surface is withdrawn. | C | DEPLOYMENT §10.6 |
+| FR-E11 | *(r11)* Two live sessions shall not silently open in the same working tree. Nothing today coordinates between sessions, so two agents can edit one checkout concurrently and neither is told — a class of loss no audit row records, because both writes are legitimate. The requirement is that the second session is *told*, not that it is refused: Vogt reports, it does not enforce (FR-G13). | C | §7 |
 
 ### FR-T — Conversational assistant (the AI layer) *(r9)*
 
@@ -637,6 +708,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | FR-M1 | *(r9)* The mobile app shall be the Capacitor shell loading the merged PWA. Its MVP1 feature set shall be: terminal sessions, assistant with voice, push, backlog/board read, and session start/approve. | M | MERGE §3; ROADMAP M13 |
 | FR-M2 | *(r9)* Push notifications shall be routed for events worth a phone interruption: a session entering `waiting-for-input` or `errored`, new drift, and the agent-task notify hook — and for nothing else by default. | S | MERGE §10 |
 | FR-M3 | *(r9)* Vogt surfaces shall be usable at phone widths; the board shall render as a list, not columns, below the narrow breakpoint. | S | MERGE §7 |
+| FR-M4 | *(r11)* A dev build of the mobile shell shall install alongside a prod build on one device: its own `applicationId`, its own FCM client entry, and its own configured front door. Android refuses two APKs sharing an id, so validating a mobile change today means uninstalling the working app first — which is why FR-M2's push routing and FR-T5's voice pass are both still unverified on hardware. The signing key may be shared. | S | §7 |
 
 ---
 
@@ -1736,3 +1808,129 @@ similar, and the new entries are all of the same kind as the old ones.
     retires a phrase this section used: what was called "needs hardware" was
     a description of *this container*, and the runners have the daemon and
     the SDK it lacks.
+
+---
+
+## 7. Designed and not delivered — the gap register *(r11, 2026-08-15)*
+
+**What this section is for.** §5 and §6 verify requirements against the build,
+one ID at a time, and they are the authority on *whether a requirement is met*.
+This section answers a different question that neither could: **what was
+designed, anywhere in this documentation set, and is not here?** Until this
+pass that question had no answer, because the gaps were true but scattered —
+one in `DESIGN.md` §3.5, one in §4.1, one in §5, three in a roadmap stage's
+closing paragraph, and eleven in documents belonging to a product that had been
+merged into this one eighteen stages earlier.
+
+Every row below was previously written down somewhere. **Nothing here is a new
+discovery**, and that is worth stating plainly: the design documents were
+honest. What they were not was countable.
+
+### 7.0 What the consolidation moved
+
+The pass that produced this register removed nine documents and the
+`docs/engine/` directory, and reduced a tenth to a pointer. Their content did
+not disappear:
+
+| Was | Is now |
+|---|---|
+| `docs/engine/API_CONTRACT.md` | `ENGINE.md` §5 |
+| `docs/engine/ASSISTANT.md` | `ENGINE.md` §6 |
+| `docs/engine/AGENT_TASKS.md` | `ENGINE.md` §7 |
+| `docs/engine/INTENT.md`, `PLAN.md` | `ENGINE.md` §1–§2 for what was built; §7.3 below for what was not |
+| `docs/engine/TOOLING.md` | `DEPLOYMENT.md` §10 |
+| `docs/engine/USER_GUIDE.md` | `USER_GUIDE.md`, rewritten to cover both halves |
+| `docs/engine/uplift.md` | §7.2 below, and `ROADMAP.md` for what shipped |
+| `engine/deploy/KOMODO.md` | `DEPLOYMENT.md` §11 |
+| `engine/README.md` (384 lines) | `ENGINE.md`; the file is now a pointer |
+
+`MERGE_MYDEVENV2.md` stays as it is. It is the record of a decision taken on a
+date, its §12–§14 already say they were folded and are no longer authoritative,
+and editing a dated investigation to match a later world would destroy the one
+thing it is good for.
+
+### 7.1 Owed — a numbered requirement that no code meets
+
+Each carries an ID, and §5 or §6 is where its verification lives. Priority is
+the requirement's own.
+
+| ID | Pri | What is missing | What the absence costs |
+|---|---|---|---|
+| **FR-L1** | M | The `migrate` verb. `init` is idempotent and brings an instance forward, and `serve` migrates before reporting ready, so the capability exists under other names. | The verb an operator reaches for is absent. Compounds NFR-I3, which is the deploy path — see §5.1. |
+| **FR-G1** | M | The contract is a versioned constant in `core/contract.py`; `VogtConfig` has no contract keys. | A self-hoster cannot state a different contract without editing Python. The shape, the version and the named failing criteria are all delivered — only the sourcing is not. |
+| **FR-S6** | S | The audit log's time filter. | An audit query cannot be bounded by when; every other axis works. |
+| **FR-T5** | S | The voice validation pass against domain vocabulary — project slugs, `WI-7`, the word "backlog". | Voice was adopted unproven and is still unproven. The system prompt now tells the model the vocabulary, which is preparation, not evidence. Blocked on FR-M4. |
+| **FR-T7** | C | The native Anthropic backend. *The other half is delivered*: a `claude-*` id on the OpenAI-compatible transport is refused with a sentence naming the model, the transport and the setting that overrides it. | The loop is OpenAI-compatible only. The `claude-*` proxy hang is unexplained but no longer silent, which was the failure that mattered — a hang is indistinguishable from thinking. |
+| **FR-D9** | C | Any producer of a `declared` dependency edge. | A dependency expressed only in a deploy script or a person's head is invisible to `deps` and to the reverse lookup. |
+| **FR-S11** | S | Anything gated by the `writeback` scope. | A token issued with `writeback` alone can only read. The trap costs whoever issues one in good faith. |
+| **FR-S12** | S | Comments in a per-item audit filter. | A work item's audit view is quietly partial. Nothing on screen says a row is missing, which is the whole problem. |
+| **FR-V5** | S | An offset on `backlog` and `bugs`. | There is no way past the top 200 of a ranked view. The truncation is announced; it just cannot be continued. |
+| **FR-E10** | C | An operable GUI stream. The compositor and streamer are in the image, the launch and process APIs are built, production runs `START_SWAY=0` and `GUI_STREAM_URL=""`. | A surface exists that has never been shown to do anything. |
+| **FR-E11** | C | Any signal that two live sessions share a working tree. | Two agents can edit one checkout concurrently and neither is told. No audit row records the loss, because both writes are legitimate. |
+| **FR-M4** | S | Separate `applicationId` for the dev mobile build. | Validating a mobile change means uninstalling the working app. This is what blocks FR-M2's and FR-T5's hardware verification, so it is smaller than the two it holds up. |
+
+### 7.2 Owed, and blocked on something that is not code
+
+Three acceptance tests are written, are the stage's stated demo, and have never
+run. They are not verification debt of the ordinary kind — no amount of reading
+the source closes them, which is why §6 counts their conjuncts apart.
+
+| Gap | Stage | What it needs | Status |
+|---|---|---|---|
+| **The browser demo** — a drag round-trips a `work.transition`, a refused one rolls back with the server's reason, a filtered board URL restores its view after reload | M11 | A person, a browser | Outstanding. 75 jsdom tests now assert the semantics; what they cannot fire is `dragover`, whose `preventDefault` is what lets a browser deliver a drop at all. No CSS is loaded, so every layout claim — FR-M3's phone width, NFR-S5's behaviour at scale — is still the demo's. |
+| **The phone demo** — a push arrives, is opened, and the session is unblocked | M13 | A device, the APK, a hand | Outstanding. The APK builds in CI. Blocked in practice by FR-M4. |
+| **Real-device FCM delivery** (FR-M2) | M13 | The same device | Outstanding. `google-services.json` carries the client; first-launch registration and end-to-end delivery are unconfirmed. |
+
+Also outstanding and in the same family: live validation on the dev stack of
+the split-pane node-identity fix, the SSE visibility/resume reconnect, the
+push-on-hang/fail/end watchers, and the auto-retry on rate limiting. All four
+are implemented and pass their suites; none has been watched working against a
+running instance. The engine's `uplift.md` said so, and said correctly that an
+outstanding item there "needs a requirement before it is anybody's plan" —
+these are covered by FR-M2, FR-U10 and FR-E2 respectively, so they are
+verification gaps rather than new IDs.
+
+### 7.3 Withdrawn — designed once, deliberately not adopted
+
+**These carry no ID on purpose.** They were designed for MyDevEnv2 as a
+standalone product, or drafted as next steps in a document that is now history.
+No Vogt requirement depends on any of them, and minting IDs would turn closed
+decisions back into open work — the exact failure r2 and r3 spent revisions
+avoiding. They are listed because an absence nobody wrote down gets
+rediscovered as an oversight.
+
+- **The Android emulator VM.** MyDevEnv2's Phase 7: a libvirt/KVM domain with
+  `/dev/kvm` passthrough, a start/stop API, Selkies inside the VM, an Android
+  tab type, and ADB-over-network back to the pod. Nothing was built and nothing
+  in the merged product needs it — the Android SDK in the image builds the APK,
+  and running an emulator is not something a work tracker does. Reviving it is a
+  new requirement, not a resumed one.
+- **The GPUI desktop client.** Deprecated 2026-07-07, not carried across by the
+  merge, archived in the MyDevEnv2 repository. A reference to `client/` in this
+  tree names something that is not here.
+- **Natural-language task drafting, a context-update helper, and webhook
+  triggers for agent tasks.** Drafted as next steps against a review of another
+  project. Interval and daily schedules cover the cases that motivated them.
+- **A wake lock while a terminal is focused, and a dedicated diff tab type.**
+  Both from the PWA's original plan; the git surface renders diffs through
+  Monaco and no wake lock exists.
+- **Server-side saved filters, GUI-side offline mode, bulk drift acceptance,
+  and voice approval.** Deferred by §3 with their reasons; repeated here only
+  so that a reader working through this register does not conclude they were
+  missed rather than refused.
+- **Backend convergence on Rust.** §3 again: the two-process shape is the
+  requirement (NFR-D11), and nothing forecloses a future port.
+
+### 7.4 What this register is not
+
+It is not a backlog, and nothing in it is scheduled. `ROADMAP.md` holds the
+stages; this document holds what is owed. The distinction matters because a gap
+register that starts carrying dates becomes a plan nobody agreed to, and then
+stops being maintained — which is how the engine ended up with a document
+called `uplift.md` that was simultaneously its history, its backlog and its
+deployment guide.
+
+The rule for adding a row: **something was designed, it is not built, and a
+reader of the design documents could reasonably have believed it was.** A thing
+nobody ever wrote down is not a gap here; it is an idea, and ideas belong in
+Vogt, which is the product this repository builds.

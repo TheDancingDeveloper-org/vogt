@@ -5,6 +5,27 @@ Decisions taken as input: one repo / one product; GUI converges on the
 Solid/Vite PWA stack; backend stack is an open question this document
 answers; deliverable is this design + phased plan (no code yet).
 
+> **Read this as a dated record, not as a description of the product** *(note
+> added 2026-08-15)*. It is the argument for a decision taken on 2026-08-14,
+> and it is deliberately **not** kept in step with what was subsequently built
+> — editing a dated investigation to match a later world destroys the one thing
+> it is good for, which is showing what was known and weighed at the time. §4
+> in particular remains the standing answer to "why two languages".
+>
+> Three consequences for a reader:
+>
+> - **Its inventory figures are as-of.** §2's "58 operations", "~16.5k lines",
+>   "~9.8k lines" were true on 2026-08-14. The registry now holds 61
+>   operations; the current figures live in `DESIGN.md` §4.2 and are checked by
+>   tests rather than by counting.
+> - **§12–§14 are folded and say so in place.** `REQUIREMENTS.md` and
+>   `ROADMAP.md` govern; those sections are kept as the working record of where
+>   revision r9 came from.
+> - **§5.1's tree sketch is out of date.** MyDevEnv2's documents no longer land
+>   under `docs/engine/`; they were consolidated on 2026-08-15 into
+>   [`ENGINE.md`](ENGINE.md), `DEPLOYMENT.md` §10–§11 and
+>   [`USER_GUIDE.md`](USER_GUIDE.md). `REQUIREMENTS.md` §7.0 is the map.
+
 ---
 
 ## 1. Executive summary

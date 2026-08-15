@@ -24,7 +24,7 @@
 //! path.
 //!
 //! External content fed back to the model is untrusted (see
-//! docs/engine/ASSISTANT.md): terminal output in `<terminal-output>`,
+//! docs/ENGINE.md section 6): terminal output in `<terminal-output>`,
 //! everything Vogt returns in `<vogt-data>`, the session roster in
 //! `<session-list>`, and failure text in `<tool-error>` — the rule is about
 //! provenance, not about which tool produced the string. Work-item titles and imported

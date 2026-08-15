@@ -881,12 +881,13 @@ carries the reminder and the order of operations: run the demo, then delete
    NFR-S5's "does not fetch the estate to render a page" holds, true
    virtualization does not. Bulk drift accept does not exist, by §3.
 
-**Open after M11**: the browser demo; comments are audited against the
-comment rather than the work item, so a per-item audit filter shows creates,
-transitions and updates but not comments (a server-side fix, either an
-`entity_kind`/parent filter on `audit.list` or a change to what a comment
-write audits); and `backlog`/`bugs` have no `offset`, so there is no way to
-page past the top 200 of a ranked view.
+**Open after M11**, all three now carrying IDs so they are countable
+*(r11)*: the browser demo (`REQUIREMENTS.md` §7.2); comments audited against
+the comment rather than the work item, so a per-item audit filter shows
+creates, transitions and updates but not comments — a server-side fix, either
+an `entity_kind`/parent filter on `audit.list` or a change to what a comment
+write audits (**FR-S12**); and `backlog`/`bugs` having no `offset`, so there is
+no way to page past the top 200 of a ranked view (**FR-V5**).
 
 ## M12 — AI layer & voice validation (M–L)
 
@@ -942,8 +943,18 @@ does not.
    a device and a microphone, and neither exists here. What was done instead
    is smaller and honest: the prompt states that items are `WI-7` and
    projects are slugs, which is what a recognizer's output has to survive.
-   FR-T7 was not attempted — the `claude-*` proxy hang is unexplained and the
-   loop is OpenAI-compatible only.
+
+4. **FR-T7 was half attempted, and this note used to say it was not**
+   *(corrected r11)*. The requirement offers two ways out of the `claude-*`
+   hang — a native Anthropic backend, or the route refused with a named
+   reason — and the second is built: `assistant.rs` refuses a `claude-*` model
+   id on the OpenAI-compatible transport with a sentence naming the model, the
+   transport and the setting that overrides it, and
+   `assistant_allow_claude_proxy` lets a deployment whose proxy serves those
+   routes correctly say so and own the result. The hang itself is still
+   unexplained, and the native backend is still absent — `REQUIREMENTS.md` §7
+   carries what remains. "Not attempted" understated the work by exactly the
+   amount that would have caused somebody to do it again.
 
 ## M13 — Mobile MVP1 (S–M)
 

@@ -24,10 +24,16 @@ Vogt gives you:
 
 ## Status
 
-**v1 complete: M0–M6 are implemented**, design revision r4. Every stage
-demo runs as an acceptance test. Two must-have requirements are delivered
-only in part and are named as such in `REQUIREMENTS.md` §5 — the `migrate`
-CLI verb (FR-L1) and the audit log's time filter (FR-S6).
+**v1 complete: M0–M6 are implemented**; **v2 (M9–M14) is built**. Design
+revision r5, requirements revision r11. Every stage demo runs as an acceptance
+test except two, which need a browser and a phone and are outstanding as such
+(`ROADMAP.md` M11 and M13).
+
+**Everything designed and not built is in one place**: `REQUIREMENTS.md` §7,
+the gap register, which separates what is *owed* — twelve items, each with a
+numbered requirement — from what was *withdrawn*. Nothing in it is a must-have.
+The design documents describe what exists; §7 is where the rest lives, and r11
+argues why that split is worth having.
 
 Vogt now sees work you did not type in. Collectors sweep your registered
 projects for git state, source markers and dependency references — plus
@@ -44,9 +50,10 @@ state and observation become drift proposals carrying their own evidence.
 **M4 (Service) is implemented**: one process serving `/api`, `/mcp` and
 plain-HTTP health on a single port, in-process TLS, scoped bearer tokens
 bound to actors with double-gated writes, backup/restore, a hardened image
-and a tag-triggered signing pipeline. The Node B stack is written and its
-port allocated; publishing an image and moving production remain separate,
-deliberate acts (NFR-D10).
+and a tag-triggered signing pipeline. The merged image is published to
+`ghcr.io/thedancingdeveloper-org/vogt-stack` and pinned by digest in
+`deploy/vogt-stack.compose.yml`; publishing an image and moving production
+remain separate, deliberate acts (NFR-D10).
 
 **M5 (GitHub module) is implemented**: read-only consolidation of a
 repository's existing issues, PRs, labels and releases; forge drift
@@ -98,7 +105,8 @@ What that adds to the tree:
 - `web/` — a Solid/Vite PWA, which becomes the product's GUI. Needs `pnpm`; run
   it from `web/`. The Rust binary embeds `web/dist/` at compile time.
 - `mobile/` — a Capacitor 8 Android shell that loads the deployed PWA.
-- `docs/engine/` — the engine's own documents, describing the engine only.
+- `docs/ENGINE.md` — the engine's reference: what it owns, running it, its wire
+  contract, the assistant, the agent-task scheduler.
 
 **The Python core is unchanged.** It remains the domain — entities, workflow,
 ranking, storage, audit — and the single authority for the operation registry
@@ -108,14 +116,16 @@ it against porting either half and explains why a narrow interface between two
 processes is the cheaper join.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the outline,
-[`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered baseline and
-what has been deliberately deferred, [`docs/ROADMAP.md`](docs/ROADMAP.md) for
-the stages (MVP = M0–M2) and what M0 actually shipped,
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the topologies,
-[`docs/CONFIG.md`](docs/CONFIG.md) for the (generated) configuration
-reference, [`docs/MERGE_MYDEVENV2.md`](docs/MERGE_MYDEVENV2.md) for the merge
-that brought the engine in, and [`engine/README.md`](engine/README.md) for the
-engine's own status, protocol notes and smoke tests.
+[`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the numbered baseline, what
+has been deliberately deferred, and **§7's register of everything designed and
+not built**, [`docs/ROADMAP.md`](docs/ROADMAP.md) for the stages (MVP = M0–M2)
+and what each actually shipped, [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for
+the topologies, the runtime image and the stacks,
+[`docs/CONFIG.md`](docs/CONFIG.md) for the (generated) configuration reference,
+[`docs/ENGINE.md`](docs/ENGINE.md) for the session engine's own reference,
+[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for driving the product, and
+[`docs/MERGE_MYDEVENV2.md`](docs/MERGE_MYDEVENV2.md) for the merge that brought
+the engine in.
 
 ```console
 $ uv run vogt init

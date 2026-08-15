@@ -6,12 +6,18 @@ engine's API contract.
 
 Both halves are checked here, and both are checked against *source*, not
 intent — the same reasoning `test_gui.py` gives at length. The engine half
-resolves against `app.rs`'s route table *and* against `docs/engine/
-API_CONTRACT.md`, and they are not the same check. The router is the stronger
-one: it is what answers requests, and a check against the description alone
-would pass while the product was broken. The document is the thing that rots,
-so it is checked too — and when the two disagree, the document is the one that
-is wrong.
+resolves against `app.rs`'s route table *and* against the wire contract in
+`docs/ENGINE.md` §5, and they are not the same check. The router is the
+stronger one: it is what answers requests, and a check against the description
+alone would pass while the product was broken. The document is the thing that
+rots, so it is checked too — and when the two disagree, the document is the one
+that is wrong.
+
+The contract lived in `docs/engine/API_CONTRACT.md` until 2026-08-15, when the
+engine's eight documents were consolidated into one (`REQUIREMENTS.md` §7.0 is
+the map). Only the path moved: the checks below read code spans out of the
+whole file, so the section's heading level is not load-bearing and neither is
+its position.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_SRC = REPO_ROOT / "web" / "src"
 VOGT_CLIENT = WEB_SRC / "vogtApi.ts"
 ENGINE_APP = REPO_ROOT / "engine" / "server" / "src" / "app.rs"
-ENGINE_CONTRACT_DOC = REPO_ROOT / "docs" / "engine" / "API_CONTRACT.md"
+ENGINE_CONTRACT_DOC = REPO_ROOT / "docs" / "ENGINE.md"
 
 #: The front door's own mount. Paths under it are Vogt operations and are
 #: resolved by the registry half of this file; the engine has three catch-all
@@ -134,7 +140,7 @@ def engine_routes() -> set[str]:
 
 
 def documented_routes() -> set[str]:
-    """Every engine path `API_CONTRACT.md` names, in a code span.
+    """Every engine path the wire contract names, in a code span.
 
     Prose is not read: a path only counts when the document set it in
     backticks, which is what its route entries do and what a passing mention
@@ -146,7 +152,7 @@ def documented_routes() -> set[str]:
     declared = re.findall(
         r"`(?:[A-Z]+ )?(/(?:api|healthz|readyz|mcp|ui-legacy)[^`\s?]*)", text
     )
-    assert declared, "no routes found in the engine's API contract document"
+    assert declared, "no routes found in the engine's wire contract (ENGINE.md \u00a75)"
     return {normalise(route) for route in declared}
 
 
@@ -230,7 +236,10 @@ def test_every_engine_path_in_the_pwa_is_in_the_engine_s_api_contract() -> None:
         candidate = normalise(literal)
         missing_from = [
             name
-            for name, known in (("the router", routes), ("API_CONTRACT.md", documented))
+            for name, known in (
+                ("the router", routes),
+                ("the wire contract", documented),
+            )
             if not resolves(candidate, known)
         ]
         if missing_from:
@@ -614,7 +623,7 @@ def test_the_vogt_surfaces_share_the_engine_s_narrow_breakpoint() -> None:
 
 
 def test_every_readiness_check_is_in_the_engines_contract() -> None:
-    """`API_CONTRACT.md` said "five checks" while the code published seven.
+    """The contract said "five checks" while the code published seven.
 
     It had been stale since `workspace_agreement` landed and got staler when
     `backup_agreement` did — a document nobody could have caught out by
@@ -629,7 +638,7 @@ def test_every_readiness_check_is_in_the_engines_contract() -> None:
     missing = sorted(name for name in published if f"`{name}`" not in documented)
     assert not missing, (
         f"{missing} are published by /readyz and named nowhere in "
-        "API_CONTRACT.md; a check a deployer cannot look up is one they "
+        "ENGINE.md \u00a75; a check a deployer cannot look up is one they "
         "cannot act on"
     )
 

@@ -1,16 +1,29 @@
 # Vogt — Design Outline
 
 Status: **v0.3 (revision r5), built**; **§1.2 reversed at r9** (2026-08-14 —
-Vogt runs the work it governs) · design 2026-08-12, reconciled
-against the delivered v1 on 2026-08-12. Sections that describe something
-the build decided differently are marked *as built* in place; the
-requirement-by-requirement verification is `REQUIREMENTS.md` §5.
+Vogt runs the work it governs) · design 2026-08-12, reconciled against the
+delivered v1 on 2026-08-12, and against the merged product on 2026-08-15.
 Scope: standalone product. Cadastre is prior art and a lessons source, not a
 dependency — see §11.
 
+**This document describes what Vogt *is*.** That rule was tightened on
+2026-08-15 and it changes how to read the sections below. Where the build
+decided something differently from an earlier draft, the decision is described
+in place and the withdrawn alternative is named so the absence reads as a
+choice. Where something was designed and **never delivered**, it is *not*
+described here as though it existed: it is a numbered gap in
+[`REQUIREMENTS.md`](REQUIREMENTS.md) §7, with what is missing and what its
+absence costs. A design document that describes unbuilt things is the most
+expensive kind of wrong, because it reads exactly like one that does not.
+
+The requirement-by-requirement delivery verification is `REQUIREMENTS.md` §5
+(v1) and §6 (v2).
+
 Companion documents: [`REQUIREMENTS.md`](REQUIREMENTS.md) (numbered FR/NFR
-baseline, with the r2 change summary), [`SCHEMA.md`](SCHEMA.md),
-[`DEPLOYMENT.md`](DEPLOYMENT.md), [`ROADMAP.md`](ROADMAP.md).
+baseline, the revision history, and §7's gap register),
+[`SCHEMA.md`](SCHEMA.md), [`DEPLOYMENT.md`](DEPLOYMENT.md),
+[`ROADMAP.md`](ROADMAP.md), [`ENGINE.md`](ENGINE.md) (the session engine's
+own reference), [`USER_GUIDE.md`](USER_GUIDE.md).
 
 ---
 
@@ -283,15 +296,12 @@ Model:
   opinion about them. This avoids lockfile format churn, transitive
   resolution, feature/platform conditionals, and per-ecosystem resolver
   semantics — the whole expensive half of dependency tooling.
-- **Edges also may be declared.** `project link A depends_on B` records an
-  edge no manifest expresses (a service calling another, a doc pipeline
-  consuming a schema). Reference kind is `path | git | declared`.
-  ***Not built.*** No `project.link` operation exists and no table backs
-  one, so every delivered edge is observed and `declared` is a `RefKind`
-  member nothing produces. The consequence is narrow but real: a dependency
-  that lives only in a deploy script or someone's head is invisible to
-  `deps` and to the reverse lookup. See `REQUIREMENTS.md` §5.1 and
-  `SCHEMA.md` §2.2.
+- **Every edge is observed.** Reference kind is `path | git | declared`, and
+  the delivered producers are the two manifest kinds: a dependency that lives
+  only in a deploy script or in someone's head is not in the graph. `declared`
+  is a `RefKind` member nothing writes — the gap and what it costs are
+  `REQUIREMENTS.md` §7 (**FR-D9**); `SCHEMA.md` §2.2 records the same absence
+  in the schema.
 - **Resolution is by path or repo URL** to a registered project. Internal
   edges are exactly the ones expressed as paths and git URLs, which is why
   package identity is not needed. Unresolved internal-looking references
@@ -384,6 +394,11 @@ mobile/        the Capacitor shell that loads that PWA
 src/vogt/      unchanged, and still the only definition of an operation
 ```
 
+The engine's own reference — what it owns, how to run it, its full wire
+contract, the assistant and the agent-task scheduler — is
+[`ENGINE.md`](ENGINE.md). It is one document because it used to be eight, each
+describing MyDevEnv2 as a separate product.
+
 Two properties hold the shape together, and both are asserted rather than
 described. **The registry is still the single definition**: the PWA's route
 table resolves against it, and so do the assistant's Vogt tools, which are
@@ -400,9 +415,13 @@ instead of one language argument (`MERGE_MYDEVENV2.md` §4).
 - **Transport parity tests**: for each use-case, a matrix test drives it via
   CLI, REST, and MCP and asserts identical results and identical audit rows.
   Two explicit exclusion lists exist and are checked for staleness in both
-  directions: `HTTP_ONLY` and `LOCAL_ONLY` (`init`, `serve`, `backup`,
-  `restore` — operations that act on the local process or data directory
-  and have no meaningful remote semantics).
+  directions. `LOCAL_ONLY` holds six — `init`, `serve`, `backup`, `restore`,
+  `import`, `mcp.stdio` — each acting on the local process or data directory
+  with no meaningful remote semantics, and each carrying its reason as the
+  dictionary's value rather than in a comment. `HTTP_ONLY` is **empty**, and
+  has been since M4: no operation has yet earned an exception in that
+  direction. It stays declared because a list that only exists once something
+  needs it is a list nobody adds to correctly.
 - **Write-back** lives only in `adapters/github/` behind a per-project
   `write_back: none | comment_only | full` policy. Every write-back action
   is itself audited and produces an Observation on the next sweep (closing
@@ -451,12 +470,13 @@ REST/CLI/GUI are peers over the same operations.
 - **Both allow and deny decisions are audited** — into `auth_decisions`
   (`SCHEMA.md` §2.1), separately from the declared-write audit, because a
   denial changes nothing and so has no entity or revision to hang from.
-- *As built*: the five scopes all exist, parse and imply correctly, but
-  **`writeback` gates no operation**. `forge.writeback` sets a project's
-  policy and requires `project.write`; the upstream write is a consequence
-  of commenting or transitioning, which are `work.write`. A token issued
-  with `writeback` alone can do nothing but read — a trap for whoever
-  issues one in good faith. See `REQUIREMENTS.md` §5.1.
+- Five scopes exist, parse and imply correctly: `read`, `work.write`,
+  `project.write`, `admin`, `writeback`. **Four of them gate something.**
+  `forge.writeback` sets a project's policy and requires `project.write`; the
+  upstream write is a consequence of commenting or transitioning, which are
+  `work.write`. So a token issued with `writeback` alone can do nothing but
+  read — a trap for whoever issues one in good faith, and a gap rather than a
+  design: `REQUIREMENTS.md` §7 (**FR-S11**).
 - **Transports**: stdio (local, same data-dir, no server required) and
   streamable HTTP at `/mcp` on the same port as REST/GUI/health (see
   `DEPLOYMENT.md` §1). A `vogt-mcp-remote` stdio bridge serves agent
@@ -479,8 +499,9 @@ sketch's `GET /projects/{id}/brief` is `GET /api/projects/brief?project=…`,
 `POST /drift/{id}/accept|reject|contest` is one `POST /api/drift/resolve`
 carrying the resolution. Nothing uses `DELETE`: `DELETE /suppressions/{id}`
 is `POST /api/suppressions/revoke`, because a revocation is an audited write
-that needs a reason, and a reason does not fit a `DELETE`. All 55 routes sit
-under `/api`; the paths below name the operation, not the URL.
+that needs a reason, and a reason does not fit a `DELETE`. The registry holds
+**61 operations**; the six in `LOCAL_ONLY` are not mounted, so **55 routes** sit
+under `/api`. The paths below name the operation, not the URL.
 
 - `projects/` CRUD + `GET /projects/{id}/brief` (per-repo view)
 - `work/` CRUD, `POST /work/{id}/transition`, `POST /work/{id}/adopt`
@@ -527,13 +548,11 @@ under `/api`; the paths below name the operation, not the URL.
 
 A **Contract** states what a compliant project looks like. It carries a
 version identifier so a status can name which contract it was evaluated
-against. *As built*: it is a versioned constant in `core/contract.py`, **not
-configuration** — `VogtConfig` has no contract keys and `evaluate()` is
-always called with the default. The declarative shape, the version
-identifier and the named failing criteria are all delivered; what is not is
-a self-hoster's ability to state a different contract without editing
-Python. FR-G1 says "sourced from configuration", so this is a gap
-(`REQUIREMENTS.md` §5.1), not a decision. The v1 contract:
+against. It is a versioned constant in `core/contract.py`: `VogtConfig` has no
+contract keys, and `evaluate()` is always called with the default. The
+declarative shape, the version identifier and the named failing criteria are
+delivered; a self-hoster stating a different contract without editing Python is
+not, and FR-G1 asks for it — `REQUIREMENTS.md` §7. The contract:
 
 ```
 required_files:  [AGENTS.md, README.md, LICENSE]
@@ -651,11 +670,11 @@ Deployment and network topologies: [`DEPLOYMENT.md`](DEPLOYMENT.md).
   migrations tables; observed store is append-only with a retention policy
   that never prunes the latest observation per subject, nor any observation
   a drift proposal references.
-- `vogt init | status | backup | restore | export | import`. *As built*:
-  there is no separate `migrate` verb — `init` is idempotent and brings an
-  existing instance forward, and `serve` migrates before it reports ready.
-  FR-L1 names `migrate` explicitly, so this is a gap recorded in
-  `REQUIREMENTS.md` §5, not a decision.
+- `vogt init | status | backup | restore | export | import`. Migration has no
+  verb of its own: `init` is idempotent and brings an existing instance
+  forward, and `serve` migrates before it reports ready. FR-L1 names `migrate`
+  explicitly, so the absence is a gap and not a decision —
+  `REQUIREMENTS.md` §7.
 - Config: pydantic settings schema is the single source of truth; example
   config and docs are generated from it in CI (drift between docs and
   defaults fails the build).
@@ -817,7 +836,13 @@ write-back, M6 the GUI. **v1 = M0–M6.**
 Post-v1: M7 (import and the notification inbox) and M8 (`connect` — reaching
 an instance from an agent environment). The merge stages **M9–M14** carry the
 §1.2 reversal into delivery — foundations, coding sessions, GUI uplift, the
-AI layer, mobile, consolidation. **v2 = M9–M13.**
+AI layer, mobile, consolidation. **v2 = M9–M14**, M14 being the consolidation
+stage rather than a feature one.
+
+Two of those stages end in a demo that has not been run, because neither can be
+run without a browser and a phone: M11's and M13's. `ROADMAP.md` says so at
+each stage and `REQUIREMENTS.md` §7 carries them as gaps, so that "built"
+nowhere quietly means "watched working".
 
 ---
 

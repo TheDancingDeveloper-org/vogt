@@ -1,13 +1,27 @@
 # Vogt — Deployment & Network Topologies (v0.2, revision r5)
 
-Status: **built** (M4; reconciled against the delivered v1 on 2026-08-12).
+Status: **built** (M4; reconciled against the delivered v1 on 2026-08-12;
+consolidated with the engine's deployment documents on 2026-08-15).
 Companion to `DESIGN.md` §7 and `SCHEMA.md`. Shaped heavily by cadastre's
 deployment history — see §4 for the specific lessons encoded here.
 
-The compose file this document describes is committed at
-`deploy/personal-vogt.compose.yml` and copied to `indexarr/ops` at
-`personal/vogt/docker-compose.yml`. §4.2 and §4.3 describe client-side
-tooling that is **not built** — see the note in each.
+**Two documents were folded in on 2026-08-15** and no longer exist separately:
+`docs/engine/TOOLING.md` is §10 (what the runtime image carries) and
+`engine/deploy/KOMODO.md` is §11 (the engine's own standalone stacks). Both
+described MyDevEnv2 as a product with its own deployment story; it has one
+deployment story, and this is it.
+
+This document covers three deployments, and confusing them is the most
+expensive mistake available here:
+
+| | Compose file | Stack | What it runs |
+|---|---|---|---|
+| **The merged product** (§9) | `deploy/vogt-stack.compose.yml` | `dev-vogt` | engine + core, one port — the target |
+| Core-only (§2.2) | `deploy/personal-vogt.compose.yml` | `personal/vogt` | vogt-core alone, digest still a placeholder |
+| Standalone engine (§11) | `engine/deploy/docker-compose.yml` | `prod/dev-mydevenv2` | the engine with no core — being retired |
+
+§4.2 and §4.3 describe client-side tooling that is **not built** — see the note
+in each, and `REQUIREMENTS.md` §7.
 
 **r4 (2026-08-12): the target deployment state is named.** Vogt runs as a
 **Docker Compose stack on Node B (`winrarhost`), deployed by Komodo** from
@@ -751,27 +765,66 @@ writes and a false audit trail. Nothing errors, no test that stubs the
 transport can see it, and the only signal is an actor name nobody reads until
 they need it — which is exactly when it has to be right.
 
+## 8. Known: every write costs a WAL checkpoint
+
+Measured against the deployed data volume on Node B, one declared write
+takes **~25ms**, almost all of it fsync:
+
+| `synchronous` | ms per write |
+|---|---|
+| `full` | 28.7 |
+| `normal` | 24.7 |
+| `off` | 0.1 |
+
+The pragma barely moves it, which is the tell. `connection.py` opens a
+connection per transaction and closes it, and closing the last connection to
+a WAL database checkpoints the log — and a checkpoint fsyncs whatever
+`synchronous` says about commits. The cost is the checkpoint, not the commit.
+
+Per-transaction connections were chosen deliberately, so that a CLI process,
+a server process and a stdio MCP process can share one data directory
+(§2.1). That requirement is real; closing after every transaction is not the
+only way to meet it. A connection held per store instance, or per thread,
+would keep multi-process safety while letting the WAL checkpoint on SQLite's
+own schedule instead of hundreds of times a sweep.
+
+Not fixed here because it is a storage-layer change and wants its own
+testing. Recorded because 25ms per write is invisible on a laptop and
+obvious on a sweep that records thousands of observations — and because the
+number will otherwise be rediscovered by whoever next wonders why a large
+estate sweeps slowly.
+
+**Do not "fix" this with `VOGT_SQLITE_SYNCHRONOUS=off` in production.** That
+trades durability for speed in a product whose declared store is an audit
+log. The knob exists for test runs, where nothing outlives the process.
+
 ## 9. Deploying the merged stack, the first time *(r9)*
 
-The merge is built and none of it has been deployed. This section is the
-sequence, in order, with what to check at each step — written before the
-first deploy rather than after it, because everything below is either a
-precondition somebody would otherwise discover at the wrong moment or a
-failure mode that reports success.
+This section is the sequence, in order, with what to check at each step. It was
+written before the first deploy, because everything below is either a
+precondition somebody would otherwise discover at the wrong moment or a failure
+mode that reports success.
 
 ### 9.0 Three things that are true before you start
 
-1. **No merged image exists anywhere.** `.github/workflows/build.yml`
-   publishes the *core-only* root `Dockerfile` to
-   `ghcr.io/thedancingdeveloper-org/vogt`. Nothing builds `engine/Dockerfile`,
-   which is the merged image. `deploy/vogt-stack.compose.yml` pins
-   `repo.indexarr.net/indexarr/vogt` at an all-zero placeholder digest that
-   nothing pushes to. **Step 9.1 is not optional and cannot be skipped by
-   pulling a tag.**
-2. **The image has never been built at all** — not in CI, not by hand. It
-   parses and every `COPY` resolves; that is the whole of what is known. The
-   riskiest step inside it is copying uv's standalone CPython between build
-   stages onto a different base.
+*Two of these read the other way round at r9 and were corrected on 2026-08-15,
+when the pipeline that had never run, ran.*
+
+1. **The merged image exists and is pinned.** `build.yml`'s `stack-image` job
+   publishes `engine/Dockerfile` to
+   `ghcr.io/thedancingdeveloper-org/vogt-stack` — a different repository from
+   the core-only `ghcr.io/thedancingdeveloper-org/vogt`, because they are
+   different artefacts for different deployments and one repository holding
+   both is how somebody eventually pins the wrong one.
+   `deploy/vogt-stack.compose.yml` carries a real digest. **Step 9.1 is only
+   needed for a build made before that job first ran**; after it, pin what the
+   job reports.
+2. **The core-only stack is the one with a placeholder.**
+   `deploy/personal-vogt.compose.yml` still pins
+   `ghcr.io/thedancingdeveloper-org/vogt` at an all-zero digest. That stack is
+   deprioritised in favour of the merged one and the placeholder is why: it
+   cannot be deployed by accident. Do not read the two files as if they were in
+   the same state.
 3. **A front door with nothing behind it reports itself ready.** The core's
    readiness probe is deliberately non-fatal (§1.1, FR-E9), and
    `entrypoint.sh` declines to start a core when `VOGT_CORE_URL` is not
@@ -791,12 +844,8 @@ cd web && pnpm install --frozen-lockfile && pnpm build && cd ..
 docker build -f engine/Dockerfile -t <registry>/vogt:<sha> .
 ```
 
-**The registry is settled (M14).** `build.yml`'s `stack-image` job publishes
-the merged image to `ghcr.io/thedancingdeveloper-org/vogt-stack` — a separate
-repository from the core-only `vogt`, because they are different artefacts for
-different deployments and one repository holding both is how somebody
-eventually pins the wrong one. So step 9.1 is only needed for a build made
-*before* that job has run once; after that, pin what the job reports.
+**The registry is settled (M14)** — see §9.0. This step is the hand-build, for
+a change that has not been through `build.yml` yet.
 
 The job also smoke-tests both halves before pushing, for the reason the
 core-only job records: two releases shipped images that had never been
@@ -927,35 +976,266 @@ Where a signed APK is *published* is still an untaken decision. The job
 uploads it as a workflow artifact, which is a place to get one from without
 inventing a release channel this product has not chosen.
 
-## 8. Known: every write costs a WAL checkpoint
+## 10. What the runtime image carries *(consolidated 2026-08-15)*
 
-Measured against the deployed data volume on Node B, one declared write
-takes **~25ms**, almost all of it fsync:
+This section is the source of truth for the toolchain the merged image ships,
+and replaces `docs/engine/TOOLING.md`. It describes the image, not the stack:
+stack shape, environment and rollout are §2.2, §9 and §11.
 
-| `synchronous` | ms per write |
-|---|---|
-| `full` | 28.7 |
-| `normal` | 24.7 |
-| `off` | 0.1 |
+The pod is a **neutral development baseline** for builds under
+`~/Working/Active/apps/`. It is not tuned for one language, because the estate
+it serves is not.
 
-The pragma barely moves it, which is the tell. `connection.py` opens a
-connection per transaction and closes it, and closing the last connection to
-a WAL database checkpoints the log — and a checkpoint fsyncs whatever
-`synchronous` says about commits. The cost is the checkpoint, not the commit.
+### 10.1 Base and system tools
 
-Per-transaction connections were chosen deliberately, so that a CLI process,
-a server process and a stdio MCP process can share one data directory
-(§2.1). That requirement is real; closing after every transaction is not the
-only way to meet it. A connection held per store instance, or per thread,
-would keep multi-process safety while letting the WAL checkpoint on SQLite's
-own schedule instead of hundreds of times a sweep.
+Ubuntu 26.04 (or newer LTS). On top of it: `ca-certificates`, `curl`, `wget`,
+`gnupg`, `lsb-release`, `git`, `git-lfs`, `vim`, `nano`, `less`, `man-db`,
+`sudo`, `build-essential`, `pkg-config`, `cmake`, `clang`, `lld`, `nasm`,
+`jq`, `ripgrep`, `fd-find`, `bat`, `rsync`, `openssh-client`, `openssh-server`,
+`iputils-ping`, `netcat-openbsd`, `dnsutils`, `xdg-utils`, `htop`, `tree`,
+`file`, `unzip`, `zip`, `musl-tools`, `gcc-mingw-w64-x86-64`,
+`gcc-aarch64-linux-gnu`, `g++-aarch64-linux-gnu`, `libssl-dev`,
+`libclang-dev`, `protobuf-compiler`.
 
-Not fixed here because it is a storage-layer change and wants its own
-testing. Recorded because 25ms per write is invisible on a laptop and
-obvious on a sweep that records thousands of observations — and because the
-number will otherwise be rediscovered by whoever next wonders why a large
-estate sweeps slowly.
+`ripgrep` is not a convenience: the engine's `GET /api/search` shells out to
+`rg`, and its absence is a deliberate `500` rather than a silent empty result,
+because an empty result reads as "no matches".
 
-**Do not "fix" this with `VOGT_SQLITE_SYNCHRONOUS=off` in production.** That
-trades durability for speed in a product whose declared store is an audit
-log. The knob exists for test runs, where nothing outlives the process.
+**Deliberately not carried over from MyDevEnv v1**: `tmux` (server-owned PTYs
+replace it), the `xdg-open` shim (a code-server workaround, and there is no
+code-server), the `/home/sprooty → /workspace` symlink (the workspace is
+bind-mounted at the path it has on the host, so paths match exactly), and
+`sshd` on 2223 (the PTY sessions and the workspace bind mount are the access
+path; add an explicit emergency SSH route if one is ever needed).
+
+### 10.2 Language toolchains
+
+**Rust** — `rustup` stable with `rustfmt`, `clippy`, `rust-analyzer`;
+cross-compile targets `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`,
+`x86_64-pc-windows-gnu`; cargo tools `cargo-deb`, `cargo-zigbuild`,
+`cargo-xwin`, `cargo-watch`; `rust-analyzer-mcp`; `sccache` from GitHub
+releases, not apt — the apt package lacks Redis support.
+
+**Installed to `/opt/rust`** via `RUSTUP_HOME=/opt/rust/rustup` and
+`CARGO_HOME=/opt/rust/cargo`, never `~/.rustup` and `~/.cargo`. This is not a
+preference. Until 2026-07-31 they lived under `$HOME`, and because the home
+directory is a bind mount at runtime, the pod silently had none of the cargo
+tools, none of the cross targets and no `sccache` — only whatever the home
+volume happened to contain. The consequence of the fix is that the crate cache
+lives in the image, so crates re-download after a redeploy; that is the cheaper
+half of the trade.
+
+**Python** — `python3`, `python3-pip`, `python3-venv`, `python3-dev`; `uv` and
+`ruff` via pip.
+
+**Node** — Node 22 from NodeSource, `pnpm` global.
+
+**Android** — JDK 21 (`openjdk-21-jdk-headless`,
+`JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64`); Android SDK at
+`/opt/android-sdk` for the same bind-mount reason as Rust, with `ANDROID_HOME`
+and `ANDROID_SDK_ROOT` pointing there and `sdkmanager`, `adb`, `apkanalyzer` on
+`PATH`. Packages: `cmdline-tools;latest`, `platform-tools`,
+`platforms;android-35`, `platforms;android-36`, `build-tools;35.0.0`,
+`build-tools;36.0.0`. Builds run through the committed wrapper
+(`mobile/android/gradlew`), never system gradle. The Capacitor project targets
+compile/target SDK 35; 36 is installed ahead of the bump.
+
+**Flutter (dev image only)** — 3.44.9 stable with its bundled Dart 3.12.2, at
+`/opt/flutter`, behind `INSTALL_FLUTTER=true`. Production does not carry it.
+
+### 10.3 Container, cloud and agent tooling
+
+Docker CLI and compose plugin (installed always; *daemon access* is
+deployment-selected, §11.2), `gh`, `rclone`, `infisical`, `tailscale`, and
+`step` (Smallstep — self-issues short-lived SSH certs against Node B's step-ca,
+and is the only host-shell SSH path for in-pod agents).
+
+Agent-facing: `opencode` in every image; `mydevenv2-rust-analyzer-mcp` and
+`github-mcp-server` for MCP — registration commands are [`ENGINE.md`](ENGINE.md)
+§4. **Codex and Claude are not installed in the production image**; they are
+user-managed there. The dev image bakes both in with `INSTALL_AI_CLIENTS=true`,
+and in that trusted pod the system `codex` command always runs with
+`--dangerously-bypass-approvals-and-sandbox` (§11.4).
+
+### 10.4 Secrets the pod needs at startup
+
+| Secret | Infisical location | Purpose |
+|---|---|---|
+| `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` | `apps` / `prod` | Join the pod to the tailnet at startup |
+| `MYDEVENV2_TOKEN` | `apps` / `prod` | The engine's primary bearer token |
+| `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` | `apps` / `prod` | Read-only Universal Auth identity for agent shells |
+| `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` | `apps` / `prod` | Secret for that identity |
+| `HOMELAB_CADASTRE_HTTP_TOKEN` | `apps` / `prod` | Child-process bearer for the private cadastre MCP endpoint |
+| `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` | `apps` / `prod` | Optional; empty disables native FCM while web push still works |
+| `MYDEVENV2_ASSISTANT_API_KEY` | `apps` / `prod` | Optional; empty hides the assistant entirely (FR-T6) |
+| `HOMELAB_VOGT_CORE_TOKEN` | `apps` / `prod` | The core token the front door injects (§9.3) |
+
+VAPID keys for browser web push are **generated by the engine on first use** and
+persisted under `state_dir`; they are not injected as stack secrets, which is
+part of why `state_dir` must be inside what `vogt backup` covers (NFR-I6).
+
+### 10.5 How credentials reach a child, and never PID 1
+
+The pod fetches service credentials **into child shells** rather than exporting
+service tokens from PID 1. Production default sessions are wrapped
+automatically; these remain useful for validation:
+
+```bash
+mydevenv2-agent-auth check
+mydevenv2-agent-auth run -- gh api user
+mydevenv2-agent-auth shell
+```
+
+The helper fetches `HOMELAB_CADASTRE_HTTP_TOKEN` on demand and exports it only
+inside that child. The bearer appears in no Dockerfile, no compose environment,
+no command line, no log and no persisted home — the same rule FR-S7 states for
+Vogt's own tokens, applied one layer out.
+
+On the first authenticated session it performs an idempotent client bootstrap
+when `MYDEVENV2_AUTO_CADASTRE_MCP=1` (the default), registering Codex's native
+HTTP transport and pointing Claude Code and OpenCode at
+`/usr/local/bin/mydevenv2-cadastre-mcp`, which obtains a fresh token per bridge
+process. Existing registrations are preserved. Set it to `0` to disable.
+
+The machine identity needs read-only access to the `cicd`, `infrastructure` and
+`apps` Infisical projects, and the helper uses the direct tailnet endpoint
+`http://100.92.54.45:8400` to avoid the browser-facing Caddy auth gate.
+
+### 10.6 GUI streaming: installed, not switched on
+
+Sway (headless Wayland), Selkies-GStreamer and Chromium are in the runtime
+image. The image records what it actually got in `/etc/mydevenv2/features.json`
+— Selkies is installed best-effort and the file says `{"selkies": null}` when it
+was unavailable — and the engine serves that through `GET /api/config`, so a
+client can tell a missing feature from a broken one.
+
+**Production runs with `START_SWAY=0` and `GUI_STREAM_URL=""`.** The GUI tab
+exists in the client and the launch APIs work, but the stream is not
+operational. That is a gap with a requirement, not a quiet default:
+[`REQUIREMENTS.md`](REQUIREMENTS.md) §7 carries it.
+
+## 11. The engine's own stacks *(consolidated 2026-08-15)*
+
+Replaces `engine/deploy/KOMODO.md`. These are the **standalone** MyDevEnv2
+stacks — the engine deployed without a Vogt core — which predate the merge and
+are scheduled for retirement in the order §9.5 gives. They are documented here
+rather than deleted because they are still running, and because `dev-mydevenv2`
+is where several engine behaviours were validated.
+
+| Stack | Ops path | Port | Host | Image |
+|---|---|---|---|---|
+| `prod-mydevenv2` | `personal/mydevenv2/` | 8910 | `mydevenv2.sprooty.com` | `repo.indexarr.net/indexarr/mydevenv2:<sha>` |
+| `dev-mydevenv2` | `personal/mydevenv2-dev/` | 8911 | `mydevenv2-dev.sprooty.com` | `…/mydevenv2:dev-<sha>` |
+
+Both are Komodo stacks on Node B, desired state in `indexarr/ops`, Caddy in
+front, built by Woodpecker (`engine/.woodpecker/server.yml`) rather than by this
+repository's GitHub Actions. **The merge did not merge the deployments**: a
+change under `engine/` does not reach production by tagging this repository, and
+the reverse is equally untrue.
+
+```text
+push to dev  -> build-and-push-dev  -> :dev / :dev-<sha>  -> personal/mydevenv2-dev  -> dev-mydevenv2
+push to main -> build-and-push      -> :latest / :<sha>   -> personal/mydevenv2      -> prod-mydevenv2
+```
+
+Both ops paths live on the ops repository's **`main`** branch, including the dev
+one. That is not symmetric with this repository's dev/main split, and the reason
+is mechanical: `ops/scripts/komodo-deploy.sh` clones ops's default branch
+unconditionally with no branch parameter, so any stack it manages has to sit on
+`main`. An ops `dev` branch was tried first and abandoned for exactly this.
+Komodo's own periphery pull is unaffected either way — it reads the stack's own
+`branch` config directly.
+
+Manual redeploy of the currently pinned image is safe when Komodo needs to
+recreate a stack without a new image: use `ops/scripts/komodo-deploy.sh` with
+`IMAGE_TAG` set to the tag already pinned, or call Komodo `DeployStack`
+directly. **Never invent an SSH or `docker compose up` deploy step** (NFR-D7).
+
+### 11.1 Recreating a stack from nothing
+
+Copy `engine/deploy/docker-compose.yml` (and the socket overlay, if wanted) to
+`indexarr/ops` under the stack's path, mint the secrets §10.4 lists, then create
+the stack through the Komodo API with `server_id: node-b`, `git_provider:
+repo.indexarr.net`, `repo: indexarr/ops`, `branch: main`, `run_directory` set to
+the ops path, `file_paths` listing the compose files, and the runtime values in
+`environment`. Komodo does not read Infisical: it writes its environment field
+into a `.env` at deploy time, which is why the compose rejects empty identity
+values and the entrypoint validates credential retrieval before starting the
+server. Then `DeployStack` once by hand; CI handles redeploys after that.
+
+Caddy on Node B routes the host to the port:
+
+```caddyfile
+mydevenv2.sprooty.com { reverse_proxy localhost:8910 }
+```
+
+Tailnet liveness and readiness are reachable without Caddy at
+`http://100.92.54.45:8910/healthz` and `http://100.92.54.45:8910/readyz`.
+
+### 11.2 The Docker socket is a trust decision, not a default
+
+The base compose is **socketless on purpose**.
+`engine/deploy/docker-compose.docker-socket.yml` is an overlay that mounts
+`/var/run/docker.sock` and adds the host socket group (`DOCKER_SOCKET_GID`,
+currently `984` on Node B — it must match `stat -c %g /var/run/docker.sock`).
+
+Production uses the overlay, because authenticated agent sessions and release
+workflows rely on host-daemon access. Understand what that buys: **any shell or
+API flow that can drive Docker inside the pod can control the host daemon.**
+Scoped non-admin API tokens reduce the HTTP blast radius and do nothing about an
+interactive shell. For personal homelab use that may be acceptable; for anything
+shared, keep the socketless base or interpose a socket proxy.
+
+### 11.3 Disk layout, and the incident behind it
+
+Prod bind-mounts `home` and `tailscale` under `/mnt/2tnvme/docker/volumes/` and
+**does not bind-mount `/tmp` at all**. That gap is why prod's `/tmp` silently
+accumulated ~184 GB of stale build and test scratch inside the writable layer on
+the root disk, contributing to a near-full-root-disk incident on Node B.
+
+The dev stack validates the fix before prod adopts it:
+
+| Inside the container | Host path | Disk |
+|---|---|---|
+| `/home/sprooty` | `/mnt/sdg/mydevenv2-dev/home` | `sdg3`, ext4, ~457 G |
+| `/var/lib/tailscale` | `/mnt/sdg/mydevenv2-dev/tailscale` | same |
+| `/tmp` | `/mnt/sdg/mydevenv2-dev/tmp` | same |
+| `/home/sprooty/Working` | `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` | **same as prod, deliberately** |
+
+The workspace mount is deliberately *not* moved: it is the same live `~/Working`
+data prod uses — two PTY servers against the same files is no different from two
+terminal windows — and migrating a live, actively-edited dataset is a separate
+and higher-stakes step from moving per-stack state and scratch. When prod adopts
+the layout, note whether it moves to `sdg` alongside dev or gets its own disk;
+`sdg` was sized for dev-only validation.
+
+**`init: true` is load-bearing.** The server execs as PID 1 and only `wait()`s
+on children it spawns directly, so orphans reparented to it are never reaped.
+Agent sessions fork many short-lived subprocesses, and on 2026-08-07 this
+exhausted `mydevenv2-dev`'s pids limit at ~106k zombies — the container could not
+fork anything, including its own diagnostic `ps`. Docker's built-in `tini` takes
+the PID 1 slot and reaps them for free. Both compose templates set it; prod's
+copy in the ops repository still needs the line.
+
+### 11.4 Codex full-access mode, in the dev pod only
+
+The dev pod *is* the isolation boundary, so its image exposes `codex` through
+`engine/deploy/codex-full-access.sh`, which always starts the real CLI with
+`--dangerously-bypass-approvals-and-sandbox`. That gives Codex the same
+filesystem and network reach as the container user, across every repository
+under `/home/sprooty/Working`, and a persisted user config cannot silently
+narrow it back to one launch directory.
+
+Do not add repository-specific `--add-dir` entries or rely on Codex project
+trust for this deployment; neither solves cross-repository release work.
+Existing chats keep the policy they started with, so validate with a new chat
+after each image deployment. The old nested-Bubblewrap configuration is no
+longer needed — remove `seccomp=unconfined` and `apparmor=unconfined` from the
+dev stack when this image deploys.
+
+### 11.5 Workspace synchronisation
+
+The workspace-root `mutagen.yml` targets Node B at
+`sprooty@100.92.54.45:/mnt/2tnvme/docker/volumes/mydevenv2/workspace`. Do not
+target the retired MyDevEnv v1 endpoint. Synchronisation is handled outside the
+app; nothing in the engine or the core performs it.

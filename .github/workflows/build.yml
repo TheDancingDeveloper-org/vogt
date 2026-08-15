@@ -22,7 +22,7 @@ name: build
 # production unsigned would be a worse hole than the one this closes.
 #
 # Two branches build, and they build into two streams that cannot collide
-# (NFR-D12, adopted from `docs/engine/uplift.md`):
+# (NFR-D12, adopted from the engine's pre-merge dev/prod split):
 #
 #   main → `sha-<commit>`      the commit images a prod deploy pins
 #   dev  → `dev` + `dev-<sha>` the images a dev stack runs, for the merge
