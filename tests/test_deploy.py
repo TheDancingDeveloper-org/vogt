@@ -864,6 +864,40 @@ def test_the_template_does_not_leave_a_dev_stack_on_production_paths() -> None:
         )
 
 
+def test_each_stack_names_the_vogt_token_of_its_own_instance() -> None:
+    """A Vogt token belongs to one instance and cannot be shared (#29).
+
+    Tokens are stored hashed in the issuing instance's own database and
+    resolved by `token_by_hash`; there is no configuration that accepts a
+    supplied value, so an instance cannot be taught a token it did not mint.
+    Vogt runs more than one instance deliberately (NFR-D12), which makes "the
+    Vogt agent token" one value per instance rather than one value.
+
+    `agent-auth.sh` had the override all along and nothing surfaced it, so
+    `vogt-dev` silently inherited the default — production's token — and every
+    in-pod agent was refused by an instance that had never issued it. The
+    error named the token *file*, which was correct throughout.
+
+    Two halves, because either alone leaves the trap open: the compose must
+    pass the variable through (or a stack cannot answer), and this template
+    must set it (or the next stack pasted from it inherits production's
+    again).
+    """
+    compose_text = _without_comments(STACK_COMPOSE.read_text(encoding="utf-8"))
+    assert "MYDEVENV2_VOGT_SECRET_NAME" in compose_text, (
+        "the compose must pass MYDEVENV2_VOGT_SECRET_NAME, or a stack has no "
+        "way to name its own instance's token"
+    )
+
+    template = _without_comments(STACK_ENV.read_text(encoding="utf-8"))
+    named = re.search(r"^MYDEVENV2_VOGT_SECRET_NAME=(\S+)", template, re.MULTILINE)
+    assert named, "the template must name this stack's own Vogt token secret"
+    assert named.group(1) != "HOMELAB_VOGT_AGENT_TOKEN", (
+        "that secret is the production instance's; a second stack using it "
+        "presents a token to an instance that never issued it"
+    )
+
+
 def test_a_release_apk_is_signed_or_the_job_stops() -> None:
     """NFR-C6's signed APK, and the failure it must not produce.
 

@@ -301,6 +301,27 @@ services:
       INFISICAL_CLIENT_SECRET: "${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET:?required for agent auth}"
       MYDEVENV2_AGENT_AUTH_REQUIRED: "1"
       MYDEVENV2_AUTO_AGENT_AUTH: "1"
+      # Which Infisical secret holds the Vogt token in-pod agents act with.
+      #
+      # A Vogt token is minted by one *instance* and stored hashed in that
+      # instance's own database, so it is meaningless to any other instance —
+      # there is no shared secret and no way to teach an instance a token it
+      # did not issue. Vogt runs more than one instance on purpose (NFR-D12),
+      # so "the Vogt agent token" is not a single value: it is one per
+      # instance, and every stack running this compose needs its own.
+      #
+      # The default names the production instance's, which is right for the
+      # stack that fronts it and wrong for every other. `vogt-dev` had no
+      # answer at all and inherited that default, so its in-pod agents
+      # presented production's token to a different instance and were refused
+      # — correctly — with a message pointing at the token *file*, which was
+      # never the problem (#29).
+      #
+      # Defaulted rather than `:?`-gated, because a deployment that has not
+      # thought about this should keep the behaviour it had; naming it here is
+      # what makes it a decision a stack can take rather than a constant
+      # buried in `agent-auth.sh`.
+      MYDEVENV2_VOGT_SECRET_NAME: "${MYDEVENV2_VOGT_SECRET_NAME:-HOMELAB_VOGT_AGENT_TOKEN}"
 
       # ── tailnet ──────────────────────────────────────────────────────────
       # Setting an auth key makes the engine's tailscale readiness check
