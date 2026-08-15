@@ -255,12 +255,16 @@ def test_a_status_that_cannot_be_read_is_never_reported_as_clean(
     stays an absence and stays forgiving.
     """
     (tmp_path / ".git").mkdir()
-    real = subprocess.run
 
-    def _status_fails(args: list[str], **kwargs: object) -> object:
-        if "status" in args:
-            return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
-        return real(args, **kwargs)  # type: ignore[arg-type]
+    def _status_fails(
+        args: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        # Only `status` fails, so the test proves the `required=True` call is
+        # the one that raises rather than any git call raising.
+        code = 128 if "status" in args else 0
+        stderr = "fatal: bad object" if code else ""
+        return subprocess.CompletedProcess(args, code, "", stderr)
 
     monkeypatch.setattr("vogt.collectors.git_local.subprocess.run", _status_fails)
 

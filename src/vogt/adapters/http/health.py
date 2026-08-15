@@ -15,12 +15,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from fastapi import APIRouter, FastAPI, Response
+from fastapi import APIRouter, FastAPI, Request, Response
 from pydantic import BaseModel
 
 from vogt import __version__
 from vogt.adapters.mcp.stdio import SUPPORTED_PROTOCOL_VERSIONS
 from vogt.application.context import AppContext
+from vogt.application.identity import (
+    PublicIdentity,
+    identity_from_config,
+    identity_from_headers,
+)
 from vogt.errors import VogtError
 
 
@@ -124,12 +129,28 @@ def add_health_routes(
         return VersionInfo()
 
     @router.get("/connection-info", response_model=ConnectionInfo, tags=["health"])
-    async def connection_info() -> ConnectionInfo:
+    async def connection_info(request: Request) -> ConnectionInfo:
+        """Where a client should go — which behind a door is not here.
+
+        Unauthenticated by design (FR-A7), and therefore the one place a
+        forwarded identity could be abused if it were trusted unconditionally:
+        this answer is what a client dials. `identity_from_headers` ignores
+        the headers unless the deployment has said it is fronted.
+        """
         ctx: AppContext = context_factory()  # type: ignore[operator]
+        identity = identity_from_headers(
+            ctx.config,
+            request.headers,
+            base=PublicIdentity(
+                url=identity_from_config(ctx.config).url,
+                api_path=api_prefix,
+                mcp_path=mcp_path,
+            ),
+        )
         return ConnectionInfo(
-            url=(ctx.config.public_url or "").rstrip("/") or None,
-            api_path=api_prefix,
-            mcp_path=mcp_path,
+            url=identity.url,
+            api_path=identity.api_path,
+            mcp_path=identity.mcp_path,
             health_path="/health/ready",
             supported_mcp_protocol_versions=list(SUPPORTED_PROTOCOL_VERSIONS),
             authentication="bearer token" if info.auth_required else "none (loopback)",

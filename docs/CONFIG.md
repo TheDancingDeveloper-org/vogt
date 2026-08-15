@@ -14,6 +14,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `data_dir` | `VOGT_DATA_DIR` | path | `$XDG_DATA_HOME/vogt`, else `~/.local/share/vogt` | allocation |
 | `import_root` | `VOGT_IMPORT_ROOT` | path, optional | `<data_dir>/repos` | allocation |
 | `public_url` | `VOGT_PUBLIC_URL` | string, optional | *(no default — must be set)* | exposure |
+| `fronted` | `VOGT_FRONTED` | boolean | `False` | behaviour |
 | `log_level` | `VOGT_LOG_LEVEL` | one of `debug`, `info`, `warning`, `error` | `info` | behaviour |
 | `marker_promotion_patterns` | `VOGT_MARKER_PROMOTION_PATTERNS` | list of strings | `TODO(vogt)`, `FIXME(vogt)` | behaviour |
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
@@ -39,6 +40,10 @@ Directory imported repositories are cloned into, one per project slug (FR-P6). A
 ### `public_url`
 
 The URL clients reach this instance at, e.g. `https://host.tailnet.ts.net:18094`. An exposure value, so it has no default and is never guessed: the process binds `0.0.0.0:8000` inside a container and is published somewhere else entirely, so the server cannot know its own address — only the operator does. Unset means `connect` reports that nobody has said, which is a different answer from reporting a URL that does not work (FR-A8).
+
+### `fronted`
+
+Whether this instance runs behind a front door that publishes it at a different address and different mount points — the merged stack, where the Rust engine serves `/api/vogt` and `/mcp` and this core is loopback-only. When true, `connect` and `/connection-info` render against the identity the door states per request (`X-Vogt-Public-Url`, `X-Vogt-Api-Path`, `X-Vogt-Mcp-Path`), because the door is the only thing that knows where clients arrive (FR-A8, FR-A9). Off by default and never inferred: an instance that has not been told it is fronted ignores those headers entirely, so nobody who can reach it can make `connect` render a client configuration — a document meant to be pasted next to a token — against an address they chose.
 
 ### `log_level`
 

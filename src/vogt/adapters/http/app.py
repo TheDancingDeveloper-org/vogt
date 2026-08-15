@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Query, Request
@@ -30,6 +31,7 @@ from starlette.types import Lifespan
 from vogt import __version__
 from vogt.adapters.http.gui import mount_gui
 from vogt.application.context import AppContext, build_context
+from vogt.application.identity import identity_from_headers
 from vogt.application.services.auth import Authenticated, authorize
 from vogt.errors import VogtError
 from vogt.registry import OperationRegistry, default_registry
@@ -146,6 +148,22 @@ def _jsonable_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
     return errors
 
 
+def _with_public_identity(ctx: AppContext, request: Request) -> AppContext:
+    """Let a front door say where this request arrived (FR-A8, MERGE §5.3).
+
+    `connect` renders an address, and behind a door the address is the door's.
+    The context's own identity is the base, so an instance that is not
+    configured as `fronted` — or one whose door said nothing — is returned
+    untouched rather than rebuilt.
+    """
+    identity = identity_from_headers(
+        ctx.config, request.headers, base=ctx.public_identity
+    )
+    if identity == ctx.public_identity:
+        return ctx
+    return replace(ctx, public_identity=identity)
+
+
 def _endpoint_for(
     operation: Operation[Any, Any],
     factory: ContextFactory,
@@ -182,7 +200,11 @@ def _endpoint_for(
                 mutating=operation.mutating,
                 transport="http",
             )
-        result: BaseModel = operation.run(ctx, params)
+        # Resolved here, not in the factory: only a request carries what the
+        # front door stated, and only the adapter should read a request
+        # (`identity.py`). A no-op unless this instance is configured as
+        # fronted and a door actually said something.
+        result: BaseModel = operation.run(_with_public_identity(ctx, request), params)
         return result
 
     endpoint.__name__ = operation.name.replace(".", "_")

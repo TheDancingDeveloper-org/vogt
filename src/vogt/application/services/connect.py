@@ -27,6 +27,7 @@ import json
 
 from vogt.adapters.mcp.stdio import SUPPORTED_PROTOCOL_VERSIONS
 from vogt.application.context import AppContext
+from vogt.application.identity import DEFAULT_API_PATH, DEFAULT_MCP_PATH
 from vogt.application.models import ConnectParams, ConnectResult
 
 #: The prose an unconfigured instance answers with. Long because it is the
@@ -40,14 +41,26 @@ NOT_CONFIGURED = (
     "it is never defaulted (NFR-D2)"
 )
 
-API_PATH = "/api"
-MCP_PATH = "/mcp"
+#: What this process serves at, and what it reports when it is the door.
+#: Behind a front door these are the door's to state, not this module's —
+#: `identity.py` carries the same values as its fallback, which is where the
+#: unfronted answer now comes from.
+API_PATH = DEFAULT_API_PATH
+MCP_PATH = DEFAULT_MCP_PATH
 
 
 def connect(ctx: AppContext, params: ConnectParams) -> ConnectResult:
-    """State how to reach this instance, and render a client config."""
-    url = (ctx.config.public_url or "").rstrip("/") or None
-    mcp_url = f"{url}{MCP_PATH}" if url else None
+    """State how to reach this instance, and render a client config.
+
+    The address comes from `ctx.public_identity` rather than from the config
+    directly: behind a front door the address a client uses is the door's, and
+    the door states it per request (`identity.py`). Everything else here —
+    which client, which format, the prose and the JSON — is Vogt's own content
+    and is rendered in this one place whichever shape it is deployed in.
+    """
+    identity = ctx.public_identity
+    url = identity.url
+    mcp_url = identity.mcp_url
     versions = list(SUPPORTED_PROTOCOL_VERSIONS)
 
     if params.client == "bridge":
@@ -59,8 +72,8 @@ def connect(ctx: AppContext, params: ConnectParams) -> ConnectResult:
 
     return ConnectResult(
         url=url,
-        api_path=API_PATH,
-        mcp_path=MCP_PATH,
+        api_path=identity.api_path,
+        mcp_path=identity.mcp_path,
         mcp_url=mcp_url,
         supported_mcp_protocol_versions=versions,
         client=params.client,

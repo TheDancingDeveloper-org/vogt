@@ -46,6 +46,7 @@ fn test_config() -> Config {
         assistant_reasoning_effort: None,
         contextkeeper_url: None,
         contextkeeper_token: None,
+        public_url: None,
         vogt_core_url: None,
         vogt_import_root: None,
         vogt_engine_state_dir: None,

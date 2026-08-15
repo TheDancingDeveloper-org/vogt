@@ -284,7 +284,14 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // engine's unrelated token list would refuse every legitimate agent.
     // `/ui-legacy` is static files, which need no token at the core either —
     // there has to be a page on which to enter one.
-    let vogt_open_routes = Router::new()
+    // The probes come first because the catch-all below would otherwise
+    // answer them with index.html at 200 — which is what it did (#24, FR-A7).
+    // Built from `PROBE_PATHS` so the router and the requirement cannot drift.
+    let mut vogt_open_routes = Router::new();
+    for path in vogt_core::PROBE_PATHS {
+        vogt_open_routes = vogt_open_routes.route(path, get(vogt_core::probe));
+    }
+    let vogt_open_routes = vogt_open_routes
         .route("/mcp", any(vogt_core::mcp))
         .route("/mcp/", any(vogt_core::mcp))
         .route("/mcp/{*path}", any(vogt_core::mcp))

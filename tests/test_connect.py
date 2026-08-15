@@ -199,3 +199,113 @@ def test_connection_info_omits_a_url_it_does_not_have(
 ) -> None:
     body = _probe_client(unconfigured).get("/connection-info").json()
     assert body["url"] is None
+
+
+# -- behind a front door (r10: FR-A8, FR-A9, MERGE §5.3) -------------------
+
+DOOR = "https://vogt-dev.sprooty.com"
+
+
+def _fronted(data_dir: Path, url: str | None = URL) -> AppContext:
+    """A core that has been told it is published by something else."""
+    context = build_context(
+        config=VogtConfig(
+            data_dir=data_dir,
+            public_url=url,
+            fronted=True,
+            sqlite_synchronous="off",
+        ),
+        principal=TEST_PRINCIPAL,
+        clock=StepClock(),
+        id_factory=SequentialIds(),
+    )
+    init_instance(context, InitParams())
+    return context
+
+
+DOOR_HEADERS = {
+    "X-Vogt-Public-Url": DOOR,
+    "X-Vogt-Api-Path": "/api/vogt",
+    "X-Vogt-Mcp-Path": "/mcp",
+}
+
+
+def test_a_fronted_instance_reports_the_door_a_client_arrived_at(
+    data_dir: Path,
+) -> None:
+    """#24: the core answered with its own address, which nothing can reach.
+
+    On the merged stack `/connection-info` reported
+    `http://vogt-dev.tailc7d3c.ts.net:8910` and `api_path: /api`, while
+    clients arrive at `https://vogt-dev.sprooty.com` and `/api/vogt`. Both
+    were true of the core and neither was usable, which is the distinction
+    r10 turns into a rule: the address belongs to the process that publishes
+    it.
+    """
+    body = (
+        _probe_client(_fronted(data_dir))
+        .get("/connection-info", headers=DOOR_HEADERS)
+        .json()
+    )
+    assert body["url"] == DOOR
+    assert body["api_path"] == "/api/vogt"
+    assert body["mcp_path"] == "/mcp"
+
+
+def test_a_fronted_connect_renders_a_configuration_that_reaches_the_door(
+    data_dir: Path,
+) -> None:
+    """#26: the pasteable answer pointed at an address no client can reach.
+
+    `connect` exists so that connecting is a capability of the product rather
+    than an exercise for the reader. Rendering it against the wrong address is
+    worse than not rendering it: it is a wrong answer that looks authoritative
+    and gets pasted into a client config next to a token.
+    """
+    client = TestClient(
+        build_app(
+            registry=default_registry(),
+            context_factory=lambda: _fronted(data_dir),
+        )
+    )
+    body = client.get(
+        "/api/connect", params={"client": "http"}, headers=DOOR_HEADERS
+    ).json()
+
+    assert body["url"] == DOOR
+    assert body["api_path"] == "/api/vogt"
+    assert body["mcp_url"] == f"{DOOR}/mcp"
+    assert json.loads(body["configuration"])["mcpServers"]["vogt"]["url"] == (
+        f"{DOOR}/mcp"
+    )
+
+
+def test_an_unfronted_instance_ignores_a_stated_identity(
+    configured: AppContext,
+) -> None:
+    """The gate, and the reason there is one.
+
+    `/connection-info` is unauthenticated (FR-A7) and `connect` renders a
+    document meant to be pasted beside a token. An instance that has not been
+    told it is fronted must therefore ignore anyone who claims to publish it,
+    or a client could be handed an attacker's address by a header.
+    """
+    body = (
+        _probe_client(configured).get("/connection-info", headers=DOOR_HEADERS).json()
+    )
+    assert body["url"] == URL, "an unfronted instance was told where it lives"
+    assert body["api_path"] == "/api"
+
+
+def test_a_fronted_instance_that_is_told_nothing_falls_back(
+    data_dir: Path,
+) -> None:
+    """A door that sends no headers is not an outage.
+
+    Field-by-field fallback: a front door publishing the core's own paths
+    should not have to restate two constants to be believed, and one that
+    sends nothing at all leaves the instance describing itself.
+    """
+    body = _probe_client(_fronted(data_dir)).get("/connection-info").json()
+    assert body["url"] == URL
+    assert body["api_path"] == "/api"

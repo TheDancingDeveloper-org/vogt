@@ -250,7 +250,28 @@ services:
       # it out. Unset means `connect` says nobody has told it, which is the
       # honest answer. Note this is now the *front door's* URL: `/mcp` and
       # `/api/vogt` under it are the engine's proxied mounts.
+      #
+      # One operator value, two consumers, because they are two facts that
+      # happen to coincide here (§5.3):
+      #
+      #   * the **engine** reads `MYDEVENV2_PUBLIC_URL` as its own address and
+      #     states it — with its mount points, `/api/vogt` and `/mcp` — to the
+      #     core on every forwarded request. This is what `connect` and
+      #     `/connection-info` render against.
+      #   * the **core** keeps `VOGT_PUBLIC_URL` as the answer it would give
+      #     if nothing were stated. Behind this door that is a fallback, not
+      #     the answer; it was the *only* answer before r10, which is why
+      #     `connect` handed out `http://…:8910/mcp` and no client could
+      #     reach it (#26).
+      MYDEVENV2_PUBLIC_URL: "${VOGT_PUBLIC_URL:?the URL clients reach the front door at}"
       VOGT_PUBLIC_URL: "${VOGT_PUBLIC_URL:?the URL clients reach the front door at}"
+      # This core is published by the engine beside it, so it honours the
+      # identity that engine states. Off by default in the product: an
+      # instance that has not been told it is fronted ignores those headers,
+      # so nobody who can reach a core-only deployment can make `connect`
+      # render a client configuration — a document meant to be pasted next to
+      # a token — against an address they chose (FR-A8, FR-A9).
+      VOGT_FRONTED: "true"
       # Imported repositories land in the estate, not in the instance volume
       # (FR-P6), and specifically under the workspace root the engine opens
       # sessions in (§6.3). The entrypoint warns at boot if these two disagree,

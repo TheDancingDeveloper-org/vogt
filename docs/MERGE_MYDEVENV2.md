@@ -165,8 +165,9 @@ supervisor (container entrypoint)
 │   ├── /api/sessions|files|git|assistant|agent-tasks|push|history|...  (native)
 │   ├── /api/vogt/...          reverse-proxy → 127.0.0.1:<internal>
 │   ├── /mcp                   reverse-proxy → vogt core MCP (streamable HTTP)
-│   ├── /version /health/live /health/ready   reverse-proxy → core (§5.3)
-│   ├── /connection-info       synthesised by the door, not proxied (§5.3)
+│   ├── /version /health/{live,ready} /connection-info
+│   │                          reverse-proxy → core, with the door's identity
+│   │                          stated on the way (§5.3)
 │   ├── /api/sessions/:id/attach   WebSocket (native)
 │   └── /healthz /readyz       aggregate: engine + probe of vogt core
 └── vogt-core (Python/uvicorn) ← loopback only, never published
@@ -206,11 +207,15 @@ no default, reported absent rather than guessed. That argument does not
 weaken one hop out, it repeats. The core binds loopback and is published
 by the engine at an address it has no way to learn. So:
 
-- The **engine** gains its own public-URL configuration, with no default,
-  and reports it absent when unset.
+- The **engine** gains its own public-URL configuration
+  (`MYDEVENV2_PUBLIC_URL`), with no default, and states nothing when unset.
 - The **core** keeps `public_url` for the core-only shape, where the core
   *is* the door. In the merged shape the core's value is an internal detail
   and no client ever sees it.
+
+Two names rather than one reused: they are two facts, and sharing a variable
+would force an operator to keep the inner and outer addresses in sync forever
+with nothing to notice when they diverge.
 
 That last point is a property worth having: it makes the current
 misconfiguration — `VOGT_PUBLIC_URL=http://vogt-dev.tailc7d3c.ts.net:8910`
@@ -218,21 +223,56 @@ on a stack reached at `https://vogt-dev.sprooty.com` — stop mattering,
 rather than requiring an operator to keep two addresses in sync forever. A
 design that removes a class of misconfiguration beats one that documents it.
 
-**Which paths the door serves, and how.** Split by whether the answer says
-anything about addressing:
+**Which paths the door serves, and how.** All four probes are routed to the
+core at the same paths — before the PWA catch-all, which is the whole of #24.
+The engine's own aggregate stays where it was, at `/healthz` and `/readyz`.
 
-| Path | Treatment | Why |
-|---|---|---|
-| `/version` | proxy verbatim | name and version only; true at every hop |
-| `/health/live`, `/health/ready` | proxy verbatim | the core's own liveness and applied schema; the engine's aggregate stays at `/healthz`, `/readyz` |
-| `/connection-info` | **synthesised by the door** | every field is addressing |
-| `/api/vogt/connect` | **rendered by the door** | it emits a client configuration, which is addressing in its most consequential form |
+**Who renders the addressing answers.** The door states, the core renders.
 
-Synthesised, not rewritten: the door composes the answer from what it knows
-(`url` = its own public URL, `api_path` = `/api/vogt`, `mcp_path` = `/mcp`,
-`health_path` = `/health/ready`) plus what only the core can say (`version`,
-`supported_mcp_protocol_versions`, `writes_enabled`). Version skew therefore
-stays truthfully reported rather than being flattened by the proxy.
+The first draft of this section said the door would *synthesise*
+`/connection-info` and `connect`. Reading `connect` changed the answer: it is
+a pure function of `(public_url, client, format)`, and everything else in it —
+two client shapes, two output formats, the prose, the JSON — is roughly a
+hundred lines of Vogt's own content, not addressing. Mirroring that into the
+front door would put the product's connection instructions in two languages
+and give them somewhere to drift, which is the failure mode this repository
+has already paid for once (`tests/test_bridge.py` opens with it: twenty tool
+signatures hand-mirrored across a server, a bridge and a registry).
+
+So the split is by *fact*, not by *file*. On every forwarded request the door
+states what only it knows:
+
+```
+X-Vogt-Public-Url: https://vogt-dev.sprooty.com
+X-Vogt-Api-Path:   /api/vogt
+X-Vogt-Mcp-Path:   /mcp
+```
+
+`api_path` and `mcp_path` come from `API_PREFIX` and `MCP_PREFIX`, the
+constants the router is built from, so the announced mount points cannot drift
+from the served ones — which is exactly the hazard that deploy-time config
+values for these would have introduced.
+
+The core renders both answers against that identity, and against its own when
+it is absent. Version skew, protocol versions and `writes_enabled` are the
+core's to report and stay the core's, unflattened.
+
+**Two gates, because this fact chooses what a client dials.** `connect`
+renders a document meant to be pasted into a client config beside a token, so
+an address a caller could choose would be a phishing primitive:
+
+- The door **strips** these headers from every inbound request before
+  forwarding, so what the core receives is what the door said and never what
+  a caller claimed. This is the gate that matters, because anyone who can
+  reach the door can send a header.
+- The core **ignores** them unless it is configured `fronted`. A core-only
+  deployment therefore cannot be told it lives somewhere else, and the gate
+  is a deployment statement rather than an inference.
+
+Neither is authorisation: the identity chooses what a response *says*, never
+what a request is *allowed to do*. That is why it may be resolved from a
+request at all, where FR-S2 forbids it for a principal — `identity.py` records
+the distinction.
 
 **`api_path` at each hop.** `/api` at the core, `/api/vogt` at the door.
 Both are correct where they are stated, which is exactly why the door must

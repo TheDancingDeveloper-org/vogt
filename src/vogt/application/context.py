@@ -7,10 +7,11 @@ the registry; they never reach past it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from vogt.adapters.engine import EngineClient
 from vogt.adapters.git import Cloner, clone_repository
+from vogt.application.identity import PublicIdentity, identity_from_config
 from vogt.config import VogtConfig, load_config
 from vogt.core.clock import Clock, utc_now
 from vogt.core.ids import IdFactory, new_id
@@ -41,6 +42,13 @@ class AppContext:
     #: `None` is not an outage: the `session.*` operations say no engine is
     #: configured, and every other operation is unaffected.
     engine: EngineClient | None = None
+    #: Where a client should reach this instance (FR-A8). Defaults to what the
+    #: configuration says, which is the whole answer when this process is the
+    #: door. Behind a front door the adapter resolves it per request from what
+    #: the door states, because the door owns the address and the mount points
+    #: and this process cannot see either — see `identity.py` for why that is
+    #: not the rule FR-S2 forbids.
+    public_identity: PublicIdentity = field(default_factory=PublicIdentity)
 
 
 def build_context(
@@ -51,12 +59,20 @@ def build_context(
     id_factory: IdFactory = new_id,
     cloner: Cloner = clone_repository,
     engine: EngineClient | None = None,
+    public_identity: PublicIdentity | None = None,
 ) -> AppContext:
     """Build a context over the SQLite backend.
 
     The principal is passed in by the adapter that authenticated it — FR-S2
     means it is never read from request data, and this signature is where
     that rule is kept honest: there is nowhere for a caller to inject one.
+
+    `public_identity` is passed the same way and for a related reason, though
+    it is a different kind of fact: an address grants nothing and says nothing
+    about the caller, but it *is* resolved from the request behind a front
+    door, so the resolution belongs to the adapter and the gate that permits
+    it belongs to the configuration (`fronted`). Defaulting to the config's
+    own answer keeps the core-only shape exactly as it was.
     """
     resolved_config = config if config is not None else load_config()
     return AppContext(
@@ -82,5 +98,10 @@ def build_context(
         engine=engine
         or EngineClient.from_config(
             resolved_config.engine_url, resolved_config.engine_token_file
+        ),
+        public_identity=(
+            public_identity
+            if public_identity is not None
+            else identity_from_config(resolved_config)
         ),
     )

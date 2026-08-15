@@ -48,6 +48,10 @@ struct Seen {
     query: Option<String>,
     authorization: Option<String>,
     method: String,
+    /// What the door said about where clients arrive (FR-A8). Recorded so a
+    /// test can tell "the door stated it" from "the caller did".
+    public_url: Option<String>,
+    api_path: Option<String>,
 }
 
 type Log = Arc<Mutex<Vec<Seen>>>;
@@ -66,6 +70,14 @@ async fn core_handler(
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
         method: method.to_string(),
+        public_url: headers
+            .get("x-vogt-public-url")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        api_path: headers
+            .get("x-vogt-api-path")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
     });
     match uri.path() {
         "/health/ready" => (
@@ -161,6 +173,7 @@ fn base_config() -> Config {
         assistant_reasoning_effort: None,
         contextkeeper_url: None,
         contextkeeper_token: None,
+        public_url: None,
         vogt_core_url: None,
         vogt_import_root: None,
         vogt_engine_state_dir: None,
@@ -1190,4 +1203,160 @@ async fn the_engine_serves_the_front_end_from_that_same_port() {
         content_type.starts_with("text/html"),
         "the root is a document, not JSON: {content_type}"
     );
+}
+
+// -- the front door's identity (r10: FR-A7, FR-A8, FR-A9, MERGE §5.3) ------
+
+const DOOR_URL: &str = "https://vogt-dev.example.com";
+
+async fn front_door_with_a_public_url() -> (String, Log) {
+    let (core_url, log) = stand_in_core().await;
+    let mut cfg = base_config();
+    cfg.vogt_core_url = Some(core_url);
+    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    cfg.public_url = Some(DOOR_URL.to_string());
+    (boot(cfg).await, log)
+}
+
+/// #24: every probe was answered by the PWA catch-all, at 200, with HTML.
+///
+/// The status is the part that mattered. A 404 would have been a correct
+/// answer to a path that is not served; a 200 carrying `index.html` cannot be
+/// told from success, so `vogt-mcp-remote` parsed a web page as JSON and died
+/// at launch while `/mcp` on the same host answered perfectly.
+#[tokio::test]
+async fn every_probe_reaches_the_core_rather_than_the_pwa() {
+    let (base, log) = front_door_with_a_public_url().await;
+    let client = reqwest::Client::new();
+
+    for path in [
+        "/version",
+        "/connection-info",
+        "/health/ready",
+        "/health/live",
+    ] {
+        let response = client.get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(response.status(), 200, "{path}");
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.contains("json"),
+            "{path} answered {content_type}, which is the PWA, not the core"
+        );
+    }
+
+    let seen: Vec<String> = proxied(&log).iter().map(|s| s.path.clone()).collect();
+    for path in [
+        "/version",
+        "/connection-info",
+        "/health/ready",
+        "/health/live",
+    ] {
+        assert!(
+            seen.contains(&path.to_string()),
+            "{path} never reached the core"
+        );
+    }
+}
+
+/// A probe carries no credential, and must not acquire one on the way.
+#[tokio::test]
+async fn a_probe_needs_no_token_and_is_not_given_one() {
+    let (base, log) = front_door_with_a_public_url().await;
+    let response = reqwest::Client::new()
+        .get(format!("{base}/version"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let probe = proxied(&log)
+        .into_iter()
+        .find(|s| s.path == "/version")
+        .expect("the probe reached the core");
+    assert_eq!(
+        probe.authorization, None,
+        "a probe was handed a credential it never asked for"
+    );
+}
+
+/// #26: the core cannot know this door's address, so the door states it.
+#[tokio::test]
+async fn the_door_states_where_clients_arrive() {
+    let (base, log) = front_door_with_a_public_url().await;
+    let response = reqwest::Client::new()
+        .get(format!("{base}/api/vogt/connect"))
+        .bearer_auth(TEST_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let seen = proxied(&log)
+        .into_iter()
+        .find(|s| s.path == "/api/connect")
+        .expect("the request reached the core");
+    assert_eq!(seen.public_url.as_deref(), Some(DOOR_URL));
+    assert_eq!(
+        seen.api_path.as_deref(),
+        Some("/api/vogt"),
+        "the door must state its own mount point, not the core's"
+    );
+}
+
+/// The gate on this door's side: a caller must never state it.
+///
+/// `connect` renders a configuration meant to be pasted beside a token, so a
+/// caller who could choose the address in it would have a phishing primitive.
+/// The core also refuses unless configured as `fronted`, but the door must
+/// not forward the claim in the first place — two gates, because this one is
+/// reachable by anyone who can reach the door.
+#[tokio::test]
+async fn a_caller_cannot_state_where_clients_arrive() {
+    let (base, log) = front_door_with_a_public_url().await;
+    let response = reqwest::Client::new()
+        .get(format!("{base}/api/vogt/connect"))
+        .bearer_auth(TEST_TOKEN)
+        .header("x-vogt-public-url", "https://attacker.example")
+        .header("x-vogt-api-path", "/api")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let seen = proxied(&log)
+        .into_iter()
+        .find(|s| s.path == "/api/connect")
+        .expect("the request reached the core");
+    assert_eq!(
+        seen.public_url.as_deref(),
+        Some(DOOR_URL),
+        "a caller's claimed address reached the core"
+    );
+    assert_eq!(seen.api_path.as_deref(), Some("/api/vogt"));
+}
+
+/// An exposure value carries no default (NFR-D2), so an unconfigured door
+/// states nothing and the core keeps answering for itself.
+#[tokio::test]
+async fn a_door_with_no_public_url_states_nothing() {
+    let (base, log) = front_door().await;
+    let response = reqwest::Client::new()
+        .get(format!("{base}/api/vogt/connect"))
+        .bearer_auth(TEST_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let seen = proxied(&log)
+        .into_iter()
+        .find(|s| s.path == "/api/connect")
+        .expect("the request reached the core");
+    assert_eq!(seen.public_url, None);
+    assert_eq!(seen.api_path, None);
 }
