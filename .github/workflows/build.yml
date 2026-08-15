@@ -298,10 +298,14 @@ jobs:
           load: true
           tags: ${{ env.STACK_IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
+            INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
 
       - name: the merged image runs both halves
         env:
           CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
+          DEV_IMAGE: ${{ github.ref == 'refs/heads/dev' }}
         run: |
           set -euo pipefail
           # The same lesson the core-only smoke test records: two releases
@@ -312,6 +316,20 @@ jobs:
           docker run --rm --entrypoint mydevenv2-server "$CANDIDATE" --help >/dev/null
           echo "both halves are present and start"
 
+          # The dev image is a working pod, and a pod without the AI clients
+          # is not the thing MyDevEnv2 shipped. `INSTALL_AI_CLIENTS` defaulted
+          # to false and no build turned it on, so `vogt-dev` ran with neither
+          # `claude` nor `codex` and nothing was red (#23). A build arg that
+          # nothing asserts is a default waiting to be forgotten — NFR-Q7 is
+          # the general form of that lesson.
+          if [ "${DEV_IMAGE}" = "true" ]; then
+            for tool in claude codex flutter; do
+              docker run --rm --entrypoint "$tool" "$CANDIDATE" --version >/dev/null \
+                || { echo "the dev image is missing $tool" >&2; exit 1; }
+            done
+            echo "dev image carries the AI clients and the mobile SDK"
+          fi
+
       - uses: docker/build-push-action@v6
         id: push
         with:
@@ -320,6 +338,16 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Identical to the candidate build's, so the pushed image is the
+          # layers the smoke test just ran, not a rebuild that happens to
+          # look similar. The `dev` branch is the dev image (`:dev`,
+          # `dev-<sha>`) and is the only one that carries the AI clients and
+          # the mobile SDK — the same split `.woodpecker/server.yml`'s
+          # `build-and-push-dev` used to make, which the migration to Actions
+          # dropped without replacing (#23).
+          build-args: |
+            INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
+            INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
           provenance: true
           sbom: true
 
