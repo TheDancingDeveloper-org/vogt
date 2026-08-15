@@ -590,7 +590,36 @@ which can be closed by writing code here:
 Three of those four were closed by writing code. The fourth was closed by
 running a command that had been described as too slow to run, which is the
 second time this documentation set has recorded that shape and the reason
-`REQUIREMENTS.md` §6 has a paragraph about it.
+§6 has a paragraph about it.
+
+**FR-M4 was already delivered, and this register's row for it was the fourth
+wrong one.** It claimed the dev shell had no FCM client entry. It has one:
+`google-services.json` carries `com.sprooty.mydevenv2.dev`,
+`engine/.woodpecker/server.yml` exports `MYDEVENV2_ANDROID_APP_ID` for the dev
+APK stream, and both `build.gradle` and `capacitor.config.ts` read it. The row
+came from `uplift.md`'s mobile caveat, which was true when written and was
+fixed afterwards — the same failure as FR-S6 and FR-S12, from the same cause,
+which is that the register's first draft read documents instead of source.
+
+What was genuinely missing is that **nothing asserted the three files agreed**.
+`build.gradle` carries the comment "Keep in sync with capacitor.config.ts",
+which is the shape of a rule nobody can enforce: two toolchains read the two
+files, and a disagreement surfaces as an APK that installs fine and silently
+never registers for push — indistinguishable from a broken push service.
+`tests/test_mobile_identity.py` (five) is the check that comment was asking
+for, including one that fails if CI ever builds every stream under the prod id.
+
+**FR-T5 narrows to the part that needs a room.** The prompt sentence standing
+in for the validation pass — that work items are `WI-7` and projects are slugs
+— was implemented and asserted by nothing, so deleting it would have broken no
+build and degraded voice into uselessness at the one input the domain is made
+of. Three tests in `assistant.rs` now pin it and the spoken-reply instruction
+beside it. The validation pass itself still needs a person, a microphone and a
+device, and that is now the whole of what FR-T5 is short.
+
+Both of those were reached by checking rather than believing — the Rust
+toolchain and the Firebase manifest were both present, and both had been
+written off in the previous pass as things this environment could not reach.
 
 ### Revision r12 — a second model vendor is a choice, not a capability
 
@@ -2022,11 +2051,10 @@ the requirement's own.
 
 | ID | Pri | What is missing | What the absence costs |
 |---|---|---|---|
-| **FR-T5** | S | The voice validation pass against domain vocabulary — project slugs, `WI-7`, the word "backlog". | Voice was adopted unproven and is still unproven. The system prompt now tells the model the vocabulary, which is preparation, not evidence. Blocked on FR-M4. |
+| **FR-T5** | S | **A person, a microphone and a device.** The prompt-level mitigation is delivered *and now asserted* (r13): three tests pin the vocabulary it teaches and the fact that replies are spoken, so the sentence standing in for the validation pass cannot be trimmed away silently. What remains is the pass itself — speaking to it and finding out. | Voice was adopted unproven and the unproven part is now exactly one thing: whether a recognizer's output survives contact with `WI-7` and a project slug. Everything reachable without hardware has been done. |
 | **FR-D9** | C | Any producer of a `declared` dependency edge. | A dependency expressed only in a deploy script or a person's head is invisible to `deps` and to the reverse lookup. |
 | **FR-E10** | C | An operable GUI stream. The compositor and streamer are in the image, the launch and process APIs are built, production runs `START_SWAY=0` and `GUI_STREAM_URL=""`. | A surface exists that has never been shown to do anything. |
 | **FR-E11** | C | Any signal that two live sessions share a working tree. Nothing in `sessions.py` or the engine's registry compares a new session's `cwd` against the live ones. | Two agents can edit one checkout concurrently and neither is told. No audit row records the loss, because both writes are legitimate. |
-| **FR-M4** | S | An FCM client entry in `google-services.json` for the dev build's application id. *The rest of this requirement is delivered*: `build.gradle` takes the id from `MYDEVENV2_ANDROID_APP_ID`, and the front door from `VOGT_ANDROID_SERVER_URL` with no default. | A dev APK installs beside prod but cannot register for push, because `google-services.json` is keyed to the application id. This is what blocks FR-M2's and FR-T5's hardware verification, so it is smaller than the two it holds up. |
 
 ### 7.2 Owed, and blocked on something that is not code
 

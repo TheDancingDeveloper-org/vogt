@@ -31,12 +31,11 @@ test except two, which need a browser and a phone and are outstanding as such
 
 **Everything designed and not built is in one place**: `REQUIREMENTS.md` §7,
 the gap register, which separates what is *owed* from what was *withdrawn* or
-deferred. **Five items remain owed and none is a must-have**; r13 closed the
-two that were, along with four should-haves. What is left cannot be finished by
-writing code here — two need a browser and a phone, one needs a Firebase entry,
-and two are `could-have`s nobody has asked for. The design documents describe
-what exists; §7 is where the rest lives, and r11 argues why that split is worth
-having.
+deferred. **Four items remain owed and none is a must-have**; r13 closed the
+two that were, along with five should-haves. What is left cannot be finished by
+writing code — one needs a person and a microphone, and three are `could-have`s
+nobody has asked for. The design documents describe what exists; §7 is where
+the rest lives, and r11 argues why that split is worth having.
 
 Vogt now sees work you did not type in. Collectors sweep your registered
 projects for git state, source markers and dependency references — plus

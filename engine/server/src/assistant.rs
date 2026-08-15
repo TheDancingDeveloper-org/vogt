@@ -1916,6 +1916,43 @@ mod tests {
     }
 
     #[test]
+    fn the_prompt_teaches_the_domain_vocabulary_a_recognizer_has_to_survive() {
+        // FR-T5's hardware-free half. The requirement asks for a validation
+        // pass against domain vocabulary — project names, the word "backlog" —
+        // because voice was adopted unproven. The pass itself needs a device
+        // and a microphone; what does not is the mitigation standing in for it
+        // until then, which was a line in this prompt that nothing asserted.
+        //
+        // It matters more than a prompt line usually does. On-device STT
+        // returns text, and "WI-7" is exactly the shape a recognizer mangles —
+        // so the model has to know the canonical forms well enough to map a
+        // spoken approximation onto them. Deleting this sentence would not
+        // break a build, would not fail a test, and would degrade voice into
+        // uselessness at the one input the domain is made of.
+        for phrase in ["WI-7", "slug", "backlog"] {
+            assert!(
+                SYSTEM_PROMPT.contains(phrase),
+                "the prompt no longer teaches {phrase:?}, which is vocabulary a \
+                 recognizer's output has to be matched against (FR-T5)"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prompt_says_replies_are_spoken() {
+        // The other half of "drivable by voice": a reply full of markdown and
+        // code fences is correct text and unusable audio, and every model's
+        // default is markdown. Asserted because it is the kind of instruction
+        // that gets trimmed when a prompt is shortened.
+        let prompt = SYSTEM_PROMPT.to_ascii_lowercase();
+        assert!(prompt.contains("voice") || prompt.contains("speakable"));
+        assert!(
+            prompt.contains("no markdown"),
+            "the prompt no longer tells the model its replies are spoken"
+        );
+    }
+
+    #[test]
     fn the_prompt_names_no_delimiter_that_nothing_emits() {
         // The same bug from the other end: a rule about a boundary that never
         // arrives teaches the model to expect one that is not there.
