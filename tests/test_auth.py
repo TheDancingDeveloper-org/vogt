@@ -228,6 +228,61 @@ def test_a_missing_scope_is_refused_and_says_what_is_needed(
         )
 
 
+def test_the_writeback_scope_gates_arming_write_back(agent: AppContext) -> None:
+    """FR-S11, in both directions, because one of them is the whole point.
+
+    `writeback` gated nothing until r13: it parsed, it implied `read`, it was
+    issuable, and no operation asked for it — so a token issued with it in good
+    faith could only read, and the control it appeared to grant did not exist.
+    It now gates `forge.writeback`, the operation that arms a project's
+    upstream pushing.
+
+    The negative half is what makes this worth writing. A test that only
+    checked the grant would pass with the scope back on `project.write` and
+    `writeback` meaningless again, which is the state this replaces.
+    """
+    armed = authenticate(agent, bearer=_token(agent, "writeback"))
+    authorize(
+        agent,
+        armed,
+        operation="forge.writeback",
+        scope="writeback",
+        mutating=True,
+        transport="http",
+    )
+
+    projects_only = authenticate(agent, bearer=_token(agent, "project.write"))
+    with pytest.raises(Forbidden, match=r"requires the 'writeback' scope"):
+        authorize(
+            agent,
+            projects_only,
+            operation="forge.writeback",
+            scope="writeback",
+            mutating=True,
+            transport="http",
+        )
+
+
+def test_every_scope_this_instance_issues_gates_something(agent: AppContext) -> None:
+    """A scope that grants nothing is worse than one that does not exist.
+
+    It is issued in good faith, appears on a token listing, and silently
+    confers only `read`. `writeback` was in exactly that state from M5 to r13,
+    and nothing could have caught it: every parse test passed, because parsing
+    was all it did.
+    """
+    del agent
+    from vogt.core.auth import ALL_SCOPES
+    from vogt.registry import default_registry
+
+    gated = {operation.scope for operation in default_registry()}
+    ungated = [scope for scope in ALL_SCOPES if scope not in gated]
+    assert not ungated, (
+        f"{ungated} gate no operation, so a token holding one is granted "
+        "nothing it does not already have"
+    )
+
+
 def test_a_read_only_server_refuses_every_write(agent: AppContext) -> None:
     """The first gate: no token can grant a write the process refuses."""
     caller = authenticate(agent, bearer=_token(agent, "admin"), writes_enabled=False)

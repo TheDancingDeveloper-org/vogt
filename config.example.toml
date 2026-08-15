@@ -24,6 +24,22 @@
 # default policy: behaviour
 # log_level = "info"
 
+# Files a compliant project must contain (FR-G1). The contract is a value you read, never a barrier you pass: changing this changes what `contract check` reports and gates nothing (FR-G13).
+# default policy: behaviour
+# contract_required_files = ["AGENTS.md", "README.md", "LICENSE"]
+
+# Directories a compliant project must contain (FR-G1).
+# default policy: behaviour
+# contract_required_dirs = ["docs", "design", "src"]
+
+# Metadata keys a compliant project must declare (FR-G1). Read from the project's own manifest, not from Vogt's registration.
+# default policy: behaviour
+# contract_required_meta = ["name", "lifecycle_state", "owner"]
+
+# Names which contract a recorded compliance status was evaluated against (FR-G1, FR-G3). If the rules above differ from the built-in defaults and this is left at its own default, Vogt appends a short digest of the rules — a status must never claim to be the stock `v1` when it is not, and an operator who edits the rules should not have to remember to rename them.
+# default policy: behaviour
+# contract_version = "v1"
+
 # Source markers containing one of these enter backlog and bug views (FR-W11). Every other marker is still observed, still queryable and still counted; it just does not claim to be work. Widening this is how you drown the ranked view.
 # default policy: behaviour
 # marker_promotion_patterns = ["TODO(vogt)", "FIXME(vogt)"]

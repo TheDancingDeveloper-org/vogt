@@ -372,7 +372,14 @@ def _gather(
 
 
 def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
-    """The ranked backlog, globally or for one project (FR-V1, FR-V2, FR-W4)."""
+    """The ranked backlog, globally or for one project (FR-V1, FR-V2, FR-W4).
+
+    Paged with `limit`/`offset` against `total_considered` (FR-V5). Ranking is
+    computed over the whole candidate set before the slice, so page two is the
+    next rows of one ordering rather than a fresh ranking of what was left —
+    which is the only version that pages honestly, and is why the offset is
+    applied here rather than pushed into the query.
+    """
     ranked, declared, observed, suppressed = _gather(
         ctx,
         project=params.project,
@@ -384,7 +391,7 @@ def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
         trust_states=params.trust_states,
     )
     return BacklogResult(
-        items=ranked[: params.limit],
+        items=ranked[params.offset : params.offset + params.limit],
         total_considered=len(ranked),
         declared=declared,
         observed=observed,
@@ -395,7 +402,10 @@ def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
 
 
 def bugs(ctx: AppContext, params: BugsParams) -> BacklogResult:
-    """Open bugs across every project, declared and observed alike."""
+    """Open bugs across every project, declared and observed alike.
+
+    Paged like `backlog`, and for the same reason (FR-V5).
+    """
     ranked, declared, observed, suppressed = _gather(
         ctx,
         project=params.project,
@@ -406,7 +416,7 @@ def bugs(ctx: AppContext, params: BugsParams) -> BacklogResult:
         label=params.label,
     )
     return BacklogResult(
-        items=ranked[: params.limit],
+        items=ranked[params.offset : params.offset + params.limit],
         total_considered=len(ranked),
         declared=declared,
         observed=observed,

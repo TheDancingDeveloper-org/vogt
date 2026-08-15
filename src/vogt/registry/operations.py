@@ -783,7 +783,15 @@ def build_operations() -> list[Operation[Any, Any]]:
         Operation(
             name="forge.writeback",
             summary="Set a project's write-back policy: none, comment_only, full.",
-            scope="project.write",
+            # FR-S11: the scope named `writeback` gates arming write-back, and
+            # nothing else does. It required `project.write` until r13, which
+            # left `writeback` gating no operation at all — a scope a token can
+            # hold and be granted nothing by. Arming upstream pushes is a
+            # different power from registering a project or moving its
+            # lifecycle state, and a deployment that wants an agent to manage
+            # projects without ever letting it speak to a forge now has a way
+            # to say so.
+            scope="writeback",
             mutating=True,
             params_model=SetWriteBackParams,
             result_model=ProjectResult,

@@ -470,13 +470,15 @@ REST/CLI/GUI are peers over the same operations.
 - **Both allow and deny decisions are audited** — into `auth_decisions`
   (`SCHEMA.md` §2.1), separately from the declared-write audit, because a
   denial changes nothing and so has no entity or revision to hang from.
-- Five scopes exist, parse and imply correctly: `read`, `work.write`,
-  `project.write`, `admin`, `writeback`. **Four of them gate something.**
-  `forge.writeback` sets a project's policy and requires `project.write`; the
-  upstream write is a consequence of commenting or transitioning, which are
-  `work.write`. So a token issued with `writeback` alone can do nothing but
-  read — a trap for whoever issues one in good faith, and a gap rather than a
-  design: `REQUIREMENTS.md` §7 (**FR-S11**).
+- Five scopes exist, parse, imply correctly, and **each gates at least one
+  operation** *(r13 — until then `writeback` gated none, so a token issued with
+  it in good faith could only read)*. `writeback` gates `forge.writeback`,
+  which arms or disarms a project's upstream pushing, and is deliberately not
+  implied by `project.write`: managing projects and deciding this instance may
+  speak to a forge on your behalf are different powers, and only the second has
+  effects outside the instance. Causing an individual upstream write still
+  needs `work.write`, because it is a consequence of commenting or
+  transitioning; the scope decides whether that consequence is switched on.
 - **Transports**: stdio (local, same data-dir, no server required) and
   streamable HTTP at `/mcp` on the same port as REST/GUI/health (see
   `DEPLOYMENT.md` §1). A `vogt-mcp-remote` stdio bridge serves agent
@@ -548,11 +550,20 @@ under `/api`. The paths below name the operation, not the URL.
 
 A **Contract** states what a compliant project looks like. It carries a
 version identifier so a status can name which contract it was evaluated
-against. It is a versioned constant in `core/contract.py`: `VogtConfig` has no
-contract keys, and `evaluate()` is always called with the default. The
-declarative shape, the version identifier and the named failing criteria are
-delivered; a self-hoster stating a different contract without editing Python is
-not, and FR-G1 asks for it — `REQUIREMENTS.md` §7. The contract:
+against, and it is **sourced from configuration** — four settings
+(`contract_required_files`, `contract_required_dirs`, `contract_required_meta`,
+`contract_version`), read through one helper so no call site can pick up three
+of them and miss the fourth *(r13; before that it was a constant, and a
+self-hoster could not state a different contract without editing Python)*.
+
+Making the rules editable puts pressure on the version: an operator who edits
+them and leaves the version at `v1` records statuses claiming to be the stock
+contract. So a contract whose rules differ from the built-in default while
+still carrying the default version gets a short digest of its own rules
+appended — `v1+3f9a2c` — and a contract the operator *named* keeps that name,
+because naming it is the deliberate act the digest infers in its absence.
+
+The defaults, which are the contract this repository holds itself to:
 
 ```
 required_files:  [AGENTS.md, README.md, LICENSE]

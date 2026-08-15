@@ -159,6 +159,41 @@ class VogtConfig(BaseSettings):
         description="Verbosity of Vogt's own diagnostics.",
         json_schema_extra={"default_policy": "behaviour"},
     )
+    contract_required_files: tuple[str, ...] = Field(
+        default=("AGENTS.md", "README.md", "LICENSE"),
+        description=(
+            "Files a compliant project must contain (FR-G1). The contract is "
+            "a value you read, never a barrier you pass: changing this "
+            "changes what `contract check` reports and gates nothing "
+            "(FR-G13)."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    contract_required_dirs: tuple[str, ...] = Field(
+        default=("docs", "design", "src"),
+        description="Directories a compliant project must contain (FR-G1).",
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    contract_required_meta: tuple[str, ...] = Field(
+        default=("name", "lifecycle_state", "owner"),
+        description=(
+            "Metadata keys a compliant project must declare (FR-G1). Read "
+            "from the project's own manifest, not from Vogt's registration."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    contract_version: str = Field(
+        default="v1",
+        description=(
+            "Names which contract a recorded compliance status was evaluated "
+            "against (FR-G1, FR-G3). If the rules above differ from the "
+            "built-in defaults and this is left at its own default, Vogt "
+            "appends a short digest of the rules — a status must never claim "
+            "to be the stock `v1` when it is not, and an operator who edits "
+            "the rules should not have to remember to rename them."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     marker_promotion_patterns: tuple[str, ...] = Field(
         default=("TODO(vogt)", "FIXME(vogt)"),
         description=(

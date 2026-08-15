@@ -558,6 +558,16 @@ class BacklogParams(Params):
     label: str | None = None
     trust_states: list[TrustState] | None = None
     limit: int = Field(default=20, ge=1, le=200)
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Ranked rows to skip. `total_considered` is the full "
+        "count, so a caller knows whether another page exists. Ranking is "
+        "recomputed per request and staleness grows with the clock, so two "
+        "pages fetched far enough apart can repeat or skip an item near a "
+        "score boundary — the same caveat `audit.list` carries, for the same "
+        "reason.",
+    )
 
 
 class BacklogResult(Result):
@@ -576,6 +586,16 @@ class BugsParams(Params):
     assignee: str | None = None
     label: str | None = None
     limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Ranked rows to skip. `total_considered` is the full "
+        "count, so a caller knows whether another page exists. Ranking is "
+        "recomputed per request and staleness grows with the clock, so two "
+        "pages fetched far enough apart can repeat or skip an item near a "
+        "score boundary — the same caveat `audit.list` carries, for the same "
+        "reason.",
+    )
 
 
 class WhyParams(Params):

@@ -16,6 +16,10 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `public_url` | `VOGT_PUBLIC_URL` | string, optional | *(no default — must be set)* | exposure |
 | `fronted` | `VOGT_FRONTED` | boolean | `False` | behaviour |
 | `log_level` | `VOGT_LOG_LEVEL` | one of `debug`, `info`, `warning`, `error` | `info` | behaviour |
+| `contract_required_files` | `VOGT_CONTRACT_REQUIRED_FILES` | list of strings | `AGENTS.md`, `README.md`, `LICENSE` | behaviour |
+| `contract_required_dirs` | `VOGT_CONTRACT_REQUIRED_DIRS` | list of strings | `docs`, `design`, `src` | behaviour |
+| `contract_required_meta` | `VOGT_CONTRACT_REQUIRED_META` | list of strings | `name`, `lifecycle_state`, `owner` | behaviour |
+| `contract_version` | `VOGT_CONTRACT_VERSION` | string | `v1` | behaviour |
 | `marker_promotion_patterns` | `VOGT_MARKER_PROMOTION_PATTERNS` | list of strings | `TODO(vogt)`, `FIXME(vogt)` | behaviour |
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
@@ -48,6 +52,22 @@ Whether this instance runs behind a front door that publishes it at a different 
 ### `log_level`
 
 Verbosity of Vogt's own diagnostics.
+
+### `contract_required_files`
+
+Files a compliant project must contain (FR-G1). The contract is a value you read, never a barrier you pass: changing this changes what `contract check` reports and gates nothing (FR-G13).
+
+### `contract_required_dirs`
+
+Directories a compliant project must contain (FR-G1).
+
+### `contract_required_meta`
+
+Metadata keys a compliant project must declare (FR-G1). Read from the project's own manifest, not from Vogt's registration.
+
+### `contract_version`
+
+Names which contract a recorded compliance status was evaluated against (FR-G1, FR-G3). If the rules above differ from the built-in defaults and this is left at its own default, Vogt appends a short digest of the rules — a status must never claim to be the stock `v1` when it is not, and an operator who edits the rules should not have to remember to rename them.
 
 ### `marker_promotion_patterns`
 

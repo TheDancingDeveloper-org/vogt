@@ -13,8 +13,13 @@ barrier you pass (FR-G13, DESIGN §2.1, §5).
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, see `configured_contract`
+    from vogt.config import VogtConfig
 
 #: Bumped when the required set changes, so a recorded status can say which
 #: contract produced it.
@@ -32,6 +37,87 @@ class Contract:
 
 
 DEFAULT_CONTRACT = Contract()
+
+
+def contract_from_settings(
+    *,
+    version: str,
+    required_files: tuple[str, ...],
+    required_dirs: tuple[str, ...],
+    required_meta: tuple[str, ...],
+) -> Contract:
+    """Build the contract this instance evaluates against (FR-G1).
+
+    Takes primitives rather than a config object, so `core` keeps knowing
+    nothing about configuration — the application layer and the collector
+    each pass what they read.
+
+    **The version is derived when it would otherwise lie.** FR-G1 asks for a
+    contract sourced from configuration *and* for a version identifier a
+    recorded status can name. Those two pull against each other: an operator
+    who edits the rules and leaves the version alone produces statuses that
+    claim to be the stock `v1` and are not, and every comparison across
+    instances after that is wrong in a way nothing surfaces. So a contract
+    that differs from the built-in default while still carrying the default
+    version gets a short digest of its own rules appended — `v1+3f9a2c`.
+
+    An operator who *names* their contract keeps that name untouched: saying
+    `contract_version = "acme-2026.1"` is the explicit act this is inferring
+    in its absence, and inferring over the top of it would be rude.
+    """
+    contract = Contract(
+        version=version,
+        required_files=tuple(required_files),
+        required_dirs=tuple(required_dirs),
+        required_meta=tuple(required_meta),
+    )
+    stock_rules = (
+        contract.required_files == DEFAULT_CONTRACT.required_files
+        and contract.required_dirs == DEFAULT_CONTRACT.required_dirs
+        and contract.required_meta == DEFAULT_CONTRACT.required_meta
+    )
+    if stock_rules or version != DEFAULT_CONTRACT_VERSION:
+        return contract
+    return Contract(
+        version=f"{version}+{rules_digest(contract)}",
+        required_files=contract.required_files,
+        required_dirs=contract.required_dirs,
+        required_meta=contract.required_meta,
+    )
+
+
+def configured_contract(config: VogtConfig) -> Contract:
+    """The contract this instance evaluates against, from configuration.
+
+    The one place the four settings are read, so a call site cannot pick up
+    three of them and miss the fourth. `VogtConfig` is imported for typing
+    only: `core` stays free of a runtime dependency on configuration, which
+    is what keeps `evaluate` callable from a test with a literal contract.
+    """
+    return contract_from_settings(
+        version=config.contract_version,
+        required_files=config.contract_required_files,
+        required_dirs=config.contract_required_dirs,
+        required_meta=config.contract_required_meta,
+    )
+
+
+def rules_digest(contract: Contract) -> str:
+    """A short, stable fingerprint of a contract's rules.
+
+    Order-insensitive within each set, because listing the same three files
+    in a different order is the same contract and should not read as a
+    different one.
+    """
+    material = "|".join(
+        ",".join(sorted(part))
+        for part in (
+            contract.required_files,
+            contract.required_dirs,
+            contract.required_meta,
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:6]
 
 
 @dataclass(frozen=True)

@@ -37,6 +37,15 @@ ALL_SCOPES: tuple[Scope, ...] = (
 #: `admin` implies everything. Nothing else implies anything: `work.write`
 #: does not grant `project.write`, because registering a project and filing a
 #: bug are different powers and an agent usually needs only one.
+#:
+#: `writeback` gates exactly one operation — `forge.writeback`, which arms or
+#: disarms a project's upstream pushing. It is deliberately *not* implied by
+#: `project.write`: managing projects and deciding that this instance may
+#: speak to a forge on your behalf are different powers, and the second is the
+#: one with effects outside this instance. Causing an individual upstream
+#: write still needs `work.write`, because it is a consequence of commenting
+#: or transitioning; what this scope decides is whether that consequence is
+#: switched on at all (FR-S11, `DESIGN.md` §4.1).
 IMPLIED: dict[Scope, frozenset[Scope]] = {
     "admin": frozenset(ALL_SCOPES),
     "project.write": frozenset({"project.write", "read"}),

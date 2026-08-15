@@ -18,7 +18,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from vogt.collectors.base import CollectorContext, Finding, finding
-from vogt.core.contract import DEFAULT_CONTRACT, evaluate
+from vogt.core.contract import configured_contract, evaluate
 from vogt.core.entities import Project
 
 KIND_CONTRACT = "contract.check"
@@ -41,8 +41,7 @@ class ContractCheckerCollector:
         return False
 
     def collect(self, ctx: CollectorContext, project: Project) -> Iterable[Finding]:
-        del ctx
-        result = evaluate(Path(project.root_path), DEFAULT_CONTRACT)
+        result = evaluate(Path(project.root_path), configured_contract(ctx.config))
         yield finding(
             kind=KIND_CONTRACT,
             subject_key=f"contract:{project.slug}",

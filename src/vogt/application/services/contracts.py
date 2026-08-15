@@ -28,7 +28,7 @@ from vogt.application.services import _resolve
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.collectors.base import CollectorContext
 from vogt.collectors.contract_checker import ContractCheckerCollector
-from vogt.core.contract import DEFAULT_CONTRACT, NOT_CHECKED, evaluate
+from vogt.core.contract import NOT_CHECKED, configured_contract, evaluate
 from vogt.core.entities import Actor
 from vogt.errors import InvalidRequest
 from vogt.storage.interface import ProjectUpdate, WriteTxn
@@ -53,7 +53,7 @@ def contract_check(ctx: AppContext, params: ContractCheckParams) -> ContractChec
         raise InvalidRequest(msg)
 
     if params.path:
-        result = evaluate(Path(params.path), DEFAULT_CONTRACT)
+        result = evaluate(Path(params.path), configured_contract(ctx.config))
         return ContractCheckResult(
             path=result.path,
             project=None,
@@ -88,7 +88,7 @@ def contract_check(ctx: AppContext, params: ContractCheckParams) -> ContractChec
         )
         ctx.observed.rebuild_latest()
 
-    result = evaluate(Path(project.root_path), DEFAULT_CONTRACT)
+    result = evaluate(Path(project.root_path), configured_contract(ctx.config))
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[ContractCheckResult]:
         del actor
@@ -161,7 +161,7 @@ def compliance(ctx: AppContext, params: ComplianceParams) -> ComplianceResult:
     return ComplianceResult(
         project=project.slug,
         status=project.compliance_status,
-        contract_version=DEFAULT_CONTRACT.version,
+        contract_version=configured_contract(ctx.config).version,
         checked_at=checked_at,
         age_seconds=age,
         failing=failing,

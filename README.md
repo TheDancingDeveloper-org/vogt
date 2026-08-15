@@ -25,17 +25,18 @@ Vogt gives you:
 ## Status
 
 **v1 complete: M0–M6 are implemented**; **v2 (M9–M14) is built**. Design
-revision r5, requirements revision r11. Every stage demo runs as an acceptance
+revision r5, requirements revision r13. Every stage demo runs as an acceptance
 test except two, which need a browser and a phone and are outstanding as such
 (`ROADMAP.md` M11 and M13).
 
 **Everything designed and not built is in one place**: `REQUIREMENTS.md` §7,
-the gap register, which separates what is *owed* — eleven items, each with a
-numbered requirement — from what was *withdrawn* or deferred. Two are must-haves and one of
-those matters operationally: **NFR-I3**, because readiness does not gate on
-migration, so an image carrying a new migration passes its healthcheck and
-fails afterwards on a missing table. The design documents describe what exists;
-§7 is where the rest lives, and r11 argues why that split is worth having.
+the gap register, which separates what is *owed* from what was *withdrawn* or
+deferred. **Five items remain owed and none is a must-have**; r13 closed the
+two that were, along with four should-haves. What is left cannot be finished by
+writing code here — two need a browser and a phone, one needs a Firebase entry,
+and two are `could-have`s nobody has asked for. The design documents describe
+what exists; §7 is where the rest lives, and r11 argues why that split is worth
+having.
 
 Vogt now sees work you did not type in. Collectors sweep your registered
 projects for git state, source markers and dependency references — plus

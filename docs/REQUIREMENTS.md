@@ -548,6 +548,50 @@ server test, and disabling the comparison fails all three probe tests. The gate
 is parametrized over both stores, because a check that read only `declared`
 would pass a deploy whose observed migration had not run.
 
+**Four should-haves close with them**, leaving §7.1 with five rows, none of
+which can be closed by writing code here:
+
+- **FR-G1 — the contract is configuration.** Four settings
+  (`contract_required_files`, `_dirs`, `_meta`, `contract_version`) replace the
+  constant, read through one helper so a call site cannot pick up three and
+  miss the fourth. The interesting part is what a *version* means once the
+  rules are editable: an operator who edits them and leaves the version at `v1`
+  would record statuses claiming to be the stock contract, and every comparison
+  across instances after that is wrong with nothing on screen to say so. So a
+  contract whose rules differ from the built-in default while still carrying
+  the default version gets a digest of its own rules appended — `v1+3f9a2c` —
+  and a contract the operator *named* keeps its name untouched, because that is
+  the explicit act the digest is inferring in its absence.
+- **FR-S11 — `writeback` gates something.** It now gates `forge.writeback`, the
+  operation that arms a project's upstream pushing, and is deliberately not
+  implied by `project.write`: managing projects and deciding this instance may
+  speak to a forge on your behalf are different powers, and only the second has
+  effects outside the instance. `tests/test_auth.py` asserts both directions,
+  and a second test asserts that **every** scope gates at least one operation —
+  which is the check that would have caught this in M5 and did not exist.
+- **FR-V5 — ranked views page.** `backlog` and `bugs` take an offset;
+  `total_considered` is unchanged by the slice, so `offset + len(items) <
+  total_considered` is the whole of "there is more". **One limit survives and
+  is not what the requirement asked about**: `RANKING_CANDIDATE_LIMIT` caps the
+  candidate set at 1,000, so paging reaches the end of the *ranked window*
+  rather than the end of the estate. That cap predates this and is deliberate —
+  scoring happens in Python — but it means "pageable past the first page" is
+  now true and "every open item is reachable in ranked order" still is not.
+  §7.1 no longer carries FR-V5; the residual is named in §7.4.
+- **NFR-S4 — the benchmark runs at the envelope, and the reason it did not was
+  wrong.** The fixture sat at 5,000 items against NFR-S1's ~100k, and the
+  argument recorded in the test was that seeding 100k "would take minutes".
+  Nobody had measured it. It takes about two seconds — the rows go in through
+  one transaction on the direct write path, not the audited one. The envelope
+  is now the default and `VOGT_BENCHMARK_SCALE=tripwire` is the opt-out, which
+  is the right way round: a smaller fixture should be something somebody asks
+  for, not something they get without noticing.
+
+Three of those four were closed by writing code. The fourth was closed by
+running a command that had been described as too slow to run, which is the
+second time this documentation set has recorded that shape and the reason
+`REQUIREMENTS.md` §6 has a paragraph about it.
+
 ### Revision r12 — a second model vendor is a choice, not a capability
 
 *2026-08-15. One clause deferred. No behaviour changes.*
@@ -1096,10 +1140,10 @@ across CLI, REST and MCP by being consistently absent from every one.
 | FR-L1 | M | ~~The CLI provides everything but `migrate`.~~ **Delivered (r13).** `migrate` is an operation in the registry and a CLI verb, local-only like `init`, reporting both stores' applied and expected versions. It refuses a data directory with no instance rather than creating one. `tests/test_schema_gate.py`. | — |
 | NFR-I3 | M | ~~Readiness does not gate on migration, and `serve` does not migrate.~~ **Delivered (r13).** `build_server` migrates both stores before assembling the app, and `/health/ready` compares each store's applied version against `bundled_schema_version()` — the highest migration the build ships — answering `503` naming the store, both numbers and `vogt migrate`. A store *ahead* of the build stays green, because `migrate` refuses that case with more diagnosis than a probe can carry. `tests/test_schema_gate.py`, mutation-checked on both halves. | — |
 | FR-S6 | M | ~~Not queryable by time.~~ **Delivered.** `ListAuditParams` now carries `since`, `until`, `project` and `offset`, and `AuditListResult` carries `total`. The interval is half-open — `since` inclusive, `until` exclusive — so consecutive windows tile the log exactly and a write made at midnight is counted once rather than in both weeks that touch it. A naive bound is read as UTC rather than the server's zone, since the stored `at` is always UTC and reinterpreting a bound locally would move a query's boundary by an hour on one host and not on another. `tests/test_audit_query.py` (twenty) and an `audit.list` step in the parity script, so the new parameters answer the same on CLI, REST and MCP. | — |
-| FR-G1 | M | The contract is declarative ✅, carries a version identifier ✅, and names every failing criterion ✅ — but it is **not sourced from configuration**. It is the constant `DEFAULT_CONTRACT` in `core/contract.py`; `VogtConfig` has no contract keys, `CONFIG.md` lists none, and `evaluate()` is only ever called with the default. Nobody self-hosting Vogt can state a contract other than this repository's own without editing Python. | Medium — it is the requirement's entire "sourced from configuration" clause, in a product meant for others to run |
-| FR-D2 | M | Edges record `path` and `git` ✅ with the manifest they came from ✅. The third reference kind, `declared`, **cannot be produced**: `DESIGN.md` §3.5's `project link A depends_on B` was never given an operation, no `project_dependencies` table exists, and `RefKind`'s third member is unreachable. A dependency no manifest expresses — a service calling another, a deploy script's assumption — cannot be recorded, so it is absent from `deps` and from the reverse lookup FR-D4 promises. | Medium |
-| FR-S3 | M | All five scopes exist, parse, imply correctly and are issuable ✅. **`writeback` gates no operation.** `forge.writeback` sets a project's policy and requires `project.write`; the upstream write is a consequence of `work.write` operations. A token issued with `writeback` alone can read and nothing else. | Medium — a control that grants nothing is worse than one that does not exist, because it is issued in good faith |
-| NFR-S4 | S | The benchmark fixture asserts the NFR-S1 interactive target at **500 projects and 5,000 work items**, not the ~100k items NFR-S1 names. The reduction is deliberate and argued in `tests/test_benchmark.py` — seeding 100k rows per run would cost minutes and prove nothing about the *query* — but the requirement says "at the NFR-S1 envelope" and the fixture is an order of magnitude below it on one axis. It catches an accidental N+1; it does not evidence the envelope. | Low, and honestly documented in the test |
+| FR-G1 | M | ~~Not sourced from configuration.~~ **Delivered (r13).** Four settings carry the rules and the version, read through `configured_contract()`. A contract whose rules differ from the built-in default while keeping the default version gets a digest appended, so a status cannot claim to be the stock `v1` and not be. `tests/test_contract_config.py` (thirteen). | — |
+| FR-D2 | M | Edges record `path` and `git` ✅ with the manifest they came from ✅. The third reference kind, `declared`, **cannot be produced** — no operation emits one. Carried as **FR-D9** in §7.1, priority C. | Medium |
+| FR-S3 | M | ~~`writeback` gates no operation.~~ **Delivered (r13)** as FR-S11. `forge.writeback` now requires `writeback`, and `tests/test_auth.py` asserts both that the scope grants it and that `project.write` alone does not — plus that every issuable scope gates at least one operation, which is the check whose absence let this sit from M5. | — |
+| NFR-S4 | S | ~~The fixture asserts the target an order of magnitude below the envelope.~~ **Delivered (r13).** It now seeds 500 projects and 100,000 work items by default. The recorded reason for scaling down — that seeding 100k "would cost minutes" — had never been measured; it takes about two seconds, because the rows go in through one transaction on the direct write path. `VOGT_BENCHMARK_SCALE=tripwire` opts back down for a fast local loop. | — |
 
 An eighth was missed by this verification entirely and is recorded here by
 r7:
@@ -1978,14 +2022,10 @@ the requirement's own.
 
 | ID | Pri | What is missing | What the absence costs |
 |---|---|---|---|
-| **FR-G1** | M | The contract is a versioned constant in `core/contract.py`; `VogtConfig` has no contract keys. | A self-hoster cannot state a different contract without editing Python. The shape, the version and the named failing criteria are all delivered — only the sourcing is not. |
 | **FR-T5** | S | The voice validation pass against domain vocabulary — project slugs, `WI-7`, the word "backlog". | Voice was adopted unproven and is still unproven. The system prompt now tells the model the vocabulary, which is preparation, not evidence. Blocked on FR-M4. |
 | **FR-D9** | C | Any producer of a `declared` dependency edge. | A dependency expressed only in a deploy script or a person's head is invisible to `deps` and to the reverse lookup. |
-| **FR-S11** | S | Anything gated by the `writeback` scope. | A token issued with `writeback` alone can only read. The trap costs whoever issues one in good faith. |
-| **FR-V5** | S | An offset on `backlog` and `bugs`. Both carry `limit` (max 200) and nothing else; `audit.list` and `work.list` do have one, so this is an inconsistency as well as a gap. | There is no way past the top 200 of a ranked view. The truncation is announced; it just cannot be continued. |
 | **FR-E10** | C | An operable GUI stream. The compositor and streamer are in the image, the launch and process APIs are built, production runs `START_SWAY=0` and `GUI_STREAM_URL=""`. | A surface exists that has never been shown to do anything. |
 | **FR-E11** | C | Any signal that two live sessions share a working tree. Nothing in `sessions.py` or the engine's registry compares a new session's `cwd` against the live ones. | Two agents can edit one checkout concurrently and neither is told. No audit row records the loss, because both writes are legitimate. |
-| **NFR-S4** | S | The benchmark fixture asserts the interactive target at 500 projects and **5,000** work items, not the ~100k NFR-S1 names. The reduction is deliberate and argued in `tests/test_benchmark.py`. | It catches an accidental per-item query inside a ranked view; it is not evidence of the envelope. Low, and honestly documented in the test that makes the claim. |
 | **FR-M4** | S | An FCM client entry in `google-services.json` for the dev build's application id. *The rest of this requirement is delivered*: `build.gradle` takes the id from `MYDEVENV2_ANDROID_APP_ID`, and the front door from `VOGT_ANDROID_SERVER_URL` with no default. | A dev APK installs beside prod but cannot register for push, because `google-services.json` is keyed to the application id. This is what blocks FR-M2's and FR-T5's hardware verification, so it is smaller than the two it holds up. |
 
 ### 7.2 Owed, and blocked on something that is not code
@@ -2048,7 +2088,31 @@ nobody wrote down gets rediscovered as an oversight.
 - **Backend convergence on Rust.** §3 again: the two-process shape is the
   requirement (NFR-D11), and nothing forecloses a future port.
 
-### 7.4 What this register is not
+### 7.4 Residuals — true, smaller than the requirement, and worth naming
+
+Closing a requirement does not always close the thing a reader assumed it was
+about. These are the differences, recorded so nobody rediscovers them as
+defects:
+
+- **Ranked views page to the end of the *window*, not the estate** (FR-V5).
+  `RANKING_CANDIDATE_LIMIT` is 1,000: the view reads a wide slice and scores it
+  in the application layer, so an estate with more than a thousand open items
+  has some that no offset reaches. The cap is deliberate and predates the
+  requirement — scoring is a documented function of several inputs rather than
+  something SQL should express — and `total_considered` reports what was
+  *considered*, so a caller cannot currently tell the window from the estate.
+  Raising it, or pushing scoring into the query, is a storage-layer change with
+  its own benchmark; neither is owed by any requirement today.
+- **The contract digest changes a recorded version, not a recorded status**
+  (FR-G1). An instance that edits its contract rules starts stamping
+  `v1+<digest>` on new checks; statuses recorded before the edit keep saying
+  `v1`, which is correct — they were evaluated against `v1` — but means a
+  project's stored `contract_version` may name a contract the configuration no
+  longer describes until it is re-checked. That is the same freshness rule
+  every other value here follows, and the compliance view already pairs the
+  status with its age.
+
+### 7.5 What this register is not
 
 It is not a backlog, and nothing in it is scheduled. `ROADMAP.md` holds the
 stages; this document holds what is owed. The distinction matters because a gap

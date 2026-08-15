@@ -1,18 +1,37 @@
-"""The scale tripwire (NFR-S1, NFR-S4).
+"""The scale tripwire, and the envelope run behind it (NFR-S1, NFR-S4).
 
 The two-store split means every aggregate view is an application-layer join,
-and that cost needs a tripwire now rather than a discovery at M6. This seeds
-a fixture at the v1 envelope and asserts the interactive target against it.
+and that cost needs a tripwire rather than a discovery at M6. This seeds a
+fixture and asserts the interactive target against it.
 
 It is deliberately a *tripwire*, not a benchmark suite: it fails when a query
-becomes order-of-magnitude slower, and it does not pretend a wall-clock
-number measured on a shared CI runner is a performance metric. The threshold
-is generous for that reason — what matters is that inserting an accidental
+becomes order-of-magnitude slower, and it does not pretend a wall-clock number
+measured on a shared CI runner is a performance metric. The threshold is
+generous for that reason — what matters is that inserting an accidental
 per-item query into a ranked view stops being invisible.
+
+**It now runs at the real envelope, and the reason it did not was wrong.**
+NFR-S4 asks for the target asserted at the NFR-S1 envelope — ~500 projects and
+~100k work items. The fixture sat at 5,000 items for a year, and the argument
+written here for scaling down was that seeding 100k "would take minutes and
+prove nothing about the query". The first half was never measured. It takes
+about two seconds: the rows go in through one transaction on the direct write
+path, not through the audited one, and SQLite does not care.
+
+So the default is the envelope. `VOGT_BENCHMARK_SCALE=tripwire` still seeds the
+smaller fixture for a faster local loop, and the assertions are the same file
+either way, so the two cannot drift apart.
+
+The second half of the old argument was right, and is why the last test here
+matters more than the timings: `RANKING_CANDIDATE_LIMIT` caps what is scored
+long before either count is reached, so the query shape is genuinely the same
+at either size. What the envelope run buys is that nobody has to take that on
+faith.
 """
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,14 +45,25 @@ from vogt.config import VogtConfig
 from vogt.core.entities import Priority, Project, WorkItem, WorkKind
 from vogt.core.principal import Principal
 
-#: The NFR-S1 envelope is ~500 projects and ~100k work items. Seeding 100k
-#: rows through the audited write path would take minutes and prove nothing
-#: about the *query*, so the fixture writes them directly and scales down the
-#: item count to what a per-run tripwire can afford. The shape being measured
-#: — one wide read plus an application-layer join and scoring pass — is the
-#: same at either size.
-BENCHMARK_PROJECTS = 500
-BENCHMARK_ITEMS = 5_000
+#: The NFR-S1 envelope is ~500 projects and ~100k work items.
+ENVELOPE_PROJECTS = 500
+ENVELOPE_ITEMS = 100_000
+
+#: The smaller fixture, kept for a faster local loop. Not what CI runs.
+TRIPWIRE_PROJECTS = 500
+TRIPWIRE_ITEMS = 5_000
+
+#: Default: the envelope NFR-S4 names. `tripwire` is the opt-*out*, which is
+#: the right way round — a smaller fixture should be the thing somebody asks
+#: for, not the thing they get without noticing.
+_SCALE = os.environ.get("VOGT_BENCHMARK_SCALE", "envelope").strip().lower()
+if _SCALE not in ("tripwire", "envelope"):  # pragma: no cover - operator error
+    msg = f"VOGT_BENCHMARK_SCALE must be 'tripwire' or 'envelope', not {_SCALE!r}"
+    raise ValueError(msg)
+
+AT_ENVELOPE = _SCALE == "envelope"
+BENCHMARK_PROJECTS = ENVELOPE_PROJECTS if AT_ENVELOPE else TRIPWIRE_PROJECTS
+BENCHMARK_ITEMS = ENVELOPE_ITEMS if AT_ENVELOPE else TRIPWIRE_ITEMS
 
 #: NFR-S1 asks for interactive (< 1 s) queries. The margin absorbs a loaded
 #: shared runner; an accidental N+1 blows straight past it.
