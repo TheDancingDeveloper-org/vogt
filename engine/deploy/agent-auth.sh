@@ -13,6 +13,11 @@ readonly CADASTRE_SECRET_NAME="${MYDEVENV2_CADASTRE_SECRET_NAME:-HOMELAB_CADASTR
 readonly VOGT_SECRET_NAME="${MYDEVENV2_VOGT_SECRET_NAME:-HOMELAB_VOGT_AGENT_TOKEN}"
 readonly DEFAULT_CADASTRE_MCP_URL="https://winrarhost.tailc7d3c.ts.net:18092/mcp"
 readonly DEFAULT_CADASTRE_MCP_RESOLVE="${MYDEVENV2_CADASTRE_MCP_RESOLVE:-}"
+# The same default `vogt-mcp-auth.sh` uses, and for the reason it gives: in
+# the merged stack the engine is the only published port (NFR-D11) and this
+# runs inside that container, so loopback needs no DNS and no certificate. A
+# session's own `VOGT_URL` still wins where one is set.
+readonly DEFAULT_VOGT_URL="http://127.0.0.1:8910"
 AUTH_TMP_DIR=""
 
 cleanup_auth_artifacts() {
@@ -30,7 +35,7 @@ Usage:
 
 Commands:
   check  Fetch credentials and validate Infisical, Forgejo, Woodpecker,
-         GitHub, Komodo, and Cadastre MCP access.
+         GitHub, Komodo, Cadastre MCP and Vogt MCP access.
   run    Execute one command with service credentials on demand in memory.
   shell  Start a login shell with service credentials on demand in memory.
 EOF
@@ -154,7 +159,7 @@ load_agent_environment() {
 }
 
 check_access() {
-    local response_file gh_login mcp_url
+    local response_file gh_login mcp_url vogt_url
     require_command curl
     require_command git
     require_command gh
@@ -205,6 +210,41 @@ check_access() {
         --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mydevenv2-agent-auth","version":"1"}}}' \
         "$mcp_url" >"$response_file"
     printf 'ok: Cadastre MCP (%s)\n' "$mcp_url"
+
+    # Vogt, probed the same way Cadastre is — because until this existed, the
+    # check reported seven services green while Vogt was completely unusable
+    # from the pod (#30). Vogt appeared in the bootstrap's banner, which says
+    # registrations were *written*, and nowhere in the probes. The first
+    # evidence of the outage arrived later, from a client, as a rejected token
+    # naming VOGT_TOKEN_FILE — a file that was correct throughout (#29).
+    #
+    # This is the one place that can catch that class of failure, because it
+    # is the only thing that runs in the pod holding the same credential a
+    # client will use, against the endpoint that client will use.
+    #
+    # An absent token is not a failure, for the reason `load_agent_environment`
+    # gives: an instance may legitimately not be deployed yet, and agent auth
+    # must keep working for git/gh regardless. So this reports three distinct
+    # states and never conflates them — configured and answering, not
+    # configured, or configured and refused.
+    vogt_url="${VOGT_URL:-$DEFAULT_VOGT_URL}"
+    if [[ -z "${VOGT_HTTP_TOKEN:-}" ]]; then
+        printf 'skip: Vogt MCP (no %s secret; no instance configured)\n' \
+            "$VOGT_SECRET_NAME"
+    elif curl -fsS --max-time 15 \
+        -H "Authorization: Bearer $VOGT_HTTP_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mydevenv2-agent-auth","version":"1"}}}' \
+        "${vogt_url%/}/mcp" >"$response_file" 2>/dev/null; then
+        printf 'ok: Vogt MCP (%s)\n' "${vogt_url%/}/mcp"
+    else
+        # Named, because the likely cause is not the one the endpoint's own
+        # error suggests: a Vogt token is minted by one instance and stored
+        # hashed there, so a token from another instance is refused however
+        # fresh it is, and the message points at the token file (#29).
+        die "Vogt MCP rejected ${VOGT_SECRET_NAME} at ${vogt_url%/}/mcp — if the token is current, check it was issued by *this* instance; tokens are not shared between Vogt instances"
+    fi
 }
 
 case "${1:-}" in

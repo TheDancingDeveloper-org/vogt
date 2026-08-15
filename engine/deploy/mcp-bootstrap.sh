@@ -177,4 +177,18 @@ install_vogt_codex
 install_vogt_claude
 install_vogt_opencode
 
-printf 'Cadastre and Vogt MCP client registrations are ready\n'
+# stderr, like every other message in this script, because of who calls it.
+#
+# `mydevenv2-agent-auth run` invokes this bootstrap on every launch, and two
+# of the things it launches are stdio MCP servers — `mydevenv2-vogt-mcp` and
+# `mydevenv2-cadastre-mcp`. For a stdio MCP server, stdout *is* the transport,
+# so a line here is not a banner: it is the first frame of the protocol, and
+# it does not parse. `tests/test_bridge.py` already forbids this of the bridge
+# — "a diagnostic on stdout corrupts framing and looks like a client bug" —
+# and the bridge obeys it. The launcher above it did not, so the rule held in
+# the one place that was tested and broke in the layer that wraps it.
+#
+# Everything an operator wants to see is still shown: an interactive shell
+# prints stderr too. The only reader that notices the difference is the one
+# that must.
+printf 'Cadastre and Vogt MCP client registrations are ready\n' >&2
