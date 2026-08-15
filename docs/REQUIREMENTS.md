@@ -507,6 +507,40 @@ offers out of the hang. The native Anthropic backend, its first way, is still
 absent. The roadmap now says both halves, because "not attempted" understated
 the work by exactly the amount that would have caused someone to redo it.
 
+### Revision r12 — a second model vendor is a choice, not a capability
+
+*2026-08-15. One clause deferred. No behaviour changes.*
+
+FR-T7 was two requirements joined by "and": **refuse rather than hang**, and
+**support a native Anthropic backend**. The first is delivered and stays. The
+second is deferred, and the reasoning is worth writing down because a deferral
+that reads as neglect gets reversed by the next person who notices it.
+
+The requirement was raised because the assistant's only transport was
+OpenAI-compatible and `claude-*` routes through the configured proxy hung.
+**The failure that mattered was the hang, not the vendor.** A hang is the worst
+thing a chat surface can do, because it is indistinguishable from thinking, and
+the 60-second client timeout that used to catch it reported "took too long"
+about something that was never going to answer. That is closed: the route
+refuses, names the model, the transport and the setting that overrides it, and
+`assistant_allow_claude_proxy` lets a deployment whose proxy does serve those
+routes say so and own the result.
+
+What the second clause would buy, once the first is delivered, is a **choice of
+vendor** rather than a capability. Nothing in v2 depends on Anthropic
+specifically; the loop works against whatever OpenAI-compatible backend a
+deployment configures. What it would cost is a second transport with its own
+tool-call semantics, its own streaming shape and its own failure modes, kept
+working by the same tests, in a product whose assistant is one surface among
+eight. The fault that motivated it is also *a proxy's*, not this product's —
+and building a second client to route around somebody else's broken route is
+the kind of fix that outlives the problem.
+
+So it moves to §3, where it is a decision with a reason rather than a `C`
+nobody schedules. Reversing it needs one thing: a use that wants Anthropic
+tool-calling specifically, at which point the ID is still here and the argument
+above is what has to be beaten.
+
 ---
 
 ## 1. Functional requirements
@@ -732,7 +766,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | FR-T4 | *(r9)* Assistant tool results carrying external content — terminal output, forge-derived text, imported issue bodies — shall be delimited as untrusted data; the threat-model rule that external content never becomes instructions extends to every Vogt read. | M | MERGE §8.5 |
 | FR-T5 | *(r9)* The assistant shall be drivable by voice: push-to-talk STT in the mobile shell, spoken replies in any client, with a validation pass against domain vocabulary (project names, "backlog") before v2 ships — voice is adopted unproven and shall not be presumed working. | S | MERGE §8.4; engine ASSISTANT.md |
 | FR-T6 | *(r9)* The assistant shall not exist unless configured: absent its API key the routes answer 404 and every GUI hides the surface. *(As-built rule, retained.)* | M | engine ASSISTANT.md |
-| FR-T7 | *(r9)* The tool loop shall be provider-portable: an OpenAI-compatible backend and a native Anthropic backend shall both be supported, and the currently-documented hang against `claude-*` proxy routes shall be resolved or the route refused with a named reason. | C | MERGE §8.4 |
+| FR-T7 | *(revised r12)* A backend that cannot serve the configured model shall refuse with a named reason rather than hang: a `claude-*` model id on the OpenAI-compatible transport answers with the model, the transport and the setting that overrides it. **Delivered.** ~~The tool loop shall additionally be provider-portable, supporting a native Anthropic backend.~~ **That clause is deferred (r12)** — see §3. | C | MERGE §8.4 |
 
 ### FR-M — Mobile surface *(r9)*
 
@@ -941,6 +975,20 @@ deferred and is not re-litigated by the merge**.
   are; their overlap is its own future investigation, not part of this merge.
 - **iOS shell.** MVP1 is Android — the existing Capacitor shell. Nothing
   designed here precludes iOS and nobody builds for it in v2.
+
+Deferred by revision r12:
+
+- **A native Anthropic backend for the assistant** (half of FR-T7). The loop
+  stays OpenAI-compatible. The clause was raised because `claude-*` routes
+  through the configured proxy hung; **that failure is closed by refusing
+  rather than hanging**, which is the half of FR-T7 that is delivered. A second
+  transport would buy a choice of vendor rather than a capability — nothing in
+  v2 depends on Anthropic specifically — and would cost a second set of
+  tool-call semantics, streaming shape and failure modes to keep working. The
+  fault that motivated it is a proxy's rather than this product's, and building
+  a second client to route around somebody else's broken route is a fix that
+  outlives its problem. Reversed by a use that wants Anthropic tool-calling
+  specifically; the ID is unchanged and r12 is the argument to beat.
 
 Named stretch goal, **not committed and not designed for**:
 
@@ -1383,7 +1431,7 @@ the file.
 | FR-E5 — "shall register the Vogt MCP server for agents running inside them" | **Delivered differently, and the previous description of it was wrong in a way that hid a defect.** Registration is not "run out of band by the container bootstrap": `agent-auth.sh` runs `mcp-bootstrap` *in the session's own startup*, per session, which is why sessions have had a Vogt MCP server all along. Believing otherwise is what stopped anyone asking the next question — **which Vogt it registered.** The answer was: not this one. The bootstrap read only its own `VOGT_MCP_URL`, defaulting to `winrarhost:18094`, so every session's agent was pointed at the *core-only stack this merge replaces* — the one `DEPLOYMENT.md` §9.5 turns off — while `start_session` exported the session's real endpoint and had it discarded. The opencode registration was worse: it pinned `VOGT_URL` at registration time, overriding the session's, and is written once and reused by every session after — the exact lesson the cadastre `:18081 → :18092` move taught, recorded in a comment two functions above it and not applied. Now: explicit override, then the session's own `VOGT_URL`, then the front door on loopback, which needs no DNS or certificate and cannot name a retired deployment (NFR-D11). Three tests in `tests/test_deploy.py`. **What is still short is only portability**: the wrappers and the script live in the image, so a session started against an engine built another way has no Vogt MCP server. | Low, down from Medium — and the row is a reminder that a wrong description of a working mechanism is more dangerous than a missing one, because it retires the question |
 | FR-T3 — "a `why` derived from the conversational context" | Still short, and less so. The `why` is whatever the model puts in the tool argument, and **nothing can verify that a sentence was derived from anything** — that half is not a gap to be closed but a claim no code can make. What was a gap is that the two failures the prompt names by name went unenforced, so the phrasing the instructions single out was the one that always got through. `assistant.rs::contentless_reason` now refuses them: a reason that only says who asked, and a reason that restates the act. It refuses by *removal*, so "the user asked for this after the sprint scope changed" passes and "as requested" does not — the refusal must not teach the model to hide the provenance, which would trade a useless audit row for a misleading one. The refusal returns to the model as a tool error and the loop continues, so the ordinary outcome is a second attempt before any card reaches a person. Three tests, one of which asserts the refusal reaches the model rather than only that no card appeared. | Medium — an unverifiable reason in an audit row is the failure mode FR-W1 exists against, and this narrows the class it can be *contentless* in without pretending to settle whether it is true |
 | FR-T5 — "a validation pass against domain vocabulary … before v2 ships" | Not run, and nothing was built that would let it be: the recognizer's best match goes straight into the composer and is auto-sent. No project list, no slug normalisation, no `WI-\d+` repair. What was done instead is that the prompt now states items are `WI-7` and projects are slugs. The requirement says voice "shall not be presumed working", and it is still presumed. | **The requirement's own words** |
-| FR-T7 — a native Anthropic backend | `ChatBackend` has two variants, `Http` and a test mock. Nothing in the repository speaks the Anthropic API. | Known, priority C |
+| FR-T7 — a native Anthropic backend | `ChatBackend` has two variants, `Http` and a test mock. Nothing in the repository speaks the Anthropic API. | **Deferred (r12)**, §3 — no longer short, decided |
 | FR-U5 — "per-item audit trail" | **The silent omission is closed.** An item's trail now includes the writes audited against its comments, by semi-join through `comments.work_item_id` — chosen over denormalising a work item id onto `audit`, because back-filling `audit` means editing the record of what happened. What remains is the same division as before: a link to the audit browser rather than an embedded trail, which is FR-U19's second clause working. | Low, down from Medium — the trail no longer omits a kind of write, which was the part that mattered |
 | NFR-D12 — "deployed to a dev stack for live validation" | Nothing deploys, from any branch. `build.yml` says so in its own step summary, and `ci.yml` records the decision — Vogt has never deployed from CI (NFR-D10). **The artefact now exists**: on 2026-08-14 the `stack-image` job ran for the first time, built `engine/Dockerfile` with the repository as its context, ran `vogt --version` and `mydevenv2-server --help` inside the candidate, signed the digest and published `dev` and `dev-ee18adc`; `deploy/vogt-stack.compose.yml` pins that digest rather than the placeholder it carried. So the image a dev stack would run and the image `dev` builds are the same artefact, and it is a real one. **What is left is one human act** — `docs/DEPLOYMENT.md` §9.4 — and until it happens no stack has run this image and mobile, voice and push remain unvalidated. | **High**, and now blocked on a deploy rather than on a build. Everything this section can do for it has been done |
 | NFR-D12 — "only `main` deploys to prod" | Vacuously true, per the row above. `main` builds a `sha-` image and publishes it; a human pins a digest and deploys. | — |
@@ -1893,7 +1941,6 @@ the requirement's own.
 | **FR-L1** | M | The `migrate` verb. `init` is idempotent and brings an instance forward, so the capability exists under another name — but note the correction: **`serve` does not migrate**, which §5.1's row and `DESIGN.md` §7 both implied it did. | The verb an operator reaches for is absent. Compounds NFR-I3 above, and is most of the fix for it. |
 | **FR-G1** | M | The contract is a versioned constant in `core/contract.py`; `VogtConfig` has no contract keys. | A self-hoster cannot state a different contract without editing Python. The shape, the version and the named failing criteria are all delivered — only the sourcing is not. |
 | **FR-T5** | S | The voice validation pass against domain vocabulary — project slugs, `WI-7`, the word "backlog". | Voice was adopted unproven and is still unproven. The system prompt now tells the model the vocabulary, which is preparation, not evidence. Blocked on FR-M4. |
-| **FR-T7** | C | The native Anthropic backend. *The other half is delivered*: a `claude-*` id on the OpenAI-compatible transport is refused with a sentence naming the model, the transport and the setting that overrides it. | The loop is OpenAI-compatible only. The `claude-*` proxy hang is unexplained but no longer silent, which was the failure that mattered — a hang is indistinguishable from thinking. |
 | **FR-D9** | C | Any producer of a `declared` dependency edge. | A dependency expressed only in a deploy script or a person's head is invisible to `deps` and to the reverse lookup. |
 | **FR-S11** | S | Anything gated by the `writeback` scope. | A token issued with `writeback` alone can only read. The trap costs whoever issues one in good faith. |
 | **FR-V5** | S | An offset on `backlog` and `bugs`. Both carry `limit` (max 200) and nothing else; `audit.list` and `work.list` do have one, so this is an inconsistency as well as a gap. | There is no way past the top 200 of a ranked view. The truncation is announced; it just cannot be continued. |
@@ -1925,12 +1972,20 @@ verification gaps rather than new IDs.
 
 ### 7.3 Withdrawn — designed once, deliberately not adopted
 
-**These carry no ID on purpose.** They were designed for MyDevEnv2 as a
-standalone product, or drafted as next steps in a document that is now history.
-No Vogt requirement depends on any of them, and minting IDs would turn closed
-decisions back into open work — the exact failure r2 and r3 spent revisions
-avoiding. They are listed because an absence nobody wrote down gets
-rediscovered as an oversight.
+**These carry no ID on purpose**, with one signposted exception below. They
+were designed for MyDevEnv2 as a standalone product, or drafted as next steps
+in a document that is now history. No Vogt requirement depends on any of them,
+and minting IDs would turn closed decisions back into open work — the exact
+failure r2 and r3 spent revisions avoiding. They are listed because an absence
+nobody wrote down gets rediscovered as an oversight.
+
+- **A native Anthropic backend for the assistant** — *the exception, because it
+  is half of an existing ID.* FR-T7's other clause, refusing rather than
+  hanging, is delivered and stays a requirement; the second transport was
+  deferred at **r12** and now lives in §3 with its reasoning. It left this
+  register's owed list on the same day it entered it, which is what a
+  deprioritisation looks like when the register is honest about the difference
+  between owed and decided.
 
 - **The Android emulator VM.** MyDevEnv2's Phase 7: a libvirt/KVM domain with
   `/dev/kvm` passthrough, a start/stop API, Selkies inside the VM, an Android

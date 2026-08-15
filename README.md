@@ -30,8 +30,8 @@ test except two, which need a browser and a phone and are outstanding as such
 (`ROADMAP.md` M11 and M13).
 
 **Everything designed and not built is in one place**: `REQUIREMENTS.md` §7,
-the gap register, which separates what is *owed* — twelve items, each with a
-numbered requirement — from what was *withdrawn*. Two are must-haves and one of
+the gap register, which separates what is *owed* — eleven items, each with a
+numbered requirement — from what was *withdrawn* or deferred. Two are must-haves and one of
 those matters operationally: **NFR-I3**, because readiness does not gate on
 migration, so an image carrying a new migration passes its healthcheck and
 fails afterwards on a missing table. The design documents describe what exists;

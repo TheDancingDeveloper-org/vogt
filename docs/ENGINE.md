@@ -994,9 +994,13 @@ that was never going to answer.
 
 `assistant_allow_claude_proxy` turns the refusal off. It exists because the
 fault is a *proxy's* rather than the model's: a deployment whose proxy serves
-those routes correctly is entitled to say so and to own the result. The check
-is about the transport, so FR-T7's other clause — a native Anthropic backend,
-still unbuilt — would not be subject to it.
+those routes correctly is entitled to say so and to own the result.
+
+**The loop is OpenAI-compatible only, and that is now a decision.** FR-T7 once
+asked for a native Anthropic backend as well; the clause was deferred at r12,
+on the grounds that the hang was the failure worth fixing and a second
+transport buys a choice of vendor rather than a capability.
+`REQUIREMENTS.md` §3 carries it.
 
 ### Tools
 
@@ -1128,10 +1132,11 @@ become instructions.
   trusted. It does **not** transitively gain Vogt write power: that needs a
   paired core token whose own scopes the core enforces.
 
-Two clauses of the assistant's requirements are short, and neither is
-described above as though it existed: FR-T5's voice validation pass and
-FR-T7's native Anthropic backend. `REQUIREMENTS.md` §7 carries both, with what
-is missing and what it costs.
+One clause of the assistant's requirements is short, and it is not described
+above as though it existed: FR-T5's voice validation pass against domain
+vocabulary. `REQUIREMENTS.md` §7 carries it, with what is missing and what it
+costs. FR-T7's native Anthropic backend was the other, and was deferred at r12
+rather than left owed — §3.
 
 ### Voice
 

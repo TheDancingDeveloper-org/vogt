@@ -950,16 +950,21 @@ does not.
    projects are slugs, which is what a recognizer's output has to survive.
 
 4. **FR-T7 was half attempted, and this note used to say it was not**
-   *(corrected r11)*. The requirement offers two ways out of the `claude-*`
-   hang — a native Anthropic backend, or the route refused with a named
-   reason — and the second is built: `assistant.rs` refuses a `claude-*` model
-   id on the OpenAI-compatible transport with a sentence naming the model, the
-   transport and the setting that overrides it, and
+   *(corrected r11, settled r12)*. The requirement offered two ways out of the
+   `claude-*` hang — a native Anthropic backend, or the route refused with a
+   named reason — and the second is built: `assistant.rs` refuses a `claude-*`
+   model id on the OpenAI-compatible transport with a sentence naming the
+   model, the transport and the setting that overrides it, and
    `assistant_allow_claude_proxy` lets a deployment whose proxy serves those
-   routes correctly say so and own the result. The hang itself is still
-   unexplained, and the native backend is still absent — `REQUIREMENTS.md` §7
-   carries what remains. "Not attempted" understated the work by exactly the
-   amount that would have caused somebody to do it again.
+   routes correctly say so and own the result. "Not attempted" understated the
+   work by exactly the amount that would have caused somebody to do it again.
+
+   **The other half is now deferred rather than outstanding (r12.)** The hang
+   was the failure that mattered and it is closed; a second transport buys a
+   choice of vendor rather than a capability, and nothing in v2 depends on
+   Anthropic specifically. `REQUIREMENTS.md` §3 carries the decision and r12
+   the argument. So M12 delivered FR-T7 as it now stands, and this stage has
+   nothing left open against it.
 
 ## M13 — Mobile MVP1 (S–M)
 
