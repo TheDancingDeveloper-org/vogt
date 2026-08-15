@@ -1,6 +1,6 @@
 # Vogt — Requirements (v0.3)
 
-Status: **baseline, revision r9** (2026-08-14), distilled from `DESIGN.md`,
+Status: **baseline, revision r10** (2026-08-15), distilled from `DESIGN.md`,
 `SCHEMA.md`, `DEPLOYMENT.md`, [`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md) and
 the originating product discussion.
 **v1 (M0–M6) is built**; §5 is the requirement-by-requirement verification
@@ -323,6 +323,92 @@ place as the merge's working record, and no longer govern. Sections §§1–11 o
 that document remain the design authority for the merge itself, and the
 Source column below cites them as **MERGE §n**.
 
+### Revision r10 — a front door inherits what it fronts
+
+**Nothing here is a new idea. Four requirements were already right and had
+stopped being about the product.** The trigger was the first real project
+import — RustNZB, on 2026-08-15 — which failed, and then kept failing
+differently for four separate reasons. None of them had a failing test,
+because each was written when the sentence around it was still true.
+
+**1. FR-A7 and FR-A8 said "the server" when there was one.** r7 established
+that a client must be able to obtain the instance's address, and that the
+address is an *exposure* value the server cannot infer (NFR-D2): it binds a
+container port and is published somewhere else entirely. That reasoning was
+correct and is now one hop short. r9's merge put a second process in front of
+the first, and every client-facing obligation quietly stayed with the process
+that no longer owns the address.
+
+Observed on the merged stack: `/version`, `/connection-info`,
+`/health/ready` and `/health/live` are not routed at the front door at all.
+The PWA's catch-all answers them — with `index.html`, at **200**. So the
+documented way to discover a Vogt instance returns a web page, successfully.
+`GET /api/connect`, which FR-A8 exists to make work, renders a ready-made MCP
+client configuration pointing at `http://vogt-dev.tailc7d3c.ts.net:8910/mcp`
+— the core's loopback-adjacent address, which no client can reach. The
+product's own answer to "how do I connect" is a wrong address, handed over
+with no error anywhere.
+
+The consequence was not cosmetic. `vogt-mcp-remote` reads
+`/connection-info` at startup, got HTML, and died on the JSON parse — so
+Vogt's MCP was unusable from every bridge client while the MCP endpoint
+itself answered `initialize` and `tools/list` perfectly. Cadastre's bridge,
+in the same pod against its own server, worked throughout, which is what made
+it look like Vogt was down rather than one route being absent.
+
+So FR-A7 and FR-A8 are revised to bind to **whichever process publishes the
+address**, and FR-A9 states the composition rule directly, because the next
+process someone puts in front will inherit the same obligations and nothing
+currently says so.
+
+FR-A7 also gains the clause the failure actually turned on: **a documented
+probe path shall never be answered by a fallback handler.** A 404 is a
+correct answer to a path that is not served. A 200 carrying something else is
+worse than either, because no client can tell it from success.
+
+**2. FR-A6's rule was right and was scoped to one symptom.** r8 established
+that bridge↔server version skew warns and never blocks — the handshake is a
+negotiation, not a gate. The bridge honoured that, and guarded an unreachable
+server and a non-200 response, and then parsed the body with nothing around
+it. One unparseable banner ended the process. The general rule was always the
+intended one: **a discovery or pre-flight step shall never prevent a client
+from using a service that works.** FR-A6 now says so instead of implying it.
+
+**3. FR-O4 was about coverage and the violation was inside a payload.**
+"Absence shall only be asserted within provably swept scope" is exactly the
+rule that was broken, one level below where it was written. The production
+image shipped without `git`; every `git` call in the `git-local` collector
+failed; the helper returned `""` for each; and the collector published
+`{"is_git_repository": true, "branch": "", "head": "", "dirty": false,
+"dirty_files": 0}` for every registered project. `dirty: false` is a positive
+claim that a working tree is clean, made by a collector that never read one,
+and it is indistinguishable downstream from a real observation — the precise
+harm FR-O4 exists to prevent, expressed as a field rather than as coverage.
+FR-O8 already had the right shape for the fix ("shall degrade to `partial`
+coverage … never to a failed sweep"); FR-O9 generalises it from one token
+scope to any unreadable source.
+
+**4. Nothing required the built artefact to be run.** NFR-Q gates types,
+lint, coverage and parity; NFR-C governs what is published. Between them, an
+image can go green, be signed, be digest-pinned and deployed while missing a
+package the product shells out to at runtime. That is what happened: `git` is
+a runtime dependency of both `project.import` (FR-P6, FR-P7) and `git-local`
+(FR-O1), the image never had it, and the first thing to notice was a failed
+import in production. Reading a Dockerfile cannot catch this; running the
+binary in the built image can. NFR-Q7 requires that, and requires the probes
+of FR-A7 to be checked **at the published address** rather than against the
+process behind it — checking the core would have passed on every one of these
+days.
+
+**Method note, in the spirit of §5.4.** Three of the four failures were
+invisible to the delivery verification for the same reason: the requirement
+was cited as satisfied by an implementation that satisfies it *at one
+address, in one topology*. §5.4 already requires requirements joined by "and"
+to be verified per conjunct. This revision adds: a requirement about a
+client-facing surface shall be verified **at each address that publishes
+it**, and a requirement about a runtime dependency shall be verified **in the
+artefact that ships**.
+
 ---
 
 ## 1. Functional requirements
@@ -402,6 +488,8 @@ filesystem discovery.*
 | FR-O7 | Unchanged observations (same subject, same content digest) shall not grow the store; sweeps shall count them as unchanged. | S | SCHEMA §3.1 |
 | FR-O8 | *(r6)* GitHub notifications shall be collected as observations through the **per-repository** endpoint, so that collection scope remains the registered project list (FR-G15) by construction rather than by filtering. They shall not be promoted into ranked views (DESIGN §3.6): a notification is a signal that something happened, not a claim that there is work. A token lacking the notifications scope shall degrade to `partial` coverage like any other unavailable source (FR-O4), never to a failed sweep. | S* | DESIGN §3.5 |
 
+| FR-O9 | *(r10)* An observation payload shall carry only values that were read. Where a source cannot be read at all — a missing or unrunnable tool, a failed command, a timeout — the collector shall report that it could not read it and the sweep shall degrade to `partial` naming the project (FR-O3, FR-O4); it shall not emit a field asserting a state it did not observe. A default that happens to be falsy is an assertion: `dirty: false` from a checkout that was never opened is indistinguishable from a clean one. | M | DESIGN §6 |
+
 \* M *when the GitHub adapter is enabled*; the adapter itself is optional (NFR-PO1).
 
 ### FR-D — Dependency references
@@ -440,9 +528,10 @@ by path or repository URL, and stops there.*
 | FR-A3 | Transport parity shall be enforced by tests whose exclusions are explicit named lists (`HTTP_ONLY`, `LOCAL_ONLY`) that fail when stale in either direction. | M | DESIGN §4.1 |
 | FR-A4 | The REST API shall publish a generated OpenAPI document. | M | DESIGN §4 |
 | FR-A5 | MCP shall be served over stdio (local, no server required) and streamable HTTP at `/mcp`; a stdio bridge shall serve clients that can only spawn local processes, discovering the remote tool list at startup rather than hardcoding it. | M | DESIGN §4.1 |
-| FR-A6 | *(revised r8)* An MCP `initialize` naming a protocol version the server does not recognise shall be answered with the newest version the server **does** support, leaving the client to continue or disconnect — the handshake is a negotiation, not a gate. A recognised version shall be answered with itself. Bridge↔server version skew shall warn on stderr and never block startup. | M | DESIGN §4.1 |
-| FR-A7 | The server shall expose plain-HTTP `/health/live`, `/health/ready`, `/version`, and `/connection-info` on every port that serves MCP. | M | DEPLOY §1 |
-| FR-A8 | *(r7)* **Connecting a client shall be a capability of the product, not an exercise for the reader.** The instance shall state the URL clients reach it at — configured, never inferred, and reported as absent when unset rather than guessed — and shall render client configuration from it (`connect`). A client that speaks streamable HTTP shall require no Vogt code installed; installation shall be a property of the stdio bridge alone, and shall be stated as its cost rather than assumed. | M | DEPLOY §4.3 |
+| FR-A6 | *(revised r8, r10)* An MCP `initialize` naming a protocol version the server does not recognise shall be answered with the newest version the server **does** support, leaving the client to continue or disconnect — the handshake is a negotiation, not a gate. A recognised version shall be answered with itself. **More generally, no discovery or pre-flight step shall prevent a client from using a service that works**: bridge↔server version skew, an unreachable or erroring discovery endpoint, and a discovery response that cannot be parsed or is not of the expected shape shall each warn on stderr and never block startup. | M | DESIGN §4.1 |
+| FR-A7 | *(revised r10)* Plain-HTTP `/health/live`, `/health/ready`, `/version`, and `/connection-info` shall be served on every port that serves MCP, by **whichever process publishes that port** — a fronting process inherits them for the address it publishes and shall not leave them to the process it fronts. A path named here shall be served or refused with a named reason; it shall never be answered by a fallback handler, because a `200` carrying something else cannot be told from success. | M | DEPLOY §1, MERGE §5.2 |
+| FR-A8 | *(r7, revised r10)* **Connecting a client shall be a capability of the product, not an exercise for the reader.** The instance shall state the URL clients reach it at — configured, never inferred, and reported as absent when unset rather than guessed — and shall render client configuration from it (`connect`). Where a process is fronted, **the URL stated and the configuration rendered shall be the fronting process's own**: the address a client must use is a property of the door it knocks on, and a fronted process can no more infer the door's published address than it could infer its own (NFR-D2). A client that speaks streamable HTTP shall require no Vogt code installed; installation shall be a property of the stdio bridge alone, and shall be stated as its cost rather than assumed. | M | DEPLOY §4.3, MERGE §5.3 |
+| FR-A9 | *(r10)* Where one process fronts another's surface, it shall satisfy that surface's client-facing obligations at the address it publishes — the probes of FR-A7, the stated URL and rendered client configuration of FR-A8 — or refuse the path with a named reason identifying which half of the product refused. Silently not routing a fronted obligation shall be treated as not implementing it. | M | MERGE §5.3 |
 
 ### FR-S — Security, identity & audit
 
@@ -610,6 +699,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | NFR-Q4 | The pydantic config schema is the single source of truth; example configs, compose files, and docs are generated from it and CI fails on drift. | M |
 | NFR-Q5 | Own dependencies: committed `uv.lock`; Renovate/Dependabot weekly with version updates, vulnerability alerts, and security fixes each explicitly enabled; CI fails on manifest/lockfile mismatch. | M |
 | NFR-Q6 | *(r9)* Both test suites shall pass in the merged repository, and two absence-modes shall stay green: the forge-less run (NFR-PO1–PO3, untouched) and a core run with no engine present — vogt-core remains fully testable alone. (MERGE §5.1, FR-E9) | M |
+| NFR-Q7 | *(r10)* A requirement about the shipped artefact shall be verified against the shipped artefact. Every tool the product invokes at runtime shall be proven present by **executing it in the built image**, not by reading the file that installs it; and the probes of FR-A7 together with the configuration rendered by FR-A8 shall be checked **at each published address**, not against the process behind it. Asserting on a Dockerfile or on a fronted process is evidence about a source file or an inner hop, and neither is the artefact a client meets. | M |
 
 ### NFR-C — CI/CD (GitHub Actions)
 

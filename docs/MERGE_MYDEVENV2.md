@@ -165,6 +165,8 @@ supervisor (container entrypoint)
 │   ├── /api/sessions|files|git|assistant|agent-tasks|push|history|...  (native)
 │   ├── /api/vogt/...          reverse-proxy → 127.0.0.1:<internal>
 │   ├── /mcp                   reverse-proxy → vogt core MCP (streamable HTTP)
+│   ├── /version /health/live /health/ready   reverse-proxy → core (§5.3)
+│   ├── /connection-info       synthesised by the door, not proxied (§5.3)
 │   ├── /api/sessions/:id/attach   WebSocket (native)
 │   └── /healthz /readyz       aggregate: engine + probe of vogt core
 └── vogt-core (Python/uvicorn) ← loopback only, never published
@@ -185,6 +187,73 @@ Why the Rust side fronts rather than the Python side or an extra Caddy:
   honest: one image or one stack, one healthcheck, one deploy act.
   Two containers in one compose stack is an acceptable fallback if
   in-container supervision fights the existing Tailscale sidecar setup.
+
+### 5.3 The front door's identity (r10)
+
+§5.2 lists what the door proxies. It did not say what the door *is*, and the
+gap had a cost: the first real import found the door answering Vogt's
+documented probes with the PWA at 200, and `connect` handing clients an MCP
+URL pointing at the core's internal address. This section settles it.
+FR-A7, FR-A8, FR-A9 and NFR-Q7 are the requirements it governs.
+
+**The rule.** *A client-facing fact about an address belongs to the process
+that publishes that address.* Everything else follows.
+
+**Who knows the public URL.** The door, and only the door. r7 established
+why a server cannot infer this: it binds a container port and is published
+somewhere else, so the URL is an *exposure* value under NFR-D2 — configured,
+no default, reported absent rather than guessed. That argument does not
+weaken one hop out, it repeats. The core binds loopback and is published
+by the engine at an address it has no way to learn. So:
+
+- The **engine** gains its own public-URL configuration, with no default,
+  and reports it absent when unset.
+- The **core** keeps `public_url` for the core-only shape, where the core
+  *is* the door. In the merged shape the core's value is an internal detail
+  and no client ever sees it.
+
+That last point is a property worth having: it makes the current
+misconfiguration — `VOGT_PUBLIC_URL=http://vogt-dev.tailc7d3c.ts.net:8910`
+on a stack reached at `https://vogt-dev.sprooty.com` — stop mattering,
+rather than requiring an operator to keep two addresses in sync forever. A
+design that removes a class of misconfiguration beats one that documents it.
+
+**Which paths the door serves, and how.** Split by whether the answer says
+anything about addressing:
+
+| Path | Treatment | Why |
+|---|---|---|
+| `/version` | proxy verbatim | name and version only; true at every hop |
+| `/health/live`, `/health/ready` | proxy verbatim | the core's own liveness and applied schema; the engine's aggregate stays at `/healthz`, `/readyz` |
+| `/connection-info` | **synthesised by the door** | every field is addressing |
+| `/api/vogt/connect` | **rendered by the door** | it emits a client configuration, which is addressing in its most consequential form |
+
+Synthesised, not rewritten: the door composes the answer from what it knows
+(`url` = its own public URL, `api_path` = `/api/vogt`, `mcp_path` = `/mcp`,
+`health_path` = `/health/ready`) plus what only the core can say (`version`,
+`supported_mcp_protocol_versions`, `writes_enabled`). Version skew therefore
+stays truthfully reported rather than being flattened by the proxy.
+
+**`api_path` at each hop.** `/api` at the core, `/api/vogt` at the door.
+Both are correct where they are stated, which is exactly why the door must
+not repeat the core's answer: a client that reads `/api` from the door's
+`/connection-info` will call a path the door does not serve.
+
+**What a client discovers, and from where.** One address, asked once. A
+client — including `vogt-mcp-remote` — reads `/connection-info` from the
+address a human gave it, and everything it needs is in that answer. It never
+learns an inner address, and it is never expected to know which shape it is
+talking to: the core-only and merged deployments answer the same four probes
+with the same field names, and differ only in the values that are genuinely
+different.
+
+**Failure shapes.** A probe path is served or refused with a named reason
+(the `503` with the refusing-half header the proxy already emits). It is
+never handed to the SPA fallback — FR-A7's clause exists because a `200`
+carrying `index.html` is the one failure a client cannot detect. And per
+FR-A6, none of this can block a client: a door that cannot reach its core
+still forwards `/mcp`, and a discovery answer that cannot be parsed is a
+warning, not an exit.
 
 ---
 
