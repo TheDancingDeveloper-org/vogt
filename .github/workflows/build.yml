@@ -153,11 +153,18 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm "$CANDIDATE" --version
+          # v0.2.0 shipped without git. Nothing was red: `project.import`
+          # shells out to it, and the `git-local` collector shells out to it,
+          # so the loss showed up only in production, as an import that could
+          # not run and a collector recording a checkout it had never read
+          # (#19, #20, #21). Reading the Dockerfile cannot catch a build that
+          # silently drops a package; running the binary can (NFR-Q7).
+          docker run --rm --entrypoint git "$CANDIDATE" --version
           if docker run --rm "$CANDIDATE" serve 2>/dev/null; then
             echo "serve started without being told where to listen" >&2
             exit 1
           fi
-          echo "image runs, and still refuses to guess an address"
+          echo "image runs, has git, and still refuses to guess an address"
 
       - uses: docker/build-push-action@v6
         id: push

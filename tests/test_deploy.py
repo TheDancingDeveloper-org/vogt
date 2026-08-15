@@ -142,6 +142,43 @@ def test_the_compose_owns_the_uid(compose: str) -> None:
     assert user.group(3) == "0", "gid stays 0; only the uid varies by host"
 
 
+def test_the_image_carries_git() -> None:
+    """git is a runtime dependency of import and of the git-local collector.
+
+    v0.2.0 shipped without it. Both builds were green: nothing in the test
+    suite runs the image, and every git call in the product is a subprocess
+    that fails at the point of use. Production therefore ran for days with
+    `project.import` unable to run at all, and with `git-local` recording a
+    clean checkout it had never read (#19, #20, #21).
+
+    This assertion is the cheap half. The half that actually proves it is
+    `docker run --entrypoint git "$CANDIDATE" --version` in `build.yml` and
+    `release.yml`, because a package can be named here and still not be in
+    the artefact — which is what NFR-Q7 now requires.
+    """
+    text = _without_comments(DOCKERFILE.read_text(encoding="utf-8"))
+    runtime = text.split("AS runtime", 1)
+    assert len(runtime) == 2, "the Dockerfile must have a named runtime stage"
+    assert re.search(r"apt-get install[^\n]*\bgit\b", runtime[1]), (
+        "the runtime stage must install git; the build stage having it is "
+        "not the same thing, and is what v0.2.0 relied on"
+    )
+
+
+def test_both_image_smoke_tests_run_git() -> None:
+    """NFR-Q7: the proof is running the artefact, so it is checked like code.
+
+    Reading a Dockerfile cannot catch a build that drops a package. Running
+    the binary in the built image can, and both publishing paths must do it —
+    a release that skips the check is exactly how this reached production.
+    """
+    for workflow in ("build.yml", "release.yml"):
+        text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+        assert 'docker run --rm --entrypoint git "$CANDIDATE" --version' in text, (
+            f"{workflow} must ask the built image for git, not the Dockerfile"
+        )
+
+
 def test_the_image_has_no_default_listen_address() -> None:
     """NFR-D2: the image must not silently bind anything."""
     text = _without_comments(DOCKERFILE.read_text(encoding="utf-8"))

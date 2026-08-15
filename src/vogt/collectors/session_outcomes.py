@@ -348,7 +348,9 @@ def _delta(
     delta.update(_commit_stats(root, window))
 
     if still_open:
-        status = git_output(root, "status", "--porcelain")
+        # Same rule as `git-local`: `uncommitted_files: 0` is a claim, and a
+        # status that could not be read must not become one (#20).
+        status = git_output(root, "status", "--porcelain", required=True)
         delta["head"] = git_output(root, "rev-parse", "HEAD") or None
         delta["uncommitted_files"] = 0 if not status else len(status.splitlines())
         delta["detail"] = (

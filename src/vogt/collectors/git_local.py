@@ -12,7 +12,12 @@ import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 
-from vogt.collectors.base import CollectorContext, Finding, finding
+from vogt.collectors.base import (
+    CollectorContext,
+    CollectorError,
+    Finding,
+    finding,
+)
 from vogt.core.entities import Project
 
 KIND_CHECKOUT = "git.checkout"
@@ -51,7 +56,10 @@ class GitLocalCollector:
 
         branch = git_output(root, "rev-parse", "--abbrev-ref", "HEAD")
         head = git_output(root, "rev-parse", "HEAD")
-        status = git_output(root, "status", "--porcelain")
+        # Required: `dirty` is the one field here that is a claim about the
+        # tree rather than a value read off it, so it must never be inferred
+        # from a question that failed (#20).
+        status = git_output(root, "status", "--porcelain", required=True)
         describe = git_output(root, "describe", "--tags", "--abbrev=0")
 
         yield finding(
@@ -80,11 +88,29 @@ class GitLocalCollector:
             )
 
 
-def git_output(root: Path, *args: str) -> str:
-    """Run one git command, returning "" for anything that does not work.
+def git_output(root: Path, *args: str, required: bool = False) -> str:
+    """Run one git command, returning "" when git ran and had no answer.
 
-    Deliberately forgiving: a repository with no commits, no tags, or a
-    detached HEAD is a normal thing to observe, not a failure to report.
+    Deliberately forgiving about *answers*: a repository with no commits, no
+    tags, or a detached HEAD is a normal thing to observe, not a failure to
+    report, and git says so by exiting non-zero.
+
+    Not forgiving about being unable to ask. git missing, unrunnable, or
+    hung is not a fact about the checkout, and the empty string it used to
+    return here was read by the caller as one — production spent v0.2.0
+    recording `dirty: false, branch: "", head: ""` for every project from an
+    image with no git, which is a clean checkout asserted by a collector
+    that never read a checkout (#20). That becomes a `CollectorError`, which
+    the sweeper already records as a partial sweep naming the project, so
+    the estate learns "not collected" instead of "there is nothing".
+
+    This also makes the timeout below mean what its comment always claimed.
+
+    `required=True` extends that to a non-zero exit, for the questions whose
+    empty answer would become a claim rather than an absence. `git status`
+    is the one that matters: "" from a failed status reads as a clean tree,
+    and a clean tree is an assertion. "no tags" is an absence, and stays
+    forgiving.
 
     Public, and shared with `session_outcomes.py`, because both collectors
     ask the same *kind* of question — what does this checkout, which already
@@ -100,8 +126,13 @@ def git_output(root: Path, *args: str) -> str:
             timeout=GIT_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):  # pragma: no cover - no git
-        return ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        msg = f"git could not be run against {root}: {exc}"
+        raise CollectorError(msg) from exc
     if completed.returncode != 0:
+        if required:
+            detail = completed.stderr.strip() or f"exit {completed.returncode}"
+            msg = f"git {args[0]} could not be read in {root}: {detail}"
+            raise CollectorError(msg)
         return ""
     return completed.stdout.strip()
