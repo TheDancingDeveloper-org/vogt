@@ -24,7 +24,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
-import { render, waitFor } from "@solidjs/testing-library";
+import { fireEvent, render, waitFor } from "@solidjs/testing-library";
 
 import App from "../App";
 import { APP_ROUTES } from "../routes";
@@ -287,5 +287,50 @@ describe("FR-T6 — the assistant is not there to be reached when it is not prov
     );
     expect(drawerButtons(container)).toContain("🎙 Assistant");
     expect(tabLabels(container)).toEqual(["🎙 Assistant"]);
+  });
+});
+
+
+describe("the drawer's width is the reader's, and persists", () => {
+  it("offers a resizer that a keyboard can reach and use", async () => {
+    // A panel resizable only by pointer is one a keyboard user cannot widen
+    // when its contents do not fit — which is precisely the state this
+    // control was added to escape.
+    const { container } = mountShell("/board");
+    await settle();
+    const grip = container.querySelector<HTMLElement>(".drawer-resizer")!;
+    expect(grip).toBeTruthy();
+    expect(grip.getAttribute("aria-label")).toBeTruthy();
+
+    fireEvent.keyDown(grip, { key: "ArrowRight" });
+    await settle();
+    expect(document.documentElement.style.getPropertyValue("--drawer-width")).toBe(
+      "276px",
+    );
+    expect(localStorage.getItem("mydevenv2.drawerWidth")).toBe("276");
+  });
+
+  it("will not let the panel be dragged away to nothing", async () => {
+    // The grip lives on the panel's own edge, so a drawer squeezed to zero
+    // takes the handle with it and cannot be brought back.
+    const { container } = mountShell("/board");
+    await settle();
+    const grip = container.querySelector<HTMLElement>(".drawer-resizer")!;
+    for (let i = 0; i < 30; i += 1) {
+      fireEvent.keyDown(grip, { key: "ArrowLeft", shiftKey: true });
+    }
+    await settle();
+    expect(document.documentElement.style.getPropertyValue("--drawer-width")).toBe(
+      "180px",
+    );
+  });
+
+  it("restores the width it was left at", async () => {
+    localStorage.setItem("mydevenv2.drawerWidth", "420");
+    mountShell("/board");
+    await settle();
+    expect(document.documentElement.style.getPropertyValue("--drawer-width")).toBe(
+      "420px",
+    );
   });
 });

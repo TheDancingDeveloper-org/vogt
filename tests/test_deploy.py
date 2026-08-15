@@ -829,3 +829,28 @@ def test_a_release_apk_is_signed_or_the_job_stops() -> None:
         "signing belongs to a release, not to every push (NFR-C3's rule "
         "applied to the APK)"
     )
+
+
+def test_two_instances_of_the_merged_stack_can_coexist(stack: str) -> None:
+    """NFR-D12 asks for a dev stack, which is by definition the second one.
+
+    Found by deploying: `container_name: vogt` collided with the core-only
+    stack's container, Docker refused, and Komodo then reported the new stack
+    *running* because it had found a container with that name belonging to
+    somebody else. A dashboard saying running about a stack that never
+    started is the failure this repository spends its time on, arriving from
+    a direction no test had covered.
+
+    Every name a second instance would collide on has to be overridable: the
+    container, the volume, and the port and paths §9.3's template already
+    sets.
+    """
+    for setting in ("container_name", "hostname"):
+        assert f"{setting}: ${{VOGT_CONTAINER_NAME:-vogt}}" in stack, (
+            f"{setting} is fixed; a second instance on the same host cannot "
+            "start, and the first symptom is a dashboard reporting it running"
+        )
+    assert "name: ${VOGT_CORE_VOLUME:-vogt-core-data}" in stack, (
+        "the core's volume is named explicitly to escape the compose project "
+        "prefix, so it must be overridable or two instances share a database"
+    )

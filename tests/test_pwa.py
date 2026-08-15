@@ -632,3 +632,26 @@ def test_every_readiness_check_is_in_the_engines_contract() -> None:
         "API_CONTRACT.md; a check a deployer cannot look up is one they "
         "cannot act on"
     )
+
+
+def test_the_drawers_actions_wrap_rather_than_overflow() -> None:
+    """Every Vogt surface is reachable from the drawer at any width.
+
+    Found by looking: the action row is a flex row inside a panel that is
+    `overflow: hidden`, and it had grown to ten buttons. At the default 260px
+    four fitted. The other six — Board, Backlog, Projects, Audit, GUI and the
+    settings gear — were laid out past the panel's edge, clipped, invisible
+    and unclickable, so the surfaces the merge exists to add could not be
+    opened from the GUI at all.
+
+    Asserted here rather than in jsdom because jsdom has no layout: it would
+    report every button at the same position and see nothing wrong. This is a
+    claim about the stylesheet, so the stylesheet is what it reads.
+    """
+    css = STYLES.read_text(encoding="utf-8")
+    actions = re.search(r"\.drawer-actions\s*\{([^}]*)\}", css)
+    assert actions, ".drawer-actions still exists"
+    assert re.search(r"flex-wrap:\s*wrap", actions.group(1)), (
+        "the drawer's action row must wrap; `.drawer` is `overflow: hidden`, "
+        "so a row that does not wrap hides its own buttons"
+    )

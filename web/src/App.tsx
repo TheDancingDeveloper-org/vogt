@@ -429,6 +429,60 @@ const App: Component = () => {
     })();
   });
 
+  // -- the drawer's width ---------------------------------------------------
+  //
+  // Per client and persisted, which is the same rule the board's layout
+  // follows (FR-U13): a width is a property of the screen somebody is sitting
+  // at, not of the estate. Clamped because a drawer dragged to nothing cannot
+  // be dragged back — the grip goes with it.
+
+  const DRAWER_WIDTH_KEY = "mydevenv2.drawerWidth";
+  const DRAWER_MIN = 180;
+  const DRAWER_MAX = 640;
+
+  const clampWidth = (value: number) =>
+    Math.min(DRAWER_MAX, Math.max(DRAWER_MIN, Math.round(value)));
+
+  const storedWidth = () => {
+    const raw = Number(localStorage.getItem(DRAWER_WIDTH_KEY));
+    return Number.isFinite(raw) && raw > 0 ? clampWidth(raw) : 260;
+  };
+
+  const [drawerWidth, setDrawerWidthSignal] = createSignal(storedWidth());
+
+  const setDrawerWidth = (value: number) => {
+    const width = clampWidth(value);
+    setDrawerWidthSignal(width);
+    localStorage.setItem(DRAWER_WIDTH_KEY, String(width));
+  };
+
+  createEffect(() => {
+    document.documentElement.style.setProperty(
+      "--drawer-width",
+      `${drawerWidth()}px`,
+    );
+  });
+
+  const beginResize = (event: PointerEvent) => {
+    event.preventDefault();
+    const grip = event.currentTarget as HTMLElement;
+    // Capture, so a fast drag that leaves the 6px grip keeps resizing rather
+    // than stopping wherever the pointer happened to exit.
+    grip.setPointerCapture(event.pointerId);
+    const startX = event.clientX;
+    const startWidth = drawerWidth();
+    const onMove = (move: PointerEvent) =>
+      setDrawerWidth(startWidth + (move.clientX - startX));
+    const onUp = () => {
+      grip.removeEventListener("pointermove", onMove);
+      grip.removeEventListener("pointerup", onUp);
+      grip.removeEventListener("pointercancel", onUp);
+    };
+    grip.addEventListener("pointermove", onMove);
+    grip.addEventListener("pointerup", onUp);
+    grip.addEventListener("pointercancel", onUp);
+  };
+
   const authenticate = async (token: string, base: string) => {
     await validateCredentials(token, base);
     setToken(token);
@@ -863,6 +917,26 @@ const App: Component = () => {
         </Show>
 
         <aside class={`drawer ${drawerOpen() ? "open" : ""}`}>
+          {/* Drag to resize, and reachable from the keyboard: a panel whose
+              width can only be changed with a pointer is one a keyboard user
+              cannot widen when its contents do not fit. */}
+          <button
+            type="button"
+            class="drawer-resizer"
+            aria-label="Resize the panel"
+            title="Drag to resize"
+            onPointerDown={beginResize}
+            onKeyDown={(event) => {
+              const step = event.shiftKey ? 48 : 16;
+              if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                setDrawerWidth(drawerWidth() - step);
+              } else if (event.key === "ArrowRight") {
+                event.preventDefault();
+                setDrawerWidth(drawerWidth() + step);
+              }
+            }}
+          />
           <div class="drawer-header">
             <span>MyDevEnv2</span>
             <span style={{ color: isConnected() ? "#7ee787" : "#ff7b72" }}>

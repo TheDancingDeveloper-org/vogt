@@ -119,8 +119,17 @@ services:
     # replaces this line; the two streams never share a tag, so which one is
     # pinned here is answerable by reading it (`build.yml`).
     image: ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:bcca1d9d5d7eb671fa25e9cb3d1f29c536d4fee30f0b977feeb3ff2d6a5b7840
-    container_name: vogt
-    hostname: vogt
+    # Overridable, and it has to be. A fixed `container_name` is a promise
+    # that only one instance of this product will ever run on a host, and the
+    # dev stack NFR-D12 asks for is by definition the second — the first
+    # deploy of `vogt-dev` failed here, on a name already held by the
+    # core-only stack, which is the same shape as the port and the volume
+    # paths: a value correct for the eventual single deployment and wrong for
+    # a second instance. Docker refused rather than replacing, so nothing was
+    # lost; the dashboard then reported the new stack "running", because it
+    # found a container with the right name belonging to somebody else.
+    container_name: ${VOGT_CONTAINER_NAME:-vogt}
+    hostname: ${VOGT_CONTAINER_NAME:-vogt}
     restart: unless-stopped
 
     # tini as PID 1. The engine only wait()s on children it spawns directly; it
@@ -356,5 +365,8 @@ secrets:
     file: ./vogt-core-token
 
 volumes:
+  # Named explicitly so it is not prefixed with the compose project, and
+  # overridable for the same reason `container_name` is: two instances on one
+  # host must not share the core's database.
   vogt-core-data:
-    name: vogt-core-data
+    name: ${VOGT_CORE_VOLUME:-vogt-core-data}
