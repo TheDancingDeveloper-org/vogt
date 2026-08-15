@@ -461,12 +461,17 @@ IDs are append-only and each continues its family from its current maximum
 | ~~FR-S12~~ | ~~A work item's audit filter shall reach its comments~~ **Withdrawn (r11)** — already delivered; see below | — |
 | FR-V5 | Ranked views shall be pageable past their first page | S |
 
+> **Status of this table, later the same day**: r13 delivered FR-S11 and FR-V5,
+> and found FR-M4 already delivered before r11 raised it. FR-D9, FR-E10 and
+> FR-E11 — the three `could-have`s — are what is left, and §7.1 governs.
+
 None of the *new* IDs is a must-have. Two must-haves in the register are older
 than this revision and were carried in from §5.1 — **NFR-I3** and **FR-L1** —
 and NFR-I3 is the one row here with operational consequence: an image carrying
 a new migration passes its healthcheck and fails afterwards on a missing table.
 It was missing from the register's first draft, which is its own small lesson,
-since §5.1 has called it "the highest of these" since 2026-08-12.
+since §5.1 has called it "the highest of these" since 2026-08-12. **Both were
+delivered at r13**, which is the revision immediately above this one.
 
 **Three of this revision's own claims were wrong, and the method that caught
 them is §5.4a's.** The first draft of §7 was assembled from what the other
