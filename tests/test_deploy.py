@@ -9,7 +9,9 @@ Tailscale address, so choosing them is an allocation inside the tailnet.
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -577,6 +579,126 @@ def test_the_bootstrap_writes_nothing_to_the_protocol_stream() -> None:
         "these write to stdout, which for a stdio MCP server is the protocol "
         f"stream: {offenders}"
     )
+
+
+CADASTRE_MCP_WRAPPER = REPO_ROOT / "engine" / "deploy" / "cadastre-mcp-auth.sh"
+
+
+def _wrapper_sandbox(tmp_path: Path, wrapper: Path, bridge: str) -> tuple[Path, Path]:
+    """Stand a wrapper up far enough to run it and watch its stdout.
+
+    Two things are replaced and nothing else. `mydevenv2-agent-auth` becomes a
+    stub that does the one thing on this path that matters — invoke the
+    bootstrap, then `exec` the command it was handed — because the real one
+    brokers Infisical secrets and a test cannot have those. The bridge itself
+    becomes a stub that answers one frame, because what is under test is the
+    launcher, not the remote.
+
+    The bootstrap is the real script, the wrapper is the real script, and the
+    only edit to either is the `/usr/local/bin` prefix the wrapper `exec`s
+    through, which is an absolute path a test cannot otherwise intercept.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    def _install(name: str, body: str) -> Path:
+        path = bin_dir / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    _install(
+        "mydevenv2-agent-auth",
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        '[[ "${1:-}" == "run" ]] || exit 2\n'
+        "shift\n"
+        '[[ "${1:-}" == "--" ]] && shift\n'
+        # `bash <path>`, not the path alone: the Dockerfile is what makes
+        # these scripts executable, and the checkout they are read from here
+        # has not been through it.
+        f'bash "{MCP_BOOTSTRAP}"\n'
+        'exec "$@"\n',
+    )
+    # A stdio bridge: read the request, answer it, say the rest on stderr.
+    _install(
+        bridge,
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "read -r _line\n"
+        "printf 'bridge: connected\\n' >&2\n"
+        'printf \'{"jsonrpc":"2.0","id":1,"result":{}}\\n\'\n',
+    )
+
+    local = tmp_path / "wrapper.sh"
+    local.write_text(
+        wrapper.read_text(encoding="utf-8").replace("/usr/local/bin", str(bin_dir)),
+        encoding="utf-8",
+    )
+    local.chmod(0o755)
+    return local, bin_dir
+
+
+@needs_engine
+@pytest.mark.parametrize(
+    ("wrapper", "bridge"),
+    [
+        (VOGT_MCP_WRAPPER, "vogt-mcp-remote"),
+        (CADASTRE_MCP_WRAPPER, "cadastre-mcp-remote"),
+    ],
+    ids=["vogt", "cadastre"],
+)
+def test_nothing_but_protocol_reaches_a_wrappers_stdout(
+    tmp_path: Path, wrapper: Path, bridge: str
+) -> None:
+    """#28, asserted by running it: every stdout line must parse as JSON.
+
+    The same assertion `tests/test_bridge.py` already makes about the bridge
+    — "a diagnostic on stdout corrupts framing and looks like a client bug" —
+    made here about the thing that launches it. The static check above reads
+    the bootstrap's own `printf`s; this one reads fd 1 of the whole wrapper
+    path, so a diagnostic introduced anywhere along it is caught, including
+    in a script this test never names.
+
+    Whether a client survives a stray line is a matter of how defensively it
+    skips what it cannot parse, which is what made the original report
+    intermittent across clients rather than absent.
+    """
+    script, bin_dir = _wrapper_sandbox(tmp_path, wrapper, bridge)
+    home = tmp_path / "home"
+    home.mkdir()
+    environment = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "HOME": str(home),
+        "TMPDIR": str(tmp_path),
+        # An absent checkout is a supported state and reports on stderr; it
+        # keeps the bootstrap from trying to pip-install anything.
+        "MYDEVENV2_CADASTRE_SRC": str(tmp_path / "absent"),
+        "MYDEVENV2_VOGT_SRC": str(tmp_path / "absent"),
+    }
+    completed = subprocess.run(
+        [str(script)],
+        input='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n',
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    frames = [line for line in completed.stdout.splitlines() if line.strip()]
+    assert frames, "the bridge's own answer should still be there"
+    for frame in frames:
+        try:
+            message = json.loads(frame)
+        except json.JSONDecodeError:  # pragma: no cover - the failure this guards
+            pytest.fail(
+                f"{wrapper.name} put a non-JSON line on the protocol stream, "
+                f"which is what a client sees as a framing error: {frame!r}"
+            )
+        assert message["jsonrpc"] == "2.0"
+    # Not merely silent: an operator still gets told, one stream over.
+    assert "registrations are ready" in completed.stderr
 
 
 @needs_engine
