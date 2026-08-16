@@ -33,6 +33,7 @@ DriftStatus = Literal["open", "accepted", "rejected", "contested"]
 #: arrive with the GitHub module at M5.
 VERSION_MISMATCH = "version_mismatch"
 UNRESOLVED_DEPENDENCY = "unresolved_dependency"
+BROKEN_PATH_DEPENDENCY = "broken_path_dependency"
 
 #: The shipped default policy: low-risk auto-accept (FR-R3, DESIGN §3.2).
 #: State-sync kinds may be accepted by an agent without a human; anything
@@ -61,6 +62,10 @@ HUMAN_GATED_REASON: dict[str, str] = {
     "update_automation_gap": (
         "turning on a security toggle is a change to the repository's "
         "settings, not to Vogt's data; accepting only records the judgement"
+    ),
+    BROKEN_PATH_DEPENDENCY: (
+        "the target is inside this project and is not there; only somebody "
+        "who knows whether it moved or was deleted can say what to do"
     ),
 }
 
@@ -142,6 +147,46 @@ def version_mismatch(
             "field": "current_version",
             "from": declared,
             "to": observed,
+        },
+        evidence=evidence,
+        evidence_observation_id=evidence_observation_id,
+    )
+
+
+def broken_path_dependency(
+    *,
+    subject_key: str,
+    project_id: str,
+    project_slug: str,
+    raw_target: str,
+    manifest: str | None,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: str | None,
+) -> DriftFinding:
+    """A path reference inside the project's own tree that resolves to nothing.
+
+    Split from `unresolved_dependency` because the two ask different
+    questions. An unresolved reference points somewhere Vogt has not been
+    told about, and the answer is usually to register it. This one points
+    inside the project, where there is nothing to register: the manifest is
+    wrong, or the directory moved. Reporting both under one kind is how
+    thirty proposals about a valid monorepo layout came to carry the gate
+    text "usually it is a project nobody has registered yet".
+    """
+    where = f" in {manifest}" if manifest else ""
+    return DriftFinding(
+        kind=BROKEN_PATH_DEPENDENCY,
+        subject_kind="dependency",
+        subject_id=subject_key,
+        project_id=project_id,
+        summary=(
+            f"{project_slug} references {raw_target!r}{where}, which is inside "
+            "this project and does not exist"
+        ),
+        proposed_change={
+            "action": "fix_manifest_or_restore_path",
+            "raw_target": raw_target,
+            "manifest": manifest,
         },
         evidence=evidence,
         evidence_observation_id=evidence_observation_id,

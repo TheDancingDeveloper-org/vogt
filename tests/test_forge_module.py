@@ -33,6 +33,7 @@ from vogt.application.models import (
     DriftListParams,
     DriftResolveParams,
     GetWorkParams,
+    ObservationsParams,
     OnboardParams,
     ProjectBriefParams,
     RegisterProjectParams,
@@ -51,6 +52,7 @@ from vogt.application.services import (
     get_work,
     list_drift,
     list_write_backs,
+    observations,
     onboard,
     register_project,
     resolve_drift,
@@ -131,6 +133,27 @@ def forge(
                 "labels": [],
                 "closed_at": "2025-01-01T00:00:00Z",
             },
+            {
+                # The case that actually occurred, and the one the fixture
+                # above never tested: closed *and* labelled a bug. All
+                # twenty-seven items `bugs` returned on the dev instance were
+                # this shape, and the unlabelled row hid the defect because it
+                # was excluded for the other reason.
+                "number": 7,
+                "title": "Fixed weeks ago",
+                "state": "closed",
+                "labels": [{"name": "bug"}],
+                "closed_at": "2025-02-01T00:00:00Z",
+            },
+            {
+                # Genuinely open and carrying no labels at all — vogt#35,
+                # cadastre#9 and #10 are all this shape.
+                "number": 9,
+                "title": "Open and unlabelled",
+                "state": "open",
+                "labels": [],
+                "updated_at": "2026-08-10T00:00:00Z",
+            },
         ]
     )
     # The adapter is "configured" by making its client factory answer,
@@ -165,7 +188,7 @@ def test_onboarding_reads_history_and_mutates_nothing(
 ) -> None:
     result = onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
 
-    assert result.issues == 2, "open *and* closed — history is the point"
+    assert result.issues == 4, "open *and* closed — history is the point"
     assert result.labels == 1
     assert result.mutations == 0
     assert forge.mutations == [], (
@@ -182,6 +205,71 @@ def test_closed_history_does_not_flood_the_backlog(
     titles = [entry.title for entry in bugs(instance, BugsParams(limit=50)).items]
     assert any("Segment fetch retries" in title for title in titles)
     assert not any("Ancient closed thing" in title for title in titles)
+
+
+def test_a_closed_issue_is_not_an_open_bug(instance: AppContext, forge: Forge) -> None:
+    """WI-8, the p0. `bugs` returned 27 observed items, all closed upstream.
+
+    Every one carried `trust_state: verified` — the highest-confidence label
+    the product has, on a claim that was false in every instance. The state
+    was in the payload the whole time; the view never consulted it.
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+    listed = bugs(instance, BugsParams(limit=50))
+
+    titles = [entry.title for entry in listed.items]
+    assert not any("Fixed weeks ago" in title for title in titles), (
+        "closed upstream, labelled a bug, and it must not read as outstanding"
+    )
+    assert any("Segment fetch retries" in title for title in titles), (
+        "and the open one is still there — this is a filter, not a purge"
+    )
+
+
+def test_what_the_filter_removed_is_reported_rather_than_dropped(
+    instance: AppContext, forge: Forge
+) -> None:
+    """A short list and a filtered list must not look alike (FR-O4).
+
+    Excluding closed subjects silently would replace one wrong answer with
+    another: the reader could not tell "nothing is outstanding" from "plenty
+    was, and it is finished".
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+    listed = backlog(instance, BacklogParams(limit=50))
+    assert listed.closed_upstream >= 2, "two closed issues in the fixture"
+
+
+def test_a_closed_subject_stays_observable(instance: AppContext, forge: Forge) -> None:
+    """Out of the ranked views is not out of the record (FR-O2).
+
+    The observation is evidence and stays queryable; what changed is only
+    whether it claims to be outstanding work.
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+    seen = observations(
+        instance, ObservationsParams(kind="forge.issue", limit=50)
+    ).observations
+    assert any(o.payload.get("title") == "Fixed weeks ago" for o in seen)
+
+
+def test_an_unlabelled_issue_says_its_kind_was_guessed(
+    instance: AppContext, forge: Forge
+) -> None:
+    """Nothing said what it was, so nothing should claim otherwise (FR-O9).
+
+    An unlabelled issue is classified `feature` because the ranking needs a
+    kind, and that guess is why the three genuinely open issues in the estate
+    were absent from `bugs` — not because anyone judged them not to be bugs.
+    Marking the guess as a guess is what keeps them findable.
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+    ranked = {e.title: e for e in backlog(instance, BacklogParams(limit=50)).items}
+
+    guessed = next(e for t, e in ranked.items() if "Open and unlabelled" in t)
+    assert guessed.classified is False
+    stated = next(e for t, e in ranked.items() if "Segment fetch retries" in t)
+    assert stated.classified is True
 
 
 def test_onboarding_without_the_adapter_says_not_collected(
@@ -301,6 +389,75 @@ def test_by_state_stays_declared_only_and_says_so(
     brief = brief_project(instance, ProjectBriefParams(slug="rustnzb"))
     assert brief.by_state == {}, "nothing declared, so nothing to break down"
     assert brief.open_work > 0, "which is not the same as nothing outstanding"
+
+
+def test_a_host_the_adapter_cannot_read_says_so(
+    instance: AppContext, tmp_path: Path, forge: Forge
+) -> None:
+    """WI-9. All zeros and `detail: null` against a repo with an open issue.
+
+    `indexarr` lives on Forgejo and has one open issue; `forge onboard`
+    returned `issues: 0, pull_requests: 0, labels: 0, releases: 0, new: 0,
+    detail: null`. The GitHub control run in the same minute returned 102
+    objects, so the operation worked and the difference was entirely the
+    remote's host. Half the remaining import queue is Forgejo-hosted, and the
+    playbook reads an empty consolidation as a signal.
+    """
+    register_project(
+        instance,
+        RegisterProjectParams(
+            name="Elsewhere",
+            root_path=str(tmp_path),
+            repo_url="https://repo.indexarr.net/indexarr/Indexarr.git",
+            reason=WHY,
+        ),
+    )
+    result = onboard(instance, OnboardParams(project="elsewhere", reason=WHY))
+
+    assert result.supported is False, "the zeros below mean nothing"
+    assert result.detail is not None
+    assert "repo.indexarr.net" in result.detail, "name the host it could not read"
+    assert "github.com" in result.detail, "and what it can"
+    assert forge.mutations == [], "and it asked nobody anything"
+
+
+def test_an_honest_empty_and_an_unread_one_are_distinguishable(
+    instance: AppContext, tmp_path: Path, forge: Forge
+) -> None:
+    """Three zeros, three causes — the reason this was p1.
+
+    A repository with no history, a host with no adapter, and a step never
+    run all produced the same output. The third is fixed by auditing the run;
+    these two are the pair that has to differ in the result itself, and the
+    counts alone cannot carry that difference — zero is zero either way.
+    """
+    register_project(
+        instance,
+        RegisterProjectParams(
+            name="Elsewhere",
+            root_path=str(tmp_path),
+            repo_url="https://repo.indexarr.net/indexarr/Indexarr.git",
+            reason=WHY,
+        ),
+    )
+    unreadable = onboard(instance, OnboardParams(project="elsewhere", reason=WHY))
+    readable = onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+
+    assert unreadable.issues == 0 and unreadable.supported is False
+    assert readable.supported is True, "the same operation, against a host it reads"
+    assert readable.detail is None, "and it has nothing to explain"
+
+
+def test_a_project_with_no_repository_url_is_not_an_empty_repository(
+    instance: AppContext, tmp_path: Path, forge: Forge
+) -> None:
+    register_project(
+        instance,
+        RegisterProjectParams(name="Local", root_path=str(tmp_path), reason=WHY),
+    )
+    result = onboard(instance, OnboardParams(project="local", reason=WHY))
+    assert result.supported is False
+    assert result.detail is not None and "no repository URL" in result.detail
 
 
 # -- write-back policy (FR-B1, B4) ----------------------------------------
@@ -541,7 +698,7 @@ def test_m5_demo(instance: AppContext, forge: Forge) -> None:
     result = onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
     assert forge.mutations == [], "not one non-GET request"
     assert result.mutations == 0
-    assert result.issues == 2
+    assert result.issues == 4
 
     open_bug = next(
         entry

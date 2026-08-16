@@ -19,6 +19,7 @@ from vogt.application.models import (
     ProjectResult,
     RegisterProjectParams,
     TransitionProjectParams,
+    UpdateProjectParams,
 )
 from vogt.application.services import _resolve
 from vogt.application.services.views import _gather, freshness_of
@@ -34,9 +35,11 @@ from vogt.storage.interface import ProjectUpdate, WorkFilter, WriteTxn
 PROJECT_REGISTER = "project.register"
 PROJECT_CREATE = "project.create"
 PROJECT_TRANSITION = "project.transition"
+PROJECT_UPDATE = "project.update"
 
 PROJECT_REGISTERED_EVENT = "project.registered"
 PROJECT_TRANSITIONED_EVENT = "project.transitioned"
+PROJECT_UPDATED_EVENT = "project.updated"
 
 
 def _new_project(
@@ -51,7 +54,11 @@ def _new_project(
         repo_url=params.repo_url,
         lifecycle_state=params.lifecycle_state,
         compliance_status="not_checked",
-        exclusions=list(DEFAULT_EXCLUSIONS),
+        exclusions=(
+            list(DEFAULT_EXCLUSIONS)
+            if params.exclusions is None
+            else list(params.exclusions)
+        ),
         trust_state="unverified",
         created_at=now,
         updated_at=now,
@@ -208,7 +215,7 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
     # `backlog --project` for the same project at the same moment. The brief
     # is the first surface an import's owner reads, and it said the import had
     # found nothing.
-    ranked, declared_work, observed_work, _ = _gather(
+    gathered = _gather(
         ctx,
         project=params.slug,
         kinds=None,
@@ -220,13 +227,13 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
 
     return ProjectBriefResult(
         project=project,
-        open_work=len(ranked),
-        open_bugs=sum(1 for entry in ranked if entry.kind == "bug"),
-        declared_work=declared_work,
-        observed_work=observed_work,
+        open_work=len(gathered.ranked),
+        open_bugs=sum(1 for entry in gathered.ranked if entry.kind == "bug"),
+        declared_work=gathered.declared,
+        observed_work=gathered.observed,
         by_state=dict(sorted(by_state.items())),
         by_kind=dict(sorted(by_kind.items())),
-        top_backlog=ranked[: params.backlog_limit],
+        top_backlog=gathered.ranked[: params.backlog_limit],
         current_version=project.current_version,
         declared_version=project.current_version,
         observed_version=observed_version,
@@ -316,6 +323,51 @@ def _dependency_summary(ctx: AppContext, project: Project) -> DependencySummary:
     )
 
 
+def update_project(ctx: AppContext, params: UpdateProjectParams) -> ProjectResult:
+    """Correct a project's declaration after registration (FR-G12).
+
+    Registration used to be the only chance to state exclusions, and it did
+    not take them either — so the defaults were what every project got, for
+    good. `pingRAG` was registered with 20,212 of its 20,329 tracked files
+    inside a vendored `corpus/`, and every source marker Vogt holds for it
+    comes from somebody else's documentation as a result. There was nothing
+    to run to fix that.
+    """
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[ProjectResult]:
+        del actor
+        project = _resolve.project(txn, params.slug)
+        if params.repo_url is None and params.exclusions is None:
+            msg = "give --repo-url or --exclusions; there is nothing else to update"
+            raise InvalidRequest(msg)
+        txn.update_project(
+            project.id,
+            ProjectUpdate(
+                repo_url=params.repo_url,
+                exclusions=(
+                    None if params.exclusions is None else tuple(params.exclusions)
+                ),
+            ),
+            at=ctx.clock(),
+        )
+        updated = txn.project_by_slug(project.slug)
+        assert updated is not None  # just written in this transaction
+        return WriteOutcome(
+            result=ProjectResult(project=updated),
+            entity_kind="project",
+            entity_id=project.id,
+            payload=updated.model_dump(mode="json"),
+            event_kind=PROJECT_UPDATED_EVENT,
+            summary={
+                "slug": project.slug,
+                "exclusions": list(updated.exclusions),
+                "repo_url": updated.repo_url,
+            },
+        )
+
+    return audited_write(ctx, operation=PROJECT_UPDATE, reason=params.reason, body=body)
+
+
 def transition_project(
     ctx: AppContext, params: TransitionProjectParams
 ) -> ProjectResult:
@@ -360,4 +412,5 @@ __all__ = [
     "record_registration",
     "register_project",
     "transition_project",
+    "update_project",
 ]

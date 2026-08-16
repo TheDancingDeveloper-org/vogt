@@ -14,13 +14,18 @@ from typing import Any
 import pytest
 
 from vogt.adapters.github import GitHubClient, GitHubUnavailable, github_collectors
-from vogt.adapters.github.client import Transport, repo_of
+from vogt.adapters.github.client import (
+    NO_CONTENT,
+    Transport,
+    repo_of,
+)
 from vogt.adapters.github.collectors import (
     GitHubActionsCollector,
     GitHubIssueCollector,
     GitHubPullRequestCollector,
     GitHubReleaseCollector,
 )
+from vogt.adapters.github.posture import GitHubPostureCollector
 from vogt.application.context import AppContext
 from vogt.application.models import (
     BacklogParams,
@@ -74,6 +79,61 @@ def _project() -> Project:
 @pytest.fixture
 def ctx(instance: AppContext) -> CollectorContext:
     return CollectorContext(config=instance.config, clock=instance.clock)
+
+
+def _toggle_transport() -> Transport:
+    """GitHub as it actually answers the repository toggles.
+
+    204 with an empty body when the setting is on, 404 when it is off. Every
+    fake transport in this file returned `json.dumps(...)` for everything,
+    which is why a year of tests passed against a client that could not read a
+    204 at all.
+    """
+
+    def transport(
+        url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
+    ) -> tuple[int, bytes]:
+        del headers, body, method
+        if "vulnerability-alerts" in url:
+            return 204, b""
+        if "automated-security-fixes" in url:
+            return 404, b""
+        return 404, b"{}"
+
+    return transport
+
+
+def test_a_204_is_a_setting_that_is_on_not_a_parse_error(
+    ctx: CollectorContext,
+) -> None:
+    """WI-4: `JSONDecodeError: Expecting value: line 1 column 1 (char 0)`.
+
+    The empty body of a 204 was handed to a JSON parser, so `gh-posture`
+    failed outright on any repository whose vulnerability alerts were
+    switched on — and failed the whole collector for that project, not one
+    field of it. It was reported as `partial` for `cadastre` and `rustnzb`
+    for as long as anyone had been looking.
+    """
+    client = GitHubClient(token="x", transport=_toggle_transport())
+    found = list(GitHubPostureCollector(client).collect(ctx, _project()))
+
+    assert len(found) == 1, "one posture observation, not an exception"
+    payload = found[0].payload
+    assert payload["vulnerability_alerts"] is True, "204 means the setting is on"
+    assert payload["automated_security_fixes"] is False, "404 means it is off"
+
+
+def test_no_content_is_not_the_same_answer_as_not_found() -> None:
+    """The distinction the whole fix rests on.
+
+    Flattening 204 into `None` would have stopped the crash and reported
+    every enabled security toggle as disabled, which is the more expensive
+    wrong answer of the two.
+    """
+    client = GitHubClient(token="x", transport=_toggle_transport())
+    assert client.get("/repos/o/r/vulnerability-alerts") is NO_CONTENT
+    assert client.get("/repos/o/r/automated-security-fixes") is None
+    assert not NO_CONTENT, "and it is falsy, so `if not payload` still reads right"
 
 
 # -- the adapter is genuinely optional ------------------------------------

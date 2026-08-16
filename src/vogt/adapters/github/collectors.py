@@ -17,6 +17,7 @@ from typing import Any
 
 from vogt.adapters.github.client import (
     DEFAULT_PER_PAGE,
+    NO_CONTENT,
     GitHubClient,
     GitHubUnavailable,
     Transport,
@@ -60,7 +61,7 @@ class _GitHubCollector:
         payloads = self._client.get(
             self.endpoint.format(owner=owner, repo=name), **query
         )
-        if payloads is None:
+        if payloads is None or payloads is NO_CONTENT:
             return []
         if isinstance(payloads, dict):
             payloads = payloads.get(self.envelope_key, [])

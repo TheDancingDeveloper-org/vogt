@@ -10,6 +10,7 @@ from vogt.application.context import AppContext
 from vogt.application.models import (
     ComplianceParams,
     ContractCheckParams,
+    ContractEvaluateParams,
     CreateProjectParams,
     CreateWorkParams,
     ProjectBriefParams,
@@ -21,6 +22,7 @@ from vogt.application.services import (
     brief_project,
     compliance,
     contract_check,
+    contract_evaluate,
     create_project,
     create_work,
     register_project,
@@ -29,7 +31,7 @@ from vogt.application.services import (
 )
 from vogt.collectors.git_local import tracked_names
 from vogt.core.contract import DEFAULT_CONTRACT, evaluate
-from vogt.errors import InvalidRequest
+from vogt.errors import NotFound
 
 WHY = "contract test"
 
@@ -170,10 +172,12 @@ def test_a_path_with_no_repository_is_still_answerable(tmp_path: Path) -> None:
 def test_checking_a_bare_path_stores_nothing(
     instance: AppContext, tmp_path: Path
 ) -> None:
-    """FR-G4: invocable against any folder, without registering it."""
-    result = contract_check(
-        instance, ContractCheckParams(path=str(tmp_path), reason=WHY)
-    )
+    """FR-G4: invocable against any folder, without registering it.
+
+    And without a reason, and without `project.write`. Sharing an operation
+    with the recording half demanded both for a call that stores nothing.
+    """
+    result = contract_evaluate(instance, ContractEvaluateParams(path=str(tmp_path)))
     assert result.recorded is False
     assert result.project is None
     with instance.declared.read() as view:
@@ -278,13 +282,19 @@ def test_a_plain_sweep_does_not_check_the_contract(
     )
 
 
-def test_checking_needs_exactly_one_target(instance: AppContext) -> None:
-    with pytest.raises(InvalidRequest, match="--path or --project"):
-        contract_check(instance, ContractCheckParams(reason=WHY))
-    with pytest.raises(InvalidRequest, match="not both"):
-        contract_check(
-            instance, ContractCheckParams(path="/tmp", project="x", reason=WHY)
-        )
+def test_the_two_halves_are_two_operations(instance: AppContext) -> None:
+    """The ambiguity is gone rather than validated.
+
+    One operation took `--path` or `--project` and had to reject both and
+    neither at runtime. They are different acts — one reads, one records —
+    and the shape now says so: `contract evaluate` takes a path and no reason,
+    `contract check` takes a project and requires one.
+    """
+    with pytest.raises(NotFound):
+        contract_check(instance, ContractCheckParams(project="absent", reason=WHY))
+
+    evaluated = contract_evaluate(instance, ContractEvaluateParams(path="/tmp"))
+    assert evaluated.recorded is False
 
 
 # -- FR-G13: nothing consumes compliance as a precondition ----------------
