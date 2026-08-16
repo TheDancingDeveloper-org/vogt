@@ -49,6 +49,7 @@ from vogt.application.services.projects import (
     list_projects,
     register_project,
     transition_project,
+    update_project,
 )
 from vogt.application.services.retention import prune
 from vogt.application.services.sessions import (
@@ -143,6 +144,7 @@ __all__ = [
     "transition_project",
     "transition_work",
     "unrelate_work",
+    "update_project",
     "update_work",
     "why",
 ]

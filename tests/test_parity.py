@@ -82,6 +82,14 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ("project.get", {"slug": "parity-project"}),
     ("project.list", {}),
     (
+        "project.update",
+        {
+            "slug": "parity-project",
+            "exclusions": ["corpus/", ".claude/"],
+            "reason": WHY,
+        },
+    ),
+    (
         "project.transition",
         {"slug": "parity-project", "to_state": "maintenance", "reason": WHY},
     ),

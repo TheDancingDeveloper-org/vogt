@@ -162,6 +162,40 @@ class RegisterProjectParams(Params):
     lifecycle_state: LifecycleState = Field(
         default="active", description="incubating / active / maintenance / archived."
     )
+    exclusions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Paths collection skips, replacing the defaults entirely rather "
+            "than adding to them. Omit for the defaults. A repository that "
+            "vendors a corpus or carries agent worktrees needs this at "
+            "registration, because the first sweep is the baseline every "
+            "later answer is compared against."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class UpdateProjectParams(Params):
+    """Correct a project's declaration after registration.
+
+    Deliberately narrow. `lifecycle_state` is absent because it has its own
+    operation with a validated edge (`project transition`), and the observed
+    fields are absent because nothing declares them. What is left is the two
+    facts a registration can get wrong and nothing else could fix: where the
+    project is published, and what collection should skip.
+    """
+
+    slug: str = Field(description="Project to update.")
+    repo_url: str | None = Field(
+        default=None, description="Leave unset to keep the current value."
+    )
+    exclusions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Replaces the current list entirely. Leave unset to keep it; pass "
+            "an empty list to collect everything."
+        ),
+    )
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
