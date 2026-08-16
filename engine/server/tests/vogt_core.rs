@@ -1284,6 +1284,136 @@ async fn a_probe_needs_no_token_and_is_not_given_one() {
     );
 }
 
+/// #34: the same failure as #24, one namespace over.
+///
+/// The probes above were fixed by registering them. That is per-path, and
+/// `/api` is not a subtree anyone registered — it is a list of routes, so
+/// every path *not* on the list was still claimed by the SPA catch-all and
+/// answered `200 text/html`. `/api/openapi.json` reads as "the spec is served
+/// here and my parser is broken", which is a worse answer than any error.
+///
+/// Asserted as a property over `MACHINE_NAMESPACES` and a set of shapes,
+/// rather than over the two paths in the report: the guarantee is "nothing
+/// under a machine namespace is ever HTML", and it was previously expressed
+/// only as a comment about route ordering — one registration away from
+/// silently regressing.
+#[tokio::test]
+async fn nothing_under_a_machine_namespace_is_ever_answered_by_the_pwa() {
+    let (base, _log) = front_door().await;
+
+    // Shapes a client actually produces: the bare namespace, its trailing
+    // slash, a spec probe, a typo, a deep path, and something that looks like
+    // a document — the last because a `.html` suffix is exactly what would
+    // tempt a static handler to answer.
+    let shapes = [
+        "",
+        "/",
+        "/openapi.json",
+        "/nonexistent-xyz",
+        "/deeply/nested/unknown/path",
+        "/index.html",
+    ];
+
+    for namespace in mydevenv2_server::app::MACHINE_NAMESPACES {
+        for shape in shapes {
+            let path = format!("{namespace}{shape}");
+            // Both credentials states: an anonymous prober and a client that
+            // holds a real token must each be told something machine-readable.
+            for headers in [reqwest::header::HeaderMap::new(), bearer(TEST_TOKEN)] {
+                let response = client()
+                    .get(format!("{base}{path}"))
+                    .headers(headers)
+                    .send()
+                    .await
+                    .unwrap();
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                assert!(
+                    !content_type.starts_with("text/html"),
+                    "{path} answered {} {content_type} — that is the PWA \
+                     claiming a machine namespace",
+                    response.status()
+                );
+            }
+        }
+    }
+}
+
+/// The other half of the property: what the catch-all is *for* still works.
+///
+/// A fix that owned `/api` by taking the whole tree from the front end would
+/// pass the test above and break every deep link, so both halves are asserted
+/// together — and the shape of the refusal is the engine's ordinary error
+/// body, not a new one only this route speaks.
+#[tokio::test]
+async fn an_unknown_api_path_is_a_json_404_and_a_deep_link_is_still_the_pwa() {
+    let (base, _log) = front_door().await;
+
+    let unknown = client()
+        .get(format!("{base}/api/openapi.json"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let body: Value = unknown.json().await.unwrap();
+    assert_eq!(
+        body["error"], "not found",
+        "the engine's own error shape, so a client that parses one parses all"
+    );
+
+    // A registered route still refuses on its own terms: 401 means "exists,
+    // bring a token", which a 404 for everything would have flattened away.
+    let registered = client()
+        .get(format!("{base}/api/status"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), StatusCode::UNAUTHORIZED);
+
+    // And the routed subtree keeps owning itself.
+    let vogt = client()
+        .get(format!("{base}/api/vogt/nonexistent"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(vogt.status(), StatusCode::UNAUTHORIZED);
+
+    // The SPA deep link — the thing the catch-all exists for. Asserted as
+    // "the asset handler answered", because whether that is `index.html` or
+    // its own bundle-missing notice depends on the `web/dist/` the suite was
+    // built against, and the routing is what this test is about.
+    let deep_link = client()
+        .get(format!("{base}/totally-bogus"))
+        .send()
+        .await
+        .unwrap();
+    let status = deep_link.status();
+    let content_type = deep_link
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let body = deep_link.text().await.unwrap();
+    if content_type.starts_with("text/html") {
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a front-end deep link is served, not refused"
+        );
+    } else {
+        assert!(
+            body.contains("web bundle not present"),
+            "an unknown non-API path must reach the asset handler; it \
+             answered {status} {content_type}: {body}"
+        );
+    }
+}
+
 /// #26: the core cannot know this door's address, so the door states it.
 #[tokio::test]
 async fn the_door_states_where_clients_arrive() {

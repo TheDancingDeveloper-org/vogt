@@ -29,6 +29,18 @@ use crate::{
     ws,
 };
 
+/// Path prefixes that belong to a machine API and must never be answered by
+/// the PWA (#34). Each is owned all the way to its leaves — `/mcp` by the
+/// proxy routes below, `/api` by the explicit JSON 404 below that — so an
+/// unknown path under one is an error and not a front-end route.
+///
+/// Ordering the catch-all last is not enough on its own: it only protects
+/// paths that are *registered*, so `/api/openapi.json` was claimed by the SPA
+/// fallback and answered `200 text/html`. Public so the router and its tests
+/// name the same strings, which is what makes the guarantee a property rather
+/// than a comment.
+pub const MACHINE_NAMESPACES: [&str; 2] = ["/api", "/mcp"];
+
 pub struct AppState {
     pub config: Arc<Config>,
     pub auth: Arc<auth::AuthRuntime>,
@@ -303,9 +315,27 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // Authorization on a WebSocket handshake).
     let ws_routes = Router::new().route("/api/sessions/{id}/attach", get(ws::attach));
 
-    // Embedded PWA. The catch-all comes last so /healthz and /api/* keep
-    // priority. SPA-style fallback to index.html for unknown paths is in
-    // `assets::not_found`.
+    // The `/api` namespace, owned to its leaves (#34). `/mcp` and `/ui-legacy`
+    // already are, by the proxy routes above; `/api` was not, because it is a
+    // list of individual routes rather than a subtree, and every path that was
+    // not on that list fell through to the SPA fallback and came back as
+    // `200 text/html`. A caller probing for `/api/openapi.json` read that as
+    // "the spec is here and my parser is broken".
+    //
+    // Registered last-resort rather than gated: a path that does not exist
+    // does not exist for any credential, and answering 401 first would make
+    // the caller go looking for a token to reach nothing. Static routes and
+    // the `/api/vogt` subtree still win — this only catches what nothing else
+    // claimed. `any` so a POST to a typo'd route is a 404 too, not a 405.
+    let api_fallback = Router::new()
+        .route("/api", any(api_namespace_not_found))
+        .route("/api/", any(api_namespace_not_found))
+        .route("/api/{*path}", any(api_namespace_not_found));
+
+    // Embedded PWA. The catch-all comes last so /healthz keeps priority, and
+    // every machine namespace in `MACHINE_NAMESPACES` is owned above so this
+    // can never claim a path under one. SPA-style fallback to index.html for
+    // unknown paths is in `assets::not_found`.
     let asset_routes = Router::new()
         .route("/", get(assets::root))
         .route("/{*path}", get(assets::asset_wild));
@@ -317,12 +347,20 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .merge(api_routes)
         .merge(vogt_open_routes)
         .merge(ws_routes)
+        .merge(api_fallback)
         .merge(asset_routes)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(Arc::clone(&state));
 
     (router, state)
+}
+
+/// The engine's ordinary error body, at 404, for a path under `/api` that no
+/// route claimed. Deliberately the same shape every other failure here uses —
+/// a client that already parses `{"error": ...}` needs nothing new to read it.
+async fn api_namespace_not_found() -> crate::error::ApiError {
+    crate::error::ApiError::NotFound
 }
 
 fn build_cors(origins: &[String]) -> CorsLayer {
