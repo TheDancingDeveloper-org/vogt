@@ -1091,8 +1091,49 @@ const Board: Component<Props> = (props) => {
     }
   };
 
+  /** Whether anything is narrowing the board, so an empty one can say why. */
+  const hasFilters = () => {
+    const active = filters();
+    return Boolean(
+      active.project ||
+        active.label ||
+        active.initiative ||
+        active.assignee ||
+        active.kinds.length ||
+        active.states.length,
+    );
+  };
+
   const lanes = createMemo<Lane[]>(() => {
     const grouped = new Map<string, Lane>();
+    // Seed a lane for every project or initiative that exists, before any
+    // work is placed. Lanes used to be derived from the loaded items alone,
+    // so a project with no work had no lane and was simply absent from the
+    // board — which is the state every freshly imported project is in. The
+    // first thing an import's owner does is open the board, and the board's
+    // answer for a correct import was to show nothing and label it "No
+    // matching work", pointing at the filter rather than at the absence.
+    if (filters().lanes === "project") {
+      for (const project of projects()) {
+        if (filters().project && project.slug !== filters().project) continue;
+        grouped.set(project.slug, {
+          key: project.slug,
+          label: project.name ?? project.slug,
+          items: [],
+        });
+      }
+    } else if (filters().lanes === "initiative") {
+      for (const initiative of initiatives()) {
+        // `laneOf` keys initiatives by id, so one without an id cannot be
+        // matched to any item and would seed a lane nothing can ever join.
+        if (!initiative.id) continue;
+        grouped.set(initiative.id, {
+          key: initiative.id,
+          label: initiative.title,
+          items: [],
+        });
+      }
+    }
     for (const item of items()) {
       const { key, label } = laneOf(item);
       const lane = grouped.get(key) ?? { key, label, items: [] };
@@ -1100,7 +1141,18 @@ const Board: Component<Props> = (props) => {
       grouped.set(key, lane);
     }
     if (grouped.size === 0) {
-      grouped.set("", { key: "", label: filters().lanes === "none" ? "All work" : "No matching work", items: [] });
+      grouped.set("", {
+        key: "",
+        // "No matching work" is a claim about the filter, and it was being
+        // made when nothing had been loaded at all. Say which it is.
+        label:
+          filters().lanes === "none"
+            ? "All work"
+            : hasFilters()
+              ? "No matching work"
+              : "No work yet",
+        items: [],
+      });
     }
     const ordered = [...grouped.values()].sort((left, right) => {
       if (left.key === "") return 1;
@@ -1636,19 +1688,30 @@ const Board: Component<Props> = (props) => {
       <div class="board-toolbar">
         <label class="board-field">
           <span>Project</span>
+          {/* Selection is declared on the options rather than on the select.
+              A `value` set before `<For>` has appended its children is
+              silently dropped, which is a hazard whenever the list arrives
+              asynchronously — and it does, from `project.list`. */}
           <select
-            value={optionValue(
-              filters().project,
-              projects().map((one) => one.slug),
-            )}
             onInput={(event) => patch({ project: event.currentTarget.value })}
           >
-            <option value="">All projects</option>
+            <option value="" selected={!filters().project}>
+              All projects
+            </option>
             <Show when={filters().project && !projects().some((one) => one.slug === filters().project)}>
-              <option value={filters().project}>{filters().project}</option>
+              <option value={filters().project} selected>
+                {filters().project}
+              </option>
             </Show>
             <For each={projects()}>
-              {(project) => <option value={project.slug}>{project.name}</option>}
+              {(project) => (
+                <option
+                  value={project.slug}
+                  selected={project.slug === filters().project}
+                >
+                  {project.name}
+                </option>
+              )}
             </For>
           </select>
         </label>
