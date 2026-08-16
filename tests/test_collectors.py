@@ -319,6 +319,67 @@ def test_a_malformed_manifest_is_a_fact_not_a_failure(
     assert list(DepRefCollector().collect(ctx, _project(tmp_path))) == []
 
 
+def test_coverage_counts_every_project_a_collector_has_seen(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """WI-11. A scoped sweep made every collector look like it had seen one.
+
+    With eight projects registered and the last sweep scoped to one,
+    `coverage` reported `projects: 1` for every collector — which reads as
+    seven unswept projects and was in fact seven projects swept an hour
+    earlier. This file's own STATUS document told readers to trust that count.
+    """
+    for name in ("Alpha", "Beta"):
+        root = tmp_path / name.lower()
+        root.mkdir()
+        (root / "a.py").write_text("# TODO(vogt): x\n", encoding="utf-8")
+        register_project(
+            instance,
+            RegisterProjectParams(name=name, root_path=str(root), reason=WHY),
+        )
+    sweep(instance, SweepParams(offline_only=True, reason=WHY))
+    sweep(instance, SweepParams(project="alpha", offline_only=True, reason=WHY))
+
+    entry = next(
+        c
+        for c in coverage(instance, CoverageParams()).collectors
+        if c.collector == "source-markers"
+    )
+    assert entry.projects == 2, "both, however narrow the last sweep was"
+    assert entry.last_sweep_scope == 1, "and the last sweep's scope is still visible"
+    assert entry.registered == 2
+    assert entry.never_swept == 0
+
+
+def test_coverage_names_a_project_nothing_has_looked_at(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """FR-O4: a registered project with no evidence behind it is the case.
+
+    It has no observations, so nothing it claims is corroborated, and it was
+    previously indistinguishable from a project that had merely missed the
+    last sweep.
+    """
+    swept_root = tmp_path / "swept"
+    swept_root.mkdir()
+    register_project(
+        instance,
+        RegisterProjectParams(name="Swept", root_path=str(swept_root), reason=WHY),
+    )
+    sweep(instance, SweepParams(offline_only=True, reason=WHY))
+
+    unswept_root = tmp_path / "unswept"
+    unswept_root.mkdir()
+    registered = register_project(
+        instance,
+        RegisterProjectParams(name="Unswept", root_path=str(unswept_root), reason=WHY),
+    )
+
+    result = coverage(instance, CoverageParams())
+    assert result.unswept_project_ids == [registered.project.id]
+    assert all(c.never_swept == 1 for c in result.collectors if c.status != "never_run")
+
+
 # -- git-local -------------------------------------------------------------
 
 

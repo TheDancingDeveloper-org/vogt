@@ -822,13 +822,49 @@ class CoverageEntry(Result):
     status: str
     last_swept_at: datetime | None = None
     age_seconds: int | None = None
-    projects: int = 0
+    projects: int = Field(
+        default=0,
+        description=(
+            "How many projects this collector has ever swept. Cumulative, "
+            "which is what the operation's name promises; it used to be the "
+            "scope of the most recent sweep, so a `--project`-scoped run made "
+            "every collector look as though it had only ever seen one."
+        ),
+    )
+    registered: int = Field(
+        default=0,
+        description="The denominator: projects registered on this instance.",
+    )
+    last_sweep_scope: int = Field(
+        default=0,
+        description=(
+            "How many projects the most recent sweep was asked about. Reported "
+            "separately so a scoped sweep and a collector that failed on seven "
+            "of eight projects stop looking alike."
+        ),
+    )
+    never_swept: int = Field(
+        default=0,
+        description=(
+            "Registered projects this collector has never looked at. The "
+            "number a reader is usually after, and the one that used to have "
+            "to be inferred from a count that could not support it."
+        ),
+    )
     detail: str | None = None
 
 
 class CoverageResult(Result):
     collectors: list[CoverageEntry]
     swept_project_ids: list[str]
+    unswept_project_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Registered projects no collector has ever swept. A registered "
+            "project nothing has looked at has no evidence behind anything it "
+            "claims, and is the case FR-O4 exists to keep visible."
+        ),
+    )
 
 
 class ObservationsParams(Params):

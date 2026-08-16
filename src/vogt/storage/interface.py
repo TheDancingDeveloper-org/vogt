@@ -563,6 +563,10 @@ class ObservedStore(Protocol):
         """The newest completed sweep per collector."""
         ...
 
+    def coverage_by_project(self) -> dict[str, dict[str, datetime]]:
+        """Per collector, when each project was last swept by it."""
+        ...
+
     # -- reads -------------------------------------------------------------
 
     def list_observations(

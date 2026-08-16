@@ -267,6 +267,30 @@ class SqliteObservedStore:
             newest.setdefault(sweep.collector, sweep)
         return newest
 
+    def coverage_by_project(self) -> dict[str, dict[str, datetime]]:
+        """Per collector, when each project was last swept by it.
+
+        Cumulative, which is what "what has looked at what, and how long ago"
+        promises and what `coverage()` above cannot answer: that returns the
+        newest sweep per collector, so its scope is whatever the last run
+        happened to be asked for. A `--project`-scoped sweep left every
+        collector reporting one project against eight registered.
+        """
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sweeps WHERE finished_at IS NOT NULL "
+                "ORDER BY collector, finished_at ASC, id ASC"
+            ).fetchall()
+        seen: dict[str, dict[str, datetime]] = {}
+        for row in rows:
+            sweep = _row_to_sweep(row)
+            finished = sweep.finished_at or sweep.started_at
+            per_project = seen.setdefault(sweep.collector, {})
+            for project_id in sweep.scope:
+                # Ascending order, so a later sweep overwrites an earlier one.
+                per_project[project_id] = finished
+        return seen
+
     # -- reads -------------------------------------------------------------
 
     def list_observations(
