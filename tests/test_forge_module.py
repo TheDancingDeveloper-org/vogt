@@ -195,6 +195,49 @@ def test_onboarding_without_the_adapter_says_not_collected(
     assert result.detail is not None and "not collected" in result.detail
 
 
+def test_a_consolidation_is_audited_with_the_reason_it_was_given(
+    instance: AppContext, forge: Forge
+) -> None:
+    """FR-S1: the largest read of an import leaves a row saying who asked.
+
+    It did not until r14. `forge onboard` is mutating and reason-required, and
+    it discarded the reason and wrote nothing — so a consolidation that ran and
+    one that was never run were indistinguishable in `audit list`. That is not
+    hypothetical: two of a five-project batch were missed for an hour because
+    of it (`vogt-onboarding/reviews/pingrag.md`).
+    """
+    why = "Consolidate rustnzb's existing history as playbook phase 5."
+    onboard(instance, OnboardParams(project="rustnzb", reason=why))
+
+    with instance.declared.read() as view:
+        rows = [r for r in view.list_audit(limit=100) if r.operation == "forge.onboard"]
+    assert len(rows) == 1, "one run, one row"
+    assert rows[0].reason == why, "the reason is stored, not merely demanded"
+    assert rows[0].entity_kind == "project"
+
+
+def test_a_consolidation_that_read_nothing_is_audited_too(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """The un-run zero and the honest zero must differ *somewhere*.
+
+    They still look alike in the result — that is `WI-9`/FR-O11's problem, and
+    it is fixed by the adapter declaring what it can read. What this pins is
+    the other half: whichever zero it was, the run itself is on the record.
+    """
+    register_project(
+        instance,
+        RegisterProjectParams(
+            name="Unwired", root_path=str(tmp_path), repo_url=REPO, reason=WHY
+        ),
+    )
+    onboard(instance, OnboardParams(project="unwired", reason="Check upstream."))
+
+    with instance.declared.read() as view:
+        rows = [r for r in view.list_audit(limit=100) if r.operation == "forge.onboard"]
+    assert [r.reason for r in rows] == ["Check upstream."]
+
+
 # -- write-back policy (FR-B1, B4) ----------------------------------------
 
 

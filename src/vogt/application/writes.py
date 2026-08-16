@@ -1,10 +1,36 @@
 """The transactional write path (NFR-I1, FR-S1, FR-N1).
 
-One function, used by every declared write there will ever be. It opens the
-transaction, resolves the acting actor, runs the caller's body, and lands the
-audit row and the event row inside the same transaction as the entity change.
-A write that skips this path is a bug the parity and audit tests are designed
-to catch.
+Two functions, and the difference between them is where the operation's
+effect lands rather than whether it is accountable.
+
+`audited_write` is used by every declared write there will ever be. It opens
+the transaction, resolves the acting actor, runs the caller's body, and lands
+the audit row and the event row inside the same transaction as the entity
+change. A write that skips this path is a bug the parity and audit tests are
+designed to catch.
+
+`audited_action` covers the mutating operations a principal invokes whose
+effect lands in the *observed* store — `forge onboard` and
+`observations prune`. FR-S1 makes both carry a `reason`, and until r14 both
+discarded it: they published an event and wrote no audit row, so a run that
+happened and a run that never happened left the same trace. `forge onboard`
+consolidated 127 objects for one project and 102 for another without either
+appearing in `audit list`, which is how a skipped consolidation in a
+five-project batch went unnoticed for an hour.
+
+Collectors still never write the declared store (FR-O2). What is recorded here
+is not a collector's finding but the fact that a principal asked for one, and
+why — the distinction `publish_event` already draws when it publishes on the
+collectors' behalf.
+
+**`sweep` is deliberately not on this path**, and it is the operation that
+looks most like it should be. The schedule runs one every
+`sweep_interval_seconds` — 900 by default — for as long as `serve` is up, with
+the fixed reason "scheduled sweep (FR-L3)" and no person to name. Auditing it
+would add ninety-six identical rows a day and bump the revision with each,
+burying the writes somebody chose to make. Its accountability lives where its
+effect does: the coverage record and the `sweep.completed` events, which is
+what FR-O3 asks for. `test_a_sweep_writes_no_audit_rows` holds that line.
 """
 
 from __future__ import annotations
@@ -127,3 +153,49 @@ def audited_write(
             at=now,
         )
         return outcome.result
+
+
+def audited_action(
+    ctx: AppContext,
+    *,
+    operation: str,
+    reason: str,
+    entity_kind: str,
+    entity_id: str,
+    outcome: dict[str, Any],
+    event_kind: str,
+    summary: dict[str, object] | None = None,
+) -> None:
+    """Record a mutating operation whose effect landed outside the declared store.
+
+    Called *after* the effect, not around it, because the two stores cannot
+    share a transaction. That ordering is deliberate: the row says what the
+    run actually produced, and a run that died half way leaves no row claiming
+    it finished. The cost is that a crash between the observed write and this
+    call loses the attribution, which is the lesser of the two dishonesties.
+
+    The audit row and its event still share one transaction, so the pairing
+    NFR-I1 guarantees for declared writes holds here too.
+    """
+    cleaned_reason = validate_reason(reason)
+    with ctx.declared.write() as txn:
+        actor = ensure_actor(ctx, txn)
+        now = ctx.clock()
+        record = txn.append_audit(
+            actor=actor,
+            operation=operation,
+            entity_kind=entity_kind,
+            entity_id=entity_id,
+            reason=cleaned_reason,
+            payload_digest=digest_of(outcome),
+            at=now,
+        )
+        txn.append_event(
+            kind=event_kind,
+            entity_kind=entity_kind,
+            entity_id=entity_id,
+            actor_id=actor.id,
+            audit_id=record.id,
+            summary=outcome if summary is None else summary,
+            at=now,
+        )

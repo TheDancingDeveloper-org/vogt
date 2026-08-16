@@ -224,6 +224,31 @@ def _forge_findings(ctx: AppContext) -> list[DriftFinding]:
     return findings
 
 
+def _raise_proposal(
+    ctx: AppContext, proposal: DriftProposal, *, reason: str
+) -> DriftProposal:
+    """Insert one proposal as the declared write it is (NFR-I1).
+
+    It landed in a bare `ctx.declared.write()` until r14, which left `drift
+    detect` putting entity rows into the declared store with no audit row and
+    no actor — the rule `audited_write` exists to enforce, broken by the
+    operation that creates more rows per run than any other.
+    """
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[DriftProposal]:
+        txn.insert_drift(proposal)
+        return WriteOutcome(
+            result=proposal,
+            entity_kind="drift_proposal",
+            entity_id=proposal.id,
+            payload=proposal.model_dump(mode="json"),
+            event_kind=DRIFT_RAISED_EVENT,
+            summary={"kind": proposal.kind, "summary": proposal.summary},
+        )
+
+    return audited_write(ctx, operation="drift.detect", reason=reason, body=body)
+
+
 def detect_drift(ctx: AppContext, params: DriftDetectParams) -> DriftDetectResult:
     """Compare declared state against observation and raise proposals (FR-R1).
 
@@ -267,15 +292,7 @@ def detect_drift(ctx: AppContext, params: DriftDetectParams) -> DriftDetectResul
             status="open",
             opened_at=ctx.clock(),
         )
-        with ctx.declared.write() as txn:
-            txn.insert_drift(proposal)
-        ctx.declared.publish_event(
-            kind=DRIFT_RAISED_EVENT,
-            entity_kind="drift_proposal",
-            entity_id=proposal.id,
-            summary={"kind": proposal.kind, "summary": proposal.summary},
-            at=ctx.clock(),
-        )
+        _raise_proposal(ctx, proposal, reason=params.reason)
         raised.append(proposal)
 
         if params.auto_accept and found.auto_acceptable:

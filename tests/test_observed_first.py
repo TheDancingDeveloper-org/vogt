@@ -307,3 +307,23 @@ def test_pruning_publishes_an_event_and_rebuilds_the_projection(
         kinds = [event.kind for event in view.list_events(after=0, limit=50)]
     assert "observations.pruned" in kinds
     assert swept.observed.counts()["subjects"] > 0
+
+
+def test_pruning_is_audited_with_the_reason_it_was_given(swept: AppContext) -> None:
+    """FR-S1: the one effect that cannot be re-derived by running it again.
+
+    A sweep deliberately writes no audit row — it runs every fifteen minutes on
+    a schedule with nobody to name. Deletion is the opposite case on both
+    counts, and until r14 it was treated the same way: the reason went into an
+    event summary and never reached `audit list`.
+    """
+    why = "Retention pass before the quarterly backup."
+    prune(swept, PruneParams(reason=why))
+
+    with swept.declared.read() as view:
+        rows = [
+            record
+            for record in view.list_audit(limit=100)
+            if record.operation == "observations.prune"
+        ]
+    assert [record.reason for record in rows] == [why]

@@ -104,6 +104,32 @@ def test_a_tag_ahead_of_the_declared_version_is_drift(released: AppContext) -> N
     assert proposal.status == "open"
 
 
+def test_raising_a_proposal_is_an_audited_declared_write(
+    released: AppContext,
+) -> None:
+    """NFR-I1: a drift proposal is a declared entity, so raising one is audited.
+
+    It was inserted in a bare `ctx.declared.write()` until r14 — an entity row
+    landing in the declared store with no audit row and no actor, by the
+    operation that creates more rows per run than any other. The rule
+    `audited_write` exists to enforce, broken where it was least visible.
+    """
+    why = "First drift pass after onboarding."
+    result = detect_drift(released, DriftDetectParams(auto_accept=False, reason=why))
+    assert result.raised, "the fixture is meant to produce one"
+
+    with released.declared.read() as view:
+        rows = [
+            record
+            for record in view.list_audit(limit=100)
+            if record.operation == "drift.detect"
+        ]
+    assert len(rows) == len(result.raised), "one row per proposal raised"
+    assert {record.reason for record in rows} == {why}
+    assert {record.entity_kind for record in rows} == {"drift_proposal"}
+    assert {record.entity_id for record in rows} == {p.id for p in result.raised}
+
+
 def test_a_proposal_carries_its_evidence(released: AppContext) -> None:
     proposal = detect_drift(
         released, DriftDetectParams(auto_accept=False, reason=WHY)
