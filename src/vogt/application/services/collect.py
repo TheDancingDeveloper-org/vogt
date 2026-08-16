@@ -161,9 +161,22 @@ def sweep(ctx: AppContext, params: SweepParams) -> SweepResult:
     )
     reports = sweeper.run(collectors, projects)
 
-    subjects = ctx.observed.rebuild_latest()
-    dep_rows = _resolve_dep_refs(ctx)
-    ctx.observed.replace_dep_refs(dep_rows)
+    try:
+        subjects = ctx.observed.rebuild_latest()
+        dep_rows = _resolve_dep_refs(ctx)
+        ctx.observed.replace_dep_refs(dep_rows)
+    except Exception as exc:
+        # Every collector above already committed its own sweep row — each
+        # one genuinely ran and is, in isolation, `ok`. But nothing after
+        # this point ran: no rebuilt projection, no `sweep.completed`
+        # event. Left alone, `coverage` would keep reporting this batch
+        # fresh and fine from a run nothing downstream ever heard complete
+        # (FR-O4, #44). Overwrite it to `failed` before the exception
+        # propagates, so absence stays honest even when the crash is here
+        # rather than inside a collector.
+        detail = f"sweep batch did not complete: {type(exc).__name__}: {exc}"
+        ctx.observed.fail_sweeps([report.sweep_id for report in reports], detail=detail)
+        raise
 
     for report in reports:
         ctx.declared.publish_event(

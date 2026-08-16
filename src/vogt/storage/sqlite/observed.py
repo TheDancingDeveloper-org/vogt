@@ -291,6 +291,27 @@ class SqliteObservedStore:
                 per_project[project_id] = finished
         return seen
 
+    def fail_sweeps(self, sweep_ids: list[str], *, detail: str) -> None:
+        """Overwrite finished sweep rows to `failed` (FR-O4).
+
+        Called when the projection rebuild that must follow every sweep
+        batch raises: each collector's row is already committed and
+        genuinely `ok` in isolation, but nothing downstream — no
+        `sweep.completed` event, no rebuilt projection — ever heard the
+        batch finish. Leaving those rows as they are would have `coverage`
+        report the batch fresh and fine from a run that never completed
+        (#44); this is the "record the sweep as failed" half of that fix.
+        """
+        if not sweep_ids:
+            return
+        placeholders = ", ".join("?" for _ in sweep_ids)
+        with self._write() as conn:
+            conn.execute(
+                f"UPDATE sweeps SET outcome = 'failed', detail = ? "
+                f"WHERE id IN ({placeholders})",
+                (detail, *sweep_ids),
+            )
+
     # -- reads -------------------------------------------------------------
 
     def list_observations(

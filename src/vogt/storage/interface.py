@@ -567,6 +567,18 @@ class ObservedStore(Protocol):
         """Per collector, when each project was last swept by it."""
         ...
 
+    def fail_sweeps(self, sweep_ids: list[str], *, detail: str) -> None:
+        """Overwrite finished sweep rows to `failed` (FR-O4).
+
+        For the case where every collector in a batch genuinely finished —
+        each `finish_sweep` committed independently — but the sweep as a
+        whole did not: the shared projection rebuild that follows every
+        batch raised before the operation could be reported complete. Left
+        alone, `coverage` would keep reporting those collectors `ok` and
+        fresh from a run nothing downstream ever heard completed (#44).
+        """
+        ...
+
     # -- reads -------------------------------------------------------------
 
     def list_observations(
