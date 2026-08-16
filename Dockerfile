@@ -17,7 +17,17 @@
 #
 # This is the multi-arch index digest for `python:3.13-slim`, so it still
 # resolves per-platform. Renovate keeps it current (`pinDigests: true`).
-FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS build
+#
+# Pulled from this organisation's GHCR mirror of Docker Hub's library images
+# rather than from Docker Hub itself (#33). The digest is unchanged and is
+# still upstream's: `.github/workflows/mirror-base-images.yml` copies the
+# manifest verbatim and fails if the digest moves, so the pin means exactly
+# what it meant before — it is only fetched from a registry that does not
+# rate-limit this repository's builds out of existence. The mirror name is
+# the upstream name with `docker.io/library/` replaced; nothing else about
+# it is a choice, and Renovate is taught the same substitution so it still
+# tracks upstream.
+FROM ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS build
 
 # uv resolves and installs from the committed lockfile, so the image contains
 # exactly what CI tested (NFR-Q5).
@@ -49,7 +59,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable
 
 
-FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS runtime
+FROM ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS runtime
 
 LABEL org.opencontainers.image.title="vogt" \
       org.opencontainers.image.description="A product development environment for the AI era" \

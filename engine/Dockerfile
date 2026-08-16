@@ -53,11 +53,29 @@
 #   - Android SDK cmdline-tools/platform-tools: Google doesn't publish a
 #     "latest" download URL for these (would need parsing their repository
 #     XML), so they stay pinned. Bumped to current as of the last audit.
-ARG NODE_IMAGE=node:22-bookworm
-ARG RUST_IMAGE=rust:1-bookworm
+#
+# The three Docker Hub library bases are named through this organisation's
+# GHCR mirror rather than through Docker Hub (#33). Builds kept failing at
+# `FROM` with 429: a self-hosted runner is one IP for every build this
+# repository makes, and authenticating measurably made it worse, because
+# the available credential is estate-wide and its bucket is empty exactly
+# when the estate is busy. `.github/workflows/mirror-base-images.yml` copies
+# each manifest list into GHCR verbatim — the index survives, so these still
+# resolve per-platform — and runs as a prerequisite of every build, so a
+# Renovate bump is mirrored before anything tries to build from it.
+#
+# The mirror name is the upstream name with `docker.io/library/` replaced by
+# `ghcr.io/thedancingdeveloper-org/vogt-base/`, and that rule is the only
+# thing tying the two together: the mirror workflow reads these lines to
+# decide what to copy, and `.github/renovate.json5` applies the same
+# substitution in reverse so a bump still comes from upstream. Overriding
+# these build args back to their Docker Hub names still works and is the
+# escape hatch for a builder that cannot reach GHCR.
+ARG NODE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm
+ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm
 # The runtime base, named once because the core's venv is built on it too —
 # see stage 3 for why that matters more than it looks.
-ARG RUNTIME_IMAGE=ubuntu:26.04
+ARG RUNTIME_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/ubuntu:26.04
 # uv builds the core's virtualenv from the committed lockfile, so the image
 # contains exactly what CI tested (NFR-Q5). Same pin as the root Dockerfile;
 # they should move together.

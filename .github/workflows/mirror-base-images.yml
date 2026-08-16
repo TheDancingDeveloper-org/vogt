@@ -1,0 +1,246 @@
+name: mirror base images
+
+# Docker Hub is not on the critical path of a build (#33).
+#
+# Every `FROM` in both Dockerfiles used to name a Docker Hub library image.
+# Anonymous pulls are rate-limited per IP and a self-hosted runner is one IP
+# for every build this repository makes, so a busy afternoon exhausted the
+# allowance and the next build failed at `FROM` with 429 — twice on
+# 2026-08-15 and again on 2026-08-14, with nothing wrong in the repository.
+#
+# Authenticating is *not* the fix, and that was established by measurement
+# rather than by argument. The credential available here is estate-wide, so
+# its 200/hour is shared with every other project's CI, while this
+# repository's own per-IP allowance was almost untouched:
+#
+#     AUTHENTICATED (sprooty):   HTTP 429  x-ratelimit-limit: 200;w=3600
+#     ANONYMOUS (runner egress): HTTP 200  x-ratelimit-limit: 100;w=3600
+#                                          x-ratelimit-remaining: 99
+#
+# Logging in trades a bucket this repository mostly controls for one it
+# shares with everything else, and which is empty exactly when the estate is
+# busy — which is when builds happen. See `build.yml` for why the login has
+# been removed rather than left inert.
+#
+# So the bases are mirrored into GHCR, where this project already publishes,
+# is already authenticated, and has no such limit. The Dockerfiles build
+# `FROM` the mirror, still pinned exactly as they were, and the only new
+# failure mode is one this organisation owns.
+#
+# ## The naming rule is the whole design
+#
+# There is no list of images anywhere. A mirrored reference is the upstream
+# reference with `docker.io/library/` replaced by
+# `ghcr.io/thedancingdeveloper-org/vogt-base/`, and this workflow reads the
+# Dockerfiles to discover what to copy. That way the Dockerfiles remain the
+# single source of truth for which base images exist and at which digests —
+# a separate manifest file would be a second copy of that fact, and the two
+# would eventually disagree in the direction that breaks a build.
+#
+# `.github/renovate.json5` teaches Renovate the same substitution
+# (`registryAliases`), so a pinned digest still tracks the upstream image
+# rather than tracking whatever this workflow last pushed.
+#
+# ## Ordering
+#
+# A Renovate digest bump lands a reference that has never been mirrored. If
+# the build ran first it would fail at `FROM` — trading one unowned outage
+# for an owned one is not the point of this. So this workflow is a
+# *prerequisite* rather than a companion: `build.yml` and `release.yml` call
+# it with `uses:` and their image jobs `needs:` it, so no build can start
+# against a reference that is not in GHCR yet. The `push` trigger below
+# makes the mirror current the moment a bump merges, and the daily schedule
+# is the backstop for the paths neither covers (a tag cut from an old
+# checkout, a manual dispatch, a bump that merged while the runners were
+# down).
+#
+# Copying is done with `docker buildx imagetools create`, which is already
+# on these runners (`docker/setup-buildx-action` and the `docker` runner
+# label) and which copies a manifest *list* as a manifest list — the
+# multi-arch index survives, so `python:3.13-slim`'s index digest is still
+# the index digest after the copy and still resolves per-platform. A
+# pull/tag/push would flatten the index to the runner's own architecture and
+# the digest in the Dockerfile would stop resolving. That property is not
+# taken on trust: the copy step asserts the destination digest equals the
+# source digest and fails if it does not.
+
+on:
+  # Called as a prerequisite by `build.yml` and `release.yml`.
+  workflow_call:
+  push:
+    branches: [main, dev]
+    paths:
+      - "Dockerfile"
+      - "engine/Dockerfile"
+      - ".github/workflows/mirror-base-images.yml"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "engine/Dockerfile"
+      - ".github/workflows/mirror-base-images.yml"
+  schedule:
+    # Renovate's window is "before 5am on monday" (`.github/renovate.json5`).
+    # Daily rather than weekly because the cost of a run that has nothing to
+    # do is two manifest HEADs against GHCR — the copy is skipped when the
+    # digest is already there. A scheduled run only ever sees the default
+    # branch; `dev`'s pins are covered by the `push` trigger and by the
+    # prerequisite call from `build.yml`.
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never cancelled: an interrupted copy leaves a reference unmirrored, and
+  # the next build is the thing that discovers it.
+  group: mirror-base-images
+  cancel-in-progress: false
+
+env:
+  # The two halves of the substitution rule. Changing either means changing
+  # `registryAliases` in `.github/renovate.json5` in the same commit.
+  MIRROR_PREFIX: ghcr.io/thedancingdeveloper-org/vogt-base/
+  UPSTREAM_PREFIX: docker.io/library/
+
+jobs:
+  check:
+    name: every base image is a mirrored one
+    # NFR-C4: every job names a self-hosted runner.
+    runs-on: [self-hosted, node-b, linux, x64]
+    steps:
+      - uses: actions/checkout@v7
+
+      # The arrangement holds only while nothing reintroduces a Docker Hub
+      # base, which is the easiest thing in the world to do by copying a
+      # `FROM` line out of somebody's blog post. This fails the pull request
+      # that does it rather than the build three days later.
+      - name: no build stage pulls from Docker Hub
+        run: |
+          set -euo pipefail
+          bad=0
+          for file in Dockerfile engine/Dockerfile; do
+            while IFS= read -r ref; do
+              # A stage name, not an image: no registry path and no tag.
+              case "$ref" in
+                *[/:]*) ;;
+                *) continue ;;
+              esac
+              # Resolved from an ARG, which is checked on its own line.
+              case "$ref" in
+                '${'*) continue ;;
+              esac
+              case "$ref" in
+                ghcr.io/*) ;;
+                *)
+                  echo "::error file=$file::base image '$ref' is not in GHCR. Mirror it: see .github/workflows/mirror-base-images.yml."
+                  bad=1
+                  ;;
+              esac
+            done < <(
+              grep -Eh '^(FROM[[:space:]]|ARG[[:space:]]+[A-Z_]*IMAGE=|COPY[[:space:]]+--from=)' "$file" \
+                | sed -E 's/^FROM[[:space:]]+//; s/^ARG[[:space:]]+[A-Z_]*IMAGE=//; s/^COPY[[:space:]]+--from=//' \
+                | awk '{print $1}'
+            )
+          done
+          [ "$bad" -eq 0 ] || exit 1
+          echo "every base image and every cross-image COPY names a registry this organisation controls"
+
+  mirror:
+    name: copy the pinned bases into GHCR
+    needs: check
+    # A pull request must not push packages, and on a fork it could not
+    # anyway. The check job above is the part that runs on a PR.
+    if: github.event_name != 'pull_request'
+    # `docker`/`publish` is advertised only by the Docker-in-Docker workers.
+    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Deliberately no Docker Hub login. #33 measured the authenticated
+      # bucket empty and the anonymous one full; see the header. This job
+      # reaches Docker Hub anonymously and only when a reference is not
+      # already mirrored, which is a handful of manifest requests a week
+      # instead of eight per build.
+
+      - name: copy
+        run: |
+          set -euo pipefail
+
+          refs="$(
+            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" Dockerfile engine/Dockerfile \
+              | sort -u
+          )"
+          if [ -z "$refs" ]; then
+            echo "no mirrored references in either Dockerfile; nothing to copy" >&2
+            exit 1
+          fi
+
+          for ref in $refs; do
+            suffix="${ref#"${MIRROR_PREFIX}"}"
+            src="${UPSTREAM_PREFIX}${suffix}"
+
+            # `repo:tag@sha256:...` splits into the tag we push and the
+            # digest we must preserve. A reference with no tag has nothing
+            # to push to: `imagetools create` names a destination by tag.
+            dst_tagged="${ref%@*}"
+            case "$ref" in
+              *@*) digest="${ref#*@}" ;;
+              *) digest="" ;;
+            esac
+            case "$dst_tagged" in
+              *:*) ;;
+              *)
+                echo "::error::'$ref' has no tag; a mirrored reference must be repo:tag or repo:tag@digest"
+                exit 1
+                ;;
+            esac
+
+            if [ -n "$digest" ] \
+              && docker buildx imagetools inspect "${dst_tagged%:*}@${digest}" >/dev/null 2>&1; then
+              echo "$ref is already mirrored; Docker Hub is not contacted"
+              continue
+            fi
+
+            echo "copying $src -> $dst_tagged"
+            src_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$src")"
+            docker buildx imagetools create --tag "$dst_tagged" "$src"
+            dst_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$dst_tagged")"
+
+            # The copy has to be a copy. If these differ the manifest was
+            # rebuilt rather than carried across, every digest pin in the
+            # Dockerfiles is stale, and saying so here is far cheaper than
+            # a `FROM` failing in a build that has no idea why.
+            if [ "$src_digest" != "$dst_digest" ]; then
+              echo "::error::$src is $src_digest but $dst_tagged is $dst_digest — the manifest was not copied verbatim"
+              exit 1
+            fi
+            if [ -n "$digest" ] && [ "$digest" != "$dst_digest" ]; then
+              echo "::error::$ref pins $digest but $src currently resolves to $dst_digest — the pin no longer exists upstream"
+              exit 1
+            fi
+            echo "$dst_tagged is $dst_digest"
+          done
+
+      - name: report what is mirrored
+        run: |
+          {
+            echo "### Base images in GHCR"
+            echo
+            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" Dockerfile engine/Dockerfile \
+              | sort -u \
+              | sed 's/^/- `/; s/$/`/'
+            echo
+            echo "Builds pull these instead of Docker Hub (#33)."
+          } >> "$GITHUB_STEP_SUMMARY"
