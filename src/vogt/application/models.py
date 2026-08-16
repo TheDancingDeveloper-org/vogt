@@ -277,14 +277,38 @@ class ProjectBriefParams(Params):
 
 
 class CiSummary(Result):
-    """The CI story for a project (FR-O6), or the absence of one."""
+    """The CI story for a project (FR-O6), or the absence of one.
+
+    Every field below describes **one revision** — the newest any retained
+    check names. That scope is the point: the same shape without it reported
+    a project as `failing` on the strength of a build that broke days before
+    the current head and had since been fixed (FR-O10).
+    """
 
     status: Literal["not_collected", "no_checks", "passing", "failing"] = (
         "not_collected"
     )
-    checks: int = 0
+    checks: int = Field(
+        default=0, description="Checks observed on `revision`, not in total."
+    )
     failing: list[str] = []
     revision: str | None = None
+    revisions_observed: int = Field(
+        default=0,
+        description=(
+            "How many distinct revisions the retained window covers. The "
+            "denominator `checks` is a numerator of, so a reader can tell a "
+            "quiet project from a busy one."
+        ),
+    )
+    earlier_failures: int = Field(
+        default=0,
+        description=(
+            "Failing checks on revisions behind `revision`. History, not "
+            "verdict: these do not make `status` failing, and a project that "
+            "fixes its build goes green here without waiting for retention."
+        ),
+    )
     detail: str | None = None
 
 

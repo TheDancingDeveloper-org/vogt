@@ -23,6 +23,7 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.application.services.views import freshness_of, rank_items
 from vogt.application.writes import WriteOutcome, audited_write
+from vogt.core.checks import roll_up
 from vogt.core.contract import DEFAULT_CONTRACT, default_scaffold
 from vogt.core.entities import Actor, Project
 from vogt.core.ids import slugify
@@ -242,11 +243,20 @@ def _observed_version(ctx: AppContext, project: Project) -> str | None:
 
 
 def _ci_summary(ctx: AppContext, project: Project) -> CiSummary:
-    """The CI story, or an honest statement that nobody has looked (FR-O6)."""
+    """The CI story for the newest observed revision (FR-O6, FR-O10).
+
+    Scoped to one revision, and says which. It used to be a verdict over
+    every retained check across every commit, pinned to whichever row sorted
+    last by sweep time — so a project whose head was green read `failing`
+    because something failed days earlier, and could never read green again
+    until the old row aged out. `core.checks` does the grouping; this decides
+    how to say it.
+    """
     if not ctx.observed.has_evidence_tables():
         return CiSummary(detail="no sweep has run; CI status is not collected")
     checks = ctx.observed.latest(kinds=("ci.check",), project_id=project.id, limit=200)
-    if not checks:
+    rollup = roll_up(checks)
+    if rollup is None:
         return CiSummary(
             status="no_checks",
             detail=(
@@ -254,17 +264,22 @@ def _ci_summary(ctx: AppContext, project: Project) -> CiSummary:
                 "has none, or the optional forge adapter is not configured"
             ),
         )
-    failing = [
-        str(check.payload.get("check", "?"))
-        for check in checks
-        if check.payload.get("conclusion") not in (None, "success", "skipped")
-    ]
-    newest = max(checks, key=lambda check: check.observed_at)
     return CiSummary(
-        status="failing" if failing else "passing",
-        checks=len(checks),
-        failing=sorted(set(failing)),
-        revision=str(newest.payload.get("revision") or "") or None,
+        status="failing" if rollup.failing else "passing",
+        checks=len(rollup.checks),
+        failing=list(rollup.failing),
+        revision=rollup.revision,
+        revisions_observed=rollup.revisions_observed,
+        earlier_failures=rollup.earlier_failures,
+        detail=(
+            None
+            if not rollup.earlier_failures
+            else (
+                f"{rollup.earlier_failures} failing check(s) on earlier "
+                f"revisions are not counted here; this is the state of "
+                f"{(rollup.revision or '')[:12]} alone"
+            )
+        ),
     )
 
 

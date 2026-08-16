@@ -47,7 +47,14 @@ from vogt.application.services.drift_service import (
     DRIFT_RAISED_EVENT,
     DRIFT_RESOLVED_EVENT,
 )
-from vogt.core.drift import UNRESOLVED_DEPENDENCY, VERSION_MISMATCH, normalise_version
+from vogt.collectors.base import finding
+from vogt.core.drift import (
+    CI_RED_VS_HEALTHY,
+    UNRESOLVED_DEPENDENCY,
+    VERSION_MISMATCH,
+    normalise_version,
+)
+from vogt.core.entities import Project
 from vogt.errors import Conflict, InvalidRequest, NotFound
 
 WHY = "drift test"
@@ -102,6 +109,84 @@ def test_a_tag_ahead_of_the_declared_version_is_drift(released: AppContext) -> N
     assert "v1.5.0" in proposal.summary
     assert proposal.proposed_change["to"] == "v1.5.0"
     assert proposal.status == "open"
+
+
+def _record_checks(
+    ctx: AppContext, project: Project, runs: list[tuple[str, str, str, str]]
+) -> None:
+    """Seed CI check observations the way `gh-actions` would."""
+    findings = [
+        finding(
+            kind="ci.check",
+            subject_key=f"ci:owner/repo@{revision}:{name}",
+            project=project,
+            payload={
+                "revision": revision,
+                "check": name,
+                "conclusion": conclusion,
+                "updated_at": ran_at,
+            },
+        )
+        for revision, name, conclusion, ran_at in runs
+    ]
+    now = ctx.clock()
+    row = ctx.observed.begin_sweep(collector="gh-actions", scope=[project.id], at=now)
+    ctx.observed.append(row.id, findings, at=now)
+    ctx.observed.finish_sweep(row.id, outcome="ok", stats={"projects": 1}, at=now)
+    ctx.observed.rebuild_latest()
+
+
+def test_a_stale_red_is_history_not_drift(released: AppContext) -> None:
+    """A fixed build must stop being a proposal (FR-O6).
+
+    `ci_red_vs_healthy` read every retained check as one population, so a
+    failure from days earlier kept raising a proposal against a project whose
+    head was green — and could keep raising it until retention removed the
+    row. Being green was not enough to be green.
+    """
+    with released.declared.read() as view:
+        project = view.list_projects(limit=10, offset=0)[0]
+    _record_checks(
+        released,
+        project,
+        [
+            ("0291aff", "build image", "failure", "2026-08-09T22:41:46Z"),
+            ("9fe53d8", "build image", "success", "2026-08-13T09:36:27Z"),
+        ],
+    )
+
+    # Guards against this test going vacuous: the checks must actually be
+    # attached to the project, or "no proposal" proves nothing.
+    brief = brief_project(released, ProjectBriefParams(slug=project.slug))
+    assert brief.ci_status.status == "passing"
+    assert brief.ci_status.revision == "9fe53d8"
+    assert brief.ci_status.earlier_failures == 1
+
+    result = detect_drift(released, DriftDetectParams(auto_accept=False, reason=WHY))
+    assert CI_RED_VS_HEALTHY not in [p.kind for p in result.raised], (
+        "the head is green; the failure is four days and one commit behind it"
+    )
+
+
+def test_a_red_head_is_still_drift(released: AppContext) -> None:
+    with released.declared.read() as view:
+        project = view.list_projects(limit=10, offset=0)[0]
+    _record_checks(
+        released,
+        project,
+        [
+            ("0291aff", "build image", "success", "2026-08-09T22:41:46Z"),
+            ("9fe53d8", "build image", "failure", "2026-08-13T09:36:27Z"),
+        ],
+    )
+
+    raised = detect_drift(
+        released, DriftDetectParams(auto_accept=False, reason=WHY)
+    ).raised
+    ci = [p for p in raised if p.kind == CI_RED_VS_HEALTHY]
+    assert len(ci) == 1
+    assert "9fe53d8" in ci[0].summary, "and it names the commit that is red"
+    assert ci[0].summary.count("build image") == 1, "one workflow, named once"
 
 
 def test_raising_a_proposal_is_an_audited_declared_write(

@@ -20,6 +20,7 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.application.services.views import freshness_of
 from vogt.application.writes import WriteOutcome, audited_write
+from vogt.core.checks import roll_up
 from vogt.core.drift import (
     AUTO_ACCEPTABLE_KINDS,
     FORGE_STATE_MISMATCH,
@@ -176,20 +177,32 @@ def _forge_findings(ctx: AppContext) -> list[DriftFinding]:
         checks = ctx.observed.latest(
             kinds=("ci.check",), project_id=project.id, limit=200
         )
-        failing = [
-            (str(c.payload.get("check", "?")), c)
-            for c in checks
-            if c.payload.get("conclusion") not in (None, "success", "skipped")
-        ]
-        if failing and project.lifecycle_state in ("active", "maintenance"):
-            newest = max((c for _, c in failing), key=lambda c: c.observed_at)
+        # Scoped to the newest observed revision. Reading the whole retained
+        # window as one population raised this proposal against projects whose
+        # head was green — the failure it named was days old and fixed, and
+        # the same workflow appeared twice in one summary because it was two
+        # runs on two commits. A stale red is not drift; it is history.
+        rollup = roll_up(checks)
+        if (
+            rollup is not None
+            and rollup.failing
+            and project.lifecycle_state in ("active", "maintenance")
+        ):
+            newest = max(
+                (
+                    c
+                    for c in rollup.checks
+                    if c.payload.get("conclusion") not in (None, "success", "skipped")
+                ),
+                key=lambda c: c.observed_at,
+            )
             findings.append(
                 ci_red_vs_healthy(
                     project_id=project.id,
                     project_slug=project.slug,
                     lifecycle_state=project.lifecycle_state,
-                    failing=[name for name, _ in failing],
-                    revision=str(newest.payload.get("revision", "")),
+                    failing=list(rollup.failing),
+                    revision=rollup.revision or "",
                     evidence=_snapshot(newest),
                     evidence_observation_id=newest.id,
                 )
