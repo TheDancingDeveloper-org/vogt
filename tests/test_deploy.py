@@ -604,6 +604,57 @@ def test_the_access_check_probes_vogt_and_not_only_cadastre() -> None:
         "an unconfigured instance must read as 'not configured', never as a "
         "failure and never as success"
     )
+    # A configured-but-broken instance must be told apart from a working one,
+    # and the credential a client reads must exist as well as be loaded.
+    assert '[[ -s "${VOGT_TOKEN_FILE:-}" ]]' in body, (
+        "a loaded token that never reached its file leaves every registered "
+        "client broken while this check is green — and the rejection they "
+        "eventually see names that file"
+    )
+
+
+@needs_engine
+def test_the_vogt_probe_reads_the_answer_and_not_only_the_status() -> None:
+    """#29 reached its client as a JSON-RPC error, which rides on a 200.
+
+    `curl -f` was the first shape of this probe. It collapses every refusal
+    into exit 22 and discards the body, so the check could say only that
+    something went wrong — while the interesting half of the answer, the
+    reason the server gave, went to /dev/null. And an MCP server that refuses
+    a *handshake* may still answer HTTP 200: `-32001` is carried in the body,
+    which is exactly how the outage in #29 was finally seen. A probe that
+    stopped at the status code would have called that green, which is the
+    same false assurance #30 is about, one layer in.
+    """
+    body = _without_comments(AGENT_AUTH.read_text(encoding="utf-8"))
+    assert "%{http_code}" in body, (
+        "capture the status rather than letting -f throw the response away"
+    )
+    assert "*'\"error\"'*" in body, (
+        "a JSON-RPC error is carried on a 200; the body has to be read"
+    )
+    assert "$vogt_status" in body and "$vogt_detail" in body, (
+        "the failure must report what the server actually said, not only that "
+        "it said no"
+    )
+
+
+@needs_engine
+def test_the_bootstrap_banner_does_not_claim_readiness() -> None:
+    """#30: the banner said 'ready' about work that only wrote config.
+
+    It reports that MCP client registrations were *written* — nothing in this
+    script contacts either endpoint. Read as readiness it is the reason a
+    completely unusable Vogt looked fine from the pod: the banner said ready,
+    the check below it was green because it never probed Vogt, and the first
+    evidence came later from a client (#29). Registration and reachability are
+    different claims and this one may only make the first.
+    """
+    body = _without_comments(MCP_BOOTSTRAP.read_text(encoding="utf-8"))
+    assert "registrations are ready" not in body, (
+        "writing a registration is not evidence that anything answers"
+    )
+    assert "registrations written" in body, "say what was actually done"
 
 
 @needs_engine
