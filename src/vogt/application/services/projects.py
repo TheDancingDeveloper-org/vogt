@@ -208,7 +208,7 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
     # `backlog --project` for the same project at the same moment. The brief
     # is the first surface an import's owner reads, and it said the import had
     # found nothing.
-    ranked, declared_work, observed_work, _ = _gather(
+    gathered = _gather(
         ctx,
         project=params.slug,
         kinds=None,
@@ -220,13 +220,13 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
 
     return ProjectBriefResult(
         project=project,
-        open_work=len(ranked),
-        open_bugs=sum(1 for entry in ranked if entry.kind == "bug"),
-        declared_work=declared_work,
-        observed_work=observed_work,
+        open_work=len(gathered.ranked),
+        open_bugs=sum(1 for entry in gathered.ranked if entry.kind == "bug"),
+        declared_work=gathered.declared,
+        observed_work=gathered.observed,
         by_state=dict(sorted(by_state.items())),
         by_kind=dict(sorted(by_kind.items())),
-        top_backlog=ranked[: params.backlog_limit],
+        top_backlog=gathered.ranked[: params.backlog_limit],
         current_version=project.current_version,
         declared_version=project.current_version,
         observed_version=observed_version,

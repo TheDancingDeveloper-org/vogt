@@ -33,6 +33,7 @@ from vogt.application.models import (
     DriftListParams,
     DriftResolveParams,
     GetWorkParams,
+    ObservationsParams,
     OnboardParams,
     ProjectBriefParams,
     RegisterProjectParams,
@@ -51,6 +52,7 @@ from vogt.application.services import (
     get_work,
     list_drift,
     list_write_backs,
+    observations,
     onboard,
     register_project,
     resolve_drift,
@@ -131,6 +133,27 @@ def forge(
                 "labels": [],
                 "closed_at": "2025-01-01T00:00:00Z",
             },
+            {
+                # The case that actually occurred, and the one the fixture
+                # above never tested: closed *and* labelled a bug. All
+                # twenty-seven items `bugs` returned on the dev instance were
+                # this shape, and the unlabelled row hid the defect because it
+                # was excluded for the other reason.
+                "number": 7,
+                "title": "Fixed weeks ago",
+                "state": "closed",
+                "labels": [{"name": "bug"}],
+                "closed_at": "2025-02-01T00:00:00Z",
+            },
+            {
+                # Genuinely open and carrying no labels at all — vogt#35,
+                # cadastre#9 and #10 are all this shape.
+                "number": 9,
+                "title": "Open and unlabelled",
+                "state": "open",
+                "labels": [],
+                "updated_at": "2026-08-10T00:00:00Z",
+            },
         ]
     )
     # The adapter is "configured" by making its client factory answer,
@@ -165,7 +188,7 @@ def test_onboarding_reads_history_and_mutates_nothing(
 ) -> None:
     result = onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
 
-    assert result.issues == 2, "open *and* closed — history is the point"
+    assert result.issues == 4, "open *and* closed — history is the point"
     assert result.labels == 1
     assert result.mutations == 0
     assert forge.mutations == [], (
@@ -182,6 +205,71 @@ def test_closed_history_does_not_flood_the_backlog(
     titles = [entry.title for entry in bugs(instance, BugsParams(limit=50)).items]
     assert any("Segment fetch retries" in title for title in titles)
     assert not any("Ancient closed thing" in title for title in titles)
+
+
+def test_a_closed_issue_is_not_an_open_bug(instance: AppContext, forge: Forge) -> None:
+    """WI-8, the p0. `bugs` returned 27 observed items, all closed upstream.
+
+    Every one carried `trust_state: verified` — the highest-confidence label
+    the product has, on a claim that was false in every instance. The state
+    was in the payload the whole time; the view never consulted it.
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+    listed = bugs(instance, BugsParams(limit=50))
+
+    titles = [entry.title for entry in listed.items]
+    assert not any("Fixed weeks ago" in title for title in titles), (
+        "closed upstream, labelled a bug, and it must not read as outstanding"
+    )
+    assert any("Segment fetch retries" in title for title in titles), (
+        "and the open one is still there — this is a filter, not a purge"
+    )
+
+
+def test_what_the_filter_removed_is_reported_rather_than_dropped(
+    instance: AppContext, forge: Forge
+) -> None:
+    """A short list and a filtered list must not look alike (FR-O4).
+
+    Excluding closed subjects silently would replace one wrong answer with
+    another: the reader could not tell "nothing is outstanding" from "plenty
+    was, and it is finished".
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+    listed = backlog(instance, BacklogParams(limit=50))
+    assert listed.closed_upstream >= 2, "two closed issues in the fixture"
+
+
+def test_a_closed_subject_stays_observable(instance: AppContext, forge: Forge) -> None:
+    """Out of the ranked views is not out of the record (FR-O2).
+
+    The observation is evidence and stays queryable; what changed is only
+    whether it claims to be outstanding work.
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+    seen = observations(
+        instance, ObservationsParams(kind="forge.issue", limit=50)
+    ).observations
+    assert any(o.payload.get("title") == "Fixed weeks ago" for o in seen)
+
+
+def test_an_unlabelled_issue_says_its_kind_was_guessed(
+    instance: AppContext, forge: Forge
+) -> None:
+    """Nothing said what it was, so nothing should claim otherwise (FR-O9).
+
+    An unlabelled issue is classified `feature` because the ranking needs a
+    kind, and that guess is why the three genuinely open issues in the estate
+    were absent from `bugs` — not because anyone judged them not to be bugs.
+    Marking the guess as a guess is what keeps them findable.
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+    ranked = {e.title: e for e in backlog(instance, BacklogParams(limit=50)).items}
+
+    guessed = next(e for t, e in ranked.items() if "Open and unlabelled" in t)
+    assert guessed.classified is False
+    stated = next(e for t, e in ranked.items() if "Segment fetch retries" in t)
+    assert stated.classified is True
 
 
 def test_onboarding_without_the_adapter_says_not_collected(
@@ -541,7 +629,7 @@ def test_m5_demo(instance: AppContext, forge: Forge) -> None:
     result = onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
     assert forge.mutations == [], "not one non-GET request"
     assert result.mutations == 0
-    assert result.issues == 2
+    assert result.issues == 4
 
     open_bug = next(
         entry

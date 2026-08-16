@@ -253,6 +253,16 @@ class RankedItem(Result):
     """
 
     origin: Literal["declared", "observed"]
+    classified: bool = Field(
+        default=True,
+        description=(
+            "Whether anything actually said what kind of work this is. False "
+            "means `kind` is this product's guess from an absence of signal — "
+            "an unlabelled forge issue — and that the subject may be missing "
+            "from the view a reader expected to find it in. Declared work is "
+            "always classified: somebody typed the kind in."
+        ),
+    )
     ref: str = Field(
         description="`WI-7` for declared work, or the observed subject key."
     )
@@ -631,6 +641,15 @@ class BacklogResult(Result):
     declared: int = 0
     observed: int = 0
     suppressed: int = 0
+    closed_upstream: int = Field(
+        default=0,
+        description=(
+            "Observed subjects left out because their source says they are "
+            "closed. Reported rather than silently dropped, so a short list is "
+            "distinguishable from a filtered one — they remain queryable "
+            "through `observations list`."
+        ),
+    )
     scope: str
     freshness: Freshness
 

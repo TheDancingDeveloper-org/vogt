@@ -40,6 +40,15 @@ MARKER_PRIORITY: Priority = "p3"
 #: it has never been through.
 OBSERVED_STATE = "observed"
 
+#: Lifecycle of an observed forge subject, read from the source rather than
+#: guessed. Held separately from `OBSERVED_STATE` above, which deliberately
+#: asserts no workflow state: "is this still outstanding" and "where is it in
+#: a process" are different questions, and only the source can answer the
+#: first.
+LIFECYCLE_OPEN = "open"
+LIFECYCLE_CLOSED = "closed"
+LIFECYCLE_UNKNOWN = "unknown"
+
 
 @dataclass(frozen=True)
 class Rankable:
@@ -88,6 +97,47 @@ def work_kind_of(observation: Observation) -> WorkKind:
         return "chore"
     labels = {str(label).lower() for label in _labels(observation)}
     return "bug" if labels & BUG_LABELS else "feature"
+
+
+def lifecycle_of(observation: Observation) -> str:
+    """Whether the source says this subject is still outstanding.
+
+    `unknown` where the source did not say, and it must stay distinguishable
+    from the other two: a subject nobody could read is not thereby open, and
+    `bugs` treating it as such is how twenty-seven issues closed weeks earlier
+    came to be listed as the estate's open defects, every one of them stamped
+    `trust_state: verified`.
+
+    Markers have no lifecycle — a TODO is in the source or it is not, and the
+    sweep that stopped finding it is what closes it.
+    """
+    if observation.kind == "marker":
+        return LIFECYCLE_OPEN
+    state = observation.payload.get("state")
+    if not isinstance(state, str):
+        return LIFECYCLE_UNKNOWN
+    normalised = state.strip().lower()
+    if normalised in (LIFECYCLE_OPEN, LIFECYCLE_CLOSED):
+        return normalised
+    if normalised == "merged":
+        return LIFECYCLE_CLOSED
+    return LIFECYCLE_UNKNOWN
+
+
+def is_classified(observation: Observation) -> bool:
+    """Whether anything actually said what kind of work this is.
+
+    `work_kind_of` has to return something, and for an unlabelled issue that
+    something is a guess. Recording that it was a guess is what keeps a
+    subject discoverable when it falls into no view: three of the estate's
+    genuinely open issues carry no labels at all, and were absent from the bug
+    view for that reason rather than because anyone judged them not to be bugs.
+    """
+    if observation.kind == "marker":
+        return True
+    if observation.kind == "forge.pull_request":
+        return True
+    return bool(_labels(observation))
 
 
 def priority_of(observation: Observation) -> Priority:
