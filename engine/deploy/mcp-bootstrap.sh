@@ -191,4 +191,4 @@ install_vogt_opencode
 # Everything an operator wants to see is still shown: an interactive shell
 # prints stderr too. The only reader that notices the difference is the one
 # that must.
-printf 'Cadastre and Vogt MCP client registrations are ready\n' >&2
+printf 'mcp-bootstrap: Cadastre and Vogt MCP client registrations written; neither endpoint was probed — run `mydevenv2-agent-auth check` for that\n' >&2

@@ -186,13 +186,15 @@ load_agent_environment() {
 }
 
 check_access() {
-    local response_file gh_login mcp_url vogt_url
+    local response_file error_file gh_login mcp_url vogt_url vogt_mcp_url
+    local vogt_status vogt_detail
     require_command curl
     require_command git
     require_command gh
     load_agent_environment
     response_file="$(mktemp)"
-    trap 'rm -f "$response_file"' EXIT
+    error_file="$(mktemp)"
+    trap 'rm -f "$response_file" "$error_file"' EXIT
 
     printf 'ok: Infisical universal auth\n'
     curl -fsS -H "Authorization: token $FORGEJO_TOKEN" \
@@ -254,23 +256,51 @@ check_access() {
     # must keep working for git/gh regardless. So this reports three distinct
     # states and never conflates them — configured and answering, not
     # configured, or configured and refused.
+    #
+    # `/mcp`, not `/api/vogt/*`: the front door forwards a client's *core*
+    # token there untouched and injects its own on the API prefix, so `/mcp`
+    # is the one surface this credential is the right kind of token for. It is
+    # also the surface every registered client uses.
     vogt_url="${VOGT_URL:-$DEFAULT_VOGT_URL}"
+    vogt_mcp_url="${vogt_url%/}/mcp"
     if [[ -z "${VOGT_HTTP_TOKEN:-}" ]]; then
         printf 'skip: Vogt MCP (no %s secret; no instance configured)\n' \
             "$VOGT_SECRET_NAME"
-    elif curl -fsS --max-time 15 \
-        -H "Authorization: Bearer $VOGT_HTTP_TOKEN" \
-        -H 'Content-Type: application/json' \
-        -H 'Accept: application/json, text/event-stream' \
-        --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mydevenv2-agent-auth","version":"1"}}}' \
-        "${vogt_url%/}/mcp" >"$response_file" 2>/dev/null; then
-        printf 'ok: Vogt MCP (%s)\n' "${vogt_url%/}/mcp"
     else
-        # Named, because the likely cause is not the one the endpoint's own
-        # error suggests: a Vogt token is minted by one instance and stored
-        # hashed there, so a token from another instance is refused however
-        # fresh it is, and the message points at the token file (#29).
-        die "Vogt MCP rejected ${VOGT_SECRET_NAME} at ${vogt_url%/}/mcp — if the token is current, check it was issued by *this* instance; tokens are not shared between Vogt instances"
+        # The token is what a client presents; the file is where a client
+        # reads it from, and the rejection an agent eventually sees names
+        # that file. Absent means every client here is broken, so it is a
+        # named failure rather than the `skip` above, which means no instance.
+        [[ -s "${VOGT_TOKEN_FILE:-}" ]] || die \
+            "Vogt token loaded but VOGT_TOKEN_FILE (${VOGT_TOKEN_FILE:-<unset>}) is missing or empty; every registered client reads the credential from that file"
+        # `-w`, not `-f`: `-f` collapses every refusal into exit 22 and throws
+        # the body away, and the body is where the server says what it
+        # refused. The status is captured instead so it can be reported.
+        vogt_status="$(curl -sS --max-time 15 \
+            -o "$response_file" -w '%{http_code}' \
+            -H "Authorization: Bearer $VOGT_HTTP_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mydevenv2-agent-auth","version":"1"}}}' \
+            "$vogt_mcp_url" 2>"$error_file")" || vogt_status="000"
+        vogt_detail="$(tr -d '\r\n' <"$response_file" | cut -c1-300)"
+        if [[ "$vogt_status" == "000" ]]; then
+            die "Vogt MCP is unreachable at $vogt_mcp_url: $(tr -d '\r\n' <"$error_file" | cut -c1-200)"
+        elif [[ "$vogt_status" != "200" ]]; then
+            # Named, because the likely cause is not the one the endpoint's
+            # own error suggests: a Vogt token is minted by one instance and
+            # stored hashed there, so a token from another instance is
+            # refused however fresh it is, and the message the agent finally
+            # sees points at the token file (#29).
+            die "Vogt MCP rejected ${VOGT_SECRET_NAME} at $vogt_mcp_url (HTTP $vogt_status): ${vogt_detail:-<empty body>} — if the token is current, check it was issued by *this* instance; tokens are not shared between Vogt instances"
+        elif [[ "$vogt_detail" == *'"error"'* ]]; then
+            # A JSON-RPC error is carried on a 200, so status alone is not the
+            # answer — this is the shape #29 reached the client in (-32001),
+            # and a probe that stopped at the status code would have called it
+            # green.
+            die "Vogt MCP answered at $vogt_mcp_url but refused the handshake: $vogt_detail — if the token is current, check it was issued by *this* instance; tokens are not shared between Vogt instances"
+        fi
+        printf 'ok: Vogt MCP (%s)\n' "$vogt_mcp_url"
     fi
 }
 
