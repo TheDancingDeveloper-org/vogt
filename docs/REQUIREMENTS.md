@@ -665,6 +665,58 @@ nobody schedules. Reversing it needs one thing: a use that wants Anthropic
 tool-calling specifically, at which point the ID is still here and the argument
 above is what has to be beaten.
 
+### Revision r14 — a tracker first, and a zero that says which zero it is
+
+Two changes, from onboarding eight real projects and reviewing what the
+instance then said about them. Both are corrections toward what this document
+already says, not new direction.
+
+**The contract reads as a verdict on repositories nobody opted in.** r2 removed
+the contract *gate* and was right to; §2.1 states the posture as "reporting, not
+enforcing", and FR-G13 forbids any operation consuming compliance as a
+precondition. That much holds. What r2 did not do is give the reporting an
+inside voice. Eight projects were checked during onboarding and eight failed —
+every one on `design/`, every one on `LICENSE` — and the only word the product
+has for that is `non_compliant`. A criterion that nothing in an estate satisfies
+is not a finding about the estate; and a user who registered a project to track
+issues, wanting none of the estate machinery, is told their repository is
+non-compliant with a template they were never offered.
+
+The template exists and is good: `default_scaffold` writes the minimum, says in
+each file what it is for, and pointedly refuses to choose a licence on the
+owner's behalf. It is reachable only from `project create`, into a new
+directory. So the product is generous to a project it creates and merely
+critical of one it is handed — which is the same asymmetry r2 removed at the
+gate, surviving in the reporting.
+
+r14 makes the contract **opt-in per project**, and pairs every reported gap with
+the means to close it: the same scaffold, runnable against a registered project,
+and a recommendation an agent can act on. Vogt should be usable as an issue
+tracker by someone who never adopts a single one of its conventions.
+
+**An empty answer must carry the same provenance as a full one.** FR-O4 already
+requires this of coverage — "absence shall only be asserted within provably
+swept scope" — and r10's FR-O9 already requires it of observation payloads, in
+terms that name the failure precisely: *a default that happens to be falsy is an
+assertion*. Neither reaches the results of operations, and that is where it was
+observed failing:
+
+- `forge onboard` against a Forgejo remote returned `issues: 0 … detail: null`
+  for a repository that has an open issue. Byte-identical to an honest empty.
+- `coverage` reported `projects: 1` with eight registered, because the count is
+  scoped to the last sweep and does not say so.
+- A collector's aggregate `status` read `failed` or `partial` for one underlying
+  fault, according only to how the sweep was scoped.
+
+r14 extends FR-O9's principle from payloads to operation results, and adds the
+mechanism that makes it enforceable rather than aspirational: an adapter
+declares what it can read, and a subject it cannot read yields `not_supported`
+rather than zero. This is the pre-1.0 window for it. REST, CLI, GUI and MCP are
+generated from one transport-neutral operation registry, so changing a result
+shape is one change today and a four-surface breaking change after 1.0.
+
+---
+
 ---
 
 ## 1. Functional requirements
@@ -687,6 +739,10 @@ above is what has to be beaten.
 now evaluated and reported; it never blocks an operation.*
 *r3: evaluation is on demand only — no scheduled re-checking, no
 filesystem discovery.*
+*r14: the contract is opt-in per project, and every reported gap comes with
+the means to close it. A project that has adopted no contract is not
+non-compliant; it is untracked by the contract, which is a valid way to use
+the product.*
 
 | ID | Requirement | Pri | Source |
 |---|---|---|---|
@@ -705,6 +761,10 @@ filesystem discovery.*
 | FR-G13 | *(r3)* No component of the system shall consume contract compliance, trust state, or drift status as a precondition for any operation. These are values to be read. | M | DESIGN §2.1 |
 | FR-G14 | *(r3)* The result of an on-demand contract check against a registered project shall be recorded as that project's compliance status (`compliant / non_compliant / not_checked`) with failing criteria and a checked-at timestamp. The value shall always be reported with its age and shall never be refreshed implicitly. | M | DESIGN §5 |
 | FR-G15 | *(r3)* Collection scope shall be the explicitly registered project list. The system shall not discover projects by crawling the filesystem, and shall not maintain a candidate or unregistered-folder listing. | M | DESIGN §5.1 |
+| FR-G16 | *(r14)* Contract adoption shall be **per project and opt-in**. A project with no adopted contract shall report compliance as `not_applicable` and shall never be described as non-compliant; no view, export or brief shall imply a fault in a project that declined the contract. `FR-G14`'s statuses apply only to projects that adopted one. | M | DESIGN §2.1 |
+| FR-G17 | *(r14)* The scaffold of FR-G11 shall be invocable against an **already-registered** project, not only at creation. It shall never overwrite an existing file, and shall report created and skipped paths exactly as `project create` does. Reporting a gap the product can close, without offering to close it, is the enforcing posture in a different costume. | S | DESIGN §5 |
+| FR-G18 | *(r14)* A contract evaluation shall be able to emit a **recommendation** alongside its result: for each failing criterion, the mechanical remedy where one exists (a file or directory the scaffold would write), and where the remedy needs judgement — which licence, what belongs in `design/` — an instruction addressed to an actor, suitable for a human to read or an agent to execute. The recommendation shall be advisory output, never applied implicitly, and shall carry no authority beyond FR-G13. | S | DESIGN §2.1, §5 |
+| FR-G19 | *(r14)* Contract criteria shall distinguish a criterion the project **has not met** from one it **cannot meet by construction** (a Cargo workspace has no root `src/`). Both may be reported; they shall not share a single word. Marking a criterion inapplicable for a project shall be an audited declaration carrying a reason, not a silent exemption. | S | DESIGN §5 |
 
 ### FR-W — Work management (the write plane)
 
@@ -730,6 +790,8 @@ filesystem discovery.*
 | FR-V2 | Global backlog ordering shall be deterministic, from documented constant-weight inputs. | M | DESIGN §3.4 |
 | FR-V3 | `why <item>` shall return the per-input score contributions for any ranked item. | M | DESIGN §3.4 |
 | FR-V4 | Every aggregating answer (brief, backlog, bugs, deps) shall carry the freshness of the underlying sweeps (oldest relevant sweep timestamp). | M | DESIGN §6 |
+| FR-V6 | *(r14)* Ranked views shall exclude observed subjects whose lifecycle is `closed` (FR-O12). A view named for open work shall contain only work that is open; a closed subject remains observable, queryable and countable, and is reachable through an explicit filter. Trust state describes how well a subject is known, not whether it is still outstanding, and shall not be read as the latter. | M | DESIGN §3.6 |
+| FR-V7 | *(r14)* Classification of an observed subject that carries no classifying signal — an unlabelled forge issue — shall be reported as unclassified rather than silently defaulted into a kind. A subject that falls into no ranked view because nothing said what it was shall remain discoverable. | S | DESIGN §3.6 |
 | FR-V5 | *(r11)* A ranked view shall be pageable past its first page: `backlog` and `bugs` shall accept an offset alongside their limit, so an estate with more open work than one page can hold is reachable rather than truncated. A view that truncates shall say so — which it already does; what it cannot currently do is continue. | S | §7 |
 
 ### FR-O — Observation & collection
@@ -745,6 +807,9 @@ filesystem discovery.*
 | FR-O7 | Unchanged observations (same subject, same content digest) shall not grow the store; sweeps shall count them as unchanged. | S | SCHEMA §3.1 |
 | FR-O8 | *(r6)* GitHub notifications shall be collected as observations through the **per-repository** endpoint, so that collection scope remains the registered project list (FR-G15) by construction rather than by filtering. They shall not be promoted into ranked views (DESIGN §3.6): a notification is a signal that something happened, not a claim that there is work. A token lacking the notifications scope shall degrade to `partial` coverage like any other unavailable source (FR-O4), never to a failed sweep. | S* | DESIGN §3.5 |
 
+| FR-O10 | *(r14)* The principle of FR-O9 shall extend from observation payloads to **operation results**. Any result reporting a count, a total, or an empty collection shall carry the scope it was computed over and whether every source in that scope was readable. An operation that could not read a source shall say so in the result; it shall not report zero. `forge onboard` returning `issues: 0, detail: null` for a repository it has no adapter for is the same assertion FR-O9 forbids, made one layer up. | M | DESIGN §6 |
+| FR-O11 | *(r14)* Every forge and collector adapter shall **declare what it can read** — hosts, ecosystems, subject kinds. A subject outside every declared capability shall yield `not_supported` naming the capability that is missing, never an empty success. A partially-implemented adapter shall therefore be safe to ship: the gaps report themselves. | M | DESIGN §1.1 |
+| FR-O12 | *(r14)* An observed forge subject shall carry a **lifecycle** derived from its source — `open`, `closed`, or `unknown` — held separately from the ranked-view state of DESIGN §3.6, which deliberately asserts no workflow state. `unknown` is the required value where the source could not be read (FR-O11) and shall be surfaced, never silently treated as either of the other two. | M | DESIGN §3.6 |
 | FR-O9 | *(r10)* An observation payload shall carry only values that were read. Where a source cannot be read at all — a missing or unrunnable tool, a failed command, a timeout — the collector shall report that it could not read it and the sweep shall degrade to `partial` naming the project (FR-O3, FR-O4); it shall not emit a field asserting a state it did not observe. A default that happens to be falsy is an assertion: `dirty: false` from a checkout that was never opened is indistinguishable from a clean one. | M | DESIGN §6 |
 
 \* M *when the GitHub adapter is enabled*; the adapter itself is optional (NFR-PO1).
