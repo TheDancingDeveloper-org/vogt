@@ -58,6 +58,12 @@ DEFAULT_EXCLUSIONS: tuple[str, ...] = (
     "dist/",
     "build/",
     ".git/",
+    # Agent scratch space. Worktrees under `.claude/` carry complete copies of
+    # a project's manifests, so without this a repository's dependency graph is
+    # inflated by however many worktrees happen to be lying around — `vogt`
+    # reported six references out, three of them duplicates from one
+    # throwaway worktree.
+    ".claude/",
 )
 
 

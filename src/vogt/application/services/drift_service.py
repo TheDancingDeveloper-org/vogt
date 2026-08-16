@@ -20,6 +20,11 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.application.services.views import freshness_of
 from vogt.application.writes import WriteOutcome, audited_write
+from vogt.collectors.dep_refs import (
+    SCOPE_BROKEN,
+    SCOPE_EXTERNAL,
+    SCOPE_INTERNAL,
+)
 from vogt.core.checks import roll_up
 from vogt.core.drift import (
     AUTO_ACCEPTABLE_KINDS,
@@ -29,6 +34,7 @@ from vogt.core.drift import (
     VERSION_MISMATCH,
     DriftFinding,
     EvidenceSnapshot,
+    broken_path_dependency,
     ci_red_vs_healthy,
     forge_state_mismatch,
     unresolved_dependency,
@@ -94,6 +100,14 @@ def _version_findings(ctx: AppContext) -> list[DriftFinding]:
 
 
 def _dependency_findings(ctx: AppContext) -> list[DriftFinding]:
+    """Unresolved references, split by where the reference actually lands.
+
+    A reference the collector scoped `internal` is a project pointing at its
+    own crates, which is what a workspace *is* — it never resolves to another
+    registered project and must never be proposed as one. Thirty of rustnzb's
+    thirty-one proposals were that, and the gate text on every one of them
+    read "usually it is a project nobody has registered yet".
+    """
     findings: list[DriftFinding] = []
     with ctx.declared.read() as view:
         slugs = {p.id: p.slug for p in view.list_projects(limit=10_000, offset=0)}
@@ -105,8 +119,18 @@ def _dependency_findings(ctx: AppContext) -> list[DriftFinding]:
         )
         if not observations:
             continue
+        # Read from the observation rather than the projection: the scope is
+        # a fact the collector established while it had the manifest and the
+        # tree in front of it, and re-deriving it here would be a second
+        # implementation to disagree with the first.
+        scope = observations[0].payload.get("scope", SCOPE_EXTERNAL)
+        if scope == SCOPE_INTERNAL:
+            continue
+        raise_as = (
+            broken_path_dependency if scope == SCOPE_BROKEN else unresolved_dependency
+        )
         findings.append(
-            unresolved_dependency(
+            raise_as(
                 subject_key=ref.subject_key,
                 project_id=ref.from_project_id,
                 project_slug=slugs.get(ref.from_project_id, ref.from_project_id),

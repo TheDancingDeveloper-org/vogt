@@ -38,8 +38,10 @@ from vogt.core.entities import Project
 WHY = "collector test"
 
 
-def _project(root: Path, slug: str = "fixture") -> Project:
+def _project(root: Path, slug: str = "fixture", *, exclusions: bool = False) -> Project:
     from datetime import UTC, datetime
+
+    from vogt.application.models import DEFAULT_EXCLUSIONS
 
     now = datetime(2026, 8, 12, tzinfo=UTC)
     return Project(
@@ -47,7 +49,11 @@ def _project(root: Path, slug: str = "fixture") -> Project:
         slug=slug,
         name=slug,
         root_path=str(root),
-        exclusions=[".venv/", "node_modules/", "target/", ".git/"],
+        exclusions=(
+            list(DEFAULT_EXCLUSIONS)
+            if exclusions
+            else [".venv/", "node_modules/", "target/", ".git/"]
+        ),
         created_at=now,
         updated_at=now,
     )
@@ -171,6 +177,139 @@ def test_package_json_workspaces_and_file_refs(
     )
     found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
     assert {f.payload["raw_target"] for f in found} == {"file:../sib", "packages/*"}
+
+
+def test_a_workspace_member_is_internal_not_an_unregistered_project(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """The rustnzb case: thirty proposals about a layout chosen on purpose.
+
+    Every one of them named a crate inside the project's own tree, and each
+    carried the gate text "usually it is a project nobody has registered yet".
+    """
+    (tmp_path / "crates" / "nzb-core").mkdir(parents=True)
+    (tmp_path / "crates" / "nzb-web").mkdir(parents=True)
+    (tmp_path / "crates" / "nzb-web" / "Cargo.toml").write_text(
+        '[dependencies]\nnzb-core = { path = "../nzb-core" }\n', encoding="utf-8"
+    )
+    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    assert [f.payload["scope"] for f in found] == ["internal"]
+
+
+def test_a_nested_workspace_reaching_back_is_still_internal(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """Why containment is the test and workspace membership is not.
+
+    rustnzb's root manifest carries `exclude = ["benchnzb", "desktop"]`, and
+    `fuzz/` is not a member either — three separate Cargo workspaces nested in
+    one repository, reaching back into the main one by relative path. Keying
+    the fix on `members` is the obvious implementation and still flags five of
+    the thirty.
+    """
+    (tmp_path / "crates" / "nzb-core").mkdir(parents=True)
+    (tmp_path / "fuzz").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["crates/*"]\nexclude = ["fuzz"]\n', encoding="utf-8"
+    )
+    (tmp_path / "fuzz" / "Cargo.toml").write_text(
+        '[dependencies]\nnzb-core = { path = "../crates/nzb-core" }\n',
+        encoding="utf-8",
+    )
+    scopes = {
+        f.payload["raw_target"]: f.payload["scope"]
+        for f in DepRefCollector().collect(ctx, _project(tmp_path))
+    }
+    assert scopes["../crates/nzb-core"] == "internal", "excluded, but still in the tree"
+
+
+def test_a_reference_outside_the_tree_is_external(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """The case the proposal was always meant for: a sibling project."""
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "sibling").mkdir()
+    (tmp_path / "repo" / "Cargo.toml").write_text(
+        '[dependencies]\nsib = { path = "../sibling" }\n', encoding="utf-8"
+    )
+    found = list(DepRefCollector().collect(ctx, _project(tmp_path / "repo")))
+    assert [f.payload["scope"] for f in found] == ["external"]
+
+
+def test_an_in_tree_path_that_resolves_to_nothing_is_broken(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """Three outcomes, not two.
+
+    Containment alone would swallow this one: it points inside the project,
+    where there is nothing to register, and the manifest is simply wrong.
+    """
+    (tmp_path / "crates").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        '[dependencies]\ngone = { path = "crates/moved-away" }\n', encoding="utf-8"
+    )
+    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    assert [f.payload["scope"] for f in found] == ["broken"]
+
+
+def test_a_glob_member_is_internal_rather_than_broken(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """`members = ["crates/*"]` is a pattern; no such directory exists."""
+    (tmp_path / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["crates/*"]\n', encoding="utf-8"
+    )
+    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    assert [f.payload["scope"] for f in found] == ["internal"]
+
+
+def test_dependency_inheritance_is_not_a_path_at_all(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """`opentelemetry.workspace = true` inherits from the workspace table.
+
+    rustnzb produced three of these and every one was reported as an
+    unregistered project named `workspace:.`.
+    """
+    (tmp_path / "Cargo.toml").write_text(
+        "[dependencies]\nopentelemetry = { workspace = true }\n", encoding="utf-8"
+    )
+    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    assert [f.payload["ref_kind"] for f in found] == ["inherited"]
+    assert [f.payload["scope"] for f in found] == ["internal"]
+
+
+def test_a_git_reference_is_external_however_it_looks(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    (tmp_path / "Cargo.toml").write_text(
+        '[dependencies]\nother = { git = "https://github.com/o/other" }\n',
+        encoding="utf-8",
+    )
+    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    assert [f.payload["scope"] for f in found] == ["external"]
+
+
+def test_agent_worktrees_are_not_part_of_the_dependency_graph(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """`vogt` reported six references out and three were one throwaway copy.
+
+    A worktree under `.claude/` carries a complete set of manifests, so the
+    graph is inflated by however many happen to be lying around.
+    """
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "Cargo.toml").write_text(
+        '[dependencies]\ncontract = { path = "contract" }\n', encoding="utf-8"
+    )
+    worktree = tmp_path / ".claude" / "worktrees" / "docs-pass" / "engine"
+    worktree.mkdir(parents=True)
+    (worktree / "Cargo.toml").write_text(
+        '[dependencies]\ncontract = { path = "contract" }\n', encoding="utf-8"
+    )
+    found = list(DepRefCollector().collect(ctx, _project(tmp_path, exclusions=True)))
+    assert len(found) == 1, "one manifest is the project's; the other is scratch"
+    assert found[0].payload["manifest"] == "engine/Cargo.toml"
 
 
 def test_a_malformed_manifest_is_a_fact_not_a_failure(

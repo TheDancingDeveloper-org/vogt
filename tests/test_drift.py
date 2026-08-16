@@ -49,6 +49,7 @@ from vogt.application.services.drift_service import (
 )
 from vogt.collectors.base import finding
 from vogt.core.drift import (
+    BROKEN_PATH_DEPENDENCY,
     CI_RED_VS_HEALTHY,
     UNRESOLVED_DEPENDENCY,
     VERSION_MISMATCH,
@@ -199,6 +200,68 @@ def test_a_red_head_is_still_drift(released: AppContext) -> None:
     assert len(ci) == 1
     assert "9fe53d8" in ci[0].summary, "and it names the commit that is red"
     assert ci[0].summary.count("build image") == 1, "one workflow, named once"
+
+
+def test_an_internal_reference_is_never_a_drift_proposal(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """The thirty rustnzb proposals, end to end.
+
+    Every one named a crate inside the project's own tree, and the board they
+    landed on was 44 proposals with 36 of them this.
+    """
+    root = tmp_path / "repo"
+    (root / "crates" / "core").mkdir(parents=True)
+    (root / "crates" / "web").mkdir(parents=True)
+    (root / "crates" / "web" / "Cargo.toml").write_text(
+        '[dependencies]\ncore = { path = "../core" }\n', encoding="utf-8"
+    )
+    _tagged_repo(root, "v1.0.0")
+    register_project(
+        instance, RegisterProjectParams(name="Mono", root_path=str(root), reason=WHY)
+    )
+    sweep(instance, SweepParams(offline_only=True, reason=WHY))
+
+    kinds = [
+        p.kind
+        for p in detect_drift(
+            instance, DriftDetectParams(auto_accept=False, reason=WHY)
+        ).raised
+    ]
+    assert UNRESOLVED_DEPENDENCY not in kinds
+    assert BROKEN_PATH_DEPENDENCY not in kinds
+
+
+def test_an_in_tree_path_that_resolves_to_nothing_is_its_own_kind(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """Three outcomes, not two.
+
+    "Register the project this points at" is the wrong instruction when the
+    target is inside the project: there is nothing to register, the manifest
+    is wrong.
+    """
+    root = tmp_path / "repo"
+    (root / "crates").mkdir(parents=True)
+    _tagged_repo(root, "v1.0.0")
+    (root / "Cargo.toml").write_text(
+        '[dependencies]\ngone = { path = "crates/moved-away" }\n', encoding="utf-8"
+    )
+    register_project(
+        instance, RegisterProjectParams(name="Mono", root_path=str(root), reason=WHY)
+    )
+    sweep(instance, SweepParams(offline_only=True, reason=WHY))
+
+    broken = [
+        p
+        for p in detect_drift(
+            instance, DriftDetectParams(auto_accept=False, reason=WHY)
+        ).raised
+        if p.kind == BROKEN_PATH_DEPENDENCY
+    ]
+    assert len(broken) == 1
+    assert "does not exist" in broken[0].summary
+    assert "not a registered project" not in broken[0].summary
 
 
 def test_raising_a_proposal_is_an_audited_declared_write(
