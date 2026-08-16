@@ -653,6 +653,35 @@ def test_dependency_references_resolve_to_registered_projects(
     assert [ref.from_project_slug for ref in reverse.referenced_by] == ["fixture"]
 
 
+def test_an_inherited_dep_ref_survives_a_real_sweep(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """Regression for #44.
+
+    `test_dependency_inheritance_is_not_a_path_at_all` above only asserts on
+    the collector's in-memory payload — which is exactly why the CHECK
+    constraint rejecting `ref_kind='inherited'` shipped unnoticed. This drives
+    the same manifest through `sweep()` and real sqlite storage, where #43's
+    fix actually broke.
+    """
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "Cargo.toml").write_text(
+        "[dependencies]\nopentelemetry = { workspace = true }\n", encoding="utf-8"
+    )
+    _register_fixture(instance, fixture)
+
+    result = sweep(
+        instance, SweepParams(collectors=["dep-refs"], offline_only=True, reason=WHY)
+    )
+    assert result.reports[0].outcome == "ok"
+
+    out = deps(instance, DepsParams(project="fixture"))
+    inherited = [ref for ref in out.references_out if ref.ref_kind == "inherited"]
+    assert len(inherited) == 1
+    assert inherited[0].raw_target == "workspace:."
+
+
 def test_an_unresolved_reference_keeps_its_raw_target(
     instance: AppContext, tmp_path: Path
 ) -> None:

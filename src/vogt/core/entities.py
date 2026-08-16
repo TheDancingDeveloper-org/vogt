@@ -289,7 +289,7 @@ class DriftProposal(Entity):
 
 
 SweepOutcome = Literal["running", "ok", "partial", "failed"]
-RefKind = Literal["path", "git", "declared"]
+RefKind = Literal["path", "git", "declared", "inherited"]
 
 
 class Sweep(Entity):
