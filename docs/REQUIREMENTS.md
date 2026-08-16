@@ -599,9 +599,14 @@ second time this documentation set has recorded that shape and the reason
 
 **FR-M4 was already delivered, and this register's row for it was the fourth
 wrong one.** It claimed the dev shell had no FCM client entry. It has one:
-`google-services.json` carries `com.sprooty.mydevenv2.dev`,
-`engine/.woodpecker/server.yml` exports `MYDEVENV2_ANDROID_APP_ID` for the dev
-APK stream, and both `build.gradle` and `capacitor.config.ts` read it. The row
+`google-services.json` carries `com.sprooty.mydevenv2.dev`, CI exports
+`MYDEVENV2_ANDROID_APP_ID` for a non-prod APK stream, and both `build.gradle`
+and `capacitor.config.ts` read it. (When this was written the export was
+`engine/.woodpecker/server.yml`'s `mobile-apk-dev` step. That file was the
+fork's vendored copy of the engine's Woodpecker pipeline, it never ran against
+this repository, and deleting it moved the export to `ci.yml`'s `android` job
+— which is a better answer than it looks, because the id is now set by a build
+that actually runs.) The row
 came from `uplift.md`'s mobile caveat, which was true when written and was
 fixed afterwards — the same failure as FR-S6 and FR-S12, from the same cause,
 which is that the register's first draft read documents instead of source.

@@ -50,7 +50,7 @@ Before changing files here:
 | Type | Rust (Axum) + Solid/Vite PWA (embedded via `rust-embed`) + Capacitor Android wrap |
 | Repo | `github.com/TheDancingDeveloper-org/vogt`, subtree `engine/`. `repo.indexarr.net/indexarr/MyDevEnv2` is the pre-merge origin and remains the archive for the deprecated GPUI desktop client. |
 | Cargo workspace root | `engine/` (`engine/Cargo.toml`, members `server` and `contract`). The repository root is a Python project, not a Rust workspace. |
-| CI pipeline | `engine/.woodpecker/server.yml` — fmt/clippy/test -> web-typecheck -> mobile-apk -> buildx -> komodo-deploy |
+| CI pipeline | `.github/workflows/ci.yml` (fmt/clippy/test, PWA typecheck and tests, Android shell) and `.github/workflows/build.yml` (the merged image, cosign-signed, to GHCR). The engine's Woodpecker pipeline is **not** in this tree: the fork vendored a copy at `engine/.woodpecker/server.yml`, it never ran here, and it has been deleted. `indexarr/MyDevEnv2` on the forge keeps the running copy, and that is the one the standalone stacks below are built by. |
 | Deploys to | Komodo stack `prod-mydevenv2` (ops repo path `personal/mydevenv2/`) — target periphery is the one running mydevenv2.sprooty.com (see ops repo) |
 | Image | `repo.indexarr.net/indexarr/mydevenv2` (`:latest` + `:<sha>`) |
 | Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port) |
@@ -115,14 +115,26 @@ Optional TOML config at `mydevenv2.toml` (CLI > env > config); see
 
 ## 4. Deployment
 
-Pipeline non-standard bits:
+Two pipelines exist and only one of them is in this repository, which is the
+first thing to get straight before reading anything below. **This** tree is
+built by GitHub Actions, described in `AGENTS.md` and in the workflow files
+themselves. The Woodpecker pipeline that still builds `prod-mydevenv2` and
+`dev-mydevenv2` belongs to `indexarr/MyDevEnv2` on the forge and is edited
+there. The fork left a copy of it at `engine/.woodpecker/server.yml`; it never
+ran here — Woodpecker's repository list does not contain Vogt, and Vogt is on
+GitHub — and it has been deleted, along with its `install-sccache.sh`, because
+a file describing how to publish a competing image and redeploy production is
+worse than no file when nothing executes it.
+
+Non-standard bits of the forge's pipeline, kept here because the stacks it
+deploys are still running and the reasons are not written down there:
 
 - Custom `clone:` block uses `git_auth_token` because the default OAuth clone started 403'ing at pipeline #17. Reference pattern in root Woodpecker pitfalls #2 / #6.
-- `sccache` uses Redis on Node B (`100.92.54.45:6380`) for `fmt` / `clippy` / `test` steps. Do not `apt install sccache`; Debian's package lacks Redis support. `engine/.woodpecker/install-sccache.sh` resolves the latest GitHub release at CI run time and verifies it against the sha256 digest that release's own API response publishes — not a hardcoded version/checksum.
-- `mkdir -p web/dist && touch web/dist/.placeholder` is used in `clippy` and `test` steps so `rust-embed` compiles before `build-and-push` produces the real bundle. That is the repository-root `web/dist/`, which is what `engine/server/src/assets.rs` embeds (`#[folder = "../../web/dist/"]`).
-- `mobile-apk` builds the Capacitor signed release APK and uploads it to Forgejo releases API tag `apk-latest`, not the generic-package registry. Signing material comes from Woodpecker secrets `mydevenv2_android_keystore_base64`, `mydevenv2_android_keystore_password`, `mydevenv2_android_key_alias`, and `mydevenv2_android_key_password`. Idempotence is delete-then-create using `scripts/forgejo-api.sh` from `indexarr/ops`.
-- `cimg/android` runs as `circleci` (UID 3434) but the workspace was cloned by `alpine/git` as root. The pipeline does `sudo chown -R circleci:circleci .` before pnpm.
-- Komodo deploy pins the SHA in `ops/personal/mydevenv2/docker-compose.yml` through standard `scripts/komodo-deploy.sh` (`STACK_NAME=prod-mydevenv2 STACK_DIR=personal/mydevenv2`).
+- `sccache` uses Redis on Node B (`100.92.54.45:6380`) for its `fmt` / `clippy` / `test` steps. Do not `apt install sccache`; Debian's package lacks Redis support. Its `install-sccache.sh` resolves the latest GitHub release at CI run time and verifies it against the sha256 digest that release's own API response publishes — not a hardcoded version/checksum. **This repository does not use it**: `ci.yml` caches with `Swatinem/rust-cache` instead, because that Redis is a Node B service that has OOM-crash-looped and a build cache able to take CI down is the wrong trade when the runners are what is scarce.
+- `mkdir -p web/dist && touch web/dist/.placeholder` before `clippy` and `test` so `rust-embed` compiles before the image build produces the real bundle. That is the repository-root `web/dist/`, which is what `engine/server/src/assets.rs` embeds (`#[folder = "../../web/dist/"]`). `ci.yml` builds the real bundle first and keeps the placeholder only as a guard.
+- `mobile-apk` builds the Capacitor signed release APK and uploads it to Forgejo releases API tag `apk-latest`, not the generic-package registry. Signing material comes from Woodpecker secrets `mydevenv2_android_keystore_base64`, `mydevenv2_android_keystore_password`, `mydevenv2_android_key_alias`, and `mydevenv2_android_key_password`. Idempotence is delete-then-create using `scripts/forgejo-api.sh` from `indexarr/ops`. That keystore and that registry stayed with the forge; `release.yml` signs from GitHub secrets and publishes the APK as a workflow artefact.
+- `cimg/android` runs as `circleci` (UID 3434) but the workspace was cloned by `alpine/git` as root. That pipeline does `sudo chown -R circleci:circleci .` before pnpm.
+- Its Komodo deploy pins the SHA in `ops/personal/mydevenv2/docker-compose.yml` through standard `scripts/komodo-deploy.sh` (`STACK_NAME=prod-mydevenv2 STACK_DIR=personal/mydevenv2`). Nothing in this repository does that or should: publishing is not deploying (NFR-D10), and Vogt has never deployed from CI.
 - The native desktop client is deprecated as of July 7, 2026 and its `client/`
   tree did not come across in the merge — it stayed in the MyDevEnv2 repo,
   which is now its archive. Its old Linux/Windows release workflows were

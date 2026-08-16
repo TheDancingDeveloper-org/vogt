@@ -70,10 +70,19 @@ engine/           its own Cargo workspace — the repository root is not one
   contract/       mydevenv2-contract: shared wire DTOs
   Dockerfile      the merged image (context is the repository root)
   deploy/         entrypoint, agent-auth helpers, the standalone compose
-  .woodpecker/    the engine's own CI, publishing to the Forgejo registry
 web/              the Solid/Vite PWA — the product's GUI, embedded at build time
 mobile/           the Capacitor 8 Android shell that loads the deployed PWA
 ```
+
+There is no `.woodpecker/` under `engine/` any more, and a path naming one is
+stale. The fork brought the engine's Woodpecker pipeline across with it, and
+in this repository it never ran: Woodpecker builds the Forgejo repositories
+and Vogt is on GitHub. What it did do was describe a second, plausible-looking
+way to publish this Dockerfile and redeploy production, which is a dangerous
+thing for a file to say when nothing executes it. The engine's checks run in
+`.github/workflows/ci.yml` and its image is built by
+`.github/workflows/build.yml`; `indexarr/MyDevEnv2` on the forge keeps its own
+pipeline for the standalone stacks (`docs/DEPLOYMENT.md` §11).
 
 Crate names, the config prefix (`MYDEVENV2_*`) and the container's own
 identity still say MyDevEnv2. That is deliberate and is not drift: the names

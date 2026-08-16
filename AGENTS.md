@@ -52,10 +52,15 @@ on any surface.
   finds no manifest. `engine/server` owns PTY lifecycle, WebSocket attach, SSE,
   the workspace-scoped file and git APIs and the assistant loop;
   `engine/contract` is the shared wire DTOs the PWA mirrors in TypeScript. It
-  carries its own `Dockerfile`, `deploy/` and `.woodpecker/` because it
-  publishes its own image to its own Komodo stack, which is why those live
-  under `engine/` rather than joining the root ones. Read `engine/AGENTS.md`
-  before changing anything in there.
+  carries its own `Dockerfile` and `deploy/` because it publishes its own
+  image to its own Komodo stack, which is why those live under `engine/`
+  rather than joining the root ones. It **no longer carries a `.woodpecker/`**:
+  the fork brought one across and it was inert here — Woodpecker builds the
+  Forgejo repositories, and this one is on GitHub — while still reading as an
+  authoritative second way to publish and deploy the same Dockerfile. The
+  engine's image is built by `.github/workflows/build.yml`, and the pre-merge
+  Forgejo repository keeps its own pipeline. Read `engine/AGENTS.md` before
+  changing anything in there.
 - `web/` — the Solid/Vite PWA, and the product's GUI going forward. It is baked
   into the Rust binary at compile time (`engine/server/src/assets.rs` embeds
   `../../web/dist/`), so a `cargo build` without a fresh `pnpm build` ships a
@@ -176,14 +181,19 @@ Workspace-level Komodo/Infisical/runner rules live in `~/Working/AGENTS.md`
 and are not restated here; `docs/DEPLOYMENT.md` §6 records only the Node B
 failure modes that specifically bite this stack.
 
-**The merge did not merge the deployments.** One repository now feeds two
-pipelines and separate stacks: this one (GitHub Actions → GHCR →
-`personal/vogt`), and the engine's (`engine/.woodpecker/server.yml` →
-Woodpecker → Forgejo registry → `prod-mydevenv2` and `dev-mydevenv2`). Both are
+**The merge did not merge the deployments.** Two pipelines still feed separate
+stacks, but only one of them lives here: this repository (GitHub Actions →
+GHCR → `personal/vogt`), and the pre-merge Forgejo repository
+`indexarr/MyDevEnv2` (Woodpecker → Forgejo registry → `prod-mydevenv2` and
+`dev-mydevenv2`). The second one is genuinely elsewhere. The fork vendored a
+copy of its `.woodpecker/server.yml` into `engine/`, which never ran — Vogt is
+not one of Woodpecker's repositories — and it has been deleted, because a
+pipeline that publishes a competing image and redeploys production is a bad
+thing to have lying around looking real. Both stacks are still
 Komodo-from-`indexarr/ops` on Node B, so the rules above apply to both.
 Collapsing them into one stack is planned, not done —
 `docs/MERGE_MYDEVENV2.md` §10 — so do not assume a change under `engine/`
-reaches production by tagging this repo, or the reverse.
+reaches the standalone stacks by merging here, or the reverse.
 
 ### If this repository ever goes public
 

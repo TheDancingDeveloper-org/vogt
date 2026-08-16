@@ -185,10 +185,15 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
     """A build arg nothing overrides is just a default (#23).
 
     `engine/Dockerfile` gates `claude`, `codex` and Flutter behind args that
-    default to false, and pointed at `.woodpecker/server.yml`'s
-    `build-and-push-dev` as the build that turned them on. That pipeline was
-    retired with the move to Actions and nothing replaced it, so `vogt-dev`
-    ran with neither client while every build stayed green.
+    default to false, and pointed at the engine's Woodpecker pipeline —
+    `build-and-push-dev` — as the build that turned them on. That pipeline
+    never ran in this repository and its vendored copy has since been
+    deleted, so for a while nothing turned them on at all and `vogt-dev` ran
+    with neither client while every build stayed green.
+
+    `build.yml` owns the arg now, which is why this reads `build.yml`. The
+    test outlives the file it was written about because the property was never
+    "a pipeline sets this" — it was "something that actually runs does".
 
     Both build steps must pass them — the candidate as well as the push, or
     the image that gets smoke-tested is not the image that gets published.

@@ -65,7 +65,6 @@ tests
 scripts
 mobile
 deploy
-engine/.woodpecker
 **/*.md
 # The one exception: `uv sync` reads it, because pyproject names it as the
 # project's readme and a missing one fails the build.
