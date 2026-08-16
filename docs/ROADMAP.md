@@ -1133,6 +1133,18 @@ for the first time and all three had been asserted in prose:
    already authenticates to, and which would remove the dependency entirely
    at the cost of moving the digests this repository pins.
 
+   *Settled since, the other way round (#33).* The secret was added and the
+   build 429'd anyway: the credential is estate-wide, so its 200/hour is
+   shared with every other project's CI and is empty exactly when the estate
+   is busy, while this repository's own per-IP bucket was at 99 of 100
+   remaining. Authenticating is a *worse* position, not a better one, and
+   both logins have been removed rather than left inert for somebody to
+   helpfully re-enable. The alternative was taken instead: both Dockerfiles
+   build `FROM` `ghcr.io/thedancingdeveloper-org/vogt-base/*`, which
+   `.github/workflows/mirror-base-images.yml` fills by copying the manifest
+   lists verbatim. The digests this repository pins did not move — a copied
+   manifest keeps its digest, and the mirror job fails if it does not.
+
 5. **A cancelled run was a check that never ran.** Path gating classifies a
    push by `before..sha`, so each commit is examined by exactly one run — and
    `cancel-in-progress` was true for every trigger, so pushing twice within a

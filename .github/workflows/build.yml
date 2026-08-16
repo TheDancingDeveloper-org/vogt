@@ -65,8 +65,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Docker Hub is not on the critical path any more (#33): both Dockerfiles
+  # build `FROM` this organisation's GHCR mirror of the library images, and
+  # this job makes sure the mirror holds what this commit's Dockerfiles ask
+  # for before either image job starts.
+  #
+  # A prerequisite rather than a companion, and that is the whole point.
+  # Renovate bumps a base digest; the merge is a push; the push builds. If
+  # the mirror were a parallel job — or worse, only a scheduled one — the
+  # build would reach a digest nobody had copied yet and fail at `FROM`,
+  # which is precisely the failure this change exists to remove. Running it
+  # first costs a few seconds: the copy is skipped entirely when the digest
+  # is already in GHCR.
+  base-images:
+    name: the bases are in GHCR
+    uses: ./.github/workflows/mirror-base-images.yml
+    permissions:
+      contents: read
+      packages: write
+
   image:
     name: build and publish a commit image
+    needs: base-images
     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
     permissions:
       contents: read
@@ -79,37 +99,31 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # Docker Hub, when a credential is configured.
+      # No Docker Hub login, deliberately — and this is a trap worth naming,
+      # because the obvious "improvement" is to add one back.
       #
-      # Every base image in both Dockerfiles comes from Docker Hub, and an
-      # anonymous pull is rate-limited per IP. A self-hosted runner is one IP
-      # for every build this repository makes, so a busy afternoon exhausts
-      # the allowance and the next build fails at `FROM` with 429 — which is
-      # what happened on 2026-08-14, to both image jobs at once, with nothing
-      # wrong in the repository.
+      # There used to be a login here, inert until `DOCKERHUB_USERNAME` was
+      # set, offered as the remedy for builds failing at `FROM` with 429. The
+      # secret was set, and the build 429'd anyway (#33):
       #
-      # Inert until somebody sets the secret, and it says which way it went
-      # rather than passing in silence: a step that quietly does nothing is
-      # indistinguishable from a step that worked.
-      - id: dockerhub
-        name: is there a Docker Hub credential
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        run: |
-          set -euo pipefail
-          if [ -n "${DOCKERHUB_USERNAME:-}" ]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No DOCKERHUB_USERNAME secret; base images are pulled anonymously and are subject to Docker Hub's per-IP rate limit. A 429 at FROM is that limit, not a fault in this repository."
-          fi
-
-      - name: log in to Docker Hub
-        if: steps.dockerhub.outputs.configured == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      #     AUTHENTICATED (sprooty):   HTTP 429  x-ratelimit-limit: 200;w=3600
+      #     ANONYMOUS (runner egress): HTTP 200  x-ratelimit-limit: 100;w=3600
+      #                                          x-ratelimit-remaining: 99
+      #
+      # The credential is estate-wide — the same one appears as
+      # `HOMELAB_SECSCAN_DOCKERHUB_*` — so its 200/hour is shared with every
+      # other project's CI and is empty exactly when the estate is busy,
+      # which is when builds happen. Authenticating traded a bucket this
+      # repository mostly controls for one it does not control at all. The
+      # secrets were removed and the build succeeded anonymously.
+      #
+      # So this build does not reach Docker Hub at all. The bases are
+      # `ghcr.io/thedancingdeveloper-org/vogt-base/*`, copied there by
+      # `mirror-base-images.yml`, which the `base-images` job runs as a
+      # prerequisite so a Renovate digest bump is mirrored before anything
+      # builds from it. Adding a Docker Hub login back here would not help
+      # anything and would put the estate's shared bucket back on this
+      # repository's critical path.
 
       - uses: docker/login-action@v3
         with:
@@ -213,6 +227,7 @@ jobs:
 
   stack-image:
     name: build and publish the merged image
+    needs: base-images
     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
     permissions:
       contents: read
@@ -239,37 +254,31 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      # Docker Hub, when a credential is configured.
+      # No Docker Hub login, deliberately — and this is a trap worth naming,
+      # because the obvious "improvement" is to add one back.
       #
-      # Every base image in both Dockerfiles comes from Docker Hub, and an
-      # anonymous pull is rate-limited per IP. A self-hosted runner is one IP
-      # for every build this repository makes, so a busy afternoon exhausts
-      # the allowance and the next build fails at `FROM` with 429 — which is
-      # what happened on 2026-08-14, to both image jobs at once, with nothing
-      # wrong in the repository.
+      # There used to be a login here, inert until `DOCKERHUB_USERNAME` was
+      # set, offered as the remedy for builds failing at `FROM` with 429. The
+      # secret was set, and the build 429'd anyway (#33):
       #
-      # Inert until somebody sets the secret, and it says which way it went
-      # rather than passing in silence: a step that quietly does nothing is
-      # indistinguishable from a step that worked.
-      - id: dockerhub
-        name: is there a Docker Hub credential
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        run: |
-          set -euo pipefail
-          if [ -n "${DOCKERHUB_USERNAME:-}" ]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No DOCKERHUB_USERNAME secret; base images are pulled anonymously and are subject to Docker Hub's per-IP rate limit. A 429 at FROM is that limit, not a fault in this repository."
-          fi
-
-      - name: log in to Docker Hub
-        if: steps.dockerhub.outputs.configured == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      #     AUTHENTICATED (sprooty):   HTTP 429  x-ratelimit-limit: 200;w=3600
+      #     ANONYMOUS (runner egress): HTTP 200  x-ratelimit-limit: 100;w=3600
+      #                                          x-ratelimit-remaining: 99
+      #
+      # The credential is estate-wide — the same one appears as
+      # `HOMELAB_SECSCAN_DOCKERHUB_*` — so its 200/hour is shared with every
+      # other project's CI and is empty exactly when the estate is busy,
+      # which is when builds happen. Authenticating traded a bucket this
+      # repository mostly controls for one it does not control at all. The
+      # secrets were removed and the build succeeded anonymously.
+      #
+      # So this build does not reach Docker Hub at all. The bases are
+      # `ghcr.io/thedancingdeveloper-org/vogt-base/*`, copied there by
+      # `mirror-base-images.yml`, which the `base-images` job runs as a
+      # prerequisite so a Renovate digest bump is mirrored before anything
+      # builds from it. Adding a Docker Hub login back here would not help
+      # anything and would put the estate's shared bucket back on this
+      # repository's critical path.
 
       - uses: docker/login-action@v3
         with:
