@@ -32,6 +32,7 @@ from vogt.application.models import (
     ConnectResult,
     ContractCheckParams,
     ContractCheckResult,
+    ContractEvaluateParams,
     CoverageParams,
     CoverageResult,
     CreateActorParams,
@@ -583,6 +584,17 @@ def build_operations() -> list[Operation[Any, Any]]:
             cli=CliBinding(("work", "adopt")),
         ),
         # -- contract and drift --------------------------------------------
+        Operation(
+            name="contract.evaluate",
+            summary="Evaluate the contract against any path; stores nothing.",
+            scope="read",
+            mutating=False,
+            params_model=ContractEvaluateParams,
+            result_model=ContractCheckResult,
+            handler=services.contract_evaluate,
+            route=HttpRoute("POST", "/contract/evaluate"),
+            cli=CliBinding(("contract", "evaluate")),
+        ),
         Operation(
             name="contract.check",
             summary="Evaluate the project contract; returns every failing rule.",

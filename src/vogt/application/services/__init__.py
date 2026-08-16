@@ -14,7 +14,11 @@ from vogt.application.services.auth import (
 )
 from vogt.application.services.collect import coverage, deps, observations, sweep
 from vogt.application.services.connect import connect
-from vogt.application.services.contracts import compliance, contract_check
+from vogt.application.services.contracts import (
+    compliance,
+    contract_check,
+    contract_evaluate,
+)
 from vogt.application.services.drift_service import (
     detect_drift,
     list_drift,
@@ -93,6 +97,7 @@ __all__ = [
     "compliance",
     "connect",
     "contract_check",
+    "contract_evaluate",
     "coverage",
     "create_actor",
     "create_initiative",

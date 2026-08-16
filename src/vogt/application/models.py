@@ -1026,14 +1026,27 @@ class CriterionView(Result):
     )
 
 
-class ContractCheckParams(Params):
-    path: str | None = Field(
-        default=None,
-        description="Any folder or repository, registered or not. Stores nothing.",
+class ContractEvaluateParams(Params):
+    """A dry run against any path. Reads, stores nothing, needs no reason.
+
+    Split from `ContractCheckParams` because the two are different
+    operations wearing one name. This one changes nothing, so FR-S1 has
+    nothing to audit — and demanding a reason for it meant the CLI collected a
+    justification for a write that never happened, then discarded it. It also
+    forced `project.write` scope on a read, so a read-only token could not
+    evaluate a contract against a folder at all.
+    """
+
+    path: str = Field(
+        description="Any folder or repository, registered or not. Stores nothing."
     )
-    project: str | None = Field(
-        default=None,
-        description="A registered project slug. Records the result with its age.",
+
+
+class ContractCheckParams(Params):
+    """Evaluate a registered project and record the result (FR-G14)."""
+
+    project: str = Field(
+        description="A registered project slug. Records the result with its age."
     )
     reason: Reason
 
