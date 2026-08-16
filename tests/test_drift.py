@@ -76,6 +76,18 @@ def _tagged_repo(root: Path, tag: str) -> Path:
     return root
 
 
+def _commit_all(root: Path, message: str) -> None:
+    """Commit the working tree, so the contract has a repository to read."""
+    subprocess.run(
+        ["git", "-C", str(root), "add", "-A"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-qm", message],
+        check=True,
+        capture_output=True,
+    )
+
+
 @pytest.fixture
 def released(instance: AppContext, tmp_path: Path) -> AppContext:
     """A registered project tagged v1.5 that still declares nothing."""
@@ -431,13 +443,18 @@ def test_a_proposal_still_explains_itself_without_the_observed_store(
 
 
 def test_m3_demo(instance: AppContext, tmp_path: Path) -> None:
-    # A project missing AGENTS.md names exactly that criterion.
+    # A project missing AGENTS.md names exactly that criterion. Everything
+    # else is *committed*, not merely written: the contract asks what the
+    # repository carries, so a required directory needs a tracked file in it
+    # — which is why this repository keeps `design/.gitkeep`.
     project = tmp_path / "repo"
     _tagged_repo(project, "v1.5.0")
     for name in ("README.md", "LICENSE"):
         (project / name).write_text("x\n", encoding="utf-8")
     for name in ("docs", "design", "src"):
         (project / name).mkdir()
+        (project / name / ".gitkeep").write_text("", encoding="utf-8")
+    _commit_all(project, "scaffold")
     register_project(
         instance,
         RegisterProjectParams(name="Demo", root_path=str(project), reason=WHY),
@@ -452,6 +469,7 @@ def test_m3_demo(instance: AppContext, tmp_path: Path) -> None:
 
     # Check nothing for a while and the brief says so rather than refreshing.
     (project / "AGENTS.md").write_text("now compliant\n", encoding="utf-8")
+    _commit_all(project, "add AGENTS.md")
     unchanged = brief_project(instance, ProjectBriefParams(slug="demo"))
     assert unchanged.compliance_status == "non_compliant"
     assert unchanged.compliance_checked_at == brief.compliance_checked_at

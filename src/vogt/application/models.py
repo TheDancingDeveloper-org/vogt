@@ -917,6 +917,15 @@ class CriterionView(Result):
     target: str
     satisfied: bool
     detail: str
+    tracked: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the repository carries this. Null where it could not be "
+            "asked — an unregistered path, or a directory that is not a "
+            "checkout. False alongside a file that exists on disk is the "
+            "present-but-untracked case: no clone would have it."
+        ),
+    )
 
 
 class ContractCheckParams(Params):

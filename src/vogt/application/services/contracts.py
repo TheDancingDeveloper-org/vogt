@@ -28,6 +28,7 @@ from vogt.application.services import _resolve
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.collectors.base import CollectorContext
 from vogt.collectors.contract_checker import ContractCheckerCollector
+from vogt.collectors.git_local import tracked_names
 from vogt.core.contract import NOT_CHECKED, configured_contract, evaluate
 from vogt.core.entities import Actor
 from vogt.errors import InvalidRequest
@@ -53,7 +54,13 @@ def contract_check(ctx: AppContext, params: ContractCheckParams) -> ContractChec
         raise InvalidRequest(msg)
 
     if params.path:
-        result = evaluate(Path(params.path), configured_contract(ctx.config))
+        # `--path` may be a checkout or a bare folder, so ask and accept
+        # `None`. An unregistered directory nobody has put under git is a
+        # legitimate thing to check a contract against (FR-G4).
+        root = Path(params.path)
+        result = evaluate(
+            root, configured_contract(ctx.config), tracked=tracked_names(root)
+        )
         return ContractCheckResult(
             path=result.path,
             project=None,
@@ -88,7 +95,10 @@ def contract_check(ctx: AppContext, params: ContractCheckParams) -> ContractChec
         )
         ctx.observed.rebuild_latest()
 
-    result = evaluate(Path(project.root_path), configured_contract(ctx.config))
+    root = Path(project.root_path)
+    result = evaluate(
+        root, configured_contract(ctx.config), tracked=tracked_names(root)
+    )
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[ContractCheckResult]:
         del actor
@@ -179,6 +189,7 @@ def _view(criterion: object) -> CriterionView:
         target=criterion.target,  # type: ignore[attr-defined]
         satisfied=criterion.satisfied,  # type: ignore[attr-defined]
         detail=criterion.detail,  # type: ignore[attr-defined]
+        tracked=criterion.tracked,  # type: ignore[attr-defined]
     )
 
 

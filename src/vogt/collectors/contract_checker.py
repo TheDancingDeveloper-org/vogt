@@ -18,6 +18,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from vogt.collectors.base import CollectorContext, Finding, finding
+from vogt.collectors.git_local import tracked_names
 from vogt.core.contract import configured_contract, evaluate
 from vogt.core.entities import Project
 
@@ -41,7 +42,10 @@ class ContractCheckerCollector:
         return False
 
     def collect(self, ctx: CollectorContext, project: Project) -> Iterable[Finding]:
-        result = evaluate(Path(project.root_path), configured_contract(ctx.config))
+        root = Path(project.root_path)
+        result = evaluate(
+            root, configured_contract(ctx.config), tracked=tracked_names(root)
+        )
         yield finding(
             kind=KIND_CONTRACT,
             subject_key=f"contract:{project.slug}",
@@ -57,7 +61,12 @@ class ContractCheckerCollector:
                 # "AGENTS.md is missing" is only actionable if you can also
                 # see that AGENTS.md was one of the things being looked for.
                 "evaluated": [
-                    {"rule": c.rule, "target": c.target, "satisfied": c.satisfied}
+                    {
+                        "rule": c.rule,
+                        "target": c.target,
+                        "satisfied": c.satisfied,
+                        "tracked": c.tracked,
+                    }
                     for c in result.criteria
                 ],
             },
