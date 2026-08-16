@@ -905,6 +905,19 @@ new route added *after* it would be shadowed by it and answer with the
 application shell, which looks like a client-side routing bug rather than a
 server one.
 
+Ordering alone was not enough, because it only protects paths that are
+*registered*. `/api` is a list of routes rather than a subtree, so anything not
+on the list — `/api/openapi.json`, a typo — was claimed by the SPA fallback and
+answered `200 text/html` (#34). Every machine namespace is now owned to its
+leaves: `/mcp` and `/ui-legacy` by their proxy routes, `/api` by a last-resort
+`/api/{*path}` that answers `404 {"error": "not found"}` in the engine's
+ordinary error shape. It is outside the bearer gate — a path that does not
+exist does not exist for any credential — and static routes and `/api/vogt/*`
+still win, so `/api/status` is still a `401` and `/api/vogt/nonexistent` still
+reaches the gate rather than the router's floor. `app::MACHINE_NAMESPACES` is
+the list, and a test asserts the property over it: no path under one is ever
+`text/html`.
+
 ### Response conventions
 
 Avoid anonymous `serde_json::json!` blobs for stable routes when a named typed
