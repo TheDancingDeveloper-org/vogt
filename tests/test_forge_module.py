@@ -391,6 +391,75 @@ def test_by_state_stays_declared_only_and_says_so(
     assert brief.open_work > 0, "which is not the same as nothing outstanding"
 
 
+def test_a_host_the_adapter_cannot_read_says_so(
+    instance: AppContext, tmp_path: Path, forge: Forge
+) -> None:
+    """WI-9. All zeros and `detail: null` against a repo with an open issue.
+
+    `indexarr` lives on Forgejo and has one open issue; `forge onboard`
+    returned `issues: 0, pull_requests: 0, labels: 0, releases: 0, new: 0,
+    detail: null`. The GitHub control run in the same minute returned 102
+    objects, so the operation worked and the difference was entirely the
+    remote's host. Half the remaining import queue is Forgejo-hosted, and the
+    playbook reads an empty consolidation as a signal.
+    """
+    register_project(
+        instance,
+        RegisterProjectParams(
+            name="Elsewhere",
+            root_path=str(tmp_path),
+            repo_url="https://repo.indexarr.net/indexarr/Indexarr.git",
+            reason=WHY,
+        ),
+    )
+    result = onboard(instance, OnboardParams(project="elsewhere", reason=WHY))
+
+    assert result.supported is False, "the zeros below mean nothing"
+    assert result.detail is not None
+    assert "repo.indexarr.net" in result.detail, "name the host it could not read"
+    assert "github.com" in result.detail, "and what it can"
+    assert forge.mutations == [], "and it asked nobody anything"
+
+
+def test_an_honest_empty_and_an_unread_one_are_distinguishable(
+    instance: AppContext, tmp_path: Path, forge: Forge
+) -> None:
+    """Three zeros, three causes — the reason this was p1.
+
+    A repository with no history, a host with no adapter, and a step never
+    run all produced the same output. The third is fixed by auditing the run;
+    these two are the pair that has to differ in the result itself, and the
+    counts alone cannot carry that difference — zero is zero either way.
+    """
+    register_project(
+        instance,
+        RegisterProjectParams(
+            name="Elsewhere",
+            root_path=str(tmp_path),
+            repo_url="https://repo.indexarr.net/indexarr/Indexarr.git",
+            reason=WHY,
+        ),
+    )
+    unreadable = onboard(instance, OnboardParams(project="elsewhere", reason=WHY))
+    readable = onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+
+    assert unreadable.issues == 0 and unreadable.supported is False
+    assert readable.supported is True, "the same operation, against a host it reads"
+    assert readable.detail is None, "and it has nothing to explain"
+
+
+def test_a_project_with_no_repository_url_is_not_an_empty_repository(
+    instance: AppContext, tmp_path: Path, forge: Forge
+) -> None:
+    register_project(
+        instance,
+        RegisterProjectParams(name="Local", root_path=str(tmp_path), reason=WHY),
+    )
+    result = onboard(instance, OnboardParams(project="local", reason=WHY))
+    assert result.supported is False
+    assert result.detail is not None and "no repository URL" in result.detail
+
+
 # -- write-back policy (FR-B1, B4) ----------------------------------------
 
 

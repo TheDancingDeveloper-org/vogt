@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vogt.adapters.github.client import GitHubClient
+from vogt.adapters.github.client import GitHubClient, unsupported_reason
 from vogt.adapters.github.collectors import (
     KIND_ISSUE,
     KIND_PULL_REQUEST,
@@ -240,6 +240,26 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
     """
     with ctx.declared.read() as view:
         project = _resolve.project(view, params.project)
+
+    # Asked before the adapter is even built: "this host is not supported" and
+    # "the adapter is not configured" are different answers, and both are
+    # different from "there is nothing there".
+    unsupported = unsupported_reason(project.repo_url)
+    if unsupported is not None:
+        refused = OnboardResult(
+            project=project.slug,
+            repo=project.repo_url,
+            issues=0,
+            pull_requests=0,
+            labels=0,
+            releases=0,
+            new=0,
+            unchanged=0,
+            supported=False,
+            detail=unsupported,
+        )
+        _record_onboard(ctx, project, params.reason, refused)
+        return refused
 
     client = GitHubClient.from_token_file(ctx.config.github_token_file)
     if client is None:

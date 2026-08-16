@@ -1326,6 +1326,16 @@ class OnboardResult(Result):
             "so the claim is asserted rather than assumed."
         ),
     )
+    supported: bool = Field(
+        default=True,
+        description=(
+            "Whether an adapter could read this repository's host at all. "
+            "False makes the zeros below meaningless rather than informative: "
+            "nothing was read, so nothing was found, and `detail` says why. "
+            "The import playbook treats an empty consolidation as a signal, "
+            "and this is what makes that signal readable."
+        ),
+    )
     detail: str | None = None
 
 
