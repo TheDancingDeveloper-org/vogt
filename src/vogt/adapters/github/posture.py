@@ -94,11 +94,16 @@ class GitHubPostureCollector:
     def _toggle(self, owner: str, name: str, endpoint: str) -> bool | None:
         """Read one repository toggle.
 
-        GitHub answers these with 204 (on) or 404 (off), and the client turns
-        a 404 into `None`. `None` from an error is deliberately preserved as
-        "could not tell" rather than flattened to `False`: reporting a
-        security toggle as off because the token lacked a scope would be a
-        false alarm that costs somebody an afternoon.
+        GitHub answers these with 204 (on) or 404 (off). The client turns a
+        404 into `None` and a 204 into `NO_CONTENT`, which is why the two need
+        to be different values: for a year the 204 reached a JSON parser and
+        raised, so the collector failed on exactly the repositories whose
+        security settings were switched on.
+
+        `None` from an error is deliberately preserved as "could not tell"
+        rather than flattened to `False`: reporting a security toggle as off
+        because the token lacked a scope would be a false alarm that costs
+        somebody an afternoon.
         """
         try:
             found = self._client.get(f"/repos/{owner}/{name}/{endpoint}")
