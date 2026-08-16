@@ -21,13 +21,13 @@ from vogt.application.models import (
     TransitionProjectParams,
 )
 from vogt.application.services import _resolve
-from vogt.application.services.views import freshness_of, rank_items
+from vogt.application.services.views import _gather, freshness_of
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.checks import roll_up
 from vogt.core.contract import DEFAULT_CONTRACT, default_scaffold
 from vogt.core.entities import Actor, Project
 from vogt.core.ids import slugify
-from vogt.core.workflow import TERMINAL_STATES, check_lifecycle_transition
+from vogt.core.workflow import check_lifecycle_transition
 from vogt.errors import Conflict, InvalidRequest
 from vogt.storage.interface import ProjectUpdate, WorkFilter, WriteTxn
 
@@ -199,14 +199,31 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
             by_state[item.state] = by_state.get(item.state, 0) + 1
             by_kind[item.kind] = by_kind.get(item.kind, 0) + 1
 
-        live = [item for item in items if item.state not in TERMINAL_STATES]
-        ranked = rank_items(view, live, now=ctx.clock())
         observed_version = _observed_version(ctx, project)
+
+    # The same population `backlog` and `bugs` rank, so the three views agree
+    # about one project at one moment. They did not: this read the declared
+    # store alone, so a project whose whole backlog arrived through
+    # `forge onboard` briefed as `open_work: 0` with nine issues ranked in
+    # `backlog --project` for the same project at the same moment. The brief
+    # is the first surface an import's owner reads, and it said the import had
+    # found nothing.
+    ranked, declared_work, observed_work, _ = _gather(
+        ctx,
+        project=params.slug,
+        kinds=None,
+        priorities=None,
+        assignee=None,
+        initiative=None,
+        label=None,
+    )
 
     return ProjectBriefResult(
         project=project,
-        open_work=len(live),
-        open_bugs=sum(1 for item in live if item.kind == "bug"),
+        open_work=len(ranked),
+        open_bugs=sum(1 for entry in ranked if entry.kind == "bug"),
+        declared_work=declared_work,
+        observed_work=observed_work,
         by_state=dict(sorted(by_state.items())),
         by_kind=dict(sorted(by_kind.items())),
         top_backlog=ranked[: params.backlog_limit],

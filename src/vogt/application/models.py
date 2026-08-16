@@ -326,10 +326,32 @@ class ProjectBriefResult(Result):
     """The per-repo view in one call (FR-P2)."""
 
     project: Project
-    open_work: int
+    open_work: int = Field(
+        description=(
+            "Outstanding work across both populations, declared and observed "
+            "— the same set `backlog --project` ranks. Split below (FR-O10)."
+        )
+    )
     open_bugs: int
-    by_state: dict[str, int]
-    by_kind: dict[str, int]
+    declared_work: int = Field(
+        default=0, description="Of `open_work`, how much somebody typed in."
+    )
+    observed_work: int = Field(
+        default=0,
+        description=(
+            "Of `open_work`, how much a collector found — chiefly what "
+            "`forge onboard` consolidated. Zero here with a non-zero "
+            "`declared_work` is a project nobody has collected for; the "
+            "reverse is a project nobody has declared work on."
+        ),
+    )
+    by_state: dict[str, int] = Field(
+        description=(
+            "Declared work items only, terminal states included. Observed "
+            "subjects have no workflow state to count (DESIGN §3.6)."
+        )
+    )
+    by_kind: dict[str, int] = Field(description="Declared work items only, as above.")
     top_backlog: list[RankedItem]
     current_version: str | None
     declared_version: str | None = None

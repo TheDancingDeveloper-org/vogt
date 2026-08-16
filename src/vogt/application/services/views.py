@@ -288,15 +288,6 @@ def _score_all(candidates: list[_Candidate], *, now: datetime) -> list[RankedIte
     ]
 
 
-def rank_items(
-    view: ReadView, items: list[WorkItem], *, now: datetime
-) -> list[RankedItem]:
-    """Score and order declared work items only (used by the brief)."""
-    if not items:
-        return []
-    return _score_all(_declared_candidates(view, items), now=now)
-
-
 def _gather(
     ctx: AppContext,
     *,

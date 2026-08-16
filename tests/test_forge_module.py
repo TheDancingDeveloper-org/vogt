@@ -26,6 +26,7 @@ from vogt.adapters.github.writeback import PERMITTED, permits
 from vogt.application.context import AppContext
 from vogt.application.models import (
     AdoptParams,
+    BacklogParams,
     BugsParams,
     CommentParams,
     DriftDetectParams,
@@ -33,6 +34,7 @@ from vogt.application.models import (
     DriftResolveParams,
     GetWorkParams,
     OnboardParams,
+    ProjectBriefParams,
     RegisterProjectParams,
     SetWriteBackParams,
     SweepParams,
@@ -41,6 +43,8 @@ from vogt.application.models import (
 )
 from vogt.application.services import (
     adopt,
+    backlog,
+    brief_project,
     bugs,
     comment_work,
     detect_drift,
@@ -236,6 +240,67 @@ def test_a_consolidation_that_read_nothing_is_audited_too(
     with instance.declared.read() as view:
         rows = [r for r in view.list_audit(limit=100) if r.operation == "forge.onboard"]
     assert [r.reason for r in rows] == ["Check upstream."]
+
+
+def test_a_consolidated_project_does_not_brief_as_empty(
+    instance: AppContext, forge: Forge
+) -> None:
+    """FR-O10: brief, backlog and bugs must agree about one project.
+
+    They did not. `brief` read the declared store alone while `backlog` and
+    `bugs` merged declared with observed, so a project whose entire backlog
+    arrived through `forge onboard` reported `open_work: 0` with its issues
+    ranked in `backlog --project` at the same moment. That is the first
+    surface an import's owner reads, and it said the import had found nothing
+    (`vogt-onboarding/reviews/pingrag.md`).
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+
+    brief = brief_project(instance, ProjectBriefParams(slug="rustnzb"))
+    ranked = backlog(instance, BacklogParams(project="rustnzb", limit=50))
+
+    assert ranked.total_considered > 0, "the fixture consolidates something"
+    assert brief.open_work == ranked.total_considered
+    assert brief.top_backlog, "and it is not an empty list next to a count"
+    assert [entry.ref for entry in brief.top_backlog] == [
+        entry.ref for entry in ranked.items[: len(brief.top_backlog)]
+    ], "same ordering, not merely the same size"
+
+
+def test_the_brief_says_which_population_it_counted(
+    instance: AppContext, forge: Forge
+) -> None:
+    """A total that does not name its halves is the shape FR-O10 forbids.
+
+    Nine observed and nothing declared, and nine declared and nothing
+    observed, are different situations for an owner reading a brief — one is
+    a repository nobody has triaged, the other is a project nobody has
+    collected for.
+    """
+    before = brief_project(instance, ProjectBriefParams(slug="rustnzb"))
+    assert (before.declared_work, before.observed_work) == (0, 0)
+
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+
+    after = brief_project(instance, ProjectBriefParams(slug="rustnzb"))
+    assert after.observed_work > 0, "consolidation is visible as observed"
+    assert after.declared_work == 0, "and is not miscounted as declared"
+    assert after.open_work == after.declared_work + after.observed_work
+
+
+def test_by_state_stays_declared_only_and_says_so(
+    instance: AppContext, forge: Forge
+) -> None:
+    """Observed subjects have no workflow state, so they cannot be counted here.
+
+    Keeping `by_state` declared-only is deliberate rather than an oversight:
+    giving an observed subject a state would imply it had been through a
+    machine it has never entered (DESIGN §3.6).
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+    brief = brief_project(instance, ProjectBriefParams(slug="rustnzb"))
+    assert brief.by_state == {}, "nothing declared, so nothing to break down"
+    assert brief.open_work > 0, "which is not the same as nothing outstanding"
 
 
 # -- write-back policy (FR-B1, B4) ----------------------------------------
