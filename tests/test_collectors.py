@@ -613,6 +613,46 @@ def test_a_sweep_writes_no_audit_rows(instance: AppContext, tmp_path: Path) -> N
     assert len(after) == before, f"a sweep audited something: {after}"
 
 
+def test_a_crash_after_collectors_records_the_batch_as_failed(
+    instance: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-O4, secondary finding in #44.
+
+    Every collector below already commits its own sweep row independently
+    (`Sweeper.run_one`), so a crash in the shared projection rebuild that
+    follows leaves those rows genuinely `ok` in isolation — but nothing
+    downstream (rebuilt projection, `sweep.completed` events) ever ran.
+    Left alone, `coverage` would report the batch fresh and fine from a run
+    nothing outside the observed store ever heard complete. This is the
+    "record the sweep as failed" fix `sweep()` now applies before the
+    exception propagates.
+    """
+    _register_fixture(instance, tmp_path)
+
+    def _boom(rows: object) -> int:
+        raise RuntimeError("simulated projection-rebuild crash")
+
+    monkeypatch.setattr(instance.observed, "replace_dep_refs", _boom)
+
+    with instance.declared.read() as view:
+        events_before = len(view.list_events(after=0, limit=200))
+
+    with pytest.raises(RuntimeError, match="simulated"):
+        sweep(instance, SweepParams(offline_only=True, reason=WHY))
+
+    covered = coverage(instance, CoverageParams())
+    by_collector = {entry.collector: entry.status for entry in covered.collectors}
+    assert by_collector["git-local"] == "failed"
+    assert by_collector["source-markers"] == "failed"
+    assert by_collector["dep-refs"] == "failed"
+
+    with instance.declared.read() as view:
+        events_after = len(view.list_events(after=0, limit=200))
+    assert events_after == events_before, (
+        "a crashed sweep must publish no completion event"
+    )
+
+
 def test_observations_are_queryable_including_unpromoted(
     instance: AppContext, tmp_path: Path
 ) -> None:
