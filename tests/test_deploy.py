@@ -697,8 +697,11 @@ def test_nothing_but_protocol_reaches_a_wrappers_stdout(
                 f"which is what a client sees as a framing error: {frame!r}"
             )
         assert message["jsonrpc"] == "2.0"
-    # Not merely silent: an operator still gets told, one stream over.
-    assert "registrations are ready" in completed.stderr
+    # Not merely silent: an operator still gets told, one stream over. The
+    # wording itself is asserted below, by the test that owns it (#30); all
+    # this one cares about is that moving the banner off stdout did not
+    # silence it.
+    assert "registrations written" in completed.stderr
 
 
 @needs_engine
