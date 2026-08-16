@@ -11,6 +11,26 @@ nothing in the product needs.
 
 The trade, stated plainly: the graph tells you where the risk lives, and a
 `git diff` tells you whether it has bitten.
+
+**A reference is also classified by where it lands.** A Cargo workspace is
+made of path dependencies between its own crates, and reporting each of them
+as "a project nobody has registered" turned rustnzb's first sweep into thirty
+proposals about a layout its owner had chosen on purpose. So every path
+reference is resolved against the manifest that declares it and given a
+`scope`:
+
+- `internal` — resolves inside the project's own `root_path` and exists. A
+  workspace member. Not drift, and never was.
+- `broken` — resolves inside `root_path` and there is nothing there. A real
+  finding, and a different one: the manifest is wrong, not the registry.
+- `external` — resolves outside `root_path`, or is a git URL. The only kind
+  that can mean "a project nobody has registered yet".
+
+Containment is the test rather than workspace membership, because membership
+gets it wrong: rustnzb's root manifest excludes `benchnzb` and `desktop`, and
+`fuzz/` is not a member either, so those three are separate workspaces nested
+in the same repository reaching back into the main one by relative path. Five
+of the thirty would still have been flagged.
 """
 
 from __future__ import annotations
@@ -65,8 +85,40 @@ class DepRefCollector:
                         "ref_kind": ref_kind,
                         "raw_target": target,
                         "manifest": relative,
+                        "scope": _scope(ref_kind, target, manifest=path, root=root),
                     },
                 )
+
+
+#: How a reference relates to the project that declares it.
+SCOPE_INTERNAL = "internal"
+SCOPE_EXTERNAL = "external"
+SCOPE_BROKEN = "broken"
+
+
+def _scope(ref_kind: str, target: str, *, manifest: Path, root: Path) -> str:
+    """Where a reference lands, relative to the project that declares it."""
+    if ref_kind != "path":
+        # A git URL names something by address, not by location; an inherited
+        # dependency (`foo.workspace = true`) names the workspace root, which
+        # is this project by construction.
+        return SCOPE_EXTERNAL if ref_kind == "git" else SCOPE_INTERNAL
+    if target.startswith(INTERNAL_PREFIXES):
+        # `workspace:*`, `file:../thing`, `link:./thing` — the prefix is a
+        # protocol, not a path segment, and what follows it may be a glob.
+        _, _, remainder = target.partition(":")
+        target = remainder or "."
+    try:
+        resolved = (manifest.parent / target).resolve()
+        inside = resolved.is_relative_to(root.resolve())
+    except (OSError, ValueError):  # pragma: no cover - unresolvable path
+        return SCOPE_EXTERNAL
+    if not inside:
+        return SCOPE_EXTERNAL
+    # A glob member (`crates/*`) does not exist as a path and is not broken.
+    if "*" in target or "?" in target:
+        return SCOPE_INTERNAL
+    return SCOPE_INTERNAL if resolved.exists() else SCOPE_BROKEN
 
 
 def _references(path: Path) -> list[tuple[str, str]]:
@@ -164,7 +216,11 @@ def _from_spec(spec: object) -> list[tuple[str, str]]:
         found.append(("git", git))
     workspace = spec.get("workspace")
     if workspace is True:
-        found.append(("path", "workspace:."))
+        # Cargo dependency *inheritance* from the root `[workspace.dependencies]`
+        # table — `opentelemetry.workspace = true`. It is not a path and must
+        # never reach path resolution; rustnzb produced three of these and all
+        # three were reported as unregistered projects called `workspace:.`.
+        found.append(("inherited", "workspace:."))
     return found
 
 

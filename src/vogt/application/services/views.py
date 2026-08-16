@@ -23,6 +23,7 @@ import fnmatch
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import NamedTuple
 
 from vogt.application.context import AppContext
 from vogt.application.models import (
@@ -38,9 +39,12 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.core.entities import Observation, Project, Suppression, WorkItem
 from vogt.core.observed import (
+    LIFECYCLE_CLOSED,
     OBSERVED_STATE,
     Rankable,
+    is_classified,
     is_worklike,
+    lifecycle_of,
     priority_of,
     title_of,
     work_kind_of,
@@ -248,6 +252,7 @@ def _observed_candidates(
                 ),
                 entry=RankedItem(
                     origin="observed",
+                    classified=is_classified(observation),
                     ref=observation.subject_key,
                     title=title_of(observation),
                     kind=work_kind_of(observation),
@@ -288,13 +293,18 @@ def _score_all(candidates: list[_Candidate], *, now: datetime) -> list[RankedIte
     ]
 
 
-def rank_items(
-    view: ReadView, items: list[WorkItem], *, now: datetime
-) -> list[RankedItem]:
-    """Score and order declared work items only (used by the brief)."""
-    if not items:
-        return []
-    return _score_all(_declared_candidates(view, items), now=now)
+class _Gathered(NamedTuple):
+    """What one pass over both stores produced, and what it left out.
+
+    A tuple of four positional ints was fine while there were four; the fifth
+    is the one a reader has to be told about, so they are named now.
+    """
+
+    ranked: list[RankedItem]
+    declared: int
+    observed: int
+    suppressed: int
+    closed: int
 
 
 def _gather(
@@ -308,7 +318,7 @@ def _gather(
     label: str | None,
     trust_states: Sequence[str] | None = None,
     include_observed: bool = True,
-) -> tuple[list[RankedItem], int, int, int]:
+) -> _Gathered:
     """Build the ranked set across both stores."""
     with ctx.declared.read() as view:
         project_row = None if project is None else _resolve.project(view, project)
@@ -334,6 +344,7 @@ def _gather(
 
         observed: list[Observation] = []
         suppressed = 0
+        closed_count = 0
         if include_observed and ctx.observed.has_evidence_tables():
             worklike = [
                 observation
@@ -342,6 +353,24 @@ def _gather(
                     limit=RANKING_CANDIDATE_LIMIT,
                 )
                 if is_worklike(observation)
+            ]
+            # A view named for outstanding work contains only work that is
+            # outstanding. `bugs` returned twenty-seven observed items and every
+            # one was closed upstream, each stamped `trust_state: verified` —
+            # the state sat in the payload the whole time and nothing consulted
+            # it. Trust describes how well a subject is known, not whether it is
+            # still open, and was being read as the second. A closed subject
+            # stays observable through `observations list`; it is only out of
+            # the ranked views.
+            closed_count = sum(
+                1
+                for observation in worklike
+                if lifecycle_of(observation) == LIFECYCLE_CLOSED
+            )
+            worklike = [
+                observation
+                for observation in worklike
+                if lifecycle_of(observation) != LIFECYCLE_CLOSED
             ]
             kept: list[Observation] = []
             for observation in worklike:
@@ -368,7 +397,9 @@ def _gather(
         ranked = [entry for entry in ranked if entry.kind in set(kinds)]
     if priorities:
         ranked = [entry for entry in ranked if entry.priority in set(priorities)]
-    return ranked, len(declared_items), len(observed), suppressed
+    return _Gathered(
+        ranked, len(declared_items), len(observed), suppressed, closed_count
+    )
 
 
 def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
@@ -380,7 +411,7 @@ def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
     which is the only version that pages honestly, and is why the offset is
     applied here rather than pushed into the query.
     """
-    ranked, declared, observed, suppressed = _gather(
+    gathered = _gather(
         ctx,
         project=params.project,
         kinds=params.kinds,
@@ -391,11 +422,12 @@ def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
         trust_states=params.trust_states,
     )
     return BacklogResult(
-        items=ranked[params.offset : params.offset + params.limit],
-        total_considered=len(ranked),
-        declared=declared,
-        observed=observed,
-        suppressed=suppressed,
+        items=gathered.ranked[params.offset : params.offset + params.limit],
+        total_considered=len(gathered.ranked),
+        declared=gathered.declared,
+        observed=gathered.observed,
+        suppressed=gathered.suppressed,
+        closed_upstream=gathered.closed,
         scope=params.project or "global",
         freshness=freshness_of(ctx),
     )
@@ -406,7 +438,7 @@ def bugs(ctx: AppContext, params: BugsParams) -> BacklogResult:
 
     Paged like `backlog`, and for the same reason (FR-V5).
     """
-    ranked, declared, observed, suppressed = _gather(
+    gathered = _gather(
         ctx,
         project=params.project,
         kinds=["bug"],
@@ -416,11 +448,12 @@ def bugs(ctx: AppContext, params: BugsParams) -> BacklogResult:
         label=params.label,
     )
     return BacklogResult(
-        items=ranked[params.offset : params.offset + params.limit],
-        total_considered=len(ranked),
-        declared=declared,
-        observed=observed,
-        suppressed=suppressed,
+        items=gathered.ranked[params.offset : params.offset + params.limit],
+        total_considered=len(gathered.ranked),
+        declared=gathered.declared,
+        observed=gathered.observed,
+        suppressed=gathered.suppressed,
+        closed_upstream=gathered.closed,
         scope=params.project or "global",
         freshness=freshness_of(ctx),
     )

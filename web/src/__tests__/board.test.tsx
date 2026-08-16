@@ -884,6 +884,51 @@ describe("FR-U13 — a swimlane is a grouping, not a filter value", () => {
     expect(vogt.matching("GET /work")).toHaveLength(1);
   });
 
+  it("gives a project with no work a lane of its own", async () => {
+    // WI-7. Lanes were derived from the loaded work items alone, so a project
+    // with none had no lane and was simply absent — which is the state every
+    // freshly imported project is in. The first thing an import's owner does
+    // is open the board, and its answer for a correct import was to show
+    // nothing at all.
+    const vogt = fakeVogt({
+      ...LANED,
+      "GET /projects": {
+        body: {
+          projects: [
+            { slug: "alpha", name: "Alpha" },
+            { slug: "beta", name: "Beta" },
+            { slug: "gamma", name: "Gamma" },
+          ],
+        },
+      },
+    });
+    const { container } = board("/board?lanes=project");
+
+    await waitFor(() => expect(laneLabels(container)).toContain("Alpha"));
+
+    expect(laneLabels(container)).toContain("Gamma");
+    expect(cardsInLane(container, "Gamma")).toEqual([]);
+    expect(laneHead(container, "Gamma").querySelector(".board-lane-count")?.textContent).toBe(
+      "0",
+    );
+    // Still one load: an empty lane is this client arranging what it has.
+    expect(vogt.matching("GET /work")).toHaveLength(1);
+  });
+
+  it("says nothing is here rather than nothing matches, when nothing is here", async () => {
+    // The other half of WI-7: the empty state named the filter as the cause
+    // when no filter was applied, so a correct import read as a broken one.
+    fakeVogt({
+      ...LANED,
+      "GET /work": { body: { items: [], total: 0 } },
+      "GET /projects": { body: { projects: [] } },
+    });
+    const { container } = board("/board?lanes=project");
+
+    await waitFor(() => expect(laneLabels(container).length).toBeGreaterThan(0));
+    expect(laneLabels(container)).toEqual(["No work yet"]);
+  });
+
   it("regroups by initiative on the same load, and asks Vogt nothing", async () => {
     const vogt = fakeVogt(LANED);
     const view = board("/board?lanes=project");

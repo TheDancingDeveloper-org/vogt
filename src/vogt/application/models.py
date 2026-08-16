@@ -58,6 +58,12 @@ DEFAULT_EXCLUSIONS: tuple[str, ...] = (
     "dist/",
     "build/",
     ".git/",
+    # Agent scratch space. Worktrees under `.claude/` carry complete copies of
+    # a project's manifests, so without this a repository's dependency graph is
+    # inflated by however many worktrees happen to be lying around — `vogt`
+    # reported six references out, three of them duplicates from one
+    # throwaway worktree.
+    ".claude/",
 )
 
 
@@ -156,6 +162,40 @@ class RegisterProjectParams(Params):
     lifecycle_state: LifecycleState = Field(
         default="active", description="incubating / active / maintenance / archived."
     )
+    exclusions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Paths collection skips, replacing the defaults entirely rather "
+            "than adding to them. Omit for the defaults. A repository that "
+            "vendors a corpus or carries agent worktrees needs this at "
+            "registration, because the first sweep is the baseline every "
+            "later answer is compared against."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class UpdateProjectParams(Params):
+    """Correct a project's declaration after registration.
+
+    Deliberately narrow. `lifecycle_state` is absent because it has its own
+    operation with a validated edge (`project transition`), and the observed
+    fields are absent because nothing declares them. What is left is the two
+    facts a registration can get wrong and nothing else could fix: where the
+    project is published, and what collection should skip.
+    """
+
+    slug: str = Field(description="Project to update.")
+    repo_url: str | None = Field(
+        default=None, description="Leave unset to keep the current value."
+    )
+    exclusions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Replaces the current list entirely. Leave unset to keep it; pass "
+            "an empty list to collect everything."
+        ),
+    )
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
@@ -247,6 +287,16 @@ class RankedItem(Result):
     """
 
     origin: Literal["declared", "observed"]
+    classified: bool = Field(
+        default=True,
+        description=(
+            "Whether anything actually said what kind of work this is. False "
+            "means `kind` is this product's guess from an absence of signal — "
+            "an unlabelled forge issue — and that the subject may be missing "
+            "from the view a reader expected to find it in. Declared work is "
+            "always classified: somebody typed the kind in."
+        ),
+    )
     ref: str = Field(
         description="`WI-7` for declared work, or the observed subject key."
     )
@@ -277,14 +327,40 @@ class ProjectBriefParams(Params):
 
 
 class CiSummary(Result):
-    """The CI story for a project (FR-O6), or the absence of one."""
+    """The CI story for a project (FR-O6), or the absence of one.
+
+    Every field below describes **one revision** — the newest any retained
+    check names. That scope is the point: the same shape without it reported
+    a project as `failing` on the strength of a build that broke days before
+    the current head and had since been fixed. FR-O4's rule — partial
+    coverage is disclosed, never silently returned as complete — is the same
+    rule one layer up from the observations it was written about.
+    """
 
     status: Literal["not_collected", "no_checks", "passing", "failing"] = (
         "not_collected"
     )
-    checks: int = 0
+    checks: int = Field(
+        default=0, description="Checks observed on `revision`, not in total."
+    )
     failing: list[str] = []
     revision: str | None = None
+    revisions_observed: int = Field(
+        default=0,
+        description=(
+            "How many distinct revisions the retained window covers. The "
+            "denominator `checks` is a numerator of, so a reader can tell a "
+            "quiet project from a busy one."
+        ),
+    )
+    earlier_failures: int = Field(
+        default=0,
+        description=(
+            "Failing checks on revisions behind `revision`. History, not "
+            "verdict: these do not make `status` failing, and a project that "
+            "fixes its build goes green here without waiting for retention."
+        ),
+    )
     detail: str | None = None
 
 
@@ -302,10 +378,33 @@ class ProjectBriefResult(Result):
     """The per-repo view in one call (FR-P2)."""
 
     project: Project
-    open_work: int
+    open_work: int = Field(
+        description=(
+            "Outstanding work across both populations, declared and observed "
+            "— the same set `backlog --project` ranks. Split below, because "
+            "a total that does not name its populations is not an answer."
+        )
+    )
     open_bugs: int
-    by_state: dict[str, int]
-    by_kind: dict[str, int]
+    declared_work: int = Field(
+        default=0, description="Of `open_work`, how much somebody typed in."
+    )
+    observed_work: int = Field(
+        default=0,
+        description=(
+            "Of `open_work`, how much a collector found — chiefly what "
+            "`forge onboard` consolidated. Zero here with a non-zero "
+            "`declared_work` is a project nobody has collected for; the "
+            "reverse is a project nobody has declared work on."
+        ),
+    )
+    by_state: dict[str, int] = Field(
+        description=(
+            "Declared work items only, terminal states included. Observed "
+            "subjects have no workflow state to count (DESIGN §3.6)."
+        )
+    )
+    by_kind: dict[str, int] = Field(description="Declared work items only, as above.")
     top_backlog: list[RankedItem]
     current_version: str | None
     declared_version: str | None = None
@@ -576,6 +675,15 @@ class BacklogResult(Result):
     declared: int = 0
     observed: int = 0
     suppressed: int = 0
+    closed_upstream: int = Field(
+        default=0,
+        description=(
+            "Observed subjects left out because their source says they are "
+            "closed. Reported rather than silently dropped, so a short list is "
+            "distinguishable from a filtered one — they remain queryable "
+            "through `observations list`."
+        ),
+    )
     scope: str
     freshness: Freshness
 
@@ -748,13 +856,49 @@ class CoverageEntry(Result):
     status: str
     last_swept_at: datetime | None = None
     age_seconds: int | None = None
-    projects: int = 0
+    projects: int = Field(
+        default=0,
+        description=(
+            "How many projects this collector has ever swept. Cumulative, "
+            "which is what the operation's name promises; it used to be the "
+            "scope of the most recent sweep, so a `--project`-scoped run made "
+            "every collector look as though it had only ever seen one."
+        ),
+    )
+    registered: int = Field(
+        default=0,
+        description="The denominator: projects registered on this instance.",
+    )
+    last_sweep_scope: int = Field(
+        default=0,
+        description=(
+            "How many projects the most recent sweep was asked about. Reported "
+            "separately so a scoped sweep and a collector that failed on seven "
+            "of eight projects stop looking alike."
+        ),
+    )
+    never_swept: int = Field(
+        default=0,
+        description=(
+            "Registered projects this collector has never looked at. The "
+            "number a reader is usually after, and the one that used to have "
+            "to be inferred from a count that could not support it."
+        ),
+    )
     detail: str | None = None
 
 
 class CoverageResult(Result):
     collectors: list[CoverageEntry]
     swept_project_ids: list[str]
+    unswept_project_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Registered projects no collector has ever swept. A registered "
+            "project nothing has looked at has no evidence behind anything it "
+            "claims, and is the case FR-O4 exists to keep visible."
+        ),
+    )
 
 
 class ObservationsParams(Params):
@@ -871,16 +1015,38 @@ class CriterionView(Result):
     target: str
     satisfied: bool
     detail: str
+    tracked: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the repository carries this. Null where it could not be "
+            "asked — an unregistered path, or a directory that is not a "
+            "checkout. False alongside a file that exists on disk is the "
+            "present-but-untracked case: no clone would have it."
+        ),
+    )
+
+
+class ContractEvaluateParams(Params):
+    """A dry run against any path. Reads, stores nothing, needs no reason.
+
+    Split from `ContractCheckParams` because the two are different
+    operations wearing one name. This one changes nothing, so FR-S1 has
+    nothing to audit — and demanding a reason for it meant the CLI collected a
+    justification for a write that never happened, then discarded it. It also
+    forced `project.write` scope on a read, so a read-only token could not
+    evaluate a contract against a folder at all.
+    """
+
+    path: str = Field(
+        description="Any folder or repository, registered or not. Stores nothing."
+    )
 
 
 class ContractCheckParams(Params):
-    path: str | None = Field(
-        default=None,
-        description="Any folder or repository, registered or not. Stores nothing.",
-    )
-    project: str | None = Field(
-        default=None,
-        description="A registered project slug. Records the result with its age.",
+    """Evaluate a registered project and record the result (FR-G14)."""
+
+    project: str = Field(
+        description="A registered project slug. Records the result with its age."
     )
     reason: Reason
 
@@ -1241,6 +1407,16 @@ class OnboardResult(Result):
         description=(
             "Always zero. Onboarding is read-only (FR-B3); the field exists "
             "so the claim is asserted rather than assumed."
+        ),
+    )
+    supported: bool = Field(
+        default=True,
+        description=(
+            "Whether an adapter could read this repository's host at all. "
+            "False makes the zeros below meaningless rather than informative: "
+            "nothing was read, so nothing was found, and `detail` says why. "
+            "The import playbook treats an empty consolidation as a signal, "
+            "and this is what makes that signal readable."
         ),
     )
     detail: str | None = None

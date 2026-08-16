@@ -22,51 +22,57 @@ from vogt.application.models import (
     ComplianceResult,
     ContractCheckParams,
     ContractCheckResult,
+    ContractEvaluateParams,
     CriterionView,
 )
 from vogt.application.services import _resolve
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.collectors.base import CollectorContext
 from vogt.collectors.contract_checker import ContractCheckerCollector
+from vogt.collectors.git_local import tracked_names
 from vogt.core.contract import NOT_CHECKED, configured_contract, evaluate
 from vogt.core.entities import Actor
-from vogt.errors import InvalidRequest
 from vogt.storage.interface import ProjectUpdate, WriteTxn
 
 CONTRACT_CHECK = "contract.check"
 CONTRACT_CHECKED_EVENT = "contract.checked"
 
 
-def contract_check(ctx: AppContext, params: ContractCheckParams) -> ContractCheckResult:
-    """Evaluate the contract against a path or a registered project (FR-G4).
+def contract_evaluate(
+    ctx: AppContext, params: ContractEvaluateParams
+) -> ContractCheckResult:
+    """Evaluate the contract against any path, storing nothing (FR-G4).
 
-    Against an unregistered folder it is a pure read: nothing is stored,
-    because there is nothing to store it against. Against a registered
-    project it also records the result — as evidence in the observed store
-    and as a projection on the project row (FR-G14).
+    A pure read, and now shaped like one: no `reason`, no `project.write`
+    scope. Both were required while this shared an operation with the
+    recording half, so the CLI collected a justification for a write that
+    never happened and a read-only token could not run it at all.
     """
-    if not params.path and not params.project:
-        msg = "give either --path or --project"
-        raise InvalidRequest(msg)
-    if params.path and params.project:
-        msg = "give --path or --project, not both"
-        raise InvalidRequest(msg)
+    root = Path(params.path)
+    result = evaluate(
+        root, configured_contract(ctx.config), tracked=tracked_names(root)
+    )
+    return ContractCheckResult(
+        path=result.path,
+        project=None,
+        contract_version=result.contract_version,
+        status=result.status,
+        criteria=[_view(c) for c in result.criteria],
+        failing=[_view(c) for c in result.failing],
+        recorded=False,
+        checked_at=None,
+    )
 
-    if params.path:
-        result = evaluate(Path(params.path), configured_contract(ctx.config))
-        return ContractCheckResult(
-            path=result.path,
-            project=None,
-            contract_version=result.contract_version,
-            status=result.status,
-            criteria=[_view(c) for c in result.criteria],
-            failing=[_view(c) for c in result.failing],
-            recorded=False,
-            checked_at=None,
-        )
 
+def contract_check(ctx: AppContext, params: ContractCheckParams) -> ContractCheckResult:
+    """Evaluate a registered project's contract and record the result (FR-G14).
+
+    The result lands twice: as evidence in the observed store with a subject
+    key and a timestamp, and as a projection on the project row. `recorded:
+    true` is the thing that distinguishes this from `contract evaluate`.
+    """
     with ctx.declared.read() as view:
-        project = _resolve.project(view, params.project or "")
+        project = _resolve.project(view, params.project)
 
     # Run it as the collector, so the answer lands in the evidence store with
     # a subject key and a timestamp like every other observation.
@@ -88,7 +94,10 @@ def contract_check(ctx: AppContext, params: ContractCheckParams) -> ContractChec
         )
         ctx.observed.rebuild_latest()
 
-    result = evaluate(Path(project.root_path), configured_contract(ctx.config))
+    root = Path(project.root_path)
+    result = evaluate(
+        root, configured_contract(ctx.config), tracked=tracked_names(root)
+    )
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[ContractCheckResult]:
         del actor
@@ -179,6 +188,7 @@ def _view(criterion: object) -> CriterionView:
         target=criterion.target,  # type: ignore[attr-defined]
         satisfied=criterion.satisfied,  # type: ignore[attr-defined]
         detail=criterion.detail,  # type: ignore[attr-defined]
+        tracked=criterion.tracked,  # type: ignore[attr-defined]
     )
 
 

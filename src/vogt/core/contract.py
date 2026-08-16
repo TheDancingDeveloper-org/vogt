@@ -190,6 +190,14 @@ class CriterionResult:
     target: str
     satisfied: bool
     detail: str
+    tracked: bool | None = None
+    """Whether the repository carries this, where that could be asked.
+
+    `None` means it could not be — an unregistered path, or a directory that
+    is not a checkout. `False` on a criterion whose file is sitting right
+    there is the case this field exists for (FR-G3): present on one disk,
+    absent from every clone.
+    """
 
 
 @dataclass(frozen=True)
@@ -214,11 +222,64 @@ NON_COMPLIANT = "non_compliant"
 NOT_CHECKED = "not_checked"
 
 
-def evaluate(path: Path, contract: Contract = DEFAULT_CONTRACT) -> ContractResult:
+def _criterion(
+    rule: str, name: str, on_disk: bool, tracked: frozenset[str] | None
+) -> CriterionResult:
+    """One criterion, answered against the repository where there is one."""
+    suffix = "/" if rule == "required_dir" else ""
+    if not on_disk:
+        return CriterionResult(
+            rule=rule,
+            target=name,
+            satisfied=False,
+            detail=f"{name}{suffix} is missing",
+            tracked=None if tracked is None else False,
+        )
+    if tracked is None:
+        return CriterionResult(
+            rule=rule, target=name, satisfied=True, detail="present", tracked=None
+        )
+    if name in tracked:
+        return CriterionResult(
+            rule=rule, target=name, satisfied=True, detail="present", tracked=True
+        )
+    return CriterionResult(
+        rule=rule,
+        target=name,
+        satisfied=False,
+        detail=(
+            f"{name}{suffix} is present in the working tree but not tracked, "
+            "so no clone of this repository has it"
+        ),
+        tracked=False,
+    )
+
+
+def evaluate(
+    path: Path,
+    contract: Contract = DEFAULT_CONTRACT,
+    *,
+    tracked: frozenset[str] | None = None,
+) -> ContractResult:
     """Check a folder or repository against a contract.
 
     Works on any path, registered or not (FR-G4), and blocks nothing
     (FR-G13). The result is a value to read.
+
+    `tracked` is the set of top-level names the repository carries, from a
+    caller that is allowed to run git — `None` where nobody could ask. A
+    criterion satisfied on disk but absent from that set **fails**, because
+    the criterion means "this repository carries its licence", not "this disk
+    has a file with that name today". Two projects onboarded on 2026-08-16
+    were recorded as satisfying `AGENTS.md` on an untracked 288-byte stub —
+    one of sixty-three byte-identical copies a tool had dropped around the
+    workspace — and one satisfied `docs/` on an empty untracked directory git
+    cannot represent even in principle, while its real documentation sat in
+    `documentation/`. Clone either repository and neither criterion holds.
+
+    This module stays pure: the caller does the asking, and passing `None`
+    keeps the old filesystem-only behaviour for a path with no repository
+    behind it.
     """
     root = Path(path).expanduser()
     criteria: list[CriterionResult] = []
@@ -248,24 +309,12 @@ def evaluate(path: Path, contract: Contract = DEFAULT_CONTRACT) -> ContractResul
         )
     )
     for name in contract.required_files:
-        present = (root / name).is_file()
         criteria.append(
-            CriterionResult(
-                rule="required_file",
-                target=name,
-                satisfied=present,
-                detail="present" if present else f"{name} is missing",
-            )
+            _criterion("required_file", name, (root / name).is_file(), tracked)
         )
     for name in contract.required_dirs:
-        present = (root / name).is_dir()
         criteria.append(
-            CriterionResult(
-                rule="required_dir",
-                target=name,
-                satisfied=present,
-                detail="present" if present else f"{name}/ is missing",
-            )
+            _criterion("required_dir", name, (root / name).is_dir(), tracked)
         )
 
     failing = [c for c in criteria if not c.satisfied]

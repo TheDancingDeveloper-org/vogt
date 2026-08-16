@@ -585,6 +585,28 @@ nothing (§2.1):
   a three-week-old `compliant` is honest in a way a silently-refreshed one
   is not.
 
+**A criterion is asked of the repository, not of the disk.** Where the target
+is a git checkout, a required file or directory must be *tracked*:
+present in the working tree and absent from every clone is a failure, and it
+says so — `AGENTS.md is present in the working tree but not tracked, so no
+clone of this repository has it`. `CriterionResult.tracked` carries the
+distinction (`None` where the question could not be asked, so
+`contract check --path` on a plain folder still works as FR-G4 requires).
+
+This was not a hypothetical. Two projects onboarded on 2026-08-16 were
+recorded as satisfying `AGENTS.md` on an untracked 288-byte stub — one of
+sixty-three byte-identical copies a tool had dropped across the workspace —
+and one satisfied `docs/` on an *empty* untracked directory, which git cannot
+represent even in principle, while its real documentation sat in
+`documentation/`. A compliance number that improves as such stubs spread, and
+not at all as repositories are fixed, is measuring the wrong thing. It also
+makes a recorded status reproducible: the same commit checked out elsewhere
+now gives the same answer.
+
+The consequence worth stating plainly is that a required directory needs a
+tracked file in it — which is why `design/` in this repository holds a
+`.gitkeep`, and always did.
+
 Nothing re-checks on a timer. If you want a current answer, ask for one —
 which is a one-line CLI call, an MCP tool an agent can invoke as part of
 its own workflow, and a thing that costs nothing when nobody cares.

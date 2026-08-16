@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 
 from vogt.application.context import AppContext, build_context
-from vogt.application.models import ContractCheckParams
-from vogt.application.services import contract_check
+from vogt.application.models import ContractEvaluateParams
+from vogt.application.services import contract_evaluate
 from vogt.config import VogtConfig
 from vogt.core.contract import (
     COMPLIANT,
@@ -90,7 +90,7 @@ def test_a_configured_contract_is_what_gets_evaluated(tmp_path: Path) -> None:
         ),
     )
 
-    result = contract_check(ctx, ContractCheckParams(path=str(project), reason=WHY))
+    result = contract_evaluate(ctx, ContractEvaluateParams(path=str(project)))
 
     assert result.status == COMPLIANT, [c.rule for c in result.failing]
     assert result.contract_version == "house-2026.1"
@@ -115,7 +115,7 @@ def test_a_failing_criterion_is_still_named_under_a_custom_contract(
         ),
     )
 
-    result = contract_check(ctx, ContractCheckParams(path=str(project), reason=WHY))
+    result = contract_evaluate(ctx, ContractEvaluateParams(path=str(project)))
 
     failing = [c.target for c in result.failing]
     assert any("HOUSE-RULES.md" in target for target in failing), failing
@@ -234,7 +234,7 @@ def test_the_contract_is_still_a_value_not_a_gate(tmp_path: Path) -> None:
         ),
     )
 
-    result = contract_check(ctx, ContractCheckParams(path=str(project), reason=WHY))
+    result = contract_evaluate(ctx, ContractEvaluateParams(path=str(project)))
     assert result.status == NON_COMPLIANT
     assert result.criteria, "a bare boolean is what FR-G1 forbids"
     assert result.failing, "and the failures are named, not merely counted"

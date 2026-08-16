@@ -10,6 +10,7 @@ from vogt.application.context import AppContext
 from vogt.application.models import (
     ComplianceParams,
     ContractCheckParams,
+    ContractEvaluateParams,
     CreateProjectParams,
     CreateWorkParams,
     ProjectBriefParams,
@@ -21,14 +22,16 @@ from vogt.application.services import (
     brief_project,
     compliance,
     contract_check,
+    contract_evaluate,
     create_project,
     create_work,
     register_project,
     sweep,
     transition_project,
 )
+from vogt.collectors.git_local import tracked_names
 from vogt.core.contract import DEFAULT_CONTRACT, evaluate
-from vogt.errors import InvalidRequest
+from vogt.errors import NotFound
 
 WHY = "contract test"
 
@@ -64,10 +67,103 @@ def test_a_missing_path_fails_with_a_useful_rule(tmp_path: Path) -> None:
 
 
 def test_this_repository_satisfies_its_own_contract() -> None:
-    """NFR-O3, checked against the real thing rather than a fixture."""
+    """NFR-O3, checked against the real thing rather than a fixture.
+
+    Asked as a *repository*, not as a directory: every criterion must be met
+    by something a clone would receive. `design/` holds nothing but a
+    `.gitkeep`, and that file is the reason this passes rather than an
+    accident of the checkout.
+    """
     repo = Path(__file__).resolve().parents[1]
-    result = evaluate(repo)
+    result = evaluate(repo, tracked=tracked_names(repo))
     assert result.status == "compliant", [c.detail for c in result.failing]
+    assert all(c.tracked for c in result.criteria if c.rule != "path.exists")
+
+
+# -- what the repository carries, not what the disk holds (FR-G3) ----------
+
+
+def test_an_untracked_file_does_not_satisfy_a_criterion(tmp_path: Path) -> None:
+    """The `indexarr` and `arz-client` case, and it is not a corner one.
+
+    Both were recorded as satisfying `AGENTS.md` on an untracked 288-byte
+    stub — one of sixty-three byte-identical copies a tool had dropped across
+    the workspace, two of them in repositories still queued for import. The
+    criterion means "this repository carries its agent guidance"; what was
+    measured was "this disk has a file with that name today", and those come
+    apart exactly on the repositories a standards migration is about.
+    """
+    _compliant(tmp_path)
+    result = evaluate(tmp_path, tracked=frozenset({"README.md", "LICENSE"}))
+
+    agents = next(c for c in result.criteria if c.target == "AGENTS.md")
+    assert not agents.satisfied
+    assert agents.tracked is False
+    assert "not tracked" in agents.detail
+    assert "no clone" in agents.detail, "say why it matters, not just what"
+    assert result.status == "non_compliant"
+
+
+def test_a_tracked_file_still_satisfies_it(tmp_path: Path) -> None:
+    _compliant(tmp_path)
+    tracked = frozenset(DEFAULT_CONTRACT.required_files) | frozenset(
+        DEFAULT_CONTRACT.required_dirs
+    )
+    result = evaluate(tmp_path, tracked=tracked)
+    assert result.status == "compliant"
+    assert all(c.tracked for c in result.criteria if c.rule != "path.exists")
+
+
+def test_an_empty_directory_cannot_satisfy_a_required_dir(tmp_path: Path) -> None:
+    """Git cannot represent an empty directory, so it is never in a clone.
+
+    `indexarr` passed `docs/` on one — a `mkdir` somebody ran once — while
+    its real documentation sat in `documentation/`, which the contract does
+    not look at. The criterion was satisfied by the empty directory and would
+    have been failed by the real one.
+    """
+    _compliant(tmp_path)
+    # Everything tracked except `docs`, which is what an empty directory
+    # looks like to `git ls-files`: absent.
+    tracked = (
+        frozenset(DEFAULT_CONTRACT.required_files)
+        | frozenset(DEFAULT_CONTRACT.required_dirs)
+    ) - {"docs"}
+
+    result = evaluate(tmp_path, tracked=tracked)
+    docs = next(c for c in result.criteria if c.target == "docs")
+    assert not docs.satisfied
+    assert docs.tracked is False
+
+
+def test_a_missing_file_is_not_confused_with_an_untracked_one(tmp_path: Path) -> None:
+    """Two failures, two details.
+
+    FR-G3 asks for the specific criteria that failed rather than a bare
+    pass/fail, and "missing" and "present but not in the repository" are
+    different things to go and do.
+    """
+    (tmp_path / "AGENTS.md").write_text("x\n", encoding="utf-8")
+    result = evaluate(tmp_path, tracked=frozenset())
+
+    agents = next(c for c in result.criteria if c.target == "AGENTS.md")
+    licence = next(c for c in result.criteria if c.target == "LICENSE")
+    assert "not tracked" in agents.detail
+    assert licence.detail == "LICENSE is missing"
+
+
+def test_a_path_with_no_repository_is_still_answerable(tmp_path: Path) -> None:
+    """FR-G4: `contract check --path` on a plain folder is legitimate.
+
+    `tracked=None` is "nobody could ask", and it must not collapse into
+    "nothing is tracked" — that would fail every criterion on a directory
+    whose only crime is not being a git checkout.
+    """
+    _compliant(tmp_path)
+    result = evaluate(tmp_path, tracked=None)
+    assert result.status == "compliant"
+    assert all(c.tracked is None for c in result.criteria)
+    assert tracked_names(tmp_path) is None, "and that is what a bare folder gives"
 
 
 # -- through the service ---------------------------------------------------
@@ -76,10 +172,12 @@ def test_this_repository_satisfies_its_own_contract() -> None:
 def test_checking_a_bare_path_stores_nothing(
     instance: AppContext, tmp_path: Path
 ) -> None:
-    """FR-G4: invocable against any folder, without registering it."""
-    result = contract_check(
-        instance, ContractCheckParams(path=str(tmp_path), reason=WHY)
-    )
+    """FR-G4: invocable against any folder, without registering it.
+
+    And without a reason, and without `project.write`. Sharing an operation
+    with the recording half demanded both for a call that stores nothing.
+    """
+    result = contract_evaluate(instance, ContractEvaluateParams(path=str(tmp_path)))
     assert result.recorded is False
     assert result.project is None
     with instance.declared.read() as view:
@@ -184,13 +282,19 @@ def test_a_plain_sweep_does_not_check_the_contract(
     )
 
 
-def test_checking_needs_exactly_one_target(instance: AppContext) -> None:
-    with pytest.raises(InvalidRequest, match="--path or --project"):
-        contract_check(instance, ContractCheckParams(reason=WHY))
-    with pytest.raises(InvalidRequest, match="not both"):
-        contract_check(
-            instance, ContractCheckParams(path="/tmp", project="x", reason=WHY)
-        )
+def test_the_two_halves_are_two_operations(instance: AppContext) -> None:
+    """The ambiguity is gone rather than validated.
+
+    One operation took `--path` or `--project` and had to reject both and
+    neither at runtime. They are different acts — one reads, one records —
+    and the shape now says so: `contract evaluate` takes a path and no reason,
+    `contract check` takes a project and requires one.
+    """
+    with pytest.raises(NotFound):
+        contract_check(instance, ContractCheckParams(project="absent", reason=WHY))
+
+    evaluated = contract_evaluate(instance, ContractEvaluateParams(path="/tmp"))
+    assert evaluated.recorded is False
 
 
 # -- FR-G13: nothing consumes compliance as a precondition ----------------

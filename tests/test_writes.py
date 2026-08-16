@@ -9,11 +9,13 @@ from vogt.application.models import (
     InitParams,
     ListEventsParams,
     RegisterProjectParams,
+    UpdateProjectParams,
 )
 from vogt.application.services import (
     init_instance,
     list_events,
     register_project,
+    update_project,
 )
 from vogt.application.writes import WriteOutcome, audited_write, validate_reason
 from vogt.core.entities import Actor
@@ -141,6 +143,84 @@ def test_a_name_with_no_slug_is_refused(instance: AppContext) -> None:
         register_project(
             instance,
             RegisterProjectParams(name="///", root_path="/srv/x", reason="try it"),
+        )
+
+
+def test_exclusions_can_be_stated_at_registration(instance: AppContext) -> None:
+    """WI-3. The first sweep is the baseline everything later is compared to.
+
+    `pingRAG` was registered with 20,212 of its 20,329 tracked files inside a
+    vendored `corpus/`, and every source marker Vogt holds for it is somebody
+    else's documentation as a result — including one file that is literally a
+    third party's `TODO.md`.
+    """
+    registered = register_project(
+        instance,
+        RegisterProjectParams(
+            name="Corpus Carrier",
+            root_path="/srv/corpus-carrier",
+            exclusions=["corpus/", "data/"],
+            reason="a test write",
+        ),
+    )
+    assert registered.project.exclusions == ["corpus/", "data/"]
+
+
+def test_registration_without_exclusions_still_gets_the_defaults(
+    instance: AppContext,
+) -> None:
+    """Stating them replaces the defaults; omitting them keeps the defaults."""
+    registered = register_project(
+        instance,
+        RegisterProjectParams(
+            name="Plain", root_path="/srv/plain", reason="a test write"
+        ),
+    )
+    assert ".git/" in registered.project.exclusions
+
+
+def test_exclusions_can_be_corrected_after_registration(
+    instance: AppContext,
+) -> None:
+    """The half of WI-3 that had no execution path at all.
+
+    Registration was the only chance to state them and did not take them
+    either, so the defaults were what every project got, permanently. The
+    playbook has a phase for recording what should be excluded and there was
+    nothing to run against it.
+    """
+    register_project(
+        instance,
+        RegisterProjectParams(
+            name="Late", root_path="/srv/late", reason="a test write"
+        ),
+    )
+    updated = update_project(
+        instance,
+        UpdateProjectParams(
+            slug="late",
+            exclusions=["corpus/"],
+            reason="The corpus is vendored documentation, not this project's source.",
+        ),
+    )
+    assert updated.project.exclusions == ["corpus/"]
+
+    with instance.declared.read() as view:
+        rows = [r for r in view.list_audit(limit=20) if r.operation == "project.update"]
+    assert len(rows) == 1, "and correcting a declaration is an audited write"
+
+
+def test_an_update_that_changes_nothing_is_refused(instance: AppContext) -> None:
+    """A write with nothing to write is a caller error, not a silent no-op."""
+    register_project(
+        instance,
+        RegisterProjectParams(
+            name="Idle", root_path="/srv/idle", reason="a test write"
+        ),
+    )
+    with pytest.raises(InvalidRequest):
+        update_project(
+            instance, UpdateProjectParams(slug="idle", reason="a test write")
         )
 
 

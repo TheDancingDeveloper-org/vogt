@@ -20,6 +20,12 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.application.services.views import freshness_of
 from vogt.application.writes import WriteOutcome, audited_write
+from vogt.collectors.dep_refs import (
+    SCOPE_BROKEN,
+    SCOPE_EXTERNAL,
+    SCOPE_INTERNAL,
+)
+from vogt.core.checks import roll_up
 from vogt.core.drift import (
     AUTO_ACCEPTABLE_KINDS,
     FORGE_STATE_MISMATCH,
@@ -28,6 +34,7 @@ from vogt.core.drift import (
     VERSION_MISMATCH,
     DriftFinding,
     EvidenceSnapshot,
+    broken_path_dependency,
     ci_red_vs_healthy,
     forge_state_mismatch,
     unresolved_dependency,
@@ -93,6 +100,14 @@ def _version_findings(ctx: AppContext) -> list[DriftFinding]:
 
 
 def _dependency_findings(ctx: AppContext) -> list[DriftFinding]:
+    """Unresolved references, split by where the reference actually lands.
+
+    A reference the collector scoped `internal` is a project pointing at its
+    own crates, which is what a workspace *is* — it never resolves to another
+    registered project and must never be proposed as one. Thirty of rustnzb's
+    thirty-one proposals were that, and the gate text on every one of them
+    read "usually it is a project nobody has registered yet".
+    """
     findings: list[DriftFinding] = []
     with ctx.declared.read() as view:
         slugs = {p.id: p.slug for p in view.list_projects(limit=10_000, offset=0)}
@@ -104,8 +119,18 @@ def _dependency_findings(ctx: AppContext) -> list[DriftFinding]:
         )
         if not observations:
             continue
+        # Read from the observation rather than the projection: the scope is
+        # a fact the collector established while it had the manifest and the
+        # tree in front of it, and re-deriving it here would be a second
+        # implementation to disagree with the first.
+        scope = observations[0].payload.get("scope", SCOPE_EXTERNAL)
+        if scope == SCOPE_INTERNAL:
+            continue
+        raise_as = (
+            broken_path_dependency if scope == SCOPE_BROKEN else unresolved_dependency
+        )
         findings.append(
-            unresolved_dependency(
+            raise_as(
                 subject_key=ref.subject_key,
                 project_id=ref.from_project_id,
                 project_slug=slugs.get(ref.from_project_id, ref.from_project_id),
@@ -176,20 +201,32 @@ def _forge_findings(ctx: AppContext) -> list[DriftFinding]:
         checks = ctx.observed.latest(
             kinds=("ci.check",), project_id=project.id, limit=200
         )
-        failing = [
-            (str(c.payload.get("check", "?")), c)
-            for c in checks
-            if c.payload.get("conclusion") not in (None, "success", "skipped")
-        ]
-        if failing and project.lifecycle_state in ("active", "maintenance"):
-            newest = max((c for _, c in failing), key=lambda c: c.observed_at)
+        # Scoped to the newest observed revision. Reading the whole retained
+        # window as one population raised this proposal against projects whose
+        # head was green — the failure it named was days old and fixed, and
+        # the same workflow appeared twice in one summary because it was two
+        # runs on two commits. A stale red is not drift; it is history.
+        rollup = roll_up(checks)
+        if (
+            rollup is not None
+            and rollup.failing
+            and project.lifecycle_state in ("active", "maintenance")
+        ):
+            newest = max(
+                (
+                    c
+                    for c in rollup.checks
+                    if c.payload.get("conclusion") not in (None, "success", "skipped")
+                ),
+                key=lambda c: c.observed_at,
+            )
             findings.append(
                 ci_red_vs_healthy(
                     project_id=project.id,
                     project_slug=project.slug,
                     lifecycle_state=project.lifecycle_state,
-                    failing=[name for name, _ in failing],
-                    revision=str(newest.payload.get("revision", "")),
+                    failing=list(rollup.failing),
+                    revision=rollup.revision or "",
                     evidence=_snapshot(newest),
                     evidence_observation_id=newest.id,
                 )
@@ -222,6 +259,31 @@ def _forge_findings(ctx: AppContext) -> list[DriftFinding]:
                     )
                 )
     return findings
+
+
+def _raise_proposal(
+    ctx: AppContext, proposal: DriftProposal, *, reason: str
+) -> DriftProposal:
+    """Insert one proposal as the declared write it is (NFR-I1).
+
+    It landed in a bare `ctx.declared.write()` until 2026-08-16, which left `drift
+    detect` putting entity rows into the declared store with no audit row and
+    no actor — the rule `audited_write` exists to enforce, broken by the
+    operation that creates more rows per run than any other.
+    """
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[DriftProposal]:
+        txn.insert_drift(proposal)
+        return WriteOutcome(
+            result=proposal,
+            entity_kind="drift_proposal",
+            entity_id=proposal.id,
+            payload=proposal.model_dump(mode="json"),
+            event_kind=DRIFT_RAISED_EVENT,
+            summary={"kind": proposal.kind, "summary": proposal.summary},
+        )
+
+    return audited_write(ctx, operation="drift.detect", reason=reason, body=body)
 
 
 def detect_drift(ctx: AppContext, params: DriftDetectParams) -> DriftDetectResult:
@@ -267,15 +329,7 @@ def detect_drift(ctx: AppContext, params: DriftDetectParams) -> DriftDetectResul
             status="open",
             opened_at=ctx.clock(),
         )
-        with ctx.declared.write() as txn:
-            txn.insert_drift(proposal)
-        ctx.declared.publish_event(
-            kind=DRIFT_RAISED_EVENT,
-            entity_kind="drift_proposal",
-            entity_id=proposal.id,
-            summary={"kind": proposal.kind, "summary": proposal.summary},
-            at=ctx.clock(),
-        )
+        _raise_proposal(ctx, proposal, reason=params.reason)
         raised.append(proposal)
 
         if params.auto_accept and found.auto_acceptable:

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vogt.adapters.github.client import GitHubClient
+from vogt.adapters.github.client import GitHubClient, unsupported_reason
 from vogt.adapters.github.collectors import (
     KIND_ISSUE,
     KIND_PULL_REQUEST,
@@ -37,11 +37,14 @@ from vogt.application.models import (
     WriteBackListResult,
 )
 from vogt.application.services import _resolve
+from vogt.application.writes import audited_action
 from vogt.collectors.base import CollectorContext
 from vogt.core.entities import Actor, Project, WorkItem, WriteBackRecord
 
 WRITEBACK_SET = "project.writeback"
 WRITEBACK_SET_EVENT = "project.writeback_set"
+#: One consolidation run, attributed to whoever asked for it (FR-S1).
+ONBOARDED_EVENT = "forge.onboarded"
 
 
 @dataclass(frozen=True)
@@ -238,9 +241,29 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
     with ctx.declared.read() as view:
         project = _resolve.project(view, params.project)
 
+    # Asked before the adapter is even built: "this host is not supported" and
+    # "the adapter is not configured" are different answers, and both are
+    # different from "there is nothing there".
+    unsupported = unsupported_reason(project.repo_url)
+    if unsupported is not None:
+        refused = OnboardResult(
+            project=project.slug,
+            repo=project.repo_url,
+            issues=0,
+            pull_requests=0,
+            labels=0,
+            releases=0,
+            new=0,
+            unchanged=0,
+            supported=False,
+            detail=unsupported,
+        )
+        _record_onboard(ctx, project, params.reason, refused)
+        return refused
+
     client = GitHubClient.from_token_file(ctx.config.github_token_file)
     if client is None:
-        return OnboardResult(
+        unconfigured = OnboardResult(
             project=project.slug,
             repo=project.repo_url,
             issues=0,
@@ -254,6 +277,8 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
                 "which is 'not collected', not 'there is nothing'"
             ),
         )
+        _record_onboard(ctx, project, params.reason, unconfigured)
+        return unconfigured
 
     consolidator = GitHubConsolidator(client, max_pages=params.max_pages)
     collector_ctx = CollectorContext(config=ctx.config, clock=ctx.clock)
@@ -276,7 +301,7 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
     for entry in findings:
         by_kind[entry.kind] = by_kind.get(entry.kind, 0) + 1
 
-    return OnboardResult(
+    result = OnboardResult(
         project=project.slug,
         repo=project.repo_url,
         issues=by_kind.get(KIND_ISSUE, 0),
@@ -286,4 +311,27 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
         new=stats.new,
         unchanged=stats.unchanged,
         mutations=0,
+    )
+    # The largest read of an import, and for a long time the only step of one
+    # left no trace: a consolidation that ran and one that was never run were
+    # indistinguishable in `audit list`, which is how two of a five-project
+    # batch were missed for an hour. Every return path records, including the
+    # ones that read nothing — "the adapter is not configured" is still an
+    # answer somebody asked for, and why they asked is the useful half.
+    _record_onboard(ctx, project, params.reason, result)
+    return result
+
+
+def _record_onboard(
+    ctx: AppContext, project: Project, reason: str, result: OnboardResult
+) -> None:
+    """Attribute one consolidation run to the principal who asked for it."""
+    audited_action(
+        ctx,
+        operation="forge.onboard",
+        reason=reason,
+        entity_kind="project",
+        entity_id=project.id,
+        outcome=result.model_dump(mode="json"),
+        event_kind=ONBOARDED_EVENT,
     )

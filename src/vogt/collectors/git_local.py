@@ -136,3 +136,26 @@ def git_output(root: Path, *args: str, required: bool = False) -> str:
             raise CollectorError(msg)
         return ""
     return completed.stdout.strip()
+
+
+def tracked_names(root: Path) -> frozenset[str] | None:
+    """The top-level names this repository actually carries, or `None`.
+
+    `None` means the question could not be asked — `root` is not a git
+    checkout, or git is not runnable here — which is different from "it
+    carries nothing" and is what lets the contract fall back to reading the
+    filesystem rather than failing every criterion at once (FR-O9).
+
+    Only the first path segment is kept, because that is all a contract
+    criterion names: `AGENTS.md`, `docs`. A directory is tracked if anything
+    under it is, which is also the only sense in which git has directories at
+    all — and is exactly why an empty `docs/` cannot be tracked and should
+    never have counted.
+    """
+    if not (root / ".git").exists():
+        return None
+    try:
+        listing = git_output(root, "ls-files", "-z", required=True)
+    except CollectorError:
+        return None
+    return frozenset(entry.split("/", 1)[0] for entry in listing.split("\0") if entry)

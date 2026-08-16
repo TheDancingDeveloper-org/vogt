@@ -325,6 +325,16 @@ def coverage(ctx: AppContext, params: CoverageParams) -> CoverageResult:
         return CoverageResult(collectors=[], swept_project_ids=[])
 
     newest = ctx.observed.coverage()
+    # Cumulative rather than last-sweep, because the question this operation
+    # is named for — what has looked at what — cannot be answered from one
+    # sweep's scope. With eight projects registered and the last sweep scoped
+    # to one, every collector reported `projects: 1`, which reads as seven
+    # unswept projects and was in fact seven projects swept an hour earlier.
+    ever = ctx.observed.coverage_by_project()
+    with ctx.declared.read() as view:
+        registered = {
+            project.id for project in view.list_projects(limit=10_000, offset=0)
+        }
     registry = collector_registry(ctx)
     now = ctx.clock()
 
@@ -332,16 +342,18 @@ def coverage(ctx: AppContext, params: CoverageParams) -> CoverageResult:
     swept: set[str] = set()
     for name in registry.names:
         sweep_record = newest.get(name)
+        seen = ever.get(name, {})
+        swept.update(seen)
         if sweep_record is None:
             entries.append(
                 CoverageEntry(
                     collector=name,
                     status="never_run",
                     detail="this collector has not completed a sweep",
+                    registered=len(registered),
                 )
             )
             continue
-        swept.update(sweep_record.scope)
         finished = sweep_record.finished_at or sweep_record.started_at
         entries.append(
             CoverageEntry(
@@ -349,11 +361,18 @@ def coverage(ctx: AppContext, params: CoverageParams) -> CoverageResult:
                 status=sweep_record.outcome,
                 last_swept_at=finished,
                 age_seconds=int((now - finished).total_seconds()),
-                projects=len(sweep_record.scope),
+                projects=len(seen),
+                registered=len(registered),
+                last_sweep_scope=len(sweep_record.scope),
+                never_swept=len(registered - set(seen)),
                 detail=sweep_record.detail,
             )
         )
-    return CoverageResult(collectors=entries, swept_project_ids=sorted(swept))
+    return CoverageResult(
+        collectors=entries,
+        swept_project_ids=sorted(swept),
+        unswept_project_ids=sorted(registered - swept),
+    )
 
 
 def observations(ctx: AppContext, params: ObservationsParams) -> ObservationsResult:

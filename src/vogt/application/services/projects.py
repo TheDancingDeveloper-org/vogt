@@ -19,23 +19,27 @@ from vogt.application.models import (
     ProjectResult,
     RegisterProjectParams,
     TransitionProjectParams,
+    UpdateProjectParams,
 )
 from vogt.application.services import _resolve
-from vogt.application.services.views import freshness_of, rank_items
+from vogt.application.services.views import _gather, freshness_of
 from vogt.application.writes import WriteOutcome, audited_write
+from vogt.core.checks import roll_up
 from vogt.core.contract import DEFAULT_CONTRACT, default_scaffold
 from vogt.core.entities import Actor, Project
 from vogt.core.ids import slugify
-from vogt.core.workflow import TERMINAL_STATES, check_lifecycle_transition
+from vogt.core.workflow import check_lifecycle_transition
 from vogt.errors import Conflict, InvalidRequest
 from vogt.storage.interface import ProjectUpdate, WorkFilter, WriteTxn
 
 PROJECT_REGISTER = "project.register"
 PROJECT_CREATE = "project.create"
 PROJECT_TRANSITION = "project.transition"
+PROJECT_UPDATE = "project.update"
 
 PROJECT_REGISTERED_EVENT = "project.registered"
 PROJECT_TRANSITIONED_EVENT = "project.transitioned"
+PROJECT_UPDATED_EVENT = "project.updated"
 
 
 def _new_project(
@@ -50,7 +54,11 @@ def _new_project(
         repo_url=params.repo_url,
         lifecycle_state=params.lifecycle_state,
         compliance_status="not_checked",
-        exclusions=list(DEFAULT_EXCLUSIONS),
+        exclusions=(
+            list(DEFAULT_EXCLUSIONS)
+            if params.exclusions is None
+            else list(params.exclusions)
+        ),
         trust_state="unverified",
         created_at=now,
         updated_at=now,
@@ -198,17 +206,34 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
             by_state[item.state] = by_state.get(item.state, 0) + 1
             by_kind[item.kind] = by_kind.get(item.kind, 0) + 1
 
-        live = [item for item in items if item.state not in TERMINAL_STATES]
-        ranked = rank_items(view, live, now=ctx.clock())
         observed_version = _observed_version(ctx, project)
+
+    # The same population `backlog` and `bugs` rank, so the three views agree
+    # about one project at one moment. They did not: this read the declared
+    # store alone, so a project whose whole backlog arrived through
+    # `forge onboard` briefed as `open_work: 0` with nine issues ranked in
+    # `backlog --project` for the same project at the same moment. The brief
+    # is the first surface an import's owner reads, and it said the import had
+    # found nothing.
+    gathered = _gather(
+        ctx,
+        project=params.slug,
+        kinds=None,
+        priorities=None,
+        assignee=None,
+        initiative=None,
+        label=None,
+    )
 
     return ProjectBriefResult(
         project=project,
-        open_work=len(live),
-        open_bugs=sum(1 for item in live if item.kind == "bug"),
+        open_work=len(gathered.ranked),
+        open_bugs=sum(1 for entry in gathered.ranked if entry.kind == "bug"),
+        declared_work=gathered.declared,
+        observed_work=gathered.observed,
         by_state=dict(sorted(by_state.items())),
         by_kind=dict(sorted(by_kind.items())),
-        top_backlog=ranked[: params.backlog_limit],
+        top_backlog=gathered.ranked[: params.backlog_limit],
         current_version=project.current_version,
         declared_version=project.current_version,
         observed_version=observed_version,
@@ -242,11 +267,20 @@ def _observed_version(ctx: AppContext, project: Project) -> str | None:
 
 
 def _ci_summary(ctx: AppContext, project: Project) -> CiSummary:
-    """The CI story, or an honest statement that nobody has looked (FR-O6)."""
+    """The CI story for the newest observed revision (FR-O6).
+
+    Scoped to one revision, and says which. It used to be a verdict over
+    every retained check across every commit, pinned to whichever row sorted
+    last by sweep time — so a project whose head was green read `failing`
+    because something failed days earlier, and could never read green again
+    until the old row aged out. `core.checks` does the grouping; this decides
+    how to say it.
+    """
     if not ctx.observed.has_evidence_tables():
         return CiSummary(detail="no sweep has run; CI status is not collected")
     checks = ctx.observed.latest(kinds=("ci.check",), project_id=project.id, limit=200)
-    if not checks:
+    rollup = roll_up(checks)
+    if rollup is None:
         return CiSummary(
             status="no_checks",
             detail=(
@@ -254,17 +288,22 @@ def _ci_summary(ctx: AppContext, project: Project) -> CiSummary:
                 "has none, or the optional forge adapter is not configured"
             ),
         )
-    failing = [
-        str(check.payload.get("check", "?"))
-        for check in checks
-        if check.payload.get("conclusion") not in (None, "success", "skipped")
-    ]
-    newest = max(checks, key=lambda check: check.observed_at)
     return CiSummary(
-        status="failing" if failing else "passing",
-        checks=len(checks),
-        failing=sorted(set(failing)),
-        revision=str(newest.payload.get("revision") or "") or None,
+        status="failing" if rollup.failing else "passing",
+        checks=len(rollup.checks),
+        failing=list(rollup.failing),
+        revision=rollup.revision,
+        revisions_observed=rollup.revisions_observed,
+        earlier_failures=rollup.earlier_failures,
+        detail=(
+            None
+            if not rollup.earlier_failures
+            else (
+                f"{rollup.earlier_failures} failing check(s) on earlier "
+                f"revisions are not counted here; this is the state of "
+                f"{(rollup.revision or '')[:12]} alone"
+            )
+        ),
     )
 
 
@@ -282,6 +321,51 @@ def _dependency_summary(ctx: AppContext, project: Project) -> DependencySummary:
         referenced_by=len(incoming),
         unresolved=sum(1 for ref in out if ref.to_project_id is None),
     )
+
+
+def update_project(ctx: AppContext, params: UpdateProjectParams) -> ProjectResult:
+    """Correct a project's declaration after registration (FR-G12).
+
+    Registration used to be the only chance to state exclusions, and it did
+    not take them either — so the defaults were what every project got, for
+    good. `pingRAG` was registered with 20,212 of its 20,329 tracked files
+    inside a vendored `corpus/`, and every source marker Vogt holds for it
+    comes from somebody else's documentation as a result. There was nothing
+    to run to fix that.
+    """
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[ProjectResult]:
+        del actor
+        project = _resolve.project(txn, params.slug)
+        if params.repo_url is None and params.exclusions is None:
+            msg = "give --repo-url or --exclusions; there is nothing else to update"
+            raise InvalidRequest(msg)
+        txn.update_project(
+            project.id,
+            ProjectUpdate(
+                repo_url=params.repo_url,
+                exclusions=(
+                    None if params.exclusions is None else tuple(params.exclusions)
+                ),
+            ),
+            at=ctx.clock(),
+        )
+        updated = txn.project_by_slug(project.slug)
+        assert updated is not None  # just written in this transaction
+        return WriteOutcome(
+            result=ProjectResult(project=updated),
+            entity_kind="project",
+            entity_id=project.id,
+            payload=updated.model_dump(mode="json"),
+            event_kind=PROJECT_UPDATED_EVENT,
+            summary={
+                "slug": project.slug,
+                "exclusions": list(updated.exclusions),
+                "repo_url": updated.repo_url,
+            },
+        )
+
+    return audited_write(ctx, operation=PROJECT_UPDATE, reason=params.reason, body=body)
 
 
 def transition_project(
@@ -328,4 +412,5 @@ __all__ = [
     "record_registration",
     "register_project",
     "transition_project",
+    "update_project",
 ]

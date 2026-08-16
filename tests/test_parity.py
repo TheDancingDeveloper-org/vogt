@@ -82,6 +82,14 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ("project.get", {"slug": "parity-project"}),
     ("project.list", {}),
     (
+        "project.update",
+        {
+            "slug": "parity-project",
+            "exclusions": ["corpus/", ".claude/"],
+            "reason": WHY,
+        },
+    ),
+    (
         "project.transition",
         {"slug": "parity-project", "to_state": "maintenance", "reason": WHY},
     ),
@@ -166,6 +174,7 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ),
     ("suppression.list", {}),
     # -- contract and drift -------------------------------------------------
+    ("contract.evaluate", {"path": "{root}"}),
     ("contract.check", {"project": "parity-fixture", "reason": WHY}),
     ("compliance", {"project": "parity-fixture"}),
     ("drift.detect", {"reason": WHY}),

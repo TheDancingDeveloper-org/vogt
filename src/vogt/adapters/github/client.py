@@ -29,6 +29,33 @@ DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_PER_PAGE = 100
 
 
+class _NoContent:
+    """A successful response that carried no body.
+
+    Distinct from `None`, which this client uses for 404 — and the difference
+    is the whole point. GitHub answers the repository toggles with 204 when
+    they are *on* and 404 when they are *off*, so flattening the two would
+    report every enabled security setting as disabled.
+    """
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        """Falsy, so `if not payload` reads correctly without knowing about it.
+
+        Identity is what distinguishes 204 from 404 (`is None`); truthiness is
+        what every caller that just wants "was there anything" already tests.
+        """
+        return False
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "NO_CONTENT"
+
+
+#: The one instance; compare with `is`.
+NO_CONTENT = _NoContent()
+
+
 class Transport(Protocol):
     """How this client actually talks, so tests never need a network.
 
@@ -109,6 +136,14 @@ class GitHubClient:
         if status >= 400:
             msg = f"GitHub returned {status} for {path}"
             raise GitHubUnavailable(msg)
+        if status == 204 or not body.strip():
+            # 204 is the documented answer for the repository toggles, and the
+            # collector that reads them said so in its own docstring while this
+            # line fed the empty body to a JSON parser. The result was
+            # `JSONDecodeError: Expecting value: line 1 column 1 (char 0)`,
+            # which took down the whole `gh-posture` sweep for the project
+            # rather than one field of it.
+            return NO_CONTENT
         return json.loads(body.decode("utf-8"))
 
     def send(self, path: str, payload: dict[str, Any], *, method: str = "POST") -> Any:
@@ -162,6 +197,38 @@ class GitHubClient:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             msg = f"GitHub unreachable: {exc}"
             raise GitHubUnavailable(msg) from exc
+
+
+#: The one host this adapter can read. Stated as a value rather than left
+#: implicit in `repo_of`'s parsing, so an operation can tell a caller *why*
+#: it read nothing instead of reporting zero and leaving them to guess.
+SUPPORTED_HOST = "github.com"
+
+
+def unsupported_reason(repo_url: str | None) -> str | None:
+    """Why this adapter cannot read that repository, or `None` if it can.
+
+    An empty success is the failure mode this exists to prevent. `forge
+    onboard` against a Forgejo project returned `issues: 0, pull_requests: 0,
+    …, detail: null` for a repository with an open issue in it — byte-identical
+    to the honest answer for a repository with no history at all. Half the
+    estate's remaining import queue is Forgejo-hosted, and the import playbook
+    reads an empty consolidation as a signal, so that signal was unreadable
+    for exactly the repositories it was most needed on.
+    """
+    if not repo_url:
+        return (
+            "this project declares no repository URL, so there is no forge to "
+            "read — which is 'not collected', not 'there is nothing'"
+        )
+    if repo_of(repo_url) is not None:
+        return None
+    host = repo_url.split("://")[-1].split("/")[0] or repo_url
+    return (
+        f"the GitHub adapter cannot read {host}; it reads {SUPPORTED_HOST} only, "
+        "so nothing was collected here and no conclusion should be drawn from "
+        "the counts"
+    )
 
 
 def repo_of(repo_url: str | None) -> tuple[str, str] | None:
