@@ -724,11 +724,15 @@ is today (NFR-PO4).
 image" for 3 and 4, meaning a separate repository. The MyDevEnv2 merge arrived
 first, so all four code-side prerequisites are now files in this repository's
 `engine/` subtree, built by `engine/Dockerfile` and shipped by
-`engine/.woodpecker/server.yml` — which is a happier place for them: the
-integration and the thing it integrates with are now reviewable in one diff.
-The image and Komodo stack it deploys to are still the engine's own, not
-Vogt's; see `docs/MERGE_MYDEVENV2.md` §10 for the stack consolidation that has
-not happened yet.
+`.github/workflows/build.yml` — which is a happier place for them: the
+integration and the thing it integrates with are now reviewable in one diff,
+and the build that ships them is the one whose logs this repository can read.
+(The sentence here used to name `engine/.woodpecker/server.yml`. That was the
+vendored copy of the engine's Woodpecker pipeline, it never ran against this
+repository, and it has been deleted; the standalone stacks in §11 are still
+built by the *forge's* copy of it.) The Komodo stacks the engine's own image
+deploys to are still the engine's, not Vogt's; see `docs/MERGE_MYDEVENV2.md`
+§10 for the stack consolidation that has not happened yet.
 
 **One thing is still open, and it is in a file this repository must not edit.**
 The estate `AGENTS.md` Vogt row (prerequisite 5, done) still says the token is
@@ -1136,10 +1140,16 @@ is where several engine behaviours were validated.
 | `dev-mydevenv2` | `personal/mydevenv2-dev/` | 8911 | `mydevenv2-dev.sprooty.com` | `…/mydevenv2:dev-<sha>` |
 
 Both are Komodo stacks on Node B, desired state in `indexarr/ops`, Caddy in
-front, built by Woodpecker (`engine/.woodpecker/server.yml`) rather than by this
-repository's GitHub Actions. **The merge did not merge the deployments**: a
-change under `engine/` does not reach production by tagging this repository, and
-the reverse is equally untrue.
+front, built by Woodpecker rather than by this repository's GitHub Actions —
+and the pipeline that builds them lives in the pre-merge Forgejo repository
+`indexarr/MyDevEnv2`, which is where Woodpecker's repository list points. It
+is not in this tree. A vendored copy of it sat under `engine/.woodpecker/`
+from the merge until it was deleted; reading that copy to
+understand these stacks was always reading the wrong file, since nothing here
+ever triggered it and the forge's copy is the one that has been changing.
+**The merge did not merge the deployments**: a change under `engine/` does not
+reach these stacks by merging or tagging this repository, and the reverse is
+equally untrue.
 
 ```text
 push to dev  -> build-and-push-dev  -> :dev / :dev-<sha>  -> personal/mydevenv2-dev  -> dev-mydevenv2

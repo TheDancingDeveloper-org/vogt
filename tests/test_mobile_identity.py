@@ -34,7 +34,14 @@ MOBILE = REPO_ROOT / "mobile"
 GRADLE = MOBILE / "android" / "app" / "build.gradle"
 CAPACITOR = MOBILE / "capacitor.config.ts"
 SERVICES = MOBILE / "android" / "app" / "google-services.json"
-WOODPECKER = REPO_ROOT / "engine" / ".woodpecker" / "server.yml"
+#: Every workflow that can build an APK. Was `engine/.woodpecker/server.yml`
+#: until that vendored pipeline was deleted — it was inert here, since
+#: Woodpecker builds the pre-merge Forgejo repository and this one is on
+#: GitHub, so a test reading it was asserting about a file that never ran.
+#: The property it protected is real, so it moved with the builds rather than
+#: being dropped: whatever CI builds an APK under has to be an identity FCM
+#: knows.
+WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
 #: The variable both build files read. Named once here so a rename shows up as
 #: one failure rather than as a silent divergence.
@@ -56,9 +63,22 @@ def _packages() -> set[str]:
 
 
 def _ci_app_ids() -> set[str]:
-    """Every application id the engine's pipeline builds an APK under."""
-    text = WOODPECKER.read_text(encoding="utf-8")
-    return set(re.findall(rf'{APP_ID_VAR}="([^"]+)"', text))
+    """Every application id a GitHub Actions job builds an APK under.
+
+    Read out of the workflows rather than named here, because the point is to
+    fail when somebody adds a build stream — not when somebody updates a list
+    that the builds no longer match. A job that sets nothing builds under
+    `DEFAULT_APP_ID`, which the workflow cannot state and the two build files'
+    fallbacks do; that case is covered by the test above this one.
+    """
+    found: set[str] = set()
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        # Both quoting styles YAML allows for a scalar, and the bare form.
+        found |= set(re.findall(rf'{APP_ID_VAR}:\s*"([^"\s]+)"', text))
+        found |= set(re.findall(rf"{APP_ID_VAR}:\s*'([^'\s]+)'", text))
+        found |= set(re.findall(rf"{APP_ID_VAR}:\s*([A-Za-z][\w.]*)\s*$", text, re.M))
+    return found
 
 
 def test_both_build_files_read_the_same_variable() -> None:
@@ -97,7 +117,7 @@ def test_every_application_id_ci_builds_can_receive_push() -> None:
     `google-services.json` is keyed by package name. An APK built under an id
     with no client entry installs happily, runs happily, and silently cannot
     register for FCM — so the dev build looks like a push outage rather than a
-    misconfiguration. Asserted against what the pipeline actually exports, so
+    misconfiguration. Asserted against what the workflows actually set, so
     adding a third build stream without a Firebase entry fails here rather
     than on somebody's phone.
     """
@@ -114,12 +134,17 @@ def test_every_application_id_ci_builds_can_receive_push() -> None:
 def test_the_dev_stream_builds_under_its_own_id() -> None:
     """Two APKs side by side is the whole point of the requirement.
 
-    Asserted rather than assumed because the pipeline could set the variable to
+    Asserted rather than assumed because a workflow could set the variable to
     the prod id and everything above would still pass — the ids would agree,
     the entry would exist, and the two builds would still refuse to coexist.
+
+    This is the assertion that caught the deletion of the vendored Woodpecker
+    pipeline: it was the only file in the tree that set the variable, and
+    removing it left the id built by nothing. `ci.yml`'s `android` job sets it
+    now.
     """
     ci_ids = _ci_app_ids()
-    assert ci_ids, "no pipeline step sets an application id"
+    assert ci_ids, "no workflow job sets an application id"
     assert ci_ids != {DEFAULT_APP_ID}, (
         "every APK CI builds carries the prod application id, so a dev build "
         "still cannot install beside prod"

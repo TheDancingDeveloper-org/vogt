@@ -421,10 +421,27 @@ jobs:
       # artifact and points at nothing — installing it would show the offline
       # page. A real APK is built by a release job that names a real front
       # door.
+      #
+      # `MYDEVENV2_ANDROID_APP_ID` is the non-prod identity (FR-M4). The
+      # engine's Woodpecker pipeline was the only thing in the tree that ever
+      # set it — its `mobile-apk-dev` step — and that file has been deleted,
+      # so without this every APK the product builds would carry the prod
+      # application id. That is wrong twice over: this APK is debug-signed, so
+      # Android refuses to install it over a real one anyway, and an id with
+      # no build behind it is an id nobody notices going stale. Named on both
+      # steps because the two toolchains read it at different moments —
+      # Capacitor when it writes the native config, Gradle when it assembles —
+      # and setting it on one is the exact divergence `tests/
+      # test_mobile_identity.py` exists to catch.
+      #
+      # `com.sprooty.mydevenv2.dev` has its own client entry in
+      # `mobile/android/app/google-services.json`, so this build can register
+      # for push; that agreement is asserted, not assumed.
       - name: capacitor sync
         working-directory: mobile
         env:
           VOGT_ANDROID_SERVER_URL: http://127.0.0.1:8910
+          MYDEVENV2_ANDROID_APP_ID: "com.sprooty.mydevenv2.dev"
         run: npx cap sync android
 
       # A *debug* APK: it is signed with Gradle's generated debug key, so it
@@ -433,6 +450,8 @@ jobs:
       # see the note at the bottom of this file.
       - name: assemble
         working-directory: mobile/android
+        env:
+          MYDEVENV2_ANDROID_APP_ID: "com.sprooty.mydevenv2.dev"
         run: ./gradlew assembleDebug --no-daemon
 
       - uses: actions/upload-artifact@v7
@@ -490,10 +509,23 @@ jobs:
           echo "every half that had something to check passed"
 
 # ---------------------------------------------------------------------------
-# What did not come over from `engine/.woodpecker/server.yml`
+# What did not come over from the engine's Woodpecker pipeline
 #
 # The engine arrived with a Woodpecker pipeline against a Forgejo instance
-# (`repo.indexarr.net`). Its *checks* are all above. These parts were dropped
+# (`repo.indexarr.net`), vendored into this tree as
+# `engine/.woodpecker/server.yml`. **That copy has been deleted.** It never
+# ran here — Woodpecker's repositories are `indexarr/MyDevEnv` and
+# `indexarr/MyDevEnv2` on the forge, and this repository is on GitHub — so
+# what it actually was, for as long as it sat here, was a second set of
+# publish and deploy steps that looked authoritative and was not: it built
+# `repo.indexarr.net/indexarr/mydevenv2` from the same Dockerfile `build.yml`
+# builds, and it moved production. The pre-merge repository keeps its own
+# copy and its own pipeline; nothing here was disabled to delete this one,
+# because nothing here was ever enabled.
+#
+# The record below stays, because it is the *reason* each part is absent
+# rather than a description of a file, and a deleted file cannot be read for
+# the answer. Its checks are all above. These parts were dropped
 # deliberately, and each is a decision rather than an oversight:
 #
 #   * The custom `clone:` step authenticating to `repo.indexarr.net` with
@@ -527,6 +559,13 @@ jobs:
 #     (NFR-C6), unsigned, so a broken shell is caught; where a signed APK
 #     gets published in the merged product is a release decision that has not
 #     been taken, and inventing one here would have been worse than saying so.
+#
+#     What *did* come over is the one part of those steps the rest of the
+#     tree depends on: `mobile-apk-dev`'s `MYDEVENV2_ANDROID_APP_ID`. Two
+#     build files read that variable and a Firebase client entry is keyed to
+#     its value, so deleting the only thing that set it would have left three
+#     files agreeing about an identity nothing built. The `android` job sets
+#     it, for the reason given there.
 #
 #   * `discord-success` / `discord-failure` webhooks. No webhook secret exists
 #     in this repository, and a notification step that silently `|| true`s is

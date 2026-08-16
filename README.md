@@ -102,8 +102,9 @@ What that adds to the tree:
 - `engine/` — a Rust/Axum workspace (`engine/server`, `engine/contract`) that
   owns PTY sessions, WebSocket attach with scrollback replay, an SSE event
   stream, workspace-scoped file and git APIs, and a server-side assistant loop.
-  It is its own Cargo workspace and carries its own `Dockerfile`, `deploy/` and
-  `.woodpecker/`. Needs `cargo`; run it from `engine/`.
+  It is its own Cargo workspace and carries its own `Dockerfile` and
+  `deploy/`; its image is built and published by this repository's GitHub
+  Actions. Needs `cargo`; run it from `engine/`.
 - `web/` — a Solid/Vite PWA, which becomes the product's GUI. Needs `pnpm`; run
   it from `web/`. The Rust binary embeds `web/dist/` at compile time.
 - `mobile/` — a Capacitor 8 Android shell that loads the deployed PWA.
