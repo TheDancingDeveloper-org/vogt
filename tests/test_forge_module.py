@@ -204,7 +204,7 @@ def test_a_consolidation_is_audited_with_the_reason_it_was_given(
 ) -> None:
     """FR-S1: the largest read of an import leaves a row saying who asked.
 
-    It did not until r14. `forge onboard` is mutating and reason-required, and
+    It did not. `forge onboard` is mutating and reason-required, and
     it discarded the reason and wrote nothing — so a consolidation that ran and
     one that was never run were indistinguishable in `audit list`. That is not
     hypothetical: two of a five-project batch were missed for an hour because
@@ -225,9 +225,9 @@ def test_a_consolidation_that_read_nothing_is_audited_too(
 ) -> None:
     """The un-run zero and the honest zero must differ *somewhere*.
 
-    They still look alike in the result — that is `WI-9`/FR-O11's problem, and
-    it is fixed by the adapter declaring what it can read. What this pins is
-    the other half: whichever zero it was, the run itself is on the record.
+    They still look alike in the result — that is `WI-9`'s problem, and it is
+    fixed by the adapter declaring what it can read. What this pins is the
+    other half: whichever zero it was, the run itself is on the record.
     """
     register_project(
         instance,
@@ -245,7 +245,7 @@ def test_a_consolidation_that_read_nothing_is_audited_too(
 def test_a_consolidated_project_does_not_brief_as_empty(
     instance: AppContext, forge: Forge
 ) -> None:
-    """FR-O10: brief, backlog and bugs must agree about one project.
+    """brief, backlog and bugs must agree about one project.
 
     They did not. `brief` read the declared store alone while `backlog` and
     `bugs` merged declared with observed, so a project whose entire backlog
@@ -270,7 +270,7 @@ def test_a_consolidated_project_does_not_brief_as_empty(
 def test_the_brief_says_which_population_it_counted(
     instance: AppContext, forge: Forge
 ) -> None:
-    """A total that does not name its halves is the shape FR-O10 forbids.
+    """A total that does not name its halves is not an answer.
 
     Nine observed and nothing declared, and nine declared and nothing
     observed, are different situations for an owner reading a brief — one is

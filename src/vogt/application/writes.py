@@ -11,8 +11,8 @@ designed to catch.
 
 `audited_action` covers the mutating operations a principal invokes whose
 effect lands in the *observed* store — `forge onboard` and
-`observations prune`. FR-S1 makes both carry a `reason`, and until r14 both
-discarded it: they published an event and wrote no audit row, so a run that
+`observations prune`. FR-S1 makes both carry a `reason`, and both used to
+discard it: they published an event and wrote no audit row, so a run that
 happened and a run that never happened left the same trace. `forge onboard`
 consolidated 127 objects for one project and 102 for another without either
 appearing in `audit list`, which is how a skipped consolidation in a

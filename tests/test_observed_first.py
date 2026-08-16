@@ -314,7 +314,7 @@ def test_pruning_is_audited_with_the_reason_it_was_given(swept: AppContext) -> N
 
     A sweep deliberately writes no audit row — it runs every fifteen minutes on
     a schedule with nobody to name. Deletion is the opposite case on both
-    counts, and until r14 it was treated the same way: the reason went into an
+    counts, and it was treated the same way regardless: the reason went into an
     event summary and never reached `audit list`.
     """
     why = "Retention pass before the quarterly backup."

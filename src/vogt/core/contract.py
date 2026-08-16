@@ -195,7 +195,7 @@ class CriterionResult:
 
     `None` means it could not be — an unregistered path, or a directory that
     is not a checkout. `False` on a criterion whose file is sitting right
-    there is the case this field exists for (FR-G19): present on one disk,
+    there is the case this field exists for (FR-G3): present on one disk,
     absent from every clone.
     """
 

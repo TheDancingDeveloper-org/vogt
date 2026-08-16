@@ -282,7 +282,9 @@ class CiSummary(Result):
     Every field below describes **one revision** — the newest any retained
     check names. That scope is the point: the same shape without it reported
     a project as `failing` on the strength of a build that broke days before
-    the current head and had since been fixed (FR-O10).
+    the current head and had since been fixed. FR-O4's rule — partial
+    coverage is disclosed, never silently returned as complete — is the same
+    rule one layer up from the observations it was written about.
     """
 
     status: Literal["not_collected", "no_checks", "passing", "failing"] = (
@@ -329,7 +331,8 @@ class ProjectBriefResult(Result):
     open_work: int = Field(
         description=(
             "Outstanding work across both populations, declared and observed "
-            "— the same set `backlog --project` ranks. Split below (FR-O10)."
+            "— the same set `backlog --project` ranks. Split below, because "
+            "a total that does not name its populations is not an answer."
         )
     )
     open_bugs: int

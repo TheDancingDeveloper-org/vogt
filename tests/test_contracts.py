@@ -78,7 +78,7 @@ def test_this_repository_satisfies_its_own_contract() -> None:
     assert all(c.tracked for c in result.criteria if c.rule != "path.exists")
 
 
-# -- what the repository carries, not what the disk holds (FR-G19) ---------
+# -- what the repository carries, not what the disk holds (FR-G3) ----------
 
 
 def test_an_untracked_file_does_not_satisfy_a_criterion(tmp_path: Path) -> None:
@@ -135,7 +135,12 @@ def test_an_empty_directory_cannot_satisfy_a_required_dir(tmp_path: Path) -> Non
 
 
 def test_a_missing_file_is_not_confused_with_an_untracked_one(tmp_path: Path) -> None:
-    """Two failures, two details. FR-G19 asks for the distinction to survive."""
+    """Two failures, two details.
+
+    FR-G3 asks for the specific criteria that failed rather than a bare
+    pass/fail, and "missing" and "present but not in the repository" are
+    different things to go and do.
+    """
     (tmp_path / "AGENTS.md").write_text("x\n", encoding="utf-8")
     result = evaluate(tmp_path, tracked=frozenset())
 

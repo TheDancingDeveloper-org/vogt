@@ -585,8 +585,8 @@ nothing (§2.1):
   a three-week-old `compliant` is honest in a way a silently-refreshed one
   is not.
 
-**A criterion is asked of the repository, not of the disk** *(r14)*. Where
-the target is a git checkout, a required file or directory must be *tracked*:
+**A criterion is asked of the repository, not of the disk.** Where the target
+is a git checkout, a required file or directory must be *tracked*:
 present in the working tree and absent from every clone is a failure, and it
 says so — `AGENTS.md is present in the working tree but not tracked, so no
 clone of this repository has it`. `CriterionResult.tracked` carries the

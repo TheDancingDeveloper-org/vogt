@@ -260,7 +260,7 @@ def _observed_version(ctx: AppContext, project: Project) -> str | None:
 
 
 def _ci_summary(ctx: AppContext, project: Project) -> CiSummary:
-    """The CI story for the newest observed revision (FR-O6, FR-O10).
+    """The CI story for the newest observed revision (FR-O6).
 
     Scoped to one revision, and says which. It used to be a verdict over
     every retained check across every commit, pinned to whichever row sorted

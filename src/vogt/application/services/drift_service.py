@@ -242,7 +242,7 @@ def _raise_proposal(
 ) -> DriftProposal:
     """Insert one proposal as the declared write it is (NFR-I1).
 
-    It landed in a bare `ctx.declared.write()` until r14, which left `drift
+    It landed in a bare `ctx.declared.write()` until 2026-08-16, which left `drift
     detect` putting entity rows into the declared store with no audit row and
     no actor — the rule `audited_write` exists to enforce, broken by the
     operation that creates more rows per run than any other.

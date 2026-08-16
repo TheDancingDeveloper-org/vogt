@@ -206,7 +206,7 @@ def test_raising_a_proposal_is_an_audited_declared_write(
 ) -> None:
     """NFR-I1: a drift proposal is a declared entity, so raising one is audited.
 
-    It was inserted in a bare `ctx.declared.write()` until r14 — an entity row
+    It was inserted in a bare `ctx.declared.write()` — an entity row
     landing in the declared store with no audit row and no actor, by the
     operation that creates more rows per run than any other. The rule
     `audited_write` exists to enforce, broken where it was least visible.

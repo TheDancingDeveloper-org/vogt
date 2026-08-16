@@ -43,7 +43,7 @@ from vogt.core.entities import Actor, Project, WorkItem, WriteBackRecord
 
 WRITEBACK_SET = "project.writeback"
 WRITEBACK_SET_EVENT = "project.writeback_set"
-#: One consolidation run, attributed to whoever asked for it (r14, FR-S1).
+#: One consolidation run, attributed to whoever asked for it (FR-S1).
 ONBOARDED_EVENT = "forge.onboarded"
 
 
@@ -292,7 +292,7 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
         unchanged=stats.unchanged,
         mutations=0,
     )
-    # The largest read of an import, and until r14 the only step of one that
+    # The largest read of an import, and for a long time the only step of one
     # left no trace: a consolidation that ran and one that was never run were
     # indistinguishable in `audit list`, which is how two of a five-project
     # batch were missed for an hour. Every return path records, including the
