@@ -37,6 +37,7 @@ pub struct Session {
     pub id: Uuid,
     pub name: Mutex<String>,
     pub created_at: time::OffsetDateTime,
+    activity_changed_at: Mutex<time::OffsetDateTime>,
     ended_at: Mutex<Option<time::OffsetDateTime>>,
     pub cwd: String,
     command: Option<String>,
@@ -107,6 +108,7 @@ impl Session {
             cwd: self.cwd.clone(),
             command: self.command.clone(),
             created_at: format_rfc3339(self.created_at),
+            activity_changed_at: format_rfc3339(*self.activity_changed_at.lock()),
         }
     }
 
@@ -313,10 +315,12 @@ pub fn spawn(
         }
     });
 
+    let created_at = time::OffsetDateTime::now_utc();
     let session = Arc::new(Session {
         id,
         name: Mutex::new(spec.name.clone()),
-        created_at: time::OffsetDateTime::now_utc(),
+        created_at,
+        activity_changed_at: Mutex::new(created_at),
         ended_at: Mutex::new(None),
         cwd: cwd_display,
         command,
@@ -583,6 +587,7 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
         *a = new;
         drop(a);
         *session.activity_since.lock() = Instant::now();
+        *session.activity_changed_at.lock() = time::OffsetDateTime::now_utc();
         bus.publish(ServerEvent::Activity {
             id: session.id,
             state: new,

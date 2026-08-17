@@ -25,8 +25,8 @@ from vogt.core.entities import (
     Comment,
     DriftProposal,
     Event,
-    Initiative,
     InboxTriage,
+    Initiative,
     Label,
     Project,
     Relation,
@@ -1706,7 +1706,11 @@ def _row_to_token(row: sqlite3.Row) -> Token:
     return Token(
         id=str(row["id"]),
         actor_id=str(row["actor_id"]),
-        actor_identity_ref=str(row["actor_identity_ref"]),
+        actor_identity_ref=(
+            None
+            if row["actor_identity_ref"] is None
+            else str(row["actor_identity_ref"])
+        ),
         name=str(row["name"]),
         scopes=json.loads(str(row["scopes"])),
         created_at=from_iso(str(row["created_at"])),

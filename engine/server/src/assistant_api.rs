@@ -61,6 +61,11 @@ pub struct ActionReq {
     pub approve: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ReasonReq {
+    pub reason: String,
+}
+
 /// Approve or deny. The identity on *this* request is the approving user, and
 /// it is theirs a Vogt write is made with — not the one who sent the message
 /// that proposed it, if a different token did.
@@ -73,6 +78,18 @@ pub async fn resolve_action(
     let rt = runtime(&state)?;
     let caller = Caller::from_identity(identity.map(|Extension(id)| id));
     Ok(Json(rt.resolve_action(caller, id, req.approve).await?))
+}
+
+/// Preview an edited reason without approving or delivering the held write.
+/// The runtime keeps the original action id and expiry, and returns the exact
+/// regenerated card the next approval will review.
+pub async fn replace_reason(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ReasonReq>,
+) -> Result<Json<PendingActionView>> {
+    let rt = runtime(&state)?;
+    Ok(Json(rt.replace_pending_reason(id, req.reason).await?))
 }
 
 #[derive(Debug, serde::Serialize)]

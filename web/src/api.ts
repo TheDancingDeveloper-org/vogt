@@ -691,6 +691,8 @@ export const api = {
     req<AssistantReply>("POST", "/api/assistant/message", { text }),
   assistantAction: (id: string, approve: boolean) =>
     req<AssistantReply>("POST", `/api/assistant/actions/${id}`, { approve }),
+  assistantReplaceReason: (id: string, reason: string) =>
+    req<AssistantReasonPreview>("PATCH", `/api/assistant/actions/${id}`, { reason }),
   assistantHistory: () => req<AssistantHistory>("GET", "/api/assistant/history"),
   assistantReset: () => req<OkResponse>("POST", "/api/assistant/reset"),
   sessionInput: (id: string, text: string, submit = false) =>
@@ -763,6 +765,9 @@ export interface AssistantVogtWriteAction {
   reason: string;
   payload: string;
 }
+
+/** The exact card returned after a Vogt-write reason preview/update. */
+export type AssistantReasonPreview = AssistantVogtWriteAction;
 
 /**
  * Discriminated because the two effectors have nothing in common but the gate:

@@ -13,6 +13,7 @@ each other.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -25,6 +26,10 @@ from vogt.application.context import AppContext
 from vogt.application.models import (
     BacklogParams,
     CoverageParams,
+    InboxArchiveParams,
+    InboxListParams,
+    InboxRestoreParams,
+    InboxSnoozeParams,
     ListEventsParams,
     NotificationsParams,
     ObservationsParams,
@@ -32,12 +37,16 @@ from vogt.application.models import (
     SweepParams,
 )
 from vogt.application.services import (
+    archive_inbox,
     backlog,
     coverage,
     list_events,
+    list_inbox,
     list_notifications,
     observations,
     register_project,
+    restore_inbox,
+    snooze_inbox,
     sweep,
 )
 
@@ -295,3 +304,55 @@ def test_the_forge_inbox_never_leaks_into_the_events_feed(
     assert KIND_NOTIFICATION not in kinds
     assert not any(kind.startswith("forge.") for kind in kinds)
     assert "sweep.completed" in kinds
+
+
+def test_normalized_inbox_paginates_and_audits_occurrence_triage(
+    instance: AppContext, forge: Forge
+) -> None:
+    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+
+    first_page = list_inbox(instance, InboxListParams(limit=1))
+    assert len(first_page.entries) == 1
+    assert first_page.next_cursor is not None
+    assert first_page.coverage["github"].status == "ok"
+    assert first_page.github_scope == "registered projects only"
+
+    second_page = list_inbox(
+        instance, InboxListParams(limit=1, cursor=first_page.next_cursor)
+    )
+    assert len(second_page.entries) == 1
+    assert second_page.entries[0].entry_key != first_page.entries[0].entry_key
+
+    entry_key = first_page.entries[0].entry_key
+    snoozed = snooze_inbox(
+        instance,
+        InboxSnoozeParams(
+            entry_key=entry_key,
+            until=datetime(2099, 1, 1, tzinfo=UTC),
+            reason=WHY,
+        ),
+    )
+    assert snoozed.entry.triage_state == "snoozed"
+    assert (
+        list_inbox(instance, InboxListParams(triage_states=["snoozed"]))
+        .entries[0]
+        .entry_key
+        == entry_key
+    )
+
+    restored = restore_inbox(
+        instance,
+        InboxRestoreParams(entry_key=entry_key, reason=WHY),
+    )
+    assert restored.entry.triage_state == "active"
+    archived = archive_inbox(
+        instance,
+        InboxArchiveParams(entry_key=entry_key, reason=WHY),
+    )
+    assert archived.entry.triage_state == "archived"
+    assert (
+        list_inbox(instance, InboxListParams(triage_states=["archived"]))
+        .entries[0]
+        .entry_key
+        == entry_key
+    )

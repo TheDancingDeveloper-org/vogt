@@ -108,6 +108,8 @@ export default function Assistant(props: AssistantProps) {
   const [transcript, setTranscript] = createSignal<AssistantTranscriptEntry[]>([]);
   const [pending, setPending] = createSignal<AssistantPendingAction | null>(null);
   const [busy, setBusy] = createSignal(false);
+  const [reasonDraft, setReasonDraft] = createSignal("");
+  const [reasonBusy, setReasonBusy] = createSignal(false);
   const [draft, setDraft] = createSignal("");
   const [ttsOn, setTtsOn] = createSignal(localStorage.getItem(TTS_PREF_KEY) === "1");
   const [listening, setListening] = createSignal(false);
@@ -126,6 +128,11 @@ export default function Assistant(props: AssistantProps) {
     transcript();
     pending();
     scrollToEnd();
+  });
+
+  createEffect(() => {
+    const action = pending();
+    setReasonDraft(action?.kind === "vogt_write" ? action.reason : "");
   });
 
   onMount(async () => {
@@ -197,6 +204,19 @@ export default function Assistant(props: AssistantProps) {
       props.onError(`assistant action: ${String(e)}`);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const replaceReason = async (action: AssistantVogtWriteAction) => {
+    const reason = reasonDraft().trim();
+    if (!reason || reasonBusy() || busy()) return;
+    setReasonBusy(true);
+    try {
+      setPending(await api.assistantReplaceReason(action.id, reason));
+    } catch (e) {
+      props.onError(`assistant reason: ${String(e)}`);
+    } finally {
+      setReasonBusy(false);
     }
   };
 
@@ -418,9 +438,22 @@ export default function Assistant(props: AssistantProps) {
                       the part of this card that outlives the approval.
                     */}
                     <div style={{ "font-size": "13px" }}>
-                      Recorded reason:{" "}
-                      <em style={{ opacity: 0.9 }}>{write().reason}</em>
+                      Recorded reason (editable before approval):
                     </div>
+                    <textarea
+                      aria-label="Assistant Vogt write reason"
+                      value={reasonDraft()}
+                      rows={2}
+                      disabled={reasonBusy() || busy()}
+                      onInput={(event) => setReasonDraft(event.currentTarget.value)}
+                    />
+                    <button
+                      type="button"
+                      disabled={reasonBusy() || busy() || !reasonDraft().trim()}
+                      onClick={() => void replaceReason(write())}
+                    >
+                      {reasonBusy() ? "Updating reason…" : "Update reason for review"}
+                    </button>
                     <code style={payloadStyle}>{write().payload}</code>
                   </>
                 )}

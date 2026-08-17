@@ -26,6 +26,12 @@ from vogt.application.services.drift_service import (
 )
 from vogt.application.services.history import list_audit, list_events
 from vogt.application.services.imports import import_project
+from vogt.application.services.inbox import (
+    archive_inbox,
+    list_inbox,
+    restore_inbox,
+    snooze_inbox,
+)
 from vogt.application.services.instance import (
     init_instance,
     migrate_instance,
@@ -89,6 +95,7 @@ from vogt.application.services.writeback import (
 
 __all__ = [
     "adopt",
+    "archive_inbox",
     "backlog",
     "backup",
     "brief_project",
@@ -118,6 +125,7 @@ __all__ = [
     "list_auth_decisions",
     "list_drift",
     "list_events",
+    "list_inbox",
     "list_initiatives",
     "list_labels",
     "list_notifications",
@@ -136,11 +144,13 @@ __all__ = [
     "relate_work",
     "resolve_drift",
     "restore",
+    "restore_inbox",
     "revoke_suppression",
     "revoke_token",
     "serve",
     "serve_mcp_stdio",
     "set_write_back",
+    "snooze_inbox",
     "start_session",
     "status",
     "stop_session",

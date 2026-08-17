@@ -124,11 +124,13 @@ const PAGE_SIZE = 500;
 /** Safety ceiling for the compatibility path while `board.list` is absent. */
 const MAX_ITEMS = 2000;
 
-/** Conservative content estimate only; measured cards replace it in a layoutful browser. */
+/** Conservative seed only; measured cards replace it as soon as they render. */
 const CARD_ESTIMATE = 112;
 
-/** Exported for layout-free tests; production replaces it with content sizes. */
-export const CARD_ESTIMATE_TOP = CARD_ESTIMATE + 8;
+/** Compatibility export for older fixtures; production never uses it as a slot. */
+export const CARD_SLOT = CARD_ESTIMATE;
+/** Compatibility export retained for the existing measurement fixtures. */
+export const CARD_ESTIMATE_TOP = CARD_ESTIMATE;
 
 /**
  * Below this many cards a cell draws whole.
@@ -145,7 +147,6 @@ const VIRTUALIZE_ABOVE = 60;
 /** Pixel overscan, not a number of rows. */
 const OVERSCAN_PX = 320;
 const DEFAULT_VIEWPORT_PX = 480;
-const CARD_GAP_PX = 8;
 
 const POLL_CHOICES = [10, 20, 60, 0] as const;
 const DEFAULT_POLL_SECONDS = 20;
@@ -2040,7 +2041,7 @@ const Board: Component<Props> = (props) => {
                             cellScroll.get(mine) ?? 0,
                           );
                           const [viewport, setViewport] = createSignal(0);
-                          const measured = new MeasuredWindow(CARD_ESTIMATE + CARD_GAP_PX);
+                          const measured = new MeasuredWindow(CARD_ESTIMATE);
                           const [measurementVersion, setMeasurementVersion] = createSignal(0);
                           createEffect(() => {
                             if (measured.setKeys(cards().map((item) => item.ref))) {
@@ -2327,26 +2328,17 @@ const Board: Component<Props> = (props) => {
                                                 bounced() === item.ref ? " board-card--bounced" : ""
                                               }`}
                                               ref={(node) => {
-                                                const observer = new ResizeObserver((entries) => {
-                                                  const entry = entries?.[0];
+                                                const observer = new ResizeObserver((entries: ResizeObserverEntry[] = []) => {
+                                                  const entry = entries[0];
                                                   if (!entry) return;
-                                                  const borderBox = entry.borderBoxSize as readonly ResizeObserverSize[] | undefined;
-                                                  const borderHeight = borderBox?.[0]?.blockSize;
-                                                  const contentHeight = entry.contentRect.height;
+                                                  const height = entry.borderBoxSize;
                                                   const measuredHeight =
-                                                    (borderHeight && borderHeight > 0
-                                                      ? borderHeight
-                                                      : contentHeight > 0
-                                                        ? contentHeight
-                                                        : undefined);
-                                                  // jsdom and hidden tabs have no layout. Keep the
-                                                  // estimate in that case; a zero is not a real card
-                                                  // size and must not collapse the prefix index.
-                                                  if (measuredHeight === undefined) return;
-                                                  const change = measured.measure(
-                                                    item.ref,
-                                                    measuredHeight + CARD_GAP_PX,
-                                                  );
+                                                    Array.isArray(height)
+                                                      ? height[0]?.blockSize
+                                                      : height?.[0]?.blockSize ?? entry.contentRect.height;
+                                                  const contentHeight = measuredHeight ?? entry.contentRect.height;
+                                                  if (!contentHeight || contentHeight <= 0) return;
+                                                  const change = measured.measure(item.ref, contentHeight);
                                                   if (change) {
                                                     setMeasurementVersion((version) => version + 1);
                                                     if (change.top < scrollTop()) {
@@ -2361,6 +2353,13 @@ const Board: Component<Props> = (props) => {
                                                   }
                                                 });
                                                 observer.observe(node);
+                                                queueMicrotask(() => {
+                                                  const contentHeight = node.getBoundingClientRect().height;
+                                                  const change = contentHeight > 0
+                                                    ? measured.measure(item.ref, contentHeight)
+                                                    : null;
+                                                  if (change) setMeasurementVersion((version) => version + 1);
+                                                });
                                                 onCleanup(() => observer.disconnect());
                                               }}
                                               role="button"

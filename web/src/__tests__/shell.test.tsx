@@ -138,13 +138,6 @@ function tabLabels(container: HTMLElement): string[] {
   );
 }
 
-/** The drawer buttons, by their visible text. */
-function drawerButtons(container: HTMLElement): string[] {
-  return [...container.querySelectorAll(".drawer-actions button")].map(
-    (node) => node.textContent ?? "",
-  );
-}
-
 beforeEach(() => {
   // `tabs.ts` holds its store in module state, so a tab opened by the last
   // test is still open in this one — and every assertion here is about which
@@ -164,6 +157,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
 
     await surface(container, ".vogt-surface.board");
     expect(tabLabels(container)).toEqual([]);
+    expect(container.querySelector(".tab-strip")).toBeNull();
   });
 
   it("opens the ranked backlog", async () => {
@@ -171,6 +165,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
 
     await surface(container, ".vogt-surface.vogt-backlog");
     expect(tabLabels(container)).toEqual([]);
+    expect(container.querySelector(".tab-strip")).toBeNull();
   });
 
   it("opens the project page on the project the link names", async () => {
@@ -197,6 +192,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     );
     expect(vogt.matching("GET /work/get")[0]?.query.get("ref")).toBe("WI-1");
     expect(tabLabels(container)).toEqual([]);
+    expect(container.querySelector(".tab-strip")).toBeNull();
   });
 
   it("opens an audit query, narrowed to what the link carried", async () => {
@@ -236,6 +232,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     await waitFor(() => expect(container.querySelector(".drawer")).toBeTruthy());
     await settle();
     expect(tabLabels(container)).toEqual([]);
+    expect(container.querySelector(".tab-strip")).toBeNull();
     expect(container.querySelector(".vogt-surface.board")).toBeTruthy();
   });
 
@@ -266,12 +263,9 @@ describe("FR-T6 — the assistant is not there to be reached when it is not prov
 
     // Wait for the config to have arrived, so this is an assertion about a
     // resolved gate and not about a race the shell would lose later.
-    await waitFor(() =>
-      expect(drawerButtons(container)).toContain("Board"),
-    );
+    await waitFor(() => expect(container.querySelector(".places-rail")).toBeTruthy());
     await settle();
-    expect(drawerButtons(container)).not.toContain("Assistant");
-    expect(tabLabels(container)).toEqual([]);
+    expect(container.querySelector(".places-nav")?.textContent).not.toContain("Assistant");
     expect(container.textContent).not.toContain("Ask about your terminal sessions");
   });
 
@@ -287,7 +281,7 @@ describe("FR-T6 — the assistant is not there to be reached when it is not prov
         "Ask about your terminal sessions",
       ),
     );
-    expect(drawerButtons(container)).toContain("Assistant");
+    expect(container.querySelector(".places-nav")?.textContent).toContain("Assistant");
     expect(tabLabels(container)).toEqual(["Assistant"]);
   });
 });

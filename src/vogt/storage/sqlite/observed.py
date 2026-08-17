@@ -375,6 +375,18 @@ class SqliteObservedStore:
             ).fetchall()
         return [_row_to_observation(row) for row in rows]
 
+    def latest_by_subject(self, subject_key: str) -> Observation | None:
+        """Return the newest observation for one subject."""
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT subject_key, observation_id AS id, observation_id, "
+                "collector, kind, project_id, payload, content_digest, "
+                "source_url, promoted, observed_at, '' AS sweep_id "
+                "FROM latest_observations WHERE subject_key = ?",
+                (subject_key,),
+            ).fetchone()
+        return None if row is None else _row_to_observation(row)
+
     def dep_refs(
         self, *, from_project_id: str | None = None, to_project_id: str | None = None
     ) -> list[DepRef]:

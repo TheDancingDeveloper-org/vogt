@@ -60,12 +60,18 @@ import {
   closeTab,
   focusTab,
   openAssistantTab,
+  openBacklogTab,
+  openBoardTab,
+  openInboxTab,
+  openAuditTab,
+  openProjectsTab,
   openEditorTab,
   openGitTab,
   openGuiTab,
   openHistoryTab,
   openTasksTab,
   openTerminalTab,
+  openWorkItemTab,
   replaceTabs,
   snapshotTabs,
   tabsStore,
@@ -258,6 +264,12 @@ function pathFor(tab: Tab): string {
   if (tab.kind === "git") return `/g/${encodeURIComponent(tab.repo)}`;
   if (tab.kind === "gui") return "/gui";
   if (tab.kind === "history") return "/history";
+  if (tab.kind === "board") return "/board";
+  if (tab.kind === "backlog") return "/backlog";
+  if (tab.kind === "inbox") return "/inbox";
+  if (tab.kind === "projects") return "/projects";
+  if (tab.kind === "audit") return "/audit";
+  if (tab.kind === "workitem") return `/w/${encodeURIComponent(tab.ref)}`;
   if (tab.kind === "assistant") return "/assistant";
   return "/tasks";
 }
@@ -351,15 +363,15 @@ const App: Component = () => {
 
   // Check if we're in IDE mode
   const isIDEMode = layoutMode === "ide";
-  const activeKind = () =>
-    tabsStore.tabs.find((tab) => tab.id === tabsStore.active)?.kind ?? null;
-  const editorWorkspaceActive = () => isIDEMode && activeKind() === "editor";
   const stablePlace = () => {
     const path = location.pathname;
     return path === "/sessions" || path === "/board" || path === "/backlog" ||
       path === "/inbox" || path === "/projects" || path === "/audit" ||
       path.startsWith("/w/");
   };
+  const activeKind = () =>
+    tabsStore.tabs.find((tab) => tab.id === tabsStore.active)?.kind ?? null;
+  const editorWorkspaceActive = () => isIDEMode && activeKind() === "editor";
 
   onMount(() => {
     const unsubscribeAuthState = subscribeAuthState(() => {
@@ -512,6 +524,16 @@ const App: Component = () => {
       // provisioned, and a tab that opens and then fails is a worse answer
       // than no tab.
       if (publicCfg()?.assistant_enabled) openAssistantTab();
+    } else if (path === "/board") {
+      openBoardTab();
+    } else if (path === "/backlog") {
+      openBacklogTab();
+    } else if (path === "/inbox") {
+      openInboxTab();
+    } else if (path === "/projects") {
+      openProjectsTab();
+    } else if (path === "/audit") {
+      openAuditTab();
     } else if (path === "/settings") {
       setSettingsOpen(true);
     } else if (path.startsWith("/w/") && params.ref) {
@@ -519,6 +541,7 @@ const App: Component = () => {
       // first: the item lives in vogt-core, which this shell does not read,
       // and the surface itself reports a ref that does not resolve. Refusing
       // to open the tab would turn a typo into a blank screen.
+      openWorkItemTab(decodeURIComponent(params.ref));
     }
   });
 
@@ -975,39 +998,43 @@ const App: Component = () => {
             <Show when={publicCfg()?.vogt?.configured}>
               <button
                 onClick={() => {
+                  openBoardTab();
                   navigate("/board");
                   setDrawerOpen(false);
                 }}
                 title="Work items by workflow state"
               >
-                Board
+                ▦ Board
               </button>
               <button
                 onClick={() => {
+                  openBacklogTab();
                   navigate("/backlog");
                   setDrawerOpen(false);
                 }}
                 title="The ranked backlog and bugs, with the reason for the ranking"
               >
-                Backlog
+                ☰ Backlog
               </button>
               <button
                 onClick={() => {
+                  openProjectsTab();
                   navigate("/projects");
                   setDrawerOpen(false);
                 }}
                 title="Per-project state, compliance and the drift inbox"
               >
-                Projects
+                ▤ Projects
               </button>
               <button
                 onClick={() => {
+                  openAuditTab();
                   navigate("/audit");
                   setDrawerOpen(false);
                 }}
                 title="Who wrote what, and the reason they gave"
               >
-                Audit
+                ⧉ Audit
               </button>
             </Show>
             <Show when={publicCfg()?.assistant_enabled}>
@@ -1019,7 +1046,7 @@ const App: Component = () => {
                 }}
                 title="Talk to the assistant about your sessions"
               >
-                Assistant
+                🎙 Assistant
               </button>
             </Show>
             <button
@@ -1030,10 +1057,10 @@ const App: Component = () => {
               }}
               title="Open the GUI stream tab"
             >
-              GUI stream
+              🖥 GUI
             </button>
             <button onClick={() => setSettingsOpen(true)} title="Settings">
-              Settings
+              ⚙
             </button>
           </div>
           <Show when={sessionsError()}>
@@ -1132,6 +1159,7 @@ const App: Component = () => {
           />
         </aside>
 
+        <Show when={!stablePlace()}>
         <div class="tab-strip">
           <button
             class="menu-btn"
@@ -1202,6 +1230,7 @@ const App: Component = () => {
             )}
           </For>
         </div>
+        </Show>
 
         <main class="main">
           <Show when={!isConnected() && getToken()}>
@@ -1222,8 +1251,39 @@ const App: Component = () => {
               onNotify={(message, kind) => showToast(message, { kind })}
             />
           </Show>
-          <Show when={stablePlace()} fallback={
-            <div class="tab-view" style={{ display: editorWorkspaceActive() ? "none" : "flex" }}>
+          <Show when={stablePlace()}>
+            <div class="place-view">
+              <Show when={location.pathname === "/sessions"}>
+                <Sessions />
+              </Show>
+              <Show when={location.pathname === "/board"}>
+                <Board onError={(msg) => showToast(msg, { kind: "error" })} />
+              </Show>
+              <Show when={location.pathname === "/backlog"}>
+                <Backlog onError={(msg) => showToast(msg, { kind: "error" })} />
+              </Show>
+              <Show when={location.pathname === "/inbox"}>
+                <Inbox onError={(msg) => showToast(msg, { kind: "error" })} />
+              </Show>
+              <Show when={location.pathname === "/projects"}>
+                <Projects onError={(msg) => showToast(msg, { kind: "error" })} />
+              </Show>
+              <Show when={location.pathname === "/audit"}>
+                <AuditBrowser onError={(msg) => showToast(msg, { kind: "error" })} />
+              </Show>
+              <Show when={location.pathname.startsWith("/w/") && params.ref}>
+                <WorkItemDetail
+                  itemRef={decodeURIComponent(params.ref ?? "")}
+                  onError={(msg) => showToast(msg, { kind: "error" })}
+                />
+              </Show>
+            </div>
+          </Show>
+          <Show when={!stablePlace()}>
+          <div
+            class="tab-view"
+            style={{ display: editorWorkspaceActive() ? "none" : "flex" }}
+          >
             <For each={tabsStore.tabs}>
               {(t) => (
                 <div
@@ -1356,34 +1416,7 @@ const App: Component = () => {
                 <button onClick={() => void onCreate()}>+ New session</button>
               </div>
             </Show>
-            </div>
-          }>
-            <div class="place-view">
-              <Show when={location.pathname === "/sessions"}>
-                <Sessions />
-              </Show>
-              <Show when={location.pathname === "/board"}>
-                <Board onError={(msg) => showToast(msg, { kind: "error" })} />
-              </Show>
-              <Show when={location.pathname === "/backlog"}>
-                <Backlog onError={(msg) => showToast(msg, { kind: "error" })} />
-              </Show>
-              <Show when={location.pathname === "/inbox"}>
-                <Inbox onError={(msg) => showToast(msg, { kind: "error" })} />
-              </Show>
-              <Show when={location.pathname === "/projects"}>
-                <Projects onError={(msg) => showToast(msg, { kind: "error" })} />
-              </Show>
-              <Show when={location.pathname === "/audit"}>
-                <AuditBrowser onError={(msg) => showToast(msg, { kind: "error" })} />
-              </Show>
-              <Show when={location.pathname.startsWith("/w/") && params.ref}>
-                <WorkItemDetail
-                  itemRef={decodeURIComponent(params.ref ?? "")}
-                  onError={(msg) => showToast(msg, { kind: "error" })}
-                />
-              </Show>
-            </div>
+          </div>
           </Show>
           <Show when={activeKind() === "terminal"}>
             <ModKeyRow

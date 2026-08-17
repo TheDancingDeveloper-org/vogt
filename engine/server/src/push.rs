@@ -50,6 +50,8 @@ pub enum NotificationKind {
     /// New drift raised in vogt-core: the estate disagrees with what was
     /// declared about it, and nobody has ruled on the disagreement yet.
     Drift,
+    /// An assistant effect is waiting in the in-memory approval gate.
+    AssistantApproval,
     Test,
 }
 
@@ -114,6 +116,8 @@ pub struct PushPreferences {
     pub agent_task_notify: bool,
     #[serde(default = "default_true")]
     pub drift: bool,
+    #[serde(default = "default_true")]
+    pub assistant_approval: bool,
     #[serde(default)]
     pub quiet_hours: QuietHours,
 }
@@ -127,6 +131,7 @@ impl Default for PushPreferences {
             agent_task_started: false,
             agent_task_notify: true,
             drift: true,
+            assistant_approval: true,
             quiet_hours: QuietHours::default(),
         }
     }
@@ -141,6 +146,7 @@ impl PushPreferences {
             NotificationKind::AgentTaskStarted => self.agent_task_started,
             NotificationKind::AgentTaskNotify => self.agent_task_notify,
             NotificationKind::Drift => self.drift,
+            NotificationKind::AssistantApproval => self.assistant_approval,
             NotificationKind::Test => true,
         }
     }
@@ -159,6 +165,8 @@ pub struct PendingDigest {
     /// `PushManager::new` turns a parse failure into a refusal to boot.
     #[serde(default)]
     pub drift_count: u32,
+    #[serde(default)]
+    pub assistant_approval_count: u32,
     #[serde(with = "time::serde::rfc3339")]
     pub queued_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -436,6 +444,22 @@ impl PushManager {
         counts
     }
 
+    /// Send the non-sensitive hint for the current assistant action. The
+    /// action id is used only in the deep link; the held terminal bytes,
+    /// Vogt payload and audit reason never enter notification text or data.
+    pub async fn notify_assistant_approval(&self, id: uuid::Uuid) -> DispatchCounts {
+        self.notify(
+            NotificationKind::AssistantApproval,
+            "Approval needed",
+            "A terminal input or Vogt change is waiting for you.",
+            serde_json::json!({
+                "kind": "assistant-approval",
+                "url": format!("/sessions?approval={id}"),
+            }),
+        )
+        .await
+    }
+
     pub async fn flush_ready_digests(&self) -> DispatchCounts {
         let now = OffsetDateTime::now_utc();
         let ready = {
@@ -616,6 +640,7 @@ fn queue_digest(
         agent_task_started_count: 0,
         agent_task_notify_count: 0,
         drift_count: 0,
+        assistant_approval_count: 0,
         queued_at: now,
         last_event_at: now,
         latest_title: title.to_string(),
@@ -642,6 +667,9 @@ fn queue_digest(
             digest.agent_task_notify_count = digest.agent_task_notify_count.saturating_add(1)
         }
         NotificationKind::Drift => digest.drift_count = digest.drift_count.saturating_add(1),
+        NotificationKind::AssistantApproval => {
+            digest.assistant_approval_count = digest.assistant_approval_count.saturating_add(1)
+        }
         NotificationKind::Test => {}
     }
 }
@@ -668,6 +696,9 @@ fn digest_notification_payload(digest: &PendingDigest) -> (String, String, serde
     }
     if digest.drift_count > 0 {
         parts.push(format!("{} drift", digest.drift_count));
+    }
+    if digest.assistant_approval_count > 0 {
+        parts.push(format!("{} approval", digest.assistant_approval_count));
     }
     let summary = if parts.is_empty() {
         format!("{} queued notifications", digest.total_count)
@@ -826,6 +857,7 @@ mod tests {
             agent_task_started_count: 1,
             agent_task_notify_count: 1,
             drift_count: 2,
+            assistant_approval_count: 0,
             queued_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
             last_event_at: OffsetDateTime::from_unix_timestamp(1_700_000_100).unwrap(),
             latest_title: "Task wants attention".into(),

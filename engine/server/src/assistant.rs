@@ -43,6 +43,7 @@ use crate::{
     activity::strip_ansi,
     config::Config,
     error::{ApiError, Result},
+    push::PushManager,
     sessions::SessionRegistry,
     vogt_tools::{self, Caller, VogtToolDef, VogtTools},
 };
@@ -246,6 +247,9 @@ impl ChatBackend {
 
 pub struct AssistantRuntime {
     sessions: Arc<SessionRegistry>,
+    /// Push is a hint only. The client must read assistant/history and match
+    /// the id against this same in-memory action before showing controls.
+    push: Option<Arc<PushManager>>,
     /// The Vogt toolbox, or `None` when no core is configured. An assistant
     /// without a core is the assistant as it shipped, not a broken one
     /// (FR-T6): the Vogt tools are simply absent from every turn.
@@ -325,7 +329,11 @@ fn openai_route_refusal(model: &str, allowed: bool) -> Option<String> {
 impl AssistantRuntime {
     /// Returns None when no API key is configured — the feature is disabled
     /// and the routes should 404.
-    pub fn from_config(cfg: &Config, sessions: Arc<SessionRegistry>) -> Option<Arc<Self>> {
+    pub fn from_config(
+        cfg: &Config,
+        sessions: Arc<SessionRegistry>,
+        push: Arc<PushManager>,
+    ) -> Option<Arc<Self>> {
         let api_key = cfg.assistant_api_key.clone()?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
@@ -337,6 +345,7 @@ impl AssistantRuntime {
         }
         Some(Arc::new(Self {
             sessions,
+            push: Some(push),
             vogt,
             backend: ChatBackend::Http {
                 client,
@@ -379,6 +388,46 @@ impl AssistantRuntime {
         let mut convo = self.conversation.lock().await;
         expire_pending(&mut convo);
         convo.pending.as_ref().map(|p| p.view.clone())
+    }
+
+    /// Replace only the audit reason on the current Vogt-write card. This is
+    /// a preview/update step: it never resumes the model loop or calls Vogt,
+    /// and it does not refresh the card's original 120-second expiry.
+    pub async fn replace_pending_reason(
+        &self,
+        id: Uuid,
+        reason: String,
+    ) -> Result<PendingActionView> {
+        let mut convo = self.conversation.lock().await;
+        expire_pending(&mut convo);
+        let pending = convo.pending.as_mut().ok_or(ApiError::NotFound)?;
+        if pending.view.id() != id {
+            return Err(ApiError::NotFound);
+        }
+        let PendingActionView::VogtWrite(view) = &mut pending.view else {
+            return Err(ApiError::BadRequest(
+                "only a Vogt write reason can be edited".into(),
+            ));
+        };
+        let reason = reason.trim().to_string();
+        if reason.is_empty() {
+            return Err(ApiError::BadRequest("reason must not be empty".into()));
+        }
+        if let Some(complaint) = contentless_reason(&reason) {
+            return Err(ApiError::BadRequest(complaint));
+        }
+        let write = pending
+            .vogt
+            .as_mut()
+            .ok_or_else(|| ApiError::Internal("pending Vogt write lost its held payload".into()))?;
+        let object = write.args.as_object_mut().ok_or_else(|| {
+            ApiError::Internal("pending Vogt write arguments are not an object".into())
+        })?;
+        object.insert("reason".into(), Value::String(reason.clone()));
+        view.reason = reason;
+        view.payload =
+            serde_json::to_string_pretty(&write.args).unwrap_or_else(|_| write.args.to_string());
+        Ok(pending.view.clone())
     }
 
     pub async fn reset(&self) {
@@ -702,6 +751,19 @@ impl AssistantRuntime {
                             created: Instant::now(),
                             vogt,
                         });
+                        if let Some(push) = self.push.clone() {
+                            let id = view.id();
+                            tokio::spawn(async move {
+                                let counts = push.notify_assistant_approval(id).await;
+                                tracing::debug!(
+                                    action = %id,
+                                    ok = counts.ok,
+                                    fail = counts.fail,
+                                    queued = counts.queued,
+                                    "assistant approval push dispatched"
+                                );
+                            });
+                        }
                         return Ok(AssistantReply {
                             reply: None,
                             pending_action: Some(view),
@@ -1238,6 +1300,7 @@ mod tests {
     fn runtime_with_script(sessions: Arc<SessionRegistry>, script: Vec<Value>) -> AssistantRuntime {
         AssistantRuntime {
             sessions,
+            push: None,
             vogt: None,
             backend: ChatBackend::Mock {
                 script: parking_lot::Mutex::new(VecDeque::from(script)),
@@ -1731,6 +1794,26 @@ mod tests {
         assert!(card.payload.contains("\"kind\": \"bug\""));
         assert!(card.payload.contains("\"reason\":"));
 
+        // Editing a reason is a preview only. It keeps the same action id,
+        // changes the held registry arguments, and still cannot reach core.
+        let preview = rt
+            .replace_pending_reason(
+                action.id(),
+                "The board drops this drag after the second resize".into(),
+            )
+            .await
+            .unwrap();
+        let preview_card = as_vogt_write(&preview);
+        assert_eq!(preview.id(), action.id());
+        assert_eq!(
+            preview_card.reason,
+            "The board drops this drag after the second resize"
+        );
+        assert!(preview_card
+            .payload
+            .contains("The board drops this drag after the second resize"));
+        assert!(core.tool_calls().is_empty());
+
         // Nothing reached the core: the model proposed, and that is all.
         assert!(
             core.tool_calls().is_empty(),
@@ -1757,6 +1840,11 @@ mod tests {
             calls[0].arguments.get("title").and_then(Value::as_str),
             Some("The board drops a drag"),
             "the approved payload is the payload sent"
+        );
+        assert_eq!(
+            calls[0].arguments.get("reason").and_then(Value::as_str),
+            Some("The board drops this drag after the second resize"),
+            "approval must send the reason that was last reviewed"
         );
 
         // The core's answer comes back delimited like any other Vogt content.

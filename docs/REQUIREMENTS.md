@@ -1,6 +1,6 @@
 # Vogt — Requirements (v0.3)
 
-Status: **baseline, revision r10** (2026-08-15), distilled from `DESIGN.md`,
+Status: **baseline, revision r15** (2026-08-17), distilled from `DESIGN.md`,
 `SCHEMA.md`, `DEPLOYMENT.md`, [`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md) and
 the originating product discussion.
 **v1 (M0–M6) is built**; §5 is the requirement-by-requirement verification
@@ -715,6 +715,50 @@ rather than zero. This is the pre-1.0 window for it. REST, CLI, GUI and MCP are
 generated from one transport-neutral operation registry, so changing a result
 shape is one change today and a four-surface breaking change after 1.0.
 
+### Revision r15 — the places plan becomes an acceptance boundary
+
+*2026-08-17. Stage 0 of `RESTRUCTURE.md` turns the reviewed places, Inbox,
+Sessions and phone uplift into an owned contract. The drawings and the plan
+remain proposals; the IDs below are the work that is now owed.*
+
+Seven requirements are appended using the next free number in each family.
+They cover the server projection before its surface, the shared triage writes,
+the places/panes shell, the Inbox interactions, measured content-sized views,
+the existing assistant gate's presentation, and phone reachability:
+
+| New ID | What it names | Pri |
+|---|---|---|
+| FR-N4 | A normalized, server-ordered, keyset-pageable Inbox projection over GitHub, drift, CI and agent attention, with coverage and stable material-versioned entry keys. | M |
+| FR-N5 | Audited shared Inbox archive, snooze and restore, while local seen state remains presentation-only and material source changes can resurface an occurrence. | M |
+| FR-U23 | Stable places, Sessions panes/tools and idempotent migration of the old tab state without losing routes or capabilities. | M |
+| FR-U24 | An Inbox surface driven only by FR-N4, with coverage/provenance, evidence-before-action and typed reasons for every write and batch. | M |
+| FR-U25 | Content-sized, measured and virtualized Board cards and Backlog rows, alongside NFR-S5's existing estate-scale guarantees. | S |
+| FR-T8 | Consistent presentation of the one existing pending action, including reason preview/update for Vogt writes and a subsequent exact-payload approval. | M |
+| FR-M5 | Sessions-first phone navigation with four primary places, labelled secondary-route reachability and push deep links to the current pending action. | S |
+
+Three existing requirements are revised in place, with their earlier r9
+meaning retained in the rows below and the new conjuncts named here:
+
+- **FR-U7** keeps project-scoped drift summary, age and count, but its action
+  link now targets the canonical filtered Inbox; Projects does not grow a
+  second resolver or triage surface.
+- **FR-M2** adds the `assistant_approval` push kind. Its lock-screen content is
+  non-sensitive and the push opens the current action; terminal bytes, Vogt
+  payloads and reasons never appear in the notification.
+- **FR-U11** names `/inbox`, `/sessions` and `/settings` and preserves every
+  existing deep link in the route matrix in `RESTRUCTURE.md` Stage 3.
+
+**NFR-S5 is deliberately not revised.** It continues to require
+virtualization, bounded reads and estate-scale interaction; FR-U25 adds the
+content-sizing contract without turning an estimate into a fixed CSS height.
+
+The new and revised clauses are owed in §7.1. Their staged delivery is
+recorded in `ROADMAP.md`: Stage 0 is the contract gate, Stages 1, 3–8 are the
+M11 web work, Stage 2 extends M12's assistant/push work, Stage 9 is M13's
+phone pass, and Stage 10 is M14's browser/device/live-stack conformance
+close-out. The historical §5/§6 audits are not rewritten to claim these
+unbuilt clauses.
+
 ---
 
 ---
@@ -898,6 +942,8 @@ by path or repository URL, and stops there.*
 | FR-N1 | *(revised r2)* The system shall expose a cursor-based `/events` feed backed by a single append-only `events` table in the declared store with a monotonic `seq`. Declared writes shall insert their event row in the same transaction as the entity change and audit row. Sweep completions and CI state transitions shall be published into the same table by the application layer at sweep completion. `seq` is the cursor; no client shall be required to merge orderings across the two stores. | M | DESIGN §4.2, SCHEMA §2.5 |
 | FR-N2 | Email/desktop/webhook push is out of scope for v1; the events feed is the sole notification surface. | M | DESIGN §9 |
 | FR-N3 | *(r6)* The system shall expose collected GitHub notifications (FR-O8) as their own read-only view, filterable by project, reason and unread state, and separate from the `/events` feed — that feed is this instance's own history and shall not be merged with a forge's. The view shall state that its contents belong to the configured token's account and are therefore instance-scoped, not per-actor. Nothing shall be marked read upstream. | S* | DESIGN §4.2 |
+| FR-N4 | *(r15)* One registry-backed `inbox.list` operation shall provide a normalized attention read over GitHub notifications, drift proposals, failing current-revision CI checks, and agent attention. The server shall own source coverage, deterministic global ordering, stable material-versioned entry keys, high-water marks and opaque keyset pagination; the client shall not merge `notifications`, `drift.list`, `events.list` or engine reads. The projection shall not merge the `/events` history or mutate GitHub read state. | M | RESTRUCTURE Stage 0, Stage 1 |
+| FR-N5 | *(r15)* Shared Inbox archive, snooze and restore shall be audited writes with typed reasons, keyed to the material occurrence. An unchanged re-observation shall remain triaged, while a materially changed source version may resurface; local seen state shall be per-client presentation state outside the shared contract, and reading an elapsed snooze shall not write. | M | RESTRUCTURE Stage 0, Stage 1 |
 
 ### FR-U — GUI
 
@@ -909,11 +955,11 @@ by path or repository URL, and stops there.*
 | FR-U4 | *(r9)* The GUI shall present a board of work items whose columns are the workflow's states read from `workflow.list` — never hard-coded — where a drag is a `work.transition` and an illegal transition bounces with the server's stated reason. | M | MERGE §7.1 |
 | FR-U5 | *(r9)* The GUI shall present a work item in full: description, state history, comments, relations, labels, per-item audit trail, collected evidence with freshness and trust, and the start-session control (FR-E4). | M | MERGE §7.2 |
 | FR-U6 | *(r9)* The GUI shall present the ranked backlog and bugs views with the explainable `why`, quick-create, and bulk transition/label — under r6's rule: a mutating operation appears only through a view that collects a reason the user typed. | M | MERGE §7.3 |
-| FR-U7 | *(r9)* The GUI shall present per-project pages: brief, CI status, contract/compliance, drift inbox, dependency graph, and the import form. | S | MERGE §7.4 |
+| FR-U7 | *(r9, revised r15)* The GUI shall present per-project pages: brief, CI status, contract/compliance, drift summary with count, age and context, dependency graph, and the import form. Project drift actions shall link to the canonical filtered Inbox (`/inbox?source=drift&project=<slug>`); evidence, triage and resolution shall not be duplicated on the project page. | S | MERGE §7.4; RESTRUCTURE Stage 0, Stage 4 |
 | FR-U8 | *(r9)* The PWA shall consume only public APIs, and every URL in the shipped bundle shall resolve against the operation registry *and* the engine's API contract — extending the existing M6 assertion to the Solid bundle and to both halves. | M | MERGE §7 |
 | FR-U9 | *(r9)* The legacy GUI shall keep serving at `/ui-legacy` until every operation it exposed is reachable in the PWA, and shall then be removed — parity is asserted, not assumed. | S | MERGE §5.1 |
 | FR-U10 | *(r9)* Views showing server-announced state — session activity (FR-E2), work item state, drift arrivals, notification counts — shall update live from the SSE stream without a manual refresh. A lost stream shall be indicated and shall reconcile on reconnect; a stale view shall never present itself as current. | M | MERGE §7; engine README |
-| FR-U11 | *(r9)* Every project, work item, board (including its active filter set), session, and audit query shall be addressable by URL: deep links shall survive reload, be shareable, and restore the exact view. Terminal deep links (`/#/t/<id>`) are adopted as-built; Vogt surfaces shall follow the same scheme. | M | MERGE §7; engine README |
+| FR-U11 | *(r9, revised r15)* Every project, work item, board (including its active filter set), session, and audit query shall be addressable by URL: deep links shall survive reload, be shareable, and restore the exact view. The places shell shall name `/inbox`, `/sessions` and `/settings`, preserve the existing deep links in `RESTRUCTURE.md` Stage 3's route matrix, and keep terminal deep links (`/#/t/<id>`) valid. | M | MERGE §7; engine README; RESTRUCTURE Stage 0, Stage 3 |
 | FR-U12 | *(r9)* A drag or inline edit shall render optimistically and reconcile against the server's answer, which is authoritative: a refused `work.transition` shall roll the item back visibly and surface the server's stated reason where the drop happened. The client shall never persist, cache, or re-derive a state the server refused. | M | MERGE §7.1 |
 | FR-U13 | *(r9)* The board shall support swimlanes by project or initiative, per-column WIP counts, and collapse/expand of lanes and columns; lane and column layout preferences shall persist per client. | S | MERGE §7.1 |
 | FR-U14 | *(r9)* Board, backlog, and bugs views shall filter by project, workflow state, type, label, initiative, and actor, with filters combinable and reflected in the URL (FR-U11). A combined filter shall be nameable and recalled as a saved filter; saved filters are per-client state in v2 (server-side shared filters are deferred, §3). | S | MERGE §7.1, §7.3 |
@@ -925,6 +971,9 @@ by path or repository URL, and stops there.*
 | FR-U20 | *(r9)* A work item linked to a session (FR-E4) shall show the live activity badge and an open-terminal control that navigates to the terminal surface attached to that session; the terminal surface shall link back to the owning work item. | M | MERGE §6.1, §7.2 |
 | FR-U21 | *(r9)* Every surface shall have a designed absent state: engine unavailable → Vogt views work and session controls disable with the named reason; vogt-core unavailable → terminal, files, git, and assistant-over-sessions work and Vogt surfaces report the outage rather than rendering empty data as truth (FR-E9's degrade rule, made visible). | M | MERGE §11.2, FR-E9 |
 | FR-U22 | *(r9)* The board shall be operable entirely from the keyboard: item focus, moving an item between columns (the drag's equivalent, still subject to FR-U12's reconcile), opening detail, and quick-create shall each have a binding discoverable in the GUI. | S | MERGE §7.1 |
+| FR-U23 | *(r15)* The GUI shall use stable, non-closable places instead of product-level tabs without losing a route or capability. Terminal/editor tabs shall migrate to Sessions panes, machine tools shall remain reachable inside Sessions, work-item and surface tabs shall become addressable recent places, and migration of `mydevenv2.tabs.v1` shall be idempotent and preserve the old value until the new state is written successfully. | M | RESTRUCTURE Stage 0, Stage 3 |
+| FR-U24 | *(r15)* The Inbox surface shall consume only `inbox.list`, render source coverage, provenance, trust and freshness, show drift evidence before its actions, and collect a typed reason for every shared write and batch. Local seen/selection state shall not call the server, and keyboard, pointer and batch paths shall use the same reason boundary. | M | RESTRUCTURE Stage 0, Stage 4 |
+| FR-U25 | *(r15)* Board cards and Backlog rows shall size to their measured content, wrap and expand in place, and use one keyed measured window with pixel overscan, scroll anchoring and invalidation for width/font/expansion changes. The estimate shall not become a fixed CSS height; NFR-S5's virtualization, bounded reads and estate-scale interaction guarantees remain in force. | S | RESTRUCTURE Stage 0, Stage 5–7; NFR-S5 |
 
 ### FR-E — Coding sessions & session engine *(r9)*
 
@@ -956,15 +1005,17 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | FR-T5 | *(r9)* The assistant shall be drivable by voice: push-to-talk STT in the mobile shell, spoken replies in any client, with a validation pass against domain vocabulary (project names, "backlog") before v2 ships — voice is adopted unproven and shall not be presumed working. | S | MERGE §8.4; engine ASSISTANT.md |
 | FR-T6 | *(r9)* The assistant shall not exist unless configured: absent its API key the routes answer 404 and every GUI hides the surface. *(As-built rule, retained.)* | M | engine ASSISTANT.md |
 | FR-T7 | *(revised r12)* A backend that cannot serve the configured model shall refuse with a named reason rather than hang: a `claude-*` model id on the OpenAI-compatible transport answers with the model, the transport and the setting that overrides it. **Delivered.** ~~The tool loop shall additionally be provider-portable, supporting a native Anthropic backend.~~ **That clause is deferred (r12)** — see §3. | C | MERGE §8.4 |
+| FR-T8 | *(r15)* Sessions, Assistant and phone shall render the one existing pending action consistently. Editing is allowed only for a current, unexpired Vogt write and replaces only its reason; the engine shall return the regenerated exact payload for review, and a separate subsequent approval shall be required before the core is called. Terminal input remains the existing pending terminal act, direct session-agent writes remain immediate and audited to the session actor, and no second approval store or route shall exist. | M | RESTRUCTURE Stage 0, Stage 2, Stage 8–9 |
 
 ### FR-M — Mobile surface *(r9)*
 
 | ID | Requirement | Pri | Source |
 |---|---|---|---|
 | FR-M1 | *(r9)* The mobile app shall be the Capacitor shell loading the merged PWA. Its MVP1 feature set shall be: terminal sessions, assistant with voice, push, backlog/board read, and session start/approve. | M | MERGE §3; ROADMAP M13 |
-| FR-M2 | *(r9)* Push notifications shall be routed for events worth a phone interruption: a session entering `waiting-for-input` or `errored`, new drift, and the agent-task notify hook — and for nothing else by default. | S | MERGE §10 |
+| FR-M2 | *(r9, revised r15)* Push notifications shall be routed for events worth a phone interruption: a session entering `waiting-for-input` or `errored`, new drift, the agent-task notify hook, and an assistant pending-action approval — and for nothing else by default. The approval notification shall expose no terminal bytes, Vogt payload or reason and shall deep-link to `/sessions?approval=<id>`; the link is only a hint to the authoritative current action. | S | MERGE §10; RESTRUCTURE Stage 0, Stage 2 |
 | FR-M3 | *(r9)* Vogt surfaces shall be usable at phone widths; the board shall render as a list, not columns, below the narrow breakpoint. | S | MERGE §7 |
 | FR-M4 | *(r11)* A dev build of the mobile shell shall install alongside a prod build on one device **and register for push**. The id and the front door are already build inputs (`MYDEVENV2_ANDROID_APP_ID`, `VOGT_ANDROID_SERVER_URL`); what is missing is an FCM client entry for the dev id, since `google-services.json` is keyed to the application id. Until it exists, validating a mobile change means uninstalling the working app — which is why FR-M2's push routing and FR-T5's voice pass are both unverified on hardware. The signing key may be shared. | S | §7 |
+| FR-M5 | *(r15)* On narrow/coarse clients, the four primary places shall use a text-labelled bottom bar for Sessions, Inbox, Board and Backlog. Every secondary route shall remain reachable through a labelled “Go to…” control or a contextual link, including Projects, Audit, Settings, work items and all Sessions tools; push shall open the current pending action through its deep link. There shall be no approval-by-voice path. | S | RESTRUCTURE Stage 0, Stage 9 |
 
 ---
 
@@ -2081,7 +2132,7 @@ similar, and the new entries are all of the same kind as the old ones.
 
 ---
 
-## 7. Designed and not delivered — the gap register *(r11, 2026-08-15)*
+## 7. Designed and not delivered — the gap register *(r15, 2026-08-17)*
 
 **What this section is for.** §5 and §6 verify requirements against the build,
 one ID at a time, and they are the authority on *whether a requirement is met*.
@@ -2130,6 +2181,13 @@ the requirement's own.
 | **FR-D9** | C | Any producer of a `declared` dependency edge. | A dependency expressed only in a deploy script or a person's head is invisible to `deps` and to the reverse lookup. |
 | **FR-E10** | C | An operable GUI stream. The compositor and streamer are in the image, the launch and process APIs are built, production runs `START_SWAY=0` and `GUI_STREAM_URL=""`. | A surface exists that has never been shown to do anything. |
 | **FR-E11** | C | Any signal that two live sessions share a working tree. Nothing in `sessions.py` or the engine's registry compares a new session's `cwd` against the live ones. | Two agents can edit one checkout concurrently and neither is told. No audit row records the loss, because both writes are legitimate. |
+| **FR-N4** | M | The server-owned normalized Inbox projection: four source families, material-versioned entry keys, coverage, deterministic ordering and opaque high-water/keyset pagination. The current PWA has no `inbox.list` registry operation. | A client-side merge would misorder, duplicate or silently omit attention and could confuse collected-empty with not-collected. |
+| **FR-N5** | M | Shared occurrence-scoped archive, snooze and restore with audited typed reasons and triage snapshots. Local seen state is not a substitute; the current declared store has no complete triage path. | Attention decisions would either disappear on re-observation or become unaudited client fiction. |
+| **FR-U23** | M | Stable non-closable places, Sessions panes/tools and idempotent migration from `mydevenv2.tabs.v1`. Current shell changes are partial and retain the old tab model. | A route or machine capability can still be stranded by closing a product tab or by a malformed migration. |
+| **FR-U24** | M | Canonical Inbox interaction consuming only `inbox.list`, with coverage/provenance, evidence-before-action and typed reasons on pointer, keyboard and batch writes. | Duplicate drift resolution and unqualified empty states would make the attention surface misleading. |
+| **FR-U25** | S | One production-tested measured window shared by Board and Backlog, plus bounded server reads. The current Board prototype is not yet green across its scale tests and Backlog is not integrated. | Long content can clip or make scroll offsets wrong; a DOM window over an unbounded read still fails the scale contract. |
+| **FR-T8** | M | Presentation of the existing pending-action gate in Sessions, Assistant and phone, including reason preview/update and push deep link. The engine PATCH is present but the UI and end-to-end tests are incomplete. | A second client path could approve a stale or altered payload, or imply that voice/direct agent writes share the human gate. |
+| **FR-M5** | S | Sessions-first phone navigation, labelled secondary-route reachability and current-action push deep links. The responsive shell is partial and has no device evidence. | A phone user can land in a surface with no way to reach settings, audit, projects or machine tools. |
 
 ### 7.2 Owed, and blocked on something that is not code
 
@@ -2140,6 +2198,7 @@ the source closes them, which is why §6 counts their conjuncts apart.
 | Gap | Stage | What it needs | Status |
 |---|---|---|---|
 | **The browser demo** — a drag round-trips a `work.transition`, a refused one rolls back with the server's reason, a filtered board URL restores its view after reload | M11 | A person, a browser | Outstanding. 75 jsdom tests now assert the semantics; what they cannot fire is `dragover`, whose `preventDefault` is what lets a browser deliver a drop at all. No CSS is loaded, so every layout claim — FR-M3's phone width, NFR-S5's behaviour at scale — is still the demo's. |
+| **The restructure conformance demo** — Inbox cursor continuation while new facts arrive, stable places and migration, measured Board/Backlog content, and the full route matrix | M11 | A browser with CSS and a fixture estate | Outstanding. Partial shell, Inbox and measured-window code is not evidence of the server contract or browser layout. |
 | **The phone demo** — a push arrives, is opened, and the session is unblocked | M13 | A device, the APK, a hand | Outstanding. The APK builds in CI. Blocked in practice by FR-M4. |
 | **Real-device FCM delivery** (FR-M2) | M13 | The same device | Outstanding. `google-services.json` carries the client; first-launch registration and end-to-end delivery are unconfirmed. |
 

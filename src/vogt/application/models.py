@@ -34,7 +34,6 @@ from vogt.core.entities import (
     Event,
     Initiative,
     InitiativeState,
-    InboxTriage,
     Label,
     LifecycleState,
     Name,
@@ -112,13 +111,13 @@ class InboxEntry(Result):
     source_subject_key: str
     source_url: str | None = None
     trust_state: TrustState = "unverified"
-    freshness: Literal["current", "stale", "provisional", "live", "unknown"] = (
-        "unknown"
-    )
+    freshness: Literal["current", "stale", "provisional", "live", "unknown"] = "unknown"
     provisional: bool = False
     triage_state: InboxTriageState = "active"
     snooze_until: datetime | None = None
     action: InboxAction | None = None
+    evidence_snapshot: dict[str, object] | None = None
+    proposed_change: dict[str, object] | None = None
 
 
 class InboxCoverage(Result):
@@ -127,7 +126,7 @@ class InboxCoverage(Result):
     source: InboxSource
     status: str
     count: int = 0
-    last_swept_at: datetime | None = None
+    observed_at: datetime | None = None
     projects: int = 0
     registered: int = 0
     detail: str | None = None
@@ -135,7 +134,7 @@ class InboxCoverage(Result):
 
 class InboxListParams(Params):
     sources: list[InboxSource] | None = None
-    triage_states: list[InboxTriageState] = Field(default_factory=lambda: ["active"])
+    triage_states: list[InboxTriageState] = Field(default=["active"])
     project: str | None = None
     work_item: str | None = None
     limit: int = Field(default=50, ge=1, le=100)
@@ -146,11 +145,13 @@ class InboxListResult(Result):
     entries: list[InboxEntry]
     next_cursor: str | None = None
     snapshot_at: datetime
-    coverage: list[InboxCoverage]
+    coverage: dict[InboxSource, InboxCoverage]
     counts: dict[str, int]
-    github_scope: str
+    github_scope: str = "registered projects only"
+    instance_scope: str = "registered projects only"
     engine_status: Literal["not_configured", "available", "unreachable"]
     engine_detail: str | None = None
+    engine_available: bool = True
 
 
 class InboxArchiveParams(Params):

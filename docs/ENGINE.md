@@ -549,6 +549,9 @@ provisioned. Mutating routes require the `assistant` token capability. See
 - `POST /api/assistant/message` `{"text": "..."}` ->
   `{"reply": string|null, "pending_action"?: PendingAction, "tool_trace"?: string[]}`
 - `POST /api/assistant/actions/:id` `{"approve": bool}` -> same reply shape
+- `PATCH /api/assistant/actions/:id` `{"reason": string}` -> the updated
+  pending action only; Vogt writes accept this preview step, terminal input
+  refuses it, and no effector runs until the unchanged POST approval route.
 - `GET /api/assistant/history` -> `{"transcript": [...], "pending_action"?: ...}`
 - `POST /api/assistant/reset` -> `OkResponse`
 

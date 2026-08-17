@@ -108,6 +108,10 @@ pub struct SessionSummary {
     pub command: Option<String>,
     #[serde(default)]
     pub created_at: String,
+    /// Wall-clock instant when the current activity state began. This keeps
+    /// live attention occurrence keys stable across reads.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub activity_changed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +121,71 @@ pub struct SessionDetail {
     pub scrollback_pos: u64,
     #[serde(default)]
     pub scrollback_base64: String,
+}
+
+/// A pending assistant effect awaiting the single on-screen approval gate.
+///
+/// This is deliberately shared by every client surface. It is ephemeral and
+/// carries the exact effector payload that the engine holds in memory; it is
+/// not an approval ledger or a history record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PendingAction {
+    /// Exact text, and whether the engine will append Enter, for one PTY.
+    SendInput(SendInputAction),
+    /// Exact registry arguments, pretty printed for human review.
+    VogtWrite(VogtWriteAction),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendInputAction {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub session_name: String,
+    pub text: String,
+    pub submit: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VogtWriteAction {
+    pub id: Uuid,
+    pub operation: String,
+    pub target: String,
+    pub reason: String,
+    pub payload: String,
+}
+
+impl PendingAction {
+    pub fn id(&self) -> Uuid {
+        match self {
+            Self::SendInput(action) => action.id,
+            Self::VogtWrite(action) => action.id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssistantTranscriptEntry {
+    pub role: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_trace: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssistantReply {
+    pub reply: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_action: Option<PendingAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_trace: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssistantHistory {
+    pub transcript: Vec<AssistantTranscriptEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_action: Option<PendingAction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -406,6 +475,7 @@ mod tests {
             cwd: "/workspace".into(),
             command: None,
             created_at: String::new(),
+            activity_changed_at: String::new(),
         };
         let json = serde_json::to_string(&summary).unwrap();
         assert!(!json.contains("continuity"), "{json}");

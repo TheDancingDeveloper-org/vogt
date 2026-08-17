@@ -1,9 +1,11 @@
 import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 import {
-  InboxContractUnavailable,
   VogtUnavailable,
+  archiveInbox,
   listInbox,
+  restoreInbox,
+  snoozeInbox,
   type InboxEntry,
   type InboxListResult,
   type InboxSourceCoverage,
@@ -62,29 +64,80 @@ const Coverage: Component<{ result: InboxListResult }> = (props) => (
   </section>
 );
 
-const Entry: Component<{ entry: InboxEntry; seen: boolean; onOpen: (entry: InboxEntry) => void }> = (props) => (
-  <article class={`inbox-entry ${props.seen ? "inbox-entry-seen" : "inbox-entry-unseen"}`}>
-    <div class="inbox-entry-mark" aria-label={props.seen ? "Seen" : "Unread"} />
-    <div class="inbox-entry-body">
-      <div class="inbox-entry-heading">
-        <span class="inbox-source">{props.entry.source}</span>
-        <h2>{props.entry.title}</h2>
+interface EntryProps {
+  entry: InboxEntry;
+  seen: boolean;
+  busy: boolean;
+  onOpen: (entry: InboxEntry) => void;
+  onTriage: (
+    entry: InboxEntry,
+    action: "archive" | "snooze" | "restore",
+    reason: string,
+    until?: string,
+  ) => void;
+}
+
+const Entry: Component<EntryProps> = (props) => {
+  const [reason, setReason] = createSignal("");
+  const [until, setUntil] = createSignal((() => {
+    const next = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    next.setMinutes(next.getMinutes() - next.getTimezoneOffset());
+    return next.toISOString().slice(0, 16);
+  })());
+  const submit = (action: "archive" | "snooze" | "restore") => {
+    props.onTriage(
+      props.entry,
+      action,
+      reason(),
+      action === "snooze" ? new Date(until()).toISOString() : undefined,
+    );
+  };
+  return (
+    <article class={`inbox-entry ${props.seen ? "inbox-entry-seen" : "inbox-entry-unseen"}`}>
+      <div class="inbox-entry-mark" aria-label={props.seen ? "Seen" : "Unread"} />
+      <div class="inbox-entry-body">
+        <div class="inbox-entry-heading">
+          <span class="inbox-source">{props.entry.source}</span>
+          <h2>{props.entry.title}</h2>
+        </div>
+        <p class="inbox-entry-summary">{props.entry.summary ?? "No summary was provided by the server."}</p>
+        <div class="inbox-entry-meta">
+          <span>Occurred {age(props.entry.occurred_at)}</span>
+          <Show when={props.entry.observed_at}><span>Observed {age(props.entry.observed_at)}</span></Show>
+          <Show when={props.entry.project_slug}><span>Project: {props.entry.project_slug}</span></Show>
+          <Show when={props.entry.work_item_ref}><span>Work item: {props.entry.work_item_ref}</span></Show>
+          <span>Source: {props.entry.source_subject_key ?? "server-normalized entry"}</span>
+          <Show when={props.entry.trust_state}><span>Trust: {props.entry.trust_state}</span></Show>
+          <span>State: {props.entry.triage_state}</span>
+        </div>
+        <div class="inbox-entry-actions">
+          <button type="button" class="inbox-open" onClick={() => props.onOpen(props.entry)}>
+            Open entry
+          </button>
+          <label>
+            <span>Reason</span>
+            <input
+              value={reason()}
+              onInput={(event) => setReason(event.currentTarget.value)}
+              placeholder="Why this triage decision?"
+            />
+          </label>
+          <Show when={props.entry.triage_state === "active"}>
+            <button type="button" disabled={props.busy} onClick={() => submit("archive")}>Archive</button>
+            <label>
+              <span>Snooze until</span>
+              <input type="datetime-local" value={until()} onInput={(event) => setUntil(event.currentTarget.value)} />
+            </label>
+            <button type="button" disabled={props.busy} onClick={() => submit("snooze")}>Snooze</button>
+          </Show>
+          <Show when={props.entry.triage_state !== "active"}>
+            <button type="button" disabled={props.busy} onClick={() => submit("restore")}>Restore</button>
+          </Show>
+        </div>
       </div>
-      <p class="inbox-entry-summary">{props.entry.summary ?? "No summary was provided by the server."}</p>
-      <div class="inbox-entry-meta">
-        <span>Occurred {age(props.entry.occurred_at)}</span>
-        <Show when={props.entry.observed_at}><span>Observed {age(props.entry.observed_at)}</span></Show>
-        <Show when={props.entry.project_slug}><span>Project: {props.entry.project_slug}</span></Show>
-        <Show when={props.entry.work_item_ref}><span>Work item: {props.entry.work_item_ref}</span></Show>
-        <span>Source: {props.entry.source_subject ?? "server-normalized entry"}</span>
-        <Show when={props.entry.trust_state}><span>Trust: {props.entry.trust_state}</span></Show>
-      </div>
-      <button type="button" class="inbox-open" onClick={() => props.onOpen(props.entry)}>
-        Open entry
-      </button>
-    </div>
-  </article>
-);
+    </article>
+  );
+};
 
 const Inbox: Component<Props> = (props) => {
   const navigate = useNavigate();
@@ -95,6 +148,7 @@ const Inbox: Component<Props> = (props) => {
   const [cursor, setCursor] = createSignal<string | null>(null);
   const [seen, setSeen] = createSignal<Set<string>>(new Set<string>());
   const [source, setSource] = createSignal("");
+  const [triaging, setTriaging] = createSignal<string | null>(null);
 
   const seenKey = "mydevenv2.inbox.seen.v1";
   const readSeen = () => {
@@ -131,7 +185,7 @@ const Inbox: Component<Props> = (props) => {
     } catch (error) {
       setFailure(error instanceof Error ? error : new Error(String(error)));
       setResult(null);
-      if (!(error instanceof VogtUnavailable) && !(error instanceof InboxContractUnavailable)) props.onError?.(String(error));
+      if (!(error instanceof VogtUnavailable)) props.onError?.(String(error));
     } finally {
       setLoading(false);
     }
@@ -154,6 +208,29 @@ const Inbox: Component<Props> = (props) => {
     writeSeen(entry.entry_key);
     if (entry.work_item_ref) navigate(`/w/${encodeURIComponent(entry.work_item_ref)}`);
     else if (entry.session_id) navigate(`/t/${encodeURIComponent(entry.session_id)}`);
+  };
+
+  const triage = async (
+    entry: InboxEntry,
+    action: "archive" | "snooze" | "restore",
+    reason: string,
+    until?: string,
+  ) => {
+    if (!reason.trim()) {
+      props.onError?.("A reason is required for every Inbox triage decision.");
+      return;
+    }
+    setTriaging(entry.entry_key);
+    try {
+      if (action === "archive") await archiveInbox(entry.entry_key, reason);
+      else if (action === "restore") await restoreInbox(entry.entry_key, reason);
+      else if (until) await snoozeInbox(entry.entry_key, until, reason);
+      await load();
+    } catch (error) {
+      props.onError?.(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTriaging(null);
+    }
   };
 
   return (
@@ -188,7 +265,7 @@ const Inbox: Component<Props> = (props) => {
       </Show>
       <div class="inbox-list" aria-live="polite">
         <For each={result()?.entries ?? []}>
-          {(entry) => <Entry entry={entry} seen={seen().has(entry.entry_key)} onOpen={openEntry} />}
+          {(entry) => <Entry entry={entry} seen={seen().has(entry.entry_key)} busy={triaging() === entry.entry_key} onOpen={openEntry} onTriage={triage} />}
         </For>
       </div>
       <Show when={result()?.next_cursor}>

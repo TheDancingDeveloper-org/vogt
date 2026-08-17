@@ -51,6 +51,10 @@ export const ROUTES = {
   compliance: "/compliance",
   "audit.list": "/audit",
   notifications: "/notifications",
+  "inbox.list": "/inbox",
+  "inbox.archive": "/inbox/archive",
+  "inbox.snooze": "/inbox/snooze",
+  "inbox.restore": "/inbox/restore",
   "events.list": "/events",
   "session.list": "/sessions",
   "session.start": "/sessions",
@@ -66,16 +70,6 @@ export class VogtUnavailable extends Error {
     message: string,
   ) {
     super(message);
-  }
-}
-
-/** The current front door has not shipped the normalized Inbox operation. */
-export class InboxContractUnavailable extends Error {
-  constructor() {
-    super(
-      "The normalized inbox.list contract is not available from this front door yet.",
-    );
-    this.name = "InboxContractUnavailable";
   }
 }
 
@@ -154,30 +148,29 @@ export interface FreshnessSummary {
 /**
  * The normalized attention contract planned for the canonical Inbox.
  *
- * This client deliberately only carries the contract shape while the backend
- * operation is absent from this checkout. Inbox.tsx renders that absence and
- * never falls back to merging notifications, drift, or events in the browser.
+ * Inbox.tsx consumes this one server-owned projection and never falls back to
+ * merging notifications, drift, or events in the browser.
  */
 export interface InboxEntry {
   entry_key: string;
   source: "github" | "drift" | "ci" | "agent" | string;
   kind: string;
-  occurred_at: string;
+  occurred_at?: string | null;
   observed_at?: string | null;
   title: string;
   summary?: string | null;
   project_slug?: string | null;
   work_item_ref?: string | null;
   session_id?: string | null;
-  source_subject?: string | null;
+  source_subject_key?: string | null;
   source_url?: string | null;
   trust_state?: TrustState;
-  freshness?: FreshnessSummary;
+  freshness?: "current" | "stale" | "provisional" | "live" | "unknown" | string;
   triage_state?: "active" | "archived" | "snoozed" | string;
-  snoozed_until?: string | null;
+  snooze_until?: string | null;
   action?: {
     drift_id?: string;
-    observed_subject_key?: string;
+    subject_key?: string;
   };
 }
 
@@ -185,6 +178,7 @@ export interface InboxSourceCoverage {
   status: "current" | "partial" | "unswept" | "unconfigured" | "failed" | string;
   count: number;
   observed_at?: string | null;
+  registered?: number;
   detail?: string | null;
 }
 
@@ -193,8 +187,12 @@ export interface InboxListResult {
   next_cursor?: string | null;
   snapshot_at: string;
   coverage: Record<string, InboxSourceCoverage>;
+  counts?: Record<string, number>;
+  github_scope?: string;
   instance_scope?: string | null;
   engine_available?: boolean;
+  engine_status?: "not_configured" | "available" | "unreachable" | string;
+  engine_detail?: string | null;
 }
 
 export interface WorkItem {
@@ -523,16 +521,31 @@ export const notifications = (params: Record<string, unknown> = {}) =>
   // different answer from "nothing to say" (FR-N3).
   call<Record<string, unknown>>("notifications", params);
 
-/**
- * Read the canonical Inbox only when the backend exposes its contract.
- *
- * This checkout predates `inbox.list`, so intentionally no URL is invented
- * here and no legacy reads are composed in the browser. When the registry
- * operation lands, this function is the single client seam to wire to it.
- */
-export const listInbox = async (_params: Record<string, unknown> = {}): Promise<InboxListResult> => {
-  throw new InboxContractUnavailable();
-};
+/** Read the canonical server-owned Inbox. The browser never composes legacy
+ * notification, drift, event or engine reads into this answer. */
+export const listInbox = (params: Record<string, unknown> = {}) =>
+  call<InboxListResult>("inbox.list", params);
+
+export const archiveInbox = (entry_key: string, reason: string) =>
+  call<{ entry: InboxEntry }>(
+    "inbox.archive",
+    { entry_key, reason },
+    "POST",
+  );
+
+export const snoozeInbox = (entry_key: string, until: string, reason: string) =>
+  call<{ entry: InboxEntry }>(
+    "inbox.snooze",
+    { entry_key, until, reason },
+    "POST",
+  );
+
+export const restoreInbox = (entry_key: string, reason: string) =>
+  call<{ entry: InboxEntry }>(
+    "inbox.restore",
+    { entry_key, reason },
+    "POST",
+  );
 
 /** The audit log, narrowed and paged (FR-S6, FR-U19).
  *

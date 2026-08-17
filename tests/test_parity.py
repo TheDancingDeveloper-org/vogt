@@ -179,6 +179,30 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ("compliance", {"project": "parity-fixture"}),
     ("drift.detect", {"reason": WHY}),
     ("drift.list", {"status": "open"}),
+    ("inbox.list", {}),
+    (
+        "inbox.snooze",
+        lambda seen: {
+            "entry_key": seen["inbox.list"]["entries"][0]["entry_key"],
+            "until": "2099-01-01T00:00:00+00:00",
+            "reason": WHY,
+        },
+    ),
+    ("inbox.list", {"triage_states": ["snoozed"]}),
+    (
+        "inbox.restore",
+        lambda seen: {
+            "entry_key": seen["inbox.snooze"]["entry"]["entry_key"],
+            "reason": WHY,
+        },
+    ),
+    (
+        "inbox.archive",
+        lambda seen: {
+            "entry_key": seen["inbox.restore"]["entry"]["entry_key"],
+            "reason": WHY,
+        },
+    ),
     (
         "drift.resolve",
         lambda seen: {

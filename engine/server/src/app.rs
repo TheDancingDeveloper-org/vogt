@@ -103,7 +103,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         runtime.spawn_refresher();
     }
 
-    let assistant = AssistantRuntime::from_config(&cfg, Arc::clone(&sessions));
+    let assistant = AssistantRuntime::from_config(&cfg, Arc::clone(&sessions), Arc::clone(&push));
     if assistant.is_some() {
         tracing::info!(model = %cfg.assistant_model, "assistant enabled");
     }
@@ -189,7 +189,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/assistant/message", post(assistant_api::message))
         .route(
             "/api/assistant/actions/{id}",
-            post(assistant_api::resolve_action),
+            post(assistant_api::resolve_action).patch(assistant_api::replace_reason),
         )
         .route("/api/assistant/history", get(assistant_api::history))
         .route("/api/assistant/reset", post(assistant_api::reset))

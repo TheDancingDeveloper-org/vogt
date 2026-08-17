@@ -73,6 +73,7 @@ class EngineSession:
     activity: str
     cwd: str
     exit_code: int | None = None
+    activity_changed_at: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineSession:
@@ -82,6 +83,7 @@ class EngineSession:
             activity=str(payload.get("activity", "unknown")),
             cwd=str(payload.get("cwd", "")),
             exit_code=payload.get("exit_code"),
+            activity_changed_at=_optional_str(payload.get("activity_changed_at")),
         )
 
 

@@ -1,4 +1,4 @@
-# Vogt — Deliverable Stages (v0.3, revision r9)
+# Vogt — Deliverable Stages (v0.3, revision r15)
 
 Status: **M0–M6 delivered — v1 is built** (2026-08-12); **M7 and M8 are
 post-v1**; **M9–M14 are v2** — the MyDevEnv2 merge, added by
@@ -65,9 +65,9 @@ operation the stage added.
 | M8 | Reachable by an agent *(post-v1)* | `connect`, and the five estate prerequisites behind it | FR-A8; `DEPLOYMENT.md` §7 (1–5) |
 | M9 | Foundations *(v2)* | One repo, one stack, one published port; both halves' CI green | NFR-D11, NFR-D12, NFR-C6, NFR-Q6, FR-U9 |
 | M10 | Coding sessions *(v2, merge-MVP)* | A work item can open a session in its project's tree | FR-E1–E5, FR-E8, FR-E9, FR-S9, FR-S10 |
-| M11 | GUI uplift *(v2)* | The Solid PWA becomes the single front end, specified to interaction depth | FR-U4–U8, FR-U10–U22, NFR-S5 |
-| M12 | AI layer & voice *(v2)* | The assistant learns the Vogt domain; voice is validated rather than assumed | FR-T1–T4, FR-T6; FR-T5 validated, FR-T7 attempted |
-| M13 | Mobile MVP1 *(v2)* | The phone is a first-class surface | FR-M1–M3, FR-E6, FR-E7 |
+| M11 | GUI uplift *(v2, restructure)* | The Solid PWA becomes the single front end, then gains places, Inbox, and measured high-volume surfaces | FR-N4–N5, FR-U4–U8, FR-U10–U25, NFR-S5 |
+| M12 | AI layer & voice *(v2, restructure)* | The assistant learns the Vogt domain; voice is validated rather than assumed; the existing gate is presented consistently | FR-T1–T4, FR-T6, FR-T8; FR-T5 validated, FR-T7 attempted |
+| M13 | Mobile MVP1 *(v2, restructure)* | The phone is a first-class, sessions-first surface | FR-M1–M5, FR-E6, FR-E7 |
 | M14 | Consolidation *(ongoing)* | Old stacks retired, names settled, r9 verified against the build | NFR-I6 (unclaimed by any other stage) |
 
 Deferred and withdrawn requirement IDs (FR-G2, FR-G5–G10, FR-D7) appear in
@@ -796,8 +796,28 @@ smaller notes from the same session:
 interaction depth rather than to a list of views — M6's lesson, applied
 before the fact this time.
 
-Delivers FR-U4–U8, FR-U10–U22, NFR-S5, and retires FR-U9's legacy surface
-at parity.
+Delivers FR-N4–N5, FR-U4–U8, FR-U10–U25, NFR-S5, and retires FR-U9's
+legacy surface at parity. The reviewed restructure is staged inside M11 so
+the normalized Inbox contract and the places shell land before their surfaces.
+
+### M11 restructure delivery order
+
+The implementation plan in `RESTRUCTURE.md` is the acceptance boundary for
+this addition to M11:
+
+1. Stage 0 records FR-N4–N5, FR-U23–U25, FR-T8 and FR-M5 in the requirements
+   history and gap register; no product code is justified before that gate.
+2. Stage 1 delivers the server-owned Inbox projection and audited triage.
+3. Stage 3 migrates the product shell to stable places and Sessions panes;
+   Stage 4 consumes the single Inbox operation.
+4. Stage 5 proves measured content-sized windowing and bounded reads before
+   Stages 6–7 change Board and Backlog.
+5. Stages 8–9 complete Sessions presentation and the sessions-first phone;
+   Stage 10 records automated, browser, live-stack and device evidence.
+
+An unfinished stage remains in the gap register even when an earlier stage's
+code has landed. Source inspection or jsdom does not close the browser,
+live-stack or device demonstrations.
 
 Build order, which is part of the deliverable:
 1. Board **with its interaction contract** — FR-U10–U12 land *with* FR-U4,
@@ -899,7 +919,10 @@ the cost of a roadmap paragraph that outlives the thing it describes.
 **Objective**: the assistant learns the Vogt domain — and voice, adopted
 unproven, is put through its paces rather than assumed.
 
-Delivers FR-T1–T4, FR-T6; FR-T5 validated; FR-T7 attempted.
+Delivers FR-T1–T4, FR-T6 and the existing pending-action presentation in
+FR-T8; FR-T5 is validated and FR-T7 attempted. The approval extension stays
+inside the engine's one in-memory gate and does not add a core approval
+ledger.
 
 Deliverables:
 - **Registry-derived read tools** (FR-T1): the curated read slice generated
@@ -971,7 +994,9 @@ does not.
 **Objective**: the phone becomes a real surface — the one where an agent
 waiting for input actually reaches you.
 
-Delivers FR-M1–M3, FR-E6, FR-E7.
+Delivers FR-M1–M5, FR-E6 and FR-E7. The four primary places are Sessions,
+Inbox, Board and Backlog; secondary routes remain reachable through the
+labelled navigation control described by `RESTRUCTURE.md` Stage 9.
 
 Deliverables:
 - The Capacitor shell repointed at the merged PWA (FR-M1), APK CI on the dev
