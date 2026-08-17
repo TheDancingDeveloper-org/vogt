@@ -62,8 +62,8 @@
 //     agreed to show it. So the cell now *windows* — the same mechanism
 //     `Backlog.tsx` uses and for the same reason, because a second idea of
 //     what virtualization means on one product is two things to keep true:
-//     a fixed card height pinned by `styles.css`, a `ResizeObserver` on the
-//     cell's own scroller, and a slice of the list with overscan either
+//     a measured card height, a `ResizeObserver` on the cell's own scroller,
+//     and a slice of the list with overscan either
 //     side. Everything the filter matched is reachable, in the order it
 //     matched; only what is on screen is in the DOM.
 //
@@ -124,13 +124,8 @@ const PAGE_SIZE = 500;
 /** Safety ceiling for the compatibility path while `board.list` is absent. */
 const MAX_ITEMS = 2000;
 
-/** Conservative seed only; measured cards replace it as soon as they render. */
-const CARD_ESTIMATE = 112;
-
-/** Compatibility export for older fixtures; production never uses it as a slot. */
-export const CARD_SLOT = CARD_ESTIMATE;
-/** Compatibility export retained for the existing measurement fixtures. */
-export const CARD_ESTIMATE_TOP = CARD_ESTIMATE;
+/** Layout-free seed only; measured cards replace it as soon as they render. */
+export const CARD_ESTIMATE = 112;
 
 /**
  * Below this many cards a cell draws whole.
@@ -147,6 +142,7 @@ const VIRTUALIZE_ABOVE = 60;
 /** Pixel overscan, not a number of rows. */
 const OVERSCAN_PX = 320;
 const DEFAULT_VIEWPORT_PX = 480;
+const CARD_SPACING_PX = 8;
 
 const POLL_CHOICES = [10, 20, 60, 0] as const;
 const DEFAULT_POLL_SECONDS = 20;
@@ -2041,8 +2037,12 @@ const Board: Component<Props> = (props) => {
                             cellScroll.get(mine) ?? 0,
                           );
                           const [viewport, setViewport] = createSignal(0);
-                          const measured = new MeasuredWindow(CARD_ESTIMATE);
+                          const measured = new MeasuredWindow(CARD_ESTIMATE + CARD_SPACING_PX);
                           const [measurementVersion, setMeasurementVersion] = createSignal(0);
+                          const totalHeight = createMemo(() => {
+                            measurementVersion();
+                            return measured.totalHeight();
+                          });
                           createEffect(() => {
                             if (measured.setKeys(cards().map((item) => item.ref))) {
                               setMeasurementVersion((version) => version + 1);
@@ -2277,9 +2277,10 @@ const Board: Component<Props> = (props) => {
                                 <div
                                   class="board-cell-cards"
                                   ref={(node) => {
-                                    const observer = new ResizeObserver(() =>
-                                      setViewport(node.clientHeight),
-                                    );
+                                    const observer = new ResizeObserver((entries) => {
+                                      const height = entries[0]?.contentRect.height ?? node.clientHeight;
+                                      if (height > 0) setViewport(height);
+                                    });
                                     observer.observe(node);
                                     queueMicrotask(() => {
                                       // A rebuilt cell is a fresh element at
@@ -2307,7 +2308,7 @@ const Board: Component<Props> = (props) => {
                                   <div
                                     class="board-cell-run"
                                     style={{
-                                      height: `${measured.totalHeight()}px`,
+                                      height: `${totalHeight()}px`,
                                     }}
                                   >
                                     <div
@@ -2328,17 +2329,21 @@ const Board: Component<Props> = (props) => {
                                                 bounced() === item.ref ? " board-card--bounced" : ""
                                               }`}
                                               ref={(node) => {
-                                                const observer = new ResizeObserver((entries: ResizeObserverEntry[] = []) => {
+                                                const observer = new ResizeObserver((entries) => {
                                                   const entry = entries[0];
-                                                  if (!entry) return;
-                                                  const height = entry.borderBoxSize;
-                                                  const measuredHeight =
-                                                    Array.isArray(height)
-                                                      ? height[0]?.blockSize
-                                                      : height?.[0]?.blockSize ?? entry.contentRect.height;
-                                                  const contentHeight = measuredHeight ?? entry.contentRect.height;
-                                                  if (!contentHeight || contentHeight <= 0) return;
-                                                  const change = measured.measure(item.ref, contentHeight);
+                                                  const box = entry?.borderBoxSize;
+                                                  const borderHeight = Array.isArray(box)
+                                                    ? box[0]?.blockSize
+                                                    : box && typeof box === "object" && "blockSize" in box
+                                                      ? box.blockSize
+                                                      : undefined;
+                                                  const cardHeight =
+                                                    borderHeight ?? entry?.contentRect.height ?? node.getBoundingClientRect().height;
+                                                  if (cardHeight <= 0) return;
+                                                  const change = measured.measure(
+                                                    item.ref,
+                                                    cardHeight + CARD_SPACING_PX,
+                                                  );
                                                   if (change) {
                                                     setMeasurementVersion((version) => version + 1);
                                                     if (change.top < scrollTop()) {
@@ -2354,11 +2359,14 @@ const Board: Component<Props> = (props) => {
                                                 });
                                                 observer.observe(node);
                                                 queueMicrotask(() => {
-                                                  const contentHeight = node.getBoundingClientRect().height;
-                                                  const change = contentHeight > 0
-                                                    ? measured.measure(item.ref, contentHeight)
-                                                    : null;
-                                                  if (change) setMeasurementVersion((version) => version + 1);
+                                                  const cardHeight = node.getBoundingClientRect().height;
+                                                  if (cardHeight > 0) {
+                                                    const change = measured.measure(
+                                                      item.ref,
+                                                      cardHeight + CARD_SPACING_PX,
+                                                    );
+                                                    if (change) setMeasurementVersion((version) => version + 1);
+                                                  }
                                                 });
                                                 onCleanup(() => observer.disconnect());
                                               }}

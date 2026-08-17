@@ -60,11 +60,6 @@ import {
   closeTab,
   focusTab,
   openAssistantTab,
-  openBacklogTab,
-  openBoardTab,
-  openInboxTab,
-  openAuditTab,
-  openProjectsTab,
   openEditorTab,
   openGitTab,
   openGuiTab,
@@ -236,12 +231,6 @@ function activityLabel(s: ActivityState, exit: number | null): string {
   }
 }
 
-function tabActivityClass(tab: Tab): string | null {
-  if (tab.kind !== "terminal") return null;
-  const s = sessionsStore.sessions[tab.sessionId];
-  return s ? activityClass(s) : "idle";
-}
-
 /**
  * Where each tab was last seen, including its query string.
  *
@@ -264,11 +253,6 @@ function pathFor(tab: Tab): string {
   if (tab.kind === "git") return `/g/${encodeURIComponent(tab.repo)}`;
   if (tab.kind === "gui") return "/gui";
   if (tab.kind === "history") return "/history";
-  if (tab.kind === "board") return "/board";
-  if (tab.kind === "backlog") return "/backlog";
-  if (tab.kind === "inbox") return "/inbox";
-  if (tab.kind === "projects") return "/projects";
-  if (tab.kind === "audit") return "/audit";
   if (tab.kind === "workitem") return `/w/${encodeURIComponent(tab.ref)}`;
   if (tab.kind === "assistant") return "/assistant";
   return "/tasks";
@@ -278,8 +262,6 @@ const App: Component = () => {
   const navigate = useNavigate();
   const params = useParams<{ id?: string; path?: string; ref?: string }>();
   const location = useLocation();
-  const [drawerOpen, setDrawerOpen] = createSignal(false);
-  const [mobileTabsOpen, setMobileTabsOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
   const [templateSelectorOpen, setTemplateSelectorOpen] = createSignal(false);
@@ -359,19 +341,13 @@ const App: Component = () => {
   const [authState, setAuthState] = createSignal<"checking" | "unauthenticated" | "authenticated">("checking");
   const [authError, setAuthError] = createSignal<string | null>(null);
   const layoutMode = getLayoutMode();
-  const activeTab = () => tabsStore.tabs.find((tab) => tab.id === tabsStore.active) ?? null;
 
   // Check if we're in IDE mode
   const isIDEMode = layoutMode === "ide";
-  const stablePlace = () => {
-    const path = location.pathname;
-    return path === "/sessions" || path === "/board" || path === "/backlog" ||
-      path === "/inbox" || path === "/projects" || path === "/audit" ||
-      path.startsWith("/w/");
-  };
   const activeKind = () =>
     tabsStore.tabs.find((tab) => tab.id === tabsStore.active)?.kind ?? null;
-  const editorWorkspaceActive = () => isIDEMode && activeKind() === "editor";
+  const editorWorkspaceActive = () =>
+    isIDEMode && activeKind() === "editor" && location.pathname.startsWith("/e/");
 
   onMount(() => {
     const unsubscribeAuthState = subscribeAuthState(() => {
@@ -410,60 +386,6 @@ const App: Component = () => {
     })();
   });
 
-  // -- the drawer's width ---------------------------------------------------
-  //
-  // Per client and persisted, which is the same rule the board's layout
-  // follows (FR-U13): a width is a property of the screen somebody is sitting
-  // at, not of the estate. Clamped because a drawer dragged to nothing cannot
-  // be dragged back — the grip goes with it.
-
-  const DRAWER_WIDTH_KEY = "mydevenv2.drawerWidth";
-  const DRAWER_MIN = 180;
-  const DRAWER_MAX = 640;
-
-  const clampWidth = (value: number) =>
-    Math.min(DRAWER_MAX, Math.max(DRAWER_MIN, Math.round(value)));
-
-  const storedWidth = () => {
-    const raw = Number(localStorage.getItem(DRAWER_WIDTH_KEY));
-    return Number.isFinite(raw) && raw > 0 ? clampWidth(raw) : 260;
-  };
-
-  const [drawerWidth, setDrawerWidthSignal] = createSignal(storedWidth());
-
-  const setDrawerWidth = (value: number) => {
-    const width = clampWidth(value);
-    setDrawerWidthSignal(width);
-    localStorage.setItem(DRAWER_WIDTH_KEY, String(width));
-  };
-
-  createEffect(() => {
-    document.documentElement.style.setProperty(
-      "--drawer-width",
-      `${drawerWidth()}px`,
-    );
-  });
-
-  const beginResize = (event: PointerEvent) => {
-    event.preventDefault();
-    const grip = event.currentTarget as HTMLElement;
-    // Capture, so a fast drag that leaves the 6px grip keeps resizing rather
-    // than stopping wherever the pointer happened to exit.
-    grip.setPointerCapture(event.pointerId);
-    const startX = event.clientX;
-    const startWidth = drawerWidth();
-    const onMove = (move: PointerEvent) =>
-      setDrawerWidth(startWidth + (move.clientX - startX));
-    const onUp = () => {
-      grip.removeEventListener("pointermove", onMove);
-      grip.removeEventListener("pointerup", onUp);
-      grip.removeEventListener("pointercancel", onUp);
-    };
-    grip.addEventListener("pointermove", onMove);
-    grip.addEventListener("pointerup", onUp);
-    grip.addEventListener("pointercancel", onUp);
-  };
-
   const authenticate = async (token: string, base: string) => {
     await validateCredentials(token, base);
     setToken(token);
@@ -488,7 +410,7 @@ const App: Component = () => {
     if (location.pathname === pathFor(active)) lastUrlByTab.set(active.id, here);
   });
 
-  // URL → tabs syncing. createEffect (not createMemo) — we want side effects,
+  // URL syncing. createEffect (not createMemo) — we want side effects,
   // not a memoised value.
   createEffect(() => {
     const path = location.pathname;
@@ -518,22 +440,12 @@ const App: Component = () => {
     } else if (path === "/tasks") {
       openTasksTab();
     } else if (path === "/assistant" || path.startsWith("/assistant/")) {
-      // The same condition the drawer button carries. Without it a hand-typed
+      // The same condition the rail carries. Without it a hand-typed
       // `#/assistant` opened a tab against routes that answer 404 when no key
       // is configured — FR-T6 says the assistant does not exist unless it is
       // provisioned, and a tab that opens and then fails is a worse answer
       // than no tab.
       if (publicCfg()?.assistant_enabled) openAssistantTab();
-    } else if (path === "/board") {
-      openBoardTab();
-    } else if (path === "/backlog") {
-      openBacklogTab();
-    } else if (path === "/inbox") {
-      openInboxTab();
-    } else if (path === "/projects") {
-      openProjectsTab();
-    } else if (path === "/audit") {
-      openAuditTab();
     } else if (path === "/settings") {
       setSettingsOpen(true);
     } else if (path.startsWith("/w/") && params.ref) {
@@ -609,7 +521,6 @@ const App: Component = () => {
       );
       openTerminalTab(s.id, s.name);
       navigate(`/t/${s.id}`, { replace: false });
-      setDrawerOpen(false);
     } catch (e) {
       showToast(`create failed: ${(e as Error).message}`, { kind: "error" });
     }
@@ -631,7 +542,6 @@ const App: Component = () => {
       );
       openTerminalTab(s.id, s.name);
       navigate(`/t/${s.id}`, { replace: false });
-      setDrawerOpen(false);
       setTemplateSelectorContext(null);
     } catch (e) {
       showToast(`create failed: ${(e as Error).message}`, { kind: "error" });
@@ -662,7 +572,6 @@ const App: Component = () => {
       }
       openTerminalTab(dup.id, dup.name);
       navigate(`/t/${dup.id}`);
-      setDrawerOpen(false);
     } catch (e) {
       showToast(`duplicate failed: ${(e as Error).message}`, { kind: "error" });
     }
@@ -716,7 +625,6 @@ const App: Component = () => {
     senders.clear();
     actions.clear();
     replaceTabs({ tabs, active });
-    setDrawerOpen(false);
     setSettingsOpen(false);
     setCommandPaletteOpen(false);
     setLayoutMode(layout.layout_mode);
@@ -764,15 +672,6 @@ const App: Component = () => {
       (location.pathname === "/tasks" && tabId === "tasks") ||
       ((location.pathname === "/assistant" || location.pathname.startsWith("/assistant/")) &&
         tabId === "assistant") ||
-      // The five Vogt surfaces were missing from this list, so closing the
-      // tab you were looking at left the URL pointing at a route with no tab
-      // behind it and the main area fell through to the empty state. It shows
-      // up worst on a phone, where the tab sheet is the only way to move
-      // between tabs and closing one is the common gesture.
-      (location.pathname === "/board" && tabId === "board") ||
-      (location.pathname === "/backlog" && tabId === "backlog") ||
-      (location.pathname === "/projects" && tabId === "projects") ||
-      (location.pathname === "/audit" && tabId === "audit") ||
       (location.pathname.startsWith("/w/") &&
         `workitem:${decodeURIComponent(params.ref ?? "")}` === tabId);
 
@@ -922,176 +821,24 @@ const App: Component = () => {
               <Show when={publicCfg()?.assistant_enabled}><a href="#/assistant">Assistant</a></Show>
             </div>
           </nav>
-          <div class="places-rail-footer">
-            <button type="button" onClick={() => navigate("/settings")}>Settings</button>
-            <span class="rail-connection">{isConnected() ? "Connected" : "Offline"}</span>
-          </div>
-        </aside>
-        <Show when={drawerOpen()}>
-          <div
-            class="drawer-scrim"
-            onPointerDown={() => setDrawerOpen(false)}
-          />
-        </Show>
-        <Show when={mobileTabsOpen()}>
-          <div
-            class="drawer-scrim"
-            onPointerDown={() => setMobileTabsOpen(false)}
-          />
-        </Show>
-
-        <aside class={`drawer ${drawerOpen() ? "open" : ""}`}>
-          {/* Drag to resize, and reachable from the keyboard: a panel whose
-              width can only be changed with a pointer is one a keyboard user
-              cannot widen when its contents do not fit. */}
-          <button
-            type="button"
-            class="drawer-resizer"
-            aria-label="Resize the panel"
-            title="Drag to resize"
-            onPointerDown={beginResize}
-            onKeyDown={(event) => {
-              const step = event.shiftKey ? 48 : 16;
-              if (event.key === "ArrowLeft") {
-                event.preventDefault();
-                setDrawerWidth(drawerWidth() - step);
-              } else if (event.key === "ArrowRight") {
-                event.preventDefault();
-                setDrawerWidth(drawerWidth() + step);
-              }
-            }}
-          />
-          <div class="drawer-header">
-            <span>MyDevEnv2</span>
-            <span style={{ color: isConnected() ? "#7ee787" : "#ff7b72" }}>
-              {isConnected() ? "●" : "○"}
-            </span>
-          </div>
-          <div class="drawer-actions">
-            <button onClick={() => onCreate()}>+ Session</button>
-            <button
-              onClick={() => {
-                openGitTab("");
-                navigate("/g/");
-                setDrawerOpen(false);
-              }}
-              title="Open git tab for workspace root"
-            >
-              ⎇ Git
-            </button>
-            <button
-              onClick={() => {
-                openTasksTab();
-                navigate("/tasks");
-                setDrawerOpen(false);
-              }}
-              title="Open recurring agent tasks"
-            >
-              Tasks
-            </button>
-            {/*
-              The Vogt surfaces. Shown only when this front door has a core
-              behind it — `/api/config` says so without anyone having to
-              authenticate or provoke a 503 — because a tab that opens and
-              then reports an outage is a worse answer than no tab (FR-U21).
-            */}
-            <Show when={publicCfg()?.vogt?.configured}>
-              <button
-                onClick={() => {
-                  openBoardTab();
-                  navigate("/board");
-                  setDrawerOpen(false);
-                }}
-                title="Work items by workflow state"
-              >
-                ▦ Board
-              </button>
-              <button
-                onClick={() => {
-                  openBacklogTab();
-                  navigate("/backlog");
-                  setDrawerOpen(false);
-                }}
-                title="The ranked backlog and bugs, with the reason for the ranking"
-              >
-                ☰ Backlog
-              </button>
-              <button
-                onClick={() => {
-                  openProjectsTab();
-                  navigate("/projects");
-                  setDrawerOpen(false);
-                }}
-                title="Per-project state, compliance and the drift inbox"
-              >
-                ▤ Projects
-              </button>
-              <button
-                onClick={() => {
-                  openAuditTab();
-                  navigate("/audit");
-                  setDrawerOpen(false);
-                }}
-                title="Who wrote what, and the reason they gave"
-              >
-                ⧉ Audit
-              </button>
-            </Show>
-            <Show when={publicCfg()?.assistant_enabled}>
-              <button
-                onClick={() => {
-                  openAssistantTab();
-                  navigate("/assistant");
-                  setDrawerOpen(false);
-                }}
-                title="Talk to the assistant about your sessions"
-              >
-                🎙 Assistant
-              </button>
-            </Show>
-            <button
-              onClick={() => {
-                openGuiTab();
-                navigate("/gui");
-                setDrawerOpen(false);
-              }}
-              title="Open the GUI stream tab"
-            >
-              🖥 GUI
-            </button>
-            <button onClick={() => setSettingsOpen(true)} title="Settings">
-              ⚙
-            </button>
-          </div>
-          <Show when={sessionsError()}>
-            <div style={{ padding: "8px 10px", color: "#ff7b72", "font-size": "12px" }}>
-              {sessionsError()}
-            </div>
-          </Show>
-          <div class="session-list">
+          <div class="places-rail-session-area">
+            <div class="places-section-label">Running</div>
             <For
               each={sessionsStore.order
                 .map((id) => sessionsStore.sessions[id])
                 .filter((s): s is SessionSummary => Boolean(s))
                 .sort((a, b) => {
-                  // Bookmarked sessions float to the top. `bookmarks()` is read
-                  // here so this re-sorts reactively when a bookmark toggles.
                   const set = new Set(bookmarks());
-                  const aB = set.has(a.id) ? 0 : 1;
-                  const bB = set.has(b.id) ? 0 : 1;
-                  return aB - bB;
+                  return (set.has(a.id) ? 0 : 1) - (set.has(b.id) ? 0 : 1);
                 })}
               fallback={<div class="empty">No sessions yet.</div>}
             >
               {(s) => (
                 <div
-                  class={`session-row ${
-                    tabsStore.active === `term:${s.id}` ? "active" : ""
-                  }`}
+                  class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""}`}
                   onClick={() => {
                     openTerminalTab(s.id, s.name);
                     navigate(`/t/${s.id}`);
-                    setDrawerOpen(false);
                   }}
                   onContextMenu={(e) => {
                     e.preventDefault();
@@ -1099,139 +846,56 @@ const App: Component = () => {
                   }}
                   title={`${s.name}\ncwd: ${s.cwd}`}
                 >
-                  <span
-                    class={`activity-dot ${activityClass(s)}`}
-                    title={activityLabel(s.activity, s.exit_code)}
-                  />
-                  <span
-                    class={`continuity-dot ${continuityBadge(s).cls}`}
-                    title={continuityBadge(s).title}
-                  >
+                  <span class={`activity-dot ${activityClass(s)}`} title={activityLabel(s.activity, s.exit_code)} />
+                  <span class={`continuity-dot ${continuityBadge(s).cls}`} title={continuityBadge(s).title}>
                     {continuityBadge(s).glyph}
                   </span>
                   <div class="session-row-body">
                     <span class="name">{s.name}</span>
-                    <Show when={s.cwd}>
-                      <span class="cwd">{s.cwd}</span>
-                    </Show>
+                    <Show when={s.cwd}><span class="cwd">{s.cwd}</span></Show>
                   </div>
-                  <span
+                  <button
+                    type="button"
                     class="row-btn"
                     title={isBookmarked(s.id) ? "Remove bookmark" : "Bookmark"}
                     onClick={(e) => {
                       e.stopPropagation();
                       toggleBookmark(s.id);
                     }}
-                  >
-                    {isBookmarked(s.id) ? "★" : "☆"}
-                  </span>
-                  <span
+                  >{isBookmarked(s.id) ? "★" : "☆"}</button>
+                  <button
+                    type="button"
                     class="row-btn"
                     title="Duplicate (same cwd)"
                     onClick={(e) => {
                       e.stopPropagation();
                       void onDuplicateSession(s);
                     }}
-                  >
-                    ⧉
-                  </span>
-                  <span
+                  >⧉</button>
+                  <button
+                    type="button"
                     class="close"
                     title="Kill & remove"
                     onClick={(e) => {
                       e.stopPropagation();
                       void onCloseSession(s);
                     }}
-                  >
-                    ×
-                  </span>
+                  >×</button>
                 </div>
               )}
             </For>
           </div>
           <FileTree
-            onOpen={() => setDrawerOpen(false)}
+            onOpen={() => navigate("/sessions")}
             promptPath={promptUser}
-            onCreatePresetHere={(path) => {
-              void onCreate(path);
-            }}
+            onCreatePresetHere={(path) => { void onCreate(path); }}
             onError={(message) => showToast(message, { kind: "error" })}
           />
+          <div class="places-rail-footer">
+            <button type="button" onClick={() => navigate("/settings")}>Settings</button>
+            <span class="rail-connection">{isConnected() ? "Connected" : "Offline"}</span>
+          </div>
         </aside>
-
-        <Show when={!stablePlace()}>
-        <div class="tab-strip">
-          <button
-            class="menu-btn"
-            onClick={() => setDrawerOpen((v) => !v)}
-            aria-label="Toggle drawer"
-          >
-            ☰
-          </button>
-          <button
-            class="menu-btn"
-            onClick={() => void onCreate()}
-            title="New terminal (Ctrl+Shift+T)"
-            aria-label="New terminal"
-          >
-            +
-          </button>
-          <button
-            class="menu-btn"
-            onClick={() => setMobileTabsOpen(true)}
-            title="Show open tabs"
-            aria-label="Show open tabs"
-          >
-            {tabsStore.tabs.length}
-          </button>
-          <For each={tabsStore.tabs}>
-            {(t) => (
-              <div
-                class={`tab ${tabsStore.active === t.id ? "active" : ""}`}
-                onAuxClick={(e) => {
-                  // Middle-click closes the tab (browser/editor convention).
-                  if (e.button === 1) {
-                    e.preventDefault();
-                    void requestCloseTab(t.id);
-                  }
-                }}
-                title={t.label}
-              >
-                <button
-                  type="button"
-                  class="tab-main"
-                  onClick={() => {
-                    focusTab(t.id);
-                    navigate(urlForTab(t));
-                  }}
-                >
-                  <Show when={t.kind === "terminal"}>
-                    <span class={`activity-dot ${tabActivityClass(t) ?? "idle"}`} />
-                  </Show>
-                  <span class="label">
-                    {t.label}
-                  </span>
-                  <Show when={t.kind === "editor" && t.dirty}>
-                    <span class="dirty-dot" title="unsaved changes" />
-                  </Show>
-                </button>
-                <button
-                  type="button"
-                  class="close"
-                  aria-label={`Close ${t.label}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void requestCloseTab(t.id);
-                  }}
-                >
-                  ×
-                </button>
-              </div>
-            )}
-          </For>
-        </div>
-        </Show>
-
         <main class="main">
           <Show when={!isConnected() && getToken()}>
             <div class="connection-banner">
@@ -1251,38 +915,33 @@ const App: Component = () => {
               onNotify={(message, kind) => showToast(message, { kind })}
             />
           </Show>
-          <Show when={stablePlace()}>
-            <div class="place-view">
-              <Show when={location.pathname === "/sessions"}>
-                <Sessions />
-              </Show>
-              <Show when={location.pathname === "/board"}>
-                <Board onError={(msg) => showToast(msg, { kind: "error" })} />
-              </Show>
-              <Show when={location.pathname === "/backlog"}>
-                <Backlog onError={(msg) => showToast(msg, { kind: "error" })} />
-              </Show>
-              <Show when={location.pathname === "/inbox"}>
-                <Inbox onError={(msg) => showToast(msg, { kind: "error" })} />
-              </Show>
-              <Show when={location.pathname === "/projects"}>
-                <Projects onError={(msg) => showToast(msg, { kind: "error" })} />
-              </Show>
-              <Show when={location.pathname === "/audit"}>
-                <AuditBrowser onError={(msg) => showToast(msg, { kind: "error" })} />
-              </Show>
-              <Show when={location.pathname.startsWith("/w/") && params.ref}>
-                <WorkItemDetail
-                  itemRef={decodeURIComponent(params.ref ?? "")}
-                  onError={(msg) => showToast(msg, { kind: "error" })}
-                />
-              </Show>
-            </div>
+          <Show when={location.pathname === "/sessions"}>
+            <div class="stable-place"><Sessions /></div>
           </Show>
-          <Show when={!stablePlace()}>
+          <Show when={location.pathname === "/board"}>
+            <div class="stable-place"><Board onError={(msg) => showToast(msg, { kind: "error" })} /></div>
+          </Show>
+          <Show when={location.pathname === "/backlog"}>
+            <div class="stable-place"><Backlog onError={(msg) => showToast(msg, { kind: "error" })} /></div>
+          </Show>
+          <Show when={location.pathname === "/inbox"}>
+            <div class="stable-place"><Inbox onError={(msg) => showToast(msg, { kind: "error" })} /></div>
+          </Show>
+          <Show when={location.pathname === "/projects"}>
+            <div class="stable-place"><Projects onError={(msg) => showToast(msg, { kind: "error" })} /></div>
+          </Show>
+          <Show when={location.pathname === "/audit"}>
+            <div class="stable-place"><AuditBrowser onError={(msg) => showToast(msg, { kind: "error" })} /></div>
+          </Show>
           <div
             class="tab-view"
-            style={{ display: editorWorkspaceActive() ? "none" : "flex" }}
+            style={{
+              display:
+                editorWorkspaceActive() ||
+                ["/sessions", "/board", "/backlog", "/inbox", "/projects", "/audit"].includes(location.pathname)
+                  ? "none"
+                  : "flex",
+            }}
           >
             <For each={tabsStore.tabs}>
               {(t) => (
@@ -1367,17 +1026,6 @@ const App: Component = () => {
                       onError={(msg) => showToast(msg, { kind: "error" })}
                     />
                   </Show>
-                  <Show when={t.kind === "board"}>
-                    <Board onError={(msg) => showToast(msg, { kind: "error" })} />
-                  </Show>
-                  <Show when={t.kind === "backlog"}>
-                    <Backlog
-                      onError={(msg) => showToast(msg, { kind: "error" })}
-                    />
-                  </Show>
-                  <Show when={t.kind === "inbox"}>
-                    <Inbox onError={(msg) => showToast(msg, { kind: "error" })} />
-                  </Show>
                   <Show when={t.kind === "workitem" && t}>
                     {(tab) => (
                       <WorkItemDetail
@@ -1387,16 +1035,6 @@ const App: Component = () => {
                         onError={(msg) => showToast(msg, { kind: "error" })}
                       />
                     )}
-                  </Show>
-                  <Show when={t.kind === "projects"}>
-                    <Projects
-                      onError={(msg) => showToast(msg, { kind: "error" })}
-                    />
-                  </Show>
-                  <Show when={t.kind === "audit"}>
-                    <AuditBrowser
-                      onError={(msg) => showToast(msg, { kind: "error" })}
-                    />
                   </Show>
                   <Show when={t.kind === "tasks"}>
                     <AgentTasks
@@ -1412,13 +1050,12 @@ const App: Component = () => {
             </For>
             <Show when={tabsStore.tabs.length === 0}>
               <div class="empty">
-                <div>Open a file from the drawer or create a session.</div>
+                <div>Open a file from the rail or create a session.</div>
                 <button onClick={() => void onCreate()}>+ New session</button>
               </div>
             </Show>
           </div>
-          </Show>
-          <Show when={activeKind() === "terminal"}>
+          <Show when={activeKind() === "terminal" && location.pathname.startsWith("/t/")}>
             <ModKeyRow
               send={(d) => activeSend(d)}
               onCopy={() => void activeCopy()}
@@ -1429,59 +1066,6 @@ const App: Component = () => {
           </Show>
         </main>
       </div>
-
-      <Show when={mobileTabsOpen()}>
-        <div class="mobile-tabs-sheet">
-          <div class="mobile-tabs-header">
-            <div>
-              <strong>Open tabs</strong>
-              <div class="mobile-tabs-meta">
-                {tabsStore.tabs.length} total
-                <Show when={activeTab()}>
-                  {(tab) => <span> • active: {tab().label}</span>}
-                </Show>
-              </div>
-            </div>
-            <button type="button" onClick={() => setMobileTabsOpen(false)}>
-              Close
-            </button>
-          </div>
-          <div class="mobile-tabs-list">
-            <For each={tabsStore.tabs}>
-              {(tab) => (
-                <div
-                  class={`mobile-tab-row ${tabsStore.active === tab.id ? "active" : ""}`}
-                >
-                  <button
-                    type="button"
-                    class="mobile-tab-main"
-                    onClick={() => {
-                      focusTab(tab.id);
-                      navigate(urlForTab(tab));
-                      setMobileTabsOpen(false);
-                    }}
-                  >
-                    <span class="mobile-tab-title">
-                      <Show when={tab.kind === "terminal"}>
-                        <span class={`activity-dot ${tabActivityClass(tab) ?? "idle"}`} />
-                      </Show>
-                      {tab.label}
-                    </span>
-                    <span class="mobile-tab-kind">{tab.kind}</span>
-                  </button>
-                  <button
-                    type="button"
-                    class="mobile-tab-close"
-                    onClick={() => void requestCloseTab(tab.id)}
-                  >
-                    ×
-                  </button>
-                </div>
-              )}
-            </For>
-          </div>
-        </div>
-      </Show>
 
       <nav class="phone-bottom-nav" aria-label="Primary navigation">
         <a href="#/sessions" class={location.pathname.startsWith("/sessions") || location.pathname.startsWith("/t/") ? "active" : ""}>Sessions</a>
@@ -1598,7 +1182,7 @@ const App: Component = () => {
         open={commandPaletteOpen()}
         onClose={() => setCommandPaletteOpen(false)}
         onCreateSession={() => void onCreate()}
-        onOpenFile={() => setDrawerOpen(true)}
+        onOpenFile={() => navigate("/sessions")}
         onOpenSettings={() => setSettingsOpen(true)}
         onShowShortcuts={() => setShortcutsOpen(true)}
         onError={(message) => showToast(message, { kind: "error" })}

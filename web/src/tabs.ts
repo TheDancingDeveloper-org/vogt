@@ -8,14 +8,6 @@ export type Tab =
   | { id: string; kind: "history"; label: string }
   | { id: string; kind: "tasks"; label: string }
   | { id: string; kind: "assistant"; label: string }
-  // The Vogt surfaces (M11). A board and a backlog are one per client; a work
-  // item is one tab per item, because two of them open at once is the
-  // ordinary case when one blocks the other.
-  | { id: string; kind: "board"; label: string }
-  | { id: string; kind: "backlog"; label: string }
-  | { id: string; kind: "inbox"; label: string }
-  | { id: string; kind: "projects"; label: string }
-  | { id: string; kind: "audit"; label: string }
   | { id: string; kind: "workitem"; ref: string; label: string };
 
 export interface TabsStateSnapshot {
@@ -24,7 +16,8 @@ export interface TabsStateSnapshot {
   active: string | null;
 }
 
-const STORAGE_KEY = "mydevenv2.tabs.v1";
+const STORAGE_KEY = "mydevenv2.tabs.v2";
+const LEGACY_STORAGE_KEY = "mydevenv2.tabs.v1";
 
 function cloneTab(tab: Tab): Tab {
   return tab.kind === "editor" ? { ...tab, dirty: Boolean(tab.dirty) } : { ...tab };
@@ -73,11 +66,6 @@ function normalizeTab(value: unknown): Tab | null {
     case "history":
     case "tasks":
     case "assistant":
-    case "board":
-    case "backlog":
-    case "projects":
-    case "audit":
-    case "inbox":
       if (typeof raw.label !== "string") return null;
       return {
         id: raw.id,
@@ -106,8 +94,25 @@ function normalizeState(value: unknown): TabsStateSnapshot {
 
 function loadInitial(): TabsStateSnapshot {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? normalizeState(JSON.parse(raw)) : { tabs: [], active: null };
+    const current = localStorage.getItem(STORAGE_KEY);
+    if (current) {
+      const normalized = normalizeState(JSON.parse(current));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+      return normalized;
+    }
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!legacy) return { tabs: [], active: null };
+    // normalizeTab deliberately drops the old product-surface tab kinds.
+    // They are stable places now, so carrying them into v2 would recreate a
+    // second, closable route for the same surface.
+    const migrated = normalizeState(JSON.parse(legacy));
+    const stable = migrated.tabs;
+    const next = {
+      tabs: stable,
+      active: stable.some((tab) => tab.id === migrated.active) ? migrated.active : stable[0]?.id ?? null,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    return next;
   } catch {
     return { tabs: [], active: null };
   }
@@ -246,7 +251,7 @@ export function openHistoryTab(): Tab {
     persist();
     return existing;
   }
-  const tab: Tab = { id, kind: "history", label: "📜 History" };
+  const tab: Tab = { id, kind: "history", label: "History" };
   setStore(
     produce((s) => {
       s.tabs.push(tab);
@@ -336,31 +341,6 @@ export function replaceTabs(next: TabsStateSnapshot) {
   persist();
 }
 
-/** The board: one per client, and the surface a Vogt session usually starts from. */
-export function openBoardTab(): Tab {
-  return openSingletonTab("board", "board", "Board");
-}
-
-/** The ranked backlog and bugs, which share a tab and a filter set. */
-export function openBacklogTab(): Tab {
-  return openSingletonTab("backlog", "backlog", "Backlog");
-}
-
-/** The canonical attention Inbox: one stable place, not a closable tab. */
-export function openInboxTab(): Tab {
-  return openSingletonTab("inbox", "inbox", "Inbox");
-}
-
-/** Per-project pages and the drift inbox they carry. */
-export function openProjectsTab(): Tab {
-  return openSingletonTab("projects", "projects", "Projects");
-}
-
-/** The audit browser: who wrote what, and the reason they gave. */
-export function openAuditTab(): Tab {
-  return openSingletonTab("audit", "audit", "Audit");
-}
-
 /** One work item, addressable so the tab survives a reload (FR-U11). */
 export function openWorkItemTab(ref: string): Tab {
   const id = `workitem:${ref}`;
@@ -371,29 +351,6 @@ export function openWorkItemTab(ref: string): Tab {
     return existing;
   }
   const tab: Tab = { id, kind: "workitem", ref, label: ref };
-  setStore(
-    produce((s) => {
-      s.tabs.push(tab);
-      s.active = id;
-    }),
-  );
-  persist();
-  return tab;
-}
-
-/** Shared by the tabs there is exactly one of. */
-function openSingletonTab(
-  id: string,
-  kind: "board" | "backlog" | "inbox" | "projects" | "audit",
-  label: string,
-): Tab {
-  const existing = store.tabs.find((t) => t.id === id);
-  if (existing) {
-    setStore("active", id);
-    persist();
-    return existing;
-  }
-  const tab: Tab = { id, kind, label } as Tab;
   setStore(
     produce((s) => {
       s.tabs.push(tab);

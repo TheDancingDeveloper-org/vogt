@@ -9,10 +9,9 @@
 // copied into a test would pass for a route that had been deleted from the
 // product.
 //
-// A path added here reaches the app only if `App.tsx`'s URL→tabs effect has
-// an arm for it; the two are deliberately separate, because the router
-// deciding a URL exists and the shell deciding what to open for it are
-// different failures with different symptoms.
+// A path added here reaches the app only if `App.tsx`'s URL effect has an arm
+// for it; the two are deliberately separate, because the router deciding a
+// URL exists and the shell deciding what to show are different failures.
 export const APP_ROUTES = [
   "/",
   "/sessions",

@@ -28,12 +28,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, waitFor } from "@solidjs/testing-library";
-import Board, {
-  CARD_ESTIMATE_TOP,
-  cellKey,
-  projectBoard,
-  type Lane,
-} from "../Board";
+import Board, { CARD_ESTIMATE, cellKey, projectBoard, type Lane } from "../Board";
 import type { WorkItem } from "../vogtApi";
 import { fakeVogt, mountAt, refusal, settle, workItem } from "./harness";
 
@@ -75,28 +70,30 @@ function column(count: number, over: (at: number) => Record<string, unknown> = (
 /**
  * A `ResizeObserver` the test can fire, and a height to fire it with.
  *
- * The surface measures its cells rather than assuming a height, and jsdom
- * has neither layout nor a real observer — the one in `setup.ts` is a stub
- * that never calls anybody back, because a surface that crashed on a missing
- * `ResizeObserver` would fail every assertion for the wrong reason. So the
- * measurement is supplied here: the height is defined on the observed
- * elements and the callback the surface handed over is called, which is
- * exactly the sequence a real observer produces.
+ * The surface measures its cells rather than assuming a height. This helper
+ * supplies the content-box entry a real observer would provide while keeping
+ * jsdom's layout-free behavior explicit.
  *
  * Must be installed before the board mounts; the observer is created when the
  * cell's scroller is.
  */
 function measuredCells(): (height: number) => void {
-  const watched: { node: Element; fire: () => void }[] = [];
+  const watched: { node: Element; fire: (height: number) => void }[] = [];
   vi.stubGlobal(
     "ResizeObserver",
     class {
-      readonly #callback: () => void;
-      constructor(callback: () => void) {
+      readonly #callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
         this.#callback = callback;
       }
       observe(node: Element): void {
-        watched.push({ node, fire: () => this.#callback() });
+        watched.push({
+          node,
+          fire: (height) => this.#callback(
+            [{ target: node, contentRect: { height } } as ResizeObserverEntry],
+            this as unknown as ResizeObserver,
+          ),
+        });
       }
       unobserve(): void {}
       disconnect(): void {}
@@ -104,12 +101,45 @@ function measuredCells(): (height: number) => void {
   );
   return (height: number) => {
     for (const one of watched) {
-      Object.defineProperty(one.node, "clientHeight", {
-        value: height,
-        configurable: true,
-      });
-      one.fire();
+      if (one.node.classList.contains("board-cell-cards")) {
+        Object.defineProperty(one.node, "clientHeight", {
+          value: height,
+          configurable: true,
+        });
+        one.fire(height);
+      }
     }
+  };
+}
+
+/** Fire a content-size change for a rendered card. */
+function measuredCards(): (ref: string, height: number) => void {
+  const watched: { node: Element; callback: ResizeObserverCallback }[] = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      readonly #callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback;
+      }
+      observe(node: Element): void {
+        watched.push({ node, callback: this.#callback });
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    },
+  );
+  return (ref: string, height: number) => {
+    const one = watched.find((entry) => entry.node.id === `board-card-${ref}`);
+    if (!one) throw new Error(`card ${ref} is not rendered`);
+    one.callback(
+      [{
+        target: one.node,
+        contentRect: { height },
+        borderBoxSize: [{ blockSize: height }],
+      } as unknown as ResizeObserverEntry],
+      {} as ResizeObserver,
+    );
   };
 }
 
@@ -120,9 +150,8 @@ function measuredCells(): (height: number) => void {
  * produced by scrolling it — nothing here can make the scroller 600px tall
  * and an assignment to `scrollTop` on a box-less element does not stick. The
  * event the surface listens for is then dispatched, which is exactly what a
- * real scroll delivers. What this cannot check is that the browser's own
- * scrolling lines up with the window's arithmetic; that is what pinning the
- * card height in `styles.css` is for, and it needs a browser.
+ * real scroll delivers. The measured prefix-sum tests cover the arithmetic
+ * that keeps browser scroll anchoring aligned with the rendered cards.
  */
 function scrollCell(container: HTMLElement, state: string, offset: number): void {
   const scroller = cell(container, state).querySelector<HTMLElement>(
@@ -197,7 +226,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
       const assumed = drawnRefs(container, "open").length;
 
       // A cell thirty cards tall.
-      resize(30 * CARD_ESTIMATE_TOP);
+      resize(30 * (CARD_ESTIMATE + 8));
       await waitFor(() =>
         expect(drawnRefs(container, "open").length).toBeGreaterThan(assumed),
       );
@@ -220,7 +249,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
     const { container } = board();
 
     await waitFor(() => expect(drawnRefs(container, "open").length).toBeGreaterThan(0));
-    scrollCell(container, "open", 200 * CARD_ESTIMATE_TOP);
+    scrollCell(container, "open", 200 * (CARD_ESTIMATE + 8));
     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-200"));
 
     // A load is a new set of item objects and a new set of lanes, and `For`
@@ -239,6 +268,32 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
     expect(drawnRefs(container, "open")).not.toContain("WI-0");
   });
 
+  it("anchors scroll when a rendered card above the viewport grows", async () => {
+    const resizeCard = measuredCards();
+    try {
+      const total = 400;
+      fakeVogt({
+        "GET /workflows": { body: { workflows: [chain("feature", ["open", "done"])] } },
+        "GET /work": { body: { items: column(total), total } },
+      });
+      const { container } = board();
+
+      await waitFor(() => expect(drawnRefs(container, "open").length).toBeGreaterThan(0));
+      scrollCell(container, "open", 200 * (CARD_ESTIMATE + 8));
+      await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-200"));
+      const scroller = cell(container, "open").querySelector<HTMLElement>(".board-cell-cards")!;
+      const before = scroller.scrollTop;
+
+      // WI-198 is in the overscan slice immediately above the viewport. Its
+      // growth must move the scroll offset by the same delta or the reader's
+      // focused card would jump while ResizeObserver catches up.
+      resizeCard("WI-198", 212);
+      await waitFor(() => expect(scroller.scrollTop).toBe(before + 100));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("puts a windowed column back to the top when the filter changes", async () => {
     const total = 400;
     fakeVogt({
@@ -248,7 +303,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
     const { container } = board();
 
     await waitFor(() => expect(drawnRefs(container, "open").length).toBeGreaterThan(0));
-    scrollCell(container, "open", 200 * CARD_ESTIMATE_TOP);
+    scrollCell(container, "open", 200 * (CARD_ESTIMATE + 8));
     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-200"));
 
     const label = [...container.querySelectorAll<HTMLElement>(".board-field")].find(
@@ -280,7 +335,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
     // And the scroll runway is the length of the column, so the scrollbar is
     // the length of the column.
     const run = cell(container, "open").querySelector<HTMLElement>(".board-cell-run");
-    expect(run?.style.height).toBe(`${total * CARD_ESTIMATE_TOP}px`);
+    expect(run?.style.height).toBe(`${total * (CARD_ESTIMATE + 8)}px`);
   });
 
   it("reaches the last card the filter matched, which the cap never could", async () => {
@@ -296,10 +351,10 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
 
     // Under the cap, WI-60 onwards were not reachable at all: the instruction
     // was to narrow the filter until the board agreed to show them.
-    scrollCell(container, "open", 200 * CARD_ESTIMATE_TOP);
+    scrollCell(container, "open", 200 * (CARD_ESTIMATE + 8));
     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-200"));
 
-    scrollCell(container, "open", total * CARD_ESTIMATE_TOP);
+    scrollCell(container, "open", total * (CARD_ESTIMATE + 8));
     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-399"));
     expect(drawnRefs(container, "open")).not.toContain("WI-0");
   });

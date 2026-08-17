@@ -122,9 +122,17 @@ export class MeasuredWindow {
     const firstOffset = Math.max(0, scrollTop - overscan);
     const lastOffset = Math.min(total, scrollTop + Math.max(0, viewport) + overscan);
     const start = this.tree.lowerBound(firstOffset);
+    // A value exactly on an item boundary belongs to the next interval. A
+    // machine epsilon is not enough once the offset has been rounded (for
+    // example, 120 - Number.EPSILON is still 120), so step back by a tiny
+    // pixel-sized amount for the exclusive end boundary.
+    const endOffset = Math.max(
+      0,
+      lastOffset - Math.max(1e-7, Math.abs(lastOffset) * Number.EPSILON * 4),
+    );
     const end = Math.min(
       this.keys.length,
-      this.tree.lowerBound(Math.max(0, lastOffset - Number.EPSILON)) + 1,
+      this.tree.lowerBound(endOffset) + 1,
     );
     return { start, end: Math.max(start, end), top: this.offsetOf(start), total };
   }

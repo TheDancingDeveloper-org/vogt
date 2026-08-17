@@ -16,11 +16,7 @@ import {
 } from "./vogtApi";
 import {
   focusTab,
-  openAuditTab,
-  openBacklogTab,
-  openBoardTab,
   openGitTab,
-  openProjectsTab,
   openTerminalTab,
   openWorkItemTab,
   openHistoryTab,
@@ -359,7 +355,7 @@ const CommandPalette: Component<Props> = (props) => {
           id: `project-terminal-${project.cwd || "root"}`,
           label: `Open terminal in ${project.displayName}`,
           description: location,
-          icon: "💻",
+          icon: ">_",
           action: () => launchWorkspaceCommand(`shell-${project.displayName}`, "bash", project.cwd),
           category: "Project Actions",
         });
@@ -368,7 +364,7 @@ const CommandPalette: Component<Props> = (props) => {
           id: `project-git-${project.cwd || "root"}`,
           label: `Open git status for ${project.displayName}`,
           description: location,
-          icon: "⎇",
+          icon: "git",
           action: () => {
             openGitTab(project.cwd);
             navigate(project.cwd ? `/g/${encodeURIComponent(project.cwd)}` : "/g/");
@@ -382,7 +378,7 @@ const CommandPalette: Component<Props> = (props) => {
             id: `project-${project.cwd || "root"}-${project.packageManager}-${script}`,
             label: `Run ${project.packageManager} ${script}`,
             description: `${project.displayName} • ${location}`,
-            icon: "▶",
+            icon: "run",
             action: () =>
               launchWorkspaceCommand(
                 `${project.displayName}-${script}`,
@@ -401,7 +397,7 @@ const CommandPalette: Component<Props> = (props) => {
               id: `project-${project.cwd || "root"}-cargo-test`,
               label: "Run cargo test",
               description: `${project.displayName} • ${location}`,
-              icon: "🦀",
+              icon: "Rs",
               action: () =>
                 launchWorkspaceCommand(
                   `${project.displayName}-cargo-test`,
@@ -414,7 +410,7 @@ const CommandPalette: Component<Props> = (props) => {
               id: `project-${project.cwd || "root"}-cargo-clippy`,
               label: "Run cargo clippy",
               description: `${project.displayName} • ${location}`,
-              icon: "🦀",
+              icon: "Rs",
               action: () =>
                 launchWorkspaceCommand(
                   `${project.displayName}-cargo-clippy`,
@@ -432,7 +428,7 @@ const CommandPalette: Component<Props> = (props) => {
               id: `project-${project.cwd || "root"}-pytest`,
               label: "Run pytest",
               description: `${project.displayName} • ${location}`,
-              icon: "🐍",
+              icon: "Py",
               action: () =>
                 launchWorkspaceCommand(`${project.displayName}-pytest`, "pytest", project.cwd),
               category: "Project Actions",
@@ -441,7 +437,7 @@ const CommandPalette: Component<Props> = (props) => {
               id: `project-${project.cwd || "root"}-ruff`,
               label: "Run ruff check",
               description: `${project.displayName} • ${location}`,
-              icon: "🐍",
+              icon: "Py",
               action: () =>
                 launchWorkspaceCommand(
                   `${project.displayName}-ruff`,
@@ -458,7 +454,7 @@ const CommandPalette: Component<Props> = (props) => {
             id: `project-${project.cwd || "root"}-just`,
             label: "Run just",
             description: `${project.displayName} • ${location}`,
-            icon: "▶",
+            icon: "run",
             action: () => launchWorkspaceCommand(`${project.displayName}-just`, "just", project.cwd),
             category: "Project Actions",
           });
@@ -469,7 +465,7 @@ const CommandPalette: Component<Props> = (props) => {
             id: `project-${project.cwd || "root"}-make`,
             label: "Run make",
             description: `${project.displayName} • ${location}`,
-            icon: "▶",
+            icon: "run",
             action: () => launchWorkspaceCommand(`${project.displayName}-make`, "make", project.cwd),
             category: "Project Actions",
           });
@@ -568,7 +564,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: `history-${i}`,
       label: r.session_name,
       description: r.match_snippet.replace(/<\/?mark>/g, ""),
-      icon: "🔍",
+      icon: "?",
       action: () => {
         openHistoryTab();
         navigate("/history");
@@ -583,7 +579,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: `file-${i}`,
       label: file.name,
       description: file.path,
-      icon: "📄",
+      icon: "file",
       action: () => {
         openEditorTab(file.path);
         navigate(`/e/${encodeURIComponent(file.path)}`);
@@ -601,7 +597,7 @@ const CommandPalette: Component<Props> = (props) => {
           id: "symbol-no-editor",
           label: "Open a file to search symbols",
           description: "Symbol search works against the active editor tab",
-          icon: "@",
+          icon: "sym",
           action: () => undefined,
           category: "Current File Symbols",
         },
@@ -614,7 +610,7 @@ const CommandPalette: Component<Props> = (props) => {
           id: "symbol-message",
           label: symbolMessage()!,
           description: active.path,
-          icon: "@",
+          icon: "sym",
           action: () => undefined,
           category: "Current File Symbols",
         },
@@ -631,7 +627,7 @@ const CommandPalette: Component<Props> = (props) => {
       ]
         .filter(Boolean)
         .join(" • "),
-      icon: "@",
+      icon: "sym",
       action: () => {
         focusTab(active.id);
         navigate(`/e/${encodeURIComponent(active.path)}`);
@@ -657,9 +653,8 @@ const CommandPalette: Component<Props> = (props) => {
         id: "vogt-board",
         label: "Open Board",
         description: "Work items by workflow state",
-        icon: "▦",
+        icon: "",
         action: () => {
-          openBoardTab();
           navigate("/board");
           props.onClose();
         },
@@ -669,9 +664,8 @@ const CommandPalette: Component<Props> = (props) => {
         id: "vogt-backlog",
         label: "Open Backlog",
         description: "The ranked backlog and bugs, with the reason for the order",
-        icon: "☰",
+        icon: "",
         action: () => {
-          openBacklogTab();
           navigate("/backlog");
           props.onClose();
         },
@@ -681,9 +675,8 @@ const CommandPalette: Component<Props> = (props) => {
         id: "vogt-projects",
         label: "Open Projects",
         description: "Per-project state, compliance and the drift inbox",
-        icon: "▤",
+        icon: "",
         action: () => {
-          openProjectsTab();
           navigate("/projects");
           props.onClose();
         },
@@ -693,9 +686,8 @@ const CommandPalette: Component<Props> = (props) => {
         id: "vogt-audit",
         label: "Open Audit",
         description: "Who wrote what, and the reason they gave",
-        icon: "⧉",
+        icon: "",
         action: () => {
-          openAuditTab();
           navigate("/audit");
           props.onClose();
         },
@@ -719,9 +711,8 @@ const CommandPalette: Component<Props> = (props) => {
         id: "vogt-new-work",
         label: "New Work Item...",
         description: "Opens the backlog's quick-create, which collects a reason",
-        icon: "✚",
+        icon: "+",
         action: () => {
-          openBacklogTab();
           navigate("/backlog?create=1");
           props.onClose();
         },
@@ -733,9 +724,8 @@ const CommandPalette: Component<Props> = (props) => {
         description:
           "Opens the drift inbox, where each proposal shows both sides and " +
           "takes a typed reason",
-        icon: "⚖",
+        icon: "drift",
         action: () => {
-          openProjectsTab();
           navigate("/projects?view=drift");
           props.onClose();
         },
@@ -745,9 +735,8 @@ const CommandPalette: Component<Props> = (props) => {
         id: "vogt-import-project",
         label: "Import a Project...",
         description: "Opens the import form, which collects a reason",
-        icon: "⇤",
+        icon: "import",
         action: () => {
-          openProjectsTab();
           navigate("/projects?view=import");
           props.onClose();
         },
@@ -757,7 +746,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: "new-session",
       label: "New Terminal Session",
       description: "Create a new shell session",
-      icon: "🖥",
+      icon: ">_",
       action: () => {
         props.onClose();
         props.onCreateSession?.();
@@ -768,7 +757,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: "new-file",
       label: "New File",
       description: "Create a new file in the workspace",
-      icon: "📄",
+      icon: "file",
       action: () => {
         props.onClose();
         props.onOpenFile?.();
@@ -779,7 +768,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: "open-file",
       label: "Open File...",
       description: "Browse and open a file from workspace",
-      icon: "📁",
+      icon: "dir",
       action: () => {
         props.onClose();
         // This would trigger file tree focus or file picker
@@ -791,7 +780,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: "git-status",
       label: "Git Status",
       description: "Open git status view for workspace root",
-      icon: "⎇",
+      icon: "git",
       action: () => {
         openGitTab("");
         navigate("/g/");
@@ -803,7 +792,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: "search-history",
       label: "Search History",
       description: "Search through session history",
-      icon: "🔍",
+      icon: "?",
       action: () => {
         openHistoryTab();
         navigate("/history");
@@ -815,7 +804,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: "open-tasks",
       label: "Open Agent Tasks",
       description: "Inspect and run recurring agent tasks",
-      icon: "≡",
+      icon: "tasks",
       action: () => {
         openTasksTab();
         navigate("/tasks");
@@ -827,7 +816,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: "open-gui",
       label: "Open GUI Stream",
       description: "Open the GUI stream tab",
-      icon: "🖥",
+      icon: ">_",
       action: () => {
         openGuiTab();
         navigate("/gui");
@@ -839,7 +828,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: "open-settings",
       label: "Open Settings",
       description: "Configure token, layout, templates, notifications",
-      icon: "⚙",
+      icon: "set",
       action: () => {
         props.onOpenSettings?.();
         props.onClose();
@@ -850,7 +839,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: "show-shortcuts",
       label: "Keyboard Shortcuts",
       description: "View all keyboard shortcuts",
-      icon: "⌨",
+      icon: "key",
       action: () => {
         props.onShowShortcuts?.();
         props.onClose();
@@ -864,7 +853,7 @@ const CommandPalette: Component<Props> = (props) => {
         id: "save-workspace-layout",
         label: "Save Workspace Layout",
         description: "Capture the current tabs and layout mode in this browser",
-        icon: "◫",
+        icon: "layout",
         action: async () => {
           props.onClose();
           await props.onSaveWorkspaceLayout?.();
@@ -891,16 +880,16 @@ const CommandPalette: Component<Props> = (props) => {
               : `Switch to ${tab.kind} tab`,
       icon:
         tab.kind === "editor"
-          ? "📄"
+          ? "file"
           : tab.kind === "git"
-            ? "⎇"
+            ? "git"
             : tab.kind === "gui"
-              ? "🖥"
+              ? ">_"
               : tab.kind === "history"
-                ? "📜"
+                ? "hist"
                 : tab.kind === "tasks"
-                  ? "≡"
-                  : "💻",
+                  ? "tasks"
+                  : ">_",
       action: () => {
         if (tab.kind === "terminal") {
           openTerminalTab(tab.sessionId, tab.label);
@@ -933,7 +922,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: `layout-${layout.id}`,
       label: `Restore ${layout.name}`,
       description: workspaceLayoutSummary(layout),
-      icon: "◫",
+      icon: "layout",
       action: async () => {
         props.onClose();
         await props.onRestoreWorkspaceLayout?.(layout.id);
@@ -950,7 +939,7 @@ const CommandPalette: Component<Props> = (props) => {
         id: `session-${s.id}`,
         label: s.name,
         description: `Jump to session • ${s.cwd}`,
-        icon: "💻",
+        icon: ">_",
         action: () => {
           openTerminalTab(s.id, s.name);
           navigate(`/t/${s.id}`);
@@ -967,7 +956,7 @@ const CommandPalette: Component<Props> = (props) => {
         id: `recent-${i}`,
         label: f.path.split("/").pop() || f.path,
         description: f.path,
-        icon: "📄",
+        icon: "file",
         action: () => {
           openEditorTab(f.path);
           navigate(`/e/${encodeURIComponent(f.path)}`);
@@ -982,7 +971,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: `template-${index}`,
       label: `Launch ${template.name}`,
       description: template.description || "Create a session from this preset",
-      icon: "◇",
+      icon: "preset",
       action: async () => {
         await props.onLaunchTemplate?.(template);
         props.onClose();
@@ -996,7 +985,7 @@ const CommandPalette: Component<Props> = (props) => {
       id: `task-${task.id}`,
       label: `Run ${task.name}`,
       description: `${task.status} • ${task.run_count} runs • ${task.schedule.kind}`,
-      icon: task.status === "active" ? "▶" : "⏸",
+      icon: task.status === "active" ? "run" : "paused",
       action: async () => {
         try {
           const run = await api.runAgentTask(task.id);
@@ -1023,9 +1012,8 @@ const CommandPalette: Component<Props> = (props) => {
         id: `vogt-project-${project.slug}`,
         label: `Open project ${project.name}`,
         description: project.slug,
-        icon: "▤",
+        icon: "project",
         action: () => {
-          openProjectsTab();
           navigate(`/projects?p=${encodeURIComponent(project.slug)}`);
           props.onClose();
         },
@@ -1037,7 +1025,7 @@ const CommandPalette: Component<Props> = (props) => {
         description: [item.kind, item.state, item.project_slug]
           .filter(Boolean)
           .join(" · "),
-        icon: "✦",
+        icon: "work",
         action: () => {
           openWorkItemTab(item.ref);
           navigate(`/w/${encodeURIComponent(item.ref)}`);

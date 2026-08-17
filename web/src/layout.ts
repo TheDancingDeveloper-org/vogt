@@ -1,4 +1,5 @@
-// Layout mode preference storage
+// Pane arrangement preference storage. Product places are routes; this only
+// controls how the remaining editor panes arrange themselves.
 const LAYOUT_MODE_KEY = "mydevenv2.layoutMode.v1";
 
 export type LayoutMode = "tabbed" | "ide";

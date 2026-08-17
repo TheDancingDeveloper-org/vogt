@@ -15,8 +15,6 @@
   --activity-waiting: #f85149;
   --activity-errored: #ff7b72;
   --activity-done: #3fb950;
-  --drawer-width: 260px;
-  --tab-height: 36px;
   --modkey-height: 44px;
   --safe-top: max(env(safe-area-inset-top, 0px), var(--native-safe-top, 0px));
   --safe-right: max(env(safe-area-inset-right, 0px), var(--native-safe-right, 0px));
@@ -234,19 +232,16 @@ textarea {
 
 .app {
   display: grid;
-  grid-template-rows: var(--tab-height) 1fr;
-  grid-template-columns: 184px var(--drawer-width) 1fr;
+  grid-template-columns: 248px 1fr;
   grid-template-areas:
-    "places drawer tabs"
-    "places drawer main";
+    "places main";
   width: 100%;
   height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-/* Stable product places. The drawer and tab strip remain available for the
-   machine panes, but product navigation is text-first and cannot be closed. */
+/* Stable product places. Surfaces are routes, not closable tabs. */
 .places-rail {
   grid-area: places;
   display: flex;
@@ -269,8 +264,22 @@ textarea {
   text-align: left;
 }
 .places-nav {
-  flex: 1;
+  flex: 0 0 auto;
+  max-height: 38%;
   overflow-y: auto;
+}
+.places-rail-session-area {
+  min-height: 0;
+  overflow-y: auto;
+  padding-top: 2px;
+}
+.places-section-label {
+  padding: 0 8px 4px;
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 .places-group {
   display: flex;
@@ -313,44 +322,21 @@ textarea {
   color: var(--fg-muted);
   font-size: 11px;
 }
+.stable-place {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+}
 
 @media (max-width: 768px) {
-  /* The drawer is a fixed overlay below this width, not a grid column, so
-     there is no column to resize and the grip would only be something to
-     catch a thumb on. */
-  .drawer-resizer {
-    display: none;
-  }
-
   .app {
     grid-template-columns: 1fr;
-    grid-template-areas:
-      "tabs"
-      "main";
+    grid-template-areas: "main";
   }
   .places-rail {
     display: none;
-  }
-  .drawer {
-    position: fixed;
-    inset: 0 auto 0 0;
-    width: 80%;
-    max-width: 320px;
-    z-index: 20;
-    transform: translateX(-100%);
-    transition: transform 0.18s ease-out;
-    padding-top: var(--safe-top);
-    padding-bottom: var(--safe-bottom);
-    padding-left: var(--safe-left);
-  }
-  .drawer.open {
-    transform: translateX(0);
-  }
-  .drawer-scrim {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.4);
-    z-index: 19;
   }
 }
 
@@ -358,45 +344,7 @@ textarea {
   display: none;
 }
 
-.drawer {
-  grid-area: drawer;
-  background: var(--bg-elev);
-  border-right: 1px solid var(--bd);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-  /* For the resizer, which sits on the panel's own right edge. */
-  position: relative;
-}
-
-/* Drag to set the panel's width. The width is a custom property on `.app`,
-   so the grid column follows it without a reflow of anything else, and the
-   chosen value is per client (FR-U13's rule for layout) rather than a
-   setting anybody else inherits. */
-.drawer-resizer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 6px;
-  height: 100%;
-  cursor: col-resize;
-  /* Above the panel's content so a drag never lands on a button underneath,
-     and transparent so it does not read as a second border. */
-  z-index: 2;
-  background: transparent;
-  border: 0;
-  padding: 0;
-}
-
-.drawer-resizer:hover,
-.drawer-resizer:focus-visible {
-  background: var(--accent, #2f81f7);
-  opacity: 0.45;
-  outline: none;
-}
-
-.drawer-header {
+.places-section-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -408,24 +356,10 @@ textarea {
   letter-spacing: 0.04em;
   color: var(--fg-muted);
 }
-.drawer-header-actions {
+.places-section-header-actions {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-}
-
-.drawer-actions {
-  display: flex;
-  /* Wraps, because the row grew past the panel and the overflow was
-     unreachable rather than ugly: `.drawer` is `overflow: hidden`, so the
-     buttons past 260px — Backlog, Projects, Audit, Assistant, GUI and the
-     settings gear — were clipped, invisible and unclickable. That is every
-     Vogt surface the merge added, so the merged product's own tabs could not
-     be opened from the GUI at the default width. */
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--bd);
 }
 
 .session-list {
@@ -510,40 +444,9 @@ textarea {
   }
 }
 
-.tab-strip {
-  grid-area: tabs;
-  display: flex;
-  align-items: stretch;
-  background: var(--bg-elev);
-  border-bottom: 1px solid var(--bd);
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
-}
-
-.tab-strip .menu-btn {
-  display: none;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  border: 0;
-  border-right: 1px solid var(--bd);
-  border-radius: 0;
-  font-size: 16px;
-}
-
 @media (max-width: 768px) {
-  .tab-strip .menu-btn {
-    display: inline-flex;
-  }
   .connection-banner {
     padding-right: max(12px, var(--safe-right));
-  }
-  .mobile-tabs-sheet {
-    display: flex;
-    flex-direction: column;
-    padding-bottom: var(--safe-bottom);
   }
 
   .phone-bottom-nav {
@@ -602,164 +505,6 @@ textarea {
 .connection-banner-copy span {
   font-size: 11px;
   color: var(--fg-muted);
-}
-
-.mobile-tabs-sheet {
-  position: fixed;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 24;
-  display: none;
-  max-height: min(70vh, 560px);
-  background: var(--bg-elev);
-  border-top: 1px solid var(--bd-strong);
-  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45);
-}
-
-.mobile-tabs-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px;
-  border-bottom: 1px solid var(--bd);
-}
-
-.mobile-tabs-meta {
-  margin-top: 4px;
-  font-size: 11px;
-  color: var(--fg-muted);
-}
-
-.mobile-tabs-list {
-  display: flex;
-  flex-direction: column;
-  overflow-y: auto;
-  max-height: calc(min(70vh, 560px) - 60px);
-}
-
-.mobile-tab-row {
-  display: flex;
-  align-items: stretch;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-}
-
-.mobile-tab-row.active {
-  background: rgba(88, 166, 255, 0.08);
-}
-
-.mobile-tab-main,
-.mobile-tab-close {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.mobile-tab-main {
-  flex: 1 1 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-  padding: 12px;
-  text-align: left;
-}
-
-.mobile-tab-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mobile-tab-kind {
-  flex: 0 0 auto;
-  font-size: 11px;
-  text-transform: uppercase;
-  color: var(--fg-muted);
-}
-
-.mobile-tab-close {
-  flex: 0 0 48px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--fg-muted);
-}
-
-.tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 4px 0 10px;
-  background: var(--bg-tab);
-  border: 0;
-  border-right: 1px solid var(--bd);
-  border-radius: 0;
-  color: var(--fg-muted);
-  min-width: 90px;
-  max-width: 220px;
-  white-space: nowrap;
-  font-size: 13px;
-  flex: 0 0 auto;
-}
-.tab:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
-.tab.active {
-  background: var(--bg-tab-active);
-  color: var(--fg);
-  border-bottom: 2px solid var(--accent);
-}
-.tab-main {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 100%;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-}
-.tab .label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.tab .close {
-  display: inline-flex;
-  width: 22px;
-  height: 22px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 3px;
-  font-size: 14px;
-  background: transparent;
-  border: 0;
-  color: inherit;
-  cursor: pointer;
-  opacity: 0.7;
-  touch-action: manipulation;
-}
-.tab .close:hover {
-  background: rgba(255, 255, 255, 0.1);
-  opacity: 1;
-}
-@media (pointer: coarse) {
-  .tab .close {
-    width: 28px;
-    height: 28px;
-    font-size: 16px;
-  }
 }
 
 .activity-dot {
@@ -1347,16 +1092,6 @@ textarea {
   flex: 1;
   min-height: 0;
   min-width: 0;
-}
-
-/* Dirty indicator on tab */
-.tab .dirty-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-left: 2px;
-  background: var(--accent);
-  border-radius: 50%;
 }
 
 /* Git tab */
@@ -4678,21 +4413,19 @@ textarea {
   color: var(--fg-muted);
 }
 
-/* Two lines, and the height of two lines whether or not the title fills
-   them, so every card is the same height and the tile below it is where the
-   window says it is. The whole title is on the item, one click away. */
+/* Long titles stay readable within the card; the card itself remains
+   content-sized so measured offsets continue to match what is painted. */
 .board-card-title {
   font-size: 13px;
   color: var(--fg);
   line-height: 1.35;
   overflow-wrap: anywhere;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
   flex: 0 0 auto;
-  height: calc(1.35em * 2);
 }
 
 .board-card-meta {
@@ -4863,9 +4596,8 @@ textarea {
 
 /* -- FR-M3: below the narrow breakpoint the board is a list ---------------
  *
- * 768px, which is the width the engine's own tabs collapse at — the drawer
- * goes off-canvas, the tab strip becomes a sheet, and the git and history
- * panes stop being two columns. A board that kept its columns for another
+ * 768px, where the board becomes a list and the phone navigation takes over.
+ * A board that kept its columns for another
  * 130px would be the one surface disagreeing with the shell around it, and a
  * second breakpoint is a second thing to keep true.
  *

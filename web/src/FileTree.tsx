@@ -412,9 +412,9 @@ const FileTree: Component<Props> = (props) => {
           onInput={(e) => setSearchQuery(e.currentTarget.value)}
         />
       </div>
-      <div class="drawer-header">
+      <div class="places-section-header">
         <span>Files</span>
-        <span class="drawer-header-actions">
+        <span class="places-section-header-actions">
           <button
             style={{ "font-size": "11px", padding: "2px 6px" }}
             onClick={() => void newFile()}

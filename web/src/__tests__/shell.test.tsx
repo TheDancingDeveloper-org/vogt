@@ -2,7 +2,7 @@
 //
 // Every other file here mounts one surface at one URL, which settles what a
 // surface does with the URL it is handed and says nothing about how it came
-// to be handed one. `App.tsx`'s URL→tabs effect is the half in between — the
+// to be handed one. `App.tsx`'s URL effect is the half in between — the
 // half M11 found broken for *every* surface, and the half §6.2a records as
 // "mounted by nothing". So this file mounts the shell, behind the same route
 // table `index.tsx` routes with, and asserts the property FR-U11 actually
@@ -24,7 +24,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
-import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { render, waitFor } from "@solidjs/testing-library";
 
 import App from "../App";
 import { APP_ROUTES } from "../routes";
@@ -69,8 +69,8 @@ interface ShellOptions {
  *
  * The engine stubs are the shell's own boot, not the requirement: a token the
  * front door accepts (`/api/status`), the public config every gate reads, the
- * session list the drawer and the terminal links resolve against, and the
- * file tree in the drawer. Left unstubbed they answer 404 — which is a real
+ * session list the places rail and the terminal links resolve against, and the
+ * file tree in the rail. Left unstubbed they answer 404 — which is a real
  * state and one `absentStates.test.tsx` is about, and not the state a test of
  * "does this link open this surface" wants to be in.
  */
@@ -107,7 +107,7 @@ function mountShell(url: string, options: ShellOptions = {}): Shell {
 }
 
 /**
- * The pane the reader is actually looking at.
+ * The place or pane the reader is actually looking at.
  *
  * Every open tab stays mounted — that is how a terminal survives a tab switch
  * — and all but the active one are `display: none`. A test that queried the
@@ -115,7 +115,7 @@ function mountShell(url: string, options: ShellOptions = {}): Shell {
  * exact failure "the link opened the wrong tab" produces.
  */
 function shown(container: HTMLElement): HTMLElement | null {
-  const place = container.querySelector<HTMLElement>(".place-view");
+  const place = container.querySelector<HTMLElement>(".stable-place");
   if (place) return place;
   const panes = [...container.querySelectorAll<HTMLElement>(".tab-view > div")];
   return panes.find((pane) => pane.style.display === "flex") ?? null;
@@ -131,7 +131,7 @@ async function surface(container: HTMLElement, selector: string): Promise<HTMLEl
   });
 }
 
-/** The labels in the tab strip, in order. */
+/** Stable places deliberately have no top-level tab strip. */
 function tabLabels(container: HTMLElement): string[] {
   return [...container.querySelectorAll(".tab-strip .tab .label")].map(
     (node) => node.textContent ?? "",
@@ -158,6 +158,22 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     await surface(container, ".vogt-surface.board");
     expect(tabLabels(container)).toEqual([]);
     expect(container.querySelector(".tab-strip")).toBeNull();
+    expect(
+      [...container.querySelectorAll<HTMLElement>(".places-nav a")].map(
+        (link) => [link.textContent, link.getAttribute("href")],
+      ),
+    ).toEqual([
+      ["Board", "#/board"],
+      ["Backlog", "#/backlog"],
+      ["Inbox", "#/inbox"],
+      ["Projects", "#/projects"],
+      ["Audit", "#/audit"],
+      ["Sessions", "#/sessions"],
+      ["Git", "#/g"],
+      ["History", "#/history"],
+      ["Tasks", "#/tasks"],
+      ["GUI stream", "#/gui"],
+    ]);
   });
 
   it("opens the ranked backlog", async () => {
@@ -165,7 +181,6 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
 
     await surface(container, ".vogt-surface.vogt-backlog");
     expect(tabLabels(container)).toEqual([]);
-    expect(container.querySelector(".tab-strip")).toBeNull();
   });
 
   it("opens the project page on the project the link names", async () => {
@@ -192,7 +207,6 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     );
     expect(vogt.matching("GET /work/get")[0]?.query.get("ref")).toBe("WI-1");
     expect(tabLabels(container)).toEqual([]);
-    expect(container.querySelector(".tab-strip")).toBeNull();
   });
 
   it("opens an audit query, narrowed to what the link carried", async () => {
@@ -211,7 +225,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     const { container } = mountShell("/t/eng-1", { sessions: [SESSION] });
 
     await surface(container, ".terminal-host");
-    expect(tabLabels(container)).toEqual(["alpha-build"]);
+    expect(tabLabels(container)).toEqual([]);
   });
 
   it("opens no phantom terminal for a session the server does not know", async () => {
@@ -220,26 +234,22 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     // to a PTY that does not exist, is a worse one.
     const { container } = mountShell("/t/eng-gone", { sessions: [SESSION] });
 
-    await waitFor(() => expect(container.querySelector(".session-list")).toBeTruthy());
+    await waitFor(() => expect(container.querySelector(".places-rail-session-area")).toBeTruthy());
     await settle();
     expect(tabLabels(container)).toEqual([]);
     expect(container.querySelector(".terminal-host")).toBeNull();
   });
 
-  it("opens nothing at the root, which names no surface", async () => {
+  it("redirects the root to the desktop default place", async () => {
     const { container } = mountShell("/");
 
-    await waitFor(() => expect(container.querySelector(".drawer")).toBeTruthy());
-    await settle();
+    await surface(container, ".vogt-surface.board");
     expect(tabLabels(container)).toEqual([]);
-    expect(container.querySelector(".tab-strip")).toBeNull();
-    expect(container.querySelector(".vogt-surface.board")).toBeTruthy();
   });
 
-  it("follows a second link into a second surface, without closing the first", async () => {
-    // The effect runs on every URL, not once at boot: a link followed from a
-    // chat message while the app is already open is the common case, and a
-    // boot-only effect would leave the reader staring at the previous tab.
+  it("follows a second link into a second stable place", async () => {
+    // The effect runs on every URL, not once at boot. Stable places replace
+    // one another in the main area and never accumulate closable tabs.
     const { container, go } = mountShell("/board");
     await surface(container, ".vogt-surface.board");
 
@@ -247,6 +257,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
 
     await surface(container, ".vogt-surface.vogt-backlog");
     expect(tabLabels(container)).toEqual([]);
+    expect(container.querySelector(".tab-strip")).toBeNull();
   });
 });
 
@@ -263,9 +274,11 @@ describe("FR-T6 — the assistant is not there to be reached when it is not prov
 
     // Wait for the config to have arrived, so this is an assertion about a
     // resolved gate and not about a race the shell would lose later.
-    await waitFor(() => expect(container.querySelector(".places-rail")).toBeTruthy());
+    await waitFor(() =>
+      expect(container.querySelector(".places-rail")).toBeTruthy(),
+    );
     await settle();
-    expect(container.querySelector(".places-nav")?.textContent).not.toContain("Assistant");
+    expect(tabLabels(container)).toEqual([]);
     expect(container.textContent).not.toContain("Ask about your terminal sessions");
   });
 
@@ -281,52 +294,7 @@ describe("FR-T6 — the assistant is not there to be reached when it is not prov
         "Ask about your terminal sessions",
       ),
     );
-    expect(container.querySelector(".places-nav")?.textContent).toContain("Assistant");
-    expect(tabLabels(container)).toEqual(["Assistant"]);
-  });
-});
-
-
-describe("the drawer's width is the reader's, and persists", () => {
-  it("offers a resizer that a keyboard can reach and use", async () => {
-    // A panel resizable only by pointer is one a keyboard user cannot widen
-    // when its contents do not fit — which is precisely the state this
-    // control was added to escape.
-    const { container } = mountShell("/board");
-    await settle();
-    const grip = container.querySelector<HTMLElement>(".drawer-resizer")!;
-    expect(grip).toBeTruthy();
-    expect(grip.getAttribute("aria-label")).toBeTruthy();
-
-    fireEvent.keyDown(grip, { key: "ArrowRight" });
-    await settle();
-    expect(document.documentElement.style.getPropertyValue("--drawer-width")).toBe(
-      "276px",
-    );
-    expect(localStorage.getItem("mydevenv2.drawerWidth")).toBe("276");
-  });
-
-  it("will not let the panel be dragged away to nothing", async () => {
-    // The grip lives on the panel's own edge, so a drawer squeezed to zero
-    // takes the handle with it and cannot be brought back.
-    const { container } = mountShell("/board");
-    await settle();
-    const grip = container.querySelector<HTMLElement>(".drawer-resizer")!;
-    for (let i = 0; i < 30; i += 1) {
-      fireEvent.keyDown(grip, { key: "ArrowLeft", shiftKey: true });
-    }
-    await settle();
-    expect(document.documentElement.style.getPropertyValue("--drawer-width")).toBe(
-      "180px",
-    );
-  });
-
-  it("restores the width it was left at", async () => {
-    localStorage.setItem("mydevenv2.drawerWidth", "420");
-    mountShell("/board");
-    await settle();
-    expect(document.documentElement.style.getPropertyValue("--drawer-width")).toBe(
-      "420px",
-    );
+    expect(container.querySelector(".tab-strip")).toBeNull();
+    expect(tabLabels(container)).toEqual([]);
   });
 });
