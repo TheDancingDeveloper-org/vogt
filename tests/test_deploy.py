@@ -197,6 +197,18 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
 
     Both build steps must pass them — the candidate as well as the push, or
     the image that gets smoke-tested is not the image that gets published.
+
+    `theclawbay` joined the probed set after WI-17, by a different route to the
+    same place: it was installed by no image at all, living only in a persisted
+    `$HOME`, so binding `vogt-dev` to a different home volume took it away and
+    — again — nothing was red. #23 was a build arg nothing asserted; WI-17 was
+    a tool nothing ran. The loop answers both.
+
+    Asserted as a set rather than as the literal loop line, because the exact
+    string broke the first time a fourth tool was added, which is a test
+    failing for the wrong reason: the property is *which tools are proven*, not
+    how they are spelled in a `for`. Removing one still fails, which is the
+    part worth keeping.
     """
     text = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
     on_dev = r"=\$\{\{ github\.ref == 'refs/heads/dev' \}\}"
@@ -206,9 +218,17 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
             f"{arg} must be passed to both the candidate and the pushed "
             f"build of engine/Dockerfile; found {len(wired)}"
         )
-    assert "for tool in claude codex flutter; do" in text, (
+    loop = re.search(r"for tool in ([^;]+); do", text)
+    assert loop, (
+        "the dev image's smoke test must loop over the tools the image carries "
+        "and run each one (NFR-Q7)"
+    )
+    probed = set(loop.group(1).split())
+    owed = {"claude", "codex", "flutter", "theclawbay"}
+    assert owed <= probed, (
         "the dev image's smoke test must ask the image for the clients "
-        "(NFR-Q7); a build arg nothing asserts is how #23 went unnoticed"
+        "(NFR-Q7); a build arg nothing asserts is how #23 went unnoticed, and "
+        f"a tool nothing runs is how WI-17 did. Missing: {sorted(owed - probed)}"
     )
 
 
