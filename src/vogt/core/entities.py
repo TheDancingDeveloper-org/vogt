@@ -326,6 +326,18 @@ class Observation(Entity):
     observed_at: datetime
 
 
+class InboxTriage(Entity):
+    """The shared, audited decision attached to one Inbox occurrence."""
+
+    entry_key: str
+    state: Literal["active", "archived", "snoozed"] = "active"
+    snooze_until: datetime | None = None
+    actor_id: str
+    actor_identity_ref: str | None = None
+    decided_at: datetime
+    occurrence_snapshot: dict[str, object] = {}
+
+
 class DepRef(Entity):
     """One reference from a project to another project (FR-D1–D4).
 

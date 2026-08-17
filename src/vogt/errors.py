@@ -53,6 +53,30 @@ class InvalidRequest(VogtError):
     http_status = 400
 
 
+class InvalidCursor(InvalidRequest):
+    """A paging cursor does not belong to the requested Inbox query."""
+
+    code = "invalid_cursor"
+
+
+class InboxEntryNotFound(NotFound):
+    """The requested Inbox occurrence is not in the current projection."""
+
+    code = "inbox_entry_not_found"
+
+
+class InvalidTriageState(Conflict):
+    """The requested triage action does not apply to the entry's state."""
+
+    code = "invalid_triage_state"
+
+
+class InvalidSnooze(InvalidRequest):
+    """A snooze deadline is not a future instant."""
+
+    code = "invalid_snooze"
+
+
 class MissingReason(InvalidRequest):
     """A write arrived without the reason every audited write requires.
 

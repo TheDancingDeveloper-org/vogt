@@ -34,6 +34,7 @@ from vogt.core.entities import (
     Event,
     Initiative,
     InitiativeState,
+    InboxTriage,
     Label,
     LifecycleState,
     Name,
@@ -77,6 +78,99 @@ class Result(BaseModel):
     """Base for operation results."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+# -- normalized attention inbox -------------------------------------------
+
+
+InboxSource = Literal["github", "drift", "ci", "agent"]
+InboxTriageState = Literal["active", "archived", "snoozed"]
+
+
+class InboxAction(Result):
+    """A typed target for the action a row can take."""
+
+    kind: Literal["drift", "observation", "session"]
+    drift_id: str | None = None
+    subject_key: str | None = None
+    session_id: str | None = None
+
+
+class InboxEntry(Result):
+    """One server-normalized occurrence in the attention stream."""
+
+    entry_key: str
+    source: InboxSource
+    kind: str
+    occurred_at: datetime | None = None
+    observed_at: datetime | None = None
+    title: str
+    summary: str = Field(default="", max_length=1000)
+    project_slug: str | None = None
+    work_item_ref: str | None = None
+    session_id: str | None = None
+    source_subject_key: str
+    source_url: str | None = None
+    trust_state: TrustState = "unverified"
+    freshness: Literal["current", "stale", "provisional", "live", "unknown"] = (
+        "unknown"
+    )
+    provisional: bool = False
+    triage_state: InboxTriageState = "active"
+    snooze_until: datetime | None = None
+    action: InboxAction | None = None
+
+
+class InboxCoverage(Result):
+    """Coverage and count for one normalized source."""
+
+    source: InboxSource
+    status: str
+    count: int = 0
+    last_swept_at: datetime | None = None
+    projects: int = 0
+    registered: int = 0
+    detail: str | None = None
+
+
+class InboxListParams(Params):
+    sources: list[InboxSource] | None = None
+    triage_states: list[InboxTriageState] = Field(default_factory=lambda: ["active"])
+    project: str | None = None
+    work_item: str | None = None
+    limit: int = Field(default=50, ge=1, le=100)
+    cursor: str | None = None
+
+
+class InboxListResult(Result):
+    entries: list[InboxEntry]
+    next_cursor: str | None = None
+    snapshot_at: datetime
+    coverage: list[InboxCoverage]
+    counts: dict[str, int]
+    github_scope: str
+    engine_status: Literal["not_configured", "available", "unreachable"]
+    engine_detail: str | None = None
+
+
+class InboxArchiveParams(Params):
+    entry_key: str
+    reason: Reason
+
+
+class InboxSnoozeParams(Params):
+    entry_key: str
+    until: datetime
+    reason: Reason
+
+
+class InboxRestoreParams(Params):
+    entry_key: str
+    reason: Reason
+
+
+class InboxTriageResult(Result):
+    entry: InboxEntry
 
 
 # -- instance --------------------------------------------------------------

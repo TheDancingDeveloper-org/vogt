@@ -26,6 +26,7 @@ from vogt.core.entities import (
     DriftProposal,
     Event,
     Initiative,
+    InboxTriage,
     Label,
     Project,
     Relation,
@@ -721,6 +722,26 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_drift(row) for row in rows]
 
+    # -- inbox triage -------------------------------------------------------
+
+    def inbox_triage_by_key(self, entry_key: str) -> InboxTriage | None:
+        row = self._conn.execute(
+            "SELECT t.*, a.identity_ref AS actor_identity_ref "
+            "FROM inbox_triage t JOIN actors a ON a.id = t.actor_id "
+            "WHERE t.entry_key = ?",
+            (entry_key,),
+        ).fetchone()
+        return None if row is None else _row_to_inbox_triage(row)
+
+    def list_inbox_triage(self, *, limit: int = 10_000) -> list[InboxTriage]:
+        rows = self._conn.execute(
+            "SELECT t.*, a.identity_ref AS actor_identity_ref "
+            "FROM inbox_triage t JOIN actors a ON a.id = t.actor_id "
+            "ORDER BY t.decided_at DESC, t.entry_key DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_inbox_triage(row) for row in rows]
+
     def drift_by_id(self, proposal_id: str) -> DriftProposal | None:
         row = self._conn.execute(
             "SELECT d.*, p.slug AS project_slug, a.identity_ref AS resolved_by "
@@ -1309,6 +1330,24 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def upsert_inbox_triage(self, triage: InboxTriage) -> None:
+        self._conn.execute(
+            "INSERT INTO inbox_triage (entry_key, state, snooze_until, actor_id, "
+            "decided_at, occurrence_snapshot) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(entry_key) DO UPDATE SET state = excluded.state, "
+            "snooze_until = excluded.snooze_until, actor_id = excluded.actor_id, "
+            "decided_at = excluded.decided_at, "
+            "occurrence_snapshot = excluded.occurrence_snapshot",
+            (
+                triage.entry_key,
+                triage.state,
+                None if triage.snooze_until is None else to_iso(triage.snooze_until),
+                triage.actor_id,
+                to_iso(triage.decided_at),
+                json.dumps(triage.occurrence_snapshot, default=str, sort_keys=True),
+            ),
+        )
+
     def resolve_drift(
         self,
         proposal_id: str,
@@ -1768,6 +1807,19 @@ def _row_to_drift(row: sqlite3.Row) -> DriftProposal:
         resolution_reason=(
             None if row["resolution_reason"] is None else str(row["resolution_reason"])
         ),
+    )
+
+
+def _row_to_inbox_triage(row: sqlite3.Row) -> InboxTriage:
+    snooze_until = row["snooze_until"]
+    return InboxTriage(
+        entry_key=str(row["entry_key"]),
+        state=row["state"],
+        snooze_until=(None if snooze_until is None else from_iso(str(snooze_until))),
+        actor_id=str(row["actor_id"]),
+        actor_identity_ref=str(row["actor_identity_ref"]),
+        decided_at=from_iso(str(row["decided_at"])),
+        occurrence_snapshot=json.loads(str(row["occurrence_snapshot"])),
     )
 
 

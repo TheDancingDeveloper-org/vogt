@@ -23,6 +23,7 @@ from vogt.core.entities import (
     DriftProposal,
     Event,
     Initiative,
+    InboxTriage,
     Label,
     Observation,
     Project,
@@ -269,6 +270,12 @@ class ReadView(Protocol):
         """
         ...
 
+    # -- inbox triage -------------------------------------------------------
+
+    def inbox_triage_by_key(self, entry_key: str) -> InboxTriage | None: ...
+
+    def list_inbox_triage(self, *, limit: int = 10_000) -> list[InboxTriage]: ...
+
     # -- sessions ----------------------------------------------------------
 
     def session_by_id(self, session_id: str) -> CodingSession | None: ...
@@ -413,6 +420,8 @@ class WriteTxn(ReadView, Protocol):
         ...
 
     def insert_drift(self, proposal: DriftProposal) -> None: ...
+
+    def upsert_inbox_triage(self, triage: InboxTriage) -> None: ...
 
     def resolve_drift(
         self,
@@ -599,6 +608,8 @@ class ObservedStore(Protocol):
         promoted_only: bool = False,
         limit: int = 1000,
     ) -> list[Observation]: ...
+
+    def latest_by_subject(self, subject_key: str) -> Observation | None: ...
 
     def dep_refs(
         self, *, from_project_id: str | None = None, to_project_id: str | None = None
