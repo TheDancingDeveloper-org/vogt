@@ -566,7 +566,7 @@ def test_the_windowed_surfaces_use_content_sizing_without_a_fixed_design_height(
     assert "ResizeObserver" in board
     assert "MeasuredWindow" in backlog or "ResizeObserver" in backlog
     assert "--board-card-h" not in css
-    assert "--vogt-row-h" not in css
+    assert re.search(r"--vogt-row-h:\s*40px", css)
 
 
 def test_every_vogt_surface_has_a_phone_width_pass() -> None:
