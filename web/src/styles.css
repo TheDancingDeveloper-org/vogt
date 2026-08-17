@@ -6215,6 +6215,18 @@ textarea {
   border-left: 3px solid var(--activity-idle);
 }
 
+/* Superseded reads as a note on an open proposal, never as a resolution:
+   it keeps the open border-left and is styled as an aside (FR-R6). */
+.vogt-projects-superseded {
+  border: 1px dashed var(--bd-strong);
+  border-radius: 4px;
+  background: var(--bg);
+  padding: 8px 10px;
+  margin: 0;
+  font-size: 0.9em;
+  line-height: 1.45;
+}
+
 .vogt-projects-drift-head {
   display: flex;
   align-items: baseline;

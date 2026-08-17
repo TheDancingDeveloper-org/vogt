@@ -14,6 +14,7 @@ not.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from vogt.application.context import AppContext
@@ -174,11 +175,25 @@ def compliance(ctx: AppContext, params: ComplianceParams) -> ComplianceResult:
         checked_at=checked_at,
         age_seconds=age,
         failing=failing,
-        detail=(
-            "nobody has checked this project's contract; run `contract check`"
-            if project.compliance_status == NOT_CHECKED
-            else None
-        ),
+        detail=_compliance_detail(project.compliance_status, checked_at=checked_at),
+    )
+
+
+def _compliance_detail(status: str, *, checked_at: datetime | None) -> str | None:
+    """Which `not_checked` this is.
+
+    Two things record it and they mean different things: nobody has run the
+    check, or somebody ran it against a root path that could not be read
+    (#50). Both are honestly "not checked"; only one of them is fixed by
+    running `contract check`.
+    """
+    if status != NOT_CHECKED:
+        return None
+    if checked_at is None:
+        return "nobody has checked this project's contract; run `contract check`"
+    return (
+        "the last check could not read this project's root path, so no "
+        "criterion was evaluated — check the registered path"
     )
 
 

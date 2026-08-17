@@ -31,6 +31,15 @@ gets it wrong: rustnzb's root manifest excludes `benchnzb` and `desktop`, and
 `fuzz/` is not a member either, so those three are separate workspaces nested
 in the same repository reaching back into the main one by relative path. Five
 of the thirty would still have been flagged.
+
+**Every project also gets one scan record**, whatever was found. Three
+different zeros reach `deps` otherwise and none of them is distinguishable
+from the others: a project that references nothing, a Go or Maven project
+whose manifests this collector does not parse, and a project no sweep has
+covered. The record names the manifests read, the ones that would not parse,
+and the ones present in a format this does not read — so a zero says which
+zero it is (FR-O4, and the audit #50 asked for after WI-9 fixed the same
+shape for `forge onboard`).
 """
 
 from __future__ import annotations
@@ -47,7 +56,38 @@ from vogt.core.entities import Project
 
 KIND_DEP_REF = "dep_ref"
 
+#: One record per project saying what the walk actually read (FR-O4).
+#: Without it, three different zeros are indistinguishable at `deps`: a
+#: project that genuinely references nothing, a project whose manifests are
+#: in a format this collector does not parse, and a project nothing has
+#: swept. `forge onboard` learned to tell its zeros apart in WI-9; this is
+#: the same fix on the surface the same audit named next (#50).
+KIND_DEP_SCAN = "dep_scan"
+
 MANIFESTS = ("Cargo.toml", "package.json", "pyproject.toml")
+
+#: Manifests this collector recognises and does not read. Named rather than
+#: ignored: a Go or Maven project reporting no dependency references is
+#: reporting the collector's reach, not the project's graph, and a reader
+#: cannot tell the two apart from a bare zero. Extending `MANIFESTS` is how
+#: one of these stops being listed here.
+UNSUPPORTED_MANIFESTS = (
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "Gemfile",
+    "composer.json",
+    "mix.exs",
+    "requirements.txt",
+    "Package.swift",
+    "pubspec.yaml",
+    "CMakeLists.txt",
+)
+
+#: The same point by suffix, for ecosystems that name the file after the
+#: project rather than after the tool.
+UNSUPPORTED_SUFFIXES = (".csproj", ".fsproj", ".vbproj")
 
 #: Prefixes that mean "this is not a published package, it is that thing
 #: over there". Everything else is a registry dependency and ignored.
@@ -71,12 +111,26 @@ class DepRefCollector:
         del ctx
         root = Path(project.root_path).expanduser()
         exclusions = tuple(project.exclusions)
+        read: list[str] = []
+        unreadable: list[str] = []
+        unsupported: list[str] = []
+        references = 0
 
         for path in walk_project(root, exclusions=exclusions):
-            if path.name not in MANIFESTS:
-                continue
             relative = path.relative_to(root).as_posix()
-            for ref_kind, target in _references(path):
+            if path.name not in MANIFESTS:
+                if path.name in UNSUPPORTED_MANIFESTS or (
+                    path.suffix in UNSUPPORTED_SUFFIXES
+                ):
+                    unsupported.append(relative)
+                continue
+            found = _references(path)
+            if found is None:
+                unreadable.append(relative)
+                continue
+            read.append(relative)
+            for ref_kind, target in found:
+                references += 1
                 yield finding(
                     kind=KIND_DEP_REF,
                     subject_key=f"depref:{project.slug}/{relative}->{target}",
@@ -88,6 +142,19 @@ class DepRefCollector:
                         "scope": _scope(ref_kind, target, manifest=path, root=root),
                     },
                 )
+
+        yield finding(
+            kind=KIND_DEP_SCAN,
+            subject_key=f"depscan:{project.slug}",
+            project=project,
+            payload={
+                "manifests_read": len(read),
+                "references": references,
+                "unreadable_manifests": sorted(unreadable),
+                "unsupported_manifests": sorted(unsupported),
+                "root_exists": root.is_dir(),
+            },
+        )
 
 
 #: How a reference relates to the project that declares it.
@@ -121,17 +188,22 @@ def _scope(ref_kind: str, target: str, *, manifest: Path, root: Path) -> str:
     return SCOPE_INTERNAL if resolved.exists() else SCOPE_BROKEN
 
 
-def _references(path: Path) -> list[tuple[str, str]]:
-    """Extract internal-looking references from one manifest."""
+def _references(path: Path) -> list[tuple[str, str]] | None:
+    """Extract internal-looking references from one manifest.
+
+    `None` means the manifest could not be read, which is a different answer
+    from "it declares no internal references" and is reported as such in the
+    scan record. A malformed manifest is still a fact about the project
+    rather than a collector failure: the sweep stays `ok` and the file is
+    named.
+    """
     try:
         if path.name == "package.json":
             return _from_package_json(json.loads(path.read_text(encoding="utf-8")))
         with path.open("rb") as handle:
             document = tomllib.load(handle)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError):
-        # A malformed manifest is a fact about the project, not a collector
-        # failure. It yields no references and no error.
-        return []
+        return None
     if path.name == "Cargo.toml":
         return _from_cargo(document)
     return _from_pyproject(document)

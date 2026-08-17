@@ -29,6 +29,7 @@ from vogt.application.models import (
     BacklogParams,
     BugsParams,
     CommentParams,
+    CreateWorkParams,
     DriftDetectParams,
     DriftListParams,
     DriftResolveParams,
@@ -40,6 +41,7 @@ from vogt.application.models import (
     SetWriteBackParams,
     SweepParams,
     TransitionWorkParams,
+    UpdateWorkParams,
     WriteBackListParams,
 )
 from vogt.application.services import (
@@ -48,6 +50,7 @@ from vogt.application.services import (
     brief_project,
     bugs,
     comment_work,
+    create_work,
     detect_drift,
     get_work,
     list_drift,
@@ -59,8 +62,13 @@ from vogt.application.services import (
     set_write_back,
     sweep,
     transition_work,
+    update_work,
 )
-from vogt.core.drift import FORGE_STATE_MISMATCH, UPDATE_AUTOMATION_GAP
+from vogt.core.drift import (
+    FORGE_STATE_MISMATCH,
+    REFERENCED_ISSUE_MISMATCH,
+    UPDATE_AUTOMATION_GAP,
+)
 
 WHY = "forge module test"
 REPO = "https://github.com/TheDancingDeveloper-org/rustnzb"
@@ -655,6 +663,123 @@ def test_accepting_a_state_mismatch_closes_the_item_with_provenance(
         record = view.list_audit(limit=1)[0]
     assert record.operation == "drift.resolve"
     assert "fixed upstream" in record.reason
+
+
+def _finish(instance: AppContext, ref: str) -> None:
+    for state in ("in_progress", "review", "done"):
+        transition_work(
+            instance, TransitionWorkParams(ref=ref, to_state=state, reason=WHY)
+        )
+
+
+def test_an_item_finished_while_the_issue_it_names_is_open_is_drift(
+    instance: AppContext, forge: Forge
+) -> None:
+    """#49, end to end.
+
+    `WI-16` mirrored issue `#44`, named it in the first line of its body, and
+    was marked done while `#44` stayed open on GitHub for hours. Nothing
+    inside Vogt noticed; an onboarding agent following the import playbook
+    did, and refused to proceed.
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+    created = create_work(
+        instance,
+        CreateWorkParams(
+            kind="bug",
+            title="Retries forever",
+            body=f"GitHub: {REPO}/issues/12 (fix in PR {REPO}/pull/13)",
+            project="rustnzb",
+            reason=WHY,
+        ),
+    )
+    _finish(instance, created.item.ref)
+
+    raised = detect_drift(instance, DriftDetectParams(auto_accept=True, reason=WHY))
+    proposal = next(p for p in raised.raised if p.kind == REFERENCED_ISSUE_MISMATCH)
+
+    assert "gh:TheDancingDeveloper-org/rustnzb#12" in proposal.summary
+    assert proposal.id not in raised.auto_accepted, "read-only and human-resolved"
+    assert proposal.proposed_change["action"] == "review"
+
+    listed = list_drift(instance, DriftListParams())
+    assert REFERENCED_ISSUE_MISMATCH in listed.human_gated
+
+
+def test_a_pull_request_number_in_a_title_is_not_an_issue_reference(
+    instance: AppContext, forge: Forge
+) -> None:
+    """Why bare `#n` is not matched.
+
+    `WI-16`'s own title reads "Regression from #43" — and #43 is a pull
+    request, while the issue it mirrors is named in the body as a URL.
+    Resolving `#n` against the item's project would have raised a proposal
+    about a PR from a sentence describing history.
+    """
+    onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
+    created = create_work(
+        instance,
+        CreateWorkParams(
+            kind="bug",
+            title="Regression from #12",
+            body="Fixed in #13. See also #9.",
+            project="rustnzb",
+            reason=WHY,
+        ),
+    )
+    _finish(instance, created.item.ref)
+
+    raised = detect_drift(instance, DriftDetectParams(auto_accept=False, reason=WHY))
+    assert [p for p in raised.raised if p.kind == REFERENCED_ISSUE_MISMATCH] == []
+
+
+def test_an_adopted_link_raises_one_proposal_not_two(
+    instance: AppContext, forge: Forge
+) -> None:
+    """`forge_state_mismatch` owns the subjects somebody deliberately linked."""
+    ref = _adopted(instance, forge)
+    update_work(
+        instance,
+        UpdateWorkParams(
+            ref=ref,
+            body=f"GitHub: {REPO}/issues/12",
+            reason=WHY,
+        ),
+    )
+    _finish(instance, ref)
+
+    raised = detect_drift(instance, DriftDetectParams(auto_accept=False, reason=WHY))
+    kinds = [p.kind for p in raised.raised]
+    assert REFERENCED_ISSUE_MISMATCH not in kinds, (
+        "the adopted link already has a proposal; two would be one "
+        "disagreement wearing two rows"
+    )
+    assert FORGE_STATE_MISMATCH in kinds
+
+
+def test_reopening_finished_work_is_never_automatic(
+    instance: AppContext, forge: Forge
+) -> None:
+    """The direction with no positive evidence behind it (#49).
+
+    `gh-issues` reads open issues, and an unchanged subject is not
+    re-appended — so the newest observation of an issue closed last week
+    still says `open`. Auto-accepting that direction reopens finished work
+    from an absence nobody observed.
+    """
+    ref = _adopted(instance, forge)
+    _finish(instance, ref)
+    assert get_work(instance, GetWorkParams(ref=ref)).item.state == "done"
+
+    raised = detect_drift(instance, DriftDetectParams(auto_accept=True, reason=WHY))
+    mismatch = next(p for p in raised.raised if p.kind == FORGE_STATE_MISMATCH)
+
+    assert mismatch.proposed_change["to"] == "open"
+    assert raised.auto_accepted == [], "nothing reopens work on its own"
+    assert get_work(instance, GetWorkParams(ref=ref)).item.state == "done"
+    assert "reads open issues only" in mismatch.summary, (
+        "the proposal says what its evidence can and cannot see"
+    )
 
 
 def test_a_missing_automation_toggle_names_which_one(

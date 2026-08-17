@@ -285,18 +285,28 @@ def evaluate(
     criteria: list[CriterionResult] = []
 
     if not root.is_dir():
+        # `not_checked`, not `non_compliant`. Nothing was read, so nothing
+        # was evaluated, and a verdict from a read that never happened is
+        # the same shape WI-9 fixed for `forge onboard`: an answer
+        # indistinguishable from the honest one for a project that genuinely
+        # fails its contract (#50). The status a project records for an
+        # unreachable root now says nobody could look, which is true.
         criteria.append(
             CriterionResult(
                 rule="path.exists",
                 target=str(root),
                 satisfied=False,
-                detail="the path does not exist or is not a directory",
+                detail=(
+                    "the path does not exist or is not a directory, so no "
+                    "criterion below was evaluated — this is 'not checked', "
+                    "not 'does not comply'"
+                ),
             )
         )
         return ContractResult(
             contract_version=contract.version,
             path=str(root),
-            status=NON_COMPLIANT,
+            status=NOT_CHECKED,
             criteria=tuple(criteria),
         )
 

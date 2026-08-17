@@ -1015,11 +1015,45 @@ class ObservationsParams(Params):
 
 class ObservationsResult(Result):
     observations: list[Observation]
-    total: int
+    total: int = Field(
+        description=(
+            "How many rows this page holds — not how many exist. The store "
+            "is queried a page at a time and no count is taken behind it, so "
+            "`total == limit` means 'there may be more', never 'that is all'."
+        )
+    )
+    detail: str | None = Field(
+        default=None,
+        description=(
+            "Why an empty answer is empty, where that is not 'there are "
+            "none'. An unswept instance has no evidence tables at all, and "
+            "returning `[]` for that reads as a collector that found nothing "
+            "(FR-O4)."
+        ),
+    )
 
 
 class DepsParams(Params):
     project: str = Field(description="Project slug.")
+
+
+class MirroredSource(Result):
+    """The same source in two places, reported and never judged (FR-D8).
+
+    A path member of one project that declares the package a separately
+    registered project publishes — `rustnzb`'s `crates/nzb-core` and the
+    standalone `nzb-core`. Contents are not compared and no divergence is
+    asserted; the two declared versions are recorded as the facts they are.
+    """
+
+    package: str
+    project: str = Field(description="The project that carries the copy.")
+    mirrors: str = Field(description="The registered project that publishes it.")
+    local_path: str = Field(description="Where the copy sits, inside `project`.")
+    manifest: str | None = None
+    local_version: str | None = None
+    published_version: str | None = None
+    observed_at: datetime
 
 
 class DepsResult(Result):
@@ -1027,13 +1061,48 @@ class DepsResult(Result):
 
     Carries `freshness` because a graph is an aggregate over sweeps, and an
     empty graph with no sweep behind it means "not collected", not "this
-    project depends on nothing" (FR-O4, FR-U2).
+    project depends on nothing" (FR-O4, FR-U2). `status` narrows the same
+    point to this project: estate-wide freshness cannot say whether the
+    dependency collector has ever walked *this* tree.
     """
 
     project: str
     references_out: list[DepRef]
     referenced_by: list[DepRef]
     unresolved: int = 0
+    mirrors: list[MirroredSource] = Field(
+        default=[],
+        description="Copies this project carries of other projects' source (FR-D8).",
+    )
+    mirrored_by: list[MirroredSource] = Field(
+        default=[],
+        description="Projects carrying a copy of this project's source (FR-D8).",
+    )
+    status: Literal["not_collected", "collected"] = Field(
+        default="not_collected",
+        description=(
+            "Whether the dependency collector has walked this project. "
+            "`not_collected` makes the counts above meaningless rather than "
+            "informative: nothing was read, so nothing was found."
+        ),
+    )
+    manifests_read: int = Field(
+        default=0,
+        description="How many manifests the last walk actually parsed.",
+    )
+    unsupported_manifests: list[str] = Field(
+        default=[],
+        description=(
+            "Manifests present in a format the collector does not read "
+            "(`go.mod`, `pom.xml`, …). A project whose graph lives entirely "
+            "in one of these reports no references and has plenty."
+        ),
+    )
+    unreadable_manifests: list[str] = Field(
+        default=[],
+        description="Manifests in a supported format that would not parse.",
+    )
+    detail: str | None = None
     freshness: Freshness = Freshness()
 
 
@@ -1196,6 +1265,23 @@ class DriftDetectResult(Result):
     auto_accepted: list[str]
     already_open: int = Field(
         description="Findings that already had an open proposal, so were not re-raised."
+    )
+    superseded: list[str] = Field(
+        default=[],
+        description=(
+            "Open proposals this run marked as raised under evidence a later "
+            "sweep no longer reproduces (FR-R6). They are still open and "
+            "still need a person; the flag only tells the inbox which ones "
+            "are worth reading first."
+        ),
+    )
+    not_collected: list[str] = Field(
+        default=[],
+        description=(
+            "Registered projects no collector has ever swept. Nothing could "
+            "be raised for them, which is a different answer from finding no "
+            "drift there (FR-O4)."
+        ),
     )
     auto_acceptable_kinds: list[str]
 

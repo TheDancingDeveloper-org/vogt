@@ -820,6 +820,129 @@ The POC scope, sequencing and what it must prove are in `docs/VOICE_POC.md`.
 Its outcome is expected to revise this section once more: either FR-T13's
 utterance list is met and the gate tap is fine, or the tap is not fine and
 somebody has to argue with FR-T2.
+### Revision r17 — what the onboarding pass filed, and the sweep it asked for
+
+The estate onboarding of 2026-08-17 registered thirty-eight projects and filed
+four issues against this repository (#47–#50). Three name gaps in what is
+built; the fourth asks for a sweep nobody had run. As with r14, none of them is
+new direction — each is a correction toward something this document already
+says.
+
+**A relationship the design named and no code ever wrote (FR-D8).** `rustnzb`
+vendors seven `nzb-*` crates that are *also* separately published, separately
+registered repositories; `rustTorrent` does the same with eleven `librtbit-*`
+crates. Eighteen concrete cases, each of which Vogt held as two unrelated
+projects that happened to share a name, and each of which somebody had to work
+out by hand. FR-D8 has specified the answer since r2 — report the
+`mirrored_source` relationship as an observation, compare no contents, assert
+no divergence — and `grep -rn mirrored_source src/` returned nothing. It is
+built at r15 as its own offline collector, matching on the package name both
+manifests declare, which is the identity the two copies already agree on and
+the only signal available that is not the content comparison FR-D8 forbids.
+
+Worth recording separately: **§7.1 did not carry FR-D8**, and by its own
+admission rule it should have — something was designed, it is not built, and a
+reader of `DESIGN.md` §3.5 could reasonably have believed it was. The register
+was assembled from gaps that documents *stated*; this one was visible only by
+grepping the source for the identifier. A gap register that misses a row is
+worse than one nobody reads, so the omission is named here rather than quietly
+resolved by the same change that closes it.
+
+**A proposal that outlived the thing that raised it (FR-R6).** `WI-2`'s fix
+stopped `dep-refs` misclassifying Cargo dependency inheritance as an unresolved
+reference. The thirty-six proposals it had already raised under the old logic
+stayed open through the fix, its deploy, a later regression and a re-fix, and
+closed only because a person confirmed from timestamps that they predated the
+fix and ran `drift resolve --reject` thirty-six times. `drift detect` only ever
+*adds*: it raised zero new proposals on that pass, reported five `already_open`,
+and never looked at the thirty-six. This is not a one-off — every fix that
+changes what a collector reports leaves behind whatever it had already raised.
+
+FR-R6 does not auto-close, deliberately: FR-R2 keeps resolution with a person
+or an authorised agent, and FR-U18 refuses even bulk *accept* in the GUI on the
+grounds that evidence should be read per proposal. It marks. A proposal whose
+condition a later completed sweep no longer reproduces carries `superseded_at`
+and a detail naming the sweep, stays open, keeps its snapshot, and clears again
+if the condition returns.
+
+`#48` also asked whether the CLI should carry FR-U18's no-bulk-accept
+discipline, since a loop of single `drift resolve` calls is what cleared the
+thirty-six. **It should not, and the reason is that they are different
+mechanisms.** FR-U18 forbids a *button* that resolves many proposals from one
+click without their evidence on screen; the CLI has no such verb, and each call
+in that loop resolved one proposal, took its own reason, and wrote its own
+audit row. What made the loop unsafe was not its shape but that the operator
+had to establish staleness by hand — which is the gap FR-R6 closes.
+
+**Two registers and no referee (FR-R7).** `WI-16` mirrored GitHub issue `#44`,
+named it in the first line of its body, and was marked done when the fix
+deployed; `#44` stayed open for hours. Nothing inside Vogt noticed. What
+noticed was a freshly-spawned onboarding agent following the import playbook,
+which treats an open `#44` as a hard stop, correctly refusing to proceed. Vogt
+already collects `forge.issue` observations and already treats
+declared-versus-observed disagreement as the thing drift exists to catch; this
+shape had simply never been wired up as one. FR-R7 raises it as its own kind:
+read-only, human-resolved, never applying a change.
+
+It matches a **qualified** reference — `owner/name#12`, or an issue URL — and
+never a bare `#12`. `WI-16`'s own title reads "Regression from #43", where #43
+is a pull request, while the issue it mirrors appears in the body as a URL;
+resolving `#n` against the item's project would have produced a proposal about
+a PR from a sentence describing history. Precision is load-bearing here,
+because a rejected proposal is re-raised by the next `detect` — a false
+positive is a recurring cost, not a one-time one.
+
+Building it surfaced a live hazard in the kind next door. `gh-issues` collects
+**open** issues, and dedup appends nothing for an unchanged subject, so the
+newest observation of an issue closed last month still says `open` — and
+`forge_state_mismatch` was auto-accepting in both directions. The reopen
+direction therefore reopened finished work from an absence nobody observed. It
+is now auto-acceptable only where the evidence is positive (`closed` upstream
+→ close the item); the other direction is human-gated and its summary says what
+the evidence can and cannot see.
+
+**Three zeros, audited (#50).** WI-9 taught `forge onboard` to say which of its
+zeros it meant, and was written against exactly one collector's one failure
+mode. #50 asked for the sweep that fix did not do: every surface that returns a
+bare count, checked for the same three-way ambiguity — genuinely empty / not
+collected / never run.
+
+| Surface | Could a zero here mean "not collected"? | State after r15 |
+|---|---|---|
+| `forge onboard` | Yes — a Forgejo remote returned four zeros and a null detail | Fixed at WI-9: `supported: false` and a detail naming the host |
+| `coverage` | Yes | Already honest: `never_run`, per-collector outcome, `never_swept` count |
+| `deps` | **Yes, three ways** — nothing to find, a manifest format `dep-refs` does not parse, or a project no sweep has walked | Fixed: `dep-refs` writes a scan record per project; `deps` carries `status`, `manifests_read`, the unsupported and unreadable manifests, and a `detail` saying which zero this is |
+| `brief.dependencies` | Yes — `status: collected` was claimed from an estate-wide check, so a project registered after the last sweep reported `collected, 0` | Fixed: claimed per project, from that project's scan record |
+| `contract check` / `contract evaluate` | Yes — a root path that could not be read returned `non_compliant`, a verdict from a read that never happened, and `contract check` recorded it on the project | Fixed: `not_checked`, with the criterion detail saying so |
+| `compliance` | No, but its `not_checked` had one meaning for two causes | Fixed: the detail distinguishes "nobody ran it" from "the last run could not read the path" |
+| `drift detect` | Partly — it refuses outright with no coverage at all, and said nothing about unswept projects on a partly swept instance | Fixed: `not_collected` names the projects nothing could have been raised for |
+| `drift list` | No | Already honest: carries `freshness`, and an empty inbox is only reassuring beside it |
+| `observations` | Yes — an instance with no evidence tables returned `[]` with no detail | Fixed: a detail saying no sweep has run |
+| `notifications` | No | Already honest: detail plus `freshness` |
+| `backlog`, `bugs`, `why`, `project brief` (CI half) | No | Already honest: `freshness`, `CiSummary.status`, `NotCollected` |
+| `sweep` | No | Per-collector outcome and named per-project failures |
+| `status`, `project list`, `work list`, `audit list`, `events`, `export`, `import`, `session list` | No | Declared-store counts with no collector between the question and the answer; there is no third state to confuse |
+
+Two residuals the sweep found and r15 does **not** fix, named here so they are
+not rediscovered as defects:
+
+- **An observation's `observed_at` is when its payload was first seen, not
+  when it was last confirmed.** Dedup writes nothing for an unchanged subject
+  (§3.1 of `SCHEMA.md`, NFR-S2), which is the property that keeps growth
+  proportional to change — and it means no subject can be dated to the sweep
+  that last saw it. Two consequences are live: a closed GitHub issue's newest
+  observation says `open` indefinitely (the reason FR-R7 is human-gated and
+  `forge_state_mismatch` lost half its auto-accept), and `latest_dep_refs`
+  keeps a reference whose manifest entry has been deleted until something
+  re-observes that subject. Closing it means a per-subject last-seen record —
+  a schema change to the evidence store and a new coverage concept — which is
+  a requirement someone should write deliberately rather than something to
+  smuggle into a bugfix.
+- **`ObservationsResult.total` is the size of the page, not of the store.**
+  Every other `total` in the result models is a real count. This one is
+  `len(rows)` because the query is paged with no count behind it, so `total ==
+  limit` means "there may be more" and never "that is all". Documented on the
+  field at r15; making it a true count is a storage change with its own cost.
 
 ---
 
@@ -935,7 +1058,7 @@ by path or repository URL, and stops there.*
 | FR-D5 | *(revised r2)* Dependency reporting shall include one drift kind: `unresolved_dependency` — an internal-looking reference whose target is not a registered project. | S | SCHEMA §2.4 |
 | FR-D6 | *(moved r2)* Update-automation posture shall be tracked as independent facts (version-updates config / vulnerability alerts / security fixes), never one boolean. This is forge posture, delivered with the forge module (FR-O5b), not with dependency references. | M* | DESIGN §3.5 |
 | FR-D7 | ~~Advisory/vulnerability enrichment (RustSec, OSV, GitHub advisories).~~ **Withdrawn (r2)** — advisory matching requires resolved versions, which r2 removes. Deferred to §3. | — | — |
-| FR-D8 | *(r2)* Where the same source exists both as a path member of one project and as a separate registered project, the system shall report the `mirrored_source` relationship as an observation. It shall not compare contents and shall not assert divergence. | C | DESIGN §3.5 |
+| FR-D8 | *(r2, delivered r15)* Where the same source exists both as a path member of one project and as a separate registered project, the system shall report the `mirrored_source` relationship as an observation. It shall not compare contents and shall not assert divergence. | C | DESIGN §3.5 |
 | FR-D9 | *(r11)* An operation shall record a dependency edge no manifest expresses — a service that calls another, a pipeline that consumes a schema — with reference kind `declared`. `RefKind` has carried the member since M2 and nothing produces it, so an edge that lives only in a deploy script is invisible to `deps` and to the reverse lookup. | C | DESIGN §3.5 |
 
 ### FR-R — Drift & reconciliation
@@ -947,6 +1070,8 @@ by path or repository URL, and stops there.*
 | FR-R3 | Auto-accept rules shall be configurable per project and per drift kind; the shipped default is low-risk auto-accept (state-sync kinds agent-acceptable; destructive/structural kinds always human-gated). | M | DESIGN §3.2 |
 | FR-R4 | Every declared entity shall carry a computed trust state: `verified / stale / unverified / disputed` — derived from observation freshness and agreement, never hand-set. `disputed` is distinct from the drift *resolution* status `contested`, which is chosen by an actor. | M | SCHEMA §4 |
 | FR-R5 | *(r2)* A drift proposal shall embed a self-contained evidence snapshot at raise time, and observations referenced by a proposal shall be exempt from retention pruning while that reference exists. Evidence shall never become unreachable through retention. | M | SCHEMA §2.4, §5 |
+| FR-R6 | *(r15)* Where a completed sweep newer than an open proposal no longer reproduces the condition that raised it, the proposal shall be marked as superseded by fresher evidence, and the mark shall clear if the condition reproduces again. Marking shall not resolve the proposal, shall not alter its evidence snapshot, and shall be coverage-gated: absence outside a completed sweep is "not collected" (FR-O4). | S | SCHEMA §2.4 |
+| FR-R7 | *(r15)* Where a work item's own text names a forge issue by a qualified reference — `owner/name#number` or an issue URL — and the item's state disagrees with the issue's most recent observed state, the system shall raise it as a drift kind of its own. It shall be human-gated, shall propose no change, and shall not duplicate a proposal already raised for an adopted link on the same subject. | S | SCHEMA §2.4 |
 
 ### FR-A — API surfaces & parity
 

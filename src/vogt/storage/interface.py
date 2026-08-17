@@ -423,6 +423,16 @@ class WriteTxn(ReadView, Protocol):
 
     def upsert_inbox_triage(self, triage: InboxTriage) -> None: ...
 
+    def mark_drift_superseded(
+        self, proposal_id: str, *, detail: str | None, at: datetime | None
+    ) -> bool:
+        """Flag an open proposal whose raising condition fresher evidence no
+        longer reproduces, or clear the flag when it reproduces again (FR-R6).
+
+        Never a resolution: the proposal stays open and human-gated (FR-R2).
+        """
+        ...
+
     def resolve_drift(
         self,
         proposal_id: str,

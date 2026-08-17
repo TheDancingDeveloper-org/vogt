@@ -331,8 +331,13 @@ jobs:
           # `claude` nor `codex` and nothing was red (#23). A build arg that
           # nothing asserts is a default waiting to be forgotten — NFR-Q7 is
           # the general form of that lesson.
+          #
+          # `theclawbay` joins the loop for the second half of that lesson
+          # (WI-17): it was in nobody's image and only in a persisted home, so
+          # replacing the home volume took it away and, again, nothing was red.
+          # A tool nothing executes is a tool nothing knows it has lost.
           if [ "${DEV_IMAGE}" = "true" ]; then
-            for tool in claude codex flutter; do
+            for tool in claude codex flutter theclawbay; do
               docker run --rm --entrypoint "$tool" "$CANDIDATE" --version >/dev/null \
                 || { echo "the dev image is missing $tool" >&2; exit 1; }
             done

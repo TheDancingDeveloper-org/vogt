@@ -1348,6 +1348,26 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def mark_drift_superseded(
+        self,
+        proposal_id: str,
+        *,
+        detail: str | None,
+        at: datetime | None,
+    ) -> bool:
+        """Flag, or un-flag, an open proposal as raised under stale evidence.
+
+        Only open proposals: a resolved one is history, and rewriting history
+        because a later sweep disagreed with it would destroy the record of
+        what somebody decided and on what basis.
+        """
+        cursor = self._conn.execute(
+            "UPDATE drift_proposals SET superseded_at = ?, superseded_detail = ? "
+            "WHERE id = ? AND status = 'open'",
+            (None if at is None else to_iso(at), detail, proposal_id),
+        )
+        return cursor.rowcount > 0
+
     def resolve_drift(
         self,
         proposal_id: str,
@@ -1799,6 +1819,14 @@ def _row_to_drift(row: sqlite3.Row) -> DriftProposal:
         proposed_change=json.loads(str(row["proposed_change"])),
         status=row["status"],
         opened_at=from_iso(str(row["opened_at"])),
+        superseded_at=(
+            None
+            if row["superseded_at"] is None
+            else from_iso(str(row["superseded_at"]))
+        ),
+        superseded_detail=(
+            None if row["superseded_detail"] is None else str(row["superseded_detail"])
+        ),
         resolved_by_actor_id=(
             None
             if row["resolved_by_actor_id"] is None

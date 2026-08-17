@@ -22,6 +22,7 @@ around a fact (r2 decision).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
@@ -67,6 +68,11 @@ HUMAN_GATED_REASON: dict[str, str] = {
         "the target is inside this project and is not there; only somebody "
         "who knows whether it moved or was deleted can say what to do"
     ),
+    "referenced_issue_state_mismatch": (
+        "the reference was read out of the item's own text rather than "
+        "adopted as a link, and only somebody who knows which register is "
+        "right can say whether to close the issue or reopen the item"
+    ),
 }
 
 
@@ -105,7 +111,20 @@ class DriftFinding:
 
     @property
     def auto_acceptable(self) -> bool:
-        """Whether the shipped default policy lets an agent accept this."""
+        """Whether the shipped default policy lets an agent accept this.
+
+        `forge_state_mismatch` is auto-acceptable in **one direction only**,
+        and the asymmetry is about evidence rather than about risk appetite.
+        `gh-issues` reads open issues; a closed one simply stops appearing,
+        and observations are appended only when they change, so the newest
+        observation of a closed issue still says `open` — indefinitely.
+        "Upstream is closed" is therefore a fact somebody produced, while
+        "upstream is open" is also what a closed-and-not-re-read issue looks
+        like. Auto-accepting the second direction reopens finished work from
+        an absence nobody observed (found while building #49's kind).
+        """
+        if self.kind == FORGE_STATE_MISMATCH:
+            return str(self.proposed_change.get("to", "")) == "done"
         return self.kind in AUTO_ACCEPTABLE_KINDS
 
 
@@ -229,6 +248,26 @@ def unresolved_dependency(
     )
 
 
+def _last_observed_open(
+    subject_key: str, work_ref: str, declared_state: str, evidence: EvidenceSnapshot
+) -> str:
+    """The other direction, said honestly.
+
+    `gh-issues` collects open issues, and an unchanged subject is not
+    re-appended, so this evidence dates from when the issue was *last seen
+    open* and a close since then is invisible to that collector. Saying so
+    in the proposal turns a puzzling question into an answerable one:
+    re-consolidate the repository and this either persists or disappears.
+    """
+    return (
+        f"{subject_key} was open when last observed "
+        f"({evidence.observed_at.isoformat()}), but {work_ref} is "
+        f"{declared_state!r} here — `gh-issues` reads open issues only, so a "
+        "close after that time is invisible to it; `forge onboard` re-reads "
+        "closed state"
+    )
+
+
 # -- forge drift kinds (M5) ------------------------------------------------
 
 FORGE_STATE_MISMATCH = "forge_state_mismatch"
@@ -266,8 +305,10 @@ def forge_state_mismatch(
         subject_id=work_item_id,
         project_id=project_id,
         summary=(
-            f"{subject_key} is {upstream_state} upstream, but {work_ref} is "
+            f"{subject_key} is closed upstream, but {work_ref} is "
             f"{declared_state!r} here"
+            if upstream_state == "closed"
+            else _last_observed_open(subject_key, work_ref, declared_state, evidence)
         ),
         proposed_change={
             "entity": "work_item",
@@ -348,6 +389,97 @@ def ci_red_vs_healthy(
             "action": "review",
             "failing": sorted(failing),
             "revision": revision,
+        },
+        evidence=evidence,
+        evidence_observation_id=evidence_observation_id,
+    )
+
+
+REFERENCED_ISSUE_MISMATCH = "referenced_issue_state_mismatch"
+
+#: `owner/name#123` — an unambiguous cross-repository reference.
+_QUALIFIED_REF = re.compile(
+    r"\b(?P<owner>[A-Za-z0-9][\w.-]*)/(?P<repo>[A-Za-z0-9][\w.-]*)#(?P<number>\d+)\b"
+)
+
+#: A full issue URL. `/pull/` is deliberately not matched: a pull request is
+#: not the issue, and `WI-16`'s body names both.
+_ISSUE_URL = re.compile(
+    r"https?://(?:www\.)?github\.com/"
+    r"(?P<owner>[A-Za-z0-9][\w.-]*)/(?P<repo>[A-Za-z0-9][\w.-]*)/issues/"
+    r"(?P<number>\d+)"
+)
+
+
+def issue_references(text: str) -> list[str]:
+    """Forge subject keys a work item's own text names (FR-R7).
+
+    **Bare `#44` is deliberately not matched.** It is the commonest way to
+    write a reference and the least decidable one: `WI-16`'s own title says
+    "Regression from #43", and #43 is a pull request, while the issue it
+    actually mirrors is named in the body as a full URL. Resolving `#n`
+    against the item's project would have produced a proposal about a PR from
+    a sentence describing history. A qualified reference or a URL is somebody
+    naming a specific issue in a specific repository, which is what this is
+    allowed to act on.
+
+    Returns subject keys in the `gh:owner/repo#number` form the forge
+    collectors already use, deduplicated, in first-seen order.
+    """
+    keys: list[str] = []
+    for pattern in (_ISSUE_URL, _QUALIFIED_REF):
+        for match in pattern.finditer(text):
+            repo = match.group("repo").removesuffix(".git")
+            key = f"gh:{match.group('owner')}/{repo}#{match.group('number')}"
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
+def referenced_issue_state_mismatch(
+    *,
+    work_item_id: str,
+    work_ref: str,
+    declared_state: str,
+    upstream_state: str,
+    subject_key: str,
+    project_id: str | None,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: str | None,
+) -> DriftFinding:
+    """A work item and the issue its own text names disagree (FR-R7).
+
+    Structurally the same disagreement as `forge_state_mismatch` and a
+    different kind on purpose: that one is about a link somebody *adopted*,
+    which is a deliberate act, and it may sync state automatically. This one
+    is about a reference read out of an item's title or body, which is a
+    weaker claim — so it proposes nothing, applies nothing, and is always
+    human-gated.
+
+    `WI-16` mirrored issue `#44`, named it in the first line of its body, was
+    marked done when the fix deployed, and left `#44` open on GitHub for
+    hours. Nothing inside Vogt noticed; an onboarding agent following the
+    import playbook did, and refused to proceed (#49).
+    """
+    finished_here = "finished" if declared_state in ("done", "wont_do") else "open"
+    return DriftFinding(
+        kind=REFERENCED_ISSUE_MISMATCH,
+        subject_kind="work_item",
+        subject_id=work_item_id,
+        project_id=project_id,
+        summary=(
+            f"{work_ref} references {subject_key}, which was {upstream_state} "
+            f"when last observed ({evidence.observed_at.isoformat()}), while "
+            f"{work_ref} is {declared_state!r} — {finished_here} here, "
+            f"{upstream_state} there"
+        ),
+        proposed_change={
+            "entity": "work_item",
+            "action": "review",
+            "subject_key": subject_key,
+            "work_ref": work_ref,
+            "declared_state": declared_state,
+            "upstream_state": upstream_state,
         },
         evidence=evidence,
         evidence_observation_id=evidence_observation_id,
