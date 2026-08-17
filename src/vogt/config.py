@@ -265,6 +265,20 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "exposure"},
     )
+    session_scratch_project: str | None = Field(
+        default=None,
+        description=(
+            "The project slug a session with no work item and no project "
+            "resolves to (FR-T11). It exists for the spoken request that has "
+            "no subject — 'research the best risotto in Wollongong' — which "
+            "still needs a registered working tree to open in. Unset means "
+            "such a request is refused by name rather than opened somewhere "
+            "guessed, which is FR-E3's whole point: the working directory "
+            "comes from the registry, and a scratch project is a registered "
+            "project like any other."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     engine_state_dir: Path | None = Field(
         default=None,
         description=(

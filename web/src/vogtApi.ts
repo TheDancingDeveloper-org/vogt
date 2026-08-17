@@ -348,6 +348,10 @@ export interface SessionSummary {
   actor: string;
   cwd: string;
   template?: string | null;
+  /** What the session was *asked* to run (FR-T11) — not what the agent inside
+   *  it is using now, which nothing here can know. */
+  model?: string | null;
+  effort?: string | null;
   reason: string;
   started_at: string;
   stopped_at?: string | null;

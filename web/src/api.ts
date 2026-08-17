@@ -687,8 +687,14 @@ export const api = {
   flushPushDigests: () =>
     req<{ ok: number; fail: number; queued: number }>("POST", "/api/push/flush-digests"),
 
-  assistantMessage: (text: string) =>
-    req<AssistantReply>("POST", "/api/assistant/message", { text }),
+  // `profile` names which configured backend runs this turn (FR-T9). Omitted
+  // means the deployment's default, which is what every caller sent before
+  // profiles existed.
+  assistantMessage: (text: string, profile?: string) =>
+    req<AssistantReply>("POST", "/api/assistant/message", {
+      text,
+      ...(profile ? { profile } : {}),
+    }),
   assistantAction: (id: string, approve: boolean) =>
     req<AssistantReply>("POST", `/api/assistant/actions/${id}`, { approve }),
   assistantReplaceReason: (id: string, reason: string) =>
@@ -735,6 +741,12 @@ export interface PublicConfig {
     legacy_gui_prefix?: string;
   };
   assistant_model?: string | null;
+  /**
+   * The provider profiles a request may name (FR-T9). A name and the model
+   * that name runs, and nothing else: the key would be spendable and the base
+   * URL is an exposure value, so neither is advertised.
+   */
+  assistant_profiles?: { name: string; model: string; default: boolean }[];
 }
 
 export interface AssistantTranscriptEntry {

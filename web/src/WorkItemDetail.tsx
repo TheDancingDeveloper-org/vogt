@@ -1715,6 +1715,19 @@ const WorkItemDetail: Component<Props> = (props) => {
                               </div>
                               <div class="wid-session-meta">
                                 <span>{session.template ?? "default shell"}</span>
+                                {/* What it was asked to run (FR-T11). Shown
+                                    beside the template because "Claude Code"
+                                    and "Claude Code on Opus at high effort"
+                                    are different sessions and cost
+                                    differently. */}
+                                <Show when={session.model}>
+                                  {(model) => (
+                                    <span class="wid-mono">
+                                      {model()}
+                                      {session.effort ? ` · ${session.effort}` : ""}
+                                    </span>
+                                  )}
+                                </Show>
                                 <span class="wid-mono">{session.cwd}</span>
                                 <span>as {session.actor}</span>
                                 <span>started {formatWhen(session.started_at)}</span>

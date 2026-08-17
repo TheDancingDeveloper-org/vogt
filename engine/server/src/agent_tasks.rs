@@ -735,6 +735,8 @@ impl AgentTaskRegistry {
             // about, and has just named it in `env`. Asking the registry for
             // a second one would write the brief twice.
             prompt: None,
+            model: None,
+            effort: None,
             cols: Some(100),
             rows: Some(30),
             scrollback_bytes: None,

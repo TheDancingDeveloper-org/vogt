@@ -1286,8 +1286,8 @@ class SqliteWriteTxn(SqliteReadView):
     def insert_session(self, session: CodingSession) -> None:
         self._conn.execute(
             "INSERT INTO coding_sessions (id, engine_session_id, project_id, "
-            "work_item_id, actor_id, cwd, template, reason, started_at, "
-            "stopped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "work_item_id, actor_id, cwd, template, model, effort, reason, "
+            "started_at, stopped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session.id,
                 session.engine_session_id,
@@ -1296,6 +1296,8 @@ class SqliteWriteTxn(SqliteReadView):
                 session.actor_id,
                 session.cwd,
                 session.template,
+                session.model,
+                session.effort,
                 session.reason,
                 to_iso(session.started_at),
                 None if session.stopped_at is None else to_iso(session.stopped_at),
@@ -1792,6 +1794,8 @@ def _row_to_session(row: sqlite3.Row) -> CodingSession:
         actor_id=str(row["actor_id"]),
         cwd=str(row["cwd"]),
         template=None if row["template"] is None else str(row["template"]),
+        model=None if row["model"] is None else str(row["model"]),
+        effort=None if row["effort"] is None else str(row["effort"]),
         reason=str(row["reason"]),
         started_at=from_iso(str(row["started_at"])),
         stopped_at=None if stopped is None else from_iso(str(stopped)),

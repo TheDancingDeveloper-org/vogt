@@ -550,6 +550,16 @@ class SessionSummary(Result):
     actor: str = Field(description="Actor the session's writes are attributed to.")
     cwd: str
     template: str | None = None
+    model: str | None = Field(
+        default=None,
+        description=(
+            "The model this session was started with (FR-T11). What was asked "
+            "for, not what the agent is using now."
+        ),
+    )
+    effort: str | None = Field(
+        default=None, description="The reasoning effort it was started with."
+    )
     reason: str
     started_at: datetime
     stopped_at: datetime | None = None
@@ -1782,10 +1792,17 @@ class ConnectResult(Result):
 class StartSessionParams(Params):
     """Open a terminal for a work item, or for a project.
 
-    Exactly one of `work_item` and `project` is required. A session always
-    belongs to a project — the work item's own, when one is given — because
-    the working directory comes from the project registry and nowhere else
-    (FR-E3).
+    At most one of `work_item` and `project`. A session always belongs to a
+    project — the work item's own, when one is given — because the working
+    directory comes from the project registry and nowhere else (FR-E3).
+
+    *(r16, FR-T11)* Giving **neither** is allowed only when the deployment has
+    configured a scratch project, and resolves to it. It exists for the spoken
+    request with no subject — "research the best risotto in Wollongong" — which
+    has no work item and no repository but still needs a registered tree to
+    open in. The scratch project is a project like any other: registered, with
+    a root path somebody chose. What is *not* allowed is inventing a directory,
+    which is the failure FR-E3 exists against.
     """
 
     work_item: str | None = Field(default=None, description="Work item ref, e.g. WI-7.")
@@ -1799,6 +1816,22 @@ class StartSessionParams(Params):
     )
     name: str | None = Field(
         default=None, description="Session name. Derived from the subject if omitted."
+    )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Model id for the agent CLI this template runs, e.g. "
+            "'gpt-5.6' or 'claude-sonnet-4-5'. Omitted means the CLI's own "
+            "default. A template that cannot be told which model to use "
+            "refuses rather than ignoring this."
+        ),
+    )
+    effort: str | None = Field(
+        default=None,
+        description=(
+            "Reasoning effort for the agent CLI, e.g. 'low' / 'medium' / "
+            "'high'. Omitted means the CLI's own default."
+        ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
 

@@ -65,6 +65,16 @@ pub const CURATED_READS: &[&str] = &[
     "work.get",
     "work.list",
     "compliance",
+    // FR-T10: "are there any notifications?" is the Inbox, and the Inbox is
+    // `inbox.list` — the normalized, server-ordered projection over GitHub,
+    // drift, CI and agent attention that carries its own coverage (FR-N4).
+    //
+    // Deliberately *not* the `notifications` operation, which is GitHub only.
+    // Offering both would leave the model free to answer the general question
+    // from one source and report the other three as nothing — which is the
+    // exact failure this tool exists to prevent, and the one a spoken answer
+    // hides best, because "no notifications" sounds complete.
+    "inbox.list",
 ];
 
 /// The write set of FR-T2. Every one of these passes the pending-action gate;
@@ -97,6 +107,12 @@ const TARGET_KEYS: &[&str] = &[
     "to_state",
     "kind",
     "template",
+    // FR-T11 with FR-T2: a spoken "using GPT 5.6 medium" is half of what was
+    // asked for, so a card that showed only the project would be asking for
+    // approval of something narrower than the request. Last in the list, so
+    // they never crowd out the subject.
+    "model",
+    "effort",
 ];
 
 /// Who the front door says is driving this turn.
@@ -620,6 +636,7 @@ pub mod stub {
             "project_list",
             "work_list",
             "compliance",
+            "inbox_list",
             "work_transition",
             "work_comment",
         ] {
@@ -807,6 +824,11 @@ mod tests {
                 "work.get",
                 "work.list",
                 "compliance",
+                // FR-T10 (r16). Added deliberately, and only this one: the
+                // `notifications` operation is GitHub-only and would let the
+                // general attention question be answered from a quarter of
+                // the sources without saying so.
+                "inbox.list",
             ]
         );
         // Every one of these passes the pending-action gate. A name added

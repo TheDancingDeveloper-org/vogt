@@ -44,6 +44,8 @@ fn test_config() -> Config {
         assistant_max_tool_calls: 8,
         assistant_allow_claude_proxy: false,
         assistant_reasoning_effort: None,
+        assistant_profiles: vec![],
+        assistant_default_profile: None,
         contextkeeper_url: None,
         contextkeeper_token: None,
         public_url: None,

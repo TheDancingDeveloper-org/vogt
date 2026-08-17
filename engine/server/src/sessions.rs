@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use uuid::Uuid;
 
 use crate::{
+    agent_cli,
     config::Config,
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
@@ -53,6 +54,18 @@ impl SessionRegistry {
                 spec.cwd = None;
             }
         }
+        // Before the prompt file is written and before anything is spawned:
+        // a request naming a model this command cannot be told about is
+        // refused, not started plain (FR-T11). Doing it here rather than in
+        // `pty::spawn` keeps the refusal free of side effects to undo.
+        if let Some(rewritten) = agent_cli::apply(
+            spec.command.as_deref(),
+            spec.model.as_deref(),
+            spec.effort.as_deref(),
+        )? {
+            spec.command = Some(rewritten);
+        }
+
         // Allocated here rather than inside `pty::spawn` so the prompt file
         // below can be named for the session it belongs to, and so the file
         // exists before the child does.

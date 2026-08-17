@@ -22,6 +22,8 @@ import {
   type AssistantTranscriptEntry,
   type AssistantVogtWriteAction,
 } from "./api";
+import { listProjects } from "./vogtApi";
+import { describeRepairs, repairUtterance } from "./voiceRepair";
 
 const TTS_PREF_KEY = "mydevenv2.assistant.tts";
 
@@ -114,6 +116,18 @@ export default function Assistant(props: AssistantProps) {
   const [ttsOn, setTtsOn] = createSignal(localStorage.getItem(TTS_PREF_KEY) === "1");
   const [listening, setListening] = createSignal(false);
   const [sttAvailable, setSttAvailable] = createSignal(false);
+  // The vocabulary the repair pass matches against (FR-T13). Fetched from
+  // `project.list`, not hard-coded: a repair against a list in this file
+  // would be a guess wearing a validation pass's clothes. Empty is a working
+  // state — the pass repairs work-item refs and leaves names alone.
+  const [slugs, setSlugs] = createSignal<string[]>([]);
+  const [repaired, setRepaired] = createSignal("");
+  // Which backend this conversation runs on (FR-T9). Empty means the
+  // deployment's default, which is what a client that never chose sends.
+  const [profiles, setProfiles] = createSignal<
+    { name: string; model: string; default: boolean }[]
+  >([]);
+  const [profile, setProfile] = createSignal("");
 
   let scroller: HTMLDivElement | undefined;
   let inputEl: HTMLInputElement | undefined;
@@ -142,6 +156,19 @@ export default function Assistant(props: AssistantProps) {
       setPending(history.pending_action ?? null);
     } catch (e) {
       props.onError(`assistant history: ${String(e)}`);
+    }
+    try {
+      setProfiles((await api.publicConfig()).assistant_profiles ?? []);
+    } catch {
+      // No profile list means no choice to offer, not a broken assistant:
+      // every request then runs on the deployment's default.
+    }
+    try {
+      const listed = await listProjects();
+      setSlugs(listed.projects.map((project) => project.slug));
+    } catch {
+      // A core that cannot be asked costs slug repair and nothing else: the
+      // composer, the work-item repair and typed input all keep working.
     }
     if (Capacitor.isPluginAvailable("SpeechRecognition")) {
       try {
@@ -185,7 +212,7 @@ export default function Assistant(props: AssistantProps) {
     stopSpeaking();
     setTranscript((cur) => [...cur, { role: "user", text: trimmed }]);
     try {
-      applyReply(await api.assistantMessage(trimmed));
+      applyReply(await api.assistantMessage(trimmed, profile() || undefined));
     } catch (e) {
       props.onError(`assistant: ${String(e)}`);
     } finally {
@@ -270,8 +297,19 @@ export default function Assistant(props: AssistantProps) {
     // because releasing the button removes that listener and the release is
     // now the ordinary way a take ends. Under the toggle this lived in the
     // listener and worked because the recognizer usually stopped itself.
-    const text = draft().trim();
-    if (text) void send(text);
+    const heard = draft().trim();
+    if (!heard) return;
+    // FR-T13: the recognizer's best guess is put back into the vocabulary the
+    // domain is made of before it is sent. `WI-7` and a project slug are
+    // exactly what a recognizer mangles, and they are the subject of the
+    // sentence — an utterance that survives everything except its subject is
+    // a failed utterance.
+    const { text, repairs } = repairUtterance(heard, slugs());
+    // Shown, not silently applied: a wrong repair is confidently wrong and is
+    // what gets sent, so the speaker gets to see it in the transcript.
+    setRepaired(repairs.length ? describeRepairs(repairs) : "");
+    setDraft(text);
+    void send(text);
   };
 
   /** End the take and send nothing — for leaving the surface mid-sentence. */
@@ -335,6 +373,28 @@ export default function Assistant(props: AssistantProps) {
     >
       <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
         <strong style={{ flex: 1 }}>Assistant</strong>
+        {/*
+          Offered only when there is a choice to make (FR-T9). One configured
+          profile is not a decision, and a select with one option is a control
+          that asks a question with no answer.
+        */}
+        <Show when={profiles().length > 1}>
+          <select
+            data-testid="assistant-profile"
+            aria-label="Provider profile"
+            value={profile()}
+            onChange={(e) => setProfile(e.currentTarget.value)}
+          >
+            <option value="">
+              {`default (${profiles().find((p) => p.default)?.model ?? ""})`}
+            </option>
+            <For each={profiles()}>
+              {(entry) => (
+                <option value={entry.name}>{`${entry.name} · ${entry.model}`}</option>
+              )}
+            </For>
+          </select>
+        </Show>
         <button
           type="button"
           title={ttsOn() ? "Disable spoken replies" : "Speak replies aloud"}
@@ -473,6 +533,22 @@ export default function Assistant(props: AssistantProps) {
           <div style={{ opacity: 0.6, "font-size": "13px" }}>thinking…</div>
         </Show>
       </div>
+
+      {/*
+        What the repair pass changed on the way from the microphone to the
+        composer (FR-T13). Shown because a repair that nobody can see is
+        indistinguishable from a recognizer that heard correctly — and when it
+        is wrong, this line is the only thing that says why the answer is
+        about the wrong item.
+      */}
+      <Show when={repaired()}>
+        <div
+          data-testid="voice-repair"
+          style={{ opacity: 0.7, "font-size": "12px" }}
+        >
+          heard differently: {repaired()}
+        </div>
+      </Show>
 
       <form
         style={{ display: "flex", gap: "8px" }}

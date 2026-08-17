@@ -60,6 +60,10 @@
 # default policy: exposure
 # engine_url = null
 
+# The project slug a session with no work item and no project resolves to (FR-T11). It exists for the spoken request that has no subject — 'research the best risotto in Wollongong' — which still needs a registered working tree to open in. Unset means such a request is refused by name rather than opened somewhere guessed, which is FR-E3's whole point: the working directory comes from the registry, and a scratch project is a registered project like any other.
+# default policy: behaviour
+# session_scratch_project = null
+
 # The session engine's state directory, when this process can read it — the merged deployment runs both halves in one container, so it usually can. `backup` copies it and `restore` puts it back, because half a restore is the failure NFR-I6 exists to prevent: the work items come back and the terminals' history, push subscriptions and agent tasks do not. Its absence is what makes a backup a core-only backup, so there is no default — the same reason `github_token_file` has none. Unset, the manifest says 'not configured' rather than quietly covering less than it appears to.
 # default policy: behaviour
 # engine_state_dir = null

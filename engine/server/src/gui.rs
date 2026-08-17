@@ -182,6 +182,19 @@ pub struct PublicConfig {
     /// Model id the assistant uses, for display. None when disabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant_model: Option<String>,
+    /// The configured provider profiles a request may name (FR-T9): a name,
+    /// the model that name runs by default, and which one is the deployment's
+    /// default. **Never a key or a base URL** — a client offering the choice
+    /// needs neither, and a base URL is an exposure value (NFR-D2).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub assistant_profiles: Vec<AssistantProfileSummary>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct AssistantProfileSummary {
+    pub name: String,
+    pub model: String,
+    pub default: bool,
 }
 
 pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicConfig> {
@@ -193,6 +206,20 @@ pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicCon
         vogt: crate::vogt_core::public_status(&state),
         assistant_enabled: state.assistant.is_some(),
         assistant_model: state.assistant.as_ref().map(|a| a.model().to_string()),
+        assistant_profiles: state
+            .assistant
+            .as_ref()
+            .map(|a| {
+                a.profile_summaries()
+                    .into_iter()
+                    .map(|(name, model, default)| AssistantProfileSummary {
+                        name,
+                        model,
+                        default,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 

@@ -350,7 +350,8 @@ section that documents it.
   ready container can still be reporting one of them false.
 - `GET /api/config` -> `PublicConfig`
   `{gui_stream_url, version, features, session_templates, assistant_enabled,
-  assistant_model?}` — what the browser needs at boot, before the user has
+  assistant_model?, assistant_profiles?}` — what the browser needs at boot,
+  before the user has
   typed a token into Settings. It is outside the gate because it returns no
   secrets: `assistant_enabled` is presence only, never the key.
   `features` is read per request from `/etc/mydevenv2/features.json` and is
@@ -397,6 +398,40 @@ field — the brief the session's agent should start from:
   "name": "VOGT-42 fix the flaky forge test",
   "cwd": "Active/apps/vogt",
   "prompt": "Fix the flaky forge test.\n\nWhy: it blocks the release."
+}
+```
+
+`SessionSpec` also carries optional `model` and `effort` (FR-T11, r16) — which
+model the agent CLI in `command` should run, and how hard it should think. The
+engine turns them into that CLI's own flags (`agent_cli.rs`):
+
+| Command | `model` | `effort` |
+|---|---|---|
+| `claude` | `--model <id>` | `--effort <level>` |
+| `codex` | `-m <id>` | `-c model_reasoning_effort=<level>` |
+| `opencode` | `--model <provider/id>` | *refused — it has no effort control* |
+
+Three rules, each written against a specific failure:
+
+- **A command with no mapping is refused, never started plain.** A session
+  that quietly ignored `model` would spawn, run, answer, and be the wrong
+  model — a failure with no symptom. The refusal names the binary.
+- **The values are validated before they become argv.** They arrive from an
+  LLM tool call and are handed to a process spawn, so a model id is letters,
+  digits and `. _ - / :` only. A leading dash is refused by name: a "model id"
+  that is really `--dangerously-skip-permissions` turns a session into a
+  different session, and the card the user approved said *model*.
+- **The flags go on the end**, because every supported form ends with the
+  agent binary — `mydevenv2-agent-auth run -- claude` included, which is what
+  every protected template looks like.
+
+```json
+{
+  "name": "scratch/scratch",
+  "cwd": "Active/scratch",
+  "command": ["mydevenv2-agent-auth", "run", "--", "codex"],
+  "model": "gpt-5.6",
+  "effort": "medium"
 }
 ```
 
@@ -999,6 +1034,57 @@ the terminal half works exactly as before (FR-T6, FR-E9).
 | `assistant_max_tool_calls` | `MYDEVENV2_ASSISTANT_MAX_TOOL_CALLS` | `8` |
 | `assistant_reasoning_effort` | `MYDEVENV2_ASSISTANT_REASONING_EFFORT` | unset |
 | `assistant_allow_claude_proxy` | `MYDEVENV2_ASSISTANT_ALLOW_CLAUDE_PROXY` | `false` |
+| `assistant_profiles` | `MYDEVENV2_ASSISTANT_PROFILES_JSON` | `[]` |
+| `assistant_default_profile` | `MYDEVENV2_ASSISTANT_DEFAULT_PROFILE` | the implicit `default` |
+
+#### Provider profiles (FR-T9, r16)
+
+A **profile** is one named OpenAI-compatible route:
+`{name, base_url, api_key, model, reasoning_effort?, allow_claude_proxy?}`.
+The flat `assistant_*` keys above become the implicit profile named
+`default` whenever `assistant_api_key` is set, so a deployment that never
+heard of profiles keeps exactly the behaviour it had and gains a name a
+request can say. `assistant_profiles` is *additional*.
+
+```toml
+assistant_default_profile = "clawbay"
+
+[[assistant_profiles]]
+name = "clawbay"
+base_url = "https://api.theclawbay.com/v1"
+api_key = "sk-…"
+model = "gpt-5.4-mini"
+
+[[assistant_profiles]]
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+api_key = "sk-or-…"
+model = "qwen/qwen3-coder"
+reasoning_effort = "medium"
+```
+
+`POST /api/assistant/message` takes an optional `profile` naming one. An
+unknown name is refused and the configured ones are listed; a profile whose
+model this transport cannot serve is refused with **the profile named**
+(FR-T7, evaluated per profile — the hang is one proxy's property, not the
+deployment's). Approving a card resumes on the profile that proposed it: an
+approval that continued on another model would hand one conversation's tool
+results to a model that never saw it.
+
+The route-level guard now fires only when *no* configured profile can answer.
+With one profile that is the original rule exactly; with two it is the honest
+generalisation — a broken second profile must not stop the history of a
+conversation held on a working one from being read.
+
+`/api/config` advertises `assistant_profiles: [{name, model, default}]` and
+**never a key or a base URL**: a browser offering the choice needs neither,
+and a base URL is an exposure value (NFR-D2).
+
+**A Claude subscription is not a profile.** It has no HTTP API to point a
+`base_url` at, so the way to spend one is the `Claude Code (protected)`
+session template — a session, not the assistant loop. That is why r16 routes
+around the r12 deferral of a native Anthropic backend rather than reversing
+it.
 
 The Vogt half needs no assistant-specific key. It uses `vogt_core_url` — the
 same core the front door proxies — and the `vogt_core_token_file` pairing on
@@ -1052,8 +1138,17 @@ and would then drift silently as the registry changed.
   from ever being confused, by the model or by the dispatcher.
 - **Curation.** The slice is named in `vogt_tools.rs` and intersected with
   what the core actually serves. Reads: `backlog`, `bugs`, `why`,
-  `project.brief`, `project.list`, `work.get`, `work.list`, `compliance`.
-  Writes: `work.create`, `work.transition`, `work.comment`, `session.start`.
+  `project.brief`, `project.list`, `work.get`, `work.list`, `compliance`,
+  `inbox.list`. Writes: `work.create`, `work.transition`, `work.comment`,
+  `session.start`.
+  **`inbox.list` and not `notifications`** (FR-T10, r16): "are there any
+  notifications?" is a question about *attention*, and the Inbox projection is
+  the one that covers all four sources and carries its own coverage. The
+  `notifications` operation is GitHub only; offering both would leave the
+  model free to answer the general question from a quarter of the sources and
+  report the rest as nothing — which a spoken "no notifications" hides
+  perfectly. The system prompt states that an uncollected source is not an
+  empty one and must be named.
   A curated name the core does not serve — a rename, or a scope this caller
   lacks — is logged at info and skipped. It is never fabricated: a fabricated
   schema is a tool call that fails at the far end for a reason nobody can read.

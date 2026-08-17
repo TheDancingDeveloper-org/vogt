@@ -37,6 +37,16 @@ pub struct SessionSpec {
     /// a file the engine owns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// Which model the agent CLI in `command` should run, and how hard it
+    /// should think (FR-T11). The engine turns these into that CLI's own
+    /// flags or environment; a command it has no mapping for is refused by
+    /// name rather than started without them, because a session that
+    /// silently ran the default model is the failure this field exists
+    /// against — it works, it answers, and it is not what was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

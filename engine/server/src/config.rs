@@ -8,6 +8,37 @@ use crate::error::{ApiError, Result};
 const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_MUTATING_REQUEST_LIMIT_PER_MINUTE: u32 = 600;
 
+/// One named OpenAI-compatible backend the assistant may run a turn against
+/// (FR-T9).
+///
+/// A profile is a *route*, not a vendor integration: `base_url`, a key, and
+/// the model and effort to use when a request does not say. That is why
+/// adding OpenRouter beside The Claw Bay is configuration rather than code,
+/// and why a Claude subscription is not expressible here — it has no HTTP
+/// API to point a `base_url` at, and is spent through the `claude` CLI
+/// session template instead (r16).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssistantProfile {
+    /// How a request asks for this profile. Unique across the deployment.
+    pub name: String,
+    pub base_url: String,
+    /// Server-side only. Never advertised — `/api/config` carries names and
+    /// models so a client can offer a choice, and nothing that could spend it.
+    pub api_key: String,
+    pub model: String,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// Per-profile, because the hang FR-T7 refuses is a property of one
+    /// proxy's routes and not of the deployment: a second profile whose proxy
+    /// serves `claude-*` correctly may say so without speaking for the first.
+    #[serde(default)]
+    pub allow_claude_proxy: bool,
+}
+
+/// The name the flat `assistant_*` keys are exposed under, so a deployment
+/// that never heard of profiles still has one and can be named by a request.
+pub const IMPLICIT_PROFILE_NAME: &str = "default";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionTemplate {
     pub name: String,
@@ -199,6 +230,13 @@ pub struct Config {
     /// deployment whose proxy serves them correctly is entitled to say so,
     /// and to own the result.
     pub assistant_allow_claude_proxy: bool,
+    /// Named backends beside the one the flat keys above describe (FR-T9).
+    /// The flat keys become the implicit `default` profile when a key is set,
+    /// so this list is *additional* and may be empty.
+    pub assistant_profiles: Vec<AssistantProfile>,
+    /// Which profile a request that names none runs against. `None` means the
+    /// implicit `default` when it exists, else the first configured profile.
+    pub assistant_default_profile: Option<String>,
     /// Base URL of the ContextKeeper sidecar. None disables every continuity
     /// surface: terminals still work and simply read as unprotected.
     pub contextkeeper_url: Option<String>,
@@ -272,6 +310,8 @@ struct FileConfig {
     assistant_allow_claude_proxy: Option<bool>,
     assistant_max_tool_calls: Option<u32>,
     assistant_reasoning_effort: Option<String>,
+    assistant_profiles: Option<Vec<AssistantProfile>>,
+    assistant_default_profile: Option<String>,
     contextkeeper_url: Option<String>,
     contextkeeper_token: Option<String>,
     public_url: Option<String>,
@@ -321,6 +361,30 @@ pub fn load(
     }
     validate_extra_tokens(&token, &extra_tokens)?;
     resolve_paired_core_tokens(&mut extra_tokens)?;
+
+    // Profiles from the file, then from the environment, then validated as one
+    // list — a container that adds OpenRouter with a variable and a file that
+    // already names it must not silently end up with two `openrouter`s, one of
+    // which is never reachable.
+    let mut assistant_profiles = from_file.assistant_profiles.unwrap_or_default();
+    if let Some(env_profiles) = parse_assistant_profiles_env("MYDEVENV2_ASSISTANT_PROFILES_JSON")? {
+        assistant_profiles.extend(env_profiles);
+    }
+    let assistant_default_profile = from_file
+        .assistant_default_profile
+        .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_DEFAULT_PROFILE").ok())
+        .filter(|s| !s.trim().is_empty());
+    let assistant_api_key = from_file
+        .assistant_api_key
+        .clone()
+        .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_API_KEY").ok())
+        .filter(|s| !s.trim().is_empty());
+    let assistant_key_present = assistant_api_key.is_some();
+    validate_assistant_profiles(
+        assistant_key_present,
+        &assistant_profiles,
+        assistant_default_profile.as_deref(),
+    )?;
 
     let workspace_root_raw = from_file.workspace_root.map(std::path::PathBuf::from);
     let workspace_root = workspace_root_raw
@@ -419,10 +483,7 @@ pub fn load(
         session_templates: from_file
             .session_templates
             .unwrap_or_else(SessionTemplate::default_templates),
-        assistant_api_key: from_file
-            .assistant_api_key
-            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_API_KEY").ok())
-            .filter(|s| !s.trim().is_empty()),
+        assistant_api_key,
         assistant_base_url: from_file
             .assistant_base_url
             .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_BASE_URL").ok())
@@ -448,6 +509,8 @@ pub fn load(
                     .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
             })
             .unwrap_or(false),
+        assistant_profiles,
+        assistant_default_profile,
         // Unprefixed on purpose: these are ContextKeeper's own variable names,
         // and the same two values configure its CLI and hooks inside the
         // container. One name for one credential.
@@ -603,6 +666,83 @@ fn parse_extra_tokens_env(name: &str) -> Result<Option<Vec<ScopedTokenConfig>>> 
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
     }
+}
+
+fn parse_assistant_profiles_env(name: &str) -> Result<Option<Vec<AssistantProfile>>> {
+    match std::env::var(name) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = serde_json::from_str::<Vec<AssistantProfile>>(trimmed)
+                .map_err(|e| ApiError::Config(format!("parsing {name}: {e}")))?;
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
+    }
+}
+
+/// Refuse at startup rather than at the first request (FR-T9).
+///
+/// Every fault here is one whose runtime symptom is a request that names a
+/// profile and gets somebody else's — a duplicate name resolving to whichever
+/// entry the lookup reached first, or a default that points at nothing and
+/// silently falls back. Both are the kind of wrong that answers.
+fn validate_assistant_profiles(
+    implicit_profile_exists: bool,
+    profiles: &[AssistantProfile],
+    default_profile: Option<&str>,
+) -> Result<()> {
+    let mut seen: Vec<&str> = Vec::new();
+    if implicit_profile_exists {
+        seen.push(IMPLICIT_PROFILE_NAME);
+    }
+    for profile in profiles {
+        let name = profile.name.trim();
+        if name.is_empty() {
+            return Err(ApiError::Config(
+                "assistant profile name must not be empty".into(),
+            ));
+        }
+        if seen.contains(&name) {
+            return Err(ApiError::Config(format!(
+                "duplicate assistant profile {name:?}: a request naming it would \
+                 reach whichever one was read first"
+            )));
+        }
+        if profile.base_url.trim().is_empty() {
+            return Err(ApiError::Config(format!(
+                "assistant profile {name:?} has no base_url"
+            )));
+        }
+        if profile.api_key.trim().is_empty() {
+            return Err(ApiError::Config(format!(
+                "assistant profile {name:?} has no api_key"
+            )));
+        }
+        if profile.model.trim().is_empty() {
+            return Err(ApiError::Config(format!(
+                "assistant profile {name:?} has no model"
+            )));
+        }
+        seen.push(name);
+    }
+    if let Some(default) = default_profile.map(str::trim).filter(|s| !s.is_empty()) {
+        if !seen.contains(&default) {
+            return Err(ApiError::Config(format!(
+                "assistant_default_profile {default:?} is not configured; known \
+                 profiles: {}",
+                if seen.is_empty() {
+                    "none".to_string()
+                } else {
+                    seen.join(", ")
+                }
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_extra_tokens(primary_token: &str, extra_tokens: &[ScopedTokenConfig]) -> Result<()> {
@@ -830,5 +970,90 @@ mod tests {
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "readonly");
+    }
+
+    // -- Assistant provider profiles (FR-T9) --------------------------------
+
+    fn profile(name: &str, model: &str) -> AssistantProfile {
+        AssistantProfile {
+            name: name.into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: "sk-or".into(),
+            model: model.into(),
+            reasoning_effort: None,
+            allow_claude_proxy: false,
+        }
+    }
+
+    #[test]
+    fn two_profiles_with_one_name_are_refused_at_startup() {
+        // The runtime symptom of a duplicate is a request that names a
+        // profile and reaches whichever entry the lookup happened to find
+        // first — an answer, on the wrong key, that nothing reports.
+        let err = validate_assistant_profiles(
+            false,
+            &[profile("openrouter", "a"), profile("openrouter", "b")],
+            None,
+        )
+        .expect_err("a duplicate name must not boot");
+        let message = format!("{err:?}");
+        assert!(message.contains("openrouter"), "{message}");
+    }
+
+    #[test]
+    fn a_named_profile_may_not_collide_with_the_implicit_one() {
+        assert!(validate_assistant_profiles(true, &[profile("default", "a")], None).is_err());
+        assert!(validate_assistant_profiles(false, &[profile("default", "a")], None).is_ok());
+    }
+
+    #[test]
+    fn a_default_that_names_nothing_is_refused_and_lists_what_exists() {
+        // Otherwise it falls back silently and every request runs somewhere
+        // other than where the operator wrote down.
+        let err =
+            validate_assistant_profiles(true, &[profile("openrouter", "a")], Some("openrouterr"))
+                .expect_err("an unknown default must not boot");
+        let message = format!("{err:?}");
+        assert!(message.contains("openrouterr"), "{message}");
+        assert!(message.contains("default"), "{message}");
+        assert!(message.contains("openrouter"), "{message}");
+    }
+
+    #[test]
+    fn the_implicit_profile_can_be_the_named_default() {
+        assert!(
+            validate_assistant_profiles(true, &[profile("openrouter", "a")], Some("default"))
+                .is_ok()
+        );
+        assert!(
+            validate_assistant_profiles(false, &[profile("openrouter", "a")], Some("default"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_profile_missing_a_route_or_a_key_is_refused_by_name() {
+        // Each of these is a profile that would exist, be offerable in
+        // `/api/config`, and fail only when somebody spoke to it.
+        type Break = fn(&mut AssistantProfile);
+        let cases: [(&str, Break); 3] = [
+            ("base_url", |p| p.base_url = "  ".into()),
+            ("api_key", |p| p.api_key = String::new()),
+            ("model", |p| p.model = String::new()),
+        ];
+        for (field, mutate) in cases {
+            let mut broken = profile("openrouter", "a");
+            mutate(&mut broken);
+            let err = validate_assistant_profiles(false, &[broken], None)
+                .expect_err("a profile with no {field} must not boot");
+            let message = format!("{err:?}");
+            assert!(message.contains("openrouter"), "{field}: {message}");
+            assert!(message.contains(field), "{field}: {message}");
+        }
+    }
+
+    #[test]
+    fn an_empty_profile_name_is_refused() {
+        assert!(validate_assistant_profiles(false, &[profile("  ", "a")], None).is_err());
     }
 }

@@ -35,8 +35,11 @@ fn runtime(state: &AppState) -> Result<Arc<AssistantRuntime>> {
     // overrides it. Refused rather than 404: the assistant *is* provisioned,
     // and reporting it absent would send an operator looking for a missing
     // API key.
+    // With profiles (FR-T9) this fires only when *no* configured route can
+    // answer; a request naming one that cannot is refused in `message`, where
+    // the profile is known and can be named.
     if let Some(reason) = runtime.refusal() {
-        return Err(ApiError::Config(reason.to_string()));
+        return Err(ApiError::Config(reason));
     }
     Ok(runtime)
 }
@@ -44,6 +47,10 @@ fn runtime(state: &AppState) -> Result<Arc<AssistantRuntime>> {
 #[derive(Debug, Deserialize)]
 pub struct MessageReq {
     pub text: String,
+    /// Which configured provider profile to run this turn against (FR-T9).
+    /// Absent means the deployment's default.
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 pub async fn message(
@@ -53,7 +60,9 @@ pub async fn message(
 ) -> Result<Json<AssistantReply>> {
     let rt = runtime(&state)?;
     let caller = Caller::from_identity(identity.map(|Extension(id)| id));
-    Ok(Json(rt.handle_message(caller, req.text).await?))
+    Ok(Json(
+        rt.handle_message(caller, req.text, req.profile).await?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]

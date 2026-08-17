@@ -25,6 +25,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `engine_url` | `VOGT_ENGINE_URL` | string, optional | *(no default — must be set)* | exposure |
+| `session_scratch_project` | `VOGT_SESSION_SCRATCH_PROJECT` | string, optional | *(no default — must be set)* | behaviour |
 | `engine_state_dir` | `VOGT_ENGINE_STATE_DIR` | path, optional | *(no default — must be set)* | behaviour |
 | `engine_token_file` | `VOGT_ENGINE_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
@@ -88,6 +89,10 @@ Path to a file containing a GitHub token. Its absence is what switches the optio
 ### `engine_url`
 
 Where the session engine listens, e.g. `http://127.0.0.1:8910`. The engine is the other half of the merged product: it owns the PTYs a work item's session runs in (FR-E1). Unset means the `session.*` operations report that no engine is configured — absence of the engine costs sessions and nothing else, which is FR-E9 read from this side. An exposure value, so it is never guessed: co-located today, its address is still the operator's to state.
+
+### `session_scratch_project`
+
+The project slug a session with no work item and no project resolves to (FR-T11). It exists for the spoken request that has no subject — 'research the best risotto in Wollongong' — which still needs a registered working tree to open in. Unset means such a request is refused by name rather than opened somewhere guessed, which is FR-E3's whole point: the working directory comes from the registry, and a scratch project is a registered project like any other.
 
 ### `engine_state_dir`
 

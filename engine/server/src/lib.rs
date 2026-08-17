@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod agent_cli;
 pub mod agent_tasks;
 pub mod api;
 pub mod app;

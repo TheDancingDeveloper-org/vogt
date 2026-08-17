@@ -21,6 +21,8 @@ from vogt.application.context import AppContext
 from vogt.application.models import (
     CreateWorkParams,
     GetWorkParams,
+    ListAuditParams,
+    ListEventsParams,
     ListSessionsParams,
     RegisterProjectParams,
     RelateWorkParams,
@@ -30,6 +32,8 @@ from vogt.application.models import (
 from vogt.application.services import (
     create_work,
     get_work,
+    list_audit,
+    list_events,
     list_sessions,
     register_project,
     relate_work,
@@ -510,3 +514,162 @@ def test_the_work_item_view_shows_what_is_running_for_it(
 
     stop_session(wired, StopSessionParams(id=started.session.id, reason=WHY))
     assert get_work(wired, GetWorkParams(ref="WI-1")).sessions == []
+
+
+# -- which model, and where a subjectless request goes (FR-T11, r16) -------
+
+
+def test_a_model_and_an_effort_reach_the_engine(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Vogt says which model; how it reaches a CLI is the engine's business.
+
+    Asserted on the wire rather than on the returned summary, because a
+    session that recorded `gpt-5.6` in its own row and started the default
+    model would satisfy every reader of `session_list` and be wrong about
+    the only thing the caller asked for.
+    """
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", model="gpt-5.6", effort="medium", reason=WHY
+        ),
+    )
+    assert engine.last_spec["model"] == "gpt-5.6"
+    assert engine.last_spec["effort"] == "medium"
+
+
+def test_naming_no_model_sends_no_model(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The ordinary request is unchanged, field for field.
+
+    The engine refuses a command it cannot pass a model to, so a client that
+    started sending an empty field and had it arrive as a present one would
+    break every plain shell session.
+    """
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert "model" not in engine.last_spec
+    assert "effort" not in engine.last_spec
+
+
+def test_the_model_asked_for_is_recorded_and_read_back(
+    wired: AppContext,
+) -> None:
+    started = start_session(
+        wired,
+        StartSessionParams(
+            project="vogt", model="claude-opus-4-5", effort="high", reason=WHY
+        ),
+    )
+    assert started.session.model == "claude-opus-4-5"
+    assert started.session.effort == "high"
+
+    listed = list_sessions(wired, ListSessionsParams()).sessions
+    assert [(row.model, row.effort) for row in listed] == [("claude-opus-4-5", "high")]
+
+
+def test_a_subjectless_session_is_refused_when_no_scratch_project_exists(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """FR-E3, held.
+
+    The tempting alternative is a default working directory, and it is the
+    one failure FR-E3 is written against: it succeeds, somewhere plausible.
+    The refusal names the setting so a reader can make it work rather than
+    guess why it did not.
+    """
+    before = len(engine.sent)
+    with pytest.raises(InvalidRequest) as raised:
+        start_session(wired, StartSessionParams(reason=WHY))
+    assert "session_scratch_project" in str(raised.value)
+    assert len(engine.sent) == before, "nothing should have been started"
+
+
+def _with_scratch(ctx: AppContext) -> AppContext:
+    register_project(
+        ctx,
+        RegisterProjectParams(
+            name="Scratch", root_path="/srv/estate/scratch", reason=WHY
+        ),
+    )
+    return dataclasses.replace(
+        ctx,
+        config=ctx.config.model_copy(update={"session_scratch_project": "scratch"}),
+    )
+
+
+def test_a_subjectless_session_opens_in_the_configured_scratch_project(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """U4: "research the best risotto in Wollongong" has no repository.
+
+    It still opens in a *registered* project's tree — the scratch project is
+    a project like any other, chosen by an operator — so the path comes from
+    the registry and nowhere else.
+    """
+    ctx = _with_scratch(wired)
+
+    started = start_session(ctx, StartSessionParams(model="gpt-5.6", reason=WHY))
+
+    assert started.session.project == "scratch"
+    assert started.session.work_item is None
+    assert engine.last_spec["cwd"] == "/srv/estate/scratch"
+    # The name says it fell back rather than being chosen, so a list of
+    # sessions does not read as though somebody picked this project.
+    assert engine.last_spec["name"].startswith("scratch/")
+
+
+def test_a_scratch_fallback_says_so_on_the_record(
+    wired: AppContext,
+) -> None:
+    """Otherwise the record names a project nobody asked for.
+
+    A session that fell back to scratch and one deliberately opened in it
+    are different decisions, and months later the trail is the only place
+    that difference survives. The write is audited either way — this is
+    about the summary being able to tell them apart.
+    """
+    ctx = _with_scratch(wired)
+    started = start_session(ctx, StartSessionParams(model="gpt-5.6", reason=WHY))
+
+    assert list_audit(ctx, ListAuditParams(operation="session.start")).records, (
+        "the start is audited like every other write"
+    )
+
+    events = [
+        event
+        for event in list_events(ctx, ListEventsParams()).events
+        if event.kind == "session.started"
+    ]
+    assert events, "the start should raise an event"
+    summary = events[-1].summary
+    assert summary["scratch"] is True
+    assert summary["project"] == "scratch"
+    assert summary["model"] == "gpt-5.6"
+    assert summary["effort"] is None
+    assert started.session.project == "scratch"
+
+
+def test_a_session_somebody_chose_is_not_marked_scratch(
+    wired: AppContext,
+) -> None:
+    """The other half: `scratch` must mean "fell back", not "is that project"."""
+    ctx = _with_scratch(wired)
+    start_session(ctx, StartSessionParams(project="scratch", reason=WHY))
+
+    events = [
+        event
+        for event in list_events(ctx, ListEventsParams()).events
+        if event.kind == "session.started"
+    ]
+    assert events[-1].summary["scratch"] is False
+
+
+def test_naming_both_a_work_item_and_a_project_is_still_refused(
+    wired: AppContext,
+) -> None:
+    with pytest.raises(InvalidRequest):
+        start_session(
+            wired, StartSessionParams(work_item="WI-1", project="vogt", reason=WHY)
+        )

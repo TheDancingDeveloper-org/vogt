@@ -263,6 +263,8 @@ class EngineClient:
         cwd: str,
         env: dict[str, str] | None = None,
         prompt: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -285,6 +287,13 @@ class EngineClient:
             # The engine takes pairs, not an object, so that ordering is the
             # caller's and duplicate keys are visible rather than merged.
             spec["env"] = [[key, value] for key, value in env.items()]
+        # Sent only when asked for (FR-T11), so a session that named neither
+        # is byte-for-byte the request this client has always made and the
+        # engine's own defaults keep applying.
+        if model:
+            spec["model"] = model
+        if effort:
+            spec["effort"] = effort
         payload = self._call("/api/sessions", method="POST", payload=spec)
         return EngineSession.from_payload(payload if isinstance(payload, dict) else {})
 

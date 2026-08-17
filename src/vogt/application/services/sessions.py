@@ -78,6 +78,8 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         cwd=subject.cwd,
         env=_session_env(ctx, session_id, credential.secret),
         brief=subject.brief,
+        model=params.model,
+        effort=params.effort,
     )
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
@@ -111,6 +113,8 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             actor_id=holder.id,
             cwd=subject.cwd,
             template=params.template,
+            model=params.model,
+            effort=params.effort,
             reason=writes.validate_reason(params.reason),
             started_at=now,
             stopped_at=None,
@@ -128,6 +132,13 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 "work_item": subject.work_item_ref,
                 "project": subject.project_slug,
                 "cwd": subject.cwd,
+                # Named in the audit summary because a spoken request that
+                # resolved to the scratch project asked for neither, and a row
+                # saying only which project it opened in would read as though
+                # somebody chose it (FR-T11).
+                "scratch": subject.is_scratch,
+                "model": params.model,
+                "effort": params.effort,
             },
         )
 
@@ -249,12 +260,16 @@ class _Subject:
         cwd: str,
         work_item: WorkItem | None,
         brief: str,
+        is_scratch: bool = False,
     ) -> None:
         self.project_id = project_id
         self.project_slug = project_slug
         self.cwd = cwd
         self.work_item = work_item
         self.brief = brief
+        #: Resolved from `session_scratch_project` rather than named by the
+        #: caller (FR-T11). Carried so the name and the audit row can say so.
+        self.is_scratch = is_scratch
 
     @property
     def work_item_id(self) -> str | None:
@@ -266,13 +281,35 @@ class _Subject:
 
     @property
     def default_name(self) -> str:
+        # A scratch session says so in its own name. Otherwise a list of
+        # sessions shows several called `scratch` and nothing distinguishes
+        # the one that was asked for from the ones that fell back to it.
+        if self.is_scratch:
+            return f"scratch/{self.project_slug}"
         return self.work_item_ref or self.project_slug
 
 
 def _subject(ctx: AppContext, params: StartSessionParams, session_id: str) -> _Subject:
-    if (params.work_item is None) == (params.project is None):
-        msg = "give exactly one of --work-item or --project"
+    if params.work_item is not None and params.project is not None:
+        msg = "give at most one of --work-item or --project"
         raise InvalidRequest(msg)
+    if params.work_item is None and params.project is None:
+        # FR-T11. The refusal names the setting because the alternative — a
+        # default working directory — is the one failure FR-E3 is written
+        # against, and it fails by succeeding somewhere plausible.
+        scratch = ctx.config.session_scratch_project
+        if not scratch:
+            msg = (
+                "a session needs a work item or a project, and no scratch "
+                "project is configured for requests that name neither (set "
+                "session_scratch_project to a registered project slug)"
+            )
+            raise InvalidRequest(msg)
+        params = params.model_copy(update={"project": scratch})
+        with ctx.declared.read() as view:
+            subject = _resolve_subject(view, params, session_id, ctx)
+        subject.is_scratch = True
+        return subject
 
     with ctx.declared.read() as view:
         return _resolve_subject(view, params, session_id, ctx)
@@ -353,6 +390,8 @@ def _start_on_engine(
     cwd: str,
     env: dict[str, str],
     brief: str,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> EngineSession:
     return engine.create_session(
         prompt=brief,
@@ -363,6 +402,12 @@ def _start_on_engine(
         command=None if template is None else [template],
         cwd=cwd,
         env=env,
+        # Passed through for the same reason (FR-T11): *how* a model id
+        # reaches a CLI is `claude --model` or `codex -m`, which is knowledge
+        # about that pod's binaries. Vogt says which model; the engine knows
+        # how to ask for it, and refuses by name when it cannot.
+        model=model,
+        effort=effort,
     )
 
 
@@ -396,6 +441,8 @@ def _audited_payload(session: CodingSession) -> dict[str, object]:
         "actor_id": session.actor_id,
         "cwd": session.cwd,
         "template": session.template,
+        "model": session.model,
+        "effort": session.effort,
         "started_at": session.started_at.isoformat(),
         "stopped_at": None
         if session.stopped_at is None
@@ -432,6 +479,8 @@ def _summarize(
         actor=session.actor_id if actor is None else actor.identity_ref,
         cwd=session.cwd,
         template=session.template,
+        model=session.model,
+        effort=session.effort,
         reason=session.reason,
         started_at=session.started_at,
         stopped_at=session.stopped_at,

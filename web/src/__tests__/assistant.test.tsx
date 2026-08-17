@@ -301,3 +301,149 @@ describe("FR-T5 — replies are spoken, and approval is never one of them", () =
     expect(speech.cancels()).toBeGreaterThan(before);
   });
 });
+
+// -- The repair pass, wired (FR-T13, r16) ----------------------------------
+
+/** The JSON bodies posted to the assistant's message route, in order. */
+function assistantMessageBodies(): Record<string, unknown>[] {
+  const stub = globalThis.fetch as unknown as {
+    mock: { calls: [RequestInfo | URL, RequestInit?][] };
+  };
+  return stub.mock.calls
+    .filter(([input]) => String(input).includes("/api/assistant/message"))
+    .map(([, init]) =>
+      typeof init?.body === "string"
+        ? (JSON.parse(init.body) as Record<string, unknown>)
+        : {},
+    );
+}
+
+describe("what the recognizer heard, repaired before it is sent", () => {
+  beforeEach(() => {
+    for (const fn of Object.values(recognition)) fn.mockClear();
+  });
+
+  it("sends the repaired utterance, not the raw transcription", async () => {
+    // `voiceRepair.test.ts` proves the repair; this proves it is *reached*.
+    // Without the wiring the module is a well-tested file that nothing calls,
+    // and the utterance that arrives at the engine is the one with the
+    // spaces in the project name.
+    const { mic } = await mountAssistant();
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle();
+    // The default harness registers `alpha` and `beta` as projects, and the
+    // repair is against what `project.list` returned — not a list in the
+    // source, which is the difference between a validation pass and a guess.
+    listenerFor("partialResults")?.({
+      matches: ["can you work on issue twelve for alfa"],
+    });
+    await settle();
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    await settle();
+
+    const bodies = assistantMessageBodies();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]?.text).toBe("can you work on WI-12 for alpha");
+  });
+
+  it("shows what it changed", async () => {
+    // A repair nobody can see is indistinguishable from a recognizer that
+    // heard correctly — and when it is wrong, this line is the only thing
+    // that explains why the answer is about the wrong item.
+    const { mic, container } = await mountAssistant();
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle();
+    listenerFor("partialResults")?.({ matches: ["work on issue twelve"] });
+    await settle();
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    await settle();
+
+    const note = container.querySelector('[data-testid="voice-repair"]');
+    expect(note?.textContent).toContain("WI-12");
+  });
+
+  it("says nothing when there was nothing to repair", async () => {
+    const { mic, container } = await mountAssistant();
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle();
+    listenerFor("partialResults")?.({ matches: ["are there any notifications"] });
+    await settle();
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    await settle();
+
+    expect(assistantMessageBodies()[0]?.text).toBe("are there any notifications");
+    expect(container.querySelector('[data-testid="voice-repair"]')).toBeNull();
+  });
+});
+
+// -- Provider profiles (FR-T9, r16) ----------------------------------------
+
+describe("choosing which backend answers", () => {
+  beforeEach(() => {
+    for (const fn of Object.values(recognition)) fn.mockClear();
+  });
+
+  it("offers no choice when the deployment configured one profile", async () => {
+    // A select with one option is a control that asks a question with no
+    // answer.
+    const { container } = await mountAssistant({
+      "GET /api/config": {
+        body: {
+          assistant_enabled: true,
+          assistant_profiles: [
+            { name: "default", model: "gpt-5.4-mini", default: true },
+          ],
+        },
+      },
+    });
+    expect(container.querySelector('[data-testid="assistant-profile"]')).toBeNull();
+  });
+
+  it("sends the chosen profile with the message", async () => {
+    const { container } = await mountAssistant({
+      "GET /api/config": {
+        body: {
+          assistant_enabled: true,
+          assistant_profiles: [
+            { name: "clawbay", model: "gpt-5.4-mini", default: true },
+            { name: "openrouter", model: "qwen/qwen3-coder", default: false },
+          ],
+        },
+      },
+      "POST /api/assistant/message": {
+        body: { reply: "hi", pending_action: null, tool_trace: [] },
+      },
+    });
+    const select = container.querySelector(
+      '[data-testid="assistant-profile"]',
+    ) as HTMLSelectElement;
+    expect(select).not.toBeNull();
+
+    fireEvent.change(select, { target: { value: "openrouter" } });
+    await settle();
+    await say(container, "hello");
+
+    expect(assistantMessageBodies()[0]?.profile).toBe("openrouter");
+  });
+
+  it("names no profile when the default is left alone", async () => {
+    // The request a client that never chose has always sent. A field that
+    // appeared as `null` would be a request naming a profile called nothing.
+    const { container } = await mountAssistant({
+      "GET /api/config": {
+        body: {
+          assistant_enabled: true,
+          assistant_profiles: [
+            { name: "clawbay", model: "gpt-5.4-mini", default: true },
+            { name: "openrouter", model: "qwen/qwen3-coder", default: false },
+          ],
+        },
+      },
+      "POST /api/assistant/message": {
+        body: { reply: "hi", pending_action: null, tool_trace: [] },
+      },
+    });
+    await say(container, "hello");
+    expect(assistantMessageBodies()[0]).not.toHaveProperty("profile");
+  });
+});

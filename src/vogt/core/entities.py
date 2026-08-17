@@ -200,6 +200,11 @@ class CodingSession(Entity):
     actor_id: str
     cwd: str
     template: str | None = None
+    #: What was *asked for* (FR-T11), not what the agent is using now. A
+    #: session whose operator typed `/model` at the prompt has moved on and
+    #: this field will not know — the same line FR-E2 draws around activity.
+    model: str | None = None
+    effort: str | None = None
     reason: str
     started_at: datetime
     stopped_at: datetime | None = None

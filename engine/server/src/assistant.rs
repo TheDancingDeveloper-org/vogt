@@ -69,6 +69,13 @@ output before answering. Use the vogt_* tools for anything about work, \
 projects, priorities or bugs rather than guessing: \"the top bug\" and \"what \
 should I work on\" are questions Vogt answers, not questions you estimate. \
 Work items are referred to like WI-7 and projects by slug.\n\
+\"Are there any notifications?\", \"anything needing attention?\" and \
+\"what's in my inbox?\" are the Inbox: use vogt_inbox_list. Its answer carries \
+a coverage block naming each source — GitHub, drift, CI, agent attention — \
+and whether it was collected. A source that was not collected is not empty, \
+and you must say so rather than counting it as nothing: say how many entries \
+there are, which sources they came from, and name any source that has not \
+been collected. Then give the first few entries, newest first.\n\
 Every write waits for the user. When you ask to type into a session \
 (send_input) or to change something in Vogt (the mutating vogt_* tools), the \
 user sees the exact payload on their screen and approves it there; say \
@@ -185,14 +192,57 @@ struct Conversation {
     messages: Vec<Value>,
     transcript: Vec<TranscriptEntry>,
     pending: Option<PendingAction>,
+    /// The profile the current turn is running on (FR-T9). Held so that
+    /// approving a card resumes the loop on the route that proposed it: an
+    /// approval that continued on a different model would hand the tool
+    /// results of one conversation to another.
+    profile: Option<String>,
+}
+
+/// One resolved backend route the loop may run a turn against (FR-T9).
+///
+/// The runtime holds several and picks one per turn, which is why the model,
+/// the effort and the FR-T7 refusal live here rather than on the runtime: they
+/// are facts about *a route*, and a deployment with two routes has two
+/// answers to each of them.
+pub struct Profile {
+    pub name: String,
+    base_url: String,
+    api_key: String,
+    pub model: String,
+    reasoning_effort: Option<String>,
+    /// Why this profile cannot serve its own model, if it cannot (FR-T7).
+    /// Computed at construction: it is a fact about the configuration, so
+    /// re-deriving it per request would only invite it to drift.
+    refusal: Option<String>,
+}
+
+impl Profile {
+    fn from_config(profile: &crate::config::AssistantProfile) -> Self {
+        Self {
+            name: profile.name.trim().to_string(),
+            base_url: profile.base_url.clone(),
+            api_key: profile.api_key.clone(),
+            model: profile.model.clone(),
+            reasoning_effort: profile.reasoning_effort.clone(),
+            refusal: openai_route_refusal(&profile.model, profile.allow_claude_proxy),
+        }
+    }
+
+    /// The refusal, with the profile named — because with more than one route
+    /// configured, "the assistant is configured with model X" no longer says
+    /// which of them a reader has to go and fix.
+    fn refusal(&self) -> Option<String> {
+        self.refusal
+            .as_ref()
+            .map(|reason| format!("assistant profile `{}`: {reason}", self.name))
+    }
 }
 
 /// Chat backend abstraction so tests can script responses without HTTP.
 pub enum ChatBackend {
     Http {
         client: reqwest::Client,
-        base_url: String,
-        api_key: String,
     },
     /// Scripted replies, plus every request body the loop built — so a test
     /// can assert on what the model was actually offered, not only on what it
@@ -205,13 +255,10 @@ pub enum ChatBackend {
 }
 
 impl ChatBackend {
-    async fn complete(&self, body: Value) -> Result<Value> {
+    async fn complete(&self, profile: &Profile, body: Value) -> Result<Value> {
         match self {
-            ChatBackend::Http {
-                client,
-                base_url,
-                api_key,
-            } => {
+            ChatBackend::Http { client } => {
+                let (base_url, api_key) = (&profile.base_url, &profile.api_key);
                 let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
                 let resp = client
                     .post(&url)
@@ -255,13 +302,12 @@ pub struct AssistantRuntime {
     /// (FR-T6): the Vogt tools are simply absent from every turn.
     vogt: Option<VogtTools>,
     backend: ChatBackend,
-    model: String,
-    reasoning_effort: Option<String>,
+    /// Every configured route, in the order a client should offer them. Never
+    /// empty: a runtime exists only when at least one profile does.
+    profiles: Vec<Profile>,
+    /// Index into `profiles` for a request that names none.
+    default_profile: usize,
     max_tool_calls: u32,
-    /// Set when this backend cannot serve this model, and why (FR-T7).
-    /// Computed once at construction: it is a fact about the configuration,
-    /// so re-deriving it per request would only invite it to drift.
-    refusal: Option<String>,
     /// Serializes turns: one user message / action resolution at a time.
     conversation: tokio::sync::Mutex<Conversation>,
 }
@@ -334,7 +380,11 @@ impl AssistantRuntime {
         sessions: Arc<SessionRegistry>,
         push: Arc<PushManager>,
     ) -> Option<Arc<Self>> {
-        let api_key = cfg.assistant_api_key.clone()?;
+        let profiles = Self::profiles_from_config(cfg);
+        if profiles.is_empty() {
+            return None;
+        }
+        let default_profile = Self::default_profile_index(cfg, &profiles);
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
@@ -347,22 +397,105 @@ impl AssistantRuntime {
             sessions,
             push: Some(push),
             vogt,
-            backend: ChatBackend::Http {
-                client,
-                base_url: cfg.assistant_base_url.clone(),
-                api_key,
-            },
-            model: cfg.assistant_model.clone(),
-            reasoning_effort: cfg.assistant_reasoning_effort.clone(),
+            backend: ChatBackend::Http { client },
+            profiles,
+            default_profile,
             max_tool_calls: cfg.assistant_max_tool_calls,
-            refusal: openai_route_refusal(&cfg.assistant_model, cfg.assistant_allow_claude_proxy),
             conversation: tokio::sync::Mutex::new(Conversation::default()),
         }))
     }
 
+    /// The flat `assistant_*` keys first, as the implicit `default` profile,
+    /// then the named ones (FR-T9).
+    ///
+    /// The implicit one is what keeps profiles from being a migration: a
+    /// deployment that has only ever set `assistant_model` still has exactly
+    /// the behaviour it had, and now also a name a request can say.
+    fn profiles_from_config(cfg: &Config) -> Vec<Profile> {
+        let mut profiles = Vec::new();
+        if let Some(api_key) = cfg.assistant_api_key.clone() {
+            profiles.push(Profile {
+                name: crate::config::IMPLICIT_PROFILE_NAME.to_string(),
+                base_url: cfg.assistant_base_url.clone(),
+                api_key,
+                model: cfg.assistant_model.clone(),
+                reasoning_effort: cfg.assistant_reasoning_effort.clone(),
+                refusal: openai_route_refusal(
+                    &cfg.assistant_model,
+                    cfg.assistant_allow_claude_proxy,
+                ),
+            });
+        }
+        profiles.extend(cfg.assistant_profiles.iter().map(Profile::from_config));
+        profiles
+    }
+
+    /// `assistant_default_profile` if it names one, else the implicit
+    /// `default`, else the first configured profile. `config::load` has
+    /// already refused a name that matches nothing, so the fallback here is
+    /// for a runtime built without going through it (tests).
+    fn default_profile_index(cfg: &Config, profiles: &[Profile]) -> usize {
+        cfg.assistant_default_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .and_then(|name| profiles.iter().position(|p| p.name == name))
+            .or_else(|| {
+                profiles
+                    .iter()
+                    .position(|p| p.name == crate::config::IMPLICIT_PROFILE_NAME)
+            })
+            .unwrap_or(0)
+    }
+
     /// Why every route here refuses, if it does (FR-T7).
-    pub fn refusal(&self) -> Option<&str> {
-        self.refusal.as_deref()
+    ///
+    /// Only when *no* configured route can answer. With one profile that is
+    /// exactly the original rule; with two it is the honest generalisation —
+    /// a broken default is a reason to refuse that route, not a reason the
+    /// history of a conversation held on a working one cannot be read.
+    pub fn refusal(&self) -> Option<String> {
+        if self.profiles.iter().all(|p| p.refusal.is_some()) {
+            return self.profiles[self.default_profile].refusal();
+        }
+        None
+    }
+
+    /// Resolve a requested profile name to a route, refusing by name when it
+    /// is unknown or cannot serve its own model (FR-T9).
+    fn profile_for(&self, requested: Option<&str>) -> Result<&Profile> {
+        let profile = match requested.map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) => self
+                .profiles
+                .iter()
+                .find(|p| p.name == name)
+                .ok_or_else(|| {
+                    ApiError::BadRequest(format!(
+                        "unknown assistant profile {name:?}; configured: {}",
+                        self.profile_names().join(", ")
+                    ))
+                })?,
+            None => &self.profiles[self.default_profile],
+        };
+        if let Some(reason) = profile.refusal() {
+            return Err(ApiError::Config(reason));
+        }
+        Ok(profile)
+    }
+
+    fn profile_names(&self) -> Vec<&str> {
+        self.profiles.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    /// What `/api/config` may say about the routes: a name and the model it
+    /// runs by default, for every profile, and which one is the default.
+    /// Never a key — a browser choosing a provider needs neither.
+    pub fn profile_summaries(&self) -> Vec<(String, String, bool)> {
+        self.profiles
+            .iter()
+            .enumerate()
+            .map(|(idx, p)| (p.name.clone(), p.model.clone(), idx == self.default_profile))
+            .collect()
     }
 
     /// Resolve the Vogt tools this caller gets this turn. A core that is
@@ -376,8 +509,11 @@ impl AssistantRuntime {
         Turn { caller, vogt_tools }
     }
 
+    /// The model the default route runs. What `/api/config` has always
+    /// advertised; `profile_summaries` is what a client offering a choice
+    /// reads instead.
     pub fn model(&self) -> &str {
-        &self.model
+        &self.profiles[self.default_profile].model
     }
 
     pub async fn history(&self) -> Vec<TranscriptEntry> {
@@ -442,7 +578,12 @@ impl AssistantRuntime {
     ///
     /// `caller` is the authenticated front-door identity behind this request.
     /// Every Vogt read this turn makes is made as them.
-    pub async fn handle_message(&self, caller: Caller, text: String) -> Result<AssistantReply> {
+    pub async fn handle_message(
+        &self,
+        caller: Caller,
+        text: String,
+        profile: Option<String>,
+    ) -> Result<AssistantReply> {
         let text = text.trim().to_string();
         if text.is_empty() {
             return Err(ApiError::BadRequest("message must not be empty".into()));
@@ -450,11 +591,15 @@ impl AssistantRuntime {
         if text.len() > 8 * 1024 {
             return Err(ApiError::BadRequest("message too long".into()));
         }
+        // Resolved before anything is recorded: a request naming a profile
+        // that cannot answer must not first append its text to the transcript.
+        let profile = self.profile_for(profile.as_deref())?;
         // Before the conversation lock: resolving the turn can mean an HTTP
         // round trip to the core, and holding the lock across it would make
         // one slow core serialize every client of this assistant.
         let turn = self.begin_turn(caller).await;
         let mut convo = self.conversation.lock().await;
+        convo.profile = Some(profile.name.clone());
         expire_pending(&mut convo);
         // A new message while an action is pending implicitly abandons it.
         if convo.pending.is_some() {
@@ -468,7 +613,7 @@ impl AssistantRuntime {
             text,
             tool_trace: vec![],
         });
-        self.run_loop(&mut convo, Vec::new(), &turn).await
+        self.run_loop(&mut convo, Vec::new(), &turn, profile).await
     }
 
     /// Approve or deny the pending action, then resume the loop.
@@ -487,6 +632,8 @@ impl AssistantRuntime {
     ) -> Result<AssistantReply> {
         let turn = self.begin_turn(caller).await;
         let mut convo = self.conversation.lock().await;
+        // The route that proposed the card finishes the turn that made it.
+        let profile = self.profile_for(convo.profile.as_deref())?;
         expire_pending(&mut convo);
         let pending = match convo.pending.take() {
             Some(p) if p.view.id() == id => p,
@@ -521,7 +668,7 @@ impl AssistantRuntime {
             "tool_call_id": pending.tool_call_id,
             "content": outcome,
         }));
-        self.run_loop(&mut convo, results, &turn).await
+        self.run_loop(&mut convo, results, &turn, profile).await
     }
 
     /// Send an approved write to the core as the approving user.
@@ -588,6 +735,7 @@ impl AssistantRuntime {
         convo: &mut Conversation,
         carried_results: Vec<Value>,
         turn: &Turn,
+        profile: &Profile,
     ) -> Result<AssistantReply> {
         convo.messages.extend(carried_results);
         let mut tool_trace: Vec<String> = Vec::new();
@@ -617,7 +765,10 @@ impl AssistantRuntime {
             }
             let response = self
                 .backend
-                .complete(self.request_body(convo, force_final, turn))
+                .complete(
+                    profile,
+                    self.request_body(convo, force_final, turn, profile),
+                )
                 .await;
             let response = match response {
                 Ok(r) => r,
@@ -800,7 +951,13 @@ impl AssistantRuntime {
         }
     }
 
-    fn request_body(&self, convo: &Conversation, force_final: bool, turn: &Turn) -> Value {
+    fn request_body(
+        &self,
+        convo: &Conversation,
+        force_final: bool,
+        turn: &Turn,
+        profile: &Profile,
+    ) -> Value {
         let mut messages = vec![json!({"role": "system", "content": SYSTEM_PROMPT})];
         messages.extend(convo.messages.iter().cloned());
         // The session tools are the engine's own and are literals; the Vogt
@@ -808,13 +965,13 @@ impl AssistantRuntime {
         let mut tools = tool_definitions();
         tools.extend(turn.tool_definitions());
         let mut body = json!({
-            "model": self.model,
+            "model": profile.model,
             "messages": messages,
             "max_tokens": 1024,
             "tools": tools,
             "tool_choice": if force_final { "none" } else { "auto" },
         });
-        if let Some(effort) = &self.reasoning_effort {
+        if let Some(effort) = &profile.reasoning_effort {
             body["reasoning_effort"] = json!(effort);
         }
         body
@@ -1261,7 +1418,12 @@ mod tests {
     use std::collections::VecDeque;
 
     fn test_registry() -> Arc<SessionRegistry> {
-        let cfg = Arc::new(Config {
+        let cfg = Arc::new(test_config_for_profiles());
+        Arc::new(SessionRegistry::new(cfg, EventBus::default(), None))
+    }
+
+    fn test_config_for_profiles() -> Config {
+        Config {
             bind: "127.0.0.1:0".parse().unwrap(),
             token: "test-token-1234567890".into(),
             token_mutating_request_limit_per_minute: 600,
@@ -1286,6 +1448,8 @@ mod tests {
             assistant_max_tool_calls: 8,
             assistant_allow_claude_proxy: false,
             assistant_reasoning_effort: None,
+            assistant_profiles: vec![],
+            assistant_default_profile: None,
             contextkeeper_url: None,
             contextkeeper_token: None,
             public_url: None,
@@ -1293,8 +1457,7 @@ mod tests {
             vogt_import_root: None,
             vogt_engine_state_dir: None,
             vogt_core_token: None,
-        });
-        Arc::new(SessionRegistry::new(cfg, EventBus::default(), None))
+        }
     }
 
     fn runtime_with_script(sessions: Arc<SessionRegistry>, script: Vec<Value>) -> AssistantRuntime {
@@ -1306,11 +1469,21 @@ mod tests {
                 script: parking_lot::Mutex::new(VecDeque::from(script)),
                 seen: parking_lot::Mutex::new(Vec::new()),
             },
-            model: "test-model".into(),
-            reasoning_effort: None,
+            profiles: vec![test_profile("default", "test-model")],
+            default_profile: 0,
             max_tool_calls: 8,
-            refusal: None,
             conversation: tokio::sync::Mutex::new(Conversation::default()),
+        }
+    }
+
+    fn test_profile(name: &str, model: &str) -> Profile {
+        Profile {
+            name: name.into(),
+            base_url: "http://unused.invalid".into(),
+            api_key: "sk-test".into(),
+            model: model.into(),
+            reasoning_effort: None,
+            refusal: openai_route_refusal(model, false),
         }
     }
 
@@ -1362,6 +1535,8 @@ mod tests {
                 cwd: None,
                 env: None,
                 prompt: None,
+                model: None,
+                effort: None,
                 cols: Some(80),
                 rows: Some(24),
                 scrollback_bytes: None,
@@ -1437,7 +1612,7 @@ mod tests {
     async fn plain_reply_round_trip() {
         let rt = runtime_with_script(test_registry(), vec![final_reply("hello there")]);
         let out = rt
-            .handle_message(terminal_caller(), "hi".into())
+            .handle_message(terminal_caller(), "hi".into(), None)
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("hello there"));
@@ -1462,7 +1637,7 @@ mod tests {
             ],
         );
         let out = rt
-            .handle_message(terminal_caller(), "what's going on?".into())
+            .handle_message(terminal_caller(), "what's going on?".into(), None)
             .await
             .unwrap();
         assert_eq!(
@@ -1500,7 +1675,7 @@ mod tests {
             ],
         );
         let out = rt
-            .handle_message(terminal_caller(), "type it".into())
+            .handle_message(terminal_caller(), "type it".into(), None)
             .await
             .unwrap();
         assert!(out.reply.is_none());
@@ -1547,7 +1722,7 @@ mod tests {
             ],
         );
         let out = rt
-            .handle_message(terminal_caller(), "do the thing".into())
+            .handle_message(terminal_caller(), "do the thing".into(), None)
             .await
             .unwrap();
         let action = out.pending_action.expect("pending action");
@@ -1579,11 +1754,10 @@ mod tests {
         script.push(final_reply("capped"));
         let rt = AssistantRuntime {
             max_tool_calls: 3,
-            refusal: None,
             ..runtime_with_script(sessions, script)
         };
         let out = rt
-            .handle_message(terminal_caller(), "loop forever".into())
+            .handle_message(terminal_caller(), "loop forever".into(), None)
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("capped"));
@@ -1600,10 +1774,289 @@ mod tests {
             ],
         );
         let out = rt
-            .handle_message(terminal_caller(), "read it".into())
+            .handle_message(terminal_caller(), "read it".into(), None)
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("that session doesn't exist"));
+    }
+
+    // -- Provider profiles (FR-T9) ------------------------------------------
+
+    /// Which model each request this run actually asked for.
+    fn models_asked_for(rt: &AssistantRuntime) -> Vec<String> {
+        let ChatBackend::Mock { seen, .. } = &rt.backend else {
+            panic!("not a mock backend");
+        };
+        let seen = seen.lock();
+        seen.iter()
+            .filter_map(|body| body.get("model").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    }
+
+    fn runtime_with_profiles(
+        sessions: Arc<SessionRegistry>,
+        script: Vec<Value>,
+        profiles: Vec<Profile>,
+        default_profile: usize,
+    ) -> AssistantRuntime {
+        AssistantRuntime {
+            profiles,
+            default_profile,
+            ..runtime_with_script(sessions, script)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_named_profile_decides_which_model_the_turn_asks_for() {
+        // The whole point of FR-T9: switching provider is a request field and
+        // a config entry, not a second transport. If the name did not reach
+        // the request body, everything else here would still pass.
+        let rt = runtime_with_profiles(
+            test_registry(),
+            vec![final_reply("hello from openrouter")],
+            vec![
+                test_profile("clawbay", "gpt-5.4-mini"),
+                test_profile("openrouter", "qwen/qwen3-coder"),
+            ],
+            0,
+        );
+        rt.handle_message(
+            terminal_caller(),
+            "hi".into(),
+            Some("openrouter".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(models_asked_for(&rt), vec!["qwen/qwen3-coder".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn naming_no_profile_runs_the_deployment_default() {
+        let rt = runtime_with_profiles(
+            test_registry(),
+            vec![final_reply("hi")],
+            vec![
+                test_profile("clawbay", "gpt-5.4-mini"),
+                test_profile("openrouter", "qwen/qwen3-coder"),
+            ],
+            1,
+        );
+        rt.handle_message(terminal_caller(), "hi".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(models_asked_for(&rt), vec!["qwen/qwen3-coder".to_string()]);
+        assert_eq!(rt.model(), "qwen/qwen3-coder");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_profile_is_refused_by_name_and_says_what_exists() {
+        // A typo must not quietly answer on somebody else's model and bill
+        // somebody else's key. Naming the configured ones is what turns the
+        // refusal into a fix.
+        let rt = runtime_with_profiles(
+            test_registry(),
+            vec![final_reply("never reached")],
+            vec![
+                test_profile("clawbay", "gpt-5.4-mini"),
+                test_profile("openrouter", "qwen/qwen3-coder"),
+            ],
+            0,
+        );
+        let err = rt
+            .handle_message(terminal_caller(), "hi".into(), Some("openrouterr".into()))
+            .await
+            .expect_err("an unknown profile is refused");
+        let message = format!("{err:?}");
+        assert!(message.contains("openrouterr"), "{message}");
+        assert!(message.contains("clawbay"), "{message}");
+        assert!(message.contains("openrouter"), "{message}");
+        // Refused before anything was recorded: the transcript is untouched.
+        assert!(rt.history().await.is_empty());
+        assert!(models_asked_for(&rt).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_profile_that_would_hang_is_refused_with_the_profile_named() {
+        // FR-T7's refusal, per route. With one profile the old sentence said
+        // enough; with two, "the assistant is configured with model X" no
+        // longer says which entry a reader has to go and fix.
+        let rt = runtime_with_profiles(
+            test_registry(),
+            vec![final_reply("never reached")],
+            vec![
+                test_profile("clawbay", "gpt-5.4-mini"),
+                test_profile("subscription", "claude-sonnet-4-5"),
+            ],
+            0,
+        );
+        let err = rt
+            .handle_message(terminal_caller(), "hi".into(), Some("subscription".into()))
+            .await
+            .expect_err("a claude-* route on this transport is the documented hang");
+        let message = format!("{err:?}");
+        assert!(message.contains("subscription"), "{message}");
+        assert!(message.contains("claude-sonnet-4-5"), "{message}");
+        assert!(
+            message.contains("assistant_allow_claude_proxy"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn one_broken_route_does_not_close_the_others() {
+        // The route-level guard exists so a hang cannot masquerade as
+        // thinking. It must not also mean that a deployment which added a
+        // broken second profile can no longer read its own history.
+        let rt = runtime_with_profiles(
+            test_registry(),
+            vec![],
+            vec![
+                test_profile("clawbay", "gpt-5.4-mini"),
+                test_profile("subscription", "claude-sonnet-4-5"),
+            ],
+            0,
+        );
+        assert!(rt.refusal().is_none());
+    }
+
+    #[test]
+    fn when_no_route_can_answer_the_refusal_still_names_one() {
+        let rt = runtime_with_profiles(
+            test_registry(),
+            vec![],
+            vec![test_profile("subscription", "claude-opus-4")],
+            0,
+        );
+        let reason = rt.refusal().expect("no route can answer");
+        assert!(reason.contains("subscription"), "{reason}");
+        assert!(reason.contains("claude-opus-4"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn approving_a_card_resumes_on_the_profile_that_proposed_it() {
+        // A card is a paused turn. Resuming it on the deployment default
+        // would hand one model's tool results to another — and the model that
+        // gets them has never seen the conversation that produced them.
+        let sessions = test_registry();
+        let session = spawn_cat(&sessions);
+        let rt = runtime_with_profiles(
+            sessions.clone(),
+            vec![
+                tool_call_reply(
+                    "send_input",
+                    json!({"session_id": session.id, "text": "ls", "submit": true}),
+                ),
+                final_reply("done"),
+            ],
+            vec![
+                test_profile("clawbay", "gpt-5.4-mini"),
+                test_profile("openrouter", "qwen/qwen3-coder"),
+            ],
+            0,
+        );
+        let paused = rt
+            .handle_message(
+                terminal_caller(),
+                "type it".into(),
+                Some("openrouter".into()),
+            )
+            .await
+            .unwrap();
+        let id = paused.pending_action.expect("a card").id();
+        rt.resolve_action(terminal_caller(), id, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            models_asked_for(&rt),
+            vec![
+                "qwen/qwen3-coder".to_string(),
+                "qwen/qwen3-coder".to_string()
+            ],
+            "the approval resumed on the route that proposed the card"
+        );
+        sessions.remove(session.id).unwrap();
+    }
+
+    #[test]
+    fn the_flat_keys_are_still_a_profile_and_are_still_the_default() {
+        // Profiles must not be a migration. A deployment that has only ever
+        // set `assistant_model` keeps exactly what it had, and gains a name it
+        // can be asked for by.
+        let mut cfg = test_config_for_profiles();
+        cfg.assistant_api_key = Some("sk-test".into());
+        cfg.assistant_model = "gpt-5.4-mini".into();
+        cfg.assistant_profiles = vec![crate::config::AssistantProfile {
+            name: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: "sk-or".into(),
+            model: "qwen/qwen3-coder".into(),
+            reasoning_effort: None,
+            allow_claude_proxy: false,
+        }];
+        let profiles = AssistantRuntime::profiles_from_config(&cfg);
+        assert_eq!(
+            profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["default", "openrouter"]
+        );
+        assert_eq!(
+            AssistantRuntime::default_profile_index(&cfg, &profiles),
+            0,
+            "with no default named, the implicit one wins"
+        );
+        cfg.assistant_default_profile = Some("openrouter".into());
+        assert_eq!(AssistantRuntime::default_profile_index(&cfg, &profiles), 1);
+    }
+
+    #[test]
+    fn a_deployment_with_only_named_profiles_still_has_an_assistant() {
+        // No flat key at all: the feature is provisioned by the profile list
+        // alone, and the first entry is the default.
+        let mut cfg = test_config_for_profiles();
+        cfg.assistant_api_key = None;
+        cfg.assistant_profiles = vec![crate::config::AssistantProfile {
+            name: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: "sk-or".into(),
+            model: "qwen/qwen3-coder".into(),
+            reasoning_effort: Some("medium".into()),
+            allow_claude_proxy: false,
+        }];
+        let profiles = AssistantRuntime::profiles_from_config(&cfg);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "openrouter");
+        assert_eq!(profiles[0].reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(AssistantRuntime::default_profile_index(&cfg, &profiles), 0);
+    }
+
+    #[test]
+    fn the_advertised_summary_carries_no_key_and_no_url() {
+        // `/api/config` is read by a browser. A profile is a name and a model
+        // there and nothing else — the key would be spendable and the base URL
+        // is an exposure value.
+        let rt = runtime_with_profiles(
+            test_registry(),
+            vec![],
+            vec![
+                test_profile("clawbay", "gpt-5.4-mini"),
+                test_profile("openrouter", "qwen/qwen3-coder"),
+            ],
+            1,
+        );
+        let summaries = rt.profile_summaries();
+        assert_eq!(
+            summaries,
+            vec![
+                ("clawbay".to_string(), "gpt-5.4-mini".to_string(), false),
+                (
+                    "openrouter".to_string(),
+                    "qwen/qwen3-coder".to_string(),
+                    true
+                ),
+            ]
+        );
+        let rendered = serde_json::to_string(&summaries).unwrap();
+        assert!(!rendered.contains("sk-test"), "{rendered}");
+        assert!(!rendered.contains("unused.invalid"), "{rendered}");
     }
 
     // -- Vogt (FR-T1 – FR-T4, FR-T6) ---------------------------------------
@@ -1669,7 +2122,7 @@ mod tests {
             &core.base_url,
             None,
         );
-        rt.handle_message(paired_caller(), "hello".into())
+        rt.handle_message(paired_caller(), "hello".into(), None)
             .await
             .unwrap();
 
@@ -1693,7 +2146,7 @@ mod tests {
     async fn no_core_configured_means_no_vogt_tools_and_a_working_assistant() {
         let rt = runtime_with_script(test_registry(), vec![final_reply("hi")]);
         let out = rt
-            .handle_message(paired_caller(), "anything?".into())
+            .handle_message(paired_caller(), "anything?".into(), None)
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("hi"));
@@ -1715,7 +2168,7 @@ mod tests {
             None,
         );
         let out = rt
-            .handle_message(paired_caller(), "what's on top?".into())
+            .handle_message(paired_caller(), "what's on top?".into(), None)
             .await
             .unwrap();
         assert_eq!(
@@ -1776,7 +2229,7 @@ mod tests {
         );
 
         let out = rt
-            .handle_message(terminal_caller(), "file that bug".into())
+            .handle_message(terminal_caller(), "file that bug".into(), None)
             .await
             .unwrap();
         assert!(out.reply.is_none());
@@ -1873,7 +2326,7 @@ mod tests {
             None,
         );
         let out = rt
-            .handle_message(paired_caller(), "close WI-7".into())
+            .handle_message(paired_caller(), "close WI-7".into(), None)
             .await
             .unwrap();
         let action = out.pending_action.expect("a pending action");
@@ -1909,7 +2362,7 @@ mod tests {
         // Reads work for this caller — the fallback is enough to attribute
         // nothing — so the tools were offered…
         let out = rt
-            .handle_message(terminal_caller(), "comment on WI-7".into())
+            .handle_message(terminal_caller(), "comment on WI-7".into(), None)
             .await
             .unwrap();
         let action = out.pending_action.expect("a pending action");
@@ -2026,6 +2479,320 @@ mod tests {
         }
     }
 
+    // -- Checkpoint A: the five utterances, typed (VOICE_POC §2, §4) --------
+    //
+    // The POC's first checkpoint, and the one that decides whether voice is
+    // worth a microphone at all: each of U1–U5 is driven through the real
+    // tool loop against a stand-in core, and what is asserted is the tool the
+    // loop reached for and where it stopped. Typed rather than spoken on
+    // purpose — if these cannot be answered from text, no recognizer will
+    // save them, and this half is the half that keeps working next month.
+    //
+    // The model's replies are scripted because the question here is not
+    // whether a model chooses well. It is whether the tools exist, whether
+    // the payloads survive, and whether the gate holds where FR-T2 says it
+    // does.
+
+    fn tool_names_called(core: &vogt_tools::stub::StubCore) -> Vec<String> {
+        core.tool_calls()
+            .into_iter()
+            .filter_map(|call| call.tool)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn u1_are_there_any_notifications() {
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let rt = runtime_with_vogt(
+            test_registry(),
+            vec![
+                tool_call_reply("vogt_inbox_list", json!({"limit": 10})),
+                final_reply("Four things, all from GitHub. CI has not been collected."),
+            ],
+            &core.base_url,
+            Some("shared-core-token"),
+        );
+        let out = rt
+            .handle_message(paired_caller(), "are there any notifications?".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(tool_names_called(&core), vec!["inbox_list"]);
+        assert!(out.reply.is_some());
+        // A read, so nothing waits for a human.
+        assert!(out.pending_action.is_none());
+    }
+
+    #[tokio::test]
+    async fn u2_what_open_issues_are_there_for_a_project() {
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let rt = runtime_with_vogt(
+            test_registry(),
+            vec![
+                tool_call_reply("vogt_project_list", json!({})),
+                tool_call_reply("vogt_bugs", json!({"project": "rustnzbd"})),
+                final_reply("Two open bugs on rustnzbd."),
+            ],
+            &core.base_url,
+            Some("shared-core-token"),
+        );
+        let out = rt
+            .handle_message(
+                paired_caller(),
+                "what open issues are there for rustnzbd?".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(tool_names_called(&core), vec!["project_list", "bugs"]);
+        assert!(out.pending_action.is_none());
+        // The slug reached the core as a slug. The repair pass upstream
+        // (`web/src/voiceRepair.ts`) is what makes that true of an utterance;
+        // this asserts the second half — that nothing here mangles it again.
+        let bugs = core
+            .tool_calls()
+            .into_iter()
+            .find(|call| call.tool.as_deref() == Some("bugs"))
+            .expect("bugs was called");
+        assert_eq!(bugs.arguments.get("project").unwrap(), "rustnzbd");
+    }
+
+    #[tokio::test]
+    async fn u3_can_you_work_on_an_issue_stops_at_the_gate() {
+        // The utterance that ends in something happening. FR-T2 is the whole
+        // point: a spoken request may prepare a session and may not start
+        // one. The reply that comes back has a card in it and no session.
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let rt = runtime_with_vogt(
+            test_registry(),
+            vec![
+                tool_call_reply(
+                    "vogt_session_start",
+                    json!({
+                        "work_item": "WI-12",
+                        "reason": "Sam asked to pick this bug up next",
+                    }),
+                ),
+                final_reply("Started."),
+            ],
+            &core.base_url,
+            Some("shared-core-token"),
+        );
+        let out = rt
+            .handle_message(
+                paired_caller(),
+                "can you work on WI-12 for rustnzbd?".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let card = out
+            .pending_action
+            .expect("a session start waits for a human");
+        let PendingActionView::VogtWrite(view) = &card else {
+            panic!("expected a Vogt write card, got {card:?}");
+        };
+        assert_eq!(view.operation, "session.start");
+        assert!(view.target.contains("WI-12"), "{}", view.target);
+        assert!(
+            tool_names_called(&core).is_empty(),
+            "nothing may reach the core before the approval"
+        );
+
+        rt.resolve_action(paired_caller(), card.id(), true)
+            .await
+            .unwrap();
+        assert_eq!(tool_names_called(&core), vec!["session_start"]);
+    }
+
+    #[tokio::test]
+    async fn u4_research_something_with_no_project_names_the_model_on_the_card() {
+        // The subject-less request. Vogt resolves it to the scratch project
+        // (FR-T11, asserted in `tests/test_sessions.py`); what matters here is
+        // that the card a person approves says which model they are about to
+        // spend, because "using GPT 5.6 medium" was half of what was asked
+        // for and a card showing only the project would be asking for
+        // approval of something narrower than the request.
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let rt = runtime_with_vogt(
+            test_registry(),
+            vec![
+                tool_call_reply(
+                    "vogt_session_start",
+                    json!({
+                        "model": "gpt-5.6",
+                        "effort": "medium",
+                        "reason": "Sam wants somewhere to research a dinner question",
+                    }),
+                ),
+                final_reply("Ready."),
+            ],
+            &core.base_url,
+            Some("shared-core-token"),
+        );
+        let out = rt
+            .handle_message(
+                paired_caller(),
+                "research the best place to buy risotto in Wollongong, using \
+                 gpt 5.6 medium"
+                    .into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let card = out
+            .pending_action
+            .expect("a session start waits for a human");
+        let PendingActionView::VogtWrite(view) = &card else {
+            panic!("expected a Vogt write card, got {card:?}");
+        };
+        assert!(view.target.contains("gpt-5.6"), "{}", view.target);
+        assert!(view.target.contains("medium"), "{}", view.target);
+
+        rt.resolve_action(paired_caller(), card.id(), true)
+            .await
+            .unwrap();
+        let started = core
+            .tool_calls()
+            .into_iter()
+            .find(|call| call.tool.as_deref() == Some("session_start"))
+            .expect("the approved start reached the core");
+        // The exact payload, not a re-derivation of it (FR-T2).
+        assert_eq!(started.arguments.get("model").unwrap(), "gpt-5.6");
+        assert_eq!(started.arguments.get("effort").unwrap(), "medium");
+    }
+
+    #[tokio::test]
+    async fn u5_what_is_that_terminal_doing() {
+        // The one utterance that needs no Vogt at all — it is the assistant
+        // as MyDevEnv2 shipped it, and it has to keep working when the core
+        // is absent (FR-E9, FR-T6).
+        let sessions = test_registry();
+        let session = spawn_cat(&sessions);
+        let rt = runtime_with_script(
+            sessions.clone(),
+            vec![
+                tool_call_reply("list_sessions", json!({})),
+                tool_call_reply("read_session_tail", json!({"session_id": session.id})),
+                final_reply("It is sitting idle."),
+            ],
+        );
+        let out = rt
+            .handle_message(
+                terminal_caller(),
+                "what is the terminal for rustnzbd doing?".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.reply.as_deref(), Some("It is sitting idle."));
+        assert!(out.pending_action.is_none());
+        assert_eq!(out.tool_trace.len(), 2);
+        sessions.remove(session.id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_utterance_can_talk_its_own_way_past_the_gate() {
+        // The checkpoint's real question. A voice journey ends at a card, and
+        // the only thing that resolves a card is an approve/deny route — so
+        // the words that would resolve one, said instead of tapped, must
+        // abandon it rather than approve it (FR-T2, and FR-M5's "no
+        // approval-by-voice path").
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let rt = runtime_with_vogt(
+            test_registry(),
+            vec![
+                tool_call_reply(
+                    "vogt_session_start",
+                    json!({"work_item": "WI-12", "reason": "Sam asked to start on it"}),
+                ),
+                final_reply("I still need you to approve that on screen."),
+            ],
+            &core.base_url,
+            Some("shared-core-token"),
+        );
+        let out = rt
+            .handle_message(paired_caller(), "work on WI-12".into(), None)
+            .await
+            .unwrap();
+        let id = out.pending_action.expect("a card").id();
+
+        // Said, not tapped. Every phrasing a speaker would reach for.
+        for spoken in ["yes", "approve it", "go ahead", "yes, approve, do it"] {
+            let answer = rt
+                .handle_message(paired_caller(), spoken.into(), None)
+                .await;
+            // The card is abandoned by the new message, so the second and
+            // later utterances find nothing to abandon and simply answer.
+            let _ = answer;
+        }
+        assert!(
+            tool_names_called(&core).is_empty(),
+            "speech reached the core: {:?}",
+            tool_names_called(&core)
+        );
+        // And the id it was carrying is spent, so a late approval of it 404s
+        // rather than delivering what the conversation has moved on from.
+        assert!(rt.resolve_action(paired_caller(), id, true).await.is_err());
+    }
+
+    // -- The notifications question (FR-T10) --------------------------------
+
+    #[tokio::test]
+    async fn the_inbox_is_a_tool_the_assistant_is_offered() {
+        // U1's tool. Without it, "are there any notifications?" is answered
+        // from whatever the model can reach — sessions and the backlog — and
+        // sounds just as confident.
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let rt = runtime_with_vogt(
+            test_registry(),
+            vec![final_reply("nothing new")],
+            &core.base_url,
+            Some("core-token"),
+        );
+        rt.handle_message(paired_caller(), "any notifications?".into(), None)
+            .await
+            .unwrap();
+        assert!(
+            offered_tools(&rt).contains(&"vogt_inbox_list".to_string()),
+            "offered: {:?}",
+            offered_tools(&rt)
+        );
+    }
+
+    #[test]
+    fn the_general_attention_question_is_not_wired_to_the_github_only_read() {
+        // `notifications` is the GitHub-only operation. If it were curated
+        // beside the Inbox, the model could answer the general question from
+        // one source and report the other three as nothing — and a spoken "no
+        // notifications" is the answer that hides that best.
+        assert!(
+            !vogt_tools::CURATED_READS.contains(&"notifications"),
+            "the Inbox projection is what answers this, not the GitHub feed"
+        );
+        assert!(vogt_tools::CURATED_READS.contains(&"inbox.list"));
+    }
+
+    #[test]
+    fn the_prompt_makes_coverage_part_of_the_answer() {
+        // The failure this is against: three of the four sources uncollected,
+        // an empty list, and a spoken "no, nothing needs your attention" —
+        // which is a true sentence about the data and a false one about the
+        // world. On a screen the coverage strip is visible beside the count;
+        // spoken, nothing carries it unless the words do.
+        let prompt = SYSTEM_PROMPT;
+        assert!(prompt.contains("vogt_inbox_list"), "{prompt}");
+        assert!(
+            prompt.contains("not collected is not empty"),
+            "the prompt no longer distinguishes an uncollected source from an \
+             empty one (FR-T10)"
+        );
+        for phrase in ["notifications", "coverage"] {
+            assert!(prompt.contains(phrase), "the prompt lost {phrase:?}");
+        }
+    }
+
     #[test]
     fn the_prompt_says_replies_are_spoken() {
         // The other half of "drivable by voice": a reply full of markdown and
@@ -2116,7 +2883,7 @@ mod tests {
             None,
         );
         let out = rt
-            .handle_message(paired_caller(), "what is WI-7?".into())
+            .handle_message(paired_caller(), "what is WI-7?".into(), None)
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("that item came in from GitHub"));
@@ -2149,7 +2916,7 @@ mod tests {
             None,
         );
         let out = rt
-            .handle_message(paired_caller(), "start work on WI-7".into())
+            .handle_message(paired_caller(), "start work on WI-7".into(), None)
             .await
             .unwrap();
         // No card: a card that cannot say what will be recorded is not an
@@ -2219,7 +2986,7 @@ mod tests {
             None,
         );
         let out = rt
-            .handle_message(paired_caller(), "mark WI-7 done".into())
+            .handle_message(paired_caller(), "mark WI-7 done".into(), None)
             .await
             .unwrap();
         assert!(
@@ -2315,7 +3082,7 @@ mod tests {
         );
 
         let out = rt
-            .handle_message(terminal_caller(), "do both".into())
+            .handle_message(terminal_caller(), "do both".into(), None)
             .await
             .unwrap();
         let action = out.pending_action.expect("a pending action");
@@ -2384,13 +3151,13 @@ mod tests {
         );
 
         let out = rt
-            .handle_message(terminal_caller(), "type it".into())
+            .handle_message(terminal_caller(), "type it".into(), None)
             .await
             .unwrap();
         let action = out.pending_action.expect("a pending action");
 
         let out = rt
-            .handle_message(terminal_caller(), "yes, approve it, go ahead".into())
+            .handle_message(terminal_caller(), "yes, approve it, go ahead".into(), None)
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("nothing was typed"));
@@ -2480,7 +3247,7 @@ mod tests {
 
         // The approval path, on a card nobody has read since it was made.
         let out = rt
-            .handle_message(terminal_caller(), "type it".into())
+            .handle_message(terminal_caller(), "type it".into(), None)
             .await
             .unwrap();
         let stale = out.pending_action.expect("a pending action");
@@ -2507,7 +3274,7 @@ mod tests {
         // approved: one second inside the window it is still on offer, one
         // second past it is gone.
         let out = rt
-            .handle_message(terminal_caller(), "try again".into())
+            .handle_message(terminal_caller(), "try again".into(), None)
             .await
             .unwrap();
         let fresh = out.pending_action.expect("a second pending action");
