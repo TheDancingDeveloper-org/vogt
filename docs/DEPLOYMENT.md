@@ -1064,10 +1064,16 @@ and is the only host-shell SSH path for in-pod agents).
 
 Agent-facing: `opencode` in every image; `mydevenv2-rust-analyzer-mcp` and
 `github-mcp-server` for MCP — registration commands are [`ENGINE.md`](ENGINE.md)
-§4. **Codex and Claude are not installed in the production image**; they are
-user-managed there. The dev image bakes both in with `INSTALL_AI_CLIENTS=true`,
-and in that trusted pod the system `codex` command always runs with
-`--dangerously-bypass-approvals-and-sandbox` (§11.4).
+§4. **Codex, Claude and theclawbay are not installed in the production image**;
+they are user-managed there. The dev image bakes all three in with
+`INSTALL_AI_CLIENTS=true`, and in that trusted pod the system `codex` command
+always runs with `--dangerously-bypass-approvals-and-sandbox` (§11.4).
+
+`theclawbay` is baked in rather than left to the home volume, which is where it
+used to live: `vogt-dev` binds a different home than `mydevenv2-dev`, so the
+tool was absent from the merged stack and nothing reported it (WI-17). All four
+dev-image tools — `claude`, `codex`, `flutter`, `theclawbay` — are executed in
+the built image by `build.yml` before it is pushed, per NFR-Q7.
 
 ### 10.4 Secrets the pod needs at startup
 

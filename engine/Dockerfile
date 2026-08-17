@@ -407,9 +407,18 @@ ARG INSTALL_AI_CLIENTS
 # boundary, so install the real Codex entry point under libexec and expose the
 # codex-full-access wrapper as `codex`. This overrides persisted per-user
 # workspace-write/network restrictions for every repo under ~/Working.
+#
+# `theclawbay` is here for the reason the other two already are, learned the
+# hard way: it was never installed by any image, in MyDevEnv2 or here. It was
+# an npm global somebody put in the persisted $HOME, so `vogt-dev` — bound to
+# a different home volume than `mydevenv2-dev` — simply did not have it, and
+# nothing was red. A tool the pod is expected to carry belongs in the image
+# under /usr/local, where the runtime bind mount cannot take it away. That it
+# also installs *into* $HOME is unchanged and still handled by the PATH
+# ordering above; this only fixes where `theclawbay` itself lives.
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
 RUN if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        sudo npm install -g --prefix=/usr/local @openai/codex @anthropic-ai/claude-code \
+        sudo npm install -g --prefix=/usr/local @openai/codex @anthropic-ai/claude-code theclawbay \
         && sudo install -d /usr/local/libexec \
         && codex_target="$(readlink -f /usr/local/bin/codex)" \
         && sudo ln -s "$codex_target" /usr/local/libexec/codex-real \
