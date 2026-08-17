@@ -8,10 +8,11 @@ joins, ordering, coverage disclosure, and occurrence-scoped decisions.
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from vogt.adapters.engine import EngineUnavailable
 from vogt.adapters.github.collectors import KIND_CHECK
@@ -63,6 +64,7 @@ Cursor = tuple[str, str]
 
 
 def list_inbox(ctx: AppContext, params: InboxListParams) -> InboxListResult:
+    snapshot_at = ctx.clock()
     with ctx.declared.read() as view:
         entries = _collect(ctx, view)
         project_ids = {
@@ -86,12 +88,29 @@ def list_inbox(ctx: AppContext, params: InboxListParams) -> InboxListResult:
             and (work_item_id is None or entry.work_item_ref == params.work_item)
             and _triage_matches(entry, params.triage_states, ctx.clock())
         ]
+        source_water = _high_water(entries)
+        cursor_value = (
+            _decode_cursor(params.cursor, fingerprint) if params.cursor else None
+        )
+        cursor_water = _cursor_high_water(cursor_value)
+        if cursor_value is not None:
+            snapshot_at = _cursor_snapshot(cursor_value)
+            if cursor_water is not None:
+                source_water = {
+                    source: cursor_water.get(source) for source in source_water
+                }
+            entries = [entry for entry in entries if _within_water(entry, source_water)]
         entries.sort(key=_sort_key, reverse=True)
-        start = _cursor_index(entries, params.cursor, fingerprint)
+        start = _cursor_index(entries, cursor_value)
         page = entries[start : start + params.limit]
         next_cursor = None
         if start + params.limit < len(entries):
-            next_cursor = _encode_cursor(fingerprint, page[-1])
+            next_cursor = _encode_cursor(
+                fingerprint,
+                page[-1],
+                snapshot_at=snapshot_at,
+                high_water=source_water,
+            )
         coverage = _coverage(ctx, view, entries)
         engine_status, engine_detail = _engine_status(ctx)
         counts = {
@@ -101,7 +120,8 @@ def list_inbox(ctx: AppContext, params: InboxListParams) -> InboxListResult:
         return InboxListResult(
             entries=page,
             next_cursor=next_cursor,
-            snapshot_at=ctx.clock(),
+            snapshot_at=snapshot_at,
+            high_water=source_water,
             coverage=coverage,
             counts=counts,
             github_scope="registered projects only",
@@ -479,29 +499,34 @@ def _fingerprint(
     )
 
 
-def _encode_cursor(fingerprint: str, entry: InboxEntry) -> str:
+def _encode_cursor(
+    fingerprint: str,
+    entry: InboxEntry,
+    *,
+    snapshot_at: datetime,
+    high_water: dict[InboxSource, datetime | None],
+) -> str:
     moment = _entry_moment(entry)
     raw = json.dumps(
         {
             "fingerprint": fingerprint,
             "occurred_at": moment.isoformat(),
             "entry_key": entry.entry_key,
+            "snapshot_at": snapshot_at.isoformat(),
+            "high_water": {
+                source: value.isoformat() if value is not None else None
+                for source, value in high_water.items()
+            },
         }
     ).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def _cursor_index(
-    entries: list[InboxEntry], cursor: str | None, fingerprint: str
-) -> int:
-    if not cursor:
+def _cursor_index(entries: list[InboxEntry], cursor: dict[str, Any] | None) -> int:
+    if cursor is None:
         return 0
     try:
-        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
-        value = json.loads(raw)
-        if value.get("fingerprint") != fingerprint:
-            raise ValueError
-        key = (datetime.fromisoformat(value["occurred_at"]), value["entry_key"])
+        key = (datetime.fromisoformat(cursor["occurred_at"]), cursor["entry_key"])
         for index, entry in enumerate(entries):
             if _sort_key(entry) < key:
                 return index
@@ -510,6 +535,74 @@ def _cursor_index(
         raise InvalidCursor(
             "cursor is malformed or belongs to another Inbox query"
         ) from None
+
+
+def _decode_cursor(cursor: str, fingerprint: str) -> dict[str, Any]:
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        value = json.loads(raw)
+        if not isinstance(value, dict) or value.get("fingerprint") != fingerprint:
+            raise ValueError
+        if not isinstance(value.get("occurred_at"), str) or not isinstance(
+            value.get("entry_key"), str
+        ):
+            raise ValueError
+        datetime.fromisoformat(value["occurred_at"])
+        if not isinstance(value.get("snapshot_at"), str):
+            raise ValueError
+        datetime.fromisoformat(value["snapshot_at"])
+        return value
+    except (binascii.Error, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        raise InvalidCursor(
+            "cursor is malformed or belongs to another Inbox query"
+        ) from None
+
+
+def _cursor_high_water(
+    cursor: dict[str, Any] | None,
+) -> dict[InboxSource, datetime] | None:
+    if cursor is None:
+        return None
+    raw = cursor.get("high_water")
+    if not isinstance(raw, dict):
+        raise InvalidCursor("cursor does not carry a high-water mark")
+    result: dict[InboxSource, datetime] = {}
+    for source in (GITHUB_KIND, DRIFT_KIND, CI_KIND, AGENT_KIND):
+        value = raw.get(source)
+        if value is not None:
+            if not isinstance(value, str):
+                raise InvalidCursor("cursor has an invalid high-water mark")
+            try:
+                result[source] = datetime.fromisoformat(value)
+            except ValueError:
+                raise InvalidCursor("cursor has an invalid high-water mark") from None
+    return result
+
+
+def _cursor_snapshot(cursor: dict[str, Any]) -> datetime:
+    try:
+        return datetime.fromisoformat(cursor["snapshot_at"])
+    except (ValueError, KeyError, TypeError):
+        raise InvalidCursor("cursor has an invalid snapshot time") from None
+
+
+def _high_water(entries: list[InboxEntry]) -> dict[InboxSource, datetime | None]:
+    result: dict[InboxSource, datetime | None] = dict.fromkeys(
+        (GITHUB_KIND, DRIFT_KIND, CI_KIND, AGENT_KIND), None
+    )
+    for entry in entries:
+        moment = entry.occurred_at or entry.observed_at
+        if moment is None:
+            continue
+        previous = result[entry.source]
+        if previous is None or moment > previous:
+            result[entry.source] = moment
+    return result
+
+
+def _within_water(entry: InboxEntry, water: dict[InboxSource, datetime | None]) -> bool:
+    high = water.get(entry.source)
+    return high is not None and _entry_moment(entry) <= high
 
 
 def _coverage(

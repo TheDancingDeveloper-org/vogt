@@ -56,6 +56,7 @@ import {
 } from "./vogtApi";
 import { openWorkItemTab } from "./tabs";
 import { ViewAgeBadge, createLoadStamp, createViewAge } from "./viewAge";
+import { MeasuredWindow } from "./measuredWindow";
 
 interface Props {
   onError?: (message: string) => void;
@@ -69,8 +70,8 @@ const SAVED_FILTERS_KEY = "mydevenv2.vogtSavedFilters.v1";
 /** Enough that a runaway list cannot be saved into a full storage quota. */
 const MAX_SAVED_FILTERS = 40;
 
-/** Row height in px. Virtualization needs it fixed; the CSS pins it too. */
-const ROW_HEIGHT = 40;
+/** Layout-free seed only; actual rows report their measured border-box height. */
+export const ROW_ESTIMATE = 40;
 
 /**
  * Below this many rows the list renders whole.
@@ -83,7 +84,6 @@ const ROW_HEIGHT = 40;
 const VIRTUALIZE_ABOVE = 60;
 
 /** Rows rendered beyond each edge of the viewport, so a fast scroll is not blank. */
-const OVERSCAN = 8;
 
 /** `BacklogParams.limit` is capped at 200 server-side; offering more would lie. */
 const PAGE_SIZES = [50, 100, 200] as const;
@@ -986,6 +986,15 @@ const Backlog: Component<Props> = (props) => {
   let scroller: HTMLDivElement | undefined;
   const [scrollTop, setScrollTop] = createSignal(0);
   const [viewportHeight, setViewportHeight] = createSignal(0);
+  const measured = new MeasuredWindow(ROW_ESTIMATE);
+  const [measurementVersion, setMeasurementVersion] = createSignal(0);
+
+  createEffect(() => {
+    measurementVersion();
+    if (measured.setKeys(visible().map((entry) => entry.ref))) {
+      setMeasurementVersion((version) => version + 1);
+    }
+  });
 
   onMount(() => {
     const node = scroller;
@@ -1011,12 +1020,15 @@ const Backlog: Component<Props> = (props) => {
   const virtualized = createMemo(() => visible().length > VIRTUALIZE_ABOVE);
 
   const window_ = createMemo(() => {
+    measurementVersion();
     const rows = visible();
     if (!virtualized()) return { start: 0, end: rows.length };
-    const height = viewportHeight() || ROW_HEIGHT * 20;
-    const first = Math.max(0, Math.floor(scrollTop() / ROW_HEIGHT) - OVERSCAN);
-    const count = Math.ceil(height / ROW_HEIGHT) + OVERSCAN * 2;
-    return { start: first, end: Math.min(rows.length, first + count) };
+    const range = measured.range(
+      scrollTop(),
+      viewportHeight() || ROW_ESTIMATE * 20,
+      320,
+    );
+    return { start: range.start, end: range.end, top: range.top };
   });
 
   const windowRows = createMemo(() => {
@@ -1592,11 +1604,11 @@ const Backlog: Component<Props> = (props) => {
                 </p>
               }
             >
-              <div style={{ height: `${visible().length * ROW_HEIGHT}px`, position: "relative" }}>
+              <div style={{ height: `${measured.totalHeight()}px`, position: "relative" }}>
                 <div
                   style={{
                     position: "absolute",
-                    top: `${window_().start * ROW_HEIGHT}px`,
+                    top: `${window_().top ?? measured.offsetOf(window_().start)}px`,
                     left: "0",
                     right: "0",
                   }}
@@ -1606,6 +1618,23 @@ const Backlog: Component<Props> = (props) => {
                       const sourceUrl = readString(entry, "source_url");
                       return (
                         <div
+                          ref={(node) => {
+                            const observer = new ResizeObserver(() => {
+                              const change = measured.measure(
+                                entry.ref,
+                                node.getBoundingClientRect().height,
+                              );
+                              if (!change) return;
+                              setMeasurementVersion((version) => version + 1);
+                              if (change.index < window_().start) {
+                                const next = Math.max(0, scrollTop() + change.delta);
+                                setScrollTop(next);
+                                if (scroller) scroller.scrollTop = next;
+                              }
+                            });
+                            observer.observe(node);
+                            onCleanup(() => observer.disconnect());
+                          }}
                           class={`vogt-backlog-row${
                             explained().includes(entry.ref) ? " explained" : ""
                           }`}

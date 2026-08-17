@@ -356,3 +356,35 @@ def test_normalized_inbox_paginates_and_audits_occurrence_triage(
         .entry_key
         == entry_key
     )
+
+
+def test_inbox_cursor_freezes_each_source_before_later_facts_arrive(
+    instance: AppContext, forge: Forge
+) -> None:
+    """A continuation cannot duplicate or append a row outside its snapshot."""
+    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    first_page = list_inbox(instance, InboxListParams(limit=1))
+    assert first_page.next_cursor is not None
+    assert first_page.high_water["github"] is not None
+
+    forge.notifications.append(
+        {
+            "id": "1003",
+            "reason": "review_requested",
+            "unread": True,
+            "updated_at": "2026-08-12T09:00:00Z",
+            "subject": {
+                "title": "A fact that arrived after page one",
+                "type": "PullRequest",
+                "url": "https://api.github.com/repos/TheDancingDeveloper-org/rustnzb/pulls/33",
+            },
+        }
+    )
+    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+
+    continuation = list_inbox(
+        instance, InboxListParams(limit=10, cursor=first_page.next_cursor)
+    )
+    titles = {entry.title for entry in continuation.entries}
+    assert "A fact that arrived after page one" not in titles
+    assert "ci workflow run failed" in titles

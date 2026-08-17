@@ -145,6 +145,8 @@ class InboxListResult(Result):
     entries: list[InboxEntry]
     next_cursor: str | None = None
     snapshot_at: datetime
+    """Per-source high-water marks for this server-owned read window."""
+    high_water: dict[InboxSource, datetime | None]
     coverage: dict[InboxSource, InboxCoverage]
     counts: dict[str, int]
     github_scope: str = "registered projects only"

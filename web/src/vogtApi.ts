@@ -55,6 +55,8 @@ export const ROUTES = {
   "inbox.archive": "/inbox/archive",
   "inbox.snooze": "/inbox/snooze",
   "inbox.restore": "/inbox/restore",
+  suppress: "/suppressions",
+  "work.adopt": "/work/adopt",
   "events.list": "/events",
   "session.list": "/sessions",
   "session.start": "/sessions",
@@ -168,7 +170,10 @@ export interface InboxEntry {
   freshness?: "current" | "stale" | "provisional" | "live" | "unknown" | string;
   triage_state?: "active" | "archived" | "snoozed" | string;
   snooze_until?: string | null;
+  evidence_snapshot?: Record<string, unknown> | null;
+  proposed_change?: Record<string, unknown> | null;
   action?: {
+    kind?: "drift" | "observation" | "session" | string;
     drift_id?: string;
     subject_key?: string;
   };
@@ -186,6 +191,7 @@ export interface InboxListResult {
   entries: InboxEntry[];
   next_cursor?: string | null;
   snapshot_at: string;
+  high_water?: Record<string, string | null>;
   coverage: Record<string, InboxSourceCoverage>;
   counts?: Record<string, number>;
   github_scope?: string;
@@ -546,6 +552,18 @@ export const restoreInbox = (entry_key: string, reason: string) =>
     { entry_key, reason },
     "POST",
   );
+
+export const suppressInbox = (subject: string, reason: string) =>
+  call<Record<string, unknown>>("suppress", { subject, reason }, "POST");
+
+export const adoptInbox = (subject: string, reason: string) =>
+  call<Record<string, unknown>>("work.adopt", { subject, reason }, "POST");
+
+export const resolveInboxDrift = (
+  id: string,
+  resolution: "accepted" | "rejected",
+  reason: string,
+) => call<DriftResult>("drift.resolve", { id, resolution, reason }, "POST");
 
 /** The audit log, narrowed and paged (FR-S6, FR-U19).
  *

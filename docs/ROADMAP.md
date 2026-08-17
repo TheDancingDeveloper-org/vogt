@@ -3,8 +3,8 @@
 Status: **M0–M6 delivered — v1 is built** (2026-08-12); **M7 and M8 are
 post-v1**; **M9–M14 are v2** — the MyDevEnv2 merge, added by
 `REQUIREMENTS.md` revision r9 (2026-08-14). **M9–M13 are built**
-(2026-08-14); M11's demo is outstanding for want of a browser, and M13's for
-want of a device, and its "as built" note says what that costs.
+(2026-08-14); M11 now has automated Chromium GUI evidence, while its live
+stack/manual conformance evidence and M13's device evidence remain outstanding.
 
 **M14 is delivered except for the acts that are somebody's to take.** The
 merge is on `main`, both image streams are built and signed, CI is green
@@ -66,7 +66,7 @@ operation the stage added.
 | M9 | Foundations *(v2)* | One repo, one stack, one published port; both halves' CI green | NFR-D11, NFR-D12, NFR-C6, NFR-Q6, FR-U9 |
 | M10 | Coding sessions *(v2, merge-MVP)* | A work item can open a session in its project's tree | FR-E1–E5, FR-E8, FR-E9, FR-S9, FR-S10 |
 | M11 | GUI uplift *(v2, restructure)* | The Solid PWA becomes the single front end, then gains places, Inbox, and measured high-volume surfaces | FR-N4–N5, FR-U4–U8, FR-U10–U25, NFR-S5 |
-| M12 | AI layer & voice *(v2, restructure)* | The assistant learns the Vogt domain; voice is validated rather than assumed; the existing gate is presented consistently | FR-T1–T4, FR-T6, FR-T8; FR-T5 validated, FR-T7 attempted |
+| M12 | AI layer & voice *(v2, restructure)* | The assistant learns the Vogt domain; voice is validated rather than assumed; the existing gate is presented consistently | FR-T1–T4, FR-T6, FR-T8; FR-T5 validated, FR-T7 attempted; *(r16)* FR-T9–T13 and FR-M6 via the POC in `VOICE_POC.md` |
 | M13 | Mobile MVP1 *(v2, restructure)* | The phone is a first-class, sessions-first surface | FR-M1–M5, FR-E6, FR-E7 |
 | M14 | Consolidation *(ongoing)* | Old stacks retired, names settled, r9 verified against the build | NFR-I6 (unclaimed by any other stage) |
 
@@ -844,17 +844,15 @@ filters restores its exact view after reload; killing the engine mid-demo
 disables session controls with a named reason while every Vogt view keeps
 answering.
 
-### M11 as built — the demo did not run, and what that costs
+### M11 as built — automated GUI evidence and remaining acceptance work
 
-**The deviation, stated first because it governs everything else: none of
-the five surfaces has been rendered in a browser.** This environment has
-none. What is proven is structural — they call the operations the registry
-serves, they collect a reason before every write, they distinguish an outage
-from an empty answer, they build and typecheck — and every one of those is
-asserted in `tests/test_pwa.py`. What is *not* proven is anything a person
-would notice: no drag has been dragged, no deep link has round-tripped
-through the router, no refusal has bounced a card, no layout has been seen.
-The M11 demo above is the acceptance test and it is outstanding.
+The PWA now has a Playwright Chromium suite in `web/tests/browser/gui.spec.ts`.
+It covers a real desktop Board drag/drop gesture, filter URL reload, Inbox
+evidence and reasoned actions, labelled phone navigation and Go to reachability;
+the jsdom suite also covers migration, keyboard/batch Inbox decisions and the
+Sessions exact-payload approval review. What remains is the live-server
+refusal round-trip, a large-estate browser fixture, the full route sweep and
+the live-stack observation listed in `REQUIREMENTS.md` §7.2.
 
 That is also why the legacy GUI is still here. FR-U9's condition — every
 operation it exposes is rendered by a PWA surface — was reached, and a test
@@ -901,10 +899,9 @@ carries the reminder and the order of operations: run the demo, then delete
    NFR-S5's "does not fetch the estate to render a page" holds, true
    virtualization does not. Bulk drift accept does not exist, by §3.
 
-**Open after M11** — two of the three, since one was closed and this note did
-not notice *(corrected r11)*: the browser demo (`REQUIREMENTS.md` §7.2), and
-`backlog`/`bugs` having no `offset`, so there is no way to page past the top
-200 of a ranked view (**FR-V5**).
+**Open after M11** — the live/manual browser conformance evidence described in
+`REQUIREMENTS.md` §7.2, and `backlog`/`bugs` having no `offset`, so there is no
+way to page past the top 200 of a ranked view (**FR-V5**).
 
 The third said comments were audited against the comment rather than the work
 item, so a per-item audit filter would miss them. **That was fixed and this

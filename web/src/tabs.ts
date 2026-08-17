@@ -1,4 +1,6 @@
+import { untrack } from "solid-js";
 import { createStore, produce } from "solid-js/store";
+import { PLACES_MIGRATION_KEY, PLACES_STATE_KEY } from "./layout";
 
 export type Tab =
   | { id: string; kind: "terminal"; sessionId: string; label: string }
@@ -14,6 +16,21 @@ export interface TabsStateSnapshot {
   tabs: Tab[];
   /** Tab id (not session/path) currently focused, or null if none. */
   active: string | null;
+}
+
+export interface RecentPlace {
+  path: string;
+  label: string;
+}
+
+interface PlacesStateSnapshot {
+  places: RecentPlace[];
+}
+
+export interface LegacyMigrationResult {
+  state: TabsStateSnapshot;
+  places: RecentPlace[];
+  initialRoute: string | null;
 }
 
 const STORAGE_KEY = "mydevenv2.tabs.v2";
@@ -92,33 +109,146 @@ function normalizeState(value: unknown): TabsStateSnapshot {
   };
 }
 
+const SURFACE_ROUTES: Record<string, string> = {
+  board: "/board",
+  backlog: "/backlog",
+  inbox: "/inbox",
+  projects: "/projects",
+  audit: "/audit",
+};
+
+function legacyRoute(raw: Record<string, unknown>): string | null {
+  const kind = typeof raw.kind === "string" ? raw.kind : "";
+  const surface = SURFACE_ROUTES[kind];
+  if (surface) return surface;
+  if (kind === "workitem" && typeof raw.ref === "string") {
+    return `/w/${encodeURIComponent(raw.ref)}`;
+  }
+  if (kind === "terminal" && typeof raw.sessionId === "string") {
+    return `/t/${encodeURIComponent(raw.sessionId)}`;
+  }
+  if (kind === "editor" && typeof raw.path === "string") {
+    return `/e/${encodeURIComponent(raw.path)}`;
+  }
+  if (kind === "git" && typeof raw.repo === "string") {
+    return raw.repo ? `/g/${encodeURIComponent(raw.repo)}` : "/g";
+  }
+  if (kind === "gui") return "/gui";
+  if (kind === "history") return "/history";
+  if (kind === "tasks") return "/tasks";
+  if (kind === "assistant") return "/assistant";
+  return null;
+}
+
+function placeLabel(raw: Record<string, unknown>, path: string): string {
+  if (typeof raw.label === "string" && raw.label.trim()) return raw.label;
+  if (path.startsWith("/w/")) return decodeURIComponent(path.slice(3));
+  return path === "/g" ? "Git" : path.slice(1) || "Vogt";
+}
+
+function addPlace(places: RecentPlace[], path: string, label: string) {
+  if (places.some((place) => place.path === path)) return;
+  places.push({ path, label });
+}
+
+/**
+ * Convert the pre-places tab snapshot without touching browser storage.
+ * Keeping this pure makes the destructive edge of migration testable: all
+ * valid neighbours survive malformed entries, and the old key can remain
+ * untouched until the caller has written every replacement record.
+ */
+export function migrateLegacyState(value: unknown): LegacyMigrationResult {
+  if (!value || typeof value !== "object") {
+    return { state: { tabs: [], active: null }, places: [], initialRoute: null };
+  }
+  const rawState = value as Record<string, unknown>;
+  const rawTabs = Array.isArray(rawState.tabs) ? rawState.tabs : [];
+  const tabs: Tab[] = [];
+  const places: RecentPlace[] = [];
+  const activeId = typeof rawState.active === "string" ? rawState.active : null;
+  let initialRoute: string | null = null;
+
+  for (const value of rawTabs) {
+    if (!value || typeof value !== "object") continue;
+    const raw = value as Record<string, unknown>;
+    const kind = typeof raw.kind === "string" ? raw.kind : "";
+    const route = legacyRoute(raw);
+    if (kind === "workitem" || SURFACE_ROUTES[kind]) {
+      if (route) {
+        addPlace(places, route, placeLabel(raw, route));
+        if (raw.id === activeId) initialRoute = route;
+      }
+      continue;
+    }
+    const tab = normalizeTab(raw);
+    if (!tab) continue;
+    tabs.push(tab);
+    if (raw.id === activeId) initialRoute = route;
+  }
+
+  const active = activeId && tabs.some((tab) => tab.id === activeId)
+    ? activeId
+    : tabs[0]?.id ?? null;
+  return {
+    state: { tabs, active },
+    places: places.slice(0, 12),
+    initialRoute,
+  };
+}
+
+function readPlaces(): RecentPlace[] {
+  try {
+    const raw = localStorage.getItem(PLACES_STATE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Partial<PlacesStateSnapshot>;
+    if (!Array.isArray(parsed.places)) return [];
+    return parsed.places.filter(
+      (place): place is RecentPlace =>
+        Boolean(place) && typeof place.path === "string" && typeof place.label === "string",
+    ).slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
+let migratedInitialRoute: string | null = null;
+let migratedPlaces: RecentPlace[] = [];
+
 function loadInitial(): TabsStateSnapshot {
   try {
     const current = localStorage.getItem(STORAGE_KEY);
-    if (current) {
-      const normalized = normalizeState(JSON.parse(current));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
-      return normalized;
-    }
     const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (!legacy) return { tabs: [], active: null };
-    // normalizeTab deliberately drops the old product-surface tab kinds.
-    // They are stable places now, so carrying them into v2 would recreate a
-    // second, closable route for the same surface.
-    const migrated = normalizeState(JSON.parse(legacy));
-    const stable = migrated.tabs;
-    const next = {
-      tabs: stable,
-      active: stable.some((tab) => tab.id === migrated.active) ? migrated.active : stable[0]?.id ?? null,
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    return next;
+    const marker = localStorage.getItem(PLACES_MIGRATION_KEY);
+    if (legacy && marker !== "v1") {
+      const migration = migrateLegacyState(JSON.parse(legacy));
+      // The legacy value is intentionally not removed. A failed write leaves
+      // it available for the next boot to retry, while the marker is written
+      // only after both replacement values are durable.
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(migration.state));
+      localStorage.setItem(
+        PLACES_STATE_KEY,
+        JSON.stringify({ places: migration.places }),
+      );
+      localStorage.setItem(PLACES_MIGRATION_KEY, "v1");
+      migratedInitialRoute = migration.initialRoute;
+      migratedPlaces = migration.places;
+      return migration.state;
+    }
+    const normalized = current
+      ? normalizeState(JSON.parse(current))
+      : { tabs: [], active: null };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+    migratedPlaces = readPlaces();
+    return normalized;
   } catch {
     return { tabs: [], active: null };
   }
 }
 
 const [store, setStore] = createStore<TabsStateSnapshot>(loadInitial());
+const [placesStore, setPlacesStore] = createStore<PlacesStateSnapshot>({
+  places: migratedPlaces.length ? migratedPlaces : readPlaces(),
+});
 
 function persist() {
   try {
@@ -129,6 +259,26 @@ function persist() {
 }
 
 export const tabsStore = store;
+export const recentPlacesStore = placesStore;
+
+export function initialRoute(): string | null {
+  return migratedInitialRoute;
+}
+
+export function rememberPlace(path: string, label: string): void {
+  if (!path || path === "/") return;
+  const current = untrack(() => placesStore.places);
+  const next = [
+    { path, label },
+    ...current.filter((place) => place.path !== path),
+  ].slice(0, 12);
+  setPlacesStore("places", next);
+  try {
+    localStorage.setItem(PLACES_STATE_KEY, JSON.stringify({ places: next }));
+  } catch {
+    /* recent navigation is presentation state */
+  }
+}
 
 export function openTerminalTab(sessionId: string, label: string): Tab {
   const id = `term:${sessionId}`;

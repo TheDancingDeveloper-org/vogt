@@ -68,6 +68,9 @@ import {
   openTerminalTab,
   openWorkItemTab,
   replaceTabs,
+  initialRoute,
+  recentPlacesStore,
+  rememberPlace,
   snapshotTabs,
   tabsStore,
   type Tab,
@@ -414,10 +417,11 @@ const App: Component = () => {
   // not a memoised value.
   createEffect(() => {
     const path = location.pathname;
+    const currentSearch = location.search;
     if (path === "/") {
       const narrow = window.matchMedia("(max-width: 768px)").matches ||
         (navigator.maxTouchPoints > 0 && window.innerWidth < 1024);
-      navigate(narrow ? "/sessions" : "/board", { replace: true });
+      navigate(initialRoute() ?? (narrow ? "/sessions" : "/board"), { replace: true });
     } else if (path === "/sessions") {
       // Sessions is a stable place; its panes are opened by the explicit tool
       // routes below and are never represented as a product tab.
@@ -454,6 +458,23 @@ const App: Component = () => {
       // and the surface itself reports a ref that does not resolve. Refusing
       // to open the tab would turn a typo into a blank screen.
       openWorkItemTab(decodeURIComponent(params.ref));
+    }
+    if (path !== "/") {
+      const labels: Record<string, string> = {
+        "/board": "Board",
+        "/backlog": "Backlog",
+        "/inbox": "Inbox",
+        "/projects": "Projects",
+        "/audit": "Audit",
+        "/sessions": "Sessions",
+        "/g": "Git",
+        "/history": "History",
+        "/tasks": "Tasks",
+        "/gui": "GUI stream",
+        "/assistant": "Assistant",
+      };
+      const label = labels[path] ?? (path.startsWith("/w/") ? decodeURIComponent(path.slice(3)) : path);
+      rememberPlace(`${path}${currentSearch}`, label);
     }
   });
 
@@ -885,6 +906,14 @@ const App: Component = () => {
               )}
             </For>
           </div>
+          <Show when={recentPlacesStore.places.length > 0}>
+            <div class="places-recent" aria-label="Recent places">
+              <div class="places-section-label">Recent places</div>
+              <For each={recentPlacesStore.places.slice(0, 6)}>
+                {(place) => <a href={`#${place.path}`}>{place.label}</a>}
+              </For>
+            </div>
+          </Show>
           <FileTree
             onOpen={() => navigate("/sessions")}
             promptPath={promptUser}
@@ -897,6 +926,9 @@ const App: Component = () => {
           </div>
         </aside>
         <main class="main">
+          <button type="button" class="mobile-go-to" onClick={() => setCommandPaletteOpen(true)}>
+            Go to…
+          </button>
           <Show when={!isConnected() && getToken()}>
             <div class="connection-banner">
               <div class="connection-banner-copy">

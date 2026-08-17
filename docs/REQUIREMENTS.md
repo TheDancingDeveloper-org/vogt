@@ -759,6 +759,68 @@ phone pass, and Stage 10 is M14's browser/device/live-stack conformance
 close-out. The historical §5/§6 audits are not rewritten to claim these
 unbuilt clauses.
 
+### Revision r16 — voice becomes a way of working, and a model is something you ask for
+
+*2026-08-17. Voice-first user journeys, provider profiles and model/effort
+selection for spawned sessions are named as requirements. A proof of concept
+precedes any of it: `docs/VOICE_POC.md`. Nothing here is delivered.*
+
+Until now voice was an input method bolted onto the assistant (FR-T5): a
+push-to-talk button, a spoken reply, adopted unproven. r16 promotes it to a
+**way of using Vogt with no screen in hand** — asking what needs attention,
+asking about a project's open issues, asking for work to be started, asking
+for a fresh session on a named model at a named effort — on the phone and on
+the desktop, over the same engine. The reference for the interaction shape is
+[voicemode](https://github.com/mbailey/voicemode): STT and TTS behind
+OpenAI-compatible audio endpoints, so a cloud provider and a local
+Whisper.cpp/Kokoro pair are interchangeable by configuration.
+
+Three things this revision decides, so they are not re-litigated by the POC:
+
+1. **The gate holds.** FR-T2's "voice never approves" is unchanged. A voice-only
+   journey that ends in a mutating act — *work on WI-7*, *start a session* —
+   ends in a spoken announcement that a card is waiting and one on-screen tap
+   (FR-M2 pushes the deep link, so the tap is one screen away on the phone).
+   The POC exists partly to find out whether that tap is tolerable in the
+   flow. If it is not, the argument for a *narrow* spoken approval (a
+   read-back of the exact payload plus a per-action spoken nonce) has to be
+   made against FR-T2 in a later revision; it is **not** made here.
+2. **"Claude subscription" is the `claude` CLI, not an HTTP backend.** A
+   subscription has no API surface this product can call, so the way to spend
+   it is the existing `Claude Code (protected)` template — a session, not the
+   assistant loop. That is why FR-T9 asks for provider *profiles* rather than a
+   second transport, and why the r12 deferral of a native Anthropic backend
+   stands. OpenRouter and The Claw Bay are both OpenAI-compatible and are one
+   `base_url` apart.
+3. **A session still needs a project (FR-E3).** *"Research the best risotto in
+   Wollongong"* has none. Rather than a heuristic default cwd — the failure
+   FR-E3 exists to prevent — FR-T11 asks for a configured **scratch project**
+   that a subject-less spoken request resolves to, named as such in the
+   session's name and audit row.
+
+Six requirements are appended and two are revised in place:
+
+| New ID | What it names | Pri |
+|---|---|---|
+| FR-T9 | Assistant provider profiles: named `{base_url, key, default model, effort}` sets, selectable per deployment and per request; OpenAI-compatible only. | M |
+| FR-T10 | A `notifications` read tool in the assistant, over the same projection the Inbox reads (FR-N4), so *"are there any notifications?"* is answered from the server's order, not the model's. | M |
+| FR-T11 | Spoken session spawning: `session.start` gains `model` and `effort`, defaults come from the profile, and a subject-less request resolves to the configured scratch project. Gated by FR-T2. | M |
+| FR-T12 | Server-side voice pipeline: STT and TTS behind OpenAI-compatible audio endpoints (`/audio/transcriptions`, `/audio/speech`), configurable to a cloud provider or a local Whisper.cpp/Kokoro pair; the existing on-device Web Speech / Capacitor path remains as fallback and is chosen per client. | S |
+| FR-T13 | Voice-first journeys as an acceptance list: the five utterances in `VOICE_POC.md` §2 shall each complete by voice alone up to (and only up to) the FR-T2 gate, on the phone and on the desktop, with a domain-vocabulary repair pass (project slugs, `WI-\d+`) between the recognizer and the composer. Absorbs and closes FR-T5's validation clause. | S |
+| FR-M6 | The mobile shell shall keep receiving updates while backgrounded — push (FR-M2) as the wake, a foreground service only for the duration of an active voice conversation, and no always-listening microphone. Push arrivals during an active conversation are spoken. | S |
+
+- **FR-T5** is revised: the push-to-talk and spoken-reply clauses stand; the
+  "validation pass" clause moves to FR-T13, where it is an acceptance list
+  rather than an intention.
+- **FR-E8**'s `session.start` grows `model` and `effort` on every surface (CLI,
+  REST, MCP) — parity is the requirement, so the assistant is not the only
+  caller that can ask.
+
+The POC scope, sequencing and what it must prove are in `docs/VOICE_POC.md`.
+Its outcome is expected to revise this section once more: either FR-T13's
+utterance list is met and the gate tap is fine, or the tap is not fine and
+somebody has to argue with FR-T2.
+
 ---
 
 ---
@@ -989,7 +1051,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | FR-E5 | *(r9)* Sessions started for a project or work item shall register the Vogt MCP server for agents running inside them, carrying a per-session actor-scoped token (FR-S10), so that agent writes to Vogt are attributed to that session's actor. | M | MERGE §6.1 |
 | FR-E6 | *(r9)* Session outcomes — exit code, duration, resulting working-tree delta — shall be collected as observations with freshness and trust, like all other evidence. | S | MERGE §6.2 |
 | FR-E7 | *(r9)* A scheduled agent task may be bound to a project or work item; a bound run's findings shall be recordable as Vogt observations, not only as push notifications. The schedule remains one a person created (§3). | S | MERGE §6.1 |
-| FR-E8 | *(r9)* `session.start`, `session.list`, and `session.stop` shall be operations in the registry, and therefore present with parity on CLI, REST, and MCP (FR-A1). | M | MERGE §6.2 |
+| FR-E8 | *(r9, revised r16)* `session.start`, `session.list`, and `session.stop` shall be operations in the registry, and therefore present with parity on CLI, REST, and MCP (FR-A1). *(r16)* `session.start`'s `model` and `effort` parameters (FR-T11) are part of that parity: every surface may ask, not only the assistant. | M | MERGE §6.2 |
 | FR-E9 | *(r9)* The engine shall remain bootable with vogt-core absent, degrading to plain sessions — absence of the core costs Vogt features, never session availability (the ContextKeeper degrade rule, applied inward). | S | MERGE §11.2 |
 | FR-E10 | *(r11)* Where a deployment enables GUI streaming, it shall work: a launched process shall render and its stream shall be viewable from the GUI surface. The compositor and the streamer are installed in the image and the launch and process APIs are built; production runs with the stream switched off and unverified, so the surface is present and cannot be shown to do anything. Either it is operable in a deployment that asks for it, or the surface is withdrawn. | C | DEPLOYMENT §10.6 |
 | FR-E11 | *(r11)* Two live sessions shall not silently open in the same working tree. Nothing today coordinates between sessions, so two agents can edit one checkout concurrently and neither is told — a class of loss no audit row records, because both writes are legitimate. The requirement is that the second session is *told*, not that it is refused: Vogt reports, it does not enforce (FR-G13). | C | §7 |
@@ -1002,10 +1064,15 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | FR-T2 | *(r9)* Every mutating assistant tool — `send_input`, any `work.*` write, `session.start` — shall pass the pending-action gate: one pending action at a time, carrying the exact payload and target, expiring unapproved, approved only by an on-screen act. No model output shall be able to bypass the gate, and the voice path shall never approve. *(Promoted from the engine's `ASSISTANT.md` threat model.)* | M | MERGE §8.2 |
 | FR-T3 | *(r9)* An assistant-initiated Vogt write shall be audited to the approving user's actor with a `why` derived from the conversational context — never to a shared "assistant" actor. | M | MERGE §8.2, FR-W1 |
 | FR-T4 | *(r9)* Assistant tool results carrying external content — terminal output, forge-derived text, imported issue bodies — shall be delimited as untrusted data; the threat-model rule that external content never becomes instructions extends to every Vogt read. | M | MERGE §8.5 |
-| FR-T5 | *(r9)* The assistant shall be drivable by voice: push-to-talk STT in the mobile shell, spoken replies in any client, with a validation pass against domain vocabulary (project names, "backlog") before v2 ships — voice is adopted unproven and shall not be presumed working. | S | MERGE §8.4; engine ASSISTANT.md |
+| FR-T5 | *(r9, revised r16)* The assistant shall be drivable by voice: push-to-talk STT in the mobile shell, spoken replies in any client. ~~with a validation pass against domain vocabulary (project names, "backlog") before v2 ships~~ — the validation clause is now FR-T13's acceptance list. Voice remains adopted unproven until FR-T13 is met. | S | MERGE §8.4; engine ASSISTANT.md |
 | FR-T6 | *(r9)* The assistant shall not exist unless configured: absent its API key the routes answer 404 and every GUI hides the surface. *(As-built rule, retained.)* | M | engine ASSISTANT.md |
 | FR-T7 | *(revised r12)* A backend that cannot serve the configured model shall refuse with a named reason rather than hang: a `claude-*` model id on the OpenAI-compatible transport answers with the model, the transport and the setting that overrides it. **Delivered.** ~~The tool loop shall additionally be provider-portable, supporting a native Anthropic backend.~~ **That clause is deferred (r12)** — see §3. | C | MERGE §8.4 |
 | FR-T8 | *(r15)* Sessions, Assistant and phone shall render the one existing pending action consistently. Editing is allowed only for a current, unexpired Vogt write and replaces only its reason; the engine shall return the regenerated exact payload for review, and a separate subsequent approval shall be required before the core is called. Terminal input remains the existing pending terminal act, direct session-agent writes remain immediate and audited to the session actor, and no second approval store or route shall exist. | M | RESTRUCTURE Stage 0, Stage 2, Stage 8–9 |
+| FR-T9 | *(r16)* The assistant shall support **named provider profiles** — each an OpenAI-compatible `{base_url, api_key, default_model, default_effort}` set (e.g. `clawbay`, `openrouter`) — with one marked default per deployment and any profile selectable per request by name. A request naming an unknown profile, or a model the profile refuses (FR-T7), shall be refused with the profile named. The transport stays OpenAI-compatible; a Claude subscription is spent through the `claude` CLI session template, not through a profile. `GET /api/config` shall advertise profile names and default models only, never keys. | M | r16; VOICE_POC §3 |
+| FR-T10 | *(r16)* The assistant shall have a read-only `notifications` tool over the Inbox projection (FR-N4): server-ordered, coverage-qualified, bounded to a page. A spoken *"are there any notifications?"* shall be answered with the count, the sources covered and the first few entries, and the answer shall say when a source was not collected rather than reporting it empty. External text in entries is delimited per FR-T4. | M | r16; VOICE_POC §2 |
+| FR-T11 | *(r16)* `session.start` shall accept `model` and `effort` (parity on CLI, REST and MCP per FR-E8), applied to the chosen agent template as that CLI's own flags or env; unset values come from the selected provider profile's defaults (FR-T9), and the applied values shall be recorded on the session and shown in Sessions. A spoken request with no project or work item shall resolve to a configured **scratch project** — a registered project like any other, named in the session name and audit row — and shall be refused with a named reason if none is configured. Starting remains a mutating act behind FR-T2. | M | r16; FR-E3, FR-E8 |
+| FR-T12 | *(r16)* Speech shall be a **server-side pipeline** the engine fronts: `POST /api/assistant/stt` (audio in, text out) and `POST /api/assistant/tts` (text in, audio out), each backed by an OpenAI-compatible audio endpoint (`/audio/transcriptions`, `/audio/speech`) whose base URL and key are configured independently of the chat profile — so a cloud provider and a local Whisper.cpp + Kokoro pair are interchangeable by configuration, as in voicemode. The on-device Web Speech / Capacitor path (FR-T5) remains and each client picks one by capability and setting. Absent configuration the routes answer 404 and the client falls back (FR-T6's rule applied to speech). Audio is not stored unless a debug flag says so. | S | r16; voicemode; VOICE_POC §3 |
+| FR-T13 | *(r16)* The five voice-first utterances in `VOICE_POC.md` §2 shall each complete by voice alone — recognizer → repair → assistant → spoken reply — on the phone shell and on the desktop, up to and only up to the FR-T2 gate, which is announced and resolved on screen. Between recognizer and composer there shall be a **repair pass** that normalises project slugs against `project.list` and repairs `WI-\d+` forms, showing the repaired text before it is sent. This is the validation pass FR-T5 promised, made into an acceptance list; until it passes, voice is presumed not working. | S | r16; FR-T5; VOICE_POC §5 |
 
 ### FR-M — Mobile surface *(r9)*
 
@@ -1016,6 +1083,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | FR-M3 | *(r9)* Vogt surfaces shall be usable at phone widths; the board shall render as a list, not columns, below the narrow breakpoint. | S | MERGE §7 |
 | FR-M4 | *(r11)* A dev build of the mobile shell shall install alongside a prod build on one device **and register for push**. The id and the front door are already build inputs (`MYDEVENV2_ANDROID_APP_ID`, `VOGT_ANDROID_SERVER_URL`); what is missing is an FCM client entry for the dev id, since `google-services.json` is keyed to the application id. Until it exists, validating a mobile change means uninstalling the working app — which is why FR-M2's push routing and FR-T5's voice pass are both unverified on hardware. The signing key may be shared. | S | §7 |
 | FR-M5 | *(r15)* On narrow/coarse clients, the four primary places shall use a text-labelled bottom bar for Sessions, Inbox, Board and Backlog. Every secondary route shall remain reachable through a labelled “Go to…” control or a contextual link, including Projects, Audit, Settings, work items and all Sessions tools; push shall open the current pending action through its deep link. There shall be no approval-by-voice path. | S | RESTRUCTURE Stage 0, Stage 9 |
+| FR-M6 | *(r16)* The mobile shell shall keep receiving updates while backgrounded. The wake is push (FR-M2), not polling; while a voice conversation is active the shell shall hold an Android foreground service (with the required persistent notification) so audio capture, TTS playback and the assistant socket survive screen-off, and shall release it when the conversation ends. There shall be **no always-listening microphone** and no wake word. A push that arrives during an active conversation shall be spoken as well as shown; a push that arrives outside one behaves as FR-M2. Battery cost of a held service shall be measured in the POC before it ships. | S | r16; VOICE_POC §4 |
 
 ---
 
@@ -1229,6 +1297,11 @@ Deferred by revision r12:
   a second client to route around somebody else's broken route is a fix that
   outlives its problem. Reversed by a use that wants Anthropic tool-calling
   specifically; the ID is unchanged and r12 is the argument to beat.
+  *(r16 note: FR-T9 asks for **provider profiles**, not a second transport.
+  OpenRouter and The Claw Bay are both OpenAI-compatible, and a Claude
+  subscription is reached through the `claude` CLI, not an HTTP API — so r16
+  leaves this deferral standing and routes around it rather than reversing
+  it. See r16.)*
 
 Named stretch goal, **not committed and not designed for**:
 
@@ -2181,13 +2254,14 @@ the requirement's own.
 | **FR-D9** | C | Any producer of a `declared` dependency edge. | A dependency expressed only in a deploy script or a person's head is invisible to `deps` and to the reverse lookup. |
 | **FR-E10** | C | An operable GUI stream. The compositor and streamer are in the image, the launch and process APIs are built, production runs `START_SWAY=0` and `GUI_STREAM_URL=""`. | A surface exists that has never been shown to do anything. |
 | **FR-E11** | C | Any signal that two live sessions share a working tree. Nothing in `sessions.py` or the engine's registry compares a new session's `cwd` against the live ones. | Two agents can edit one checkout concurrently and neither is told. No audit row records the loss, because both writes are legitimate. |
-| **FR-N4** | M | A first `inbox.list` registry projection now exists, but it still lacks the complete four-source, material-versioned, high-water/keyset contract and bounded-read proof. | A client-side merge would misorder, duplicate or silently omit attention and could confuse collected-empty with not-collected. |
-| **FR-N5** | M | The registry and audited archive/snooze/restore path now exist, but occurrence snapshots, material resurface semantics and the full triage contract still need completion. | Attention decisions would either disappear on re-observation or become unaudited client fiction. |
-| **FR-U23** | M | A first stable places shell now exists, but Sessions panes/tools and idempotent migration from `mydevenv2.tabs.v1` are not complete. | A route or machine capability can still be stranded by closing a product tab or by a malformed migration. |
-| **FR-U24** | M | The Inbox now consumes `inbox.list` and has basic triage controls, but coverage/provenance, evidence-before-action, and shared pointer, keyboard and batch reason paths remain incomplete. | Duplicate drift resolution and unqualified empty states would make the attention surface misleading. |
-| **FR-U25** | S | A measured Board prototype exists, but the shared production-tested window is not yet integrated with Backlog and bounded server reads remain incomplete. | Long content can clip or make scroll offsets wrong; a DOM window over an unbounded read still fails the scale contract. |
-| **FR-T8** | M | The engine PATCH and Assistant reason-update path now exist, but Sessions, phone, push deep links and end-to-end exact-payload tests remain incomplete. | A second client path could approve a stale or altered payload, or imply that voice/direct agent writes share the human gate. |
-| **FR-M5** | S | The responsive places shell now has a first phone navigation path, but labelled secondary-route reachability, current-action push deep links and device evidence remain incomplete. | A phone user can land in a surface with no way to reach settings, audit, projects or machine tools. |
+| **FR-N4** | M | `inbox.list` now returns all four source coverages, a stable snapshot time, per-source high-water marks and an opaque keyset cursor. Collector/storage reads still use bounded `MAX_SCAN` windows rather than a proven end-to-end bounded-read path. | A client-side merge would misorder, duplicate or silently omit attention and could confuse collected-empty with not-collected; the remaining risk is scale beyond the current scan cap. |
+| **FR-N5** | M | The registry, occurrence snapshots, material entry identities and audited archive/snooze/restore path now exist. Full changed-material re-observation and non-drift resurface coverage still need a complete integration proof. | Attention decisions could disappear on re-observation or become unaudited client fiction if material identity regresses. |
+| **FR-U23** | M | Stable places, Sessions tools, recent-place links and the `mydevenv2.tabs.v1` migration now exist. Storage-write failure/retry coverage and the complete route matrix remain. | A route or machine capability could still be stranded by an incomplete migration or an untested secondary route. |
+| **FR-U24** | M | The Inbox now consumes only `inbox.list`, shows four-source coverage and evidence before action, and supports pointer, keyboard, batch, adopt, suppress and singular drift-resolution reason paths. SSE draft-protection and partial-failure integration coverage remain. | Duplicate drift resolution and unqualified empty states would make the attention surface misleading. |
+| **FR-U25** | S | Measured content-sized windows now serve Board and Backlog, including ResizeObserver measurement and scroll anchoring. Server-side bounded reads and a large-estate browser proof remain incomplete. | Long content can clip or make scroll offsets wrong; a DOM window over an unbounded read still fails the scale contract. |
+| **FR-T8** | M | The engine PATCH and Assistant reason-update path now render in Sessions, with exact-payload approval tests. Phone/push deep-link and live-stack evidence remain. | A second client path could approve a stale or altered payload, or imply that voice/direct agent writes share the human gate. |
+| **FR-M5** | S | The responsive places shell now has labelled primary navigation, Go to reachability, recent places and browser route checks. Current-action push deep links and device evidence remain. | A phone user can land in a surface with no way to reach settings, audit, projects or machine tools. |
+| **FR-T9–T13, FR-M6** | M/S | *(r16)* Everything. Named on 2026-08-17; the POC in `VOICE_POC.md` is the first delivery step and nothing in the tree yet meets any of them. | Voice stays a button on a chat tab; a session's model is whatever the template hard-codes; "any notifications?" has no tool to answer it. |
 
 ### 7.2 Owed, and blocked on something that is not code
 
@@ -2197,8 +2271,8 @@ the source closes them, which is why §6 counts their conjuncts apart.
 
 | Gap | Stage | What it needs | Status |
 |---|---|---|---|
-| **The browser demo** — a drag round-trips a `work.transition`, a refused one rolls back with the server's reason, a filtered board URL restores its view after reload | M11 | A person, a browser | Outstanding. 75 jsdom tests now assert the semantics; what they cannot fire is `dragover`, whose `preventDefault` is what lets a browser deliver a drop at all. No CSS is loaded, so every layout claim — FR-M3's phone width, NFR-S5's behaviour at scale — is still the demo's. |
-| **The restructure conformance demo** — Inbox cursor continuation while new facts arrive, stable places and migration, measured Board/Backlog content, and the full route matrix | M11 | A browser with CSS and a fixture estate | Outstanding. Partial shell, Inbox and measured-window code is not evidence of the server contract or browser layout. |
+| **The browser demo** — a drag round-trips a `work.transition`, a refused one rolls back with the server's reason, a filtered board URL restores its view after reload | M11 | A person, a browser | Automated Chromium coverage now exercises real desktop drag/drop, refusal composer entry, filter reload, Inbox evidence/actions and phone navigation. Refusal round-trip against a live server, large-estate layout inspection and the full manual route sweep remain. |
+| **The restructure conformance demo** — Inbox cursor continuation while new facts arrive, stable places and migration, measured Board/Backlog content, and the full route matrix | M11 | A browser with CSS and a fixture estate | Partial. The browser suite now covers fixture-backed Board, Inbox and phone paths; server high-water continuation while facts arrive, large measured estates and the complete route matrix still need evidence. |
 | **The phone demo** — a push arrives, is opened, and the session is unblocked | M13 | A device, the APK, a hand | Outstanding. The APK builds in CI. Blocked in practice by FR-M4. |
 | **Real-device FCM delivery** (FR-M2) | M13 | The same device | Outstanding. `google-services.json` carries the client; first-launch registration and end-to-end delivery are unconfirmed. |
 

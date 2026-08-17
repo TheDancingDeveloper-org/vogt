@@ -330,6 +330,327 @@ textarea {
   flex-direction: column;
 }
 
+.places-recent {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 22%;
+  overflow-y: auto;
+}
+
+.places-recent a {
+  padding: 5px 8px;
+  color: var(--fg-muted);
+  border-radius: 5px;
+  text-decoration: none;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.places-recent a:hover,
+.places-recent a:focus-visible {
+  color: var(--fg);
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.sessions-pending {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 16px;
+  padding: 14px;
+  border: 1px solid var(--activity-waiting);
+  border-radius: 8px;
+  background: rgba(210, 153, 34, 0.1);
+}
+
+.sessions-pending-stale {
+  opacity: 0.7;
+}
+
+.sessions-pending h2 {
+  margin: 2px 0 8px;
+  font-size: 16px;
+}
+
+.sessions-pending pre {
+  max-width: min(640px, 70vw);
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.sessions-pending-reason {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 640px;
+  margin-top: 10px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.sessions-pending-reason textarea {
+  min-width: min(520px, 70vw);
+  resize: vertical;
+}
+
+.sessions-pending-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+/* -- the canonical attention Inbox -------------------------------------- */
+
+.inbox-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.inbox-surface > .place-header {
+  flex: 0 0 auto;
+}
+
+.inbox-filter,
+.inbox-entry-actions label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.inbox-filter select,
+.inbox-entry-actions input,
+.inbox-batch input {
+  min-height: 32px;
+  padding: 6px 8px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--bd);
+  border-radius: 5px;
+  font: inherit;
+}
+
+.inbox-batch {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+
+.inbox-batch span {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.inbox-batch input {
+  flex: 1 1 240px;
+}
+
+.inbox-coverage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+
+.inbox-coverage h2,
+.inbox-coverage p {
+  margin: 0;
+}
+
+.inbox-coverage h2 {
+  font-size: 15px;
+}
+
+.inbox-scope,
+.inbox-view-age {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.inbox-coverage-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.inbox-coverage-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px;
+  border-left: 3px solid var(--bd-strong);
+  background: var(--bg);
+  font-size: 11px;
+}
+
+.inbox-coverage-item strong {
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.inbox-coverage-item span {
+  color: var(--fg-muted);
+}
+
+.inbox-coverage-current {
+  border-left-color: var(--activity-done);
+}
+
+.inbox-coverage-failed,
+.inbox-coverage-unconfigured {
+  border-left-color: var(--activity-waiting);
+}
+
+.inbox-coverage-unswept,
+.inbox-coverage-missing {
+  border-left-color: var(--activity-running);
+}
+
+.inbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inbox-entry {
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+
+.inbox-entry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.inbox-entry-unseen {
+  border-left: 3px solid var(--accent);
+}
+
+.inbox-entry-mark {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: var(--activity-idle);
+}
+
+.inbox-entry-unseen .inbox-entry-mark {
+  background: var(--accent);
+}
+
+.inbox-entry-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inbox-entry-heading,
+.inbox-entry-meta,
+.inbox-entry-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.inbox-entry-heading h2 {
+  flex: 1 1 240px;
+  margin: 0;
+  font-size: 15px;
+}
+
+.inbox-source {
+  padding: 2px 6px;
+  border: 1px solid var(--bd-strong);
+  border-radius: 10px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.inbox-entry-summary {
+  margin: 0;
+  color: var(--fg);
+}
+
+.inbox-entry-meta {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.inbox-entry-actions {
+  align-items: flex-end;
+  padding-top: 4px;
+  border-top: 1px solid var(--bd);
+}
+
+.inbox-entry-actions label {
+  flex: 1 1 220px;
+}
+
+.inbox-entry-actions button {
+  min-height: 32px;
+}
+
+.inbox-evidence {
+  padding: 8px;
+  border-left: 3px solid var(--activity-running);
+  background: var(--bg);
+}
+
+.inbox-evidence pre {
+  max-height: 180px;
+  margin: 6px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg-muted);
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.inbox-outage,
+.inbox-empty {
+  padding: 14px;
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+
+.inbox-outage h2,
+.inbox-outage p,
+.inbox-empty {
+  margin-top: 0;
+}
+
+.inbox-load-more {
+  align-self: center;
+}
+
 @media (max-width: 768px) {
   .app {
     grid-template-columns: 1fr;
@@ -338,9 +659,30 @@ textarea {
   .places-rail {
     display: none;
   }
+
+  .inbox-surface {
+    padding: 10px;
+  }
+
+  .inbox-coverage-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .inbox-entry-actions {
+    align-items: stretch;
+  }
+
+  .inbox-entry-actions button,
+  .inbox-entry-actions label {
+    flex: 1 1 100%;
+  }
 }
 
 .phone-bottom-nav {
+  display: none;
+}
+
+.mobile-go-to {
   display: none;
 }
 
@@ -478,6 +820,21 @@ textarea {
   }
   .main {
     padding-bottom: calc(58px + var(--safe-bottom));
+  }
+  .mobile-go-to {
+    display: block;
+    align-self: flex-start;
+    margin: 8px 10px 0;
+  }
+  .sessions-pending {
+    flex-direction: column;
+  }
+  .sessions-pending-actions {
+    width: 100%;
+  }
+  .sessions-pending-actions button {
+    flex: 1;
+    min-height: 44px;
   }
 }
 
@@ -4744,8 +5101,9 @@ textarea {
  * Every selector here is prefixed `vogt-backlog-` on purpose: the Vogt
  * surfaces are being built in parallel, and a shared `.vogt-*` vocabulary
  * would be three authors editing the same rules. The row grid is the one
- * load-bearing part — `--vogt-row-h` must match `ROW_HEIGHT` in
- * `Backlog.tsx`, because the virtualized list computes its window from it.
+ * load-bearing part — `--vogt-row-h` is the layout-free seed used by
+ * `Backlog.tsx`; rendered rows report their actual height to the measured
+ * window, so this is not a fixed design height.
  */
 
 .vogt-backlog {
@@ -5049,7 +5407,9 @@ textarea {
   align-items: center;
   gap: 8px;
   padding: 0 10px;
-  height: var(--vogt-row-h);
+  min-height: var(--vogt-row-h);
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 .vogt-backlog-headrow {
@@ -5289,10 +5649,9 @@ textarea {
    do the same thing more thoroughly. The select box stays so bulk actions
    remain possible.
 
-   `--vogt-row-h` is deliberately untouched: `Backlog.tsx` computes the
-   virtualizer's window from `ROW_HEIGHT`, and a row that is 40px to the
-   scroller and something else on screen renders a list that skips and
-   repeats. Phone-width work here is column count, never row height. */
+   The estimate is deliberately untouched: `Backlog.tsx` computes the
+   measured window from it before each row reports its real height. Phone-width
+   work here is column count, never a forced row height. */
 @media (max-width: 768px) {
   .vogt-backlog {
     padding: 10px;

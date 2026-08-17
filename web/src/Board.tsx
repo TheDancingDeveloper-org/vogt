@@ -1669,7 +1669,7 @@ const Board: Component<Props> = (props) => {
         {(message) => <div class="board-banner board-banner--ok">{message()}</div>}
       </Show>
 
-      <div class="board-toolbar">
+      <div class="board-toolbar" role="group" aria-label="Board filters">
         <label class="board-field">
           <span>Project</span>
           {/* Selection is declared on the options rather than on the select.

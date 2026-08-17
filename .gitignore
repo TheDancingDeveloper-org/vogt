@@ -45,3 +45,4 @@ mobile/dist/
 *.swp
 .idea/
 .vscode/
+web/test-results/

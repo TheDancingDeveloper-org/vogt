@@ -1,11 +1,14 @@
-import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
+import { Component, For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 import {
   VogtUnavailable,
+  adoptInbox,
   archiveInbox,
   listInbox,
+  resolveInboxDrift,
   restoreInbox,
   snoozeInbox,
+  suppressInbox,
   type InboxEntry,
   type InboxListResult,
   type InboxSourceCoverage,
@@ -60,20 +63,32 @@ const Coverage: Component<{ result: InboxListResult }> = (props) => (
         <span>{props.result.engine_available === false ? "Not available: live session attention cannot be read." : "Live session coverage is reported by the server."}</span>
       </div>
     </div>
-    <p class="inbox-view-age">Inbox response: {age(props.result.snapshot_at)}</p>
+    <p class="inbox-view-age">
+      Inbox response: {age(props.result.snapshot_at)}
+      <Show when={props.result.high_water}>
+        {(water) => <span> · source high-water: {Object.values(water()).filter(Boolean).length}/4 reported</span>}
+      </Show>
+    </p>
   </section>
 );
 
 interface EntryProps {
   entry: InboxEntry;
   seen: boolean;
+  selected: boolean;
   busy: boolean;
+  onSelect: (entry: InboxEntry) => void;
   onOpen: (entry: InboxEntry) => void;
   onTriage: (
     entry: InboxEntry,
     action: "archive" | "snooze" | "restore",
     reason: string,
     until?: string,
+  ) => void;
+  onAction: (
+    entry: InboxEntry,
+    action: "adopt" | "suppress" | "accept" | "reject",
+    reason: string,
   ) => void;
 }
 
@@ -92,15 +107,38 @@ const Entry: Component<EntryProps> = (props) => {
       action === "snooze" ? new Date(until()).toISOString() : undefined,
     );
   };
+  const submitAction = (action: "adopt" | "suppress" | "accept" | "reject") =>
+    props.onAction(props.entry, action, reason());
   return (
-    <article class={`inbox-entry ${props.seen ? "inbox-entry-seen" : "inbox-entry-unseen"}`}>
+    <article
+      class={`inbox-entry ${props.seen ? "inbox-entry-seen" : "inbox-entry-unseen"}`}
+      data-entry-key={props.entry.entry_key}
+      tabIndex={0}
+    >
       <div class="inbox-entry-mark" aria-label={props.seen ? "Seen" : "Unread"} />
       <div class="inbox-entry-body">
         <div class="inbox-entry-heading">
+          <input
+            type="checkbox"
+            aria-label={`Select ${props.entry.title}`}
+            checked={props.selected}
+            onChange={() => props.onSelect(props.entry)}
+          />
           <span class="inbox-source">{props.entry.source}</span>
           <h2>{props.entry.title}</h2>
         </div>
         <p class="inbox-entry-summary">{props.entry.summary ?? "No summary was provided by the server."}</p>
+        <Show when={props.entry.evidence_snapshot || props.entry.proposed_change}>
+          <section class="inbox-evidence" aria-label="Drift evidence">
+            <strong>Evidence before action</strong>
+            <Show when={props.entry.evidence_snapshot}>
+              {(evidence) => <pre>{JSON.stringify(evidence(), null, 2)}</pre>}
+            </Show>
+            <Show when={props.entry.proposed_change}>
+              {(change) => <pre>Proposed change: {JSON.stringify(change(), null, 2)}</pre>}
+            </Show>
+          </section>
+        </Show>
         <div class="inbox-entry-meta">
           <span>Occurred {age(props.entry.occurred_at)}</span>
           <Show when={props.entry.observed_at}><span>Observed {age(props.entry.observed_at)}</span></Show>
@@ -117,6 +155,7 @@ const Entry: Component<EntryProps> = (props) => {
           <label>
             <span>Reason</span>
             <input
+              id={`inbox-reason-${encodeURIComponent(props.entry.entry_key)}`}
               value={reason()}
               onInput={(event) => setReason(event.currentTarget.value)}
               placeholder="Why this triage decision?"
@@ -129,6 +168,14 @@ const Entry: Component<EntryProps> = (props) => {
               <input type="datetime-local" value={until()} onInput={(event) => setUntil(event.currentTarget.value)} />
             </label>
             <button type="button" disabled={props.busy} onClick={() => submit("snooze")}>Snooze</button>
+            <Show when={props.entry.action?.kind === "observation"}>
+              <button type="button" disabled={props.busy} onClick={() => submitAction("adopt")}>Adopt as work item</button>
+              <button type="button" disabled={props.busy} onClick={() => submitAction("suppress")}>Suppress source</button>
+            </Show>
+            <Show when={props.entry.action?.kind === "drift" && props.entry.evidence_snapshot && props.entry.proposed_change}>
+              <button type="button" disabled={props.busy} onClick={() => submitAction("accept")}>Accept proposed change</button>
+              <button type="button" disabled={props.busy} onClick={() => submitAction("reject")}>Reject proposed change</button>
+            </Show>
           </Show>
           <Show when={props.entry.triage_state !== "active"}>
             <button type="button" disabled={props.busy} onClick={() => submit("restore")}>Restore</button>
@@ -149,6 +196,10 @@ const Inbox: Component<Props> = (props) => {
   const [seen, setSeen] = createSignal<Set<string>>(new Set<string>());
   const [source, setSource] = createSignal("");
   const [triaging, setTriaging] = createSignal<string | null>(null);
+  const [selected, setSelected] = createSignal<Set<string>>(new Set<string>());
+  const [batchReason, setBatchReason] = createSignal("");
+  const [batchBusy, setBatchBusy] = createSignal(false);
+  const [focusedIndex, setFocusedIndex] = createSignal(0);
 
   const seenKey = "mydevenv2.inbox.seen.v1";
   const readSeen = () => {
@@ -173,12 +224,14 @@ const Inbox: Component<Props> = (props) => {
     setLoading(true);
     setFailure(null);
     try {
+      const query = new URLSearchParams(location.search);
+      const selectedSource = query.get("source") ?? source();
       const next = await listInbox({
         limit: 50,
         cursor: nextCursor ?? undefined,
-        sources: source() || undefined,
-        project: new URLSearchParams(location.search).get("project") ?? undefined,
-        work_item: new URLSearchParams(location.search).get("work_item") ?? undefined,
+        sources: selectedSource || undefined,
+        project: query.get("project") ?? undefined,
+        work_item: query.get("work_item") ?? undefined,
       });
       setResult(nextCursor ? { ...next, entries: [...(result()?.entries ?? []), ...next.entries] } : next);
       setCursor(next.next_cursor ?? null);
@@ -199,10 +252,90 @@ const Inbox: Component<Props> = (props) => {
   createEffect(() => {
     location.pathname;
     location.search;
+    setSource(new URLSearchParams(location.search).get("source") ?? "");
     readSeen();
     void load();
   });
   onCleanup(onVogtChanged(() => { if (!loading()) void load(); }));
+
+  const entries = () => result()?.entries ?? [];
+  const toggleSelected = (entry: InboxEntry) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(entry.entry_key)) next.delete(entry.entry_key);
+      else next.add(entry.entry_key);
+      return next;
+    });
+  };
+
+  const archiveSelected = async () => {
+    const reason = batchReason().trim();
+    const keys = [...selected()];
+    if (!keys.length) return;
+    if (!reason) {
+      props.onError?.("A reason is required for the batch Inbox decision.");
+      return;
+    }
+    setBatchBusy(true);
+    const failed: string[] = [];
+    try {
+      for (const key of keys) {
+        try {
+          await archiveInbox(key, reason);
+        } catch {
+          failed.push(key);
+        }
+      }
+      setSelected(new Set(failed));
+      setBatchReason("");
+      if (failed.length) props.onError?.(`${failed.length} Inbox archive(s) were refused; the selection was retained.`);
+      await load();
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
+  const archiveRead = async () => {
+    const readKeys = entries()
+      .filter((entry) => seen().has(entry.entry_key) && entry.triage_state === "active")
+      .map((entry) => entry.entry_key);
+    setSelected(new Set(readKeys));
+    if (readKeys.length) await archiveSelected();
+  };
+
+  const focusEntry = (index: number) => {
+    const bounded = Math.max(0, Math.min(index, entries().length - 1));
+    setFocusedIndex(bounded);
+    const entry = entries()[bounded];
+    if (entry) {
+      document.querySelector<HTMLElement>(`[data-entry-key="${CSS.escape(entry.entry_key)}"]`)?.focus();
+    }
+  };
+
+  const focusReason = (index: number) => {
+    const entry = entries()[Math.max(0, Math.min(index, entries().length - 1))];
+    if (!entry) return;
+    document.getElementById(`inbox-reason-${encodeURIComponent(entry.entry_key)}`)?.focus();
+  };
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
+    const key = event.key.toLowerCase();
+    if (key === "j" || key === "arrowdown") {
+      event.preventDefault();
+      focusEntry(focusedIndex() + 1);
+    } else if (key === "k" || key === "arrowup") {
+      event.preventDefault();
+      focusEntry(focusedIndex() - 1);
+    } else if (key === "e" || key === "s" || key === "r") {
+      event.preventDefault();
+      focusReason(focusedIndex());
+    }
+  };
+  onMount(() => {
+    window.addEventListener("keydown", onKeyDown);
+    onCleanup(() => window.removeEventListener("keydown", onKeyDown));
+  });
 
   const openEntry = (entry: InboxEntry) => {
     writeSeen(entry.entry_key);
@@ -233,6 +366,32 @@ const Inbox: Component<Props> = (props) => {
     }
   };
 
+  const action = async (
+    entry: InboxEntry,
+    kind: "adopt" | "suppress" | "accept" | "reject",
+    reason: string,
+  ) => {
+    if (!reason.trim()) {
+      props.onError?.("A reason is required for every Inbox decision.");
+      return;
+    }
+    setTriaging(entry.entry_key);
+    try {
+      const target = entry.action?.subject_key ?? entry.source_subject_key;
+      if (!target) throw new Error("Inbox entry has no adoptable source subject.");
+      if (kind === "adopt") await adoptInbox(target, reason);
+      else if (kind === "suppress") await suppressInbox(target, reason);
+      else if (entry.action?.kind === "drift" && entry.action.drift_id) {
+        await resolveInboxDrift(entry.action.drift_id, kind === "accept" ? "accepted" : "rejected", reason);
+      }
+      await load();
+    } catch (error) {
+      props.onError?.(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTriaging(null);
+    }
+  };
+
   return (
     <section class="vogt-surface inbox inbox-surface" aria-label="Inbox">
       <header class="place-header">
@@ -249,6 +408,21 @@ const Inbox: Component<Props> = (props) => {
           </select>
         </label>
       </header>
+      <div class="inbox-batch" aria-label="Batch Inbox actions">
+        <span>{selected().size} selected</span>
+        <input
+          aria-label="Batch reason"
+          value={batchReason()}
+          onInput={(event) => setBatchReason(event.currentTarget.value)}
+          placeholder="Reason for selected archive…"
+        />
+        <button type="button" disabled={batchBusy() || selected().size === 0} onClick={() => void archiveSelected()}>
+          {batchBusy() ? "Archiving…" : "Archive selected"}
+        </button>
+        <button type="button" disabled={batchBusy() || !entries().some((entry) => seen().has(entry.entry_key) && entry.triage_state === "active")} onClick={() => void archiveRead()}>
+          Archive read
+        </button>
+      </div>
       <Show when={result()}>{(answer) => <Coverage result={answer()} />}</Show>
       <Show when={failure()}>
         {(error) => (
@@ -264,8 +438,8 @@ const Inbox: Component<Props> = (props) => {
         <p class="inbox-empty">No normalized entries were returned. Check the coverage cards above: a covered-empty source is different from a source that was not collected.</p>
       </Show>
       <div class="inbox-list" aria-live="polite">
-        <For each={result()?.entries ?? []}>
-          {(entry) => <Entry entry={entry} seen={seen().has(entry.entry_key)} busy={triaging() === entry.entry_key} onOpen={openEntry} onTriage={triage} />}
+        <For each={entries()}>
+          {(entry, index) => <Entry entry={entry} seen={seen().has(entry.entry_key)} selected={selected().has(entry.entry_key)} busy={triaging() === entry.entry_key} onSelect={toggleSelected} onOpen={(value) => { setFocusedIndex(index()); openEntry(value); }} onTriage={triage} onAction={action} />}
         </For>
       </div>
       <Show when={result()?.next_cursor}>

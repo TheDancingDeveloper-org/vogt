@@ -970,6 +970,8 @@ uv run python scripts/check_docs.py
 
 cd web
 pnpm typecheck
+pnpm test
+pnpm test:browser
 pnpm build
 
 cd ../engine

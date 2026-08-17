@@ -108,6 +108,41 @@ export interface FakeVogt {
   engineCalls: RecordedCall[];
 }
 
+export const INBOX_ENTRY = {
+  entry_key: "drift:proposal-1:material-v1",
+  source: "drift",
+  kind: "state_mismatch",
+  occurred_at: "2026-08-17T10:00:00Z",
+  observed_at: "2026-08-17T10:01:00Z",
+  title: "Work item state differs from observed state",
+  summary: "Observed state is done; declared state is in_progress.",
+  project_slug: "vogt",
+  work_item_ref: "WI-7",
+  source_subject_key: "proposal-1",
+  trust_state: "disputed",
+  freshness: "current",
+  triage_state: "active",
+  action: { kind: "drift", drift_id: "proposal-1" },
+  evidence_snapshot: { observed_state: "done", observed_at: "2026-08-17T10:00:00Z" },
+  proposed_change: { state: "done" },
+};
+
+export const INBOX_RESULT = {
+  entries: [INBOX_ENTRY],
+  snapshot_at: "2026-08-17T10:01:00Z",
+  high_water: { github: null, drift: "2026-08-17T10:00:00Z", ci: null, agent: null },
+  coverage: {
+    github: { status: "unswept", count: 0, detail: "not collected" },
+    drift: { status: "current", count: 1 },
+    ci: { status: "unswept", count: 0, detail: "not collected" },
+    agent: { status: "unconfigured", count: 0, detail: "no engine" },
+  },
+  counts: { active: 1, archived: 0, snoozed: 0 },
+  instance_scope: "registered projects only",
+  engine_status: "not_configured",
+  engine_available: false,
+};
+
 // -- the event stream (FR-U10) ----------------------------------------------
 //
 // The engine's `/api/events` is not a Vogt path, so it is not in the route
