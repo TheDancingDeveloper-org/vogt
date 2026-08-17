@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics><style>
+body{margin:0;background:#0d1117;color:#c9d1d9;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}
+*{box-sizing:border-box}
+a{color:#58a6ff;text-decoration:none}a:hover{color:#79b8ff}
+</style></helmet>
+
+<div style="display:flex;height:100vh;min-height:0;background:#0d1117;overflow:hidden">
+
+  <sc-if value="{{ showRail }}" hint-placeholder-val="{{ true }}">
+  <nav style="width:248px;flex:none;border-right:1px solid #30363d;background:#0d1117;display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;align-items:center;gap:9px;height:53px;padding:0 14px;border-bottom:1px solid #30363d">
+      <span style="font-size:14px;font-weight:600;letter-spacing:.02em;color:#c9d1d9">Vogt</span>
+      <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:#8b949e">r4</span>
+    </div>
+
+    <div style="padding:14px 8px 6px 14px;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#6e7681">Work</div>
+    <button type="button" style="display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;font:inherit;font-size:13px;color:#8b949e;background:transparent;border:0;border-left:2px solid transparent;padding:8px 14px 8px 12px;cursor:pointer" style-hover="color:#c9d1d9;background:#161b22">Board</button>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;font-size:13px;color:#c9d1d9;background:#161b22;border-left:2px solid #58a6ff;padding:8px 14px 8px 12px">
+      <span style="font-weight:600">Backlog</span><span style="font-size:11px;color:#6e7681">{{ rowCount }}</span>
+    </div>
+    <button type="button" style="display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;font:inherit;font-size:13px;color:#8b949e;background:transparent;border:0;border-left:2px solid transparent;padding:8px 14px 8px 12px;cursor:pointer" style-hover="color:#c9d1d9;background:#161b22">
+      <span>Inbox</span><span style="min-width:20px;padding:0 6px;border-radius:9px;background:#f85149;color:#0d1117;font-size:10.5px;font-weight:700;line-height:18px;text-align:center">9</span>
+    </button>
+
+    <div style="padding:16px 8px 6px 14px;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#6e7681">Estate</div>
+    <button type="button" style="display:flex;align-items:center;gap:8px;width:100%;text-align:left;font:inherit;font-size:13px;color:#8b949e;background:transparent;border:0;border-left:2px solid transparent;padding:8px 14px 8px 12px;cursor:pointer" style-hover="color:#c9d1d9;background:#161b22">Projects</button>
+    <button type="button" style="display:flex;align-items:center;gap:8px;width:100%;text-align:left;font:inherit;font-size:13px;color:#8b949e;background:transparent;border:0;border-left:2px solid transparent;padding:8px 14px 8px 12px;cursor:pointer" style-hover="color:#c9d1d9;background:#161b22">Audit</button>
+
+    <div style="display:flex;align-items:center;gap:6px;padding:16px 10px 5px 14px">
+      <span style="font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#6e7681">Sessions</span>
+      <span style="font-size:10.5px;color:#484f58">4</span>
+    </div>
+    <div style="display:flex;flex-direction:column;max-height:150px;overflow-y:auto">
+      <sc-for list="{{ sessions }}" as="s" hint-placeholder-count="4">
+        <button type="button" onClick="{{ s.open }}" title="{{ s.title }}" style="{{ s.style }}" style-hover="background:#161b22">
+          <span style="{{ s.dotStyle }}"></span>
+          <span style="{{ s.contStyle }}">{{ s.continuity }}</span>
+          <span style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;text-align:left">
+            <span style="font-size:12.5px;color:#c9d1d9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.name }}</span>
+            <span style="font-size:10.5px;color:#6e7681;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.cwd }}</span>
+          </span>
+        </button>
+      </sc-for>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:6px;padding:14px 10px 5px 14px;border-top:1px solid #21262d;margin-top:8px">
+      <span style="font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#6e7681">Files</span>
+    </div>
+    <div style="flex:1;min-height:70px;overflow-y:auto;padding-bottom:6px">
+      <sc-for list="{{ tree }}" as="node" hint-placeholder-count="8">
+        <button type="button" onClick="{{ node.click }}" title="{{ node.path }}" style="{{ node.style }}" style-hover="background:#161b22;color:#c9d1d9">
+          <span style="width:12px;flex:none;color:#6e7681;font-size:10px">{{ node.caret }}</span>
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">{{ node.name }}</span>
+        </button>
+      </sc-for>
+    </div>
+
+    <div style="border-top:1px solid #30363d;padding:11px 14px;display:flex;align-items:center;gap:8px">
+      <span style="width:7px;height:7px;border-radius:50%;background:#3fb950"></span>
+      <span style="font-size:11.5px;color:#8b949e">connected</span>
+    </div>
+  </nav>
+  </sc-if>
+
+  <main style="flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden">
+
+    <header style="display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid #30363d;flex-wrap:wrap">
+      <h2 style="margin:0;font-size:20px;font-weight:600;color:#c9d1d9">Backlog</h2>
+      <div style="display:flex;border:1px solid #30363d;border-radius:5px;overflow:hidden">
+        <sc-for list="{{ views }}" as="v" hint-placeholder-count="3">
+          <button type="button" onClick="{{ v.pick }}" style="{{ v.style }}">{{ v.label }}</button>
+        </sc-for>
+      </div>
+      <span style="padding:1px 8px;border:1px solid #3fb950;border-radius:10px;font-size:12px;color:#3fb950;white-space:nowrap">live · polled 4s ago</span>
+      <div style="flex:1"></div>
+      <button type="button" onClick="{{ toggleWhy }}" style="border:1px solid #30363d;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:12px;padding:5px 10px;cursor:pointer" style-hover="background:#1c232c">{{ whyLabel }}</button>
+      <button type="button" onClick="{{ toggleWeights }}" style="border:1px solid #30363d;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:12px;padding:5px 10px;cursor:pointer" style-hover="background:#1c232c">Weights ▾</button>
+    </header>
+
+    <div style="display:flex;align-items:center;gap:7px;padding:9px 18px;border-bottom:1px solid #21262d;flex-wrap:wrap">
+      <sc-for list="{{ chips }}" as="chip" hint-placeholder-count="2">
+        <button type="button" onClick="{{ chip.drop }}" style="border:1px solid #484f58;border-radius:12px;background:#161b22;color:#c9d1d9;font:inherit;font-size:11.5px;padding:2px 9px;cursor:pointer" style-hover="border-color:#f85149;color:#ff7b72">{{ chip.label }} ×</button>
+      </sc-for>
+      <button type="button" onClick="{{ noop }}" style="border:1px dashed #484f58;border-radius:12px;background:transparent;color:#8b949e;font:inherit;font-size:11.5px;padding:2px 9px;cursor:pointer" style-hover="color:#c9d1d9;border-color:#8b949e">+ filter</button>
+      <span style="font-size:11.5px;color:#8b949e">· {{ shownLabel }}</span>
+      <div style="flex:1"></div>
+      <sc-if value="{{ selectionLabel }}" hint-placeholder-val="{{ false }}">
+        <span style="font-size:11.5px;color:#d29922">{{ selectionLabel }}</span>
+        <button type="button" onClick="{{ bulkMove }}" style="border:1px solid #484f58;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:11.5px;padding:3px 9px;cursor:pointer" style-hover="background:#1c232c">Move with one reason…</button>
+        <button type="button" onClick="{{ clearSelection }}" style="border:1px solid #30363d;border-radius:4px;background:transparent;color:#8b949e;font:inherit;font-size:11.5px;padding:3px 9px;cursor:pointer" style-hover="color:#c9d1d9">Clear</button>
+      </sc-if>
+    </div>
+
+    <sc-if value="{{ weightsOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;flex-wrap:wrap;gap:18px;margin:12px 18px 0;padding:12px 14px;border:1px solid #30363d;border-radius:6px;background:#161b22">
+        <sc-for list="{{ weights }}" as="w" hint-placeholder-count="4">
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <span style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#8b949e">{{ w.name }}</span>
+            <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;color:#c9d1d9">{{ w.value }}</span>
+          </div>
+        </sc-for>
+        <div style="flex:1;min-width:200px;font-size:11.5px;line-height:1.5;color:#8b949e">These come from the core's ranking config — this panel reads them, it does not set them. Change them with <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#c9d1d9">vogt config</span> and every surface agrees.</div>
+      </div>
+    </sc-if>
+
+    <div style="display:grid;grid-template-columns:38px 84px minmax(0,1fr) 168px 96px 62px;gap:10px;padding:9px 18px;border-bottom:1px solid #30363d;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:#8b949e">
+      <span>#</span><span>Ref</span><span>{{ titleHeading }}</span><span>Score</span><span>Trust</span><span>Age</span>
+    </div>
+
+    <div style="flex:1;min-height:0;overflow-y:auto">
+      <sc-for list="{{ rows }}" as="row" hint-placeholder-count="8">
+        <div onClick="{{ row.select }}" style="{{ row.style }}">
+          <span style="{{ row.rankStyle }}">{{ row.rank }}</span>
+          <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#58a6ff">{{ row.ref }}</span>
+          <div style="min-width:0">
+            <div style="display:flex;align-items:baseline;gap:7px">
+              <span style="{{ row.titleStyle }}">{{ row.title }}</span>
+              <span style="{{ row.liveStyle }}">{{ row.live }}</span>
+            </div>
+            <sc-if value="{{ row.showWhy }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-wrap:wrap;gap:9px;margin-top:4px;font-size:10.5px;color:#8b949e">
+                <sc-for list="{{ row.factors }}" as="f" hint-placeholder-count="4">
+                  <span style="{{ f.style }}">{{ f.label }}</span>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ row.expanded }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:9px">
+                <button type="button" onClick="{{ row.openItem }}" style="border:1px solid #484f58;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:11.5px;padding:4px 9px;cursor:pointer" style-hover="background:#1c232c">Open</button>
+                <button type="button" onClick="{{ row.session }}" style="border:1px solid #58a6ff;border-radius:4px;background:transparent;color:#58a6ff;font:inherit;font-size:11.5px;padding:4px 9px;cursor:pointer" style-hover="background:#1c232c">Open session</button>
+                <button type="button" onClick="{{ row.adopt }}" style="{{ row.adoptStyle }}" style-hover="background:#1c232c">{{ row.adoptLabel }}</button>
+                <button type="button" onClick="{{ row.suppress }}" style="border:1px solid #30363d;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:11.5px;padding:4px 9px;cursor:pointer" style-hover="background:#1c232c">Suppress…</button>
+                <button type="button" onClick="{{ row.toggleSelect }}" style="border:1px solid #30363d;border-radius:4px;background:transparent;color:#8b949e;font:inherit;font-size:11.5px;padding:4px 9px;cursor:pointer" style-hover="color:#c9d1d9">{{ row.selectLabel }}</button>
+              </div>
+              <div style="margin-top:7px;font-size:11px;color:#8b949e;line-height:1.5">{{ row.provenance }}</div>
+            </sc-if>
+            <sc-if value="{{ row.suppressOpen }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column;gap:8px;margin-top:9px;padding:10px;border:1px solid #d29922;border-radius:4px;background:#0d1117">
+                <div style="font-size:11.5px;color:#8b949e">A suppressed subject survives the next sweep finding it again. Vogt requires a reason.</div>
+                <textarea onInput="{{ row.reasonInput }}" placeholder="why this should stop filling the backlog" style="width:100%;min-height:50px;resize:vertical;font:inherit;font-size:12px;color:#c9d1d9;background:#161b22;border:1px solid #30363d;border-radius:4px;padding:6px 8px"></textarea>
+                <div style="display:flex;align-items:center;gap:7px">
+                  <button type="button" onClick="{{ row.confirmSuppress }}" style="border:1px solid #58a6ff;border-radius:4px;background:#58a6ff;color:#08111c;font:inherit;font-size:11.5px;font-weight:600;padding:4px 9px;cursor:pointer">Suppress with reason</button>
+                  <button type="button" onClick="{{ row.cancel }}" style="border:1px solid #30363d;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:11.5px;padding:4px 9px;cursor:pointer">Cancel</button>
+                </div>
+              </div>
+            </sc-if>
+          </div>
+          <div style="display:flex;align-items:center;gap:7px;min-width:0">
+            <div style="flex:1;height:8px;border:1px solid #30363d;border-radius:5px;overflow:hidden;background:#0d1117"><div style="{{ row.barStyle }}"></div></div>
+            <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#c9d1d9;font-variant-numeric:tabular-nums">{{ row.score }}</span>
+          </div>
+          <span style="{{ row.trustStyle }}">{{ row.trust }}</span>
+          <span style="font-size:11px;color:#8b949e;font-variant-numeric:tabular-nums">{{ row.age }}</span>
+        </div>
+      </sc-for>
+    </div>
+
+    <footer style="display:flex;align-items:center;gap:14px;padding:9px 18px;border-top:1px solid #30363d;background:#161b22;font-size:11.5px;color:#8b949e">
+      <span>coverage: git ✓ 3m · markers ✓ 3m · deps ✓ 3m · github ✓ 4m · <span style="color:#d29922">ci ✗ not in this sweep</span></span>
+      <div style="flex:1"></div>
+      <span>declared and collected work, ordered by the same weights</span>
+    </footer>
+
+    <sc-if value="{{ toast }}" hint-placeholder-val="{{ false }}">
+      <div style="position:fixed;left:50%;bottom:56px;transform:translateX(-50%);padding:9px 14px;border:1px solid #30363d;border-radius:6px;background:#1c232c;color:#c9d1d9;font-size:12.5px;box-shadow:0 12px 32px rgba(0,0,0,.45)">{{ toast }}</div>
+    </sc-if>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const SESSIONS = [
+  { name: "clip-fix-3", cwd: "/srv/vogt", activity: "waiting-for-input", continuity: "protected" },
+  { name: "sweep-nightly", cwd: "/srv/vogt", activity: "running", continuity: "protected" },
+  { name: "web-dev", cwd: "/srv/vogt/web", activity: "idle", continuity: "unprotected" },
+  { name: "engine", cwd: "/srv/vogt/engine", activity: "done", continuity: "recovering" },
+];
+const ACTIVITY_COLOR = { idle: "#6e7681", running: "#d29922", "waiting-for-input": "#f85149", errored: "#ff7b72", done: "#3fb950" };
+const CONTINUITY = {
+  protected: { glyph: "\u25cf", color: "#3fb950", title: "Protected" },
+  recovering: { glyph: "\u25c6", color: "#d29922", title: "Recovery available" },
+  unprotected: { glyph: "\u25cb", color: "#6e7681", title: "Unprotected" },
+};
+const TREE = [
+  { path: "docs", name: "docs", dir: true, depth: 0 },
+  { path: "engine", name: "engine", dir: true, depth: 0 },
+  { path: "src", name: "src", dir: true, depth: 0 },
+  { path: "web", name: "web", dir: true, depth: 0 },
+  { path: "web/src", name: "src", dir: true, depth: 1 },
+  { path: "web/src/Backlog.tsx", name: "Backlog.tsx", dir: false, depth: 2 },
+  { path: "web/src/styles.css", name: "styles.css", dir: false, depth: 2 },
+  { path: "mobile", name: "mobile", dir: true, depth: 0 },
+  { path: "README.md", name: "README.md", dir: false, depth: 0 },
+];
+
+const ITEMS = [
+  { ref: "WI-142", title: "Copy/paste fails on Android PWA and iOS standalone \u2014 clipboard write silently no-ops", score: 8.4, trust: "declared", age: "11d", kind: "bug", priority: "P1", live: null, blocks: 3, factors: ["P1 \u00d72.0", "blocks 3", "aged 11d \u00d71.4", "declared \u00d71.0"], provenance: "declared 11 days ago by you \u00b7 last confirmed 11 days ago \u00b7 3 items name it as a blocker" },
+  { ref: "WI-131", title: "Clipboard bridge: one code path for web, PWA and Capacitor", score: 7.1, trust: "declared", age: "4d", kind: "bug", priority: "P1", live: "session live", blocks: 1, factors: ["P1 \u00d72.0", "in progress", "aged 4d", "blocks 1"], provenance: "declared 4 days ago \u00b7 a session is attached and writes as its own actor" },
+  { ref: "SUB-77", title: "File viewer/editor not clean \u2014 scroll jump on save, gutter mis-measure at two panes", score: 5.2, trust: "observed", age: "3d", kind: "bug", priority: "P2", live: null, blocks: 0, factors: ["P2 \u00d71.4", "observed: TODO(vogt) marker", "evidence 3d old", "never confirmed"], provenance: "observed from a source marker during the 03:12 sweep \u00b7 never declared, visible by default" },
+  { ref: "WI-121", title: "Audit log time filter (FR-S6) is delivered only in part", score: 4.8, trust: "declared", age: "2w", kind: "feature", priority: "P2", live: null, blocks: 0, factors: ["P2 \u00d71.4", "aged 14d \u00d71.4", "declared"], provenance: "named as a partial delivery in REQUIREMENTS \u00a75" },
+  { ref: "WI-77", title: "migrate CLI verb (FR-L1)", score: 4.6, trust: "declared", age: "9d", kind: "feature", priority: "P2", live: "agent", blocks: 0, factors: ["P2 \u00d71.4", "agent-owned", "aged 9d"], provenance: "agent-owned \u00b7 the session writing to it is its own actor in the audit log" },
+  { ref: "SUB-91", title: "vanished_upstream \u2014 SUB-91's source marker is gone from the tree", score: 3.9, trust: "observed", age: "3w", kind: "chore", priority: "P3", live: null, blocks: 0, factors: ["P3 \u00d71.0", "declared 3w ago, never confirmed", "evidence 3h old"], provenance: "declared 3 weeks ago, never confirmed \u00b7 the marker it came from no longer exists" },
+  { ref: "GH-204", title: "issue #204 \u2014 file viewer scroll jumps on save (reported upstream)", score: 3.4, trust: "collected", age: "5d", kind: "bug", priority: "P3", live: null, blocks: 0, factors: ["P3 \u00d71.0", "collected from GitHub", "verified 4m ago"], provenance: "consolidated from GitHub, read-only \u00b7 adopting it upgrades trust, it is not a precondition for visibility" },
+  { ref: "SUB-64", title: "Contract check: cadastre has no docs/DEPLOYMENT.md", score: 2.8, trust: "observed", age: "3w", kind: "chore", priority: "P3", live: null, blocks: 0, factors: ["P3 \u00d71.0", "contract criterion", "checked 3w ago"], provenance: "a contract criterion failing by name \u00b7 a value you read, not a barrier you pass" },
+  { ref: "WI-129", title: "Android shell loads the deployed PWA over the tailnet", score: 2.1, trust: "declared", age: "1d", kind: "feature", priority: "P3", live: null, blocks: 0, factors: ["P3 \u00d71.0", "done 1d ago"], provenance: "closed yesterday with a reason" },
+];
+
+const TRUST_COLOR = { declared: "#8b949e", observed: "#d29922", collected: "#58a6ff" };
+
+class Component extends DCLogic {
+  state = {
+    expandedTree: { web: true, "web/src": true },
+    view: "ranked",
+    selected: "WI-142",
+    panel: null,
+    reason: "",
+    showWhy: true,
+    weightsOpen: false,
+    picked: [],
+    chips: ["project: vogt", "include collected"],
+    toast: null,
+  };
+
+  flash(message) {
+    if (this.timer) window.clearTimeout(this.timer);
+    this.setState({ toast: message });
+    this.timer = window.setTimeout(() => this.setState({ toast: null }), 2600);
+  }
+
+  filtered() {
+    const { view } = this.state;
+    if (view === "bugs") return ITEMS.filter((i) => i.kind === "bug");
+    if (view === "observed") return ITEMS.filter((i) => i.trust !== "declared");
+    return ITEMS;
+  }
+
+  renderVals() {
+    const list = this.filtered();
+    const max = Math.max.apply(null, ITEMS.map((i) => i.score));
+
+    const viewBtn = (id, label) => {
+      const active = this.state.view === id;
+      return {
+        label,
+        style: `border:0;border-right:1px solid #30363d;background:${active ? "#1c232c" : "transparent"};color:${active ? "#c9d1d9" : "#8b949e"};font:inherit;font-size:11.5px;padding:5px 11px;cursor:pointer`,
+        pick: () => this.setState({ view: id, selected: null, panel: null }),
+      };
+    };
+
+    const rows = list.map((item, i) => {
+      const selected = this.state.selected === item.ref;
+      const picked = this.state.picked.indexOf(item.ref) >= 0;
+      return {
+        rank: i + 1,
+        ref: item.ref,
+        title: item.title,
+        score: item.score.toFixed(1),
+        trust: item.trust,
+        age: item.age,
+        live: item.live ?? "",
+        showWhy: this.state.showWhy || selected,
+        expanded: selected,
+        suppressOpen: selected && this.state.panel === "suppress",
+        provenance: item.provenance,
+        factors: item.factors.map((label, fi) => ({
+          label,
+          style: `padding:0 6px;border-radius:8px;border:1px solid ${fi === 0 ? "#30363d" : "transparent"};color:${label.indexOf("never confirmed") >= 0 || label.indexOf("evidence") >= 0 ? "#d29922" : "#8b949e"}`,
+        })),
+        style: `display:grid;grid-template-columns:38px 84px minmax(0,1fr) 168px 96px 62px;gap:10px;align-items:start;padding:11px 18px;cursor:pointer;border-bottom:1px solid ${selected ? "#484f58" : "#21262d"};background:${selected ? "#161b22" : picked ? "#12181f" : "transparent"};box-shadow:${selected ? "inset 2px 0 0 #58a6ff" : picked ? "inset 2px 0 0 #d29922" : "none"}`,
+        rankStyle: `font-size:13px;font-variant-numeric:tabular-nums;color:${i < 3 ? "#c9d1d9" : "#6e7681"};font-weight:${i < 3 ? 600 : 400}`,
+        titleStyle: `font-size:13px;line-height:1.4;color:#c9d1d9;text-wrap:pretty`,
+        liveStyle: `flex:none;font-size:10.5px;color:${item.live ? "#3fb950" : "transparent"};white-space:nowrap`,
+        barStyle: `width:${Math.round((item.score / max) * 100)}%;height:100%;background:${i < 3 ? "#58a6ff" : "#484f58"}`,
+        trustStyle: `justify-self:start;padding:0 6px;border-radius:9px;font-size:10.5px;border:1px solid ${TRUST_COLOR[item.trust]};color:${TRUST_COLOR[item.trust]}`,
+        adoptLabel: item.trust === "declared" ? "Assign to me" : "Adopt \u2014 upgrades trust",
+        adoptStyle: `border:1px solid ${item.trust === "declared" ? "#30363d" : "#d29922"};border-radius:4px;background:transparent;color:${item.trust === "declared" ? "#c9d1d9" : "#d29922"};font:inherit;font-size:11.5px;padding:4px 9px;cursor:pointer`,
+        selectLabel: picked ? "Deselect" : "Select for bulk",
+        select: () => this.setState((s) => ({ selected: s.selected === item.ref ? null : item.ref, panel: null, reason: "" })),
+        openItem: () => this.flash(`Opening ${item.ref}`),
+        session: () => this.flash(`Session opened in this project's tree, carrying ${item.ref}'s brief`),
+        adopt: () => this.flash(item.trust === "declared" ? `${item.ref} assigned to you` : `${item.ref} adopted \u00b7 trust upgraded to declared`),
+        suppress: () => this.setState((s) => ({ panel: s.panel === "suppress" ? null : "suppress", reason: "" })),
+        reasonInput: (e) => this.setState({ reason: e.currentTarget.value }),
+        cancel: () => this.setState({ panel: null, reason: "" }),
+        confirmSuppress: () => {
+          const ok = this.state.reason.trim().length > 0;
+          this.setState({ panel: null, reason: "" });
+          this.flash(ok ? `${item.ref} suppressed \u00b7 audit row written` : "Vogt refused: a reason is required");
+        },
+        toggleSelect: () =>
+          this.setState((s) => ({
+            picked: picked ? s.picked.filter((r) => r !== item.ref) : s.picked.concat([item.ref]),
+          })),
+      };
+    });
+
+    const tree = TREE.filter((n) => {
+      const parts = n.path.split("/");
+      for (let i = 1; i < parts.length; i += 1) {
+        if (!this.state.expandedTree[parts.slice(0, i).join("/")]) return false;
+      }
+      return true;
+    }).map((n) => ({
+      name: n.name,
+      path: n.path,
+      caret: n.dir ? (this.state.expandedTree[n.path] ? "\u25be" : "\u25b8") : "",
+      style: `display:flex;align-items:center;gap:5px;width:100%;border:0;background:transparent;cursor:pointer;font:inherit;font-size:12px;padding:3px 10px 3px ${n.depth * 12 + 12}px;color:${n.dir ? "#c9d1d9" : "#8b949e"};font-weight:${n.dir ? 500 : 400}`,
+      click: () =>
+        n.dir
+          ? this.setState((s) => ({ expandedTree: { ...s.expandedTree, [n.path]: !s.expandedTree[n.path] } }))
+          : this.flash(`Opening ${n.path}`),
+    }));
+
+    return {
+      showRail: this.props.embedded !== true,
+      sessions: SESSIONS.map((s) => {
+        const cont = CONTINUITY[s.continuity];
+        return {
+          name: s.name,
+          cwd: s.cwd,
+          title: `${s.name}\ncwd: ${s.cwd}\n${cont.title}`,
+          style: `display:flex;align-items:center;gap:7px;width:100%;border:0;border-left:2px solid ${s.activity === "waiting-for-input" ? "#f85149" : "transparent"};background:transparent;cursor:pointer;font:inherit;padding:6px 12px`,
+          dotStyle: `flex:none;width:7px;height:7px;border-radius:50%;background:${ACTIVITY_COLOR[s.activity]}`,
+          contStyle: `flex:none;font-size:9px;line-height:1;color:${cont.color}`,
+          continuity: cont.glyph,
+          open: () => this.flash(`Attaching to ${s.name}`),
+        };
+      }),
+      tree,
+      rows,
+      rowCount: rows.length,
+      views: [viewBtn("ranked", "Ranked"), viewBtn("bugs", "Bugs"), viewBtn("observed", "Observed only")],
+      chips: this.state.chips.map((label) => ({
+        label,
+        drop: () => this.setState((s) => ({ chips: s.chips.filter((c) => c !== label) })),
+      })),
+      shownLabel: `${rows.length} of 118 subjects`,
+      titleHeading: this.state.showWhy ? "Title · why it ranks here" : "Title",
+      whyLabel: this.state.showWhy ? "Reasoning: shown" : "Reasoning: on select",
+      toggleWhy: () => this.setState((s) => ({ showWhy: !s.showWhy })),
+      weightsOpen: this.state.weightsOpen,
+      toggleWeights: () => this.setState((s) => ({ weightsOpen: !s.weightsOpen })),
+      weights: [
+        { name: "priority", value: "\u00d72.0" },
+        { name: "blocked-by count", value: "\u00d71.6" },
+        { name: "age", value: "\u00d71.4" },
+        { name: "trust", value: "\u00d71.0" },
+      ],
+      selectionLabel: this.state.picked.length ? `${this.state.picked.length} selected` : null,
+      bulkMove: () => this.flash(`${this.state.picked.length} items \u00b7 one reason, one audit row each`),
+      clearSelection: () => this.setState({ picked: [] }),
+      noop: () => this.flash("Not wired in this mock"),
+      toast: this.state.toast,
+    };
+  }
+}
+</script>
+</body>
+</html>
