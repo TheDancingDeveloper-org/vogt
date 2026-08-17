@@ -414,13 +414,8 @@ def test_the_command_palette_never_writes_to_vogt() -> None:
 def test_the_palette_reaches_every_vogt_surface() -> None:
     """Every read surface, by name, from the keyboard."""
     text = source(PALETTE)
-    for opener in (
-        "openBoardTab",
-        "openBacklogTab",
-        "openProjectsTab",
-        "openAuditTab",
-    ):
-        assert opener in text, f"the palette cannot reach {opener}"
+    for route in ("/board", "/backlog", "/projects", "/audit"):
+        assert route in text, f"the palette cannot reach {route}"
 
 
 # -- FR-U21: every surface has a designed absent state ---------------------
@@ -547,7 +542,9 @@ def test_the_board_cells_carry_what_the_hidden_head_row_said() -> None:
     )
 
 
-def test_the_windowed_surfaces_and_the_stylesheet_agree_on_row_height() -> None:
+def test_the_windowed_surfaces_use_content_sizing_without_a_fixed_design_height() -> (
+    None
+):
     """NFR-S5's one unguarded seam, and the only one no test in `web/` can see.
 
     The backlog's list and the board's columns both window: they draw a slice
@@ -562,21 +559,14 @@ def test_the_windowed_surfaces_and_the_stylesheet_agree_on_row_height() -> None:
     layout, so a card is zero pixels tall there whatever this file says. So it
     is checked as text, which is the only place the disagreement is visible.
     """
+    board = source(WEB_SRC / "Board.tsx")
+    backlog = source(WEB_SRC / "Backlog.tsx")
     css = STYLES.read_text(encoding="utf-8")
-    for name, constant, custom_property in (
-        ("Backlog.tsx", "ROW_HEIGHT", "--vogt-row-h"),
-        ("Board.tsx", "CARD_HEIGHT", "--board-card-h"),
-        ("Board.tsx", "CARD_GAP", "--board-card-gap"),
-    ):
-        declared = re.search(rf"\b{constant} = (\d+);", source(WEB_SRC / name))
-        assert declared, f"{name} no longer declares {constant}"
-        painted = re.search(rf"{re.escape(custom_property)}:\s*(\d+)px", css)
-        assert painted, f"styles.css no longer sets {custom_property}"
-        assert declared.group(1) == painted.group(1), (
-            f"{name} windows on {constant} = {declared.group(1)}px while "
-            f"styles.css paints {custom_property} at {painted.group(1)}px; "
-            "the slice on screen is not the slice under the scrollbar"
-        )
+    assert "MeasuredWindow" in board
+    assert "ResizeObserver" in board
+    assert "MeasuredWindow" in backlog or "ResizeObserver" in backlog
+    assert "--board-card-h" not in css
+    assert "--vogt-row-h" not in css
 
 
 def test_every_vogt_surface_has_a_phone_width_pass() -> None:
@@ -643,7 +633,7 @@ def test_every_readiness_check_is_in_the_engines_contract() -> None:
     )
 
 
-def test_the_drawers_actions_wrap_rather_than_overflow() -> None:
+def test_the_places_shell_reaches_primary_actions_without_a_drawer() -> None:
     """Every Vogt surface is reachable from the drawer at any width.
 
     Found by looking: the action row is a flex row inside a panel that is
@@ -657,10 +647,7 @@ def test_the_drawers_actions_wrap_rather_than_overflow() -> None:
     report every button at the same position and see nothing wrong. This is a
     claim about the stylesheet, so the stylesheet is what it reads.
     """
-    css = STYLES.read_text(encoding="utf-8")
-    actions = re.search(r"\.drawer-actions\s*\{([^}]*)\}", css)
-    assert actions, ".drawer-actions still exists"
-    assert re.search(r"flex-wrap:\s*wrap", actions.group(1)), (
-        "the drawer's action row must wrap; `.drawer` is `overflow: hidden`, "
-        "so a row that does not wrap hides its own buttons"
-    )
+    app = source(WEB_SRC / "App.tsx")
+    assert "places-rail" in app
+    assert "phone-bottom-nav" in app
+    assert "drawer-actions" not in STYLES.read_text(encoding="utf-8")
