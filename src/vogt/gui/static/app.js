@@ -302,7 +302,15 @@ async function driftView(query) {
           {},
           el("td", { class: "mono" }, proposal.kind),
           el("td", { class: "mono small" }, proposal.subject_id || "—"),
-          el("td", {}, proposal.status),
+          // Superseded is a note on an open proposal, never a status of its
+          // own (FR-R6): a later sweep stopped reproducing the condition, and
+          // the proposal is still open and still somebody's to resolve.
+          el(
+            "td",
+            {},
+            proposal.status,
+            proposal.superseded_at ? " · superseded by fresher evidence" : "",
+          ),
           el("td", { class: "mono small" }, JSON.stringify(proposal.proposed_change || {})),
           el("td", {}, when(proposal.opened_at)),
           // Why a human must answer this one, quoted from the API rather than
@@ -331,10 +339,46 @@ async function depsView(slug) {
     el("h2", {}, `Dependencies · ${result.project}`),
     freshness(result.freshness),
     el("p", { class: "muted" }, `${result.unresolved} reference(s) point outside the estate`),
+    // Which zero a zero is (#50). A graph with nothing in it means three
+    // different things, and the operation now says which — so the GUI must
+    // not drop the sentence that distinguishes them.
+    result.detail ? el("p", { class: "muted" }, result.detail) : el("span", {}),
     el("h3", {}, "References out"),
     depsTable(result.references_out || []),
     el("h3", {}, "Referenced by"),
     depsTable(result.referenced_by || []),
+    // FR-D8: the same source in two places, reported and never judged.
+    (result.mirrors || []).length || (result.mirrored_by || []).length
+      ? el(
+          "section",
+          {},
+          el("h3", {}, "Mirrored source"),
+          el(
+            "p",
+            { class: "muted" },
+            "The same source in two registered projects. Contents are never " +
+              "compared and no divergence is asserted.",
+          ),
+          table(
+            ["Package", "Carried by", "Mirrors", "Path", "Declared versions"],
+            [...(result.mirrors || []), ...(result.mirrored_by || [])].map((m) =>
+              el(
+                "tr",
+                {},
+                el("td", { class: "mono" }, m.package || "—"),
+                el("td", {}, link(`/project/${m.project}`, m.project)),
+                el("td", {}, link(`/project/${m.mirrors}`, m.mirrors)),
+                el("td", { class: "mono small" }, m.local_path || "—"),
+                el(
+                  "td",
+                  { class: "mono small" },
+                  `${m.local_version || "?"} here · ${m.published_version || "?"} there`,
+                ),
+              ),
+            ),
+          ),
+        )
+      : el("span", {}),
   );
 }
 

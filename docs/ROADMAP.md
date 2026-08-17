@@ -281,7 +281,8 @@ Deliverables:
   evidence snapshot at raise time and retention pinning (FR-R5).
 - Local drift kinds: `version_mismatch`, `unresolved_dependency`.
 - `mirrored_source` reporting (FR-D8) where a path member is also a
-  registered project.
+  registered project. **Not delivered at M3** — see note 4 below; built at
+  r15, after an estate onboarding produced eighteen of them by hand.
 
 **Demo**: `contract check` a project missing `AGENTS.md` → the result names
 exactly that criterion, and the project's brief shows `non_compliant`
@@ -292,7 +293,7 @@ evidence; accept it, and the audit trail shows who accepted it and why.
 Delete the observation's history window and confirm the proposal still
 renders its evidence.
 
-### M3 as built — three notes
+### M3 as built — four notes
 
 1. **FR-G13 is asserted structurally, not just behaviourally.** One test
    registers work against a non-compliant project and transitions it, to
@@ -313,6 +314,12 @@ renders its evidence.
    because the two stores are pruned, backed up and restored
    independently. The test deletes `observed.sqlite3` outright and the
    proposal still renders its evidence.
+4. **`mirrored_source` was listed here and not built** — for eleven stages,
+   without appearing in `REQUIREMENTS.md` §7's gap register either, because
+   that register was assembled from gaps documents *stated* and this one was
+   visible only by grepping for the identifier. Delivered at r15 as its own
+   collector; `REQUIREMENTS.md` r15 records both the delivery and the
+   register's blind spot.
 
 ## M4 — Service (the Node B stack)
 

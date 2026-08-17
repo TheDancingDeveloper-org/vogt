@@ -28,6 +28,7 @@ from vogt.core.contract import (
     COMPLIANT,
     DEFAULT_CONTRACT,
     NON_COMPLIANT,
+    NOT_CHECKED,
     Contract,
     configured_contract,
     contract_from_settings,
@@ -248,5 +249,25 @@ def test_a_contract_can_still_be_built_by_hand(tmp_path: Path) -> None:
     """
     del tmp_path
     result = evaluate(Path("/nonexistent"), Contract(version="hand-rolled"))
-    assert result.status == NON_COMPLIANT
+    assert result.status == NOT_CHECKED, (
+        "a path that cannot be read yields no verdict; nothing was evaluated"
+    )
     assert result.contract_version == "hand-rolled"
+
+
+def test_an_unreadable_path_is_not_checked_rather_than_non_compliant(
+    tmp_path: Path,
+) -> None:
+    """WI-9's shape on the contract surface (#50).
+
+    `non_compliant` for a root nothing could read is byte-identical to the
+    honest answer for a project that genuinely fails its contract — and
+    `contract check` records it on the project, so the estate acquires
+    verdicts from reads that never happened.
+    """
+    result = evaluate(tmp_path / "not-here", DEFAULT_CONTRACT)
+    assert result.status == NOT_CHECKED
+    assert [c.rule for c in result.criteria] == ["path.exists"], (
+        "no criterion was evaluated, so none is reported as failing"
+    )
+    assert "not 'does not comply'" in result.criteria[0].detail

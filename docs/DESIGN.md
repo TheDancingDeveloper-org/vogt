@@ -242,6 +242,27 @@ recommending — recorded as a **non-committed stretch goal**
   state-sync kinds (`forge_state_mismatch`, `version_mismatch`) may be
   auto-accepted by agents; destructive or structural kinds are always
   human-gated. Per-project/per-kind overrides.
+- *r15*: `forge_state_mismatch` auto-accepts in **one direction only**.
+  `gh-issues` reads open issues, and an unchanged subject is not
+  re-appended, so the newest observation of an issue closed last month
+  still says `open` — "closed upstream" is a fact somebody produced,
+  "open upstream" is also what a closed-and-not-re-read issue looks like.
+  Closing an item on the first is state-sync; reopening finished work on
+  the second is a write made from an absence nobody observed, and is
+  human-gated.
+- *r15*: a work item's own text may name a forge issue without anybody
+  adopting a link, and the two registers then disagree with nothing
+  watching — `referenced_issue_state_mismatch` (FR-R7). Read-only,
+  always human-resolved, and matched only on a **qualified** reference
+  (`owner/name#12`, or an issue URL): a bare `#12` is as likely to be a
+  pull request as an issue, which the work item that motivated the kind
+  demonstrates in its own title.
+- *r15*: a proposal whose raising condition a **later sweep no longer
+  reproduces** is marked `superseded_at` rather than closed (FR-R6). It
+  stays open, keeps its snapshot, and still needs a person — what changes
+  is that the inbox can tell "still true" from "raised under evidence that
+  has since moved on", which somebody was otherwise reconstructing from
+  timestamps by hand.
 - Every proposal carries a **self-contained evidence snapshot** taken at
   raise time, and pins the observations it references against retention
   pruning (FR-R5). A proposal must never outlive its evidence.
@@ -309,13 +330,27 @@ Model:
   `unresolved_dependency`.
 - **`mirrored_source`** is reported where the same source appears both as a
   path member of one project and as a separate registered project. Reported
-  as an observation; contents are never compared.
+  as an observation; contents are never compared. *Built at r15*: its own
+  offline collector (`mirrored-source`), matching on the package name both
+  manifests declare — the identity the two copies already agree on, and the
+  only signal available that is not a content comparison. A name two
+  registered projects both claim is dropped rather than guessed at. `deps`
+  lists the relation from both ends; nothing asserts divergence, and the
+  two declared versions are recorded as the facts they are.
+- **`dep-refs` writes one scan record per project** (*r15*), naming the
+  manifests it read, the ones that would not parse, and the ones present in
+  a format it does not read at all. Without it a `deps` answer of "no
+  references" is three different answers wearing one number: a project that
+  references nothing, a Go or Maven project whose graph this cannot see, and
+  a project no sweep has walked (FR-O4).
 - Update-automation posture (version-updates config / vulnerability alerts
   / automated security fixes — three independent toggles, never one
   boolean) is **forge posture**, not dependency data. It moves to the forge
   module at M5.
 - Roadmap fit: reference extraction and the cross-project graph land with
-  M2; `unresolved_dependency` reporting with M3.
+  M2; `unresolved_dependency` reporting with M3; `mirrored_source` and the
+  scan record at r15, after an estate onboarding produced eighteen mirrored
+  crates by hand.
 
 ### 3.6 Observed-first without drowning (r2/r3)
 

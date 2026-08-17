@@ -112,6 +112,18 @@ age, before any action is possible**. Accept and reject each collect a typed
 reason. There is no bulk accept, on purpose: accepting drift is a declared-state
 write, and making that convenient in bulk is exactly how the reason rule erodes.
 
+A proposal may also be flagged **superseded**: a sweep newer than the proposal
+no longer reproduces the condition that raised it. It is still open and still
+yours to resolve — the flag says only that it is worth reading before the ones
+without it, and it disappears again if the condition comes back. Nothing
+closes itself.
+
+The dependency panel distinguishes a project that references nothing from one
+whose manifests are in a format Vogt does not read (`go.mod`, `pom.xml`) and
+from one no sweep has walked. Where the same source lives in two registered
+projects — a vendored crate that is also its own repository — both ends say so;
+Vogt does not compare the copies or claim either has drifted.
+
 ### 2.4 The assistant
 
 Absent unless the deployment set an API key — the routes answer `404` and every

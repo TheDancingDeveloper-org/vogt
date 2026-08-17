@@ -331,6 +331,12 @@ export interface DriftProposal {
   proposed_change?: Record<string, unknown>;
   status: "open" | "accepted" | "rejected" | "contested" | string;
   opened_at: string;
+  /** Set where a sweep newer than this proposal no longer reproduces the
+   *  condition that raised it (FR-R6). Not a resolution: the proposal is
+   *  still open and still needs a person. It clears if the condition
+   *  reproduces again. */
+  superseded_at?: string | null;
+  superseded_detail?: string | null;
   resolved_by_actor_id?: string | null;
   resolved_by_identity_ref?: string | null;
   resolved_at?: string | null;

@@ -249,3 +249,95 @@ describe("FR-U18 — one proposal, one typed reason, one act", () => {
     expect(container.textContent).toContain("there is no bulk accept");
   });
 });
+
+describe("FR-R6 — superseded is a reading aid, not a resolution", () => {
+  it("says a later sweep stopped reproducing it, and still offers the act", async () => {
+    const { container } = inbox({
+      "GET /drift": {
+        body: {
+          proposals: [
+            driftProposal({
+              ...CARRIED,
+              superseded_at: "2026-08-17T00:00:00Z",
+              superseded_detail:
+                "git completed a sweep at 2026-08-17T00:00:00+00:00, after this " +
+                "was raised, and the condition that raised it no longer reproduces",
+            }),
+          ],
+          human_gated: {},
+          freshness: freshness(),
+        },
+      },
+    });
+    const proposal = await card(container);
+
+    expect(proposal.textContent).toContain("Superseded by fresher evidence");
+    expect(proposal.textContent).toContain("no longer reproduces");
+    // Still open, still resolvable, still showing both sides: the thirty-six
+    // were cleared by a person, and FR-R6 changes what they can see, not who
+    // decides (FR-R2, FR-U18).
+    expect(proposal.classList.contains("vogt-projects-drift--open")).toBe(true);
+    expect(proposal.querySelector("form.vogt-projects-resolve")).toBeTruthy();
+    expect(sides(proposal)).toHaveLength(2);
+  });
+
+  it("says nothing at all about a proposal no sweep has overtaken", async () => {
+    const { container } = inbox({
+      "GET /drift": {
+        body: { proposals: [CARRIED], human_gated: {}, freshness: freshness() },
+      },
+    });
+    const proposal = await card(container);
+    expect(proposal.querySelector(".vogt-projects-superseded")).toBeNull();
+  });
+});
+
+describe("FR-R7 — a reference read from an item's own text", () => {
+  it("names both registers and says accepting writes nothing", async () => {
+    const { container } = inbox({
+      "GET /drift": {
+        body: {
+          proposals: [
+            driftProposal({
+              id: "dft_09",
+              kind: "referenced_issue_state_mismatch",
+              subject_kind: "work_item",
+              summary: "WI-16 references gh:o/vogt#44, which was open when last observed",
+              evidence_snapshot: {
+                subject_key: "gh:o/vogt#44",
+                collector: "gh-issues",
+                observed_at: "2026-08-17T00:00:00Z",
+                payload: { state: "open", number: 44 },
+              },
+              proposed_change: {
+                entity: "work_item",
+                action: "review",
+                subject_key: "gh:o/vogt#44",
+                work_ref: "WI-16",
+                declared_state: "done",
+                upstream_state: "open",
+              },
+            }),
+          ],
+          human_gated: {
+            referenced_issue_state_mismatch:
+              "the reference was read out of the item's own text rather than adopted",
+          },
+          freshness: freshness(),
+        },
+      },
+    });
+    const proposal = await card(container);
+    const [declared, observed] = sides(proposal);
+
+    expect(declared!.textContent).toContain("done");
+    expect(declared!.textContent).toContain("not adopted as a link");
+    expect(observed!.textContent).toContain("open");
+    expect(observed!.textContent).toContain("gh:o/vogt#44");
+    expect(proposal.querySelector(".vogt-projects-effect")!.textContent).toContain(
+      "Accepting writes nothing",
+    );
+    // Not the generic fallback: this build knows the kind.
+    expect(proposal.textContent).not.toContain("this GUI does not know this drift kind");
+  });
+});
