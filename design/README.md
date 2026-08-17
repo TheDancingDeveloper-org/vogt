@@ -41,6 +41,13 @@ They pull React and a webfont from public CDNs, so a machine with no outbound
 network renders them unstyled rather than not at all. Keep each `.dc.html`
 beside `support.js`; nothing else links between them.
 
+**What was planned from it.** [`../docs/RESTRUCTURE.md`](../docs/RESTRUCTURE.md)
+is the staged plan for building these screens — nine stages, each citing the
+file here it came from and the guardrail clause it obeys, so a claim in the
+plan can be checked against this directory rather than trusted. It is a plan
+and not a requirement, which is the first rule above holding: nothing in it is
+owed until its Stage 0 mints an ID in `docs/REQUIREMENTS.md`.
+
 **Why the guardrails document is the one to read first.** It is the only part
 of this export that is not a drawing: it states the constraints the screens
 obey, and every one of them is lifted from the product's own principles rather

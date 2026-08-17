@@ -21,9 +21,13 @@ on any surface.
   competing design docs. **It describes what exists** — a capability that was
   designed and never built belongs in `docs/REQUIREMENTS.md` §7, not here, and
   r11 says why at length.
-- `design/` — diagrams, mockups, exploratory notes (may be messy). Currently
-  empty apart from its `.gitkeep`; the project contract requires the directory,
-  and nothing has needed it yet.
+- `design/` — diagrams, mockups, exploratory notes (may be messy). Holds
+  `restructure-2026-08/`, the desktop and mobile restructure export. Its two
+  rules are in `design/README.md`: nothing there is a specification, and
+  nothing there is a source of truth about the built product.
+- `docs/RESTRUCTURE.md` — the staged plan for turning that export into the
+  shipped PWA and phone app. A plan, not a requirement: nothing in it is owed
+  until its Stage 0 mints an ID in `docs/REQUIREMENTS.md`.
 - `src/vogt/` — the implementation (M0 and M1 landed). Layer order is
   strict: `core` (entities, ids, time, digests, the workflow engine, the
   ranking function, the contract) → `storage` (interface + the SQLite
