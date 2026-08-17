@@ -479,6 +479,35 @@ function describeSides(proposal: DriftProposal): Sides {
           "toggle on is a change to the repository's settings.",
       };
     }
+    case "referenced_issue_state_mismatch": {
+      const ref = readString(change, "work_ref") ?? proposal.subject_id;
+      const key = readString(change, "subject_key") ?? subject ?? "an upstream issue";
+      return {
+        declared: {
+          heading: "Declared here",
+          value: scalar(change["declared_state"] ?? NOT_CARRIED),
+          carried: change["declared_state"] !== undefined,
+          provenance: [
+            ...declaredStore(`work_item.state (${ref})`),
+            `the reference was read from ${ref}'s own title or body, not adopted as a link`,
+          ],
+          observedAt: null,
+          ageNote: "declared state has no sweep age; it is true until somebody writes over it",
+        },
+        observed: {
+          heading: "Observed upstream",
+          value: scalar(payload["state"] ?? change["upstream_state"] ?? NOT_CARRIED),
+          carried: payload["state"] !== undefined || change["upstream_state"] !== undefined,
+          provenance: [...seenBy, `issue: ${key}`],
+          observedAt,
+          ageNote: null,
+        },
+        effect:
+          "Accepting writes nothing. It records the judgement that the two " +
+          "registers disagreed — closing the issue, or reopening the item, is " +
+          "an act somebody takes deliberately.",
+      };
+    }
     default: {
       // A kind this build has not seen. Rendering the halves generically is
       // better than rendering nothing, and saying which half is a guess is
@@ -646,6 +675,25 @@ const DriftCard: Component<{
       </header>
 
       <p class="vogt-projects-drift-summary">{props.proposal.summary}</p>
+
+      {/* Superseded is a reading aid, not a resolution (FR-R6). The proposal
+          is still open and still needs a person; what the flag says is that a
+          sweep newer than the proposal stopped reproducing the condition, so
+          this is worth reading before the ones without it. */}
+      <Show when={props.proposal.superseded_at}>
+        {(at) => (
+          <p class="vogt-projects-superseded">
+            <strong>Superseded by fresher evidence</strong> · marked {ageOf(at())} ·{" "}
+            {formatWhen(at())}
+            <br />
+            {props.proposal.superseded_detail ??
+              "a later sweep no longer reproduces the condition that raised this"}
+            <br />
+            Still open, and still yours to resolve — the evidence below is what it was
+            raised on.
+          </p>
+        )}
+      </Show>
 
       {/* The evidence, rendered open. Not a disclosure: FR-U18 makes seeing
           both sides the precondition for acting, and a panel the reader can

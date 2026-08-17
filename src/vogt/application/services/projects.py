@@ -24,6 +24,7 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.application.services.views import _gather, freshness_of
 from vogt.application.writes import WriteOutcome, audited_write
+from vogt.collectors.dep_refs import KIND_DEP_SCAN
 from vogt.core.checks import roll_up
 from vogt.core.contract import DEFAULT_CONTRACT, default_scaffold
 from vogt.core.entities import Actor, Project
@@ -308,10 +309,24 @@ def _ci_summary(ctx: AppContext, project: Project) -> CiSummary:
 
 
 def _dependency_summary(ctx: AppContext, project: Project) -> DependencySummary:
-    """What this project references, and what references it (FR-D1–D4)."""
+    """What this project references, and what references it (FR-D1–D4).
+
+    `collected` is claimed per project, not per estate. `has_evidence_tables`
+    answers whether anything anywhere has been swept, and a project
+    registered after the last sweep passes that test while having been
+    walked by nothing — which reported `collected, 0 references` for a
+    project nobody had looked at (#50).
+    """
     if not ctx.observed.has_evidence_tables():
         return DependencySummary(
             detail="no sweep has run; dependency references are not collected"
+        )
+    if not ctx.observed.latest(kinds=(KIND_DEP_SCAN,), project_id=project.id, limit=1):
+        return DependencySummary(
+            detail=(
+                "`dep-refs` has not walked this project; its references are "
+                "not collected, which is not the same as none"
+            )
         )
     out = ctx.observed.dep_refs(from_project_id=project.id)
     incoming = ctx.observed.dep_refs(to_project_id=project.id)

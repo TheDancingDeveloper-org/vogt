@@ -12,10 +12,12 @@ from vogt.application.models import (
     CoverageParams,
     DepsParams,
     ObservationsParams,
+    ProjectBriefParams,
     RegisterProjectParams,
     SweepParams,
 )
 from vogt.application.services import (
+    brief_project,
     coverage,
     deps,
     observations,
@@ -30,8 +32,12 @@ from vogt.collectors.base import (
     finding,
     walk_project,
 )
-from vogt.collectors.dep_refs import DepRefCollector
+from vogt.collectors.dep_refs import KIND_DEP_REF, KIND_DEP_SCAN, DepRefCollector
 from vogt.collectors.git_local import GitLocalCollector
+from vogt.collectors.mirrored_source import (
+    MirroredSourceCollector,
+    RegisteredProject,
+)
 from vogt.collectors.source_markers import SourceMarkerCollector
 from vogt.core.entities import Project
 
@@ -148,6 +154,27 @@ def test_the_scanned_extensions_are_configuration(
 # -- dependency references -------------------------------------------------
 
 
+def _dep_refs(ctx: CollectorContext, project: Project) -> list[Finding]:
+    """The reference findings alone.
+
+    `dep-refs` also emits one scan record per project — what it read, what it
+    could not, and what it does not read at all — so that a zero at `deps`
+    says which zero it is (#50). These tests are about the references, and
+    filtering here keeps each one asserting on the thing it is named for.
+    """
+    return [
+        f for f in DepRefCollector().collect(ctx, project) if f.kind == KIND_DEP_REF
+    ]
+
+
+def _scan(ctx: CollectorContext, project: Project) -> Finding:
+    scans = [
+        f for f in DepRefCollector().collect(ctx, project) if f.kind == KIND_DEP_SCAN
+    ]
+    assert len(scans) == 1, "exactly one scan record per project, always"
+    return scans[0]
+
+
 def test_only_internal_looking_references_are_extracted(
     ctx: CollectorContext, tmp_path: Path
 ) -> None:
@@ -159,7 +186,7 @@ def test_only_internal_looking_references_are_extracted(
         'other = { git = "https://github.com/o/other" }\n',
         encoding="utf-8",
     )
-    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    found = list(_dep_refs(ctx, _project(tmp_path)))
     targets = {(f.payload["ref_kind"], f.payload["raw_target"]) for f in found}
     assert targets == {
         ("path", "../nzb-core"),
@@ -175,7 +202,7 @@ def test_package_json_workspaces_and_file_refs(
         ' "workspaces": ["packages/*"]}',
         encoding="utf-8",
     )
-    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    found = list(_dep_refs(ctx, _project(tmp_path)))
     assert {f.payload["raw_target"] for f in found} == {"file:../sib", "packages/*"}
 
 
@@ -192,7 +219,7 @@ def test_a_workspace_member_is_internal_not_an_unregistered_project(
     (tmp_path / "crates" / "nzb-web" / "Cargo.toml").write_text(
         '[dependencies]\nnzb-core = { path = "../nzb-core" }\n', encoding="utf-8"
     )
-    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    found = list(_dep_refs(ctx, _project(tmp_path)))
     assert [f.payload["scope"] for f in found] == ["internal"]
 
 
@@ -218,7 +245,7 @@ def test_a_nested_workspace_reaching_back_is_still_internal(
     )
     scopes = {
         f.payload["raw_target"]: f.payload["scope"]
-        for f in DepRefCollector().collect(ctx, _project(tmp_path))
+        for f in _dep_refs(ctx, _project(tmp_path))
     }
     assert scopes["../crates/nzb-core"] == "internal", "excluded, but still in the tree"
 
@@ -232,7 +259,7 @@ def test_a_reference_outside_the_tree_is_external(
     (tmp_path / "repo" / "Cargo.toml").write_text(
         '[dependencies]\nsib = { path = "../sibling" }\n', encoding="utf-8"
     )
-    found = list(DepRefCollector().collect(ctx, _project(tmp_path / "repo")))
+    found = list(_dep_refs(ctx, _project(tmp_path / "repo")))
     assert [f.payload["scope"] for f in found] == ["external"]
 
 
@@ -248,7 +275,7 @@ def test_an_in_tree_path_that_resolves_to_nothing_is_broken(
     (tmp_path / "Cargo.toml").write_text(
         '[dependencies]\ngone = { path = "crates/moved-away" }\n', encoding="utf-8"
     )
-    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    found = list(_dep_refs(ctx, _project(tmp_path)))
     assert [f.payload["scope"] for f in found] == ["broken"]
 
 
@@ -259,7 +286,7 @@ def test_a_glob_member_is_internal_rather_than_broken(
     (tmp_path / "Cargo.toml").write_text(
         '[workspace]\nmembers = ["crates/*"]\n', encoding="utf-8"
     )
-    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    found = list(_dep_refs(ctx, _project(tmp_path)))
     assert [f.payload["scope"] for f in found] == ["internal"]
 
 
@@ -274,7 +301,7 @@ def test_dependency_inheritance_is_not_a_path_at_all(
     (tmp_path / "Cargo.toml").write_text(
         "[dependencies]\nopentelemetry = { workspace = true }\n", encoding="utf-8"
     )
-    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    found = list(_dep_refs(ctx, _project(tmp_path)))
     assert [f.payload["ref_kind"] for f in found] == ["inherited"]
     assert [f.payload["scope"] for f in found] == ["internal"]
 
@@ -286,7 +313,7 @@ def test_a_git_reference_is_external_however_it_looks(
         '[dependencies]\nother = { git = "https://github.com/o/other" }\n',
         encoding="utf-8",
     )
-    found = list(DepRefCollector().collect(ctx, _project(tmp_path)))
+    found = list(_dep_refs(ctx, _project(tmp_path)))
     assert [f.payload["scope"] for f in found] == ["external"]
 
 
@@ -307,7 +334,7 @@ def test_agent_worktrees_are_not_part_of_the_dependency_graph(
     (worktree / "Cargo.toml").write_text(
         '[dependencies]\ncontract = { path = "contract" }\n', encoding="utf-8"
     )
-    found = list(DepRefCollector().collect(ctx, _project(tmp_path, exclusions=True)))
+    found = list(_dep_refs(ctx, _project(tmp_path, exclusions=True)))
     assert len(found) == 1, "one manifest is the project's; the other is scratch"
     assert found[0].payload["manifest"] == "engine/Cargo.toml"
 
@@ -316,7 +343,247 @@ def test_a_malformed_manifest_is_a_fact_not_a_failure(
     ctx: CollectorContext, tmp_path: Path
 ) -> None:
     (tmp_path / "Cargo.toml").write_text("this is not toml [[[", encoding="utf-8")
-    assert list(DepRefCollector().collect(ctx, _project(tmp_path))) == []
+    assert list(_dep_refs(ctx, _project(tmp_path))) == []
+
+
+# -- the scan record: which zero a zero is (#50) ----------------------------
+
+
+def test_the_scan_record_names_a_manifest_format_it_does_not_read(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """A Go project with no references has a graph; this one cannot see it."""
+    (tmp_path / "go.mod").write_text("module example.com/thing\n", encoding="utf-8")
+    scan = _scan(ctx, _project(tmp_path))
+    assert scan.payload["references"] == 0
+    assert scan.payload["manifests_read"] == 0
+    assert scan.payload["unsupported_manifests"] == ["go.mod"], (
+        "a zero from a format nothing parses must say so"
+    )
+
+
+def test_the_scan_record_names_a_manifest_that_would_not_parse(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    (tmp_path / "Cargo.toml").write_text("this is not toml [[[", encoding="utf-8")
+    scan = _scan(ctx, _project(tmp_path))
+    assert scan.payload["unreadable_manifests"] == ["Cargo.toml"]
+    assert scan.payload["manifests_read"] == 0
+
+
+def test_a_scan_record_is_written_even_for_a_project_with_nothing_in_it(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """The record is the coverage; skipping it when there is nothing to say
+    is exactly how "nothing here" and "nobody looked" became one answer."""
+    scan = _scan(ctx, _project(tmp_path))
+    assert scan.payload == {
+        "manifests_read": 0,
+        "references": 0,
+        "unreadable_manifests": [],
+        "unsupported_manifests": [],
+        "root_exists": True,
+    }
+
+
+def test_deps_distinguishes_an_unswept_project_from_an_independent_one(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """WI-9's shape, on the surface #50 named next.
+
+    `has_evidence_tables` is estate-wide: a project registered after the last
+    sweep passed it and reported `0 references` as though somebody had looked.
+    """
+    swept = tmp_path / "swept"
+    swept.mkdir()
+    (swept / "Cargo.toml").write_text('[package]\nname = "swept"\n', encoding="utf-8")
+    register_project(
+        instance, RegisterProjectParams(name="Swept", root_path=str(swept), reason=WHY)
+    )
+    sweep(instance, SweepParams(offline_only=True, reason=WHY))
+
+    latecomer = tmp_path / "latecomer"
+    latecomer.mkdir()
+    (latecomer / "go.mod").write_text("module example.com/late\n", encoding="utf-8")
+    register_project(
+        instance,
+        RegisterProjectParams(name="Latecomer", root_path=str(latecomer), reason=WHY),
+    )
+
+    unswept = deps(instance, DepsParams(project="latecomer"))
+    assert unswept.status == "not_collected"
+    assert unswept.detail is not None and "never walked" in unswept.detail
+
+    looked_at = deps(instance, DepsParams(project="swept"))
+    assert looked_at.status == "collected"
+    assert looked_at.references_out == []
+    assert looked_at.detail is None, "a genuine zero needs no excuse"
+
+    sweep(instance, SweepParams(offline_only=True, reason=WHY))
+    now_swept = deps(instance, DepsParams(project="latecomer"))
+    assert now_swept.status == "collected"
+    assert now_swept.unsupported_manifests == ["go.mod"]
+    assert now_swept.detail is not None
+    assert "collector's reach" in now_swept.detail
+
+
+def test_the_brief_does_not_claim_to_have_collected_an_unswept_project(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    register_project(
+        instance, RegisterProjectParams(name="Other", root_path=str(other), reason=WHY)
+    )
+    sweep(instance, SweepParams(offline_only=True, reason=WHY))
+
+    late = tmp_path / "late"
+    late.mkdir()
+    register_project(
+        instance, RegisterProjectParams(name="Late", root_path=str(late), reason=WHY)
+    )
+    summary = brief_project(instance, ProjectBriefParams(slug="late")).dependencies
+    assert summary.status == "not_collected"
+    assert summary.detail is not None and "not collected" in summary.detail
+
+
+# -- mirrored source (FR-D8) -----------------------------------------------
+
+
+class _Index:
+    """The registered project list, as the application layer hands it down."""
+
+    def __init__(self, projects: list[RegisteredProject]) -> None:
+        self._projects = projects
+
+    def registered(self) -> list[RegisteredProject]:
+        return list(self._projects)
+
+
+def _crate(root: Path, name: str, version: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "Cargo.toml").write_text(
+        f'[package]\nname = "{name}"\nversion = "{version}"\n', encoding="utf-8"
+    )
+
+
+def test_a_vendored_crate_that_is_also_a_project_is_reported(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """The rustnzb case, and the eighteen the estate onboarding produced.
+
+    `rustnzb/crates/nzb-core` is a path member of one project and `nzb-core`
+    is a separately registered project. Both facts were already true and
+    nothing joined them.
+    """
+    vendoring = tmp_path / "rustnzb"
+    _crate(vendoring / "crates" / "nzb-core", "nzb-core", "0.3.0")
+    published = tmp_path / "nzb-core"
+    _crate(published, "nzb-core", "0.4.0")
+
+    index = _Index(
+        [
+            RegisteredProject(
+                id="prj_published",
+                slug="nzb-core",
+                root_path=str(published),
+                repo_url="https://github.com/o/nzb-core",
+            )
+        ]
+    )
+    found = list(
+        MirroredSourceCollector(index).collect(ctx, _project(vendoring, "rustnzb"))
+    )
+    assert len(found) == 1
+    payload = found[0].payload
+    assert found[0].kind == "mirrored_source"
+    assert found[0].subject_key == "mirror:rustnzb/crates/nzb-core->nzb-core"
+    assert payload["package"] == "nzb-core"
+    assert payload["local_path"] == "crates/nzb-core"
+    assert payload["mirrors_project_slug"] == "nzb-core"
+    assert (payload["local_version"], payload["published_version"]) == (
+        "0.3.0",
+        "0.4.0",
+    ), "both declared versions are recorded; neither is compared to the other"
+
+
+def test_a_project_is_not_a_mirror_of_itself(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """The root manifest declares the project's own package, by definition."""
+    root = tmp_path / "solo"
+    _crate(root, "solo", "1.0.0")
+    index = _Index([RegisteredProject(id="prj_solo", slug="solo", root_path=str(root))])
+    assert (
+        list(MirroredSourceCollector(index).collect(ctx, _project(root, "solo"))) == []
+    )
+
+
+def test_a_package_name_two_projects_claim_is_not_a_finding(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """An ambiguous match would be an assertion about which copy is real."""
+    vendoring = tmp_path / "app"
+    _crate(vendoring / "vendor" / "shared", "shared", "0.1.0")
+    first = tmp_path / "first"
+    _crate(first, "shared", "0.1.0")
+    second = tmp_path / "second"
+    _crate(second, "shared", "0.2.0")
+
+    index = _Index(
+        [
+            RegisteredProject(id="prj_first", slug="first", root_path=str(first)),
+            RegisteredProject(id="prj_second", slug="second", root_path=str(second)),
+        ]
+    )
+    assert (
+        list(MirroredSourceCollector(index).collect(ctx, _project(vendoring, "app")))
+        == []
+    )
+
+
+def test_a_project_checked_out_inside_another_is_one_copy_not_two(
+    ctx: CollectorContext, tmp_path: Path
+) -> None:
+    """A submodule is the same source in one place, not the same in two."""
+    outer = tmp_path / "outer"
+    inner = outer / "vendor" / "inner"
+    _crate(inner, "inner", "1.0.0")
+    index = _Index(
+        [RegisteredProject(id="prj_inner", slug="inner", root_path=str(inner))]
+    )
+    assert (
+        list(MirroredSourceCollector(index).collect(ctx, _project(outer, "outer")))
+        == []
+    )
+
+
+def test_mirrored_source_reaches_deps_from_both_ends(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """FR-D8's whole delivery: `deps` lists it, in both directions."""
+    vendoring = tmp_path / "rustnzb"
+    _crate(vendoring / "crates" / "nzb-core", "nzb-core", "0.3.0")
+    published = tmp_path / "nzb-core"
+    _crate(published, "nzb-core", "0.4.0")
+    for name, root in (("rustnzb", vendoring), ("nzb-core", published)):
+        register_project(
+            instance,
+            RegisterProjectParams(name=name, root_path=str(root), reason=WHY),
+        )
+    sweep(instance, SweepParams(offline_only=True, reason=WHY))
+
+    carrier = deps(instance, DepsParams(project="rustnzb"))
+    assert [(m.package, m.mirrors) for m in carrier.mirrors] == [
+        ("nzb-core", "nzb-core")
+    ]
+    assert carrier.mirrored_by == []
+
+    upstream = deps(instance, DepsParams(project="nzb-core"))
+    assert [(m.package, m.project) for m in upstream.mirrored_by] == [
+        ("nzb-core", "rustnzb")
+    ]
+    assert upstream.mirrors == []
 
 
 def test_coverage_counts_every_project_a_collector_has_seen(
@@ -585,6 +852,7 @@ def test_a_sweep_records_coverage_and_publishes_an_event(
         "git-local",
         "source-markers",
         "dep-refs",
+        "mirrored-source",
     }, "contract-checker is on demand only and is not in an unnamed sweep"
     assert all(report.outcome == "ok" for report in result.reports)
 
@@ -597,7 +865,7 @@ def test_a_sweep_records_coverage_and_publishes_an_event(
 
     with instance.declared.read() as view:
         kinds = [event.kind for event in view.list_events(after=0, limit=50)]
-    assert kinds.count("sweep.completed") == 3
+    assert kinds.count("sweep.completed") == 4
 
 
 def test_a_sweep_writes_no_audit_rows(instance: AppContext, tmp_path: Path) -> None:

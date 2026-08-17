@@ -267,6 +267,7 @@ def test_the_same_estate_works_with_no_forge_at_all(estate: AppContext) -> None:
         "git-local",
         "source-markers",
         "dep-refs",
+        "mirrored-source",
     }
     assert all(report.outcome == "ok" for report in result.reports)
 

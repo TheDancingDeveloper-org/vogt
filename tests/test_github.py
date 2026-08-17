@@ -422,6 +422,7 @@ def test_the_whole_suite_runs_forge_less(instance: AppContext, tmp_path: Path) -
         "git-local",
         "source-markers",
         "dep-refs",
+        "mirrored-source",
     }
     assert all(report.outcome == "ok" for report in result.reports)
 

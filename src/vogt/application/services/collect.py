@@ -20,6 +20,7 @@ from vogt.application.models import (
     CoverageResult,
     DepsParams,
     DepsResult,
+    MirroredSource,
     ObservationsParams,
     ObservationsResult,
     SweepParams,
@@ -29,7 +30,12 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.application.services.views import freshness_of
 from vogt.collectors import CollectorContext, CollectorRegistry, Sweeper
-from vogt.collectors.dep_refs import KIND_DEP_REF
+from vogt.collectors.dep_refs import KIND_DEP_REF, KIND_DEP_SCAN
+from vogt.collectors.mirrored_source import (
+    KIND_MIRRORED_SOURCE,
+    MirroredSourceCollector,
+    RegisteredProject,
+)
 from vogt.collectors.session_outcomes import (
     SESSION_OBSERVATION_LIMIT,
     SessionOutcomeCollector,
@@ -60,11 +66,37 @@ def collector_registry(ctx: AppContext) -> CollectorRegistry:
     registry = CollectorRegistry()
     from vogt.adapters.github import github_collectors
 
+    registry.add(MirroredSourceCollector(_RegisteredProjects(ctx)))
     for collector in github_collectors(ctx.config):
         registry.add(collector)
     if ctx.engine is not None:
         registry.add(SessionOutcomeCollector(ctx.engine, _DeclaredSessions(ctx)))
     return registry
+
+
+class _RegisteredProjects:
+    """The declared read `mirrored-source` needs, done on its behalf.
+
+    Here rather than in the collector for the same reason `_DeclaredSessions`
+    is: collectors never read declared data (FR-O2). The collector is handed
+    flat records — where each project's checkout is and what it is called —
+    and does its own reading of the trees from there.
+    """
+
+    def __init__(self, ctx: AppContext) -> None:
+        self._ctx = ctx
+
+    def registered(self) -> list[RegisteredProject]:
+        with self._ctx.declared.read() as view:
+            return [
+                RegisteredProject(
+                    id=project.id,
+                    slug=project.slug,
+                    root_path=project.root_path,
+                    repo_url=project.repo_url,
+                )
+                for project in view.list_projects(limit=10_000, offset=0)
+            ]
 
 
 class _DeclaredSessions:
@@ -395,7 +427,11 @@ def observations(ctx: AppContext, params: ObservationsParams) -> ObservationsRes
     decision hides them from views, it does not delete evidence (DESIGN §3.6).
     """
     if not ctx.observed.has_evidence_tables():
-        return ObservationsResult(observations=[], total=0)
+        return ObservationsResult(
+            observations=[],
+            total=0,
+            detail="no sweep has run; there is no evidence store to read yet",
+        )
 
     project_id: str | None = None
     if params.project:
@@ -421,12 +457,19 @@ def observations(ctx: AppContext, params: ObservationsParams) -> ObservationsRes
 
 
 def deps(ctx: AppContext, params: DepsParams) -> DepsResult:
-    """References out of a project, and — reversed — into it (FR-D4)."""
+    """References out of a project, and — reversed — into it (FR-D4).
+
+    Reports which zero a zero is. An empty graph is three different answers —
+    this project references nothing, its manifests are in a format `dep-refs`
+    does not parse, or nothing has ever walked it — and until the scan record
+    landed they were one number (FR-O4, #50).
+    """
     if not ctx.observed.has_evidence_tables():
         return DepsResult(
             project=params.project,
             references_out=[],
             referenced_by=[],
+            detail="no sweep has run; dependency references are not collected",
             freshness=freshness_of(ctx),
         )
 
@@ -434,13 +477,131 @@ def deps(ctx: AppContext, params: DepsParams) -> DepsResult:
         project = _resolve.project(view, params.project)
         out = ctx.observed.dep_refs(from_project_id=project.id)
         incoming = ctx.observed.dep_refs(to_project_id=project.id)
+        mirrors, mirrored_by = _mirrors_of(ctx, project.id)
+        scan = _scan_of(ctx, project.id)
         return DepsResult(
             project=project.slug,
             references_out=[_named(view, ref) for ref in out],
             referenced_by=[_named(view, ref) for ref in incoming],
             unresolved=sum(1 for ref in out if ref.to_project_id is None),
+            mirrors=mirrors,
+            mirrored_by=mirrored_by,
+            status="not_collected" if scan is None else "collected",
+            manifests_read=0 if scan is None else scan.manifests_read,
+            unsupported_manifests=[] if scan is None else scan.unsupported,
+            unreadable_manifests=[] if scan is None else scan.unreadable,
+            detail=_deps_detail(scan, references=len(out)),
             freshness=freshness_of(ctx),
         )
+
+
+@dataclass(frozen=True)
+class _ScanRecord:
+    """What the last `dep-refs` walk of one project actually read."""
+
+    manifests_read: int
+    unsupported: list[str]
+    unreadable: list[str]
+
+
+def _scan_of(ctx: AppContext, project_id: str) -> _ScanRecord | None:
+    """The project's newest scan record, or `None` where nothing walked it.
+
+    Per project rather than per estate: `has_evidence_tables` answers whether
+    *anything* has been collected, and a project registered after the last
+    sweep passes that test while having been looked at by nothing.
+    """
+    seen = ctx.observed.latest(kinds=(KIND_DEP_SCAN,), project_id=project_id, limit=1)
+    if not seen:
+        return None
+    payload = seen[0].payload
+    return _ScanRecord(
+        manifests_read=_count(payload.get("manifests_read")),
+        unsupported=[
+            str(name) for name in _as_list(payload.get("unsupported_manifests"))
+        ],
+        unreadable=[
+            str(name) for name in _as_list(payload.get("unreadable_manifests"))
+        ],
+    )
+
+
+def _count(value: object) -> int:
+    """A payload number, read as one only when it is one."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _as_list(value: object) -> list[object]:
+    return list(value) if isinstance(value, list) else []
+
+
+def _deps_detail(scan: _ScanRecord | None, *, references: int) -> str | None:
+    """Say which zero this is, and say nothing when it is not one."""
+    if scan is None:
+        return (
+            "`dep-refs` has never walked this project, so these counts are "
+            "'not collected' rather than 'nothing to find' — run `sweep`"
+        )
+    if references:
+        return None
+    if scan.unsupported:
+        return (
+            f"no references found, and {len(scan.unsupported)} manifest(s) are "
+            "in a format `dep-refs` does not read "
+            f"({', '.join(scan.unsupported[:5])}): this zero is the "
+            "collector's reach, not the project's graph"
+        )
+    if scan.unreadable:
+        return (
+            f"no references found, and {len(scan.unreadable)} manifest(s) "
+            f"would not parse ({', '.join(scan.unreadable[:5])})"
+        )
+    if not scan.manifests_read:
+        return "no manifest was found in this project at all"
+    return None
+
+
+def _mirrors_of(
+    ctx: AppContext, project_id: str
+) -> tuple[list[MirroredSource], list[MirroredSource]]:
+    """Mirrored-source relations this project is either end of (FR-D8).
+
+    Read unfiltered and split here, because the reverse direction — who
+    carries a copy of *this* project — is a property of somebody else's
+    observation, and the observed store answers questions about a project by
+    the project the finding was made *about*.
+    """
+    mirrors: list[MirroredSource] = []
+    mirrored_by: list[MirroredSource] = []
+    with ctx.declared.read() as view:
+        slugs = {p.id: p.slug for p in view.list_projects(limit=10_000, offset=0)}
+    for observation in ctx.observed.latest(kinds=(KIND_MIRRORED_SOURCE,), limit=10_000):
+        payload = observation.payload
+        carrier = observation.project_id
+        published_id = str(payload.get("mirrors_project_id", ""))
+        if carrier is None:  # pragma: no cover - always project-scoped
+            continue
+        view_of = MirroredSource(
+            package=str(payload.get("package", "")),
+            project=slugs.get(carrier, carrier),
+            mirrors=slugs.get(
+                published_id, str(payload.get("mirrors_project_slug", ""))
+            ),
+            local_path=str(payload.get("local_path", "")),
+            manifest=_optional(payload.get("manifest")),
+            local_version=_optional(payload.get("local_version")),
+            published_version=_optional(payload.get("published_version")),
+            observed_at=observation.observed_at,
+        )
+        if carrier == project_id:
+            mirrors.append(view_of)
+        if published_id == project_id:
+            mirrored_by.append(view_of)
+    return mirrors, mirrored_by
+
+
+def _optional(value: object) -> str | None:
+    return None if value is None else str(value)
 
 
 def _named(view: ReadView, ref: DepRef) -> DepRef:

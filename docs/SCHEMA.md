@@ -186,7 +186,16 @@ with the score.
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `drift_proposals` | machine-generated, human/agent-resolved | `id, kind, subject_kind, subject_id, evidence_observation_id, evidence_snapshot(json), proposed_change(json), status(open\|accepted\|rejected\|contested), opened_at, resolved_by_actor_id, resolved_at, resolution_reason` |
+| `drift_proposals` | machine-generated, human/agent-resolved | `id, kind, subject_kind, subject_id, evidence_observation_id, evidence_snapshot(json), proposed_change(json), status(open\|accepted\|rejected\|contested), opened_at, superseded_at, superseded_detail, resolved_by_actor_id, resolved_at, resolution_reason` |
+
+`superseded_at` (r15, FR-R6) marks an **open** proposal whose raising
+condition a later completed sweep no longer reproduces. It is not a
+resolution and not a status: the row stays `open`, keeps its snapshot, and
+still requires a person (FR-R2, FR-U18). It clears again if the condition
+returns, because a stale "superseded" tells a reader to ignore a live
+proposal. Coverage-gated: nothing is marked unless the collector that raised
+it completed a sweep *after* the proposal was opened, since silence outside
+a completed sweep is "not collected" (FR-O4).
 
 `evidence_snapshot` (r2, FR-R5) is the self-contained copy of the evidence
 as it stood at raise time: the observation payload digest, its
@@ -205,6 +214,8 @@ Drift kinds (v1):
 | `ci_red_vs_healthy` | M5 | CI red on default branch, project claims healthy |
 | `vanished_upstream` | M5 | linked forge object absent within provably swept scope |
 | `update_automation_gap` | M5 | a required automation toggle is off (FR-D6) |
+| `broken_path_dependency` | M3 | a path reference inside the project's own tree resolving to nothing |
+| `referenced_issue_state_mismatch` | r15 | a work item's own text names a forge issue whose observed state disagrees (FR-R7) |
 
 *r2 removals*: `contract_violation` and `unregistered_project` are no
 longer drift — the first is `projects.compliance_status` (`DESIGN.md` §5),
@@ -345,10 +356,22 @@ side names a terminal by that id alone.
 `subject_key` is a deterministic natural key, e.g.
 `gh:owner/repo#123`, `ci:owner/repo@sha:workflow`, `mark:repo/path#L42`,
 `release:owner/repo@tag`, `depref:repo/Cargo.toml→../nzb-core`,
+`depscan:project-slug` (r15), `mirror:project/path->project` (r15, FR-D8),
 `contract:project-slug`, `session:<session id>` (r5, FR-E6),
 `task-run:<run id>` (r5, FR-E7). Same `subject_key` + same `content_digest`
 in a new sweep ⇒ no new row (sweep stats count it as unchanged), keeping
 growth proportional to change, not to polling frequency.
+
+*r15, a consequence worth stating*: `observed_at` is therefore **when a
+payload was first seen, not when it was last confirmed**, and no subject can
+be dated to the sweep that last saw it. Two live effects, both recorded in
+`REQUIREMENTS.md` r15 as residuals: a GitHub issue closed after its last
+observation keeps an observation saying `open` (the `gh-issues` collector
+reads open issues, so a close is an absence, not a payload change), and
+`latest_dep_refs` keeps a reference whose manifest entry was deleted until
+something re-observes that subject. Both would be closed by a per-subject
+last-seen record, which is a schema change and a new coverage concept rather
+than a bug fix.
 
 The two session keys are Vogt's own ids rather than the engine's, deliberately:
 a session's subject is the thing Vogt declared, so its evidence survives an

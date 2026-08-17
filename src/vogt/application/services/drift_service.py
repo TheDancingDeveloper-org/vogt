@@ -8,6 +8,9 @@ explainable as anything a human typed.
 
 from __future__ import annotations
 
+from datetime import datetime
+
+from vogt.adapters.github.collectors import KIND_ISSUE
 from vogt.application.context import AppContext
 from vogt.application.models import (
     DriftDetectParams,
@@ -37,12 +40,14 @@ from vogt.core.drift import (
     broken_path_dependency,
     ci_red_vs_healthy,
     forge_state_mismatch,
+    issue_references,
+    referenced_issue_state_mismatch,
     unresolved_dependency,
     update_automation_gap,
     vanished_upstream,
     version_mismatch,
 )
-from vogt.core.entities import Actor, DriftProposal, Observation
+from vogt.core.entities import Actor, DriftProposal, Observation, WorkItem
 from vogt.core.workflow import TERMINAL_STATES
 from vogt.errors import Conflict, InvalidRequest, NotFound
 from vogt.storage.interface import ProjectUpdate, WorkFilter, WorkItemUpdate, WriteTxn
@@ -52,6 +57,7 @@ DRIFT_RESOLVE = "drift.resolve"
 
 DRIFT_RAISED_EVENT = "drift.raised"
 DRIFT_RESOLVED_EVENT = "drift.resolved"
+DRIFT_SUPERSEDED_EVENT = "drift.superseded"
 
 RESOLUTIONS = ("accepted", "rejected", "contested")
 
@@ -143,6 +149,55 @@ def _dependency_findings(ctx: AppContext) -> list[DriftFinding]:
     return findings
 
 
+def _referenced_issue_findings(
+    ctx: AppContext, *, item: WorkItem, linked: set[str]
+) -> list[DriftFinding]:
+    """Issues a work item's own text names, against what was observed (FR-R7).
+
+    The gap this closes was found by an onboarding agent, not by Vogt:
+    `WI-16` mirrored issue `#44`, named it in the first line of its body, and
+    was marked done while `#44` stayed open for hours. Vogt already collects
+    `forge.issue` observations and already treats declared-versus-observed
+    disagreement as the thing drift exists to catch — this shape had simply
+    never been wired up as one (#49).
+
+    Three guards, each earning its place:
+
+    - **Only issues.** A `forge.pull_request` observation shares the subject
+      key space; comparing an item's state against a PR it mentions is a
+      different question nobody asked.
+    - **Not what is already linked.** An adopted `WorkLink` is
+      `forge_state_mismatch`'s subject, and raising both would put two
+      proposals on one disagreement.
+    - **Only what was observed.** No observation is "not collected", and
+      raising drift from that is the mistake FR-O4 exists to prevent.
+    """
+    findings: list[DriftFinding] = []
+    for subject_key in issue_references(f"{item.title}\n{item.body or ''}"):
+        if subject_key in linked:
+            continue
+        seen = ctx.observed.list_observations(subject_key=subject_key, limit=1)
+        if not seen or seen[0].kind != KIND_ISSUE:
+            continue
+        observation = seen[0]
+        upstream = str(observation.payload.get("state", "open"))
+        if (upstream == "closed") == (item.state in TERMINAL_STATES):
+            continue
+        findings.append(
+            referenced_issue_state_mismatch(
+                work_item_id=item.id,
+                work_ref=item.ref,
+                declared_state=item.state,
+                upstream_state=upstream,
+                subject_key=subject_key,
+                project_id=item.project_id,
+                evidence=_snapshot(observation),
+                evidence_observation_id=observation.id,
+            )
+        )
+    return findings
+
+
 def _forge_findings(ctx: AppContext) -> list[DriftFinding]:
     """The M5 kinds: state mismatch, vanished upstream, red CI, posture."""
     findings: list[DriftFinding] = []
@@ -195,6 +250,13 @@ def _forge_findings(ctx: AppContext) -> list[DriftFinding]:
                         evidence_observation_id=observation.id,
                     )
                 )
+
+        # referenced_issue_state_mismatch, from the item's own text.
+        findings.extend(
+            _referenced_issue_findings(
+                ctx, item=item, linked=set(links.get(item.id, {}))
+            )
+        )
 
     # ci_red_vs_healthy and update_automation_gap, per project.
     for project in projects.values():
@@ -286,6 +348,105 @@ def _raise_proposal(
     return audited_write(ctx, operation="drift.detect", reason=reason, body=body)
 
 
+def _mark_superseded(
+    ctx: AppContext,
+    proposal: DriftProposal,
+    *,
+    detail: str | None,
+    at: datetime | None,
+    reason: str,
+) -> None:
+    """Flag — or un-flag — an open proposal as raised under stale evidence.
+
+    An audited write like every other change to a declared row, because it
+    changes what the inbox says about a proposal somebody is going to act on.
+    """
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[DriftProposal]:
+        del actor
+        txn.mark_drift_superseded(proposal.id, detail=detail, at=at)
+        updated = txn.drift_by_id(proposal.id)
+        assert updated is not None  # read back inside the same transaction
+        return WriteOutcome(
+            result=updated,
+            entity_kind="drift_proposal",
+            entity_id=proposal.id,
+            payload=updated.model_dump(mode="json"),
+            event_kind=DRIFT_SUPERSEDED_EVENT,
+            summary={
+                "kind": proposal.kind,
+                "superseded": at is not None,
+                "detail": detail,
+            },
+        )
+
+    audited_write(ctx, operation=DRIFT_DETECT, reason=reason, body=body)
+
+
+def _reconcile_open_proposals(
+    ctx: AppContext, *, findings: list[DriftFinding], reason: str
+) -> list[str]:
+    """Re-validate the board against the evidence this run just read (FR-R6).
+
+    `drift detect` only ever added. A fix that changes what a collector
+    reports — a `ref_kind` reclassification, a corrected posture check —
+    leaves behind however many proposals it had already raised under the old
+    logic, and nothing distinguished "this is still true" from "this stopped
+    being true when the fix landed". Thirty-six `unresolved_dependency`
+    proposals survived WI-2's fix, its deploy, a regression and a re-fix, and
+    were cleared by hand after somebody reconstructed the timeline from
+    timestamps (#48).
+
+    **Not auto-close, deliberately.** FR-R2 keeps resolution with a human or
+    an authorised agent, and FR-U18 refuses even bulk *accept* in the GUI
+    because a person should see the evidence per proposal. This marks; it
+    never resolves.
+
+    **Coverage-gated, deliberately.** Silence is only meaningful inside a
+    sweep that provably covered the subject (FR-O4). A proposal is marked
+    only when the collector that raised it has completed a sweep *since* the
+    proposal was opened and the condition did not reappear in it — absence
+    without that sweep is "not collected", which is the mistake this whole
+    layer exists to avoid making.
+    """
+    current = {(f.kind, f.subject_kind, f.subject_id) for f in findings}
+    coverage = ctx.observed.coverage()
+    with ctx.declared.read() as view:
+        board = view.list_drift(status="open", limit=10_000)
+
+    marked: list[str] = []
+    for proposal in board:
+        key = (proposal.kind, proposal.subject_kind, proposal.subject_id)
+        if key in current:
+            if proposal.superseded_at is not None:
+                # It came back. A stale "superseded" flag is worse than none:
+                # it tells a reader to ignore a proposal that is true again.
+                _mark_superseded(ctx, proposal, detail=None, at=None, reason=reason)
+            continue
+        if proposal.superseded_at is not None:
+            continue
+        collector = str(proposal.evidence_snapshot.get("collector", ""))
+        swept = coverage.get(collector)
+        if swept is None or swept.finished_at is None:
+            continue
+        if swept.finished_at <= proposal.opened_at:
+            continue
+        _mark_superseded(
+            ctx,
+            proposal,
+            detail=(
+                f"{collector} completed a sweep at "
+                f"{swept.finished_at.isoformat()}, after this was raised, and "
+                "the condition that raised it no longer reproduces — the "
+                "evidence snapshot above is what it was raised on"
+            ),
+            at=ctx.clock(),
+            reason=reason,
+        )
+        marked.append(proposal.id)
+    return marked
+
+
 def detect_drift(ctx: AppContext, params: DriftDetectParams) -> DriftDetectResult:
     """Compare declared state against observation and raise proposals (FR-R1).
 
@@ -350,8 +511,33 @@ def detect_drift(ctx: AppContext, params: DriftDetectParams) -> DriftDetectResul
         raised=raised,
         auto_accepted=auto_accepted,
         already_open=len(findings) - len(raised),
+        superseded=_reconcile_open_proposals(
+            ctx, findings=findings, reason=params.reason
+        ),
+        not_collected=_projects_without_evidence(ctx),
         auto_acceptable_kinds=sorted(AUTO_ACCEPTABLE_KINDS),
     )
+
+
+def _projects_without_evidence(ctx: AppContext) -> list[str]:
+    """Registered projects no collector has ever swept (FR-O4, #50).
+
+    `detect` refuses outright when *nothing* has been collected, which was
+    the whole guard: with one project swept and eleven not, it reported the
+    raised count and said nothing about the eleven it could not have raised
+    anything for. A zero from a project nobody looked at is not a zero.
+    """
+    if not ctx.observed.has_evidence_tables():
+        return []
+    seen: set[str] = set()
+    for project_ids in ctx.observed.coverage_by_project().values():
+        seen.update(project_ids)
+    with ctx.declared.read() as view:
+        return sorted(
+            project.slug
+            for project in view.list_projects(limit=10_000, offset=0)
+            if project.id not in seen
+        )
 
 
 def list_drift(ctx: AppContext, params: DriftListParams) -> DriftListResult:

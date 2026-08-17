@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,7 @@ from vogt.application.services import (
 from vogt.application.services.drift_service import (
     DRIFT_RAISED_EVENT,
     DRIFT_RESOLVED_EVENT,
+    DRIFT_SUPERSEDED_EVENT,
 )
 from vogt.collectors.base import finding
 from vogt.core.drift import (
@@ -53,6 +55,9 @@ from vogt.core.drift import (
     CI_RED_VS_HEALTHY,
     UNRESOLVED_DEPENDENCY,
     VERSION_MISMATCH,
+    EvidenceSnapshot,
+    forge_state_mismatch,
+    issue_references,
     normalise_version,
 )
 from vogt.core.entities import Project
@@ -335,6 +340,148 @@ def test_an_unresolved_reference_is_drift(instance: AppContext, tmp_path: Path) 
 def test_detecting_before_a_sweep_says_so(instance: AppContext) -> None:
     with pytest.raises(InvalidRequest, match="nothing to"):
         detect_drift(instance, DriftDetectParams(reason=WHY))
+
+
+# -- proposals raised under evidence that moved on (#48, FR-R6) ------------
+
+
+def _broken_reference(instance: AppContext, root: Path) -> Path:
+    """A project whose manifest points at a directory inside it that is gone.
+
+    The same shape as the thirty-six: a proposal raised from one reading of a
+    manifest, which a later sweep of the *same subject* reads differently.
+    """
+    (root / "crates").mkdir(parents=True)
+    (root / "Cargo.toml").write_text(
+        '[dependencies]\ngone = { path = "crates/moved-away" }\n', encoding="utf-8"
+    )
+    register_project(
+        instance, RegisterProjectParams(name="Mono", root_path=str(root), reason=WHY)
+    )
+    sweep(instance, SweepParams(offline_only=True, reason=WHY))
+    return root / "crates" / "moved-away"
+
+
+def test_a_proposal_the_evidence_stopped_reproducing_is_marked_superseded(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """The thirty-six, and what it took to clear them.
+
+    `WI-2`'s fix stopped `dep-refs` reporting Cargo dependency inheritance as
+    an unresolved reference. The proposals it had already raised stayed open
+    through the fix, its deploy, a regression and a re-fix, and closed only
+    because somebody reconstructed the timeline from timestamps and ran
+    `drift resolve --reject` thirty-six times.
+    """
+    missing = _broken_reference(instance, tmp_path / "repo")
+    raised = detect_drift(instance, DriftDetectParams(auto_accept=False, reason=WHY))
+    proposal = next(p for p in raised.raised if p.kind == BROKEN_PATH_DEPENDENCY)
+
+    # The directory is restored, and a sweep produces the evidence that says
+    # so — the same subject, read differently.
+    missing.mkdir()
+    sweep(instance, SweepParams(offline_only=True, reason="after the fix"))
+    again = detect_drift(instance, DriftDetectParams(auto_accept=False, reason=WHY))
+
+    assert again.superseded == [proposal.id]
+    marked = next(
+        p
+        for p in list_drift(instance, DriftListParams()).proposals
+        if p.id == proposal.id
+    )
+    assert marked.status == "open", "marking is not resolving (FR-R2, FR-U18)"
+    assert marked.superseded_at is not None
+    assert marked.superseded_detail is not None
+    assert "no longer reproduces" in marked.superseded_detail
+    assert marked.evidence_snapshot, "it still carries what it was raised on"
+
+
+def test_a_condition_that_comes_back_clears_the_flag(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """A stale "superseded" is worse than none: it says ignore a live one."""
+    missing = _broken_reference(instance, tmp_path / "repo")
+    proposal = next(
+        p
+        for p in detect_drift(
+            instance, DriftDetectParams(auto_accept=False, reason=WHY)
+        ).raised
+        if p.kind == BROKEN_PATH_DEPENDENCY
+    )
+
+    missing.mkdir()
+    sweep(instance, SweepParams(offline_only=True, reason="after the fix"))
+    detect_drift(instance, DriftDetectParams(auto_accept=False, reason=WHY))
+
+    missing.rmdir()
+    sweep(instance, SweepParams(offline_only=True, reason="it came back"))
+    detect_drift(instance, DriftDetectParams(auto_accept=False, reason=WHY))
+
+    live = next(
+        p
+        for p in list_drift(instance, DriftListParams()).proposals
+        if p.id == proposal.id
+    )
+    assert live.superseded_at is None
+    assert live.superseded_detail is None
+
+
+def test_nothing_is_superseded_without_a_sweep_that_could_say_so(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """Coverage-gated, like every other absence claim here (FR-O4).
+
+    Emptying the projection removes the *finding*, not the evidence. Marking
+    on that would assert something no collector said.
+    """
+    _broken_reference(instance, tmp_path / "repo")
+    detect_drift(instance, DriftDetectParams(auto_accept=False, reason=WHY))
+
+    instance.observed.replace_dep_refs([])
+    again = detect_drift(instance, DriftDetectParams(auto_accept=False, reason=WHY))
+
+    assert again.superseded == [], "no sweep since the proposal was raised"
+
+
+def test_marking_a_proposal_superseded_is_an_audited_write(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """It changes what the inbox says about a row somebody will act on."""
+    missing = _broken_reference(instance, tmp_path / "repo")
+    detect_drift(instance, DriftDetectParams(auto_accept=False, reason=WHY))
+    missing.mkdir()
+    sweep(instance, SweepParams(offline_only=True, reason="after the fix"))
+
+    detect_drift(instance, DriftDetectParams(auto_accept=False, reason="reconcile"))
+
+    with instance.declared.read() as view:
+        events = [e.kind for e in view.list_events(after=0, limit=200)]
+        reasons = [r.reason for r in view.list_audit(limit=200)]
+    assert DRIFT_SUPERSEDED_EVENT in events
+    assert "reconcile" in reasons
+
+
+def test_detect_names_the_projects_it_could_not_have_raised_anything_for(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """#50: `detect` refuses on a wholly unswept instance, and said nothing
+    about the unswept projects on a partly swept one."""
+    swept = tmp_path / "swept"
+    swept.mkdir()
+    register_project(
+        instance, RegisterProjectParams(name="Swept", root_path=str(swept), reason=WHY)
+    )
+    sweep(instance, SweepParams(project="swept", offline_only=True, reason=WHY))
+
+    unswept = tmp_path / "unswept"
+    unswept.mkdir()
+    register_project(
+        instance,
+        RegisterProjectParams(name="Unswept", root_path=str(unswept), reason=WHY),
+    )
+
+    result = detect_drift(instance, DriftDetectParams(auto_accept=False, reason=WHY))
+    assert result.not_collected == ["unswept"]
 
 
 # -- the lifecycle ---------------------------------------------------------
@@ -628,3 +775,78 @@ def test_resolving_drift_is_not_worth_a_phone_interruption() -> None:
     `kind.startswith("drift.")`.
     """
     assert DRIFT_RESOLVED_EVENT not in engine_drift_notify_kinds()
+
+
+# -- reading an issue reference out of an item's own text (FR-R7) ----------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "GitHub: https://github.com/TheDancingDeveloper-org/vogt/issues/44",
+            ["gh:TheDancingDeveloper-org/vogt#44"],
+        ),
+        (
+            "see TheDancingDeveloper-org/vogt#44 for context",
+            ["gh:TheDancingDeveloper-org/vogt#44"],
+        ),
+        ("http://www.github.com/o/r/issues/7", ["gh:o/r#7"]),
+        # Named twice, one reference.
+        (
+            "https://github.com/o/r/issues/7 and again o/r#7",
+            ["gh:o/r#7"],
+        ),
+    ],
+)
+def test_a_qualified_reference_names_an_issue(text: str, expected: list[str]) -> None:
+    assert issue_references(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # WI-16's own title. #43 is a pull request; the issue it mirrors is
+        # named separately, as a URL.
+        "Regression from #43 (WI-2): dep-refs emits a ref_kind storage rejects",
+        "fix in PR https://github.com/TheDancingDeveloper-org/vogt/pull/45",
+        "issue 44 is the one",
+        "#44",
+    ],
+)
+def test_an_ambiguous_reference_is_not_one(text: str) -> None:
+    """Precision is load-bearing: a rejected proposal is re-raised by the
+    next `detect`, so a false positive is not a one-time cost."""
+    assert issue_references(text) == []
+
+
+def test_the_auto_accept_policy_is_asymmetric_for_forge_state() -> None:
+    """Closing on observed evidence, never reopening on its absence (#49)."""
+    evidence = EvidenceSnapshot(
+        subject_key="gh:o/r#1",
+        content_digest="d",
+        observed_at=datetime(2026, 8, 12, tzinfo=UTC),
+        collector="gh-issues",
+    )
+    closing = forge_state_mismatch(
+        work_item_id="wrk_1",
+        work_ref="WI-1",
+        declared_state="in_progress",
+        upstream_state="closed",
+        subject_key="gh:o/r#1",
+        project_id=None,
+        evidence=evidence,
+        evidence_observation_id=None,
+    )
+    reopening = forge_state_mismatch(
+        work_item_id="wrk_1",
+        work_ref="WI-1",
+        declared_state="done",
+        upstream_state="open",
+        subject_key="gh:o/r#1",
+        project_id=None,
+        evidence=evidence,
+        evidence_observation_id=None,
+    )
+    assert closing.auto_acceptable is True
+    assert reopening.auto_acceptable is False

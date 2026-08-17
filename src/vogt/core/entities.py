@@ -282,6 +282,17 @@ class DriftProposal(Entity):
     proposed_change: dict[str, object] = {}
     status: Literal["open", "accepted", "rejected", "contested"] = "open"
     opened_at: datetime
+    superseded_at: datetime | None = None
+    """When a later sweep stopped reproducing the condition that raised this.
+
+    Set on an *open* proposal, and cleared again if the condition comes back.
+    It resolves nothing: the proposal is still open, still human-gated
+    (FR-R2), and still carries the snapshot it was raised with. It says only
+    that fresher evidence exists and no longer says what the old evidence
+    said — the reconciliation somebody did by hand across thirty-six
+    proposals after WI-2's fix landed (#48).
+    """
+    superseded_detail: str | None = None
     resolved_by_actor_id: str | None = None
     resolved_by_identity_ref: str | None = None
     resolved_at: datetime | None = None
