@@ -359,7 +359,7 @@ their facts, not a replacement for those domain reads.
 
 ### Declared triage
 
-Add `0008_inbox_triage.sql` and an `InboxTriage` entity. The current projection
+Add `0009_inbox_triage.sql` and an `InboxTriage` entity. The current projection
 is keyed by `entry_key` and records state, snooze expiry, actor, latest
 decision time and the bounded normalized occurrence snapshot; audit and events
 retain the history.

@@ -1,4 +1,4 @@
--- 0009_superseded_drift — a proposal raised under evidence that no longer
+-- 0008_superseded_drift — a proposal raised under evidence that no longer
 -- says what it said.
 --
 -- WI-2's fix (#43) stopped `dep-refs` misclassifying Cargo dependency

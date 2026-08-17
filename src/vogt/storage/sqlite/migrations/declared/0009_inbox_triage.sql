@@ -1,4 +1,4 @@
--- 0008_inbox_triage — shared occurrence-scoped Inbox decisions.
+-- 0009_inbox_triage — shared occurrence-scoped Inbox decisions.
 --
 -- This is a projection of a person's current triage decision. The audit and
 -- event tables retain the complete history; the bounded snapshot means an
