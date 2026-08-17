@@ -115,6 +115,8 @@ function mountShell(url: string, options: ShellOptions = {}): Shell {
  * exact failure "the link opened the wrong tab" produces.
  */
 function shown(container: HTMLElement): HTMLElement | null {
+  const place = container.querySelector<HTMLElement>(".place-view");
+  if (place) return place;
   const panes = [...container.querySelectorAll<HTMLElement>(".tab-view > div")];
   return panes.find((pane) => pane.style.display === "flex") ?? null;
 }
@@ -161,14 +163,14 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     const { container } = mountShell("/board");
 
     await surface(container, ".vogt-surface.board");
-    expect(tabLabels(container)).toEqual(["▦ Board"]);
+    expect(tabLabels(container)).toEqual([]);
   });
 
   it("opens the ranked backlog", async () => {
     const { container } = mountShell("/backlog");
 
     await surface(container, ".vogt-surface.vogt-backlog");
-    expect(tabLabels(container)).toEqual(["☰ Backlog"]);
+    expect(tabLabels(container)).toEqual([]);
   });
 
   it("opens the project page on the project the link names", async () => {
@@ -194,7 +196,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
       ),
     );
     expect(vogt.matching("GET /work/get")[0]?.query.get("ref")).toBe("WI-1");
-    expect(tabLabels(container)).toEqual(["◈ WI-1"]);
+    expect(tabLabels(container)).toEqual([]);
   });
 
   it("opens an audit query, narrowed to what the link carried", async () => {
@@ -234,7 +236,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     await waitFor(() => expect(container.querySelector(".drawer")).toBeTruthy());
     await settle();
     expect(tabLabels(container)).toEqual([]);
-    expect(container.querySelector(".vogt-surface")).toBeNull();
+    expect(container.querySelector(".vogt-surface.board")).toBeTruthy();
   });
 
   it("follows a second link into a second surface, without closing the first", async () => {
@@ -247,7 +249,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     go("/backlog");
 
     await surface(container, ".vogt-surface.vogt-backlog");
-    expect(tabLabels(container)).toEqual(["▦ Board", "☰ Backlog"]);
+    expect(tabLabels(container)).toEqual([]);
   });
 });
 
@@ -265,10 +267,10 @@ describe("FR-T6 — the assistant is not there to be reached when it is not prov
     // Wait for the config to have arrived, so this is an assertion about a
     // resolved gate and not about a race the shell would lose later.
     await waitFor(() =>
-      expect(drawerButtons(container)).toContain("▦ Board"),
+      expect(drawerButtons(container)).toContain("Board"),
     );
     await settle();
-    expect(drawerButtons(container)).not.toContain("🎙 Assistant");
+    expect(drawerButtons(container)).not.toContain("Assistant");
     expect(tabLabels(container)).toEqual([]);
     expect(container.textContent).not.toContain("Ask about your terminal sessions");
   });
@@ -285,8 +287,8 @@ describe("FR-T6 — the assistant is not there to be reached when it is not prov
         "Ask about your terminal sessions",
       ),
     );
-    expect(drawerButtons(container)).toContain("🎙 Assistant");
-    expect(tabLabels(container)).toEqual(["🎙 Assistant"]);
+    expect(drawerButtons(container)).toContain("Assistant");
+    expect(tabLabels(container)).toEqual(["Assistant"]);
   });
 });
 

@@ -69,6 +69,16 @@ export class VogtUnavailable extends Error {
   }
 }
 
+/** The current front door has not shipped the normalized Inbox operation. */
+export class InboxContractUnavailable extends Error {
+  constructor() {
+    super(
+      "The normalized inbox.list contract is not available from this front door yet.",
+    );
+    this.name = "InboxContractUnavailable";
+  }
+}
+
 function isAbsent(status: number): boolean {
   // 503: this front door has no core configured. 502: it has one and the
   // core did not answer. Both mean "Vogt cannot be asked right now", which
@@ -139,6 +149,52 @@ export interface FreshnessSummary {
    *  difference between "nothing found" and "not collected". */
   collectors?: Record<string, string>;
   detail?: string | null;
+}
+
+/**
+ * The normalized attention contract planned for the canonical Inbox.
+ *
+ * This client deliberately only carries the contract shape while the backend
+ * operation is absent from this checkout. Inbox.tsx renders that absence and
+ * never falls back to merging notifications, drift, or events in the browser.
+ */
+export interface InboxEntry {
+  entry_key: string;
+  source: "github" | "drift" | "ci" | "agent" | string;
+  kind: string;
+  occurred_at: string;
+  observed_at?: string | null;
+  title: string;
+  summary?: string | null;
+  project_slug?: string | null;
+  work_item_ref?: string | null;
+  session_id?: string | null;
+  source_subject?: string | null;
+  source_url?: string | null;
+  trust_state?: TrustState;
+  freshness?: FreshnessSummary;
+  triage_state?: "active" | "archived" | "snoozed" | string;
+  snoozed_until?: string | null;
+  action?: {
+    drift_id?: string;
+    observed_subject_key?: string;
+  };
+}
+
+export interface InboxSourceCoverage {
+  status: "current" | "partial" | "unswept" | "unconfigured" | "failed" | string;
+  count: number;
+  observed_at?: string | null;
+  detail?: string | null;
+}
+
+export interface InboxListResult {
+  entries: InboxEntry[];
+  next_cursor?: string | null;
+  snapshot_at: string;
+  coverage: Record<string, InboxSourceCoverage>;
+  instance_scope?: string | null;
+  engine_available?: boolean;
 }
 
 export interface WorkItem {
@@ -466,6 +522,17 @@ export const notifications = (params: Record<string, unknown> = {}) =>
   // under a collector that did not run means "nobody asked", which is a
   // different answer from "nothing to say" (FR-N3).
   call<Record<string, unknown>>("notifications", params);
+
+/**
+ * Read the canonical Inbox only when the backend exposes its contract.
+ *
+ * This checkout predates `inbox.list`, so intentionally no URL is invented
+ * here and no legacy reads are composed in the browser. When the registry
+ * operation lands, this function is the single client seam to wire to it.
+ */
+export const listInbox = async (_params: Record<string, unknown> = {}): Promise<InboxListResult> => {
+  throw new InboxContractUnavailable();
+};
 
 /** The audit log, narrowed and paged (FR-S6, FR-U19).
  *

@@ -13,6 +13,7 @@ export type Tab =
   // ordinary case when one blocks the other.
   | { id: string; kind: "board"; label: string }
   | { id: string; kind: "backlog"; label: string }
+  | { id: string; kind: "inbox"; label: string }
   | { id: string; kind: "projects"; label: string }
   | { id: string; kind: "audit"; label: string }
   | { id: string; kind: "workitem"; ref: string; label: string };
@@ -76,6 +77,7 @@ function normalizeTab(value: unknown): Tab | null {
     case "backlog":
     case "projects":
     case "audit":
+    case "inbox":
       if (typeof raw.label !== "string") return null;
       return {
         id: raw.id,
@@ -344,6 +346,11 @@ export function openBacklogTab(): Tab {
   return openSingletonTab("backlog", "backlog", "Backlog");
 }
 
+/** The canonical attention Inbox: one stable place, not a closable tab. */
+export function openInboxTab(): Tab {
+  return openSingletonTab("inbox", "inbox", "Inbox");
+}
+
 /** Per-project pages and the drift inbox they carry. */
 export function openProjectsTab(): Tab {
   return openSingletonTab("projects", "projects", "Projects");
@@ -377,7 +384,7 @@ export function openWorkItemTab(ref: string): Tab {
 /** Shared by the tabs there is exactly one of. */
 function openSingletonTab(
   id: string,
-  kind: "board" | "backlog" | "projects" | "audit",
+  kind: "board" | "backlog" | "inbox" | "projects" | "audit",
   label: string,
 ): Tab {
   const existing = store.tabs.find((t) => t.id === id);

@@ -20,3 +20,7 @@ export function setLayoutMode(mode: LayoutMode) {
     // localStorage unavailable - ignore
   }
 }
+
+/** Places keep the old tab snapshot around for one release while migrating. */
+export const PLACES_STATE_KEY = "mydevenv2.places.v1";
+export const PLACES_MIGRATION_KEY = "mydevenv2.places.migrated.v1";

@@ -16,6 +16,7 @@
   --activity-errored: #ff7b72;
   --activity-done: #3fb950;
   --drawer-width: 260px;
+  --places-rail-width: 248px;
   --tab-height: 36px;
   --modkey-height: 44px;
   --safe-top: max(env(safe-area-inset-top, 0px), var(--native-safe-top, 0px));
@@ -235,10 +236,10 @@ textarea {
 .app {
   display: grid;
   grid-template-rows: var(--tab-height) 1fr;
-  grid-template-columns: var(--drawer-width) 1fr;
+  grid-template-columns: var(--places-rail-width) var(--drawer-width) 1fr;
   grid-template-areas:
-    "drawer tabs"
-    "drawer main";
+    "rail drawer tabs"
+    "rail drawer main";
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -258,6 +259,9 @@ textarea {
     grid-template-areas:
       "tabs"
       "main";
+  }
+  .places-rail {
+    display: none;
   }
   .drawer {
     position: fixed;
@@ -280,6 +284,86 @@ textarea {
     background: rgba(0, 0, 0, 0.4);
     z-index: 19;
   }
+}
+
+.places-rail {
+  grid-area: rail;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 16px;
+  padding: 18px 12px 12px;
+  background: var(--bg-elev);
+  border-right: 1px solid var(--bd);
+  overflow-y: auto;
+}
+
+.places-brand {
+  padding: 0 8px;
+  color: var(--fg);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.rail-go-to {
+  width: 100%;
+  text-align: left;
+}
+
+.places-nav,
+.places-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.places-nav {
+  gap: 18px;
+}
+
+.places-group-label {
+  padding: 0 8px 4px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.places-nav a,
+.places-rail-footer button {
+  display: block;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+.places-nav a:hover,
+.places-nav a:focus-visible,
+.places-nav a.active,
+.places-rail-footer button:hover,
+.places-rail-footer button:focus-visible {
+  background: rgba(88, 166, 255, 0.1);
+  color: var(--fg);
+}
+
+.places-rail-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.rail-connection {
+  padding: 0 8px;
+  color: var(--fg-muted);
+  font-size: 11px;
 }
 
 .drawer {
@@ -3964,15 +4048,6 @@ textarea {
    server published — the stylesheet does not know how many columns there are,
    which is the point. */
 .vogt-surface.board {
-  /* NFR-S5. `--board-card-h` and `--board-card-gap` must match `CARD_HEIGHT`
-     and `CARD_GAP` in `Board.tsx`, exactly as `--vogt-row-h` must match the
-     backlog's `ROW_HEIGHT`: a windowed column computes which cards to draw
-     and where to put them from those two numbers, and has no way to notice
-     that this file disagrees. A card is therefore a tile — two lines of
-     title and no more — which is the price of showing every card the filter
-     matched instead of the first sixty of them. */
-  --board-card-h: 116px;
-  --board-card-gap: 8px;
   /* How tall a column gets before it scrolls inside itself rather than
      making the whole board taller. Viewport-relative so a big screen shows
      more of a column, capped so a swimlane board is still several lanes of
@@ -4509,17 +4584,11 @@ textarea {
   right: 0;
 }
 
-/* A card is a fixed-height tile, because the window's arithmetic needs it to
-   be — see `--board-card-h` above. Overflow is hidden rather than left to
-   spill: a card that grew past its slot would draw over the one below it and
-   the scroll offset would stop matching what is on screen. */
 .board-card {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  height: var(--board-card-h);
-  margin-bottom: var(--board-card-gap);
-  overflow: hidden;
+  margin-bottom: 8px;
   padding: 8px 10px;
   border: 1px solid var(--bd);
   border-radius: 6px;
@@ -4582,9 +4651,8 @@ textarea {
   color: var(--fg-muted);
 }
 
-/* Two lines, and the height of two lines whether or not the title fills
-   them, so every card is the same height and the tile below it is where the
-   window says it is. The whole title is on the item, one click away. */
+/* Keep long titles compact without making their height part of the window
+   contract. The full title remains available from the item detail view. */
 .board-card-title {
   font-size: 13px;
   color: var(--fg);
@@ -4596,7 +4664,9 @@ textarea {
   -webkit-box-orient: vertical;
   overflow: hidden;
   flex: 0 0 auto;
-  height: calc(1.35em * 2);
+  max-height: calc(1.35em * 3);
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
 }
 
 .board-card-meta {
@@ -6757,4 +6827,231 @@ textarea {
 .wid-answer-form input {
   flex: 1;
   min-width: 8rem;
+}
+
+/* Stable places share one shell. Their inner surfaces own their data and
+   actions; the shell only provides containment and responsive reachability. */
+.place-view {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.place-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--bd);
+}
+
+.place-header h1,
+.place-header h2,
+.place-header p {
+  margin: 0;
+}
+
+.place-header h1 {
+  color: var(--fg);
+  font-size: 22px;
+}
+
+.place-header p {
+  max-width: 720px;
+  margin-top: 6px;
+  color: var(--fg-muted);
+  line-height: 1.45;
+}
+
+.place-kicker {
+  color: var(--accent) !important;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sessions-place-list,
+.inbox-list {
+  display: grid;
+  gap: 8px;
+  padding: 20px 24px;
+}
+
+.session-place-row,
+.inbox-entry {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  text-align: left;
+}
+
+.session-place-main,
+.inbox-entry-body {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.session-place-main small,
+.session-place-status,
+.sessions-empty,
+.sessions-outage,
+.inbox-entry-meta,
+.inbox-empty,
+.inbox-outage p {
+  color: var(--fg-muted);
+}
+
+.sessions-empty,
+.sessions-outage,
+.inbox-empty,
+.inbox-outage {
+  padding: 20px 24px;
+}
+
+.sessions-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px 20px;
+  color: var(--fg-muted);
+}
+
+.inbox-coverage {
+  margin: 16px 24px 0;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--bd);
+}
+
+.inbox-coverage h2,
+.inbox-coverage p,
+.inbox-entry-heading h2,
+.inbox-entry-summary {
+  margin-top: 0;
+}
+
+.inbox-coverage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.inbox-coverage-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid var(--bd);
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.inbox-coverage-item span,
+.inbox-entry-meta {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.inbox-entry {
+  align-items: flex-start;
+}
+
+.inbox-entry-heading,
+.inbox-entry-meta {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.inbox-entry-heading h2 {
+  margin-bottom: 6px;
+  font-size: 14px;
+}
+
+.inbox-entry-summary {
+  line-height: 1.45;
+}
+
+.inbox-entry-mark {
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--activity-idle);
+}
+
+.inbox-entry-unseen .inbox-entry-mark {
+  background: var(--accent);
+}
+
+.phone-bottom-nav {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .place-header {
+    padding: 16px;
+  }
+
+  .phone-bottom-nav {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 12;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    padding: 6px max(6px, var(--safe-left)) max(6px, var(--safe-bottom));
+    border-top: 1px solid var(--bd);
+    background: var(--bg-elev);
+  }
+
+  .phone-bottom-nav a {
+    padding: 8px 4px;
+    color: var(--fg-muted);
+    font-size: 12px;
+    text-align: center;
+    text-decoration: none;
+  }
+
+  .phone-bottom-nav a.active {
+    color: var(--accent);
+  }
+
+  .main {
+    padding-bottom: 56px;
+  }
+
+  .sessions-tools,
+  .inbox-list {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .inbox-coverage,
+  .sessions-empty,
+  .sessions-outage,
+  .inbox-empty,
+  .inbox-outage {
+    margin-right: 16px;
+    margin-left: 16px;
+    padding-right: 0;
+    padding-left: 0;
+  }
 }

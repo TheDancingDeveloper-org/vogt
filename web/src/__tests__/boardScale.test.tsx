@@ -28,7 +28,12 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, waitFor } from "@solidjs/testing-library";
-import Board, { CARD_SLOT, cellKey, projectBoard, type Lane } from "../Board";
+import Board, {
+  CARD_ESTIMATE_TOP,
+  cellKey,
+  projectBoard,
+  type Lane,
+} from "../Board";
 import type { WorkItem } from "../vogtApi";
 import { fakeVogt, mountAt, refusal, settle, workItem } from "./harness";
 
@@ -192,7 +197,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
       const assumed = drawnRefs(container, "open").length;
 
       // A cell thirty cards tall.
-      resize(30 * CARD_SLOT);
+      resize(30 * CARD_ESTIMATE_TOP);
       await waitFor(() =>
         expect(drawnRefs(container, "open").length).toBeGreaterThan(assumed),
       );
@@ -215,7 +220,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
     const { container } = board();
 
     await waitFor(() => expect(drawnRefs(container, "open").length).toBeGreaterThan(0));
-    scrollCell(container, "open", 200 * CARD_SLOT);
+    scrollCell(container, "open", 200 * CARD_ESTIMATE_TOP);
     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-200"));
 
     // A load is a new set of item objects and a new set of lanes, and `For`
@@ -243,7 +248,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
     const { container } = board();
 
     await waitFor(() => expect(drawnRefs(container, "open").length).toBeGreaterThan(0));
-    scrollCell(container, "open", 200 * CARD_SLOT);
+    scrollCell(container, "open", 200 * CARD_ESTIMATE_TOP);
     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-200"));
 
     const label = [...container.querySelectorAll<HTMLElement>(".board-field")].find(
@@ -275,7 +280,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
     // And the scroll runway is the length of the column, so the scrollbar is
     // the length of the column.
     const run = cell(container, "open").querySelector<HTMLElement>(".board-cell-run");
-    expect(run?.style.height).toBe(`${total * CARD_SLOT}px`);
+    expect(run?.style.height).toBe(`${total * CARD_ESTIMATE_TOP}px`);
   });
 
   it("reaches the last card the filter matched, which the cap never could", async () => {
@@ -291,10 +296,10 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
 
     // Under the cap, WI-60 onwards were not reachable at all: the instruction
     // was to narrow the filter until the board agreed to show them.
-    scrollCell(container, "open", 200 * CARD_SLOT);
+    scrollCell(container, "open", 200 * CARD_ESTIMATE_TOP);
     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-200"));
 
-    scrollCell(container, "open", total * CARD_SLOT);
+    scrollCell(container, "open", total * CARD_ESTIMATE_TOP);
     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-399"));
     expect(drawnRefs(container, "open")).not.toContain("WI-0");
   });

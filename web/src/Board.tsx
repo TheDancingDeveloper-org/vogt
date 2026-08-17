@@ -95,6 +95,7 @@ import { useLocation, useNavigate, useSearchParams } from "@solidjs/router";
 import { ApiError } from "./api";
 import { openWorkItemTab } from "./tabs";
 import { ViewAgeBadge, createViewAge, onVogtLive } from "./viewAge";
+import { MeasuredWindow } from "./measuredWindow";
 import {
   VogtUnavailable,
   createWork,
@@ -117,29 +118,17 @@ interface Props {
 /** Grouping for swimlanes (FR-U13). */
 type LaneMode = "none" | "project" | "initiative";
 
-/** One page of `work.list`; the server caps this at 500. */
+/** One bounded page of `work.list`; the server caps this at 500. */
 const PAGE_SIZE = 500;
 
-/** How much of a filter the board will pull before it admits truncation. */
+/** Safety ceiling for the compatibility path while `board.list` is absent. */
 const MAX_ITEMS = 2000;
 
-/**
- * Card height in px, and the gap under it. Windowing needs them fixed; the
- * CSS pins them too.
- *
- * `--board-card-h` and `--board-card-gap` in `styles.css` must match these,
- * exactly as `--vogt-row-h` must match `Backlog.tsx`'s `ROW_HEIGHT`: the
- * window's arithmetic is the only thing holding the scroll offset and the
- * drawn cards in agreement, and it has no way to notice if the stylesheet
- * disagrees with it.
- */
-const CARD_HEIGHT = 116;
-const CARD_GAP = 8;
+/** Conservative content estimate only; measured cards replace it in a layoutful browser. */
+const CARD_ESTIMATE = 112;
 
-/** What one card costs a column, top to top. Exported because it is the one
- *  number a test can use to check that the scrollbar is as long as the whole
- *  column rather than as long as the window. */
-export const CARD_SLOT = CARD_HEIGHT + CARD_GAP;
+/** Exported for layout-free tests; production replaces it with content sizes. */
+export const CARD_ESTIMATE_TOP = CARD_ESTIMATE + 8;
 
 /**
  * Below this many cards a cell draws whole.
@@ -153,12 +142,10 @@ export const CARD_SLOT = CARD_HEIGHT + CARD_GAP;
  */
 const VIRTUALIZE_ABOVE = 60;
 
-/** Cards drawn beyond each edge of the cell, so a fast scroll is not blank. */
-const OVERSCAN = 6;
-
-/** The window's height when nothing has measured the cell yet — a screenful
- *  of cards, and the only thing a layout-free environment can assume. */
-const FALLBACK_CARDS = 8;
+/** Pixel overscan, not a number of rows. */
+const OVERSCAN_PX = 320;
+const DEFAULT_VIEWPORT_PX = 480;
+const CARD_GAP_PX = 8;
 
 const POLL_CHOICES = [10, 20, 60, 0] as const;
 const DEFAULT_POLL_SECONDS = 20;
@@ -2044,28 +2031,24 @@ const Board: Component<Props> = (props) => {
                           const mine = cellKey(lane.key, column.state);
                           const cards = createMemo(() => cellItems(lane, column.state));
 
-                          // -- windowing (NFR-S5) -------------------------
-                          //
-                          // `Backlog.tsx`'s mechanism, on a cell instead of
-                          // a page: a fixed card height, a `ResizeObserver`
-                          // on the cell's own scroller, and a slice with
-                          // overscan either side. The observer rather than a
-                          // window listener for the reason the backlog gives
-                          // — a board in an unselected tab is `display:none`
-                          // with a height of zero, and comes back without a
-                          // resize event ever firing.
-
-                          // Seeded from `cellScroll`, and that is the whole
-                          // reason `cellScroll` exists — see it for why a
-                          // cell cannot keep its own offset.
+                          // -- measured windowing (NFR-S5 / FR-U25) --------
+                          // The estimate is only the layout-free seed. Each
+                          // rendered card reports its content height back to
+                          // the keyed prefix index, so expansion and width
+                          // changes alter the runway without clipping a card.
                           const [scrollTop, setScrollTop] = createSignal(
                             cellScroll.get(mine) ?? 0,
                           );
                           const [viewport, setViewport] = createSignal(0);
+                          const measured = new MeasuredWindow(CARD_ESTIMATE + CARD_GAP_PX);
+                          const [measurementVersion, setMeasurementVersion] = createSignal(0);
+                          createEffect(() => {
+                            if (measured.setKeys(cards().map((item) => item.ref))) {
+                              setMeasurementVersion((version) => version + 1);
+                            }
+                          });
 
-                          const windowed = createMemo(
-                            () => cards().length > VIRTUALIZE_ABOVE,
-                          );
+                          const windowed = createMemo(() => cards().length > VIRTUALIZE_ABOVE);
 
                           /** Where the focused card sits in *this* cell, or
                            *  -1. A `Map` read, so every cell on the board can
@@ -2078,17 +2061,18 @@ const Board: Component<Props> = (props) => {
                           });
 
                           const slice = createMemo(() => {
+                            measurementVersion();
                             const all = cards();
-                            if (!windowed()) return { start: 0, end: all.length };
-                            const height = viewport() || CARD_SLOT * FALLBACK_CARDS;
-                            const count =
-                              Math.ceil(height / CARD_SLOT) + OVERSCAN * 2;
-                            const last = Math.max(0, all.length - count);
-                            let start = Math.min(
-                              last,
-                              Math.max(0, Math.floor(scrollTop() / CARD_SLOT) - OVERSCAN),
+                            if (!windowed()) {
+                              return { start: 0, end: all.length, top: 0 };
+                            }
+                            const range = measured.range(
+                              scrollTop(),
+                              viewport() || DEFAULT_VIEWPORT_PX,
+                              OVERSCAN_PX,
                             );
-                            let end = Math.min(all.length, start + count);
+                            let start = range.start;
+                            let end = range.end;
                             // FR-U22 through a windowed column: an element
                             // that is not rendered cannot take focus, so the
                             // card the keyboard is moving to is always in the
@@ -2097,10 +2081,13 @@ const Board: Component<Props> = (props) => {
                             // scrolled it into view.
                             const at = focusHere();
                             if (at >= 0 && (at < start || at >= end)) {
-                              start = Math.max(0, Math.min(at - OVERSCAN, last));
-                              end = Math.min(all.length, start + count);
+                              start = Math.max(0, at - 4);
+                              end = Math.min(
+                                all.length,
+                                Math.max(start + 1, measured.range(measured.offsetOf(at), viewport() || DEFAULT_VIEWPORT_PX, OVERSCAN_PX).end),
+                              );
                             }
-                            return { start, end };
+                            return { start, end, top: measured.offsetOf(start) };
                           });
 
                           const windowCards = createMemo(() => {
@@ -2319,12 +2306,12 @@ const Board: Component<Props> = (props) => {
                                   <div
                                     class="board-cell-run"
                                     style={{
-                                      height: `${cards().length * CARD_SLOT}px`,
+                                      height: `${measured.totalHeight()}px`,
                                     }}
                                   >
                                     <div
                                       class="board-cell-window"
-                                      style={{ top: `${slice().start * CARD_SLOT}px` }}
+                                      style={{ top: `${slice().top}px` }}
                                     >
                                       <For each={windowCards()}>
                                         {(item) => {
@@ -2339,6 +2326,43 @@ const Board: Component<Props> = (props) => {
                                               }${focusedRef() === item.ref ? " board-card--focused" : ""}${
                                                 bounced() === item.ref ? " board-card--bounced" : ""
                                               }`}
+                                              ref={(node) => {
+                                                const observer = new ResizeObserver((entries) => {
+                                                  const entry = entries?.[0];
+                                                  if (!entry) return;
+                                                  const borderBox = entry.borderBoxSize as readonly ResizeObserverSize[] | undefined;
+                                                  const borderHeight = borderBox?.[0]?.blockSize;
+                                                  const contentHeight = entry.contentRect.height;
+                                                  const measuredHeight =
+                                                    (borderHeight && borderHeight > 0
+                                                      ? borderHeight
+                                                      : contentHeight > 0
+                                                        ? contentHeight
+                                                        : undefined);
+                                                  // jsdom and hidden tabs have no layout. Keep the
+                                                  // estimate in that case; a zero is not a real card
+                                                  // size and must not collapse the prefix index.
+                                                  if (measuredHeight === undefined) return;
+                                                  const change = measured.measure(
+                                                    item.ref,
+                                                    measuredHeight + CARD_GAP_PX,
+                                                  );
+                                                  if (change) {
+                                                    setMeasurementVersion((version) => version + 1);
+                                                    if (change.top < scrollTop()) {
+                                                      const next = scrollTop() + change.delta;
+                                                      cellScroll.set(mine, next);
+                                                      setScrollTop(next);
+                                                      queueMicrotask(() => {
+                                                        const scroller = node.closest<HTMLElement>(".board-cell-cards");
+                                                        if (scroller) scroller.scrollTop = next;
+                                                      });
+                                                    }
+                                                  }
+                                                });
+                                                observer.observe(node);
+                                                onCleanup(() => observer.disconnect());
+                                              }}
                                               role="button"
                                               tabindex={0}
                                               draggable={!writesDisabled() && !pending()}

@@ -18,6 +18,8 @@ import Assistant from "./Assistant";
 import AuditBrowser from "./AuditBrowser";
 import Backlog from "./Backlog";
 import Board from "./Board";
+import Inbox from "./Inbox";
+import Sessions from "./Sessions";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
 import Projects from "./Projects";
@@ -58,17 +60,12 @@ import {
   closeTab,
   focusTab,
   openAssistantTab,
-  openBacklogTab,
-  openBoardTab,
-  openAuditTab,
-  openProjectsTab,
   openEditorTab,
   openGitTab,
   openGuiTab,
   openHistoryTab,
   openTasksTab,
   openTerminalTab,
-  openWorkItemTab,
   replaceTabs,
   snapshotTabs,
   tabsStore,
@@ -81,35 +78,6 @@ import {
   getWorkspaceLayout,
   saveWorkspaceLayout,
 } from "./workspaceLayouts";
-
-// The glyph on a tab, by kind. A record rather than the ternary chain this
-// replaced, which had grown past the point of being read and had no arm for
-// any of the five Vogt kinds — so board, backlog, projects, audit and work
-// item tabs drew bare while the drawer buttons that opened them had icons.
-// That is worst at phone width, where the tab strip is a sheet of labels and
-// the glyph is most of what tells one entry from another at a glance. The
-// glyphs match the drawer's, deliberately: the same surface should not be two
-// different pictures depending on which control you reached it from.
-//
-// Typed against `Tab["kind"]` so a new kind that forgets its glyph is a
-// compile error rather than a blank space nobody notices.
-const TAB_GLYPHS: Record<Tab["kind"], string> = {
-  // Terminal tabs carry an activity dot instead, rendered just above; History
-  // is the one kind whose glyph is baked into its label in `tabs.ts`, so a
-  // glyph here would draw it twice.
-  terminal: "",
-  history: "",
-  editor: "📄 ",
-  git: "⎇ ",
-  gui: "🖥 ",
-  tasks: "≡ ",
-  assistant: "🎙 ",
-  board: "▦ ",
-  backlog: "☰ ",
-  projects: "▤ ",
-  audit: "⧉ ",
-  workitem: "◈ ",
-};
 
 interface LoginScreenProps {
   initialToken: string;
@@ -290,11 +258,6 @@ function pathFor(tab: Tab): string {
   if (tab.kind === "git") return `/g/${encodeURIComponent(tab.repo)}`;
   if (tab.kind === "gui") return "/gui";
   if (tab.kind === "history") return "/history";
-  if (tab.kind === "board") return "/board";
-  if (tab.kind === "backlog") return "/backlog";
-  if (tab.kind === "projects") return "/projects";
-  if (tab.kind === "audit") return "/audit";
-  if (tab.kind === "workitem") return `/w/${encodeURIComponent(tab.ref)}`;
   if (tab.kind === "assistant") return "/assistant";
   return "/tasks";
 }
@@ -391,6 +354,12 @@ const App: Component = () => {
   const activeKind = () =>
     tabsStore.tabs.find((tab) => tab.id === tabsStore.active)?.kind ?? null;
   const editorWorkspaceActive = () => isIDEMode && activeKind() === "editor";
+  const stablePlace = () => {
+    const path = location.pathname;
+    return path === "/sessions" || path === "/board" || path === "/backlog" ||
+      path === "/inbox" || path === "/projects" || path === "/audit" ||
+      path.startsWith("/w/");
+  };
 
   onMount(() => {
     const unsubscribeAuthState = subscribeAuthState(() => {
@@ -511,7 +480,14 @@ const App: Component = () => {
   // not a memoised value.
   createEffect(() => {
     const path = location.pathname;
-    if (path.startsWith("/t/") && params.id) {
+    if (path === "/") {
+      const narrow = window.matchMedia("(max-width: 768px)").matches ||
+        (navigator.maxTouchPoints > 0 && window.innerWidth < 1024);
+      navigate(narrow ? "/sessions" : "/board", { replace: true });
+    } else if (path === "/sessions") {
+      // Sessions is a stable place; its panes are opened by the explicit tool
+      // routes below and are never represented as a product tab.
+    } else if (path.startsWith("/t/") && params.id) {
       const sess = sessionsStore.sessions[params.id];
       // Don't auto-create phantoms for ids the server doesn't know about.
       if (!sess && sessionsStore.ready) return;
@@ -536,20 +512,13 @@ const App: Component = () => {
       // provisioned, and a tab that opens and then fails is a worse answer
       // than no tab.
       if (publicCfg()?.assistant_enabled) openAssistantTab();
-    } else if (path === "/board") {
-      openBoardTab();
-    } else if (path === "/backlog") {
-      openBacklogTab();
-    } else if (path === "/projects") {
-      openProjectsTab();
-    } else if (path === "/audit") {
-      openAuditTab();
+    } else if (path === "/settings") {
+      setSettingsOpen(true);
     } else if (path.startsWith("/w/") && params.ref) {
       // Unlike a terminal id, a work item ref is not checked against a store
       // first: the item lives in vogt-core, which this shell does not read,
       // and the surface itself reports a ref that does not resolve. Refusing
       // to open the tab would turn a typo into a blank screen.
-      openWorkItemTab(decodeURIComponent(params.ref));
     }
   });
 
@@ -903,6 +872,38 @@ const App: Component = () => {
         </Show>
       }>
       <div class="app">
+        <aside class="places-rail" aria-label="Places">
+          <div class="places-brand">Vogt</div>
+          <button type="button" class="rail-go-to" onClick={() => setCommandPaletteOpen(true)}>Go to…</button>
+          <nav class="places-nav">
+            <div class="places-group">
+              <span class="places-group-label">Work</span>
+              <a class={location.pathname === "/board" ? "active" : ""} href="#/board">Board</a>
+              <a class={location.pathname === "/backlog" ? "active" : ""} href="#/backlog">Backlog</a>
+              <a class={location.pathname === "/inbox" ? "active" : ""} href="#/inbox">Inbox</a>
+            </div>
+            <Show when={publicCfg()?.vogt?.configured}>
+              <div class="places-group">
+                <span class="places-group-label">Estate</span>
+                <a class={location.pathname === "/projects" ? "active" : ""} href="#/projects">Projects</a>
+                <a class={location.pathname === "/audit" ? "active" : ""} href="#/audit">Audit</a>
+              </div>
+            </Show>
+            <div class="places-group">
+              <span class="places-group-label">Machine</span>
+              <a class={location.pathname.startsWith("/sessions") || location.pathname.startsWith("/t/") ? "active" : ""} href="#/sessions">Sessions</a>
+              <a href="#/g">Git</a>
+              <a href="#/history">History</a>
+              <a href="#/tasks">Tasks</a>
+              <a href="#/gui">GUI stream</a>
+              <Show when={publicCfg()?.assistant_enabled}><a href="#/assistant">Assistant</a></Show>
+            </div>
+          </nav>
+          <div class="places-rail-footer">
+            <button type="button" onClick={() => navigate("/settings")}>Settings</button>
+            <span class="rail-connection">{isConnected() ? "Connected" : "Offline"}</span>
+          </div>
+        </aside>
         <Show when={drawerOpen()}>
           <div
             class="drawer-scrim"
@@ -974,43 +975,39 @@ const App: Component = () => {
             <Show when={publicCfg()?.vogt?.configured}>
               <button
                 onClick={() => {
-                  openBoardTab();
                   navigate("/board");
                   setDrawerOpen(false);
                 }}
                 title="Work items by workflow state"
               >
-                ▦ Board
+                Board
               </button>
               <button
                 onClick={() => {
-                  openBacklogTab();
                   navigate("/backlog");
                   setDrawerOpen(false);
                 }}
                 title="The ranked backlog and bugs, with the reason for the ranking"
               >
-                ☰ Backlog
+                Backlog
               </button>
               <button
                 onClick={() => {
-                  openProjectsTab();
                   navigate("/projects");
                   setDrawerOpen(false);
                 }}
                 title="Per-project state, compliance and the drift inbox"
               >
-                ▤ Projects
+                Projects
               </button>
               <button
                 onClick={() => {
-                  openAuditTab();
                   navigate("/audit");
                   setDrawerOpen(false);
                 }}
                 title="Who wrote what, and the reason they gave"
               >
-                ⧉ Audit
+                Audit
               </button>
             </Show>
             <Show when={publicCfg()?.assistant_enabled}>
@@ -1022,7 +1019,7 @@ const App: Component = () => {
                 }}
                 title="Talk to the assistant about your sessions"
               >
-                🎙 Assistant
+                Assistant
               </button>
             </Show>
             <button
@@ -1033,10 +1030,10 @@ const App: Component = () => {
               }}
               title="Open the GUI stream tab"
             >
-              🖥 GUI
+              GUI stream
             </button>
             <button onClick={() => setSettingsOpen(true)} title="Settings">
-              ⚙
+              Settings
             </button>
           </div>
           <Show when={sessionsError()}>
@@ -1184,7 +1181,6 @@ const App: Component = () => {
                     <span class={`activity-dot ${tabActivityClass(t) ?? "idle"}`} />
                   </Show>
                   <span class="label">
-                    {TAB_GLYPHS[t.kind] ?? ""}
                     {t.label}
                   </span>
                   <Show when={t.kind === "editor" && t.dirty}>
@@ -1226,10 +1222,8 @@ const App: Component = () => {
               onNotify={(message, kind) => showToast(message, { kind })}
             />
           </Show>
-          <div
-            class="tab-view"
-            style={{ display: editorWorkspaceActive() ? "none" : "flex" }}
-          >
+          <Show when={stablePlace()} fallback={
+            <div class="tab-view" style={{ display: editorWorkspaceActive() ? "none" : "flex" }}>
             <For each={tabsStore.tabs}>
               {(t) => (
                 <div
@@ -1321,6 +1315,9 @@ const App: Component = () => {
                       onError={(msg) => showToast(msg, { kind: "error" })}
                     />
                   </Show>
+                  <Show when={t.kind === "inbox"}>
+                    <Inbox onError={(msg) => showToast(msg, { kind: "error" })} />
+                  </Show>
                   <Show when={t.kind === "workitem" && t}>
                     {(tab) => (
                       <WorkItemDetail
@@ -1359,7 +1356,35 @@ const App: Component = () => {
                 <button onClick={() => void onCreate()}>+ New session</button>
               </div>
             </Show>
-          </div>
+            </div>
+          }>
+            <div class="place-view">
+              <Show when={location.pathname === "/sessions"}>
+                <Sessions />
+              </Show>
+              <Show when={location.pathname === "/board"}>
+                <Board onError={(msg) => showToast(msg, { kind: "error" })} />
+              </Show>
+              <Show when={location.pathname === "/backlog"}>
+                <Backlog onError={(msg) => showToast(msg, { kind: "error" })} />
+              </Show>
+              <Show when={location.pathname === "/inbox"}>
+                <Inbox onError={(msg) => showToast(msg, { kind: "error" })} />
+              </Show>
+              <Show when={location.pathname === "/projects"}>
+                <Projects onError={(msg) => showToast(msg, { kind: "error" })} />
+              </Show>
+              <Show when={location.pathname === "/audit"}>
+                <AuditBrowser onError={(msg) => showToast(msg, { kind: "error" })} />
+              </Show>
+              <Show when={location.pathname.startsWith("/w/") && params.ref}>
+                <WorkItemDetail
+                  itemRef={decodeURIComponent(params.ref ?? "")}
+                  onError={(msg) => showToast(msg, { kind: "error" })}
+                />
+              </Show>
+            </div>
+          </Show>
           <Show when={activeKind() === "terminal"}>
             <ModKeyRow
               send={(d) => activeSend(d)}
@@ -1425,9 +1450,19 @@ const App: Component = () => {
         </div>
       </Show>
 
+      <nav class="phone-bottom-nav" aria-label="Primary navigation">
+        <a href="#/sessions" class={location.pathname.startsWith("/sessions") || location.pathname.startsWith("/t/") ? "active" : ""}>Sessions</a>
+        <a href="#/inbox" class={location.pathname === "/inbox" ? "active" : ""}>Inbox</a>
+        <a href="#/board" class={location.pathname === "/board" ? "active" : ""}>Board</a>
+        <a href="#/backlog" class={location.pathname === "/backlog" ? "active" : ""}>Backlog</a>
+      </nav>
+
       <Settings
         open={settingsOpen()}
-        onClose={() => setSettingsOpen(false)}
+        onClose={() => {
+          setSettingsOpen(false);
+          if (location.pathname === "/settings") navigate("/sessions");
+        }}
         onSaveWorkspaceLayout={() => onSaveWorkspaceLayout()}
         onRestoreWorkspaceLayout={(layoutId) => onRestoreWorkspaceLayout(layoutId)}
         onDeleteWorkspaceLayout={(layoutId) => onDeleteWorkspaceLayout(layoutId)}

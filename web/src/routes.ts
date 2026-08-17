@@ -15,6 +15,7 @@
 // different failures with different symptoms.
 export const APP_ROUTES = [
   "/",
+  "/sessions",
   "/t/:id",
   "/e/*path",
   "/g",
@@ -24,8 +25,10 @@ export const APP_ROUTES = [
   "/tasks",
   "/board",
   "/backlog",
+  "/inbox",
   "/projects",
   "/audit",
+  "/settings",
   "/w/:ref",
   "/assistant",
   "/assistant/*path",
