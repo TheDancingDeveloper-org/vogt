@@ -170,7 +170,7 @@ What was built, and what it is asserted by:
 |---|---|---|
 | Provider profiles | `engine/server/src/{config,assistant,assistant_api,gui}.rs` | 9 unit tests in `assistant.rs`, 6 in `config.rs` |
 | `inbox.list` as the notifications tool | `engine/server/src/vogt_tools.rs`, prompt in `assistant.rs` | 3 tests, plus the pinned-curated-set guard updated deliberately |
-| `model` / `effort` on `session.start` | `models.py`, `sessions.py`, `client.py`, migration `0009`, `engine/server/src/agent_cli.rs` | 10 unit tests in `agent_cli.rs`, 7 in `tests/test_sessions.py` |
+| `model` / `effort` on `session.start` | `models.py`, `sessions.py`, `client.py`, migration `0010`, `engine/server/src/agent_cli.rs` | 10 unit tests in `agent_cli.rs`, 7 in `tests/test_sessions.py` |
 | Scratch project | `config.py`, `sessions.py` | 4 tests in `tests/test_sessions.py` |
 | Repair pass | `web/src/voiceRepair.ts` | 11 tests, including all five utterances |
 | Repair wired to the microphone | `web/src/Assistant.tsx` | 3 tests in `assistant.test.tsx` |
