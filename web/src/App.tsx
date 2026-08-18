@@ -63,6 +63,7 @@ import {
   sessionsStore,
   startEventStream,
   stopEventStream,
+  onVogtChanged,
 } from "./store";
 import {
   closeTab,
@@ -102,6 +103,33 @@ import {
   shouldMountTab,
 } from "./tabLifecycle";
 import { discardEditorDraft } from "./editorDrafts";
+import {
+  createPlaceMetrics,
+  type PlaceMetric,
+} from "./placeMetrics";
+
+const PlaceCount: Component<{ metric: PlaceMetric; label: string }> = (props) => {
+  const copy = () => {
+    if (props.metric.state === "loading") return { glyph: "…", label: `${props.label} loading` };
+    if (props.metric.state === "unavailable") return { glyph: "—", label: `${props.label} unavailable` };
+    const value = props.metric.value ?? 0;
+    const glyph = value > 999 ? "999+" : `${value}`;
+    return props.metric.state === "stale"
+      ? { glyph, label: `${value} ${props.label}, refreshing` }
+      : { glyph, label: `${value} ${props.label}` };
+  };
+  return (
+    <span
+      class="place-count"
+      classList={{ "place-count--attention": (props.metric.value ?? 0) > 0 && props.label.includes("waiting") }}
+      data-state={props.metric.state}
+      aria-label={copy().label}
+      title={copy().label}
+    >
+      {copy().glyph}
+    </span>
+  );
+};
 
 interface LoginScreenProps {
   initialToken: string;
@@ -295,6 +323,27 @@ const App: Component = () => {
   const [templateSelectorContext, setTemplateSelectorContext] =
     createSignal<TemplateContext | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = createSignal(false);
+  const placeMetrics = createPlaceMetrics();
+  const waitingSessions = () =>
+    sessionsStore.ready
+      ? sessionsStore.order.filter(
+          (id) => sessionsStore.sessions[id]?.activity === "waiting-for-input",
+        ).length
+      : null;
+  const sessionMetric = (): PlaceMetric => ({
+    value: sessionsStore.ready ? sessionsStore.order.length : null,
+    state: sessionsStore.ready
+      ? isConnected()
+        ? "ready"
+        : "stale"
+      : sessionsError()
+        ? "unavailable"
+        : "loading",
+  });
+  const waitingMetric = (): PlaceMetric => ({
+    value: waitingSessions(),
+    state: sessionMetric().state,
+  });
 
   const openSettings = () => {
     const here = `${location.pathname}${location.search}`;
@@ -440,6 +489,7 @@ const App: Component = () => {
         setAuthState("authenticated");
         await refreshSessions();
         startEventStream();
+        void placeMetrics.refresh();
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) {
           setAuthError("Your saved token was rejected. Sign in with the current token to continue.");
@@ -460,11 +510,13 @@ const App: Component = () => {
     startEventStream();
     setAuthError(null);
     setAuthState("authenticated");
+    void placeMetrics.refresh();
   };
 
   onCleanup(() => {
     stopEventStream();
   });
+  onCleanup(onVogtChanged(() => void placeMetrics.refresh()));
 
   // Remember where the active tab is, so re-selecting it comes back here and
   // not to the surface's default view.
@@ -954,14 +1006,14 @@ const App: Component = () => {
           <nav class="places-nav">
             <div class="places-group">
               <span class="places-group-label">Work</span>
-              <a class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined} href="#/board">Board</a>
-              <a class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined} href="#/backlog">Backlog</a>
-              <a class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined} href="#/inbox">Inbox</a>
+              <a class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined} href="#/board"><span>Board</span><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></a>
+              <a class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined} href="#/backlog"><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
+              <a class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined} href="#/inbox"><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" /></a>
             </div>
             <Show when={publicCfg()?.vogt?.configured}>
               <div class="places-group">
                 <span class="places-group-label">Estate</span>
-                <a class={currentPlace("projects") ? "active" : ""} aria-current={currentPlace("projects") ? "page" : undefined} href="#/projects">Projects</a>
+                <a class={currentPlace("projects") ? "active" : ""} aria-current={currentPlace("projects") ? "page" : undefined} href="#/projects"><span>Projects</span><PlaceCount metric={placeMetrics.metrics.projects} label="Projects" /></a>
                 <a class={currentPlace("audit") ? "active" : ""} aria-current={currentPlace("audit") ? "page" : undefined} href="#/audit">Audit</a>
               </div>
             </Show>
@@ -971,7 +1023,7 @@ const App: Component = () => {
                 class={currentPlace("sessions") ? "active" : ""}
                 aria-current={currentPlace("sessions") && !["git", "history", "tasks", "gui", "assistant"].includes(currentTool() ?? "") ? "page" : undefined}
                 href="#/sessions"
-              >Sessions</a>
+              ><span>Sessions</span><PlaceCount metric={waitingMetric()} label="sessions waiting for input" /></a>
               <a class={isCurrentTool(routeOutcome(), "git") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "git") ? "page" : undefined} href="#/g">Git</a>
               <a class={isCurrentTool(routeOutcome(), "history") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "history") ? "page" : undefined} href="#/history">History</a>
               <a class={isCurrentTool(routeOutcome(), "tasks") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "tasks") ? "page" : undefined} href="#/tasks">Tasks</a>
@@ -980,7 +1032,7 @@ const App: Component = () => {
             </div>
           </nav>
           <div class="places-rail-session-area">
-            <div class="places-section-label">Running</div>
+            <div class="places-section-label places-section-label--counted"><span>Running</span><PlaceCount metric={sessionMetric()} label="running sessions" /></div>
             <For
               each={sessionsStore.order
                 .map((id) => sessionsStore.sessions[id])
@@ -993,8 +1045,19 @@ const App: Component = () => {
             >
               {(s) => (
                 <div
-                  class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""}`}
+                  role="link"
+                  tabIndex={0}
+                  aria-current={tabsStore.active === `term:${s.id}` ? "page" : undefined}
+                  aria-label={`${s.name}, ${activityLabel(s.activity, s.exit_code)}`}
+                  class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""} ${s.activity === "waiting-for-input" ? "waiting" : ""}`}
                   onClick={() => {
+                    openTerminalTab(s.id, s.name);
+                    navigate(`/t/${s.id}`);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget) return;
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
                     openTerminalTab(s.id, s.name);
                     navigate(`/t/${s.id}`);
                   }}
@@ -1015,6 +1078,7 @@ const App: Component = () => {
                   <button
                     type="button"
                     class="row-btn"
+                    aria-label={isBookmarked(s.id) ? `Remove bookmark from ${s.name}` : `Bookmark ${s.name}`}
                     title={isBookmarked(s.id) ? "Remove bookmark" : "Bookmark"}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -1024,6 +1088,7 @@ const App: Component = () => {
                   <button
                     type="button"
                     class="row-btn"
+                    aria-label={`Duplicate ${s.name}`}
                     title="Duplicate (same cwd)"
                     onClick={(e) => {
                       e.stopPropagation();
@@ -1033,6 +1098,7 @@ const App: Component = () => {
                   <button
                     type="button"
                     class="close"
+                    aria-label={`Close ${s.name}`}
                     title="Kill & remove"
                     onClick={(e) => {
                       e.stopPropagation();
@@ -1060,7 +1126,10 @@ const App: Component = () => {
           />
           <div class="places-rail-footer">
             <button type="button" onClick={openSettings}>Settings</button>
-            <span class="rail-connection">{isConnected() ? "Connected" : "Offline"}</span>
+            <span class={`rail-connection ${isConnected() ? "connected" : "offline"}`}>
+              <span class="rail-connection-dot" aria-hidden="true" />
+              {isConnected() ? "Connected" : "Offline"}
+            </span>
           </div>
         </aside>
         <main class="main">
@@ -1264,10 +1333,10 @@ const App: Component = () => {
       </div>
 
       <nav class="phone-bottom-nav" aria-label="Primary navigation">
-        <a href="#/sessions" class={currentPlace("sessions") ? "active" : ""} aria-current={currentPlace("sessions") ? "page" : undefined}>Sessions <span class="phone-place-count">{sessionsStore.order.length}</span></a>
-        <a href="#/inbox" class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined}>Inbox</a>
-        <a href="#/board" class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined}>Board</a>
-        <a href="#/backlog" class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined}>Backlog</a>
+        <a href="#/sessions" class={currentPlace("sessions") ? "active" : ""} aria-current={currentPlace("sessions") ? "page" : undefined}><span>Sessions</span><PlaceCount metric={sessionMetric()} label="sessions" /></a>
+        <a href="#/inbox" class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined}><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" /></a>
+        <a href="#/board" class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined}><span>Board</span><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></a>
+        <a href="#/backlog" class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined}><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
       </nav>
 
       <Settings

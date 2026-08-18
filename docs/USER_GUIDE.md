@@ -280,6 +280,14 @@ so UI changes ship without a new APK; only native plumbing needs one.
 | `Ctrl/Cmd+D` | Add cursor at next match |
 | `?` | Open shortcut help outside text fields, editors and terminals |
 
+Desktop Places and the phone bottom bar share live workload counts. A numeric
+zero means the corresponding canonical read completed and found none; an
+ellipsis is still loading, a dashed retained value is refreshing, and an em
+dash means that provider is unavailable. Sessions additionally calls out the
+number waiting for input. Desktop session rows are keyboard links: focus a row
+and press Enter or Space to open it, then Tab to the labelled bookmark,
+duplicate and close controls.
+
 **The command palette reaches every read surface by fuzzy name** — projects and
 work items included, so `rstnz` finds `rustnzb`. **New File** opens a form with
 separate workspace destination and filename fields; **Open File…** opens a
