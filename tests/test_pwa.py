@@ -150,6 +150,25 @@ def test_all_pwa_dialogs_use_the_shared_accessible_foundation() -> None:
     )
 
 
+def test_primary_surfaces_use_the_shared_header_grammar() -> None:
+    """A primary surface cannot quietly reintroduce an ad-hoc top section."""
+    foundation = source(WEB_SRC / "SurfaceHeader.tsx")
+    slots = re.findall(r'data-surface-header-slot="([a-z]+)"', foundation)
+    assert slots == ["title", "honesty", "spacer", "controls", "action", "detail"]
+
+    for name in ("Board", "Backlog", "Inbox", "Sessions"):
+        text = source(WEB_SRC / f"{name}.tsx")
+        assert 'from "./SurfaceHeader"' in text, (
+            f"{name} no longer imports the shared primary-surface header"
+        )
+        assert "<SurfaceHeader" in text, (
+            f"{name} no longer renders the shared primary-surface header"
+        )
+        assert "<header" not in text, (
+            f"{name} has reintroduced direct header markup beside the shared grammar"
+        )
+
+
 # -- half two: every engine path is a route the engine serves ---------------
 
 

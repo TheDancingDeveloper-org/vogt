@@ -14,6 +14,7 @@ import { sessionsStore, sessionsError, isConnected } from "./store";
 import type { SessionSummary } from "./api";
 import type { SessionTool } from "./routeModel";
 import { pendingAction, setPendingAction } from "./pendingAction";
+import SurfaceHeader from "./SurfaceHeader";
 
 interface Props {
   currentTool?: SessionTool | null;
@@ -156,25 +157,43 @@ const Sessions: Component<Props> = (props) => {
       class={`sessions-place ${props.hasActiveWorkspace ? "has-workspace" : ""}`}
       aria-label="Sessions"
     >
-      <header class="place-header">
-        <div>
+      <SurfaceHeader
+        class="sessions-header"
+        label="Sessions header"
+        title={(
+          <>
           <p class="place-kicker">Machine</p>
           <h1>Sessions</h1>
-          <p>{sessions().length} live · sorted by attention</p>
-        </div>
-        <span class={`connection-state ${isConnected() ? "connected" : "disconnected"}`}>
-          {isConnected() ? "Connected" : "Engine unavailable"}
-        </span>
-        <Show when={props.onCreateSession}>
+          </>
+        )}
+        honesty={(
+          <div class="sessions-header-honesty" aria-live="polite">
+            <p>
+              {!sessionsStore.ready && !sessionsError()
+                ? "Loading sessions — no answer yet"
+                : sessionsError()
+                  ? `Sessions unavailable — ${sessionsError()}`
+                  : isConnected()
+                    ? `${sessions().length} live · sorted by attention`
+                    : `${sessions().length} from the last answer · stream disconnected; may be stale`}
+            </p>
+            <span class={`connection-state ${isConnected() ? "connected" : "disconnected"}`}>
+              {isConnected() ? "Connected" : "Disconnected"}
+            </span>
+          </div>
+        )}
+        controls={(
+          <SessionTools
+            currentTool={props.currentTool}
+            guiEnabled={props.guiEnabled}
+            assistantEnabled={props.assistantEnabled}
+          />
+        )}
+        action={props.onCreateSession ? (
           <button type="button" onClick={() => props.onCreateSession?.()}>
             + Session
           </button>
-        </Show>
-      </header>
-      <SessionTools
-        currentTool={props.currentTool}
-        guiEnabled={props.guiEnabled}
-        assistantEnabled={props.assistantEnabled}
+        ) : undefined}
       />
       <div class="sessions-place-body">
         <aside class="sessions-place-sidebar" aria-label="Live sessions">

@@ -96,6 +96,7 @@ import { ApiError } from "./api";
 import { openWorkItemTab } from "./tabs";
 import { ViewAgeBadge, createViewAge, onVogtLive } from "./viewAge";
 import { MeasuredWindow } from "./measuredWindow";
+import SurfaceHeader from "./SurfaceHeader";
 import {
   VogtUnavailable,
   createWork,
@@ -1574,10 +1575,12 @@ const Board: Component<Props> = (props) => {
       class={`vogt-surface board${outage() ? " board--outage" : ""}`}
       onKeyDown={onSurfaceKeyDown}
     >
-      <header class="board-header">
-        <div class="board-heading">
-          <h2>Board</h2>
-          <div class="board-summary">
+      <SurfaceHeader
+        class="board-header"
+        label="Board header"
+        title={<h1>Board</h1>}
+        honesty={(
+          <div class="board-summary" aria-live="polite">
             <span>{items().length} loaded</span>
             <Show when={truncated()}>
               <span>of {total()} matching</span>
@@ -1588,15 +1591,32 @@ const Board: Component<Props> = (props) => {
               class={`board-freshness board-freshness--${freshness().tone}`}
             />
           </div>
-          <p class="board-note">
-            Columns come from <code>workflow.list</code>; a drag is a{" "}
-            <code>work.transition</code> and Vogt decides it. Changes arrive on
-            the event stream and the poll below is the floor under it — a
-            stream can drop, and a board that stopped refreshing because a
-            socket died would be stale while looking current.
-          </p>
-        </div>
-        <div class="board-header-actions">
+        )}
+        controls={(
+          <>
+            <label class="board-field board-field--tight">
+              <span>Refresh</span>
+              <select
+                value={String(filters().poll)}
+                onInput={(event) =>
+                  patch({ poll: Number.parseInt(event.currentTarget.value, 10) })
+                }
+              >
+                <For each={POLL_CHOICES}>
+                  {(seconds) => (
+                    <option value={String(seconds)}>
+                      {seconds === 0 ? "Paused" : `Every ${seconds}s`}
+                    </option>
+                  )}
+                </For>
+              </select>
+            </label>
+            <button onClick={() => void reload()} disabled={loading()}>
+              {loading() ? "Loading…" : "Refresh now"}
+            </button>
+          </>
+        )}
+        action={(
           <button
             type="button"
             onClick={() => (createOpen() ? setCreateOpen(false) : openQuickCreate())}
@@ -1609,28 +1629,19 @@ const Board: Component<Props> = (props) => {
           >
             Quick create
           </button>
-          <label class="board-field board-field--tight">
-            <span>Refresh</span>
-            <select
-              value={String(filters().poll)}
-              onInput={(event) =>
-                patch({ poll: Number.parseInt(event.currentTarget.value, 10) })
-              }
-            >
-              <For each={POLL_CHOICES}>
-                {(seconds) => (
-                  <option value={String(seconds)}>
-                    {seconds === 0 ? "Paused" : `Every ${seconds}s`}
-                  </option>
-                )}
-              </For>
-            </select>
-          </label>
-          <button onClick={() => void reload()} disabled={loading()}>
-            {loading() ? "Loading…" : "Refresh now"}
-          </button>
-        </div>
-      </header>
+        )}
+        detail={(
+          <details class="surface-header-disclosure">
+            <summary>How this view stays current</summary>
+            <p class="board-note">
+              Columns come from <code>workflow.list</code>; a drag is a{" "}
+              <code>work.transition</code> and Vogt decides it. Changes arrive on
+              the event stream and the poll below is the floor under it, so a
+              dropped stream cannot look current indefinitely.
+            </p>
+          </details>
+        )}
+      />
 
       <Show when={outage()}>
         {(message) => (

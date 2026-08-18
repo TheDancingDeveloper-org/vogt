@@ -14,6 +14,7 @@ import {
   type InboxSourceCoverage,
 } from "./vogtApi";
 import { onVogtChanged } from "./store";
+import SurfaceHeader from "./SurfaceHeader";
 
 interface Props {
   onError?: (message: string) => void;
@@ -394,20 +395,42 @@ const Inbox: Component<Props> = (props) => {
 
   return (
     <section class="vogt-surface inbox inbox-surface" aria-label="Inbox">
-      <header class="place-header">
-        <div>
+      <SurfaceHeader
+        class="inbox-header"
+        label="Inbox header"
+        title={(
+          <>
           <p class="place-kicker">Work</p>
           <h1>Inbox</h1>
-          <p>One server-ordered attention view. Provenance and coverage stay attached to every answer.</p>
-        </div>
-        <label class="inbox-filter">
-          <span>Source</span>
-          <select value={source()} onChange={(event) => applySource(event.currentTarget.value)}>
-            <option value="">All sources</option>
-            <For each={SOURCES}>{(value) => <option value={value}>{value}</option>}</For>
-          </select>
-        </label>
-      </header>
+          </>
+        )}
+        honesty={(
+          <p class="inbox-header-honesty" aria-live="polite">
+            {failure()
+              ? "Inbox unavailable — no normalized attention answer was read."
+              : loading() && !result()
+                ? "Loading Inbox — no answer yet."
+                : result()
+                  ? `Response ${age(result()!.snapshot_at)}; source coverage remains attached below.`
+                  : "No Inbox answer has been read yet."}
+          </p>
+        )}
+        controls={(
+          <label class="inbox-filter">
+            <span>Source</span>
+            <select value={source()} onChange={(event) => applySource(event.currentTarget.value)}>
+              <option value="">All sources</option>
+              <For each={SOURCES}>{(value) => <option value={value}>{value}</option>}</For>
+            </select>
+          </label>
+        )}
+        detail={(
+          <details class="surface-header-disclosure">
+            <summary>About this view</summary>
+            <p>One server-ordered attention view. Provenance and coverage stay attached to every answer.</p>
+          </details>
+        )}
+      />
       <div class="inbox-batch" aria-label="Batch Inbox actions">
         <span>{selected().size} selected</span>
         <input

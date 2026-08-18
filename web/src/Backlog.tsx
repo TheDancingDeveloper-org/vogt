@@ -57,6 +57,7 @@ import {
 import { openWorkItemTab } from "./tabs";
 import { ViewAgeBadge, createLoadStamp, createViewAge } from "./viewAge";
 import { MeasuredWindow } from "./measuredWindow";
+import SurfaceHeader from "./SurfaceHeader";
 
 interface Props {
   onError?: (message: string) => void;
@@ -1090,50 +1091,60 @@ const Backlog: Component<Props> = (props) => {
 
   return (
     <div class="vogt-surface vogt-backlog">
-      <header class="vogt-backlog-header">
-        <div class="vogt-backlog-views" role="group" aria-label="Ranked views">
-          <For each={["backlog", "bugs"] as ViewName[]}>
-            {(name) => (
-              <button
-                type="button"
-                aria-pressed={filter().view === name}
-                class={`vogt-backlog-viewtab${filter().view === name ? " active" : ""}`}
-                onClick={() => update("view", name)}
-              >
-                {name === "backlog" ? "Backlog" : "Bugs"}
-              </button>
-            )}
-          </For>
-        </div>
-        <div class="vogt-backlog-header-actions">
+      <SurfaceHeader
+        class="vogt-backlog-header"
+        label="Backlog header"
+        title={<h1>Backlog</h1>}
+        honesty={(
+          <div class="vogt-backlog-honesty" aria-live="polite">
           <ViewAgeBadge
             age={viewAge()}
             class="vogt-backlog-age"
             title="How long ago this page last got an answer from Vogt — not how old the evidence behind that answer is, which is the line below"
           />
+            <p class={`vogt-backlog-freshness ${freshness().status}`}>
+              {freshness().text}
+              <Show when={freshness().collectors.length}>
+                <span class="vogt-backlog-collectors">
+                  <For each={freshness().collectors}>
+                    {([name, age]) => (
+                      <span class="vogt-backlog-collector">
+                        {name}: {age}
+                      </span>
+                    )}
+                  </For>
+                </span>
+              </Show>
+            </p>
+          </div>
+        )}
+        controls={(
+          <>
+            <div class="vogt-backlog-views" role="group" aria-label="Ranked views">
+              <For each={["backlog", "bugs"] as ViewName[]}>
+                {(name) => (
+                  <button
+                    type="button"
+                    aria-pressed={filter().view === name}
+                    class={`vogt-backlog-viewtab${filter().view === name ? " active" : ""}`}
+                    onClick={() => update("view", name)}
+                  >
+                    {name === "backlog" ? "Backlog" : "Bugs"}
+                  </button>
+                )}
+              </For>
+            </div>
+            <button type="button" onClick={refresh} disabled={ranked.loading}>
+              {ranked.loading ? "Loading…" : "Refresh"}
+            </button>
+          </>
+        )}
+        action={(
           <button type="button" onClick={openQuickCreate}>
             Quick create
           </button>
-          <button type="button" onClick={refresh} disabled={ranked.loading}>
-            {ranked.loading ? "Loading…" : "Refresh"}
-          </button>
-        </div>
-      </header>
-
-      <p class={`vogt-backlog-freshness ${freshness().status}`}>
-        {freshness().text}
-        <Show when={freshness().collectors.length}>
-          <span class="vogt-backlog-collectors">
-            <For each={freshness().collectors}>
-              {([name, age]) => (
-                <span class="vogt-backlog-collector">
-                  {name}: {age}
-                </span>
-              )}
-            </For>
-          </span>
-        </Show>
-      </p>
+        )}
+      />
 
       <section class="vogt-backlog-filters" aria-label="Filters">
         <div class="vogt-backlog-filter-grid">
