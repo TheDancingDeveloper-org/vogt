@@ -31,6 +31,11 @@ import Settings from "./Settings";
 import FileTree from "./FileTree";
 import CommandPalette from "./CommandPalette";
 import TemplateSelector from "./TemplateSelector";
+import Dialog from "./Dialog";
+import FeedbackCenter, {
+  createFeedbackQueue,
+  type FeedbackOptions,
+} from "./FeedbackCenter";
 import { getLayoutMode, setLayoutMode } from "./layout";
 import {
   buildDefaultSessionName,
@@ -272,15 +277,9 @@ const App: Component = () => {
     createSignal<TemplateContext | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = createSignal(false);
 
-  // Toast: errors stay longer than info messages.
-  const [toast, setToast] = createSignal<string | null>(null);
-  let toastTimer: number | undefined;
-  const showToast = (m: string, opts: { kind?: "info" | "error" } = {}) => {
-    if (toastTimer !== undefined) window.clearTimeout(toastTimer);
-    setToast(m);
-    const ms = opts.kind === "error" ? 6000 : 2500;
-    toastTimer = window.setTimeout(() => setToast(null), ms);
-  };
+  const feedback = createFeedbackQueue();
+  const showToast = (message: string, options: FeedbackOptions = {}) =>
+    feedback.push(message, options);
 
   // Per-tab terminal action registry. Solid keeps Terminal components mounted
   // across tab switches, so we register actions by tab id on mount and read
@@ -401,7 +400,6 @@ const App: Component = () => {
 
   onCleanup(() => {
     stopEventStream();
-    if (toastTimer !== undefined) window.clearTimeout(toastTimer);
   });
 
   // Remember where the active tab is, so re-selecting it comes back here and
@@ -518,7 +516,10 @@ const App: Component = () => {
     showToast("Refreshing sessions and event stream...");
   };
 
-  const onCreate = async (cwd?: string, template?: SessionTemplate) => {
+  const onCreate = async (
+    cwd?: string,
+    template?: SessionTemplate,
+  ): Promise<void> => {
     // If template selector should be shown
     if (!template && allTemplates().length > 1) {
       setTemplateSelectorContext(await resolveTemplateContext(cwd));
@@ -543,7 +544,13 @@ const App: Component = () => {
       openTerminalTab(s.id, s.name);
       navigate(`/t/${s.id}`, { replace: false });
     } catch (e) {
-      showToast(`create failed: ${(e as Error).message}`, { kind: "error" });
+      showToast("Session creation failed", {
+        kind: "error",
+        key: "session-create",
+        details: (e as Error).message,
+        actionLabel: "Retry",
+        action: () => void onCreate(cwd, template),
+      });
     }
   };
 
@@ -917,6 +924,7 @@ const App: Component = () => {
           <FileTree
             onOpen={() => navigate("/sessions")}
             promptPath={promptUser}
+            confirmAction={confirmUser}
             onCreatePresetHere={(path) => { void onCreate(path); }}
             onError={(message) => showToast(message, { kind: "error" })}
           />
@@ -943,6 +951,7 @@ const App: Component = () => {
           <Show when={editorWorkspaceActive()}>
             <EditorWorkspace
               promptPath={promptUser}
+              confirmAction={confirmUser}
               onRequestCloseTab={(tabId) => void requestCloseTab(tabId)}
               onNotify={(message, kind) => showToast(message, { kind })}
             />
@@ -1042,15 +1051,20 @@ const App: Component = () => {
                     {(tab) => (
                       <GitTab
                         repo={(tab() as Extract<Tab, { kind: "git" }>).repo}
+                        confirmAction={confirmUser}
                       />
                     )}
                   </Show>
                   <Show when={t.kind === "gui"}>
-                    <GuiTab streamUrl={publicCfg()?.gui_stream_url ?? null} />
+                    <GuiTab
+                      streamUrl={publicCfg()?.gui_stream_url ?? null}
+                      onError={(msg) => showToast(msg, { kind: "error" })}
+                    />
                   </Show>
                   <Show when={t.kind === "history"}>
                     <History
                       onError={(msg) => showToast(msg, { kind: "error" })}
+                      confirmAction={confirmUser}
                     />
                   </Show>
                   <Show when={t.kind === "assistant"}>
@@ -1071,6 +1085,7 @@ const App: Component = () => {
                   <Show when={t.kind === "tasks"}>
                     <AgentTasks
                       onError={(msg) => showToast(msg, { kind: "error" })}
+                      confirmAction={confirmUser}
                       onOpenSession={(sessionId, label) => {
                         openTerminalTab(sessionId, label);
                         navigate(`/t/${sessionId}`);
@@ -1119,96 +1134,87 @@ const App: Component = () => {
 
       <Show when={promptReq()}>
         {(req) => (
-          <div
-            class="modal-backdrop"
-            onPointerDown={() => {
+          <Dialog
+            title={req().title}
+            onClose={() => {
               req().resolve(null);
               setPromptReq(null);
             }}
           >
-            <div class="modal" onPointerDown={(e) => e.stopPropagation()}>
-              <h2>{req().title}</h2>
-              <input
-                type="text"
-                autofocus
-                value={promptDraft()}
-                placeholder={req().placeholder ?? ""}
-                onInput={(e) => setPromptDraft(e.currentTarget.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    req().resolve(promptDraft());
-                    setPromptReq(null);
-                  } else if (e.key === "Escape") {
-                    req().resolve(null);
-                    setPromptReq(null);
-                  }
+            <input
+              type="text"
+              data-dialog-initial-focus
+              value={promptDraft()}
+              placeholder={req().placeholder ?? ""}
+              onInput={(e) => setPromptDraft(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  req().resolve(promptDraft());
+                  setPromptReq(null);
+                }
+              }}
+            />
+            <div class="modal-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  req().resolve(null);
+                  setPromptReq(null);
                 }}
-              />
-              <div class="modal-actions">
-                <button
-                  onClick={() => {
-                    req().resolve(null);
-                    setPromptReq(null);
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => {
-                    req().resolve(promptDraft());
-                    setPromptReq(null);
-                  }}
-                >
-                  OK
-                </button>
-              </div>
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  req().resolve(promptDraft());
+                  setPromptReq(null);
+                }}
+              >
+                Save
+              </button>
             </div>
-          </div>
+          </Dialog>
         )}
       </Show>
 
       <Show when={confirmReq()}>
         {(req) => (
-          <div
-            class="modal-backdrop"
-            onPointerDown={() => {
+          <Dialog
+            title={req().title}
+            description={req().body}
+            onClose={() => {
               req().resolve(false);
               setConfirmReq(null);
             }}
           >
-            <div class="modal" onPointerDown={(e) => e.stopPropagation()}>
-              <h2>{req().title}</h2>
-              <Show when={req().body}>
-                <p style={{ color: "var(--fg-muted)", "font-size": "13px" }}>
-                  {req().body}
-                </p>
-              </Show>
-              <div class="modal-actions">
-                <button
-                  onClick={() => {
-                    req().resolve(false);
-                    setConfirmReq(null);
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => {
-                    req().resolve(true);
-                    setConfirmReq(null);
-                  }}
-                >
-                  OK
-                </button>
-              </div>
+            <div class="modal-actions">
+              <button
+                type="button"
+                data-dialog-initial-focus
+                onClick={() => {
+                  req().resolve(false);
+                  setConfirmReq(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                class="danger"
+                onClick={() => {
+                  req().resolve(true);
+                  setConfirmReq(null);
+                }}
+              >
+                Confirm
+              </button>
             </div>
-          </div>
+          </Dialog>
         )}
       </Show>
 
-      <Show when={toast()}>
-        <div class="toast">{toast()}</div>
-      </Show>
+      <FeedbackCenter queue={feedback} />
 
       <CommandPalette
         open={commandPaletteOpen()}

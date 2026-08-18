@@ -1,5 +1,6 @@
 import { Component, For, Show, createSignal } from "solid-js";
 import type { SessionTemplate } from "./api";
+import Dialog from "./Dialog";
 import {
   addCustomTemplate,
   deleteCustomTemplate,
@@ -148,15 +149,13 @@ const TemplateEditor: Component<Props> = (props) => {
 
   return (
     <Show when={props.open}>
-      <div
-        class="modal-backdrop"
-        onClick={(e) => {
-          if (e.target === e.currentTarget) props.onClose();
-        }}
+      <Dialog
+        labelledBy="template-editor-title"
+        onClose={props.onClose}
+        dialogClass="template-editor"
       >
-        <div class="template-editor" onClick={(e) => e.stopPropagation()}>
           <div class="template-editor-header">
-            <h2>Workspace Presets</h2>
+            <h2 id="template-editor-title">Workspace Presets</h2>
             <button class="template-editor-close" onClick={props.onClose}>
               ×
             </button>
@@ -340,8 +339,7 @@ const TemplateEditor: Component<Props> = (props) => {
               </div>
             </Show>
           </div>
-        </div>
-      </div>
+      </Dialog>
     </Show>
   );
 };

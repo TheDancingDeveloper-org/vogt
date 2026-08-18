@@ -3,6 +3,7 @@ import { api } from "./api";
 
 interface Props {
   streamUrl: string | null;
+  onError?: (message: string) => void;
 }
 
 interface SavedGuiLauncher {
@@ -84,7 +85,9 @@ const GuiTab: Component<Props> = (props) => {
       setMessage(`Launched ${label().trim() || tokens[0]}`);
       void refetch();
     } catch (e) {
-      alert((e as Error).message);
+      const message = `GUI launch failed: ${(e as Error).message}`;
+      setMessage(message);
+      props.onError?.(message);
     }
   };
 

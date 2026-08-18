@@ -25,6 +25,7 @@ interface Props {
     defaultValue?: string,
     placeholder?: string,
   ) => Promise<string | null>;
+  confirmAction?: (title: string, body?: string) => Promise<boolean>;
   onRequestCloseTab?: (tabId: string) => void;
   onNotify?: (message: string, kind?: "info" | "error") => void;
 }
@@ -86,6 +87,7 @@ const EditorWorkspace: Component<Props> = (props) => {
             <FileTree
               onOpen={() => undefined}
               promptPath={props.promptPath}
+              confirmAction={props.confirmAction}
               onError={(message) => props.onNotify?.(message, "error")}
             />
           </div>

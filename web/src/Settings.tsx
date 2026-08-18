@@ -14,6 +14,7 @@ import {
 } from "./api";
 import { getLayoutMode, setLayoutMode, type LayoutMode } from "./layout";
 import TemplateEditor from "./TemplateEditor";
+import Dialog from "./Dialog";
 import { THEMES, getThemeName, setThemeName } from "./terminalThemes";
 import {
   clearWorkspaceLayouts,
@@ -648,9 +649,7 @@ const Settings: Component<Props> = (props) => {
 
   return (
     <Show when={props.open}>
-      <div class="modal-backdrop" onClick={props.onClose}>
-        <div class="modal" onClick={(e) => e.stopPropagation()}>
-          <h2>Settings</h2>
+      <Dialog title="Settings" onClose={props.onClose}>
           <label>
             Bearer token
             <input
@@ -1492,8 +1491,7 @@ const Settings: Component<Props> = (props) => {
               Validate, save & reload
             </button>
           </div>
-        </div>
-      </div>
+      </Dialog>
       <TemplateEditor
         open={templateEditorOpen()}
         onClose={() => setTemplateEditorOpen(false)}

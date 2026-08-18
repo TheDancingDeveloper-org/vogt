@@ -1,5 +1,6 @@
 import { Component, For, Show, createMemo, createSignal } from "solid-js";
 import type { SessionTemplate } from "./api";
+import Dialog from "./Dialog";
 import {
   buildDefaultSessionName,
   fillTemplateString,
@@ -67,14 +68,11 @@ const TemplateSelector: Component<Props> = (props) => {
 
   return (
     <Show when={props.open}>
-      <div
-        class="modal-backdrop"
-        onPointerDown={(e) => {
-          if (e.target === e.currentTarget) closeSelector();
-        }}
+      <Dialog
+        title="Create New Session"
+        onClose={closeSelector}
+        dialogClass="modal template-selector"
       >
-        <div class="modal template-selector" onPointerDown={(e) => e.stopPropagation()}>
-          <h2>Create New Session</h2>
 
           <Show
             when={!selectedTemplate()}
@@ -216,8 +214,7 @@ const TemplateSelector: Component<Props> = (props) => {
               </Show>
             </div>
           </Show>
-        </div>
-      </div>
+      </Dialog>
     </Show>
   );
 };

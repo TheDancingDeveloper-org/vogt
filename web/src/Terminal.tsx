@@ -18,6 +18,7 @@ import {
   MAX_TERMINAL_CACHE_BYTES,
   saveTerminalCache,
 } from "./terminalCache";
+import Dialog from "./Dialog";
 
 const DEFAULT_FONT_SIZE = 13;
 const MIN_FONT_SIZE = 9;
@@ -868,17 +869,16 @@ const TerminalView: Component<Props> = (props) => {
         </Show>
       </div>
       <Show when={showPasteModal()}>
-        <div
-          class="paste-modal-backdrop"
-          onPointerDown={cancelPasteModal}
+        <Dialog
+          labelledBy="paste-dialog-title"
+          onClose={cancelPasteModal}
+          backdropClass="paste-modal-backdrop"
+          dialogClass="paste-modal"
         >
-          <div
-            class="paste-modal"
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            <div class="paste-modal-title">Paste text</div>
+            <div id="paste-dialog-title" class="paste-modal-title">Paste text</div>
             <textarea
-              ref={(el) => { pasteTextareaRef = el; el.focus(); }}
+              ref={(el) => { pasteTextareaRef = el; }}
+              data-dialog-initial-focus
               class="paste-modal-textarea"
               rows={5}
               placeholder="Long-press here to paste from clipboard…"
@@ -891,8 +891,7 @@ const TerminalView: Component<Props> = (props) => {
               <button class="paste-modal-btn" onClick={cancelPasteModal}>Cancel</button>
               <button class="paste-modal-btn primary" onClick={confirmPasteModal}>Paste</button>
             </div>
-          </div>
-        </div>
+        </Dialog>
       </Show>
     </>
   );

@@ -43,6 +43,7 @@ import {
   workspaceLayoutSummary,
   type SavedWorkspaceLayout,
 } from "./workspaceLayouts";
+import Dialog from "./Dialog";
 
 interface HistorySearchResult {
   session_id: string;
@@ -1092,13 +1093,13 @@ const CommandPalette: Component<Props> = (props) => {
 
   return (
     <Show when={props.open}>
-      <div
-        class="command-palette-backdrop"
-        onPointerDown={(e) => {
-          if (e.target === e.currentTarget) props.onClose();
-        }}
+      <Dialog
+        label="Command palette"
+        onClose={props.onClose}
+        dialogClass="command-palette"
+        backdropClass="command-palette-backdrop"
+        dismissOnBackdrop
       >
-        <div class="command-palette">
           <div class="command-palette-header">
             <input
               ref={inputRef}
@@ -1149,8 +1150,7 @@ const CommandPalette: Component<Props> = (props) => {
             <span>↵ Select</span>
             <span>ESC Close</span>
           </div>
-        </div>
-      </div>
+      </Dialog>
     </Show>
   );
 };

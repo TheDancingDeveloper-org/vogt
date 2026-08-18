@@ -21,6 +21,7 @@ interface Props {
     defaultValue?: string,
     placeholder?: string,
   ) => Promise<string | null>;
+  confirmAction?: (title: string, body?: string) => Promise<boolean>;
   onError?: (message: string) => void;
 }
 
@@ -286,10 +287,12 @@ const FileTree: Component<Props> = (props) => {
   };
 
   const deleteNode = async (node: TreeNode) => {
-    const ok = window.confirm(
+    if (!props.confirmAction) return;
+    const ok = await props.confirmAction(
+      node.is_dir ? `Delete folder "${node.path}"?` : `Delete file "${node.path}"?`,
       node.is_dir
-        ? `Delete folder "${node.path}" and all contents?`
-        : `Delete file "${node.path}"?`,
+        ? "The folder and every file beneath it will be permanently deleted."
+        : "The file will be permanently deleted.",
     );
     if (!ok) return;
     try {
