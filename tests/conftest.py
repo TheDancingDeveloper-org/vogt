@@ -98,12 +98,31 @@ def instance(context: AppContext) -> AppContext:
     return context
 
 
-@pytest.fixture
-def clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Remove any VOGT_* configuration leaking in from the developer's shell."""
+@pytest.fixture(scope="session", autouse=True)
+def clean_env() -> Iterator[None]:
+    """Remove any VOGT_* configuration leaking in from the developer's shell.
+
+    This is suite-wide rather than opt-in because most tests construct
+    ``VogtConfig`` directly, and pydantic-settings still lets environment
+    values override fields those tests did not name. A developer running the
+    suite inside Vogt's own engine therefore used to acquire the live GitHub
+    adapter, engine state directory, and public identity in otherwise-local
+    tests. Tests of environment precedence set their values after this
+    fixture has cleaned the inherited process environment.
+    """
     import os
 
-    for key in list(os.environ):
-        if key.startswith("VOGT_"):
-            monkeypatch.delenv(key, raising=False)
-    yield
+    inherited = {
+        key: value for key, value in os.environ.items() if key.startswith("VOGT_")
+    }
+    for key in inherited:
+        os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        # The suite owns the process for its duration, but restoring the
+        # caller's environment keeps embedded pytest runs unsurprising.
+        for key in list(os.environ):
+            if key.startswith("VOGT_"):
+                os.environ.pop(key, None)
+        os.environ.update(inherited)

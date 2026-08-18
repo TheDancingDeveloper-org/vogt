@@ -81,6 +81,12 @@ describe("project slugs", () => {
     );
   });
 
+  it("does not choose between equally plausible projects", () => {
+    const result = repairUtterance("what about alphx", ["alpha", "alphi"]);
+    expect(result.text).toBe("what about alphx");
+    expect(result.repairs).toEqual([]);
+  });
+
   it("keeps the punctuation that belonged to the sentence", () => {
     expect(repairUtterance("how is rust nzbd?", PROJECTS).text).toBe(
       "how is rustnzbd?",
