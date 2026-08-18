@@ -156,6 +156,84 @@ async function installFixtures(
   return { inboxCalls: () => inboxCalls, sessions };
 }
 
+test("History palette results restore the selected session, query and match", async ({ page }) => {
+  await installFixtures(page);
+  const archivedSessions = [
+    {
+      id: "archive-alpha", name: "alpha archive", cwd: "/workspace/alpha",
+      command: "pnpm test", created_at: "2026-08-18T09:00:00Z",
+      ended_at: "2026-08-18T09:05:00Z", exit_code: 0, scrollback_bytes: 18,
+    },
+    {
+      id: "archive-beta", name: "beta archive", cwd: "/workspace/beta",
+      command: "cargo test", created_at: "2026-08-18T10:00:00Z",
+      ended_at: "2026-08-18T10:05:00Z", exit_code: 0, scrollback_bytes: 17,
+    },
+  ];
+  const matches = [
+    {
+      session_id: "archive-alpha", session_name: "alpha archive",
+      created_at: "2026-08-18T09:00:00Z",
+      match_snippet: "alpha says <mark>needle</mark>", rank: -2,
+    },
+    {
+      session_id: "archive-beta", session_name: "beta archive",
+      created_at: "2026-08-18T10:00:00Z",
+      match_snippet: "beta says <mark>needle</mark>", rank: -1,
+    },
+  ];
+  await page.route("**/api/history/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/history/sessions") return route.fulfill({ json: archivedSessions });
+    if (path === "/api/history/search") return route.fulfill({ json: matches });
+    if (path.endsWith("/log")) {
+      const id = path.split("/").at(-2)!;
+      return route.fulfill({ json: {
+        session_id: id, text: `${id} says needle`, bytes: 20,
+        total_bytes: 20, truncated: false,
+      } });
+    }
+    const id = path.split("/").at(-1);
+    const session = archivedSessions.find((candidate) => candidate.id === id);
+    return session
+      ? route.fulfill({ json: session })
+      : route.fulfill({ status: 404, json: { error: "not found" } });
+  });
+
+  await page.goto("/#/board?project=vogt");
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+  await page.getByRole("button", { name: "Go to…" }).click();
+  const palette = page.getByRole("dialog", { name: "Command palette" });
+  await palette.locator("input").fill("> needle");
+  await expect(palette.getByText("alpha archive", { exact: true })).toBeVisible();
+  await expect(palette.getByText("beta archive", { exact: true })).toBeVisible();
+  await palette.getByText("beta archive", { exact: true }).click();
+
+  await expect(page).toHaveURL(/#\/history\?q=needle&session=archive-beta&match=m[0-9a-f]{8}$/);
+  await expect(page.getByLabel("Search all archived output")).toHaveValue("needle");
+  await expect(page.getByRole("heading", { name: "beta archive" })).toBeVisible();
+  const selectedMatch = page.locator('.history-result-snippet.qualified-match[aria-current="true"]');
+  await expect(selectedMatch).toContainText("beta says needle");
+  await expect(selectedMatch.locator("mark")).toHaveText("needle");
+
+  const qualifiedUrl = page.url();
+  await page.reload();
+  await expect(page).toHaveURL(qualifiedUrl);
+  await expect(page.getByRole("heading", { name: "beta archive" })).toBeVisible();
+  await expect(selectedMatch).toContainText("beta says needle");
+
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/board\?project=vogt$/);
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Go to…" }).click();
+  const searchPalette = page.getByRole("dialog", { name: "Command palette" });
+  await searchPalette.locator("input").fill("Search History");
+  await searchPalette.getByText("Search History", { exact: true }).click();
+  await expect(page).toHaveURL(/#\/history\?focus=search$/);
+  await expect(page.getByLabel("Search all archived output")).toBeFocused();
+});
+
 test("Board dragover/drop uses the real browser gesture and keeps its filter on reload", async ({ page }) => {
   test.skip(test.info().project.name === "phone", "Drag/drop is validated in the desktop browser project");
   await installFixtures(page);

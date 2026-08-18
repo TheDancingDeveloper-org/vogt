@@ -295,6 +295,12 @@ file, archived-output, or current-file symbol search. Closing or changing a
 special search cancels its obsolete request. Choose **Refresh Command Palette
 Data** when a write elsewhere makes a cached command list out of date.
 
+Prefix a palette query with `>` to search archived terminal output. Choosing a
+match opens a shareable History URL carrying the query, archived session and
+selected excerpt; reload restores the same marked context, and Browser Back
+returns to the route from which the palette was opened. The **Search History**
+command opens History with its archived-output search field focused.
+
 ## 5. When something is missing rather than broken
 
 Vogt is two processes, and each keeps working when the other does not. This is

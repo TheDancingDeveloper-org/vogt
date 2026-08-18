@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, within } from "@solidjs/testing-library";
+import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import History from "../History";
@@ -63,6 +64,16 @@ function mockDetailReads(): void {
   }));
 }
 
+function renderHistory() {
+  const history = createMemoryHistory();
+  history.set({ value: "/history" });
+  return render(() => (
+    <MemoryRouter history={history}>
+      <Route path="/history" component={() => <History />} />
+    </MemoryRouter>
+  ));
+}
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("History read truth", () => {
@@ -72,7 +83,7 @@ describe("History read truth", () => {
       .mockRejectedValueOnce(new Error("503 archive unavailable"))
       .mockResolvedValueOnce([]);
 
-    render(() => <History />);
+    renderHistory();
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Failed to load history: 503 archive unavailable",
@@ -95,7 +106,7 @@ describe("History read truth", () => {
       .mockRejectedValueOnce(new Error("history database busy"));
     mockDetailReads();
 
-    const { container } = render(() => <History />);
+    const { container } = renderHistory();
     expect(await screen.findByText("1 of 1 archived sessions loaded")).toBeVisible();
 
     await fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -115,7 +126,7 @@ describe("History read truth", () => {
       .mockResolvedValueOnce(lastPage);
     mockDetailReads();
 
-    render(() => <History />);
+    renderHistory();
     expect(await screen.findByText("200 of 201 archived sessions loaded")).toBeVisible();
 
     const chosen = screen.getByText(/^archive-12$/).closest("button");
@@ -145,7 +156,7 @@ describe("History read truth", () => {
       .mockResolvedValueOnce([]);
     mockDetailReads();
 
-    render(() => <History />);
+    renderHistory();
     expect(
       await screen.findByText("200 archived sessions loaded; more may be available"),
     ).toBeVisible();
@@ -184,7 +195,7 @@ describe("History read truth", () => {
         },
       ]);
 
-    render(() => <History />);
+    renderHistory();
     expect(await screen.findByText("Failed to load session detail: detail offline")).toBeVisible();
 
     await fireEvent.click(screen.getByRole("button", { name: "Retry session detail" }));
