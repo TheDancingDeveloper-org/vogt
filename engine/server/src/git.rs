@@ -25,6 +25,7 @@ async fn find_repo_root(start: &Path, boundary: &Path) -> Result<PathBuf> {
         if tokio::fs::try_exists(cur.join(".git"))
             .await
             .unwrap_or(false)
+            && is_repo_root(&cur).await
         {
             return Ok(cur);
         }
@@ -36,6 +37,27 @@ async fn find_repo_root(start: &Path, boundary: &Path) -> Result<PathBuf> {
             _ => return Err(ApiError::NotFound),
         }
     }
+}
+
+/// A `.git` path is only a marker, not proof that Git considers the directory
+/// a repository. Workspace roots can contain an empty placeholder directory,
+/// and treating one as a repository turns an ordinary empty selection into a
+/// later `git status` 500.
+async fn is_repo_root(path: &Path) -> bool {
+    let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(path)
+        .output()
+        .await
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let reported = Path::new(std::str::from_utf8(&output.stdout).unwrap_or("").trim());
+    reported == path
 }
 
 /// Resolve a repo from query: ?repo= relative to workspace_root, else

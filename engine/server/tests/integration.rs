@@ -2688,6 +2688,9 @@ async fn git_status_log_branch() {
 #[tokio::test]
 async fn git_endpoints_return_empty_for_non_repo_workspace() {
     let tmp = tempfile::tempdir().unwrap();
+    // Reproduce the deployed workspace shape from vogt#53: an empty `.git`
+    // placeholder is not a repository and must not make status return 500.
+    std::fs::create_dir(tmp.path().join(".git")).unwrap();
     std::fs::create_dir(tmp.path().join("plain-dir")).unwrap();
 
     let mut cfg = test_config();
@@ -2700,14 +2703,13 @@ async fn git_endpoints_return_empty_for_non_repo_workspace() {
         .build()
         .unwrap();
 
-    let st: Value = client
+    let response = client
         .get(format!("{base}/api/git/status"))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let st: Value = response.json().await.unwrap();
     assert_eq!(st["is_repo"], false);
     assert_eq!(st["branch"], "");
     assert!(st["entries"].as_array().unwrap().is_empty());
