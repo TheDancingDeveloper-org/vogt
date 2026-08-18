@@ -10,8 +10,9 @@
 // which is the clause this file covers.
 
 import { afterEach, describe, expect, it } from "vitest";
-import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
+import { createSignal } from "solid-js";
 import CommandPalette from "../CommandPalette";
 import { refreshSessions } from "../store";
 import { fakeVogt, settle, workItem, type FakeVogt } from "./harness";
@@ -66,6 +67,85 @@ const ESTATE = {
     body: { items: [workItem({ ref: "WI-7", title: "Ship the board" })], total: 1 },
   },
 };
+
+describe("accessible command interaction", () => {
+  it("exposes a named modal combobox, listbox and active option", async () => {
+    fakeVogt(ESTATE);
+    palette();
+
+    const dialog = screen.getByRole("dialog", { name: "Command palette" });
+    const query = screen.getByRole("combobox", { name: "Search commands" });
+    const results = screen.getByRole("listbox", { name: "Command results" });
+    await waitFor(() => expect(query).toHaveFocus());
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(query).toHaveAttribute("aria-controls", results.id);
+
+    const first = screen.getByRole("option", { name: /Open Board/ });
+    expect(first).toHaveAttribute("aria-selected", "true");
+    expect(query).toHaveAttribute("aria-activedescendant", first.id);
+    fireEvent.keyDown(query, { key: "ArrowDown" });
+    const second = screen.getByRole("option", { name: /Open Backlog/ });
+    expect(second).toHaveAttribute("aria-selected", "true");
+    expect(query).toHaveAttribute("aria-activedescendant", second.id);
+    expect(screen.getByRole("status")).toHaveTextContent("Open Backlog selected");
+  });
+
+  it("keeps focus in the query while arrows and Enter execute the active option", async () => {
+    fakeVogt(ESTATE);
+    const view = palette();
+    const query = screen.getByRole("combobox", { name: "Search commands" });
+    await waitFor(() => expect(query).toHaveFocus());
+
+    fireEvent.keyDown(query, { key: "ArrowDown" });
+    expect(query).toHaveFocus();
+    fireEvent.keyDown(query, { key: "Enter" });
+
+    await waitFor(() => expect(view.url()).toBe("/backlog"));
+    expect(view.closed()).toBe(1);
+  });
+
+  it("restores its invoker and reopens with a blank query and first selection", async () => {
+    fakeVogt(ESTATE);
+    const history = createMemoryHistory();
+    history.set({ value: "/board" });
+    let setOpen!: (open: boolean) => void;
+    const rendered = render(() => {
+      const [open, updateOpen] = createSignal(false);
+      setOpen = updateOpen;
+      return (
+        <MemoryRouter history={history}>
+          <Route
+            path="*rest"
+            component={() => (
+              <>
+                <button onClick={() => setOpen(true)}>Go to…</button>
+                <CommandPalette open={open()} onClose={() => setOpen(false)} />
+              </>
+            )}
+          />
+        </MemoryRouter>
+      );
+    });
+    const invoker = rendered.getByRole("button", { name: "Go to…" });
+    invoker.focus();
+    fireEvent.click(invoker);
+    let query = await screen.findByRole("combobox", { name: "Search commands" });
+    await waitFor(() => expect(query).toHaveFocus());
+    fireEvent.input(query, { target: { value: "audit" } });
+    expect(query).toHaveValue("audit");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(invoker).toHaveFocus());
+    fireEvent.click(invoker);
+    query = await screen.findByRole("combobox", { name: "Search commands" });
+    await waitFor(() => expect(query).toHaveFocus());
+    expect(query).toHaveValue("");
+    expect(screen.getByRole("option", { name: /Open Board/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+});
 
 describe("FR-U16 — every read surface by fuzzy name", () => {
   it("offers each registered project by name", async () => {

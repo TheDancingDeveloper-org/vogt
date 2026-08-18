@@ -267,6 +267,7 @@ so UI changes ship without a new APK; only native plumbing needs one.
 | `Ctrl/Cmd+F` / `H` / `G` | Find / replace / go to line |
 | `Alt+↑/↓` | Move line |
 | `Ctrl/Cmd+D` | Add cursor at next match |
+| `?` | Open shortcut help outside text fields, editors and terminals |
 
 **The command palette reaches every read surface by fuzzy name** — projects and
 work items included, so `rstnz` finds `rustnzb`. It never performs a write.
@@ -274,6 +275,13 @@ Mutating verbs whose collector is a *place* — quick-create, the drift inbox,
 the import form — open that view and do nothing else; per-item verbs
 (transition, comment, start session) are reached through the item's own entry,
 which opens the page carrying all three forms.
+
+Opening the palette always focuses a blank query and selects its first result.
+Arrow keys change the announced selection, Enter activates it, Tab stays inside
+the modal, and Escape closes from anywhere in it and returns focus to the
+button or shortcut that opened it. Pointer and touch activate the same command
+rows. Shortcut help states where each binding applies; in particular `?` does
+not take a literal question mark away from an input, editor or terminal.
 
 ## 5. When something is missing rather than broken
 

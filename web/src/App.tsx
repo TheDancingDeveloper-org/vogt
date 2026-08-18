@@ -27,6 +27,7 @@ import Projects from "./Projects";
 import WorkItemDetail from "./WorkItemDetail";
 import History from "./History";
 import KeyboardShortcuts from "./KeyboardShortcuts";
+import { matchAppShortcut } from "./keyboardShortcuts";
 import ModKeyRow from "./ModKeyRow";
 import Settings from "./Settings";
 import FileTree from "./FileTree";
@@ -883,25 +884,29 @@ const App: Component = () => {
     }
   };
 
-  // Keyboard shortcuts. Browser reserves Ctrl+T / Ctrl+W / Ctrl+Tab so we use
-  // Ctrl+Shift+T (new), Ctrl+Shift+W (close active), Ctrl+Alt+Arrow (cycle).
-  // Ctrl+K / Cmd+K opens the command palette.
+  // App-level shortcuts are matched from the same registry the help dialog
+  // renders. Browser-reserved alternatives and editable-surface contexts live
+  // beside the binding instead of drifting between this handler and the UI.
   const onKeyDown = (e: KeyboardEvent) => {
-    // Command palette: Ctrl+K or Cmd+K
-    if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+    const shortcut = matchAppShortcut(e);
+    if (!shortcut) return;
+
+    if (shortcut.id === "open-command-palette") {
       e.preventDefault();
       setCommandPaletteOpen(true);
       return;
     }
-
-    if (!e.ctrlKey && !e.metaKey) return;
-    const k = e.key.toLowerCase();
-    if (e.shiftKey && k === "t") {
+    if (shortcut.id === "show-shortcut-help") {
+      e.preventDefault();
+      setShortcutsOpen(true);
+      return;
+    }
+    if (shortcut.id === "new-terminal-session") {
       e.preventDefault();
       void onCreate();
       return;
     }
-    if (e.shiftKey && k === "w") {
+    if (shortcut.id === "close-active-tab") {
       const active = tabsStore.active;
       if (active) {
         e.preventDefault();
@@ -909,14 +914,14 @@ const App: Component = () => {
       }
       return;
     }
-    if (e.altKey && (k === "arrowright" || k === "arrowleft")) {
+    if (shortcut.id === "next-tab" || shortcut.id === "previous-tab") {
       const tabs = tabsStore.tabs;
       if (tabs.length === 0) return;
       const idx = Math.max(
         0,
         tabs.findIndex((t) => t.id === tabsStore.active),
       );
-      const delta = k === "arrowright" ? 1 : -1;
+      const delta = shortcut.id === "next-tab" ? 1 : -1;
       const next = tabs[(idx + delta + tabs.length) % tabs.length];
       if (next) {
         e.preventDefault();

@@ -193,8 +193,54 @@ test("Phone shell keeps labelled primary navigation and Go to reachability", asy
   await expect(page.getByRole("link", { name: "Inbox" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Go to…" })).toBeVisible();
   await page.getByRole("button", { name: "Go to…" }).click();
-  await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
+  const palette = page.getByRole("dialog", { name: "Command palette" });
+  await expect(palette).toBeVisible();
+  const query = palette.getByRole("combobox", { name: "Search commands" });
+  await expect(query).toBeFocused();
   await expect(page.getByText("Open Audit")).toBeVisible();
+  await page.keyboard.press("ArrowDown");
+  await expect(palette.getByRole("option", { name: /Open Backlog/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await page.keyboard.press("Tab");
+  await expect(query).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Go to…" })).toBeFocused();
+
+  await page.getByRole("button", { name: "Go to…" }).click();
+  await page.getByRole("combobox", { name: "Search commands" }).fill("Open Audit");
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/#\/audit$/);
+});
+
+test("Global shortcut help works outside editable surfaces and returns focus", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/sessions");
+
+  const goTo = page.getByRole("button", { name: "Go to…" });
+  await goTo.focus();
+  await page.keyboard.press("ControlOrMeta+K");
+  await expect(
+    page.getByRole("dialog", { name: "Command palette" })
+      .getByRole("combobox", { name: "Search commands" }),
+  ).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(goTo).toBeFocused();
+
+  await page.keyboard.press("?");
+  const help = page.getByRole("dialog", { name: "Keyboard Shortcuts" });
+  await expect(help).toBeVisible();
+  await expect(help.getByText("Outside text fields, editors, and terminals")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(goTo).toBeFocused();
+
+  await page.getByRole("button", { name: "Go to…" }).click();
+  const query = page.getByRole("combobox", { name: "Search commands" });
+  await query.fill("audit");
+  await page.keyboard.press("?");
+  await expect(page.getByRole("dialog", { name: "Keyboard Shortcuts" })).toHaveCount(0);
+  await expect(query).toHaveValue("audit?");
 });
 
 test("Dialog focus is contained and restored, and feedback matches its live region", async ({ page }) => {
