@@ -163,6 +163,9 @@ pub async fn kill_proc(
 #[derive(Debug, Serialize)]
 pub struct PublicConfig {
     pub gui_stream_url: Option<String>,
+    /// One server-owned visibility decision: a configured URL, an installed
+    /// streamer and an operator's recorded end-to-end verification.
+    pub gui_stream_available: bool,
     pub version: &'static str,
     /// Build-time feature availability, read from `/etc/mydevenv2/features.json`.
     /// `{"selkies": "1.6.2"}` when present, `{"selkies": null}` when the image
@@ -198,10 +201,17 @@ pub struct AssistantProfileSummary {
 }
 
 pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicConfig> {
+    let features = load_features();
+    let gui_stream_available = gui_stream_available(
+        state.config.gui_stream_url.as_deref(),
+        state.config.gui_stream_verified,
+        &features,
+    );
     Json(PublicConfig {
         gui_stream_url: state.config.gui_stream_url.clone(),
+        gui_stream_available,
         version: env!("CARGO_PKG_VERSION"),
-        features: load_features(),
+        features,
         session_templates: state.config.session_templates.clone(),
         vogt: crate::vogt_core::public_status(&state),
         assistant_enabled: state.assistant.is_some(),
@@ -223,6 +233,18 @@ pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicCon
     })
 }
 
+fn gui_stream_available(
+    gui_stream_url: Option<&str>,
+    verified: bool,
+    features: &serde_json::Value,
+) -> bool {
+    verified
+        && gui_stream_url.is_some_and(|url| !url.trim().is_empty())
+        && features
+            .get("selkies")
+            .is_some_and(|version| !version.is_null())
+}
+
 fn load_features() -> serde_json::Value {
     // Read once per request — the file is tiny and avoids needing a refresh
     // on process restart if the operator updates it out of band.
@@ -230,4 +252,38 @@ fn load_features() -> serde_json::Value {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gui_stream_available;
+
+    #[test]
+    fn gui_visibility_requires_url_streamer_and_operator_verification() {
+        assert!(!gui_stream_available(
+            None,
+            true,
+            &serde_json::json!({ "selkies": "1.6.2" }),
+        ));
+        assert!(!gui_stream_available(
+            Some("https://stream.example.test"),
+            true,
+            &serde_json::json!({ "selkies": null }),
+        ));
+        assert!(!gui_stream_available(
+            Some("   "),
+            true,
+            &serde_json::json!({ "selkies": "1.6.2" }),
+        ));
+        assert!(!gui_stream_available(
+            Some("https://stream.example.test"),
+            false,
+            &serde_json::json!({ "selkies": "1.6.2" }),
+        ));
+        assert!(gui_stream_available(
+            Some("https://stream.example.test"),
+            true,
+            &serde_json::json!({ "selkies": "1.6.2" }),
+        ));
+    }
 }

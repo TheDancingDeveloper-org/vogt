@@ -1,6 +1,6 @@
 # Vogt — User Guide
 
-Status: **current as of 2026-08-15**, and describing one product. It replaced
+Status: **current as of 2026-08-18**, and describing one product. It replaced
 `docs/engine/USER_GUIDE.md`, which was written in June 2026 for MyDevEnv2
 standing alone and therefore documented terminals, the editor and git while
 saying nothing about backlogs, boards, drift or audit — half a product, under
@@ -34,6 +34,11 @@ write needs its own capability (`sessions`, `filesystem-write`, `git-write`,
 gets a `403` — which means *this credential will never work for this route*,
 as against a `401`'s *try a different one*.
 
+Settings is a routed modal. Whether it is opened from the desktop rail, phone
+palette or command palette, closing it returns to the route that invoked it,
+including filters in the query string; a direct `#/settings` link falls back
+to Sessions. Browser Back closes a routed Settings view without adding a loop.
+
 Settings stores device-local **named auth profiles**, so you can keep a
 read-only token and an interactive one side by side and switch between them
 rather than leaving an admin token in a browser.
@@ -56,7 +61,7 @@ view it names (FR-U11). Tabs persist per device.
 | **Tasks** | `#/tasks` | Scheduled agent runs: create, edit, pause, resume, run now, inspect. |
 | **History** | `#/history` | Archived scrollback from sessions that have ended, full-text searchable. |
 | **Assistant** | `#/assistant` | The conversational surface — absent entirely unless the deployment provisioned it. |
-| **GUI** | `#/gui` | The in-pod GUI stream, when one is configured. |
+| **GUI** | `#/gui` | Hidden unless the server reports a configured stream, a shipped Selkies feature and an operator-recorded end-to-end verification. An old/direct link otherwise explains that the surface is unavailable. |
 
 ### 2.1 The board
 

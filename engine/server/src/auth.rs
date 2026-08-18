@@ -476,6 +476,7 @@ mod tests {
             idle_stall_after_ms: 10 * 60 * 1_000,
             workspace_root: std::env::temp_dir(),
             gui_stream_url: None,
+            gui_stream_verified: false,
             state_dir: tempfile::tempdir().unwrap().keep(),
             fcm_service_account_json: None,
             vapid_subject: "mailto:test@example.invalid".into(),

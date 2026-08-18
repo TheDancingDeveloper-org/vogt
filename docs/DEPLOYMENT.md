@@ -1127,10 +1127,16 @@ image. The image records what it actually got in `/etc/mydevenv2/features.json`
 was unavailable — and the engine serves that through `GET /api/config`, so a
 client can tell a missing feature from a broken one.
 
-**Production runs with `START_SWAY=0` and `GUI_STREAM_URL=""`.** The GUI tab
-exists in the client and the launch APIs work, but the stream is not
-operational. That is a gap with a requirement, not a quiet default:
-[`REQUIREMENTS.md`](REQUIREMENTS.md) §7 carries it.
+**Production runs with `START_SWAY=0`, `GUI_STREAM_URL=""` and
+`GUI_STREAM_VERIFIED=0`.** The launch APIs remain installed, but the normal
+GUI affordances are deliberately hidden. `GET /api/config` owns that
+visibility decision as `gui_stream_available`: a configured URL, a non-null
+shipped Selkies feature and an operator-set verification bit are all required.
+Set the bit only after launching a process and watching it render through the
+configured stream; a package manifest is not a runtime proof.
+Old/direct `#/gui` links render a named unavailable state. Operability remains
+a gap with the requirement and [`REQUIREMENTS.md`](REQUIREMENTS.md) §7 carries
+it; hiding the unverified surface does not claim the stream works.
 
 ## 11. The engine's own stacks *(consolidated 2026-08-15)*
 

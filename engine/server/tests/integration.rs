@@ -31,6 +31,7 @@ fn test_config() -> Config {
         idle_stall_after_ms: 10 * 60 * 1_000,
         workspace_root: std::env::temp_dir(),
         gui_stream_url: None,
+        gui_stream_verified: false,
         state_dir: tempfile::tempdir().unwrap().keep(),
         fcm_service_account_json: None,
         vapid_subject: "mailto:test@example.invalid".to_string(),
@@ -140,6 +141,10 @@ async fn config_endpoint_is_public_and_returns_shape() {
     assert!(
         body.get("gui_stream_url").is_some(),
         "missing gui_stream_url"
+    );
+    assert_eq!(
+        body["gui_stream_available"], false,
+        "unverified test config must withdraw the GUI surface"
     );
     assert!(body["version"].as_str().is_some(), "missing version");
 }

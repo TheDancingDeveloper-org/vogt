@@ -911,12 +911,34 @@ textarea {
   padding-top: 10px;
   border-top: 1px solid var(--bd);
 }
+.sessions-tools a {
+  color: var(--fg-muted);
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  padding: 5px 9px;
+  text-decoration: none;
+}
+.sessions-tools a[aria-current="page"] {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.14);
+}
 .sessions-tools > span {
   color: var(--fg-muted);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
 }
+.route-outcome {
+  max-width: 42rem;
+  margin: auto;
+  padding: 32px;
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+.route-outcome h1 { margin: 4px 0 10px; }
+.route-outcome p:not(.place-kicker) { color: var(--fg-muted); }
 @media (max-width: 768px) {
   .sessions-place { padding: 10px; }
   .session-place-row {

@@ -349,13 +349,17 @@ section that documents it.
   check passes, `503` otherwise; the last three are non-fatal by design, so a
   ready container can still be reporting one of them false.
 - `GET /api/config` -> `PublicConfig`
-  `{gui_stream_url, version, features, session_templates, assistant_enabled,
-  assistant_model?, assistant_profiles?}` — what the browser needs at boot,
+  `{gui_stream_url, gui_stream_available, version, features, session_templates, assistant_enabled,
+  vogt, assistant_model?, assistant_profiles?}` — what the browser needs at boot,
   before the user has
   typed a token into Settings. It is outside the gate because it returns no
   secrets: `assistant_enabled` is presence only, never the key.
   `features` is read per request from `/etc/mydevenv2/features.json` and is
-  `{}` when that file is absent.
+  `{}` when that file is absent. `gui_stream_available` is the server-owned
+  UI gate and is true only when a stream URL, a non-null Selkies feature and
+  `GUI_STREAM_VERIFIED=1` are all present. The latter is an operator
+  attestation set only after a launched process has rendered through the
+  configured stream.
 - `GET /api/push/public-key` -> `{vapid_public_key, fcm_enabled}` — needed to
   call `PushManager.subscribe`, so it must be reachable before a token exists.
 

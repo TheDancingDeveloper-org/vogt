@@ -29,10 +29,9 @@ import { render, waitFor } from "@solidjs/testing-library";
 import App from "../App";
 import { APP_ROUTES } from "../routes";
 import { setToken } from "../api";
-import { replaceTabs } from "../tabs";
+import { replaceTabs, tabsStore } from "../tabs";
 import {
   fakeVogt,
-  settle,
   stopLiveStream,
   workItem,
   type FakeVogt,
@@ -82,6 +81,7 @@ function mountShell(url: string, options: ShellOptions = {}): Shell {
       body: {
         version: "test",
         gui_stream_url: null,
+        gui_stream_available: false,
         assistant_enabled: false,
         vogt: { configured: true },
         ...options.config,
@@ -172,7 +172,6 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
       ["Git", "#/g"],
       ["History", "#/history"],
       ["Tasks", "#/tasks"],
-      ["GUI stream", "#/gui"],
     ]);
   });
 
@@ -228,14 +227,11 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     expect(tabLabels(container)).toEqual([]);
   });
 
-  it("opens no phantom terminal for a session the server does not know", async () => {
-    // A stale link is a link to a session that has gone, and the honest
-    // answer is nothing — a tab named after six characters of an id, attached
-    // to a PTY that does not exist, is a worse one.
+  it("names a missing terminal and offers recovery without a phantom tab", async () => {
     const { container } = mountShell("/t/eng-gone", { sessions: [SESSION] });
 
-    await waitFor(() => expect(container.querySelector(".places-rail-session-area")).toBeTruthy());
-    await settle();
+    await waitFor(() => expect(container.textContent).toContain("Session not found"));
+    expect(container.textContent).toContain("Return to Sessions");
     expect(tabLabels(container)).toEqual([]);
     expect(container.querySelector(".terminal-host")).toBeNull();
   });
@@ -262,7 +258,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
 });
 
 describe("FR-T6 — the assistant is not there to be reached when it is not provisioned", () => {
-  it("opens nothing for a hand-typed #/assistant when no key is configured", async () => {
+  it("explains a hand-typed #/assistant when no key is configured", async () => {
     // The route exists in the table — it has to, or the URL would not resolve
     // at all — so the gate is the config, read in the effect. Without it the
     // link opened a tab against routes that answer 404, which is a worse
@@ -277,7 +273,7 @@ describe("FR-T6 — the assistant is not there to be reached when it is not prov
     await waitFor(() =>
       expect(container.querySelector(".places-rail")).toBeTruthy(),
     );
-    await settle();
+    await waitFor(() => expect(container.textContent).toContain("Assistant is unavailable"));
     expect(tabLabels(container)).toEqual([]);
     expect(container.textContent).not.toContain("Ask about your terminal sessions");
   });
@@ -296,5 +292,56 @@ describe("FR-T6 — the assistant is not there to be reached when it is not prov
     );
     expect(container.querySelector(".tab-strip")).toBeNull();
     expect(tabLabels(container)).toEqual([]);
+  });
+});
+
+describe("route-owned navigation state", () => {
+  it("identifies Sessions and History as the current place and tool", async () => {
+    const { container } = mountShell("/history");
+
+    await surface(container, ".history-view");
+    const current = [...container.querySelectorAll('a[aria-current="page"]')]
+      .map((link) => link.textContent?.trim());
+    expect(current).toContain("History");
+    expect(current).not.toContain("Board");
+  });
+
+  it("hides GUI affordances but gives old direct links a truthful outcome", async () => {
+    const { container } = mountShell("/gui", {
+      config: { gui_stream_url: null, gui_stream_available: false },
+    });
+
+    await waitFor(() => expect(container.textContent).toContain("GUI stream is unavailable"));
+    expect([...container.querySelectorAll(".places-nav a")].map((link) => link.textContent))
+      .not.toContain("GUI stream");
+    expect(container.querySelector(".gui-shell")).toBeNull();
+  });
+
+  it("removes a restored GUI tab after the public gate resolves disabled", async () => {
+    replaceTabs({
+      tabs: [{ id: "gui", kind: "gui", label: "GUI" }],
+      active: "gui",
+    });
+
+    mountShell("/sessions", {
+      config: { gui_stream_url: null, gui_stream_available: false },
+    });
+
+    await waitFor(() =>
+      expect(tabsStore.tabs.some((tab) => tab.kind === "gui")).toBe(false),
+    );
+  });
+
+  it("removes a restored missing terminal without navigating away from its outcome", async () => {
+    replaceTabs({
+      tabs: [{ id: "term:gone", kind: "terminal", sessionId: "gone", label: "gone" }],
+      active: "term:gone",
+    });
+
+    const { container } = mountShell("/t/gone", { sessions: [] });
+
+    await waitFor(() => expect(container.textContent).toContain("Session not found"));
+    expect(tabsStore.tabs.some((tab) => tab.kind === "terminal")).toBe(false);
+    expect(container.querySelector(".terminal-host")).toBeNull();
   });
 });

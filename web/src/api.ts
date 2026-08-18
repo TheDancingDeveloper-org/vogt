@@ -724,6 +724,8 @@ export interface SessionTemplate {
 
 export interface PublicConfig {
   gui_stream_url: string | null;
+  /** Server-owned proof that the configured stream is safe to advertise. */
+  gui_stream_available?: boolean;
   version: string;
   /** Build-time feature availability, e.g. `{ selkies: "1.6.2" | null }`. */
   features?: Record<string, string | null | undefined>;

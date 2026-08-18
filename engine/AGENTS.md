@@ -145,7 +145,11 @@ Runtime container: multi-stage `engine/Dockerfile` produces an Ubuntu 26.04 runt
 
 Codex and Claude are deliberately not installed by the production container bootstrap. The dev image installs both; its system `codex` launcher deliberately disables Codex's nested approvals and sandbox so trusted agents have normal container-user filesystem and network access across the complete `/home/sprooty/Working` workspace. The `opencode` CLI is bundled in every image; other AI clients remain user-managed in production. Production default-shell sessions are authenticated through `mydevenv2-agent-auth`; explicit-command sessions can invoke the helper directly.
 
-Outstanding before the GUI tab is operational in production: set `START_SWAY=1`, set `GUI_STREAM_URL`, and verify Selkies from inside the pod. The stack itself, auth identity, workspace mount, and Komodo deploy path already exist.
+Outstanding before the GUI tab is operational in production: set
+`START_SWAY=1`, set `GUI_STREAM_URL`, verify a launched process renders through
+Selkies from inside the pod, and only then set `GUI_STREAM_VERIFIED=1`. The
+stack itself, auth identity, workspace mount, and Komodo deploy path already
+exist.
 
 ## 5. Agent service authentication
 

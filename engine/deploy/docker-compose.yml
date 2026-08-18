@@ -78,9 +78,11 @@ services:
       # (kernel mode, see above). Blank by default: LAN + tailnet + accepted
       # subnet routes stay direct, and public egress does too until opted in.
       TAILSCALE_EXIT_NODE: ${MYDEVENV2_TAILSCALE_EXIT_NODE:-}
-      # Phase 5: when sway+selkies is wired, set both of these.
+      # Phase 5: set the verification bit only after the first two are wired
+      # and an operator has watched a launched process render in the stream.
       START_SWAY: "0"
       GUI_STREAM_URL: ""
+      GUI_STREAM_VERIFIED: "0"
       # Phase 6: FCM service-account JSON (single-line). Empty disables FCM
       # transport; web-push still works for any browser subscription.
       MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON: ${MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON}
