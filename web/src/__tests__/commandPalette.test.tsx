@@ -13,9 +13,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { createSignal } from "solid-js";
-import CommandPalette from "../CommandPalette";
+import CommandPalette, { invalidateCommandPaletteProviders } from "../CommandPalette";
 import { refreshSessions } from "../store";
 import { fakeVogt, settle, workItem, type FakeVogt } from "./harness";
+
+const PROJECT_MANIFEST_REQUEST_COUNT = 9;
 
 function palette() {
   const history = createMemoryHistory();
@@ -35,6 +37,7 @@ function palette() {
     container: rendered.container,
     url: () => history.get(),
     closed: () => closed,
+    unmount: rendered.unmount,
     type(text: string) {
       const input = rendered.container.querySelector("input")!;
       fireEvent.input(input, { target: { value: text } });
@@ -53,6 +56,8 @@ function palette() {
     },
   };
 }
+
+afterEach(() => invalidateCommandPaletteProviders());
 
 const ESTATE = {
   "GET /projects": {
@@ -199,6 +204,83 @@ describe("FR-U16 — every read surface by fuzzy name", () => {
     await waitFor(() => expect(view.text()).toContain("Open Board"));
     expect(view.text()).not.toContain("Open project");
     expect(view.text()).not.toContain("no core");
+  });
+});
+
+describe("command palette provider lifecycle", () => {
+  it("renders static commands before dynamic providers resolve", async () => {
+    let release = () => {};
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    fakeVogt({
+      "GET /projects": async () => {
+        await waiting;
+        return ESTATE["GET /projects"];
+      },
+      "GET /work": async () => {
+        await waiting;
+        return ESTATE["GET /work"];
+      },
+    });
+
+    const view = palette();
+    expect(view.text()).toContain("Open Board");
+    expect(view.text()).toContain("Loading projects…");
+    release();
+    await waitFor(() => expect(view.text()).toContain("Open project rustnzb"));
+  });
+
+  it("reuses cached estate providers across repeated opens", async () => {
+    const vogt = fakeVogt(ESTATE, { "GET /api/agent-tasks": { body: [] } });
+    const first = palette();
+    await waitFor(() => expect(first.text()).toContain("Open project rustnzb"));
+    const afterFirst = {
+      projects: vogt.matching("GET /projects").length,
+      work: vogt.matching("GET /work").length,
+      tasks: vogt.engineCalls.filter((call) => call.path === "/api/agent-tasks").length,
+    };
+    first.unmount();
+
+    const second = palette();
+    await waitFor(() => expect(second.text()).toContain("Open project rustnzb"));
+    expect(vogt.matching("GET /projects")).toHaveLength(afterFirst.projects);
+    expect(vogt.matching("GET /work")).toHaveLength(afterFirst.work);
+    expect(vogt.engineCalls.filter((call) => call.path === "/api/agent-tasks"))
+      .toHaveLength(afterFirst.tasks);
+  });
+
+  it("defers and caches the bounded workspace manifest scan until hash mode", async () => {
+    const manifest = { name: "package.json", path: "web/package.json" };
+    const vogt = fakeVogt(ESTATE, {
+      "GET /api/agent-tasks": { body: [] },
+      "GET /api/search/files": (call) => ({
+        body: call.query.get("q") === "package.json" ? [manifest] : [],
+      }),
+      "GET /api/files": {
+        body: {
+          path: "web/package.json",
+          size: 42,
+          content: JSON.stringify({ name: "vogt-web", scripts: { test: "vitest run" } }),
+          content_base64: null,
+          is_binary: false,
+        },
+      },
+    });
+    const first = palette();
+    await waitFor(() => expect(first.text()).toContain("Open Board"));
+    expect(vogt.engineCalls.filter((call) => call.path === "/api/search/files"))
+      .toHaveLength(0);
+
+    first.type("#test");
+    await waitFor(() => expect(first.text()).toContain("Run npm test"));
+    expect(vogt.engineCalls.filter((call) => call.path === "/api/search/files"))
+      .toHaveLength(PROJECT_MANIFEST_REQUEST_COUNT);
+    first.unmount();
+
+    const second = palette();
+    second.type("#test");
+    await waitFor(() => expect(second.text()).toContain("Run npm test"));
+    expect(vogt.engineCalls.filter((call) => call.path === "/api/search/files"))
+      .toHaveLength(PROJECT_MANIFEST_REQUEST_COUNT);
   });
 });
 
