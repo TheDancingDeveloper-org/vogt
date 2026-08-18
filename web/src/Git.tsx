@@ -25,10 +25,33 @@ import {
   type MonacoNamespace,
   type TextModel,
 } from "./monaco";
+import { readToolDraft, writeToolDraft } from "./toolDrafts";
 
 interface Props {
   repo: string;
   confirmAction?: (title: string, body?: string) => Promise<boolean>;
+}
+
+interface GitDraft {
+  selected: string | null;
+  diffStaged: boolean;
+  commitMessage: string;
+  branchTarget: string;
+  newBranch: string;
+}
+
+function gitDraftKey(repo: string): string {
+  return `git:${repo}`;
+}
+
+function emptyGitDraft(): GitDraft {
+  return {
+    selected: null,
+    diffStaged: false,
+    commitMessage: "",
+    branchTarget: "",
+    newBranch: "",
+  };
 }
 
 const kindOrder: GitStatusKind[] = [
@@ -179,15 +202,24 @@ const DiffView: Component<{ repo: string; path: string; staged: boolean }> = (pr
 };
 
 const GitTab: Component<Props> = (props) => {
+  const restored = readToolDraft(gitDraftKey(props.repo), emptyGitDraft());
   const [gitError, setGitError] = createSignal<string | null>(null);
   const [actionError, setActionError] = createSignal<string | null>(null);
   const [actionInfo, setActionInfo] = createSignal<string | null>(null);
-  const [selected, setSelected] = createSignal<string | null>(null);
-  const [diffStaged, setDiffStaged] = createSignal(false);
-  const [commitMessage, setCommitMessage] = createSignal("");
-  const [branchTarget, setBranchTarget] = createSignal("");
-  const [newBranch, setNewBranch] = createSignal("");
+  const [selected, setSelected] = createSignal<string | null>(restored.selected);
+  const [diffStaged, setDiffStaged] = createSignal(restored.diffStaged);
+  const [commitMessage, setCommitMessage] = createSignal(restored.commitMessage);
+  const [branchTarget, setBranchTarget] = createSignal(restored.branchTarget);
+  const [newBranch, setNewBranch] = createSignal(restored.newBranch);
   const [busyAction, setBusyAction] = createSignal<string | null>(null);
+
+  const snapshotDraft = (): GitDraft => ({
+    selected: selected(),
+    diffStaged: diffStaged(),
+    commitMessage: commitMessage(),
+    branchTarget: branchTarget(),
+    newBranch: newBranch(),
+  });
 
   const [status, { refetch: refetchStatus }] = createResource(
     () => props.repo,
@@ -278,21 +310,32 @@ const GitTab: Component<Props> = (props) => {
     return !!entry && entry.index !== " " && entry.index !== "?";
   });
 
+  let observedRepo = props.repo;
   createEffect(() => {
-    props.repo;
-    setSelected(null);
-    setDiffStaged(false);
-    setCommitMessage("");
-    setBranchTarget("");
-    setNewBranch("");
+    const repo = props.repo;
+    if (repo === observedRepo) return;
+    writeToolDraft(gitDraftKey(observedRepo), snapshotDraft());
+    observedRepo = repo;
+    const next = readToolDraft(gitDraftKey(repo), emptyGitDraft());
+    setSelected(next.selected);
+    setDiffStaged(next.diffStaged);
+    setCommitMessage(next.commitMessage);
+    setBranchTarget(next.branchTarget);
+    setNewBranch(next.newBranch);
     setActionError(null);
     setActionInfo(null);
+  });
+
+  onCleanup(() => {
+    writeToolDraft(gitDraftKey(observedRepo), snapshotDraft());
   });
 
   createEffect(() => {
     const path = selected();
     if (!path) return;
-    const present = (status()?.entries ?? []).some((entry) => entry.path === path);
+    const currentStatus = status();
+    if (!currentStatus) return;
+    const present = currentStatus.entries.some((entry) => entry.path === path);
     if (!present) setSelected(null);
   });
 
@@ -303,9 +346,11 @@ const GitTab: Component<Props> = (props) => {
   });
 
   createEffect(() => {
-    const current = branchInfo().current.trim();
+    const loadedBranches = branches();
+    if (!loadedBranches) return;
+    const current = loadedBranches.current.trim();
     const target = branchTarget().trim();
-    if (!current && branchOptions().length === 0) {
+    if (!current && loadedBranches.all.length === 0) {
       if (target) setBranchTarget("");
       return;
     }

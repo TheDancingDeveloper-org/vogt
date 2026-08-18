@@ -20,6 +20,7 @@ import {
   removeHistoryPin,
   toggleHistoryPin,
 } from "./historyPins";
+import { readToolDraft, writeToolDraft } from "./toolDrafts";
 
 interface Props {
   onError?: (message: string) => void;
@@ -28,6 +29,26 @@ interface Props {
 
 type StatusFilter = "all" | "success" | "error" | "unfinished";
 type SortMode = "recent" | "oldest" | "largest";
+
+interface HistoryDraft {
+  selectedId: string | null;
+  metadataQuery: string;
+  outputQuery: string;
+  statusFilter: StatusFilter;
+  sortMode: SortMode;
+  showPinnedOnly: boolean;
+  tailBytes: number;
+}
+
+const EMPTY_HISTORY_DRAFT: HistoryDraft = {
+  selectedId: null,
+  metadataQuery: "",
+  outputQuery: "",
+  statusFilter: "all",
+  sortMode: "recent",
+  showPinnedOnly: false,
+  tailBytes: 64 * 1024,
+};
 
 function formatDate(value: string | null): string {
   if (!value) return "Unknown";
@@ -61,15 +82,26 @@ function matchesStatus(
 }
 
 const History: Component<Props> = (props) => {
+  const restored = readToolDraft("history", EMPTY_HISTORY_DRAFT);
   const [reloadKey, setReloadKey] = createSignal(0);
-  const [selectedId, setSelectedId] = createSignal<string | null>(null);
-  const [metadataQuery, setMetadataQuery] = createSignal("");
-  const [outputQuery, setOutputQuery] = createSignal("");
-  const [statusFilter, setStatusFilter] = createSignal<StatusFilter>("all");
-  const [sortMode, setSortMode] = createSignal<SortMode>("recent");
-  const [showPinnedOnly, setShowPinnedOnly] = createSignal(false);
+  const [selectedId, setSelectedId] = createSignal<string | null>(restored.selectedId);
+  const [metadataQuery, setMetadataQuery] = createSignal(restored.metadataQuery);
+  const [outputQuery, setOutputQuery] = createSignal(restored.outputQuery);
+  const [statusFilter, setStatusFilter] = createSignal<StatusFilter>(restored.statusFilter);
+  const [sortMode, setSortMode] = createSignal<SortMode>(restored.sortMode);
+  const [showPinnedOnly, setShowPinnedOnly] = createSignal(restored.showPinnedOnly);
   const [pinnedIds, setPinnedIds] = createSignal<string[]>(getPinnedHistoryIds());
-  const [tailBytes, setTailBytes] = createSignal(64 * 1024);
+  const [tailBytes, setTailBytes] = createSignal(restored.tailBytes);
+
+  onCleanup(() => writeToolDraft<HistoryDraft>("history", {
+    selectedId: selectedId(),
+    metadataQuery: metadataQuery(),
+    outputQuery: outputQuery(),
+    statusFilter: statusFilter(),
+    sortMode: sortMode(),
+    showPinnedOnly: showPinnedOnly(),
+    tailBytes: tailBytes(),
+  }));
 
   const refresh = () => setReloadKey((value) => value + 1);
   const refreshPins = () => setPinnedIds(getPinnedHistoryIds());
@@ -183,8 +215,10 @@ const History: Component<Props> = (props) => {
   });
 
   createEffect(() => {
+    const loadedSessions = sessions();
+    if (loadedSessions === undefined) return;
     const current = selectedId();
-    if (current && (sessions() ?? []).some((session) => session.id === current)) {
+    if (current && loadedSessions.some((session) => session.id === current)) {
       return;
     }
     const fallback = outputSearchEnabled()

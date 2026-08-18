@@ -61,6 +61,8 @@ interface ShellOptions {
   sessions?: unknown[];
   /** Extra Vogt handlers, keyed as elsewhere. */
   vogt?: Routes;
+  /** Extra session-engine handlers for the machine tools under Sessions. */
+  engine?: Routes;
 }
 
 /**
@@ -89,6 +91,7 @@ function mountShell(url: string, options: ShellOptions = {}): Shell {
     },
     "GET /api/sessions": { body: options.sessions ?? [] },
     "GET /api/tree": { body: [] },
+    ...options.engine,
   });
 
   const history = createMemoryHistory();
@@ -109,10 +112,9 @@ function mountShell(url: string, options: ShellOptions = {}): Shell {
 /**
  * The place or pane the reader is actually looking at.
  *
- * Every open tab stays mounted — that is how a terminal survives a tab switch
- * — and all but the active one are `display: none`. A test that queried the
- * whole container would pass on a surface the reader cannot see, which is the
- * exact failure "the link opened the wrong tab" produces.
+ * Terminal panes remain mounted for continuity; inactive non-terminal tools
+ * unmount. A test must still select the pane whose inline display is `flex`,
+ * because retained terminals deliberately remain in the DOM.
  */
 function shown(container: HTMLElement): HTMLElement | null {
   const place = container.querySelector<HTMLElement>(".stable-place");
@@ -345,3 +347,123 @@ describe("route-owned navigation state", () => {
     expect(container.querySelector(".terminal-host")).toBeNull();
   });
 });
+
+describe("FR-U23 — Sessions owns its machine workspace", () => {
+  it("keeps the attention roster and internal pane bar around a deep-linked tool", async () => {
+    const { container } = mountShell("/history", { sessions: [SESSION] });
+
+    await surface(container, ".history-view");
+    expect(container.querySelector(".sessions-place")).toBeTruthy();
+    await waitFor(() =>
+      expect(container.querySelector('[aria-label="Live sessions"]')?.textContent)
+        .toContain("alpha-build"),
+    );
+    expect(container.querySelector('[aria-label="Session tools"] a[aria-current="page"]')?.textContent)
+      .toBe("History");
+  });
+
+  it("retains terminals across tool routes but unmounts inactive non-terminals", async () => {
+    const { container, go, vogt } = mountShell("/t/eng-1", {
+      sessions: [SESSION],
+      config: { assistant_enabled: true },
+    });
+    await surface(container, ".terminal-host");
+
+    go("/history");
+    await surface(container, ".history-view");
+    expect(container.querySelectorAll('[data-tab-kind="terminal"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-tab-kind="history"]')).toHaveLength(1);
+
+    go("/tasks");
+    await surface(container, ".agent-tasks-view");
+    expect(container.querySelectorAll('[data-tab-kind="terminal"]')).toHaveLength(1);
+    expect(container.querySelector('[data-tab-kind="history"]')).toBeNull();
+    expect(container.querySelectorAll('[data-tab-kind="tasks"]')).toHaveLength(1);
+    expect(vogt.engineCalls.filter((call) => call.path.startsWith("/api/history")))
+      .not.toHaveLength(0);
+  });
+
+  it("composes every machine tool at its existing deep link", async () => {
+    const { container, go } = mountShell("/g/vogt", {
+      config: {
+        assistant_enabled: true,
+        gui_stream_url: "https://stream.example.test/view",
+        gui_stream_available: true,
+      },
+      engine: {
+        "GET /api/git/status": { body: {
+          repo: "vogt", branch: "main", ahead: 0, behind: 0,
+          entries: [], is_repo: true,
+        } },
+        "GET /api/git/branch": { body: { current: "main", all: ["main"] } },
+        "GET /api/git/log": { body: [] },
+        "GET /api/history/sessions": { body: [] },
+        "GET /api/agent-tasks": { body: [] },
+        "GET /api/gui/processes": { body: [] },
+        "GET /api/assistant/history": { body: { transcript: [], pending_action: null } },
+        "GET /api/files": { body: {
+          path: "src/app.ts", size: 24,
+          content: "export const app = true;\n", content_base64: null, is_binary: false,
+        } },
+      },
+    });
+
+    await surface(container, ".git-shell");
+    go("/history");
+    await surface(container, ".history-view");
+    go("/tasks");
+    await surface(container, ".agent-tasks-view");
+    go("/gui");
+    await surface(container, ".gui-shell");
+    go("/assistant");
+    await waitFor(() =>
+      expect(shown(container)?.textContent).toContain("Ask about your terminal sessions"),
+    );
+    go("/e/src%2Fapp.ts");
+    await surface(container, ".editor-shell");
+
+    expect(container.querySelector(".sessions-place")).toBeTruthy();
+  });
+
+  it("restores unsaved Git and new-task drafts after their views unmount", async () => {
+    const { container, go } = mountShell("/g/vogt", {
+      engine: {
+        "GET /api/git/status": { body: {
+          repo: "vogt", branch: "main", ahead: 0, behind: 0,
+          entries: [], is_repo: true,
+        } },
+        "GET /api/git/branch": { body: { current: "main", all: ["main"] } },
+        "GET /api/git/log": { body: [] },
+        "GET /api/history/sessions": { body: [] },
+        "GET /api/agent-tasks": { body: [] },
+      },
+    });
+
+    const git = await surface(container, ".git-shell");
+    const commit = git.querySelector<HTMLTextAreaElement>('textarea[placeholder="Commit message"]')!;
+    commit.value = "keep this commit message";
+    commit.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    go("/history");
+    await surface(container, ".history-view");
+    go("/g/vogt");
+    await waitFor(() => expect(
+      surfaceValue(container, 'textarea[placeholder="Commit message"]'),
+    ).toBe("keep this commit message"));
+
+    go("/tasks");
+    const tasks = await surface(container, ".agent-tasks-view");
+    const name = tasks.querySelector<HTMLInputElement>('.agent-task-field input[type="text"]')!;
+    name.value = "keep this task draft";
+    name.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    go("/history");
+    await surface(container, ".history-view");
+    go("/tasks");
+    await waitFor(() => expect(
+      surfaceValue(container, '.agent-task-field input[type="text"]'),
+    ).toBe("keep this task draft"));
+  });
+});
+
+function surfaceValue(container: HTMLElement, selector: string): string | undefined {
+  return shown(container)?.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)?.value;
+}

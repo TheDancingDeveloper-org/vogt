@@ -1,4 +1,12 @@
-import { For, Show, createEffect, createMemo, createSignal, onMount } from "solid-js";
+import {
+  For,
+  Show,
+  createEffect,
+  createMemo,
+  createSignal,
+  onCleanup,
+  onMount,
+} from "solid-js";
 import type {
   AgentTask,
   AgentTaskRun,
@@ -6,6 +14,7 @@ import type {
   AgentTaskUpsertRequest,
 } from "./api";
 import { api } from "./api";
+import { readToolDraft, writeToolDraft } from "./toolDrafts";
 
 interface Props {
   onError?: (message: string) => void;
@@ -27,6 +36,12 @@ interface TaskDraft {
   notifyOnStart: boolean;
   notifyOnPhrase: string;
   autoRetryOnRateLimit: boolean;
+}
+
+interface TasksViewDraft {
+  selectedTaskId: string | null;
+  draft: TaskDraft;
+  creating: boolean;
 }
 
 const EMPTY_DRAFT: TaskDraft = {
@@ -160,12 +175,21 @@ function buildRequest(draft: TaskDraft): AgentTaskUpsertRequest {
 }
 
 const AgentTasks = (props: Props) => {
+  const restored = readToolDraft<TasksViewDraft>("tasks", {
+    selectedTaskId: null,
+    draft: { ...EMPTY_DRAFT },
+    creating: false,
+  });
   const [tasks, setTasks] = createSignal<AgentTask[]>([]);
   const [loading, setLoading] = createSignal(true);
   const [saving, setSaving] = createSignal(false);
   const [runningTaskId, setRunningTaskId] = createSignal<string | null>(null);
-  const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null);
-  const [draft, setDraft] = createSignal<TaskDraft>({ ...EMPTY_DRAFT });
+  const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(
+    restored.selectedTaskId,
+  );
+  const [draft, setDraft] = createSignal<TaskDraft>({ ...restored.draft });
+  const [creating, setCreating] = createSignal(restored.creating);
+  let restoreDraftPending = restored.selectedTaskId !== null && !restored.creating;
 
   const sortedTasks = createMemo(() =>
     [...tasks()].sort((a, b) => {
@@ -196,14 +220,15 @@ const AgentTasks = (props: Props) => {
     try {
       const list = await api.listAgentTasks();
       setTasks(list);
-      const nextSelected =
-        preferredTaskId && list.some((task) => task.id === preferredTaskId)
+      const nextSelected = creating()
+        ? null
+        : preferredTaskId && list.some((task) => task.id === preferredTaskId)
           ? preferredTaskId
           : selectedTaskId() && list.some((task) => task.id === selectedTaskId())
             ? selectedTaskId()
             : list[0]?.id ?? null;
       setSelectedTaskId(nextSelected);
-      if (!nextSelected) {
+      if (!nextSelected && !creating()) {
         setDraft({ ...EMPTY_DRAFT });
       }
     } catch (e) {
@@ -220,11 +245,25 @@ const AgentTasks = (props: Props) => {
   createEffect(() => {
     const task = selectedTask();
     if (task) {
+      if (restoreDraftPending && task.id === restored.selectedTaskId) {
+        restoreDraftPending = false;
+        return;
+      }
+      restoreDraftPending = false;
       setDraft(taskToDraft(task));
     }
   });
 
+  onCleanup(() => {
+    writeToolDraft<TasksViewDraft>("tasks", {
+      selectedTaskId: selectedTaskId(),
+      draft: { ...draft() },
+      creating: creating(),
+    });
+  });
+
   const startCreate = () => {
+    setCreating(true);
     setSelectedTaskId(null);
     setDraft({ ...EMPTY_DRAFT });
   };
@@ -235,9 +274,11 @@ const AgentTasks = (props: Props) => {
       const request = buildRequest(draft());
       if (selectedTaskId()) {
         const saved = await api.updateAgentTask(selectedTaskId()!, request);
+        setCreating(false);
         await loadTasks(saved.id);
       } else {
         const created = await api.createAgentTask(request);
+        setCreating(false);
         await loadTasks(created.id);
       }
     } catch (e) {
@@ -271,6 +312,7 @@ const AgentTasks = (props: Props) => {
       const remaining = tasks().filter((candidate) => candidate.id !== task.id);
       setTasks(remaining);
       const next = remaining[0]?.id ?? null;
+      setCreating(false);
       setSelectedTaskId(next);
       if (!next) setDraft({ ...EMPTY_DRAFT });
     } catch (e) {
@@ -332,7 +374,10 @@ const AgentTasks = (props: Props) => {
                     class={`agent-task-row ${
                       selectedTaskId() === task.id ? "active" : ""
                     }`}
-                    onClick={() => setSelectedTaskId(task.id)}
+                    onClick={() => {
+                      setCreating(false);
+                      setSelectedTaskId(task.id);
+                    }}
                   >
                     <div class="agent-task-row-main">
                       <div class="agent-task-row-top">

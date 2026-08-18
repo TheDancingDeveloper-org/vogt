@@ -24,11 +24,20 @@ import {
 } from "./api";
 import { listProjects } from "./vogtApi";
 import { describeRepairs, repairUtterance } from "./voiceRepair";
+import { readToolDraft, writeToolDraft } from "./toolDrafts";
+import { pendingAction, setPendingAction } from "./pendingAction";
 
 const TTS_PREF_KEY = "mydevenv2.assistant.tts";
 
+interface AssistantDraft {
+  text: string;
+  profile: string;
+}
+
 interface AssistantProps {
   onError: (message: string) => void;
+  /** Sessions renders the shared action card when composed in its workspace. */
+  pendingHosted?: boolean;
 }
 
 function speakSentences(text: string) {
@@ -107,12 +116,15 @@ function announce(action: AssistantPendingAction): string {
 }
 
 export default function Assistant(props: AssistantProps) {
+  const restored = readToolDraft<AssistantDraft>("assistant", {
+    text: "",
+    profile: "",
+  });
   const [transcript, setTranscript] = createSignal<AssistantTranscriptEntry[]>([]);
-  const [pending, setPending] = createSignal<AssistantPendingAction | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [reasonDraft, setReasonDraft] = createSignal("");
   const [reasonBusy, setReasonBusy] = createSignal(false);
-  const [draft, setDraft] = createSignal("");
+  const [draft, setDraft] = createSignal(restored.text);
   const [ttsOn, setTtsOn] = createSignal(localStorage.getItem(TTS_PREF_KEY) === "1");
   const [listening, setListening] = createSignal(false);
   const [sttAvailable, setSttAvailable] = createSignal(false);
@@ -127,7 +139,7 @@ export default function Assistant(props: AssistantProps) {
   const [profiles, setProfiles] = createSignal<
     { name: string; model: string; default: boolean }[]
   >([]);
-  const [profile, setProfile] = createSignal("");
+  const [profile, setProfile] = createSignal(restored.profile);
 
   let scroller: HTMLDivElement | undefined;
   let inputEl: HTMLInputElement | undefined;
@@ -140,12 +152,12 @@ export default function Assistant(props: AssistantProps) {
 
   createEffect(() => {
     transcript();
-    pending();
+    pendingAction();
     scrollToEnd();
   });
 
   createEffect(() => {
-    const action = pending();
+    const action = pendingAction();
     setReasonDraft(action?.kind === "vogt_write" ? action.reason : "");
   });
 
@@ -153,7 +165,7 @@ export default function Assistant(props: AssistantProps) {
     try {
       const history = await api.assistantHistory();
       setTranscript(history.transcript);
-      setPending(history.pending_action ?? null);
+      setPendingAction(history.pending_action ?? null);
     } catch (e) {
       props.onError(`assistant history: ${String(e)}`);
     }
@@ -184,6 +196,10 @@ export default function Assistant(props: AssistantProps) {
   });
 
   onCleanup(() => {
+    writeToolDraft<AssistantDraft>("assistant", {
+      text: draft(),
+      profile: profile(),
+    });
     stopSpeaking();
     // Abandoned, not sent: leaving the surface mid-sentence must not put
     // half an utterance into the conversation on the way out.
@@ -198,7 +214,7 @@ export default function Assistant(props: AssistantProps) {
       ]);
       if (ttsOn()) speakSentences(reply.reply);
     }
-    setPending(reply.pending_action ?? null);
+    setPendingAction(reply.pending_action ?? null);
     if (reply.pending_action && ttsOn()) {
       speakSentences(announce(reply.pending_action));
     }
@@ -221,10 +237,10 @@ export default function Assistant(props: AssistantProps) {
   };
 
   const resolve = async (approve: boolean) => {
-    const action = pending();
+    const action = pendingAction();
     if (!action || busy()) return;
     setBusy(true);
-    setPending(null);
+    setPendingAction(null);
     try {
       applyReply(await api.assistantAction(action.id, approve));
     } catch (e) {
@@ -239,7 +255,7 @@ export default function Assistant(props: AssistantProps) {
     if (!reason || reasonBusy() || busy()) return;
     setReasonBusy(true);
     try {
-      setPending(await api.assistantReplaceReason(action.id, reason));
+      setPendingAction(await api.assistantReplaceReason(action.id, reason));
     } catch (e) {
       props.onError(`assistant reason: ${String(e)}`);
     } finally {
@@ -252,7 +268,7 @@ export default function Assistant(props: AssistantProps) {
     try {
       await api.assistantReset();
       setTranscript([]);
-      setPending(null);
+      setPendingAction(null);
     } catch (e) {
       props.onError(`assistant reset: ${String(e)}`);
     }
@@ -418,7 +434,7 @@ export default function Assistant(props: AssistantProps) {
           padding: "4px",
         }}
       >
-        <Show when={transcript().length === 0 && !pending()}>
+        <Show when={transcript().length === 0 && !pendingAction()}>
           <div style={{ opacity: 0.6, "font-size": "13px" }}>
             Ask about your terminal sessions — “what is the build doing?”,
             “is any agent stuck?”, “answer yes to the prompt in session two” —
@@ -461,7 +477,7 @@ export default function Assistant(props: AssistantProps) {
             </div>
           )}
         </For>
-        <Show when={pending()}>
+        <Show when={!props.pendingHosted && pendingAction()}>
           {(action) => (
             <div
               style={{

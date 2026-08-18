@@ -7,12 +7,11 @@ saying nothing about backlogs, boards, drift or audit — half a product, under
 the wrong name.
 
 **One honest caveat, stated once and not repeated.** Everything below is
-implemented and covered by tests; the five Vogt surfaces are additionally
-covered by 75 jsdom tests that drive them against a fake front door. What no
-test here has done is *render* them in a browser or hold the phone — M11's and
-M13's demos are outstanding and `ROADMAP.md` says so. Where a claim below is
-about a layout, a gesture or a spoken word, it is a claim about code that has
-been asserted and not yet watched working.
+implemented and covered by tests. The Solid surfaces have jsdom coverage
+against a fake front door and automated Chromium coverage for representative
+desktop and phone routes, including Sessions composition, terminal splitting,
+zoom-event ownership and dirty-editor lifecycle. A human/device M13 demo is
+still outstanding and `ROADMAP.md` says so.
 
 ---
 
@@ -45,8 +44,10 @@ rather than leaving an admin token in a browser.
 
 ## 2. The surfaces
 
-Everything is a tab, every tab is deep-linkable, and a pasted link restores the
-view it names (FR-U11). Tabs persist per device.
+Board, Backlog, Inbox, Projects, Audit, work items and Sessions are stable,
+non-closable places. Sessions contains the terminal/editor panes and machine
+tools; their existing deep links still select the named pane or tool, and a
+pasted link restores the view it names (FR-U11). Open panes persist per device.
 
 | Surface | Link | What it is |
 |---|---|---|
@@ -160,8 +161,15 @@ several devices can watch one session at once. On attach you get a scrollback
 snapshot and then live output; a reconnecting client can resume from its last
 cursor and receive only what it missed.
 
+The Sessions place keeps an attention-sorted live roster beside an internal
+tool bar. Terminal panes stay attached while you visit History, Tasks or
+another place; inactive non-terminal tools unmount so their network requests,
+listeners and large editor surfaces do not run in the background. Editor text
+and view position are retained while switching tools, and any dirty editor
+also activates the browser/PWA exit confirmation until it is saved.
+
 Each session carries an activity state — `idle`, `running`,
-`waiting-for-input`, `errored` — shown as a badge on the tab strip so an agent
+`waiting-for-input`, `errored` — shown in the Sessions roster so an agent
 waiting for approval is visible without opening it. **The state is a
 heuristic** and should be read as a hint: `errored` is a real non-zero exit,
 but `waiting-for-input` is a pattern match on the last ~512 visible bytes, and
@@ -207,7 +215,9 @@ so UI changes ship without a new APK; only native plumbing needs one.
   default off. Quiet hours digest instead of sending.
 - **Modifier row** above the soft keyboard: `Esc`, `Tab`, sticky `Ctrl`,
   arrows, `/ | ~`, `Enter`. Tap `Ctrl` then a letter to send `Ctrl+letter`.
-- **Pinch** to zoom terminal font; the size is remembered per device.
+- Use the terminal's labelled **A− / A+** controls for terminal-only font size;
+  the size is remembered per device. Browser pinch/Ctrl+wheel zoom remains the
+  normal whole-app zoom gesture.
 - **Copy/paste**: long-press to select, long-press empty space to paste.
 - The board renders as a list rather than columns below the narrow breakpoint.
 - Tapping a notification lands on the terminal that raised it.

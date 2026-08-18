@@ -1,9 +1,7 @@
 import {
   Component,
   For,
-  Match,
   Show,
-  Switch,
   createEffect,
   createMemo,
   createSignal,
@@ -22,29 +20,23 @@ import {
   formatTerminalInputLimit,
   terminalInputTooLarge,
 } from "./terminalInput";
-
-type SplitDirection = "row" | "column";
-
-interface PaneNode {
-  type: "pane";
-  id: string;
-  sessionId: string;
-}
-
-interface SplitNode {
-  type: "split";
-  id: string;
-  direction: SplitDirection;
-  children: TerminalLayoutNode[];
-}
-
-type TerminalLayoutNode = PaneNode | SplitNode;
-
-interface SavedLayout {
-  root: TerminalLayoutNode;
-  activePaneId: string;
-  broadcast?: boolean;
-}
+import {
+  collectPanes,
+  commitCreatedPane,
+  containsSession,
+  findPane,
+  firstPane,
+  insertPane,
+  makePane,
+  normalizeTerminalLayout,
+  paneIdFor,
+  pruneTerminalLayout,
+  removePane,
+  type SavedTerminalLayout,
+  type SplitDirection,
+  type TerminalLayoutNode,
+} from "./terminalLayout";
+import { changeTerminalFontSize } from "./terminalFont";
 
 interface Props {
   tabId: string;
@@ -60,71 +52,25 @@ interface Props {
 
 const STORAGE_KEY = "mydevenv2.terminalLayouts.v1";
 
-function paneIdFor(sessionId: string): string {
-  return `pane:${sessionId}`;
-}
-
-function makePane(sessionId: string): PaneNode {
-  return { type: "pane", id: paneIdFor(sessionId), sessionId };
-}
-
-function newSplitId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return `split:${crypto.randomUUID()}`;
-  }
-  return `split:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-}
-
-function normalizeNode(value: unknown): TerminalLayoutNode | null {
-  if (!value || typeof value !== "object") return null;
-  const obj = value as Record<string, unknown>;
-  if (
-    obj.type === "pane" &&
-    typeof obj.id === "string" &&
-    typeof obj.sessionId === "string"
-  ) {
-    return { type: "pane", id: obj.id, sessionId: obj.sessionId };
-  }
-  if (
-    obj.type === "split" &&
-    typeof obj.id === "string" &&
-    (obj.direction === "row" || obj.direction === "column") &&
-    Array.isArray(obj.children)
-  ) {
-    const children: TerminalLayoutNode[] = [];
-    for (const child of obj.children) {
-      const normalized = normalizeNode(child);
-      if (normalized) children.push(normalized);
-    }
-    if (children.length === 0) return null;
-    if (children.length === 1) return children[0] ?? null;
-    return {
-      type: "split",
-      id: obj.id,
-      direction: obj.direction,
-      children,
-    };
-  }
-  return null;
-}
-
-function readSavedLayouts(): Record<string, SavedLayout> {
+function readSavedLayouts(): Record<string, SavedTerminalLayout> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as Record<string, SavedLayout>) : {};
+    return raw
+      ? (JSON.parse(raw) as Record<string, SavedTerminalLayout>)
+      : {};
   } catch {
     return {};
   }
 }
 
-function readSavedLayout(tabId: string, sessionId: string): SavedLayout {
+function readSavedLayout(tabId: string, sessionId: string): SavedTerminalLayout {
   const fallback = {
     root: makePane(sessionId),
     activePaneId: paneIdFor(sessionId),
     broadcast: false,
   };
   const saved = readSavedLayouts()[tabId];
-  const root = normalizeNode(saved?.root);
+  const root = normalizeTerminalLayout(saved?.root);
   if (!root || !containsSession(root, sessionId)) return fallback;
   const savedActive = saved?.activePaneId ?? fallback.activePaneId;
   return {
@@ -137,7 +83,7 @@ function readSavedLayout(tabId: string, sessionId: string): SavedLayout {
   };
 }
 
-function writeSavedLayout(tabId: string, layout: SavedLayout) {
+function writeSavedLayout(tabId: string, layout: SavedTerminalLayout) {
   try {
     const all = readSavedLayouts();
     all[tabId] = layout;
@@ -145,91 +91,6 @@ function writeSavedLayout(tabId: string, layout: SavedLayout) {
   } catch {
     /* quota / private mode */
   }
-}
-
-function containsSession(node: TerminalLayoutNode, sessionId: string): boolean {
-  if (node.type === "pane") return node.sessionId === sessionId;
-  return node.children.some((child) => containsSession(child, sessionId));
-}
-
-function findPane(node: TerminalLayoutNode, paneId: string): PaneNode | null {
-  if (node.type === "pane") return node.id === paneId ? node : null;
-  for (const child of node.children) {
-    const found = findPane(child, paneId);
-    if (found) return found;
-  }
-  return null;
-}
-
-function firstPane(node: TerminalLayoutNode): PaneNode | null {
-  if (node.type === "pane") return node;
-  for (const child of node.children) {
-    const found = firstPane(child);
-    if (found) return found;
-  }
-  return null;
-}
-
-function collectPanes(node: TerminalLayoutNode): PaneNode[] {
-  if (node.type === "pane") return [node];
-  return node.children.flatMap((child) => collectPanes(child));
-}
-
-function insertPane(
-  node: TerminalLayoutNode,
-  targetPaneId: string,
-  direction: SplitDirection,
-  nextPane: PaneNode,
-): TerminalLayoutNode {
-  if (node.type === "pane") {
-    if (node.id !== targetPaneId) return node;
-    return {
-      type: "split",
-      id: newSplitId(),
-      direction,
-      children: [node, nextPane],
-    };
-  }
-  let changed = false;
-  const children = node.children.map((child) => {
-    const next = insertPane(child, targetPaneId, direction, nextPane);
-    if (next !== child) changed = true;
-    return next;
-  });
-  return changed ? { ...node, children } : node;
-}
-
-function removePane(
-  node: TerminalLayoutNode,
-  targetPaneId: string,
-): TerminalLayoutNode | null {
-  if (node.type === "pane") return node.id === targetPaneId ? null : node;
-  let changed = false;
-  const children: TerminalLayoutNode[] = [];
-  for (const child of node.children) {
-    const next = removePane(child, targetPaneId);
-    if (next !== child) changed = true;
-    if (next) children.push(next);
-  }
-  if (children.length === 0) return null;
-  if (children.length === 1) return children[0] ?? null;
-  return changed ? { ...node, children } : node;
-}
-
-function pruneMissingSessions(node: TerminalLayoutNode): TerminalLayoutNode | null {
-  if (node.type === "pane") {
-    return sessionsStore.sessions[node.sessionId] ? node : null;
-  }
-  let changed = false;
-  const children: TerminalLayoutNode[] = [];
-  for (const child of node.children) {
-    const next = pruneMissingSessions(child);
-    if (next) children.push(next);
-    if (next !== child) changed = true;
-  }
-  if (children.length === 0) return null;
-  if (children.length === 1) return children[0] ?? null;
-  return changed ? { ...node, children } : node;
 }
 
 function activityClass(session: SessionSummary | undefined): string {
@@ -254,10 +115,11 @@ interface LayoutNodeProps {
 }
 
 const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
-  <Switch>
-    <Match when={props.node.type === "pane" ? props.node : null}>
-      {(pane) => {
-        const paneId = props.node.id;
+  <Show when={props.node} keyed>
+    {(node) =>
+      node.type === "pane" ? (
+        (() => {
+          const paneId = node.id;
         return (
           <div
             class={`terminal-pane ${
@@ -267,7 +129,7 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
           >
             <Terminal
               interceptInput={(data) => props.interceptPaneInput(paneId, data)}
-              sessionId={pane().sessionId}
+              sessionId={node.sessionId}
               registerSend={(fn) => props.registerPaneSend(paneId, fn)}
               registerActions={(actions) =>
                 props.registerPaneActions(paneId, actions)
@@ -276,12 +138,10 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
             />
           </div>
         );
-      }}
-    </Match>
-    <Match when={props.node.type === "split" ? props.node : null}>
-      {(split) => (
-        <div class={`terminal-split ${split().direction}`}>
-          <For each={split().children}>
+        })()
+      ) : (
+        <div class={`terminal-split ${node.direction}`}>
+          <For each={node.children}>
             {(child) => (
               <LayoutNodeView
                 node={child}
@@ -295,9 +155,9 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
             )}
           </For>
         </div>
-      )}
-    </Match>
-  </Switch>
+      )
+    }
+  </Show>
 );
 
 const TerminalWorkspace: Component<Props> = (props) => {
@@ -312,6 +172,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
   let composerRef: HTMLTextAreaElement | undefined;
   const paneSenders = new Map<string, (data: string | ArrayBuffer) => void>();
   const paneActions = new Map<string, TerminalActions>();
+  let disposed = false;
 
   const panes = createMemo(() => collectPanes(root()));
   const activePane = createMemo(
@@ -413,6 +274,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
   });
 
   onCleanup(() => {
+    disposed = true;
     paneSenders.clear();
     paneActions.clear();
     props.registerSend?.(null);
@@ -442,7 +304,10 @@ const TerminalWorkspace: Component<Props> = (props) => {
   createEffect(() => {
     if (!sessionsStore.ready) return;
     const current = root();
-    const pruned = pruneMissingSessions(current);
+    const pruned = pruneTerminalLayout(
+      current,
+      (sessionId) => Boolean(sessionsStore.sessions[sessionId]),
+    );
     if (!pruned) return;
     if (pruned !== current) setRoot(pruned);
     if (!findPane(pruned, activePaneId())) {
@@ -478,8 +343,26 @@ const TerminalWorkspace: Component<Props> = (props) => {
         props.onNotify?.("Split opened at the default cwd", "info");
       }
       const nextPane = makePane(session.id);
-      setRoot((current) =>
-        insertPane(current, pane.id, direction, nextPane),
+      await commitCreatedPane(
+        session.id,
+        () => {
+          if (disposed || !sessionsStore.sessions[pane.sessionId]) return false;
+          let inserted = false;
+          setRoot((current) => {
+            const next = insertPane(current, pane.id, direction, nextPane);
+            inserted = next !== null;
+            return next ?? current;
+          });
+          return inserted;
+        },
+        async (sessionId) => {
+          try {
+            await killSession(sessionId);
+          } catch {
+            /* a failed or already-exited PTY must still be deleted */
+          }
+          await deleteSession(sessionId);
+        },
       );
       setActivePaneId(nextPane.id);
     } catch (err) {
@@ -555,6 +438,22 @@ const TerminalWorkspace: Component<Props> = (props) => {
         <Show when={error()}>
           <span class="terminal-workspace-error">{error()}</span>
         </Show>
+        <button
+          type="button"
+          onClick={() => changeTerminalFontSize(-1)}
+          title="Decrease terminal font size (browser zoom still scales the whole app)"
+          aria-label="Decrease terminal font size"
+        >
+          A−
+        </button>
+        <button
+          type="button"
+          onClick={() => changeTerminalFontSize(1)}
+          title="Increase terminal font size (browser zoom still scales the whole app)"
+          aria-label="Increase terminal font size"
+        >
+          A+
+        </button>
         <button
           class={broadcastEnabled() ? "active" : ""}
           onClick={() => setBroadcast((value) => !value)}
