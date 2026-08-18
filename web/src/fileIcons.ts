@@ -1,110 +1,42 @@
-// File type icon mapping
+/** Stable, text-only markers for the narrow file rail. */
 export function getFileIcon(path: string): string {
-  const ext = path.split('.').pop()?.toLowerCase() || '';
-  const basename = path.split('/').pop()?.toLowerCase() || '';
+  const ext = path.split(".").pop()?.toLowerCase() || "";
+  const basename = path.split("/").pop()?.toLowerCase() || "";
 
-  // Special files by name
   const specialFiles: Record<string, string> = {
-    'package.json': '📦',
-    'package-lock.json': '🔒',
-    'cargo.toml': '📦',
-    'cargo.lock': '🔒',
-    'dockerfile': '🐳',
-    'docker-compose.yml': '🐳',
-    'readme.md': '📖',
-    'license': '📄',
-    'makefile': '⚙️',
-    '.gitignore': '🚫',
-    '.env': '🔐',
+    "package.json": "PKG",
+    "package-lock.json": "LOCK",
+    "cargo.toml": "PKG",
+    "cargo.lock": "LOCK",
+    dockerfile: "CTR",
+    "docker-compose.yml": "CTR",
+    "readme.md": "DOC",
+    license: "DOC",
+    makefile: "MAKE",
+    ".gitignore": "GIT",
+    ".env": "ENV",
   };
+  if (specialFiles[basename]) return specialFiles[basename];
 
-  if (specialFiles[basename]) {
-    return specialFiles[basename];
-  }
-
-  // By extension
   const iconMap: Record<string, string> = {
-    // Programming languages
-    'js': '📜',
-    'jsx': '⚛️',
-    'ts': '📘',
-    'tsx': '⚛️',
-    'rs': '🦀',
-    'py': '🐍',
-    'java': '☕',
-    'go': '🐹',
-    'rb': '💎',
-    'php': '🐘',
-    'c': '©️',
-    'cpp': '©️',
-    'h': '©️',
-    'cs': '#️⃣',
-    'swift': '🍎',
-    'kt': '🔷',
-
-    // Web
-    'html': '🌐',
-    'css': '🎨',
-    'scss': '🎨',
-    'sass': '🎨',
-    'less': '🎨',
-    'vue': '💚',
-    'svelte': '🧡',
-
-    // Data/Config
-    'json': '{}',
-    'yaml': '📋',
-    'yml': '📋',
-    'toml': '⚙️',
-    'xml': '📄',
-    'csv': '📊',
-
-    // Markdown/Docs
-    'md': '📝',
-    'txt': '📄',
-    'pdf': '📕',
-    'doc': '📘',
-    'docx': '📘',
-
-    // Images
-    'png': '🖼️',
-    'jpg': '🖼️',
-    'jpeg': '🖼️',
-    'gif': '🖼️',
-    'svg': '🎨',
-    'ico': '🖼️',
-
-    // Archives
-    'zip': '🗜️',
-    'tar': '🗜️',
-    'gz': '🗜️',
-    'rar': '🗜️',
-
-    // Shell
-    'sh': '🐚',
-    'bash': '🐚',
-    'zsh': '🐚',
-    'fish': '🐠',
-
-    // Other
-    'sql': '🗄️',
-    'db': '🗄️',
-    'sqlite': '🗄️',
-    'log': '📜',
+    js: "JS", jsx: "JSX", ts: "TS", tsx: "TSX", rs: "RS", py: "PY",
+    java: "JAVA", go: "GO", rb: "RB", php: "PHP", c: "C", cpp: "C++",
+    h: "H", cs: "C#", swift: "SW", kt: "KT", html: "HTML", css: "CSS",
+    scss: "SCSS", sass: "SASS", less: "LESS", vue: "VUE", svelte: "SV",
+    json: "JSON", yaml: "YAML", yml: "YAML", toml: "TOML", xml: "XML",
+    csv: "CSV", md: "MD", txt: "TXT", pdf: "PDF", doc: "DOC", docx: "DOC",
+    png: "IMG", jpg: "IMG", jpeg: "IMG", gif: "IMG", svg: "SVG", ico: "ICO",
+    zip: "ZIP", tar: "TAR", gz: "GZ", rar: "RAR", sh: "SH", bash: "SH",
+    zsh: "SH", fish: "SH", sql: "SQL", db: "DB", sqlite: "DB", log: "LOG",
   };
-
-  return iconMap[ext] || '📄';
+  return iconMap[ext] || "FILE";
 }
 
 export function getFolderIcon(isOpen: boolean): string {
-  return isOpen ? '📂' : '📁';
+  return isOpen ? "DIR−" : "DIR";
 }
 
-export function getGitStatusIcon(status?: 'modified' | 'untracked' | 'deleted'): string | null {
-  const statusMap = {
-    modified: '●',
-    untracked: '?',
-    deleted: '✕',
-  };
+export function getGitStatusIcon(status?: "modified" | "untracked" | "deleted"): string | null {
+  const statusMap = { modified: "●", untracked: "?", deleted: "✕" };
   return status ? statusMap[status] : null;
 }

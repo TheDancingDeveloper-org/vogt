@@ -55,7 +55,10 @@ async function installFixtures(page: Page) {
   } }));
   await page.route("**/api/sessions", async (route) => route.fulfill({ json: [] }));
   await page.route("**/api/events", async (route) => route.fulfill({ status: 200, contentType: "text/event-stream", body: "" }));
-  await page.route("**/api/tree**", async (route) => route.fulfill({ json: { entries: [] } }));
+  await page.route("**/api/tree**", async (route) => route.fulfill({ json: [
+    { name: "src", path: "src", is_dir: true },
+    { name: "an-identifiable-long-filename.tsx", path: "src/an-identifiable-long-filename.tsx", is_dir: false },
+  ] }));
   await page.route("**/api/tasks**", async (route) => route.fulfill({ json: [] }));
   await page.route("**/api/vogt/**", async (route) => {
     const request = route.request();
@@ -119,4 +122,17 @@ test("Phone shell keeps labelled primary navigation and Go to reachability", asy
   await page.getByRole("button", { name: "Go to…" }).click();
   await expect(page.locator(".command-palette")).toBeVisible();
   await expect(page.getByText("Open Audit")).toBeVisible();
+});
+
+test("Files rail keeps names legible and puts secondary actions behind one control", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+  await installFixtures(page);
+  await page.goto("/#/sessions");
+  await expect(page.getByText("an-identifiable-long-filename.tsx")).toBeVisible();
+  await expect(page.getByText("TSX", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Actions for src", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Delete" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Actions for src", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open terminal" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Delete" })).toBeVisible();
 });

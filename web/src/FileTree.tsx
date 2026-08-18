@@ -54,6 +54,7 @@ function duplicatePath(path: string): string {
 
 const TreeNodeView: Component<NodeProps> = (props) => {
   const [open, setOpen] = createSignal(false);
+  const [actionsOpen, setActionsOpen] = createSignal(false);
   const [kids, setKids] = createSignal<TreeNode[] | null>(
     props.node.children ?? null,
   );
@@ -79,115 +80,51 @@ const TreeNodeView: Component<NodeProps> = (props) => {
 
   return (
     <div>
-      <div
-        class="tree-row"
-        style={{ cursor: "pointer" }}
-        onClick={toggle}
-        title={props.node.path}
-      >
-        <span
-          style={{ width: "14px", display: "inline-block", "text-align": "center" }}
+      <div class="tree-row" title={props.node.path}>
+        <button
+          type="button"
+          class="tree-main"
+          onClick={() => void toggle()}
+          aria-label={`${props.node.is_dir ? (open() ? "Collapse" : "Expand") : "Open"} ${props.node.path}`}
+          aria-expanded={props.node.is_dir ? open() : undefined}
         >
-          {props.node.is_dir ? (open() ? "▾" : "▸") : " "}
-        </span>
-        <span
-          style={{
-            "margin-left": "2px",
-            flex: 1,
-            "min-width": 0,
-            overflow: "hidden",
-            "text-overflow": "ellipsis",
-          }}
-        >
-          <span class="tree-icon">
+          <span class="tree-disclosure" aria-hidden="true">
+            {props.node.is_dir ? (open() ? "▾" : "▸") : " "}
+          </span>
+          <span class="tree-icon" aria-hidden="true">
             {props.node.is_dir ? getFolderIcon(open()) : getFileIcon(props.node.path)}
           </span>
-          {props.node.name}
-        </span>
-
-        <Show when={props.node.is_dir}>
-          <Show when={props.onCreatePresetHere}>
-            <button
-              class="tree-term-btn"
-              title="Create from preset here"
-              onClick={(e) => {
-                e.stopPropagation();
-                props.onCreatePresetHere?.(props.node.path);
-              }}
-            >
-              ✦
-            </button>
-          </Show>
-          <button
-            class="tree-term-btn"
-            title="Upload here"
-            onClick={(e) => {
-              e.stopPropagation();
-              props.onUploadHere(props.node.path);
-            }}
-          >
-            ⇪
-          </button>
-          <button
-            class="tree-term-btn"
-            title="Open terminal here"
-            onClick={(e) => {
-              e.stopPropagation();
-              props.onOpenTerminalHere(props.node.path);
-            }}
-          >
-            &gt;_
-          </button>
-        </Show>
-
-        <button
-          class="tree-term-btn"
-          title="Rename or move"
-          onClick={(e) => {
-            e.stopPropagation();
-            props.onRenameMove(props.node);
-          }}
-        >
-          ✎
+          <span class="tree-label">{props.node.name}</span>
         </button>
         <button
-          class="tree-term-btn"
-          title="Duplicate"
-          onClick={(e) => {
-            e.stopPropagation();
-            props.onDuplicate(props.node);
-          }}
+          type="button"
+          class="tree-actions-toggle"
+          aria-label={`Actions for ${props.node.path}`}
+          aria-expanded={actionsOpen()}
+          onClick={() => setActionsOpen((value) => !value)}
         >
-          ⧉
+          Actions
         </button>
-        <button
-          class="tree-term-btn danger"
-          title="Delete"
-          onClick={(e) => {
-            e.stopPropagation();
-            props.onDelete(props.node);
-          }}
-        >
-          ×
-        </button>
-
-        <Show when={!props.node.is_dir}>
-          <button
-            class="tree-term-btn"
-            title="Download"
-            onClick={(e) => {
-              e.stopPropagation();
-              api.downloadFile(props.node.path).catch((err) =>
-                console.error("download failed", err),
-              );
-            }}
-          >
-            ⬇
-          </button>
-        </Show>
       </div>
+      <Show when={actionsOpen()}>
+        <div class="tree-actions" aria-label={`Actions for ${props.node.path}`}>
+          <Show when={props.node.is_dir}>
+            <Show when={props.onCreatePresetHere}>
+              <button type="button" onClick={() => props.onCreatePresetHere?.(props.node.path)}>Create preset</button>
+            </Show>
+            <button type="button" onClick={() => props.onUploadHere(props.node.path)}>Upload here</button>
+            <button type="button" onClick={() => props.onOpenTerminalHere(props.node.path)}>Open terminal</button>
+          </Show>
+          <button type="button" onClick={() => props.onRenameMove(props.node)}>Rename / move</button>
+          <button type="button" onClick={() => props.onDuplicate(props.node)}>Duplicate</button>
+          <Show when={!props.node.is_dir}>
+            <button type="button" onClick={() => void api.downloadFile(props.node.path)}>Download</button>
+          </Show>
+          <button type="button" class="danger" onClick={() => props.onDelete(props.node)}>Delete</button>
+        </div>
+      </Show>
       <Show when={open() && props.node.is_dir}>
-        <div style={{ "padding-left": "14px" }}>
+        <div class="tree-children">
           <Show when={loading()}>
             <div class="meta" style={{ padding: "2px 8px", color: "var(--fg-muted)" }}>
               loading…
@@ -416,32 +353,32 @@ const FileTree: Component<Props> = (props) => {
         <span>Files</span>
         <span class="places-section-header-actions">
           <button
-            style={{ "font-size": "11px", padding: "2px 6px" }}
             onClick={() => void newFile()}
             title="New file"
+            aria-label="New file"
           >
-            +
+            New file
           </button>
           <button
-            style={{ "font-size": "11px", padding: "2px 6px" }}
             onClick={() => void newFolder()}
             title="New folder"
+            aria-label="New folder"
           >
-            □
+            New folder
           </button>
           <button
-            style={{ "font-size": "11px", padding: "2px 6px" }}
             onClick={() => triggerUpload("")}
             title="Upload files"
+            aria-label="Upload files"
           >
-            ⇪
+            Upload
           </button>
           <button
-            style={{ "font-size": "11px", padding: "2px 6px" }}
             onClick={refreshTree}
             title="Refresh"
+            aria-label="Refresh files"
           >
-            ⟳
+            Refresh
           </button>
         </span>
       </div>
