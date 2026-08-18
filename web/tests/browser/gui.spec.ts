@@ -43,11 +43,24 @@ const boardItems = [
   },
 ];
 
+const liveSession = {
+  id: "browser-session",
+  name: "browser-session",
+  cwd: "/workspace/vogt",
+  activity: "idle",
+  exit_code: null,
+  scrollback_bytes: 1024,
+  created_at: "2026-08-18T08:00:00Z",
+};
+
 async function installFixtures(
   page: Page,
   config: Record<string, unknown> = {},
+  initialSessions: Record<string, unknown>[] = [],
 ) {
   let inboxCalls = 0;
+  const sessions = [...initialSessions];
+  let createdSessions = 0;
   await page.addInitScript(() => {
     localStorage.setItem("mydevenv2.token", "browser-test-token");
   });
@@ -75,7 +88,42 @@ async function installFixtures(
     vogt: { configured: true },
     ...config,
   } }));
-  await page.route("**/api/sessions", async (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/sessions", async (route) => {
+    if (route.request().method() === "POST") {
+      createdSessions += 1;
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      const session = {
+        id: `browser-split-${createdSessions}`,
+        name: body.name ?? `browser-split-${createdSessions}`,
+        cwd: body.cwd ?? "/workspace/vogt",
+        activity: "idle",
+        exit_code: null,
+        scrollback_bytes: 1024,
+        created_at: "2026-08-18T08:00:00Z",
+      };
+      sessions.push(session);
+      return route.fulfill({ json: session });
+    }
+    return route.fulfill({ json: sessions });
+  });
+  await page.route("**/api/sessions/*/kill", async (route) =>
+    route.fulfill({ json: { ok: true } }),
+  );
+  await page.route("**/api/sessions/*", async (route) => {
+    if (
+      route.request().method() === "POST"
+      && new URL(route.request().url()).pathname.endsWith("/kill")
+    ) {
+      return route.fulfill({ json: { ok: true } });
+    }
+    if (route.request().method() === "DELETE") {
+      const id = new URL(route.request().url()).pathname.split("/").at(-1);
+      const index = sessions.findIndex((session) => session.id === id);
+      if (index >= 0) sessions.splice(index, 1);
+      return route.fulfill({ json: { ok: true } });
+    }
+    return route.fulfill({ status: 404, json: { error: "not found" } });
+  });
   await page.route("**/api/events", async (route) => route.fulfill({ status: 200, contentType: "text/event-stream", body: "" }));
   await page.route("**/api/tree**", async (route) => route.fulfill({ json: [
     { name: "src", path: "src", is_dir: true },
@@ -102,7 +150,7 @@ async function installFixtures(
     if (url.pathname.endsWith("/actors")) return route.fulfill({ json: { actors: [] } });
     return route.fulfill({ json: {} });
   });
-  return { inboxCalls: () => inboxCalls };
+  return { inboxCalls: () => inboxCalls, sessions };
 }
 
 test("Board dragover/drop uses the real browser gesture and keeps its filter on reload", async ({ page }) => {
@@ -332,4 +380,225 @@ test("Enabled GUI capability is reachable and renders its configured stream", as
   await expect(frame).toBeVisible();
   await expect(frame).toHaveAttribute("src", "https://stream.example.test/view");
   await expect(frame.contentFrame().getByText("fixture stream")).toBeVisible();
+});
+
+test("Sessions owns the tool workspace and retains only terminal continuity", async ({ page }) => {
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({
+      type: "snapshot-start",
+      scrollback_bytes: 0,
+      scrollback_pos: 0,
+    }));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.route("**/api/history/sessions**", async (route) =>
+    route.fulfill({ json: [] }),
+  );
+
+  await page.goto("/#/t/browser-session");
+  await expect(page.locator(".terminal-host")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Sessions" })).toBeVisible();
+  if (test.info().project.name === "desktop") {
+    await expect(page.getByRole("complementary", { name: "Live sessions" }))
+      .toContainText("browser-session");
+  }
+
+  await page.goto("/#/history");
+  await expect(page.locator(".history-view")).toBeVisible();
+  await expect(page.locator('[data-tab-kind="terminal"]')).toHaveCount(1);
+
+  await page.goto("/#/tasks");
+  await expect(page.locator(".agent-tasks-view")).toBeVisible();
+  await expect(page.locator('[data-tab-kind="terminal"]')).toHaveCount(1);
+  await expect(page.locator('[data-tab-kind="history"]')).toHaveCount(0);
+  await expect(page.locator('[data-tab-kind="tasks"]')).toHaveCount(1);
+});
+
+test("terminal split commits atomically, nests, closes and survives reload", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Split geometry is validated in the desktop browser project");
+  await installFixtures(page, {}, [liveSession]);
+  const resizeMessages: unknown[] = [];
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage((message) => {
+      if (typeof message !== "string") return;
+      const parsed = JSON.parse(message) as { type?: string };
+      if (parsed.type === "resize") resizeMessages.push(parsed);
+    });
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  await expect(page.locator(".terminal-pane")).toHaveCount(1);
+
+  await page.getByRole("button", { name: "Split right" }).click();
+  await expect(page.locator(".terminal-pane")).toHaveCount(2);
+  await page.getByRole("button", { name: "Split down" }).click();
+  await expect(page.locator(".terminal-pane")).toHaveCount(3);
+  await expect(page.locator(".terminal-split.row .terminal-split.column"))
+    .toHaveCount(1);
+  await expect(page.locator(".terminal-pane.active")).toHaveCount(1);
+
+  resizeMessages.length = 0;
+  await page.setViewportSize({ width: 1100, height: 760 });
+  await expect.poll(() => resizeMessages.length).toBeGreaterThanOrEqual(3);
+
+  await page.reload();
+  await expect(page.locator(".terminal-pane")).toHaveCount(3);
+  await page.getByRole("button", { name: "Close pane" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+  await expect(page.locator(".terminal-pane")).toHaveCount(2);
+});
+
+test("terminal split retries at the default cwd when the source cwd is outside the workspace", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Split fallback is validated in the desktop browser project");
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+
+  const requests: Record<string, unknown>[] = [];
+  await page.route("**/api/sessions", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    requests.push(body);
+    if (body.cwd) {
+      return route.fulfill({ status: 400, body: "cwd escapes workspace_root" });
+    }
+    return route.fulfill({ json: {
+      ...liveSession,
+      id: "fallback-split",
+      name: String(body.name),
+    } });
+  });
+
+  await page.goto("/#/t/browser-session");
+  await page.getByRole("button", { name: "Split right" }).click();
+  await expect(page.locator(".terminal-pane")).toHaveCount(2);
+  await expect(page.getByText("Split opened at the default cwd")).toBeVisible();
+  expect(requests).toHaveLength(2);
+  expect(requests[0]?.cwd).toBe("/workspace/vogt");
+  expect(requests[1]).not.toHaveProperty("cwd");
+});
+
+test("terminal split deletes the created session if its pane disappears in flight", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Split rollback is validated in the desktop browser project");
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+
+  let releaseCreate: (() => void) | null = null;
+  let deletedId: string | null = null;
+  await page.route("**/api/sessions", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    await new Promise<void>((resolve) => { releaseCreate = resolve; });
+    return route.fulfill({ json: {
+      ...liveSession,
+      id: "orphan-candidate",
+      name: "orphan-candidate",
+    } });
+  });
+  await page.route("**/api/sessions/orphan-candidate", async (route) => {
+    if (route.request().method() !== "DELETE") return route.fallback();
+    deletedId = "orphan-candidate";
+    return route.fulfill({ json: { ok: true } });
+  });
+
+  await page.goto("/#/t/browser-session");
+  await page.getByRole("button", { name: "Split right" }).click();
+  await page.getByTitle("Kill & remove").click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+  await expect(page.getByRole("heading", { name: "Session not found" })).toBeVisible();
+  expect(releaseCreate).not.toBeNull();
+  releaseCreate?.();
+  await expect.poll(() => deletedId).toBe("orphan-candidate");
+});
+
+test("terminal leaves browser zoom gestures alone and offers explicit font controls", async ({ page }) => {
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  const host = page.locator(".terminal-host");
+  await expect(host).toBeVisible();
+
+  const cancelled = await host.evaluate((element) =>
+    !element.dispatchEvent(new WheelEvent("wheel", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      deltaY: -120,
+    })),
+  );
+  expect(cancelled).toBe(false);
+  expect(await page.evaluate(() => localStorage.getItem("mydevenv2.terminalFontSize.v1")))
+    .toBeNull();
+
+  await page.getByRole("button", { name: "Increase terminal font size" }).click();
+  expect(await page.evaluate(() => localStorage.getItem("mydevenv2.terminalFontSize.v1")))
+    .toBe("14");
+
+  for (const zoom of ["80%", "100%", "125%", "150%", "200%"] as const) {
+    await page.locator("html").evaluate((element, nextZoom) => {
+      element.style.zoom = nextZoom;
+    }, zoom);
+    await expect(page.getByRole("navigation", { name: "Session tools" })).toBeVisible();
+    await expect(host).toBeVisible();
+  }
+});
+
+test("dirty editor requests browser exit confirmation only until save", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Monaco lifecycle is validated in the desktop browser project");
+  await installFixtures(page);
+  let saved = "export const answer = 42;\n";
+  await page.route("**/api/files**", async (route) => {
+    if (route.request().method() === "PUT") {
+      saved = (route.request().postDataJSON() as { content: string }).content;
+      return route.fulfill({ json: { ok: true, bytes: saved.length } });
+    }
+    return route.fulfill({ json: {
+      path: "src/an-identifiable-long-filename.tsx",
+      size: saved.length,
+      content: saved,
+      content_base64: null,
+      is_binary: false,
+    } });
+  });
+  await page.route("**/api/history/sessions**", async (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+  const editor = page.locator(".monaco-editor");
+  await expect(editor).toBeVisible();
+  await editor.click();
+  await page.keyboard.press("Control+A");
+  await page.keyboard.type("export const answer = 43;");
+
+  expect(await page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  })).toBe(true);
+
+  await page.goto("/#/history");
+  await expect(page.locator(".monaco-editor")).toHaveCount(0);
+  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+  await expect(page.locator(".monaco-editor .view-lines")).toContainText("43");
+
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(() => saved).toContain("43");
+  await expect.poll(() => page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  })).toBe(false);
 });

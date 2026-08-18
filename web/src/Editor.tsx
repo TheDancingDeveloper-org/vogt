@@ -10,6 +10,11 @@ import { setEditorDirty } from "./tabs";
 import { addRecentFile } from "./recentFiles";
 import { getMinimapEnabled, setMinimapEnabled } from "./editorPrefs";
 import { registerEditor } from "./editorRegistry";
+import {
+  discardEditorDraft,
+  readEditorDraft,
+  rememberEditorDraft,
+} from "./editorDrafts";
 
 interface Props {
   tabId: string;
@@ -46,6 +51,11 @@ const Editor: Component<Props> = (props) => {
     try {
       await api.writeFile(props.path, content);
       savedContent = content;
+      rememberEditorDraft(props.tabId, {
+        path: props.path,
+        content,
+        viewState: editor.saveViewState(),
+      });
       setEditorDirty(props.tabId, false);
       setSavedAt(Date.now());
       setStatus("ready");
@@ -73,8 +83,10 @@ const Editor: Component<Props> = (props) => {
         return;
       }
       savedContent = file.content ?? "";
+      const remembered = readEditorDraft(props.tabId, props.path);
+      const initialContent = remembered?.content ?? savedContent;
       model = monaco.editor.createModel(
-        savedContent,
+        initialContent,
         languageFor(props.path),
         monaco.Uri.parse(`inmemory://workspace/${props.path}`),
       );
@@ -95,9 +107,21 @@ const Editor: Component<Props> = (props) => {
         scrollBeyondLastLine: false,
         renderWhitespace: "selection",
       });
+      if (remembered?.viewState) editor.restoreViewState(remembered.viewState);
+      setEditorDirty(props.tabId, initialContent !== savedContent);
       contentChangeDisposable = editor.onDidChangeModelContent(() => {
         if (!editor) return;
-        setEditorDirty(props.tabId, editor.getValue() !== savedContent);
+        const content = editor.getValue();
+        if (content === savedContent) {
+          discardEditorDraft(props.tabId);
+        } else {
+          rememberEditorDraft(props.tabId, {
+            path: props.path,
+            content,
+            viewState: editor.saveViewState(),
+          });
+        }
+        setEditorDirty(props.tabId, content !== savedContent);
       });
       editor.addCommand(
         monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
@@ -120,6 +144,13 @@ const Editor: Component<Props> = (props) => {
 
   onCleanup(() => {
     disposed = true;
+    if (editor) {
+      rememberEditorDraft(props.tabId, {
+        path: props.path,
+        content: editor.getValue(),
+        viewState: editor.saveViewState(),
+      });
+    }
     unregisterEditor();
     resizeObserver?.disconnect();
     contentChangeDisposable?.dispose();

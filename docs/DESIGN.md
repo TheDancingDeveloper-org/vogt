@@ -427,6 +427,10 @@ web/           the Solid PWA, the product's front end from M11; consumes
                operations the CLI and MCP see. One route model supplies the
                desktop rail, phone bar and Sessions tools with their current
                place/tool and owns loading, unavailable and not-found states.
+               Sessions owns the machine workspace: terminal/editor panes and
+               Git, History, Tasks, GUI and Assistant deep links compose there.
+               Terminal panes alone stay mounted while inactive; other tools
+               unmount and retain only their promised selection/draft state.
 mobile/        the Capacitor shell that loads that PWA
 src/vogt/      unchanged, and still the only definition of an operation
 ```

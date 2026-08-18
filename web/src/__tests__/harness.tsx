@@ -587,8 +587,8 @@ export interface Mounted {
  * Render one surface at one path, inside a real router with a real history.
  *
  * The path matters: `Board.tsx` and `Backlog.tsx` both guard their URL effect
- * on `location.pathname`, because every tab in this shell is mounted at once
- * and `view`, `project` and `actor` are keys more than one of them owns. A
+ * on `location.pathname`, because navigation can outlive a surface effect and
+ * `view`, `project` and `actor` are keys more than one of them owns. A
  * test that mounted the board at `/` would find its filters never reach the
  * URL — and would be right about the code and wrong about the requirement.
  */

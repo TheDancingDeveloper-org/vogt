@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it } from "vitest";
 import Sessions from "../Sessions";
+import Assistant from "../Assistant";
 import { fakeVogt, mountAt } from "./harness";
 
 const pending = {
@@ -44,6 +45,65 @@ describe("Sessions approval presentation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Approve on screen" }));
     await waitFor(() => expect(engine.engineCalls.filter((call) => call.method === "POST")).toHaveLength(1));
     expect(engine.engineCalls.find((call) => call.method === "POST")?.body).toEqual({ approve: true });
+    mounted.unmount();
+  });
+
+  it("names pending terminal input and sorts its target first", async () => {
+    const input = {
+      kind: "send_input" as const,
+      id: "act-input",
+      session_id: "eng-waiting",
+      session_name: "waiting-agent",
+      text: "y\r",
+      submit: true,
+    };
+    fakeVogt({}, {
+      "GET /api/assistant/history": {
+        body: { transcript: [], pending_action: input },
+      },
+    });
+    const mounted = mountAt("/sessions", "/sessions", () => <Sessions />);
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Input · waiting-agent" })).toBeInTheDocument());
+    expect(screen.getByText("y\\r")).toBeInTheDocument();
+    mounted.unmount();
+  });
+
+  it("renders the workspace child and truthful audit attribution", async () => {
+    fakeVogt({}, {
+      "GET /api/assistant/history": { body: { transcript: [] } },
+    });
+    const mounted = mountAt("/sessions", "/sessions", () => (
+      <Sessions hasActiveWorkspace currentTool="history">
+        <div data-testid="machine-tool">tool workspace</div>
+      </Sessions>
+    ));
+
+    await waitFor(() => expect(screen.getByTestId("machine-tool")).toBeVisible());
+    expect(screen.getByRole("navigation", { name: "Session tools" })
+      .querySelector('a[aria-current="page"]')?.textContent).toBe("History");
+    expect(screen.getByText(/Direct session writes are audited to the session actor/))
+      .toBeInTheDocument();
+    expect(screen.getByText(/Assistant writes require on-screen approval/))
+      .toBeInTheDocument();
+    mounted.unmount();
+  });
+
+  it("renders one shared approval when Assistant is the active Sessions tool", async () => {
+    fakeVogt({}, {
+      "GET /api/assistant/history": { body: { transcript: [], pending_action: pending } },
+      "GET /api/config": { body: { assistant_profiles: [] } },
+    });
+    const mounted = mountAt("/assistant", "/assistant", () => (
+      <Sessions hasActiveWorkspace currentTool="assistant">
+        <Assistant pendingHosted onError={() => undefined} />
+      </Sessions>
+    ));
+
+    await waitFor(() => expect(screen.getAllByRole("region", { name: "Pending approval" }))
+      .toHaveLength(1));
+    expect(screen.getByRole("heading", { name: "work.transition · WI-7 → done" }))
+      .toBeInTheDocument();
     mounted.unmount();
   });
 });

@@ -1,5 +1,6 @@
-import { Component, createMemo, createResource, For, Show, createSignal } from "solid-js";
+import { Component, createMemo, createResource, For, Show, createSignal, onCleanup } from "solid-js";
 import { api } from "./api";
+import { readToolDraft, writeToolDraft } from "./toolDrafts";
 
 interface Props {
   streamUrl: string | null;
@@ -41,11 +42,20 @@ function normalizeCommand(command: string): string {
 }
 
 const GuiTab: Component<Props> = (props) => {
+  const restored = readToolDraft("gui", {
+    command: "chromium --no-sandbox --start-maximized",
+    label: "Chromium",
+  });
   const [procs, { refetch }] = createResource(() => api.guiProcesses());
-  const [cmd, setCmd] = createSignal("chromium --no-sandbox --start-maximized");
-  const [label, setLabel] = createSignal("Chromium");
+  const [cmd, setCmd] = createSignal(restored.command);
+  const [label, setLabel] = createSignal(restored.label);
   const [savedLaunchers, setSavedLaunchers] = createSignal(readSavedLaunchers());
   const [message, setMessage] = createSignal<string | null>(null);
+
+  onCleanup(() => writeToolDraft("gui", {
+    command: cmd(),
+    label: label(),
+  }));
 
   const launcherLabels = createMemo(() => {
     const map = new Map<string, string>();

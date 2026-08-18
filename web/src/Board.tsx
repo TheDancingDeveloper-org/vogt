@@ -823,9 +823,9 @@ const Board: Component<Props> = (props) => {
   //   * A link pasted into an already-mounted board was ignored: the query
   //     was read once, at construction, and never again.
   //
-  // Guarded on the pathname because every tab in this shell is mounted at
-  // once and `project`, `label` and `assignee` are keys more than one Vogt
-  // surface owns.
+  // Guarded on the pathname because the router and test harness can keep this
+  // component alive while a navigation settles, and `project`, `label` and
+  // `assignee` are keys more than one Vogt surface owns.
   let lastWritten = encodeQuery(searchParams);
 
   createEffect(() => {
@@ -1453,9 +1453,9 @@ const Board: Component<Props> = (props) => {
   /** FR-U22's last clause: quick-create has a binding, now that there is a
    *  quick-create on this board to bind.
    *
-   *  Scoped to the surface rather than to `document`: every tab in this shell
-   *  is mounted at once, so a document-level `n` would raise a work item
-   *  while somebody was reading a terminal. It listens on the board's own
+   *  Scoped to the surface rather than to `document`: a document-level `n`
+   *  could raise a work item while somebody was reading a terminal. It
+   *  listens on the board's own
    *  root and ignores anything typed into a field, which is what makes it
    *  reachable from a focused card, the toolbar, or the board's background
    *  without stealing a keystroke from the composer. */

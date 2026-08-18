@@ -8,6 +8,9 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach } from "vitest";
 import { cleanup } from "@solidjs/testing-library";
+import { clearEditorDrafts } from "../editorDrafts";
+import { clearToolDrafts } from "../toolDrafts";
+import { clearPendingAction } from "../pendingAction";
 
 class StubResizeObserver implements ResizeObserver {
   observe(): void {}
@@ -55,6 +58,9 @@ if (!window.matchMedia) {
 
 afterEach(() => {
   localStorage.clear();
+  clearEditorDrafts();
+  clearToolDrafts();
+  clearPendingAction();
 });
 
 // Unmount what the last test mounted.

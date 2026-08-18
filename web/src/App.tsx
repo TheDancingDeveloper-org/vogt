@@ -19,7 +19,7 @@ import AuditBrowser from "./AuditBrowser";
 import Backlog from "./Backlog";
 import Board from "./Board";
 import Inbox from "./Inbox";
-import Sessions, { SessionTools } from "./Sessions";
+import Sessions from "./Sessions";
 import RouteOutcomeView from "./RouteOutcome";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
@@ -72,7 +72,6 @@ import {
   openHistoryTab,
   openTasksTab,
   openTerminalTab,
-  openWorkItemTab,
   replaceTabs,
   initialRoute,
   recentPlacesStore,
@@ -95,6 +94,12 @@ import {
   settingsReturnRoute,
   type PrimaryPlace,
 } from "./routeModel";
+import {
+  hasDirtyEditor,
+  protectDirtyEditorExit,
+  shouldMountTab,
+} from "./tabLifecycle";
+import { discardEditorDraft } from "./editorDrafts";
 
 interface LoginScreenProps {
   initialToken: string;
@@ -369,6 +374,7 @@ const App: Component = () => {
     tabsStore.tabs.find((tab) => tab.id === tabsStore.active)?.kind ?? null;
   const editorWorkspaceActive = () =>
     isIDEMode && activeKind() === "editor" && location.pathname.startsWith("/e/");
+  const sessionWorkspaceActive = () => routeOutcome()?.kind === "tool";
   const guiEnabled = () => Boolean(publicCfg()?.gui_stream_available);
   const routeOutcome = () => describeRoute(
     location.pathname,
@@ -465,6 +471,18 @@ const App: Component = () => {
     if (location.pathname === pathFor(active)) lastUrlByTab.set(active.id, here);
   });
 
+  // Browser and installed-PWA lifecycle exits bypass the app's close-tab
+  // confirmation. Ask the browser to guard the window only while a real
+  // unsaved editor buffer exists, then remove the listener immediately after
+  // the last save so clean exits remain silent.
+  createEffect(() => {
+    if (!hasDirtyEditor(tabsStore.tabs)) return;
+    window.addEventListener("beforeunload", protectDirtyEditorExit);
+    onCleanup(() =>
+      window.removeEventListener("beforeunload", protectDirtyEditorExit),
+    );
+  });
+
   createEffect(() => {
     if (!configReady() || guiEnabled()) return;
     for (const tab of tabsStore.tabs.filter((candidate) => candidate.kind === "gui")) {
@@ -528,11 +546,8 @@ const App: Component = () => {
       settingsRouted = true;
       setSettingsOpen(true);
     } else if (path.startsWith("/w/") && params.ref) {
-      // Unlike a terminal id, a work item ref is not checked against a store
-      // first: the item lives in vogt-core, which this shell does not read,
-      // and the surface itself reports a ref that does not resolve. Refusing
-      // to open the tab would turn a typo into a blank screen.
-      openWorkItemTab(decodeURIComponent(params.ref));
+      // Work items are addressable stable views. The URL selects the item;
+      // unlike terminal/editor panes it does not create a product-level tab.
     }
     const outcome = routeOutcome();
     if (
@@ -793,6 +808,9 @@ const App: Component = () => {
     // Drop any per-tab registrations so we don't leak references.
     senders.delete(tabId);
     actions.delete(tabId);
+    if (tab?.kind === "editor") {
+      queueMicrotask(() => discardEditorDraft(tabId));
+    }
 
     closeTab(tabId);
     if (tab) {
@@ -1048,22 +1066,6 @@ const App: Component = () => {
               </button>
             </div>
           </Show>
-          <Show when={editorWorkspaceActive()}>
-            <EditorWorkspace
-              promptPath={promptUser}
-              confirmAction={confirmUser}
-              onRequestCloseTab={(tabId) => void requestCloseTab(tabId)}
-              onNotify={(message, kind) => showToast(message, { kind })}
-            />
-          </Show>
-          <Show when={location.pathname === "/sessions"}>
-            <div class="stable-place">
-              <Sessions
-                guiEnabled={guiEnabled()}
-                assistantEnabled={Boolean(publicCfg()?.assistant_enabled)}
-              />
-            </div>
-          </Show>
           <Show when={location.pathname === "/board"}>
             <div class="stable-place"><Board onError={(msg) => showToast(msg, { kind: "error" })} /></div>
           </Show>
@@ -1079,6 +1081,14 @@ const App: Component = () => {
           <Show when={location.pathname === "/audit"}>
             <div class="stable-place"><AuditBrowser onError={(msg) => showToast(msg, { kind: "error" })} /></div>
           </Show>
+          <Show when={location.pathname.startsWith("/w/") && params.ref}>
+            <div class="stable-place">
+              <WorkItemDetail
+                itemRef={decodeURIComponent(params.ref ?? "")}
+                onError={(msg) => showToast(msg, { kind: "error" })}
+              />
+            </div>
+          </Show>
           <Show when={routeProblem()} keyed>
             {(problem) => (
               <div class="stable-place">
@@ -1090,42 +1100,52 @@ const App: Component = () => {
               </div>
             )}
           </Show>
-          <Show when={
-            currentPlace("sessions")
-              && (routeOutcome()?.kind === "tool" || Boolean(currentTool()))
-          }>
-            <SessionTools
+          <div
+            class="sessions-shell"
+            style={{
+              display:
+                currentPlace("sessions") && !routeProblem() ? "flex" : "none",
+            }}
+          >
+            <Sessions
               currentTool={currentTool()}
               guiEnabled={guiEnabled()}
               assistantEnabled={Boolean(publicCfg()?.assistant_enabled)}
-            />
-          </Show>
-          <div
-            class="tab-view"
-            style={{
-              display:
-                routeProblem() ||
-                editorWorkspaceActive() ||
-                ["/sessions", "/board", "/backlog", "/inbox", "/projects", "/audit"].includes(location.pathname)
-                  ? "none"
-                  : "flex",
-            }}
-          >
-            <For each={tabsStore.tabs}>
-              {(t) => (
-                <div
-                  style={{
-                    display:
-                      tabsStore.active === t.id &&
-                      !(isIDEMode && t.kind === "editor")
-                        ? "flex"
-                        : "none",
-                    "flex-direction": "column",
-                    flex: 1,
-                    "min-height": 0,
-                    "min-width": 0,
-                  }}
-                >
+              hasActiveWorkspace={sessionWorkspaceActive()}
+              onCreateSession={() => void onCreate()}
+            >
+              <div class="tab-view">
+                <Show when={isIDEMode && editorWorkspaceActive()}>
+                  <div
+                    class="retained-tab-pane"
+                    data-tab-kind="editor-workspace"
+                    style={{ display: editorWorkspaceActive() ? "flex" : "none" }}
+                  >
+                    <EditorWorkspace
+                      promptPath={promptUser}
+                      confirmAction={confirmUser}
+                      onRequestCloseTab={(tabId) => void requestCloseTab(tabId)}
+                      onNotify={(message, kind) => showToast(message, { kind })}
+                    />
+                  </div>
+                </Show>
+                <For each={tabsStore.tabs.filter((tab) =>
+                  tab.kind !== "workitem"
+                    && !(isIDEMode && tab.kind === "editor")
+                    && shouldMountTab(
+                      tab,
+                      sessionWorkspaceActive() ? tabsStore.active : null,
+                    )
+                )}>
+                  {(t) => (
+                    <div
+                      class="retained-tab-pane"
+                      data-tab-kind={t.kind}
+                      data-tab-id={t.id}
+                      style={{
+                        display: tabsStore.active === t.id ? "flex" : "none",
+                      }}
+                    >
                   <Show when={t.kind === "terminal" && t}>
                     {(tab) => (
                       <TerminalWorkspace
@@ -1196,18 +1216,9 @@ const App: Component = () => {
                   </Show>
                   <Show when={t.kind === "assistant"}>
                     <Assistant
+                      pendingHosted
                       onError={(msg) => showToast(msg, { kind: "error" })}
                     />
-                  </Show>
-                  <Show when={t.kind === "workitem" && t}>
-                    {(tab) => (
-                      <WorkItemDetail
-                        itemRef={
-                          (tab() as Extract<Tab, { kind: "workitem" }>).ref
-                        }
-                        onError={(msg) => showToast(msg, { kind: "error" })}
-                      />
-                    )}
                   </Show>
                   <Show when={t.kind === "tasks"}>
                     <AgentTasks
@@ -1219,15 +1230,11 @@ const App: Component = () => {
                       }}
                     />
                   </Show>
-                </div>
-              )}
-            </For>
-            <Show when={tabsStore.tabs.length === 0}>
-              <div class="empty">
-                <div>Open a file from the rail or create a session.</div>
-                <button onClick={() => void onCreate()}>+ New session</button>
+                    </div>
+                  )}
+                </For>
               </div>
-            </Show>
+            </Sessions>
           </div>
           <Show when={activeKind() === "terminal" && location.pathname.startsWith("/t/")}>
             <ModKeyRow

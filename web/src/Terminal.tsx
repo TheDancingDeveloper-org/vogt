@@ -18,13 +18,13 @@ import {
   MAX_TERMINAL_CACHE_BYTES,
   saveTerminalCache,
 } from "./terminalCache";
+import {
+  clampTerminalFontSize,
+  DEFAULT_TERMINAL_FONT_SIZE,
+  readTerminalFontSize,
+  TERMINAL_FONT_SIZE_EVENT,
+} from "./terminalFont";
 import Dialog from "./Dialog";
-
-const DEFAULT_FONT_SIZE = 13;
-const MIN_FONT_SIZE = 9;
-const MAX_FONT_SIZE = 24;
-const FONT_SIZE_STORAGE_KEY = "mydevenv2.terminalFontSize.v1";
-const FONT_SIZE_EVENT = "mydevenv2:terminal-font-size";
 
 export interface TerminalActions {
   /** Copy the current xterm selection to the system clipboard. Returns true on success. */
@@ -47,35 +47,6 @@ interface Props {
   interceptInput?: (data: string | ArrayBuffer) => boolean;
   /** Optional callback for user-facing notifications (copy success/failure). */
   onNotify?: (message: string, kind?: "info" | "error") => void;
-}
-
-function clampFontSize(value: number): number {
-  return Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, value));
-}
-
-function readTerminalFontSize(): number {
-  try {
-    const raw = localStorage.getItem(FONT_SIZE_STORAGE_KEY);
-    if (!raw) return DEFAULT_FONT_SIZE;
-    const parsed = Number(raw);
-    return Number.isFinite(parsed)
-      ? clampFontSize(parsed)
-      : DEFAULT_FONT_SIZE;
-  } catch {
-    return DEFAULT_FONT_SIZE;
-  }
-}
-
-function writeTerminalFontSize(fontSize: number) {
-  const next = clampFontSize(Math.round(fontSize * 2) / 2);
-  try {
-    localStorage.setItem(FONT_SIZE_STORAGE_KEY, String(next));
-  } catch {
-    /* storage can be unavailable in private / locked-down contexts */
-  }
-  window.dispatchEvent(
-    new CustomEvent(FONT_SIZE_EVENT, { detail: { fontSize: next } }),
-  );
 }
 
 // Upper bound on input buffered while the WS is reconnecting. Generous enough
@@ -103,9 +74,8 @@ function configureTerminalTextarea(textarea: HTMLTextAreaElement | undefined) {
  * One xterm.js Terminal attached to a single WS session.
  *
  * Reattach is cheap because the server replays the scrollback snapshot, but
- * remounting this component still causes a fresh subscribe so prefer keeping
- * it alive (e.g. by toggling `display: none` on tab switch) rather than
- * tearing down. For Phase 2 we render only the active tab — good enough.
+ * remounting still creates a new WebSocket and replay. Sessions deliberately
+ * retains terminal panes across route changes; other tool kinds unmount.
  */
 const TerminalView: Component<Props> = (props) => {
   const [openedFor, setOpenedFor] = createSignal<string | null>(null);
@@ -288,40 +258,28 @@ const TerminalView: Component<Props> = (props) => {
 
   const applyFontSize = (fontSize: number) => {
     if (!term) return;
-    term.options.fontSize = clampFontSize(fontSize);
+    term.options.fontSize = clampTerminalFontSize(fontSize);
     scheduleFit();
   };
 
-  const publishFontSize = (fontSize: number) => {
-    const next = clampFontSize(fontSize);
-    applyFontSize(next);
-    writeTerminalFontSize(next);
-  };
-
   const estimateCellHeight = () => {
-    if (!term) return DEFAULT_FONT_SIZE * 1.2;
+    if (!term) return DEFAULT_TERMINAL_FONT_SIZE * 1.2;
     const lineHeight =
       typeof term.options.lineHeight === "number" ? term.options.lineHeight : 1;
-    return Math.max(8, (term.options.fontSize ?? DEFAULT_FONT_SIZE) * lineHeight);
+    return Math.max(
+      8,
+      (term.options.fontSize ?? DEFAULT_TERMINAL_FONT_SIZE) * lineHeight,
+    );
   };
 
   const installTouchGestures = () => {
     if (!hostRef) return () => {};
 
-    let mode: "idle" | "scroll" | "pinch" = "idle";
+    let mode: "idle" | "scroll" = "idle";
     let startX = 0;
     let startY = 0;
     let lastY = 0;
     let lineRemainder = 0;
-    let pinchStartDistance = 0;
-    let pinchStartFontSize = readTerminalFontSize();
-
-    const touchDistance = (touches: TouchList): number => {
-      const a = touches[0];
-      const b = touches[1];
-      if (!a || !b) return 0;
-      return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-    };
 
     const resetScroll = (touch: Touch) => {
       mode = "idle";
@@ -337,27 +295,10 @@ const TerminalView: Component<Props> = (props) => {
         if (touch) resetScroll(touch);
         return;
       }
-      if (event.touches.length === 2) {
-        mode = "pinch";
-        pinchStartDistance = touchDistance(event.touches);
-        pinchStartFontSize = term?.options.fontSize ?? readTerminalFontSize();
-        event.preventDefault();
-      }
     };
 
     const onTouchMove = (event: TouchEvent) => {
       if (!term) return;
-
-      if (event.touches.length === 2) {
-        const distance = touchDistance(event.touches);
-        if (pinchStartDistance > 0 && distance > 0) {
-          mode = "pinch";
-          const scale = distance / pinchStartDistance;
-          publishFontSize(pinchStartFontSize * scale);
-        }
-        event.preventDefault();
-        return;
-      }
 
       if (event.touches.length !== 1) return;
       const touch = event.touches[0];
@@ -396,26 +337,17 @@ const TerminalView: Component<Props> = (props) => {
       lineRemainder = 0;
     };
 
-    const onWheel = (event: WheelEvent) => {
-      if (!term || !event.ctrlKey) return;
-      event.preventDefault();
-      const delta = event.deltaY > 0 ? -0.5 : 0.5;
-      publishFontSize((term.options.fontSize ?? readTerminalFontSize()) + delta);
-    };
-
     const listenerOptions: AddEventListenerOptions = { passive: false };
     hostRef.addEventListener("touchstart", onTouchStart, listenerOptions);
     hostRef.addEventListener("touchmove", onTouchMove, listenerOptions);
     hostRef.addEventListener("touchend", onTouchEnd, listenerOptions);
     hostRef.addEventListener("touchcancel", onTouchEnd, listenerOptions);
-    hostRef.addEventListener("wheel", onWheel, listenerOptions);
 
     return () => {
       hostRef?.removeEventListener("touchstart", onTouchStart);
       hostRef?.removeEventListener("touchmove", onTouchMove);
       hostRef?.removeEventListener("touchend", onTouchEnd);
       hostRef?.removeEventListener("touchcancel", onTouchEnd);
-      hostRef?.removeEventListener("wheel", onWheel);
     };
   };
 
@@ -639,7 +571,7 @@ const TerminalView: Component<Props> = (props) => {
         ?.fontSize;
       if (typeof fontSize === "number") applyFontSize(fontSize);
     };
-    window.addEventListener(FONT_SIZE_EVENT, fontSizeHandler);
+    window.addEventListener(TERMINAL_FONT_SIZE_EVENT, fontSizeHandler);
 
     themeHandler = () => {
       if (term) term.options.theme = getTheme();
@@ -811,7 +743,7 @@ const TerminalView: Component<Props> = (props) => {
       viewportHandler = null;
     }
     if (fontSizeHandler) {
-      window.removeEventListener(FONT_SIZE_EVENT, fontSizeHandler);
+      window.removeEventListener(TERMINAL_FONT_SIZE_EVENT, fontSizeHandler);
       fontSizeHandler = null;
     }
     if (themeHandler) {
