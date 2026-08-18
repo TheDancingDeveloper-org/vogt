@@ -87,6 +87,7 @@ async function call<T>(
   operation: VogtOperation,
   params: Record<string, unknown> = {},
   method: "GET" | "POST" = "GET",
+  signal?: AbortSignal,
 ): Promise<T> {
   const path = ROUTES[operation];
   if (!path) throw new Error(`no route for ${operation}`);
@@ -112,7 +113,7 @@ async function call<T>(
     body = JSON.stringify(params);
   }
 
-  const res = await fetch(url, { method, headers, body });
+  const res = await fetch(url, { method, headers, body, signal });
   const text = await res.text();
   if (!res.ok) {
     let message = text;
@@ -500,8 +501,10 @@ export interface ComplianceResult {
 export const listWorkflows = () =>
   call<{ workflows: Workflow[] }>("workflow.list");
 
-export const listWork = (params: Record<string, unknown> = {}) =>
-  call<{ items: WorkItem[]; total?: number }>("work.list", params);
+export const listWork = (
+  params: Record<string, unknown> = {},
+  signal?: AbortSignal,
+) => call<{ items: WorkItem[]; total?: number }>("work.list", params, "GET", signal);
 
 export const getWork = (ref: string) => call<WorkDetail>("work.get", { ref });
 
@@ -519,8 +522,15 @@ export interface ProjectListEntry {
   root_path: string;
 }
 
-export const listProjects = (params: Record<string, unknown> = {}) =>
-  call<{ projects: ProjectListEntry[]; total: number }>("project.list", params);
+export const listProjects = (
+  params: Record<string, unknown> = {},
+  signal?: AbortSignal,
+) => call<{ projects: ProjectListEntry[]; total: number }>(
+  "project.list",
+  params,
+  "GET",
+  signal,
+);
 
 export const listLabels = () =>
   call<{ labels: { name: string; color?: string }[] }>("label.list");

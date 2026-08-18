@@ -243,6 +243,33 @@ test("Global shortcut help works outside editable surfaces and returns focus", a
   await expect(query).toHaveValue("audit?");
 });
 
+test("Repeated palette opening defers and reuses workspace discovery", async ({ page }) => {
+  let manifestRequests = 0;
+  await page.route("**/api/search/files**", async (route) => {
+    manifestRequests += 1;
+    await route.fulfill({ json: [] });
+  });
+  await installFixtures(page);
+  await page.goto("/#/sessions");
+
+  const goTo = page.getByRole("button", { name: "Go to…" });
+  await goTo.click();
+  const palette = page.getByRole("dialog", { name: "Command palette" });
+  await expect(palette.getByText("Open Board", { exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await goTo.click();
+  await expect(palette.getByText("Open Board", { exact: true })).toBeVisible();
+  expect(manifestRequests).toBe(0);
+
+  await palette.locator("input").fill("#workspace");
+  await expect.poll(() => manifestRequests).toBe(9);
+  await page.keyboard.press("Escape");
+  await goTo.click();
+  await expect(palette).toBeVisible();
+  await page.waitForTimeout(50);
+  expect(manifestRequests).toBe(9);
+});
+
 test("Dialog focus is contained and restored, and feedback matches its live region", async ({ page }) => {
   test.skip(test.info().project.name === "phone", "Settings is a desktop route");
   await installFixtures(page);

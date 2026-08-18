@@ -69,6 +69,57 @@ interface DetectedProject {
   hasMakefile: boolean;
 }
 
+type ProviderState = "idle" | "loading" | "ready" | "failed";
+type ProviderName = "agent tasks" | "work items" | "projects" | "workspace actions";
+
+interface PaletteProviderCache {
+  key: string;
+  agentTasks?: AgentTask[];
+  workItems?: VogtWorkItem[];
+  vogtProjects?: { slug: string; name: string }[];
+  detectedProjects?: DetectedProject[];
+}
+
+let providerCache: PaletteProviderCache = { key: "" };
+
+/**
+ * Explicit invalidation seam for writes, credential changes, and the palette's
+ * own Refresh command. Cached answers are never treated as durable storage.
+ */
+export function invalidateCommandPaletteProviders(): void {
+  providerCache = { key: "" };
+}
+
+function currentProviderCache(): PaletteProviderCache {
+  const key = `${api.getBase()}\u0000${api.getToken()}`;
+  if (providerCache.key !== key) providerCache = { key };
+  return providerCache;
+}
+
+function aborted(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  limit: number,
+  mapper: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, values.length) },
+    async () => {
+      while (cursor < values.length) {
+        const index = cursor++;
+        results[index] = await mapper(values[index]!);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 interface MutableDetectedProject {
   cwd: string;
   packageManager: PackageManager;
@@ -186,6 +237,14 @@ const CommandPalette: Component<Props> = (props) => {
   const [vogtProjects, setVogtProjects] = createSignal<
     { slug: string; name: string }[]
   >([]);
+  const [providerStates, setProviderStates] = createSignal<
+    Partial<Record<ProviderName, ProviderState>>
+  >({});
+  const [providerErrors, setProviderErrors] = createSignal<
+    Partial<Record<ProviderName, string>>
+  >({});
+  const [specialSearchState, setSpecialSearchState] = createSignal<ProviderState>("idle");
+  const [specialSearchError, setSpecialSearchError] = createSignal<string | null>(null);
   const [savedLayouts, setSavedLayouts] = createSignal<SavedWorkspaceLayout[]>([]);
   const paletteId = createUniqueId();
   const inputId = `command-palette-input-${paletteId}`;
@@ -193,9 +252,104 @@ const CommandPalette: Component<Props> = (props) => {
   const instructionsId = `command-palette-instructions-${paletteId}`;
   const statusId = `command-palette-status-${paletteId}`;
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  let specialSearchAbort: AbortController | undefined;
+  const providerControllers = new Set<AbortController>();
+
+  const setProviderStatus = (
+    name: ProviderName,
+    state: ProviderState,
+    message?: string,
+  ) => {
+    setProviderStates((current) => ({ ...current, [name]: state }));
+    setProviderErrors((current) => {
+      const next = { ...current };
+      if (message) next[name] = message;
+      else delete next[name];
+      return next;
+    });
+  };
+
+  const withProviderController = async <T,>(
+    run: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> => {
+    const controller = new AbortController();
+    providerControllers.add(controller);
+    try {
+      return await run(controller.signal);
+    } finally {
+      providerControllers.delete(controller);
+    }
+  };
+
+  function loadKnownProviders(force = false): void {
+    if (force) {
+      for (const controller of providerControllers) controller.abort();
+      invalidateCommandPaletteProviders();
+      setProjectCommands([]);
+      setProviderStatus("workspace actions", "idle");
+    }
+    const cache = currentProviderCache();
+
+    if (cache.agentTasks) {
+      setAgentTasks(cache.agentTasks);
+      setProviderStatus("agent tasks", "ready");
+    } else {
+      setProviderStatus("agent tasks", "loading");
+      void withProviderController((signal) => api.listAgentTasks(signal))
+        .then((tasks) => {
+          currentProviderCache().agentTasks = tasks;
+          setAgentTasks(tasks);
+          setProviderStatus("agent tasks", "ready");
+        })
+        .catch((error: unknown) => {
+          if (aborted(error)) return;
+          setProviderStatus("agent tasks", "failed", (error as Error).message);
+        });
+    }
+
+    if (cache.workItems) {
+      setWorkItems(cache.workItems);
+      setProviderStatus("work items", "ready");
+    } else {
+      setProviderStatus("work items", "loading");
+      void withProviderController((signal) => listWork({ limit: 200 }, signal))
+        .then((answer) => {
+          const items = answer.items ?? [];
+          currentProviderCache().workItems = items;
+          setWorkItems(items);
+          setProviderStatus("work items", "ready");
+        })
+        .catch((error: unknown) => {
+          if (aborted(error)) return;
+          setProviderStatus("work items", "failed", (error as Error).message);
+        });
+    }
+
+    if (cache.vogtProjects) {
+      setVogtProjects(cache.vogtProjects);
+      setProviderStatus("projects", "ready");
+    } else {
+      setProviderStatus("projects", "loading");
+      void withProviderController((signal) => listProjects({ limit: 200 }, signal))
+        .then((answer) => {
+          const projects = answer.projects ?? [];
+          currentProviderCache().vogtProjects = projects;
+          setVogtProjects(projects);
+          setProviderStatus("projects", "ready");
+        })
+        .catch((error: unknown) => {
+          if (aborted(error)) return;
+          setProviderStatus("projects", "failed", (error as Error).message);
+        });
+    }
+  }
 
   createEffect(() => {
-    if (!props.open) return;
+    if (!props.open) {
+      for (const controller of providerControllers) controller.abort();
+      specialSearchAbort?.abort();
+      return;
+    }
     // Each invocation is a fresh navigation act. A closed palette does not
     // retain a stale query or selection that could make Enter run a command
     // the user cannot see when reopening it later.
@@ -206,31 +360,7 @@ const CommandPalette: Component<Props> = (props) => {
     setSymbolResults([]);
     setSymbolMessage(null);
     setSavedLayouts(listWorkspaceLayouts());
-    void api
-      .listAgentTasks()
-      .then((tasks) => setAgentTasks(tasks))
-      .catch((e) => {
-        setAgentTasks([]);
-        props.onError?.(`Failed to load agent tasks: ${(e as Error).message}`);
-      });
-    void loadProjectCommands();
-    // Work items, so the palette reaches them by name and not only the
-    // surfaces that list them (FR-U16). Loaded once per opening: the list is
-    // small, the filter is local, and a keystroke-per-request palette is how
-    // a tracker becomes slow. A Vogt that cannot be asked simply contributes
-    // nothing here — the surfaces are where an outage is reported, not a
-    // command list somebody is typing into.
-    void listWork({ limit: 200 })
-      .then((answer) => setWorkItems(answer.items ?? []))
-      .catch(() => setWorkItems([]));
-    // Projects, for the same reason and on the same terms (FR-U16). "Every
-    // read surface (projects, work items, sessions, views) by fuzzy name" —
-    // and until now the palette imported `listWork` and nothing else, so
-    // "open project rustnzb" was not a thing the keyboard could do. The
-    // estate is a short list; 200 is the same cap the surfaces use.
-    void listProjects({ limit: 200 })
-      .then((answer) => setVogtProjects(answer.projects ?? []))
-      .catch(() => setVogtProjects([]));
+    loadKnownProviders();
   });
 
   const activeEditorTab = () => {
@@ -270,61 +400,69 @@ const CommandPalette: Component<Props> = (props) => {
     }
   };
 
-  const loadProjectCommands = async () => {
+  const loadProjectCommands = async (signal: AbortSignal) => {
     try {
-      const manifestResults = await Promise.all(
-        PROJECT_MANIFEST_QUERIES.map((name) => api.searchFiles(name, "", 40)),
-      );
-      const projects = new Map<string, MutableDetectedProject>();
+      setProviderStatus("workspace actions", "loading");
+      const cached = currentProviderCache().detectedProjects;
+      let detectedProjects: DetectedProject[];
 
-      const ensureProject = (cwd: string): MutableDetectedProject => {
-        let existing = projects.get(cwd);
-        if (!existing) {
-          existing = {
-            cwd,
-            packageManager: "npm",
-            packageScripts: [],
-            hasCargo: false,
-            hasPyproject: false,
-            hasJustfile: false,
-            hasMakefile: false,
-          };
-          projects.set(cwd, existing);
-        }
-        return existing;
-      };
+      if (cached) {
+        detectedProjects = cached;
+      } else {
+        const manifestResults = await mapWithConcurrency(
+          PROJECT_MANIFEST_QUERIES,
+          3,
+          (name) => api.searchFiles(name, "", 40, signal),
+        );
+        const projects = new Map<string, MutableDetectedProject>();
 
-      for (const matches of manifestResults) {
-        for (const file of matches) {
-          if (isIgnoredProjectPath(file.path)) continue;
-          const name = leafName(file.path);
-          const cwd = parentDir(file.path);
-          const project = ensureProject(cwd);
-          if (name === "pnpm-lock.yaml") {
-            project.packageManager = "pnpm";
-          } else if (name === "yarn.lock" && project.packageManager !== "pnpm") {
-            project.packageManager = "yarn";
-          } else if (name === "package-lock.json" && project.packageManager === "npm") {
-            project.packageManager = "npm";
-          } else if (name === "package.json") {
-            project.packageJsonPath = file.path;
-          } else if (name === "Cargo.toml") {
-            project.hasCargo = true;
-          } else if (name === "pyproject.toml") {
-            project.hasPyproject = true;
-          } else if (name === "Justfile" || name === "justfile") {
-            project.hasJustfile = true;
-          } else if (name === "Makefile") {
-            project.hasMakefile = true;
+        const ensureProject = (cwd: string): MutableDetectedProject => {
+          let existing = projects.get(cwd);
+          if (!existing) {
+            existing = {
+              cwd,
+              packageManager: "npm",
+              packageScripts: [],
+              hasCargo: false,
+              hasPyproject: false,
+              hasJustfile: false,
+              hasMakefile: false,
+            };
+            projects.set(cwd, existing);
+          }
+          return existing;
+        };
+
+        for (const matches of manifestResults) {
+          for (const file of matches) {
+            if (isIgnoredProjectPath(file.path)) continue;
+            const name = leafName(file.path);
+            const cwd = parentDir(file.path);
+            const project = ensureProject(cwd);
+            if (name === "pnpm-lock.yaml") {
+              project.packageManager = "pnpm";
+            } else if (name === "yarn.lock" && project.packageManager !== "pnpm") {
+              project.packageManager = "yarn";
+            } else if (name === "package-lock.json" && project.packageManager === "npm") {
+              project.packageManager = "npm";
+            } else if (name === "package.json") {
+              project.packageJsonPath = file.path;
+            } else if (name === "Cargo.toml") {
+              project.hasCargo = true;
+            } else if (name === "pyproject.toml") {
+              project.hasPyproject = true;
+            } else if (name === "Justfile" || name === "justfile") {
+              project.hasJustfile = true;
+            } else if (name === "Makefile") {
+              project.hasMakefile = true;
+            }
           }
         }
-      }
 
-      await Promise.all(
-        [...projects.values()].map(async (project) => {
+        await mapWithConcurrency([...projects.values()], 4, async (project) => {
           if (!project.packageJsonPath) return;
           try {
-            const pkg = await api.readFile(project.packageJsonPath);
+            const pkg = await api.readFile(project.packageJsonPath, signal);
             if (pkg.is_binary || !pkg.content) return;
             const parsed = JSON.parse(pkg.content) as PackageJson;
             project.packageName = parsed.name;
@@ -335,32 +473,34 @@ const CommandPalette: Component<Props> = (props) => {
                 .filter((name) => !PREFERRED_PACKAGE_SCRIPTS.includes(name))
                 .sort(),
             ].slice(0, 5);
-          } catch {
+          } catch (error) {
+            if (aborted(error)) throw error;
             /* package metadata is optional for shortcuts */
           }
-        }),
-      );
+        });
 
-      const detectedProjects: DetectedProject[] = [...projects.values()]
-        .filter(
-          (project) =>
-            project.packageJsonPath ||
-            project.hasCargo ||
-            project.hasPyproject ||
-            project.hasJustfile ||
-            project.hasMakefile,
-        )
-        .sort((a, b) => comparePathDepth(a.cwd, b.cwd))
-        .map((project) => ({
-          cwd: project.cwd,
-          displayName: project.packageName || pathLabel(project.cwd),
-          packageManager: project.packageManager,
-          packageScripts: project.packageScripts,
-          hasCargo: project.hasCargo,
-          hasPyproject: project.hasPyproject,
-          hasJustfile: project.hasJustfile,
-          hasMakefile: project.hasMakefile,
-        }));
+        detectedProjects = [...projects.values()]
+          .filter(
+            (project) =>
+              project.packageJsonPath ||
+              project.hasCargo ||
+              project.hasPyproject ||
+              project.hasJustfile ||
+              project.hasMakefile,
+          )
+          .sort((a, b) => comparePathDepth(a.cwd, b.cwd))
+          .map((project) => ({
+            cwd: project.cwd,
+            displayName: project.packageName || pathLabel(project.cwd),
+            packageManager: project.packageManager,
+            packageScripts: project.packageScripts,
+            hasCargo: project.hasCargo,
+            hasPyproject: project.hasPyproject,
+            hasJustfile: project.hasJustfile,
+            hasMakefile: project.hasMakefile,
+          }));
+        currentProviderCache().detectedProjects = detectedProjects;
+      }
 
       const commands: Command[] = [];
       for (const project of detectedProjects) {
@@ -488,16 +628,34 @@ const CommandPalette: Component<Props> = (props) => {
       }
 
       setProjectCommands(commands);
-    } catch {
-      setProjectCommands([]);
+      setProviderStatus("workspace actions", "ready");
+    } catch (error) {
+      if (aborted(error)) {
+        setProviderStatus("workspace actions", "idle");
+        return;
+      }
+      setProviderStatus("workspace actions", "failed", (error as Error).message);
     }
   };
 
-  // When the query starts with ">" or "/", search specialized indices
-  // (history, filenames, or current-file symbols) without mixing them into
-  // the base command list.
+  const requestWorkspaceActions = () => {
+    const state = providerStates()["workspace actions"];
+    if (state === "loading" || state === "ready") return;
+    void withProviderController(loadProjectCommands);
+  };
+
+  // Specialized indices are deliberately query-driven. Opening the palette
+  // renders static commands synchronously and does no workspace scan.
   const maybeSearchSpecial = (q: string) => {
     if (searchTimer) clearTimeout(searchTimer);
+    specialSearchAbort?.abort();
+    specialSearchAbort = undefined;
+    setSpecialSearchState("idle");
+    setSpecialSearchError(null);
+    if (q.startsWith("#")) {
+      requestWorkspaceActions();
+      return;
+    }
     if (!q.startsWith(">") && !q.startsWith("/") && !q.startsWith("@")) {
       setHistoryResults([]);
       setFileResults([]);
@@ -515,24 +673,27 @@ const CommandPalette: Component<Props> = (props) => {
       return;
     }
     searchTimer = setTimeout(async () => {
+      const controller = new AbortController();
+      specialSearchAbort = controller;
+      setSpecialSearchState("loading");
       try {
         if (mode === ">") {
           const res = await fetch(
             `${api.getBase()}/api/history/search?q=${encodeURIComponent(term)}`,
-            { headers: { Authorization: `Bearer ${api.getToken()}` } },
+            {
+              headers: { Authorization: `Bearer ${api.getToken()}` },
+              signal: controller.signal,
+            },
           );
-          if (res.ok) {
-            setHistoryResults((await res.json()) as HistorySearchResult[]);
-          } else {
-            setHistoryResults([]);
-          }
+          if (!res.ok) throw new Error(`History search failed (${res.status})`);
+          setHistoryResults((await res.json()) as HistorySearchResult[]);
           setFileResults([]);
           setSymbolResults([]);
           setSymbolMessage(null);
         } else {
           setHistoryResults([]);
           if (mode === "/") {
-            const results = await api.searchFiles(term);
+            const results = await api.searchFiles(term, "", undefined, controller.signal);
             setFileResults(results);
             setSymbolResults([]);
             setSymbolMessage(null);
@@ -551,6 +712,7 @@ const CommandPalette: Component<Props> = (props) => {
             return;
           }
           const symbols = await listEditorSymbols(active.id);
+          if (controller.signal.aborted) return;
           const filtered = filterSymbols(symbols, term);
           setSymbolResults(filtered);
           setSymbolMessage(
@@ -561,17 +723,23 @@ const CommandPalette: Component<Props> = (props) => {
                 : "Current file does not provide symbol information",
           );
         }
-      } catch {
+        setSpecialSearchState("ready");
+      } catch (error) {
+        if (aborted(error)) return;
         setHistoryResults([]);
         setFileResults([]);
         setSymbolResults([]);
         setSymbolMessage(mode === "@" ? "Failed to load symbols" : null);
+        setSpecialSearchState("failed");
+        setSpecialSearchError((error as Error).message);
       }
     }, 250);
   };
 
   onCleanup(() => {
     if (searchTimer) clearTimeout(searchTimer);
+    specialSearchAbort?.abort();
+    for (const controller of providerControllers) controller.abort();
   });
 
   const historyCommands = (): Command[] => {
@@ -849,6 +1017,14 @@ const CommandPalette: Component<Props> = (props) => {
       },
       category: "Help",
       },
+      {
+      id: "refresh-palette-data",
+      label: "Refresh Command Palette Data",
+      description: "Invalidate cached tasks, work items, projects, and workspace actions",
+      icon: "↻",
+      action: () => loadKnownProviders(true),
+      category: "Help",
+      },
     ];
 
     if (props.guiEnabled) {
@@ -949,6 +1125,35 @@ const CommandPalette: Component<Props> = (props) => {
       },
       category: "Layouts",
     }));
+  };
+
+  const providerCommands = (): Command[] => {
+    const commands: Command[] = [];
+    const status = providerStates();
+    const errors = providerErrors();
+    const labels: ProviderName[] = ["agent tasks", "work items", "projects"];
+    for (const name of labels) {
+      if (status[name] === "loading") {
+        commands.push({
+          id: `provider-${name}-loading`,
+          label: `Loading ${name}…`,
+          description: "Other commands remain available",
+          icon: "…",
+          action: () => undefined,
+          category: "Providers",
+        });
+      } else if (status[name] === "failed") {
+        commands.push({
+          id: `provider-${name}-failed`,
+          label: `Retry ${name}`,
+          description: errors[name] ?? `Failed to load ${name}`,
+          icon: "!",
+          action: () => loadKnownProviders(true),
+          category: "Providers",
+        });
+      }
+    }
+    return commands;
   };
 
   const sessionCommands = (): Command[] => {
@@ -1059,6 +1264,7 @@ const CommandPalette: Component<Props> = (props) => {
       ...templateCommands(),
       ...taskCommands(),
       ...savedLayoutCommands(),
+      ...providerCommands(),
     ];
   };
 
@@ -1068,6 +1274,26 @@ const CommandPalette: Component<Props> = (props) => {
     if (q.startsWith(">")) return historyCommands();
     if (q.startsWith("/")) return fileCommands();
     if (q.startsWith("@")) return symbolCommands();
+    if (q.startsWith("#")) {
+      const term = q.slice(1).trim();
+      if (providerStates()["workspace actions"] === "loading") return [];
+      if (providerStates()["workspace actions"] === "failed") {
+        return [{
+          id: "retry-workspace-actions",
+          label: "Retry workspace actions",
+          description: providerErrors()["workspace actions"] ?? "Workspace discovery failed",
+          icon: "!",
+          action: requestWorkspaceActions,
+          category: "Providers",
+        }];
+      }
+      if (!term) return projectCommands();
+      return projectCommands().filter(
+        (cmd) =>
+          fuzzyMatch(term, cmd.label) ||
+          (cmd.description && fuzzyMatch(term, cmd.description)),
+      );
+    }
     if (!q) return allCommands();
     return allCommands().filter(
       (cmd) =>
@@ -1124,6 +1350,24 @@ const CommandPalette: Component<Props> = (props) => {
     maybeSearchSpecial(value);
   };
 
+  const specialMessage = () => {
+    const q = query().trim();
+    if (q.startsWith("#")) {
+      const state = providerStates()["workspace actions"];
+      if (state === "loading") return "Discovering workspace actions…";
+      if (state === "failed") {
+        return `Workspace actions unavailable: ${providerErrors()["workspace actions"] ?? "request failed"}`;
+      }
+    }
+    if ([">", "/", "@"].includes(q[0] ?? "")) {
+      if (specialSearchState() === "loading") return "Searching…";
+      if (specialSearchState() === "failed") {
+        return `Search unavailable: ${specialSearchError() ?? "request failed"}`;
+      }
+    }
+    return null;
+  };
+
   return (
     <Show when={props.open}>
       <Dialog
@@ -1139,7 +1383,7 @@ const CommandPalette: Component<Props> = (props) => {
             id={inputId}
             type="text"
             class="command-palette-input"
-            placeholder="Type a command, @ for symbols, / for files, or > for history..."
+            placeholder="Type a command, # for workspace actions, @ symbols, / files, or > history..."
             value={query()}
             onInput={handleInput}
             onKeyDown={handleKeyDown}
@@ -1164,7 +1408,7 @@ const CommandPalette: Component<Props> = (props) => {
             when={filteredCommands().length > 0}
             fallback={
               <div class="command-palette-empty" role="presentation">
-                No commands found
+                {specialMessage() ?? "No commands found"}
               </div>
             }
           >
@@ -1199,7 +1443,7 @@ const CommandPalette: Component<Props> = (props) => {
         </div>
         <div id={statusId} class="visually-hidden" role="status" aria-live="polite">
           {filteredCommands().length === 0
-            ? "No commands found"
+            ? (specialMessage() ?? "No commands found")
             : `${filteredCommands().length} command${filteredCommands().length === 1 ? "" : "s"} found. ${selectedCommand()?.label ?? ""} selected.`}
         </div>
         <div class="command-palette-footer">

@@ -283,6 +283,15 @@ button or shortcut that opened it. Pointer and touch activate the same command
 rows. Shortcut help states where each binding applies; in particular `?` does
 not take a literal question mark away from an input, editor or terminal.
 
+Opening the palette renders its static and already-cached commands immediately.
+Tasks, work items, and projects load independently, so one unavailable provider
+does not block navigation commands. Prefix a query with `#` to discover
+workspace project actions from manifests; that bounded scan is deferred until
+it is requested and reused on later openings. Prefix with `/`, `>`, or `@` for
+file, archived-output, or current-file symbol search. Closing or changing a
+special search cancels its obsolete request. Choose **Refresh Command Palette
+Data** when a write elsewhere makes a cached command list out of date.
+
 ## 5. When something is missing rather than broken
 
 Vogt is two processes, and each keeps working when the other does not. This is

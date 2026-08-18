@@ -210,6 +210,7 @@ async function req<T>(
   method: string,
   path: string,
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const res = await fetch(`${getBase()}${path}`, {
     method,
@@ -217,6 +218,7 @@ async function req<T>(
       body !== undefined ? { "Content-Type": "application/json" } : {},
     ),
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   });
   const text = await res.text();
   if (!res.ok) throw new ApiError(res.status, text);
@@ -522,8 +524,8 @@ export const api = {
       "GET",
       `/api/tree?path=${encodeURIComponent(path)}&depth=${depth}`,
     ),
-  readFile: (path: string) =>
-    req<FileRead>("GET", `/api/files?path=${encodeURIComponent(path)}`),
+  readFile: (path: string, signal?: AbortSignal) =>
+    req<FileRead>("GET", `/api/files?path=${encodeURIComponent(path)}`, undefined, signal),
   writeFile: (path: string, content: string, create_parents = false) =>
     req<WriteFileResponse>("PUT", "/api/files", {
       path,
@@ -564,15 +566,18 @@ export const api = {
       "GET",
       `/api/search?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`,
     ),
-  searchFiles: (q: string, path = "", max?: number) =>
+  searchFiles: (q: string, path = "", max?: number, signal?: AbortSignal) =>
     req<FileSearchResult[]>(
       "GET",
       `/api/search/files?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}${
         typeof max === "number" ? `&max=${max}` : ""
       }`,
+      undefined,
+      signal,
     ),
 
-  listAgentTasks: () => req<AgentTask[]>("GET", "/api/agent-tasks"),
+  listAgentTasks: (signal?: AbortSignal) =>
+    req<AgentTask[]>("GET", "/api/agent-tasks", undefined, signal),
   getAgentTask: (id: string) => req<AgentTask>("GET", `/api/agent-tasks/${id}`),
   createAgentTask: (task: AgentTaskUpsertRequest) =>
     req<AgentTask>("POST", "/api/agent-tasks", task),
