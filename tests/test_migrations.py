@@ -13,6 +13,7 @@ from vogt.storage.sqlite.connection import connect, split_statements
 from vogt.storage.sqlite.declared import MIGRATIONS_DIR as DECLARED_MIGRATIONS
 from vogt.storage.sqlite.declared import SqliteDeclaredStore
 from vogt.storage.sqlite.migrator import Migrator, load_migrations
+from vogt.storage.sqlite.observed import MIGRATIONS_DIR as OBSERVED_MIGRATIONS
 from vogt.storage.sqlite.observed import SqliteObservedStore
 
 from tests.conftest import TEST_PRINCIPAL, StepClock
@@ -23,6 +24,28 @@ NOW = datetime(2026, 8, 12, 5, 0, 0, tzinfo=UTC)
 #: "the newest one", so the upgrade this test covers stays the upgrade it
 #: covers after the next migration lands.
 SESSIONS_MIGRATION = 7
+
+# These are identities already delivered to instances, not an inventory that
+# must equal the directory forever. New migrations append after this prefix
+# without requiring an edit here. Renaming, removing, or reordering one of
+# these entries is unsafe because a deployed database records the full id.
+SHIPPED_DECLARED_MIGRATION_IDS = (
+    "0001_foundation",
+    "0002_work",
+    "0003_observed_first",
+    "0004_drift",
+    "0005_tokens",
+    "0006_writeback",
+    "0007_sessions",
+    "0008_superseded_drift",
+    "0009_inbox_triage",
+    "0010_session_model",
+)
+SHIPPED_OBSERVED_MIGRATION_IDS = (
+    "0001_foundation",
+    "0002_evidence",
+    "0003_inherited_dep_refs",
+)
 
 
 def _migrator(directory: Path, *, holder: str = "test/1") -> Migrator:
@@ -146,6 +169,37 @@ def test_duplicate_migration_numbers_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(MigrationError, match="duplicate migration number"):
         load_migrations(migrations)
+
+
+@pytest.mark.parametrize(
+    ("store", "directory", "shipped_ids"),
+    [
+        ("declared", DECLARED_MIGRATIONS, SHIPPED_DECLARED_MIGRATION_IDS),
+        ("observed", OBSERVED_MIGRATIONS, SHIPPED_OBSERVED_MIGRATION_IDS),
+    ],
+)
+def test_shipped_migration_ids_are_an_append_only_prefix(
+    store: str, directory: Path, shipped_ids: tuple[str, ...]
+) -> None:
+    """#56: an applied migration identity may never move or disappear.
+
+    The full filename stem is persisted in every instance. Comparing only the
+    numeric schema version misses a rename, while exact equality would make a
+    safe append fail until somebody edited this list. A prefix assertion pins
+    what has shipped and permits only the forward operation.
+    """
+    available_ids = tuple(migration.id for migration in load_migrations(directory))
+
+    for position, shipped_id in enumerate(shipped_ids):
+        actual_id = (
+            available_ids[position] if position < len(available_ids) else "<missing>"
+        )
+        assert actual_id == shipped_id, (
+            f"{store} migration {shipped_id!r} shipped at position "
+            f"{position + 1} but is now {actual_id!r}; applied migration ids "
+            "are forward-only, so restore the shipped id and append a new "
+            "migration instead"
+        )
 
 
 def test_split_statements_ignores_comments_and_strings() -> None:
