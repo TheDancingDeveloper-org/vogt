@@ -32,6 +32,7 @@ import { setToken } from "../api";
 import { replaceTabs, tabsStore } from "../tabs";
 import {
   fakeVogt,
+  INBOX_RESULT,
   stopLiveStream,
   workItem,
   type FakeVogt,
@@ -162,7 +163,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     expect(container.querySelector(".tab-strip")).toBeNull();
     expect(
       [...container.querySelectorAll<HTMLElement>(".places-nav a")].map(
-        (link) => [link.textContent, link.getAttribute("href")],
+        (link) => [link.querySelector("span")?.textContent ?? link.textContent, link.getAttribute("href")],
       ),
     ).toEqual([
       ["Board", "#/board"],
@@ -256,6 +257,99 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     await surface(container, ".vogt-surface.vogt-backlog");
     expect(tabLabels(container)).toEqual([]);
     expect(container.querySelector(".tab-strip")).toBeNull();
+  });
+});
+
+describe("shared live steering", () => {
+  it("labels desktop and phone counts, then refreshes them from the live stream", async () => {
+    const { container, vogt } = mountShell("/sessions", {
+      sessions: [
+        SESSION,
+        { ...SESSION, id: "eng-wait", name: "needs-answer", activity: "waiting-for-input" },
+      ],
+      vogt: {
+        "GET /inbox": { body: { ...INBOX_RESULT, counts: { active: 0 } } },
+        "GET /projects": { status: 503, body: { error: { message: "projects offline" } } },
+        "GET /work": { body: { items: [], total: 12 } },
+        "GET /backlog": {
+          body: { items: [], total_considered: 7, freshness: { status: "fresh", collectors: {} } },
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="1 sessions waiting for input"]')).toBeTruthy();
+      expect(container.querySelector('[aria-label="0 active Inbox entries"]')).toBeTruthy();
+      expect(container.querySelector('[aria-label="Projects unavailable"]')).toBeTruthy();
+      expect(container.querySelector('.phone-bottom-nav [aria-label="12 Board work items"]')).toBeTruthy();
+      expect(container.querySelector('.phone-bottom-nav [aria-label="7 Backlog candidates"]')).toBeTruthy();
+      expect(container.querySelector('.places-section-label [aria-label="2 running sessions"]')).toBeTruthy();
+      expect(container.querySelectorAll(".session-row.waiting")).toHaveLength(1);
+      expect(container.querySelector(".rail-connection.connected .rail-connection-dot")).toBeTruthy();
+    });
+
+    await vogt.stream.opened();
+    vogt.route("GET /inbox", {
+      body: { ...INBOX_RESULT, counts: { active: 3 } },
+    });
+    vogt.stream.changed();
+    await waitFor(() =>
+      expect(container.querySelector('[aria-label="3 active Inbox entries"]')).toBeTruthy(),
+    );
+  });
+
+  it("keeps the last session values stale when a refresh goes offline", async () => {
+    const { container } = mountShell("/sessions", {
+      engine: {
+        "GET /api/sessions": {
+          status: 503,
+          body: { error: "session service offline" },
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('.places-nav .place-count[data-state="stale"]')).toBeTruthy();
+      expect(container.querySelector('.places-section-label .place-count[data-state="stale"]')).toBeTruthy();
+      expect(container.querySelector(".rail-connection.offline .rail-connection-dot")).toBeTruthy();
+      expect(container.textContent).toContain("Offline");
+    });
+  });
+
+  it("opens, bookmarks, and closes a session entirely from the keyboard", async () => {
+    const { container } = mountShell("/sessions", {
+      sessions: [SESSION],
+      engine: {
+        "POST /api/sessions/eng-1/kill": { body: { ok: true } },
+        "DELETE /api/sessions/eng-1": { body: { ok: true } },
+      },
+    });
+    const row = await waitFor(() => {
+      const found = container.querySelector<HTMLElement>('.session-row[role="link"]');
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    row.focus();
+    row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await waitFor(() => expect(tabsStore.active).toBe("term:eng-1"));
+
+    const bookmark = container.querySelector<HTMLButtonElement>('[aria-label="Bookmark alpha-build"]');
+    expect(bookmark).toBeTruthy();
+    bookmark!.focus();
+    bookmark!.click();
+    expect(container.querySelector('[aria-label="Remove bookmark from alpha-build"]')).toBeTruthy();
+
+    const close = container.querySelector<HTMLButtonElement>('[aria-label="Close alpha-build"]');
+    close!.focus();
+    close!.click();
+    const confirm = await waitFor(() => {
+      const found = [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent?.trim() === "Confirm");
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    confirm.click();
+    await waitFor(() => expect(container.querySelector('.session-row[role="link"]')).toBeNull());
   });
 });
 

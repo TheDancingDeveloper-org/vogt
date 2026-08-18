@@ -53,6 +53,14 @@ const liveSession = {
   created_at: "2026-08-18T08:00:00Z",
 };
 
+interface PlaceMetricFixtures {
+  sessionsUnavailable?: boolean;
+  inboxActive?: number;
+  projectsTotal?: number | null;
+  boardTotal?: number | null;
+  backlogTotal?: number | null;
+}
+
 async function installFixtures(
   page: Page,
   config: Record<string, unknown> = {},
@@ -61,7 +69,16 @@ async function installFixtures(
     { name: "src", path: "src", is_dir: true },
     { name: "an-identifiable-long-filename.tsx", path: "src/an-identifiable-long-filename.tsx", is_dir: false },
   ],
+  metricOverrides: PlaceMetricFixtures = {},
 ) {
+  const metrics = {
+    sessionsUnavailable: false,
+    inboxActive: 1,
+    projectsTotal: 1,
+    boardTotal: 1,
+    backlogTotal: 1,
+    ...metricOverrides,
+  };
   let inboxCalls = 0;
   const sessions = [...initialSessions];
   let createdSessions = 0;
@@ -108,6 +125,9 @@ async function installFixtures(
       sessions.push(session);
       return route.fulfill({ json: session });
     }
+    if (metrics.sessionsUnavailable) {
+      return route.fulfill({ status: 503, body: "sessions unavailable" });
+    }
     return route.fulfill({ json: sessions });
   });
   await page.route("**/api/sessions/*/kill", async (route) =>
@@ -144,7 +164,10 @@ async function installFixtures(
     const url = new URL(request.url());
     if (url.pathname.endsWith("/inbox")) {
       inboxCalls += 1;
-      return route.fulfill({ json: inboxResult() });
+      return route.fulfill({ json: {
+        ...inboxResult(),
+        counts: { active: metrics.inboxActive, archived: 0, snoozed: 0 },
+      } });
     }
     if (url.pathname.endsWith("/inbox/archive")) {
       return route.fulfill({ json: { entry: { ...inboxEntry, triage_state: "archived" } } });
@@ -152,11 +175,25 @@ async function installFixtures(
     if (url.pathname.endsWith("/workflows")) {
       return route.fulfill({ json: { workflows: [{ kind: "feature", initial_state: "open", states: ["open", "done"], transitions: { open: ["done"], done: [] } }] } });
     }
-    if (url.pathname.endsWith("/work")) return route.fulfill({ json: { items: boardItems, total: 1, freshness: { status: "fresh" } } });
-    if (url.pathname.endsWith("/projects")) return route.fulfill({ json: {
+    if (url.pathname.endsWith("/work")) {
+      if (metrics.boardTotal === null) return route.fulfill({ status: 503, body: "work unavailable" });
+      return route.fulfill({ json: { items: boardItems, total: metrics.boardTotal, freshness: { status: "fresh" } } });
+    }
+    if (url.pathname.endsWith("/backlog")) {
+      if (metrics.backlogTotal === null) return route.fulfill({ status: 503, body: "backlog unavailable" });
+      return route.fulfill({ json: {
+        items: boardItems,
+        total_considered: metrics.backlogTotal,
+        freshness: { status: "fresh", collectors: {} },
+      } });
+    }
+    if (url.pathname.endsWith("/projects")) {
+      if (metrics.projectsTotal === null) return route.fulfill({ status: 503, body: "projects unavailable" });
+      return route.fulfill({ json: {
       projects: [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }],
-      total: 1,
-    } });
+      total: metrics.projectsTotal,
+      } });
+    }
     if (url.pathname.endsWith("/labels")) return route.fulfill({ json: { labels: [] } });
     if (url.pathname.endsWith("/initiatives")) return route.fulfill({ json: { initiatives: [] } });
     if (url.pathname.endsWith("/actors")) return route.fulfill({ json: { actors: [] } });
@@ -277,7 +314,7 @@ test("Phone shell keeps labelled primary navigation and Go to reachability", asy
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/#/sessions");
   await expect(page.getByRole("navigation", { name: "Primary navigation" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Inbox" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Inbox/ })).toBeVisible();
   await expect(page.getByRole("button", { name: "Go to…" })).toBeVisible();
   await page.getByRole("button", { name: "Go to…" }).click();
   const palette = page.getByRole("dialog", { name: "Command palette" });
@@ -299,6 +336,109 @@ test("Phone shell keeps labelled primary navigation and Go to reachability", asy
   await page.getByRole("combobox", { name: "Search commands" }).fill("Open Audit");
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/#\/audit$/);
+});
+
+test("Places counts expose live workload meaning without overflowing the phone bar", async ({ page }) => {
+  const waitingSession = {
+    ...liveSession,
+    id: "waiting-session",
+    name: "needs-attention",
+    activity: "waiting-for-input",
+  };
+  await installFixtures(page, {}, [liveSession, waitingSession], undefined, {
+    inboxActive: 12_345,
+    projectsTotal: 23_456,
+    boardTotal: 34_567,
+    backlogTotal: 45_678,
+  });
+  if (test.info().project.name === "phone") {
+    await page.setViewportSize({ width: 320, height: 700 });
+  }
+  await page.goto("/#/sessions");
+
+  if (test.info().project.name === "phone") {
+    const nav = page.getByRole("navigation", { name: "Primary navigation" });
+    await expect(nav.getByLabel(/2 sessions/)).toHaveText("2");
+    await expect(nav.getByLabel(/12345 active Inbox entries/)).toHaveText("999+");
+    await expect(nav.getByLabel(/34567 Board work items/)).toHaveText("999+");
+    await expect(nav.getByLabel(/45678 Backlog candidates/)).toHaveText("999+");
+    const geometry = await nav.evaluate((element) => ({
+      left: element.getBoundingClientRect().left,
+      right: element.getBoundingClientRect().right,
+      viewport: document.documentElement.clientWidth,
+      overflow: element.scrollWidth - element.clientWidth,
+    }));
+    expect(geometry.left).toBeGreaterThanOrEqual(0);
+    expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
+    expect(geometry.overflow).toBeLessThanOrEqual(0);
+  } else {
+    await expect(page.locator('.places-nav [aria-label="12345 active Inbox entries"]')).toBeVisible();
+    await expect(page.locator('.places-nav [aria-label="23456 Projects"]')).toBeVisible();
+    await expect(page.locator('.places-nav [aria-label^="1 sessions waiting for input"]')).toBeVisible();
+    await expect(page.locator('.places-section-label [aria-label^="2 running sessions"]')).toBeVisible();
+    await expect(page.locator(".session-row.waiting")).toContainText("needs-attention");
+  }
+});
+
+test("Places counts distinguish real zero from an unavailable provider", async ({ page }) => {
+  await installFixtures(page, {}, [], undefined, {
+    sessionsUnavailable: true,
+    inboxActive: 0,
+    projectsTotal: null,
+    boardTotal: 0,
+    backlogTotal: null,
+  });
+  await page.goto("/#/sessions");
+
+  if (test.info().project.name === "phone") {
+    const nav = page.getByRole("navigation", { name: "Primary navigation" });
+    await expect(nav.getByLabel("sessions unavailable")).toHaveText("—");
+    await expect(nav.getByLabel("0 active Inbox entries")).toHaveText("0");
+    await expect(nav.getByLabel("0 Board work items")).toHaveText("0");
+    await expect(nav.getByLabel("Backlog candidates unavailable")).toHaveText("—");
+  } else {
+    await expect(page.locator('.places-nav [aria-label="0 active Inbox entries"]')).toHaveText("0");
+    await expect(page.locator('.places-nav [aria-label="Projects unavailable"]')).toHaveText("—");
+    await expect(page.locator('.places-nav [aria-label="sessions waiting for input unavailable"]')).toHaveText("—");
+    await expect(page.locator('.places-section-label [aria-label="running sessions unavailable"]')).toHaveText("—");
+  }
+});
+
+test("Desktop session rows open, bookmark, and close entirely from the keyboard", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The desktop Places rail owns session rows");
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({
+      type: "snapshot-start",
+      scrollback_bytes: 0,
+      scrollback_pos: 0,
+    }));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/sessions");
+
+  const row = page.locator('.session-row[role="link"]', { hasText: "browser-session" });
+  await row.focus();
+  await expect(row).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page).toHaveURL(/#\/t\/browser-session$/);
+
+  const bookmark = page.getByRole("button", { name: "Bookmark browser-session" });
+  await bookmark.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", {
+    name: "Remove bookmark from browser-session",
+  })).toBeFocused();
+  await expect(page).toHaveURL(/#\/t\/browser-session$/);
+
+  const close = page.getByRole("button", { name: "Close browser-session" });
+  await close.focus();
+  await page.keyboard.press("Enter");
+  const confirm = page.getByRole("dialog").getByRole("button", { name: "Confirm" });
+  await confirm.focus();
+  await page.keyboard.press("Enter");
+  await expect(row).toHaveCount(0);
 });
 
 test("Global shortcut help works outside editable surfaces and returns focus", async ({ page }) => {
@@ -622,7 +762,7 @@ test("Route truth owns unavailable links, current navigation and Settings return
 
   const phone = test.info().project.name === "phone";
   const currentNavigation = phone ? page.locator('.phone-bottom-nav a[aria-current="page"]') : page.locator('.places-nav a[aria-current="page"]');
-  await expect(currentNavigation).toHaveText("Board");
+  await expect(currentNavigation).toContainText("Board");
   await expect(page.getByRole("link", { name: "GUI stream" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Go to…" }).click();
@@ -637,7 +777,7 @@ test("Route truth owns unavailable links, current navigation and Settings return
       .click();
   } else await page.getByRole("button", { name: "Settings" }).click();
   await expect(page).toHaveURL(/#\/settings$/);
-  await expect(currentNavigation).toHaveText("Board");
+  await expect(currentNavigation).toContainText("Board");
   await page.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: "Cancel" }).click();
   await expect(page).toHaveURL(/#\/board\?project=vogt$/);
 
@@ -653,7 +793,7 @@ test("Route truth owns unavailable links, current navigation and Settings return
   if (phone) {
     await expect(page.locator('.phone-bottom-nav a[aria-current="page"]')).toContainText("Sessions");
   } else {
-    await expect(page.locator('.places-nav a[aria-current="page"]')).toHaveText("History");
+    await expect(page.locator('.places-nav a[aria-current="page"]')).toContainText("History");
   }
   await expect(page.getByRole("navigation", { name: "Session tools" }).getByRole("link", { name: "History" }))
     .toHaveAttribute("aria-current", "page");
@@ -1068,7 +1208,7 @@ test("dirty Agent Task drafts guard navigation and browser exit", async ({ page 
     return event.defaultPrevented;
   })).toBe(true);
 
-  await page.getByRole("link", { name: "Board", exact: true }).click();
+  await page.getByRole("link", { name: /Board/ }).click();
   await expect(page.getByRole("dialog", {
     name: "Leave Agent Tasks with an unsaved draft?",
   })).toBeVisible();
@@ -1087,7 +1227,7 @@ test("dirty Agent Task drafts guard navigation and browser exit", async ({ page 
   await page.getByRole("button", { name: "Stay here" }).click();
   await expect(name).toHaveValue("Protected browser draft");
 
-  await page.getByRole("link", { name: "Board", exact: true }).click();
+  await page.getByRole("link", { name: /Board/ }).click();
   await page.getByRole("button", { name: "Discard draft", exact: true }).click();
   await expect(page).toHaveURL(/#\/board$/);
   await expect.poll(() => page.evaluate(() => {
