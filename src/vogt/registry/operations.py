@@ -23,6 +23,8 @@ from vogt.application.models import (
     BacklogResult,
     BackupParams,
     BackupResult,
+    BoardListParams,
+    BoardListResult,
     BugsParams,
     CommentParams,
     CommentResult,
@@ -320,6 +322,19 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.list_work,
             route=HttpRoute("GET", "/work"),
             cli=CliBinding(("work", "list")),
+        ),
+        Operation(
+            name="board.list",
+            summary="Read bounded, independently pageable Board cells in one snapshot.",
+            scope="read",
+            mutating=False,
+            params_model=BoardListParams,
+            result_model=BoardListResult,
+            handler=services.list_board,
+            # A structured cell batch belongs in a body even though the
+            # operation is read-only; adapters still derive it from here.
+            route=HttpRoute("POST", "/board/list"),
+            cli=CliBinding(("board", "list")),
         ),
         Operation(
             name="work.update",

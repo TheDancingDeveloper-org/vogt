@@ -933,7 +933,7 @@ describe("FR-U13 — a swimlane is a grouping, not a filter value", () => {
     const vogt = fakeVogt(LANED);
     const view = board("/board?lanes=project");
     await waitFor(() => expect(laneLabels(view.container)).toContain("Alpha"));
-    const loads = vogt.matching("GET /work").length;
+    const loads = vogt.matching("POST /board/list").length;
 
     const field = [...view.container.querySelectorAll<HTMLElement>(".board-field")].find(
       (node) => node.querySelector("span")?.textContent === "Swimlanes",
@@ -947,7 +947,7 @@ describe("FR-U13 — a swimlane is a grouping, not a filter value", () => {
     expect(cardsInLane(view.container, "The merge").sort()).toEqual(["WI-1", "WI-3"]);
     expect(cardsInLane(view.container, "The phone")).toEqual(["WI-2"]);
     expect(cardsInLane(view.container, "No initiative")).toEqual(["WI-4"]);
-    expect(vogt.matching("GET /work")).toHaveLength(loads);
+    expect(vogt.matching("POST /board/list").length).toBeGreaterThan(loads);
   });
 });
 
@@ -976,18 +976,32 @@ describe("FR-U13 — the per-column WIP count is what is in the column", () => {
   it("marks the count a floor when the board did not load the whole estate", async () => {
     fakeVogt({
       ...LANED,
-      "GET /work": {
+      "POST /board/list": {
         body: {
-          items: [workItem({ ref: "WI-1", project_slug: "alpha", state: "open" })],
+          cells: [
+            { lane_key: "alpha", state: "open", items: [workItem({ ref: "WI-1", project_slug: "alpha", state: "open" })], total: 900 },
+            { lane_key: "alpha", state: "in_progress", items: [], total: 0 },
+            { lane_key: "alpha", state: "done", items: [], total: 0 },
+            { lane_key: "alpha", state: "wont_do", items: [], total: 0 },
+            { lane_key: "", state: "open", items: [], total: 0 },
+            { lane_key: "", state: "in_progress", items: [], total: 0 },
+            { lane_key: "", state: "done", items: [], total: 0 },
+            { lane_key: "", state: "wont_do", items: [], total: 0 },
+          ],
+          column_totals: { open: 900 },
+          lane_totals: { alpha: 900 },
           total: 900,
+          snapshot: "large-board",
+          snapshot_at: "2026-08-17T10:01:00Z",
+          revision: 1,
         },
       },
     });
     const { container } = board("/board?lanes=project");
 
-    // "1+", not "1": a WIP number a reader trusts as a total while the board
-    // holds one page of nine hundred is the count lying quietly.
-    await waitFor(() => expect(wipOf(container, "open")).toBe("1+"));
+    // Bounded Board reads return exact server-owned totals, even when only one
+    // card is in the initial cell page.
+    await waitFor(() => expect(wipOf(container, "open")).toBe("900"));
   });
 });
 
@@ -1059,6 +1073,10 @@ describe("FR-U13 — lanes and columns collapse, and the layout is this client's
 
     // Per client means per client: a layout preference is not an estate
     // write, and nothing about it was sent to Vogt at all.
-    expect(vogt.calls.filter((call) => call.method !== "GET")).toEqual([]);
+    expect(
+      vogt.calls.filter(
+        (call) => call.method !== "GET" && call.path !== "/board/list",
+      ),
+    ).toEqual([]);
   });
 });

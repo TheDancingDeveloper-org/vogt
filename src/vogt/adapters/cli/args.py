@@ -9,6 +9,7 @@ mechanical half of "nothing is CLI-only, nothing is missing from the CLI"
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import UnionType
@@ -53,7 +54,14 @@ def spec_for(name: str, field: FieldInfo) -> ArgSpec:
         choices = tuple(str(arg) for arg in get_args(annotation))
     elif origin in (list, tuple):
         is_list = True
-        kind = str
+        element = get_args(annotation)[0] if get_args(annotation) else str
+        # Structured batched reads remain usable from the generated CLI:
+        # repeat `--cells '{"lane_key":"","state":"open"}'`.
+        kind = (
+            json.loads
+            if isinstance(element, type) and issubclass(element, BaseModel)
+            else str
+        )
     elif annotation is bool:
         kind = bool
     elif annotation is int:

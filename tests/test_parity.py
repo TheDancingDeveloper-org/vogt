@@ -137,6 +137,18 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ),
     ("work.get", {"ref": "WI-1"}),
     ("work.list", {"project": "parity-project"}),
+    (
+        "board.list",
+        {
+            "project": "parity-project",
+            "lane_mode": "none",
+            "cells": [
+                {"lane_key": "", "state": "open"},
+                {"lane_key": "", "state": "in_progress"},
+            ],
+            "page_size": 1,
+        },
+    ),
     ("work.update", {"ref": "WI-1", "priority": "p0", "reason": WHY}),
     (
         "work.relate",
@@ -468,7 +480,10 @@ def _argv_for(operation: Operation[Any, Any], params: dict[str, Any]) -> list[st
             argv.append(flag if value else f"--no-{key.replace('_', '-')}")
         elif isinstance(value, list):
             for entry in value:
-                argv += [flag, str(entry)]
+                argv += [
+                    flag,
+                    json.dumps(entry) if isinstance(entry, dict) else str(entry),
+                ]
         else:
             argv += [flag, str(value)]
     return argv

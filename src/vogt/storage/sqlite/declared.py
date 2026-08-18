@@ -44,6 +44,7 @@ from vogt.core.workflow import TERMINAL_STATES, Workflow, default_workflow
 from vogt.errors import AlreadyInitialized, NotFound, NotInitialized
 from vogt.storage.interface import (
     Blocker,
+    BoardCellQuery,
     BootstrapResult,
     Counts,
     MigrationReport,
@@ -368,8 +369,13 @@ class SqliteDeclaredStore:
     def read(self) -> Iterator[SqliteReadView]:
         conn = self._open_initialized()
         try:
+            # A ReadView promises one consistent snapshot. SQLite otherwise
+            # starts and ends a read transaction around each SELECT, which
+            # would let a count and its following page observe two revisions.
+            conn.execute("BEGIN")
             yield SqliteReadView(conn)
         finally:
+            _rollback_quietly(conn)
             conn.close()
 
     @contextmanager
@@ -514,6 +520,85 @@ class SqliteReadView:
             f"SELECT COUNT(*) AS n {_WORK_JOINS} {where}", tuple(params)
         ).fetchone()
         return int(row["n"])
+
+    def board_high_water(self, work_filter: WorkFilter) -> tuple[datetime, str] | None:
+        """Newest stable work key in this filtered Board snapshot."""
+        where, params = _work_where(work_filter)
+        row = self._conn.execute(
+            f"SELECT w.created_at, w.ref {_WORK_JOINS} {where} "
+            "ORDER BY w.created_at DESC, w.ref DESC LIMIT 1",
+            tuple(params),
+        ).fetchone()
+        if row is None:
+            return None
+        return from_iso(str(row["created_at"])), str(row["ref"])
+
+    def board_counts(
+        self,
+        work_filter: WorkFilter,
+        *,
+        lane_mode: str,
+        high_water: tuple[datetime, str] | None,
+    ) -> dict[tuple[str, str], int]:
+        """Exact cell totals, grouped in one query under the snapshot bound."""
+        if high_water is None:
+            return {}
+        where, params = _work_where(work_filter)
+        where, params = _with_board_high_water(where, params, high_water)
+        lane = _board_lane_expression(lane_mode)
+        rows = self._conn.execute(
+            f"SELECT {lane} AS board_lane, w.state, COUNT(*) AS n "
+            f"{_WORK_JOINS} {where} GROUP BY {lane}, w.state",
+            tuple(params),
+        ).fetchall()
+        return {
+            (str(row["board_lane"]), str(row["state"])): int(row["n"]) for row in rows
+        }
+
+    def board_work_items(
+        self,
+        work_filter: WorkFilter,
+        *,
+        lane_mode: str,
+        cells: tuple[BoardCellQuery, ...],
+        high_water: tuple[datetime, str] | None,
+        limit: int,
+    ) -> dict[tuple[str, str], list[WorkItem]]:
+        """Read bounded pages for all requested cells in one SQL query."""
+        result: dict[tuple[str, str], list[WorkItem]] = {
+            (cell.lane_key, cell.state): [] for cell in cells
+        }
+        if not cells or high_water is None:
+            return result
+
+        where, params = _work_where(work_filter)
+        where, params = _with_board_high_water(where, params, high_water)
+        lane = _board_lane_expression(lane_mode)
+        requested: list[str] = []
+        for cell in cells:
+            clause = [f"{lane} = ?", "w.state = ?"]
+            params.extend((cell.lane_key, cell.state))
+            if cell.after_created_at is not None and cell.after_ref is not None:
+                clause.append("(w.created_at > ? OR (w.created_at = ? AND w.ref > ?))")
+                moment = to_iso(cell.after_created_at)
+                params.extend((moment, moment, cell.after_ref))
+            requested.append(f"({' AND '.join(clause)})")
+        where = _append_where(where, f"({' OR '.join(requested)})")
+
+        rows = self._conn.execute(
+            "WITH requested AS ("
+            f"SELECT {_WORK_COLUMNS}, {lane} AS board_lane, "
+            "ROW_NUMBER() OVER ("
+            f"PARTITION BY {lane}, w.state ORDER BY w.created_at, w.ref"
+            f") AS board_row {_WORK_JOINS} {where}"
+            ") SELECT * FROM requested WHERE board_row <= ? "
+            "ORDER BY board_lane, state, created_at, ref",
+            (*params, limit),
+        ).fetchall()
+        hydrated = self._hydrate(rows)
+        for row, item in zip(rows, hydrated, strict=True):
+            result[(str(row["board_lane"]), item.state)].append(item)
+        return result
 
     def blocking_fan_out(self, work_item_ids: list[str]) -> dict[str, int]:
         if not work_item_ids:
@@ -1611,6 +1696,38 @@ def _work_where(work_filter: WorkFilter) -> tuple[str, list[object]]:
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, params
+
+
+def _append_where(where: str, clause: str) -> str:
+    """Append one backend-owned predicate to a shared work filter."""
+    return f"{where} AND {clause}" if where else f"WHERE {clause}"
+
+
+def _with_board_high_water(
+    where: str,
+    params: list[object],
+    high_water: tuple[datetime, str],
+) -> tuple[str, list[object]]:
+    moment = to_iso(high_water[0])
+    return (
+        _append_where(
+            where,
+            "(w.created_at < ? OR (w.created_at = ? AND w.ref <= ?))",
+        ),
+        [*params, moment, moment, high_water[1]],
+    )
+
+
+def _board_lane_expression(lane_mode: str) -> str:
+    """SQL lane expression selected only from the closed application enum."""
+    if lane_mode == "none":
+        return "''"
+    if lane_mode == "project":
+        return "COALESCE(p.slug, '')"
+    if lane_mode == "initiative":
+        return "COALESCE(w.initiative_id, '')"
+    msg = f"unknown Board lane mode: {lane_mode}"
+    raise ValueError(msg)
 
 
 def _audit_bound(moment: datetime | None) -> str | None:

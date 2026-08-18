@@ -526,6 +526,14 @@ describe("NFR-S5 — the filter and drag paths do not degrade with backlog size"
     const vogt = fakeVogt({
       "GET /workflows": { body: { workflows: [chain("feature", states)] } },
       "GET /work": { body: { items: small, total: small.length } },
+      "GET /projects": {
+        body: {
+          projects: Array.from({ length: 20 }, (_, index) => ({
+            slug: `p${index}`,
+            name: `Project ${index}`,
+          })),
+        },
+      },
     });
     const reads = stateReads();
 

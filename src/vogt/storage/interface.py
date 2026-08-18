@@ -98,6 +98,16 @@ class WorkFilter:
 
 
 @dataclass(frozen=True)
+class BoardCellQuery:
+    """One independently continued Board cell inside a batched read."""
+
+    lane_key: str
+    state: str
+    after_created_at: datetime | None = None
+    after_ref: str | None = None
+
+
+@dataclass(frozen=True)
 class Blocker:
     """An unfinished `depends_on` target, named so a rejection can list it."""
 
@@ -176,6 +186,28 @@ class ReadView(Protocol):
     def list_work_items(self, work_filter: WorkFilter) -> list[WorkItem]: ...
 
     def count_work_items(self, work_filter: WorkFilter) -> int: ...
+
+    def board_high_water(
+        self, work_filter: WorkFilter
+    ) -> tuple[datetime, str] | None: ...
+
+    def board_counts(
+        self,
+        work_filter: WorkFilter,
+        *,
+        lane_mode: str,
+        high_water: tuple[datetime, str] | None,
+    ) -> dict[tuple[str, str], int]: ...
+
+    def board_work_items(
+        self,
+        work_filter: WorkFilter,
+        *,
+        lane_mode: str,
+        cells: tuple[BoardCellQuery, ...],
+        high_water: tuple[datetime, str] | None,
+        limit: int,
+    ) -> dict[tuple[str, str], list[WorkItem]]: ...
 
     def blocking_fan_out(self, work_item_ids: list[str]) -> dict[str, int]:
         """How many items declare `depends_on` each of these."""

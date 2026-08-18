@@ -32,6 +32,7 @@ export const ROUTES = {
   "project.brief": "/projects/brief",
   "project.import": "/projects/import",
   "work.list": "/work",
+  "board.list": "/board/list",
   "work.get": "/work/get",
   "work.create": "/work",
   "work.transition": "/work/transition",
@@ -220,6 +221,30 @@ export interface WorkItem {
   relations?: { kind: string; related_id: string }[];
   created_at: string;
   updated_at: string;
+}
+
+export interface BoardCellRequest {
+  lane_key: string;
+  state: string;
+  cursor?: string;
+}
+
+export interface BoardCellPage {
+  lane_key: string;
+  state: string;
+  items: WorkItem[];
+  total: number;
+  next_cursor?: string | null;
+}
+
+export interface BoardListResult {
+  cells: BoardCellPage[];
+  column_totals: Record<string, number>;
+  lane_totals: Record<string, number>;
+  total: number;
+  snapshot: string;
+  snapshot_at: string;
+  revision: number;
 }
 
 export interface RankedEntry {
@@ -505,6 +530,9 @@ export const listWork = (
   params: Record<string, unknown> = {},
   signal?: AbortSignal,
 ) => call<{ items: WorkItem[]; total?: number }>("work.list", params, "GET", signal);
+
+export const listBoard = (params: Record<string, unknown>, signal?: AbortSignal) =>
+  call<BoardListResult>("board.list", params, "POST", signal);
 
 export const getWork = (ref: string) => call<WorkDetail>("work.get", { ref });
 
