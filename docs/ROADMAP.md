@@ -64,9 +64,9 @@ operation the stage added.
 | M7 | Onboarding & inbox *(post-v1)* | Import a repository from GitHub; collect its notifications | FR-P6, FR-P7, FR-S8, FR-O8, FR-N3, FR-U3 |
 | M8 | Reachable by an agent *(post-v1)* | `connect`, and the five estate prerequisites behind it | FR-A8; `DEPLOYMENT.md` §7 (1–5) |
 | M9 | Foundations *(v2)* | One repo, one stack, one published port; both halves' CI green | NFR-D11, NFR-D12, NFR-C6, NFR-Q6, FR-U9 |
-| M10 | Coding sessions *(v2, merge-MVP)* | A work item can open a session in its project's tree | FR-E1–E5, FR-E8, FR-E9, FR-S9, FR-S10 |
+| M10 | Coding sessions *(v2, merge-MVP)* | A work item can open a session in its project's tree | FR-E1–E5, FR-E8, FR-E9, FR-S9, FR-S10; *(r18)* FR-E12 |
 | M11 | GUI uplift *(v2, restructure)* | The Solid PWA becomes the single front end, then gains places, Inbox, and measured high-volume surfaces | FR-N4–N5, FR-U4–U8, FR-U10–U25, NFR-S5 |
-| M12 | AI layer & voice *(v2, restructure)* | The assistant learns the Vogt domain; voice is validated rather than assumed; the existing gate is presented consistently | FR-T1–T4, FR-T6, FR-T8; FR-T5 validated, FR-T7 attempted; *(r16)* FR-T9–T13 and FR-M6 via the POC in `VOICE_POC.md` |
+| M12 | AI layer & voice *(v2, restructure)* | The assistant learns the Vogt domain; voice is validated rather than assumed; the existing gate is presented consistently | FR-T1–T4, FR-T6, FR-T8; FR-T5 validated, FR-T7 attempted; *(r16)* FR-T9–T13 and FR-M6 via the POC in `VOICE_POC.md`; *(r18)* FR-T14 |
 | M13 | Mobile MVP1 *(v2, restructure)* | The phone is a first-class, sessions-first surface | FR-M1–M5, FR-E6, FR-E7 |
 | M14 | Consolidation *(ongoing)* | Old stacks retired, names settled, r9 verified against the build | NFR-I6 (unclaimed by any other stage) |
 

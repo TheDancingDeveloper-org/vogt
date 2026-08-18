@@ -1,6 +1,6 @@
 # Vogt — Requirements (v0.3)
 
-Status: **baseline, revision r15** (2026-08-17), distilled from `DESIGN.md`,
+Status: **baseline, revision r18** (2026-08-18), distilled from `DESIGN.md`,
 `SCHEMA.md`, `DEPLOYMENT.md`, [`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md) and
 the originating product discussion.
 **v1 (M0–M6) is built**; §5 is the requirement-by-requirement verification
@@ -948,6 +948,93 @@ not rediscovered as defects:
 
 ---
 
+### Revision r18 — an interaction nobody can replay is an interaction nobody can audit
+
+*2026-08-18. Two durable logs are named: every assistant/voice interaction in
+both directions, and every TTY session's full byte stream at a 60-day default
+horizon. Neither is delivered. Both are audit requirements, and both close a
+gap where this product currently keeps less evidence about itself than it
+demands of the estate it governs.*
+
+This register has spent three revisions on the cost of two records disagreeing
+with nothing watching — FR-R6's proposals that outlived their cause, FR-R7's
+work item done while its issue stayed open, r17's whole sweep for zeros that
+could not say which zero they were. r18 names a plainer version of the same
+problem: **an interaction that leaves no record at all.** There is nothing to
+reconcile, because there is nothing.
+
+Two gaps, both confirmed against `dev` at `8b19ecb` rather than assumed:
+
+1. **The assistant's transcript is in-memory and singular.**
+   `engine/server/src/assistant.rs` holds one `Conversation`
+   (`assistant.rs:190`) behind a mutex, with no persistence primitive anywhere
+   in the file. It does not survive a restart, it is not per-actor, and
+   `history()` hands back a clone of a `Vec` that the next process will not
+   have. FR-T3 audits the *write* an assistant caused; nothing records the
+   conversation that caused it, and a conversation that caused no write —
+   which includes every refusal, every expired pending action, and every
+   question a person asked and acted on themselves — leaves no trace whatever.
+2. **The session log is output-only, optional, and its retention horizon is
+   whatever the last caller passed.** `pty.rs:390` appends the PTY's output
+   stream to a per-session file; `write_input` (`pty.rs:142`) records nothing,
+   so the log cannot answer what a person typed. `history` is
+   `Option<Arc<SessionHistory>>` (`app.rs:52`) and construction failure
+   degrades to no recording at all. `cleanup_old_sessions(retention_days)` is
+   reachable from exactly one place — an on-demand endpoint that takes the
+   number from the request body (`history_api.rs:187`) — so there is no
+   configured default, no schedule, and nothing runs if nobody calls.
+
+Three things this revision decides, so the build does not re-litigate them:
+
+1. **Audio is still not stored.** FR-T12's rule — *"Audio is not stored unless
+   a debug flag says so"* — is unchanged, and FR-T14 is deliberately a log of
+   text and structure: recognised utterance, repaired utterance, composed
+   request, reply, tool calls, tool results, pending actions and their
+   outcomes. A voice interaction is fully reconstructable from that without
+   retaining a recording of somebody's voice, which is a different class of
+   data with a different cost and a different conversation attached to it.
+2. **The TTY log records input, and that means it records secrets.** A log
+   that cannot say what was typed cannot answer the question it exists for, so
+   FR-E12 captures both directions. The consequence is named in the
+   requirement rather than discovered later: FR-S7 and FR-S8 keep credentials
+   out of argv, out of URLs and out of a clone's own configuration, and this
+   log reintroduces them somewhere new — a pasted token, a password at a
+   prompt that does not echo. The requirement therefore makes the log a
+   scope-gated read like the audit log and makes its horizon a **maximum**
+   rather than a floor. Redaction at non-echoing prompts was considered and
+   deliberately not required: the echo bit is a heuristic, and a log that is
+   *sometimes* redacted invites being trusted as though it always were.
+3. **Raw bytes, not a scraped transcript.** The stated reason for FR-E12 is
+   capturing what happened inside full-screen agent CLIs — `codex`,
+   `claude`, `opencode` — and those paint with alternate-screen switches,
+   cursor addressing and partial redraws. Scraping them to text yields redraw
+   noise rather than what was on screen. `scrollback.rs` already reached this
+   conclusion for the ring buffer, in its own words: *"Replaying raw bytes into
+   xterm.js is the cleanest path to a faithful redraw on reattach."* FR-E12
+   makes the durable log the same shape, with timing, so it replays.
+
+Two requirements are appended:
+
+| New ID | What it names | Pri |
+|---|---|---|
+| FR-T14 | Every assistant interaction durably logged in both directions — utterance, request, reply, tool calls, tool results, and each pending action's outcome including denial and expiry — attributable to an actor and surviving restart. Transcripts and structure, never audio. | M |
+| FR-E12 | Every TTY session's full byte stream, input and output, recorded durably with timing for faithful replay of full-screen TUIs; retained for a configurable default of **60 days**, enforced on a schedule; scope-gated to read, with the secret hazard of input capture named. | M |
+
+Both are **M**. The priority is not inflation: this register's own FR-S1 makes
+every declared write carry actor, reason and timestamp *in the same
+transaction*, and FR-S5 audits authorization denials as well as grants. A
+product that holds itself to that for a label change, while keeping nothing at
+all about an hour of agent work in a terminal or a conversation that moved a
+work item, is not applying its own standard to itself.
+
+**Storage is the honest cost, and it is named here rather than discovered.**
+NFR-S2 requires the *observed store* to grow proportionally to change rather
+than polling frequency; neither of these logs is an observation store, and
+neither can honour that rule — a TUI redrawing at speed writes bytes
+proportional to time, not to change. The 60-day horizon is what bounds it, and
+that is why FR-E12 makes the horizon configured and scheduled rather than
+whatever the last caller of an endpoint happened to pass.
+
 ## 1. Functional requirements
 
 ### FR-P — Projects & per-repo view
@@ -1180,6 +1267,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | FR-E9 | *(r9)* The engine shall remain bootable with vogt-core absent, degrading to plain sessions — absence of the core costs Vogt features, never session availability (the ContextKeeper degrade rule, applied inward). | S | MERGE §11.2 |
 | FR-E10 | *(r11)* Where a deployment enables GUI streaming, it shall work: a launched process shall render and its stream shall be viewable from the GUI surface. The compositor and the streamer are installed in the image and the launch and process APIs are built; production runs with the stream switched off and unverified, so the surface is present and cannot be shown to do anything. Either it is operable in a deployment that asks for it, or the surface is withdrawn. | C | DEPLOYMENT §10.6 |
 | FR-E11 | *(r11)* Two live sessions shall not silently open in the same working tree. Nothing today coordinates between sessions, so two agents can edit one checkout concurrently and neither is told — a class of loss no audit row records, because both writes are legitimate. The requirement is that the second session is *told*, not that it is refused: Vogt reports, it does not enforce (FR-G13). | C | §7 |
+| FR-E12 | *(r18)* Every TTY session shall be recorded to a durable log capturing the **full byte stream in both directions** — input as well as output — as raw bytes with timing, so that a full-screen TUI (`codex`, `claude`, `opencode`) replays faithfully including alternate-screen switches and partial redraws; a scraped text transcript does not satisfy this. It is distinct from FR-E1's ring-buffer scrollback, which is bounded and ephemeral by design. Recording shall not degrade silently: a deployment that asked for it and is not getting it shall be told, because an absent log is indistinguishable from a session that did nothing. Logs shall be retained for a **configurable horizon defaulting to 60 days**, enforced on a schedule — not only by an on-demand call carrying its own number, which is the current state and means the horizon is whatever the last caller passed. Because input capture necessarily records typed secrets — a pasted token, a password at a prompt that does not echo — reading a log shall be scope-gated as the audit log is (FR-S3, FR-S6), the log shall never be served unauthenticated, and the retention horizon is a **maximum, not a floor**. This does not weaken FR-S7 or FR-S8; it names where those rules stop holding. | M | r18; FR-E1, FR-S3, FR-S6, FR-S7 |
 
 ### FR-T — Conversational assistant (the AI layer) *(r9)*
 
@@ -1198,6 +1286,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | FR-T11 | *(r16)* `session.start` shall accept `model` and `effort` (parity on CLI, REST and MCP per FR-E8), applied to the chosen agent template as that CLI's own flags or env; unset values come from the selected provider profile's defaults (FR-T9), and the applied values shall be recorded on the session and shown in Sessions. A spoken request with no project or work item shall resolve to a configured **scratch project** — a registered project like any other, named in the session name and audit row — and shall be refused with a named reason if none is configured. Starting remains a mutating act behind FR-T2. | M | r16; FR-E3, FR-E8 |
 | FR-T12 | *(r16)* Speech shall be a **server-side pipeline** the engine fronts: `POST /api/assistant/stt` (audio in, text out) and `POST /api/assistant/tts` (text in, audio out), each backed by an OpenAI-compatible audio endpoint (`/audio/transcriptions`, `/audio/speech`) whose base URL and key are configured independently of the chat profile — so a cloud provider and a local Whisper.cpp + Kokoro pair are interchangeable by configuration, as in voicemode. The on-device Web Speech / Capacitor path (FR-T5) remains and each client picks one by capability and setting. Absent configuration the routes answer 404 and the client falls back (FR-T6's rule applied to speech). Audio is not stored unless a debug flag says so. | S | r16; voicemode; VOICE_POC §3 |
 | FR-T13 | *(r16)* The five voice-first utterances in `VOICE_POC.md` §2 shall each complete by voice alone — recognizer → repair → assistant → spoken reply — on the phone shell and on the desktop, up to and only up to the FR-T2 gate, which is announced and resolved on screen. Between recognizer and composer there shall be a **repair pass** that normalises project slugs against `project.list` and repairs `WI-\d+` forms, showing the repaired text before it is sent. This is the validation pass FR-T5 promised, made into an acceptance list; until it passes, voice is presumed not working. | S | r16; FR-T5; VOICE_POC §5 |
+| FR-T14 | *(r18)* Every assistant interaction shall be recorded to a durable log in **both directions**, surviving restart and attributable to the actor who drove it: the recognised utterance and, where FR-T13's repair pass changed it, the repaired form alongside the raw one; the composed request; the model's reply; every tool call with its arguments; every tool result; and every FR-T2 pending action with its outcome — **approved, denied, or expired**. The log shall complement FR-T3 rather than replace it: FR-T3 audits the write an assistant caused, and this records the conversation that did or did not cause one, a distinction that today leaves every refusal and every un-acted question unrecorded. **Audio shall not be stored** — FR-T12's rule stands and this log is text and structure. External content in a logged entry stays delimited as untrusted data per FR-T4, including when the log is later read back to a model. Reading the log shall be scope-gated (FR-S3) and its retention horizon configurable. | M | r18; FR-T3, FR-T4, FR-T12, FR-S6 |
 
 ### FR-M — Mobile surface *(r9)*
 
