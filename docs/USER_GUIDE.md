@@ -44,6 +44,15 @@ rather than leaving an admin token in a browser.
 
 ## 2. The surfaces
 
+Board, Backlog, Inbox, and Sessions share one working-header order: the
+surface title, the freshness/evidence or connection truth that qualifies its
+answer, view controls, then the primary action. A surface can omit a control
+or action, but it does not move the truth statement away from the answer it
+qualifies. On narrow screens and at increased browser zoom those regions wrap
+in the same reading and keyboard order. Longer implementation detail is
+available from the header's disclosure where a surface needs it; unavailable,
+empty, loading, and partial answers remain named in the surface's own words.
+
 Board, Backlog, Inbox, Projects, Audit, work items and Sessions are stable,
 non-closable places. Sessions contains the terminal/editor panes and machine
 tools; their existing deep links still select the named pane or tool, and a

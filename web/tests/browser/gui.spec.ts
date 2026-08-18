@@ -309,6 +309,67 @@ test("Inbox evidence, source filter and batch reason survive a desktop browser",
   await expect(page).toHaveURL(/#\/inbox\?source=drift/);
 });
 
+test("primary surface headers keep their shared order and geometry across zoom", async ({ page }) => {
+  await installFixtures(page, {}, [liveSession]);
+  const routes = ["board", "backlog", "inbox", "sessions"] as const;
+  const zooms = ["80%", "100%", "125%", "150%", "200%"] as const;
+  const widths = test.info().project.name === "phone" ? [390] : [1280, 768];
+  const usefulContent = {
+    board: ".board-scroll, .board-empty",
+    backlog: ".vogt-backlog-listwrap",
+    inbox: ".inbox-list",
+    sessions: ".sessions-place-body",
+  } as const;
+
+  for (const width of widths) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const routeName of routes) {
+      await page.goto(`/#/${routeName}`);
+      const header = page.locator("[data-surface-header]:visible");
+      await expect(header).toBeVisible();
+
+      const slots = await header.locator(":scope > [data-surface-header-slot]")
+        .evaluateAll((elements) => elements.map((element) =>
+          element.getAttribute("data-surface-header-slot"),
+        ));
+      const expected = ["title", "honesty", "spacer", "controls", "action", "detail"]
+        .filter((slot) => slots.includes(slot));
+      expect(slots).toEqual(expected);
+
+      for (const zoom of zooms) {
+        await page.locator("html").evaluate((element, nextZoom) => {
+          element.style.zoom = nextZoom;
+        }, zoom);
+        await expect(header).toBeVisible();
+        const geometry = await header.evaluate((element) => {
+          const viewportWidth = document.documentElement.clientWidth;
+          const viewportHeight = document.documentElement.clientHeight;
+          const essential = [...element.querySelectorAll<HTMLElement>(
+            '[data-surface-header-slot="honesty"], [data-surface-header-slot="controls"], [data-surface-header-slot="action"]',
+          )];
+          return {
+            route: window.location.hash,
+            zoom: document.documentElement.style.zoom,
+            documentOverflow: document.documentElement.scrollWidth > viewportWidth + 1,
+            headerOverflow: element.scrollWidth > element.clientWidth + 1,
+            essentialOffscreen: essential.filter((child) => {
+              const box = child.getBoundingClientRect();
+              return box.left < -1 || box.right > viewportWidth + 1
+                || box.top < -1 || box.top >= viewportHeight - 1
+                || box.width === 0;
+            }).map((child) => child.dataset.surfaceHeaderSlot),
+          };
+        });
+        expect(geometry.documentOverflow, JSON.stringify(geometry)).toBe(false);
+        expect(geometry.headerOverflow, JSON.stringify(geometry)).toBe(false);
+        expect(geometry.essentialOffscreen, JSON.stringify(geometry)).toEqual([]);
+        await expect(page.locator(usefulContent[routeName])).toBeVisible();
+      }
+      await page.locator("html").evaluate((element) => { element.style.zoom = "100%"; });
+    }
+  }
+});
+
 test("Phone shell keeps labelled primary navigation and Go to reachability", async ({ page }) => {
   await installFixtures(page);
   await page.setViewportSize({ width: 390, height: 844 });

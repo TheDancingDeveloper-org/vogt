@@ -1,12 +1,14 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const port = Number.parseInt(process.env.PLAYWRIGHT_PORT ?? "4173", 10);
+
 export default defineConfig({
   testDir: "./tests/browser",
   timeout: 30_000,
   fullyParallel: false,
   reporter: process.env.CI ? "line" : "list",
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL: `http://127.0.0.1:${port}`,
     browserName: "chromium",
     headless: true,
     ...(process.env.CHROMIUM_PATH
@@ -20,8 +22,8 @@ export default defineConfig({
     { name: "phone", use: { ...devices["iPhone 13"] } },
   ],
   webServer: {
-    command: "pnpm exec vite --host 127.0.0.1 --port 4173",
-    url: "http://127.0.0.1:4173",
+    command: `pnpm exec vite --host 127.0.0.1 --port ${port}`,
+    url: `http://127.0.0.1:${port}`,
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
   },
