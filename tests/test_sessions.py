@@ -41,7 +41,7 @@ from vogt.application.services import (
     stop_session,
 )
 from vogt.core.auth import hash_token
-from vogt.errors import InvalidRequest, NotFound
+from vogt.errors import InvalidRequest, MissingReason, NotFound
 
 WHY = "session test"
 ROOT = "/srv/estate/vogt"
@@ -180,6 +180,33 @@ def test_a_session_needs_exactly_one_subject(wired: AppContext) -> None:
         start_session(
             wired, StartSessionParams(work_item="WI-1", project="vogt", reason=WHY)
         )
+
+
+def test_a_blank_reason_is_refused_before_the_engine_starts(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Audit validation must precede the external side effect.
+
+    The engine and SQLite cannot share a transaction. If the reason is first
+    validated inside ``audited_write``, the terminal has already started by
+    the time the write is refused, leaving an unrecorded process with a token
+    that can never authenticate. Blank input is fully knowable before making
+    the HTTP call, so it is rejected there.
+    """
+    before = len(engine.sent)
+
+    with pytest.raises(MissingReason):
+        start_session(
+            wired,
+            # Adapters validate this shape before the service sees it. Build
+            # the impossible transport value directly to prove the service's
+            # own write boundary still cannot put an external side effect
+            # ahead of its audit invariant.
+            StartSessionParams.model_construct(work_item="WI-1", reason=" \t\n"),
+        )
+
+    assert len(engine.sent) == before, "an invalid write must start no terminal"
+    assert list_sessions(wired, ListSessionsParams()).sessions == []
 
 
 def test_a_work_item_with_no_project_has_no_tree_to_open_in(

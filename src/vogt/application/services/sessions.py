@@ -65,6 +65,12 @@ SESSION_SCOPES: tuple[Scope, ...] = ("read", "work.write")
 
 def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     """Open a terminal for a work item or a project (FR-E3, FR-E4, FR-E5)."""
+    # Validate everything we can before crossing the process boundary. The
+    # engine and SQLite cannot share a transaction, so rejecting the reason
+    # only when ``audited_write`` begins would leave a running terminal that
+    # Vogt never records. Keep the cleaned value for both the entity and the
+    # audit row so they cannot disagree about whitespace.
+    reason = writes.validate_reason(params.reason)
     engine = _engine(ctx)
     session_id = ctx.id_factory("ses")
     subject = _subject(ctx, params, session_id)
@@ -115,7 +121,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             template=params.template,
             model=params.model,
             effort=params.effort,
-            reason=writes.validate_reason(params.reason),
+            reason=reason,
             started_at=now,
             stopped_at=None,
         )
@@ -142,7 +148,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             },
         )
 
-    return audited_write(ctx, operation=SESSION_START, reason=params.reason, body=body)
+    return audited_write(ctx, operation=SESSION_START, reason=reason, body=body)
 
 
 def stop_session(ctx: AppContext, params: StopSessionParams) -> SessionResult:

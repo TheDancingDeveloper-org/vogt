@@ -181,14 +181,23 @@ function repairProjects(
         // one — the letters are right — so multi-word windows must match
         // exactly.
         let best: { slug: string; distance: number } | null = null;
+        let ambiguous = false;
         for (const [candidate, slug] of bySquashed) {
           const d = distance(squashed, candidate, MAX_SLUG_DISTANCE);
           // Short names are a trap: within two edits of `web` sits half the
           // language. Require the distance to be a small share of the name.
           if (d > MAX_SLUG_DISTANCE || d >= candidate.length / 2) continue;
-          if (best === null || d < best.distance) best = { slug, distance: d };
+          if (best === null || d < best.distance) {
+            best = { slug, distance: d };
+            ambiguous = false;
+          } else if (d === best.distance && slug !== best.slug) {
+            ambiguous = true;
+          }
         }
-        match = best?.slug;
+        // A tie is not evidence. Picking whichever project happened to be
+        // returned first would turn a recognizer's uncertainty into a
+        // confidently wrong subject, which is worse than leaving it visible.
+        match = ambiguous ? undefined : best?.slug;
       }
       if (match === undefined || match === core) continue;
 

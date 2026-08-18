@@ -132,8 +132,17 @@ mod tests {
 
     #[test]
     fn rejects_root_component() {
-        let root = std::env::temp_dir().canonicalize().unwrap();
-        assert!(resolve_existing(&root, "/").is_ok() || resolve_existing(&root, "/").is_err());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+
+        // Leading slashes are deliberately accepted as workspace-relative
+        // paths for compatibility, but a root component that survives the
+        // lexical stripping must never escape to the host root.
+        assert_eq!(resolve_existing(&root, "/").unwrap(), root);
+        assert!(matches!(
+            resolve_existing(&root, "/../escape"),
+            Err(ApiError::BadRequest(msg)) if msg.contains("parent component")
+        ));
     }
 
     #[test]

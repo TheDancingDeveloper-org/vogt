@@ -522,4 +522,17 @@ mod tests {
             serde_json::from_str(r#"{"name":"term","prompt":"Fix the flaky test."}"#).unwrap();
         assert_eq!(spec.prompt.as_deref(), Some("Fix the flaky test."));
     }
+
+    #[test]
+    fn session_spec_reads_model_selection_from_the_wire() {
+        // vogt-core is a separate Python process. This pins the actual JSON
+        // field names at that language boundary, rather than only testing a
+        // Rust value built in this crate.
+        let spec: SessionSpec = serde_json::from_str(
+            r#"{"name":"term","command":["codex"],"model":"gpt-5.6","effort":"medium"}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.model.as_deref(), Some("gpt-5.6"));
+        assert_eq!(spec.effort.as_deref(), Some("medium"));
+    }
 }

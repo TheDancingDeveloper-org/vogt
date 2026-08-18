@@ -2726,6 +2726,27 @@ async fn git_endpoints_return_empty_for_non_repo_workspace() {
     assert_eq!(nested_status["is_repo"], false);
     assert!(nested_status["entries"].as_array().unwrap().is_empty());
 
+    let nested_log: Vec<Value> = client
+        .get(format!("{base}/api/git/log?repo=plain-dir&n=10"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(nested_log.is_empty());
+
+    let nested_branch: Value = client
+        .get(format!("{base}/api/git/branch?repo=plain-dir"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(nested_branch["current"], "");
+    assert!(nested_branch["all"].as_array().unwrap().is_empty());
+
     let log: Vec<Value> = client
         .get(format!("{base}/api/git/log?n=10"))
         .send()
@@ -2746,6 +2767,21 @@ async fn git_endpoints_return_empty_for_non_repo_workspace() {
         .unwrap();
     assert_eq!(br["current"], "");
     assert!(br["all"].as_array().unwrap().is_empty());
+
+    // Read endpoints deliberately render an empty non-repository state.
+    // Mutation must still refuse: returning success here would claim a Git
+    // effect happened in an ordinary directory.
+    let operation = client
+        .post(format!("{base}/api/git/operate"))
+        .json(&serde_json::json!({
+            "op": "stage",
+            "repo": "plain-dir",
+            "path": "nothing.txt"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(operation.status(), StatusCode::NOT_FOUND);
 }
 
 async fn collect_binary_until(
