@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   hasDirtyEditor,
+  hasUnsavedWork,
   protectDirtyEditorExit,
   shouldMountTab,
   tabRetention,
@@ -21,12 +22,14 @@ const editor: Tab = {
   dirty: true,
 };
 const history: Tab = { id: "history", kind: "history", label: "History" };
+const tasks: Tab = { id: "tasks", kind: "tasks", label: "Tasks", dirty: true };
 
 describe("Sessions tab resource policy", () => {
   it("retains every terminal but only the active non-terminal tool", () => {
     expect(tabRetention(terminal)).toBe("always");
     expect(tabRetention(editor)).toBe("active");
     expect(tabRetention(history)).toBe("active");
+    expect(tabRetention(tasks)).toBe("always");
     expect(shouldMountTab(terminal, "history")).toBe(true);
     expect(shouldMountTab(editor, "history")).toBe(false);
     expect(shouldMountTab(history, "history")).toBe(true);
@@ -52,9 +55,16 @@ describe("Sessions tab resource policy", () => {
 });
 
 describe("dirty editor browser lifecycle", () => {
-  it("recognises aggregated dirty state across editor and tool tabs", () => {
+  it("keeps the historical editor predicate narrow", () => {
     expect(hasDirtyEditor([history, { ...editor, dirty: false }])).toBe(false);
     expect(hasDirtyEditor([history, editor, terminal])).toBe(true);
+    expect(hasDirtyEditor([history, tasks])).toBe(false);
+  });
+
+  it("recognises unsaved work across editors and task drafts", () => {
+    expect(hasUnsavedWork([history, { ...tasks, dirty: false }])).toBe(false);
+    expect(hasUnsavedWork([history, tasks])).toBe(true);
+    expect(hasUnsavedWork([history, editor])).toBe(true);
   });
 
   it("cancels beforeunload using browser-owned confirmation copy", () => {

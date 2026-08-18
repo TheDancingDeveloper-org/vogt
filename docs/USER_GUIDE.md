@@ -218,6 +218,13 @@ A task is a command, a prompt, a schedule (`manual`, `interval`, or UTC
 so attach, scrollback, history, auth and push all work the way they do
 everywhere else.
 
+Task edits remain a draft until **Save Changes** or **Create Task** succeeds.
+Selecting another task, starting a new draft, refreshing, closing the Tasks
+tab, or leaving the route asks whether to save, discard, or remain; a failed
+save keeps every field. An unavailable first read is shown as an error rather
+than as an empty task list. If a refresh fails after a successful read, the
+last task list stays visible, is marked stale, and can be retried in place.
+
 If an agent prints a line beginning with `MYDEVENV2_NOTIFY:`, two things
 happen: a push notification goes out, and the line is **recorded on the run as
 a finding**. The push is a delivery; the finding is the record, and it survives

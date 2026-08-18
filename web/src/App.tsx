@@ -13,7 +13,7 @@ import type { TerminalActions } from "./Terminal";
 import TerminalWorkspace from "./TerminalWorkspace";
 import Editor from "./Editor";
 import EditorWorkspace from "./EditorWorkspace";
-import AgentTasks from "./AgentTasks";
+import AgentTasks, { type AgentTaskDraftGuard } from "./AgentTasks";
 import Assistant from "./Assistant";
 import AuditBrowser from "./AuditBrowser";
 import Backlog from "./Backlog";
@@ -95,7 +95,7 @@ import {
   type PrimaryPlace,
 } from "./routeModel";
 import {
-  hasDirtyEditor,
+  hasUnsavedWork,
   protectDirtyEditorExit,
   shouldMountTab,
 } from "./tabLifecycle";
@@ -310,6 +310,7 @@ const App: Component = () => {
   // problem of single mutable `activeSend` / `activeCopy` refs.
   const senders = new Map<string, (data: string | ArrayBuffer) => void>();
   const actions = new Map<string, TerminalActions>();
+  let taskDraftGuard: AgentTaskDraftGuard | null = null;
   const activeSend = (data: string) => {
     const id = tabsStore.active;
     if (id) senders.get(id)?.(data);
@@ -472,11 +473,11 @@ const App: Component = () => {
   });
 
   // Browser and installed-PWA lifecycle exits bypass the app's close-tab
-  // confirmation. Ask the browser to guard the window only while a real
-  // unsaved editor buffer exists, then remove the listener immediately after
+  // confirmation. Ask the browser to guard the window only while real
+  // unsaved work exists, then remove the listener immediately after
   // the last save so clean exits remain silent.
   createEffect(() => {
-    if (!hasDirtyEditor(tabsStore.tabs)) return;
+    if (!hasUnsavedWork(tabsStore.tabs)) return;
     window.addEventListener("beforeunload", protectDirtyEditorExit);
     onCleanup(() =>
       window.removeEventListener("beforeunload", protectDirtyEditorExit),
@@ -849,6 +850,10 @@ const App: Component = () => {
 
   const requestCloseTab = async (tabId: string) => {
     const tab = tabsStore.tabs.find((t) => t.id === tabId);
+    if (tab?.kind === "tasks" && taskDraftGuard?.dirty()) {
+      taskDraftGuard.requestLeave(() => closeTabAndNavigate(tabId));
+      return;
+    }
     if (tab && tab.kind === "editor" && tab.dirty) {
       const ok = await confirmUser(
         "Discard unsaved changes?",
@@ -1224,6 +1229,9 @@ const App: Component = () => {
                     <AgentTasks
                       onError={(msg) => showToast(msg, { kind: "error" })}
                       confirmAction={confirmUser}
+                      registerDraftGuard={(guard) => {
+                        taskDraftGuard = guard;
+                      }}
                       onOpenSession={(sessionId, label) => {
                         openTerminalTab(sessionId, label);
                         navigate(`/t/${sessionId}`);

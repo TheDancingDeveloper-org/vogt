@@ -3242,6 +3242,11 @@ textarea {
   color: var(--fg-muted);
 }
 
+.agent-task-dirty {
+  color: var(--activity-running);
+  font-weight: 600;
+}
+
 .agent-tasks-header-actions {
   display: flex;
   gap: 8px;
@@ -3266,6 +3271,36 @@ textarea {
 .agent-tasks-list {
   overflow-y: auto;
   padding: 8px;
+}
+
+.agent-tasks-list.stale > :not(.agent-tasks-read-error) {
+  opacity: 0.65;
+}
+
+.agent-tasks-read-error,
+.agent-task-action-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--activity-errored);
+  border-radius: 6px;
+  color: var(--activity-errored);
+  background: rgba(248, 81, 73, 0.08);
+}
+
+.agent-tasks-read-error {
+  margin-bottom: 8px;
+}
+
+.agent-task-action-error {
+  flex: 0 0 auto;
+}
+
+.agent-task-dialog-error {
+  margin-bottom: 12px;
+  color: var(--activity-errored);
 }
 
 .agent-task-row {
@@ -3471,7 +3506,9 @@ textarea {
   .agent-tasks-header,
   .agent-task-toolbar,
   .agent-task-runs-header,
-  .agent-task-run-row {
+  .agent-task-run-row,
+  .agent-tasks-read-error,
+  .agent-task-action-error {
     flex-direction: column;
     align-items: stretch;
   }

@@ -5,6 +5,7 @@ export type TabRetention = "always" | "active";
 /** The resource policy for one open Sessions pane. */
 export function tabRetention(tab: Tab): TabRetention {
   if (tab.kind === "terminal") return "always";
+  if (tab.kind === "tasks" && tab.dirty) return "always";
   return "active";
 }
 
@@ -14,6 +15,13 @@ export function shouldMountTab(tab: Tab, activeTabId: string | null): boolean {
   return tab.id === activeTabId;
 }
 
+export function hasUnsavedWork(tabs: readonly Tab[]): boolean {
+  return tabs.some((tab) =>
+    (tab.kind === "editor" || tab.kind === "tasks") && Boolean(tab.dirty),
+  );
+}
+
+/** Kept for callers and tests that only need the historical editor predicate. */
 export function hasDirtyEditor(tabs: readonly Tab[]): boolean {
   return tabs.some((tab) => tab.kind === "editor" && Boolean(tab.dirty));
 }

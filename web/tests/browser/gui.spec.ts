@@ -676,3 +676,70 @@ test("History distinguishes an archive outage from an empty archive and recovers
   await expect(page.getByText("No archived sessions.")).toBeVisible();
   await expect(error).toHaveCount(0);
 });
+
+test("dirty Agent Task drafts guard navigation and browser exit", async ({ page }) => {
+  await installFixtures(page);
+  const task = {
+    id: "browser-task",
+    name: "Browser task",
+    prompt: "Original prompt",
+    schedule: { kind: "manual" },
+    status: "active",
+    command: null,
+    cwd: null,
+    env: [],
+    context: null,
+    notify_on_start: false,
+    notify_on_phrase: null,
+    auto_retry_on_rate_limit: true,
+    next_run: null,
+    last_run: null,
+    run_count: 0,
+    runs: [],
+    created_at: "2026-08-18T00:00:00Z",
+    updated_at: "2026-08-18T00:00:00Z",
+  };
+  await page.route("**/api/agent-tasks", async (route) =>
+    route.fulfill({ json: [task] }),
+  );
+
+  await page.goto("/#/tasks");
+  const name = page.getByRole("textbox", { name: "Name", exact: true });
+  await expect(name).toHaveValue("Browser task");
+  await name.fill("Protected browser draft");
+  await expect(page.getByText("Unsaved draft")).toBeVisible();
+
+  expect(await page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  })).toBe(true);
+
+  await page.getByRole("link", { name: "Board", exact: true }).click();
+  await expect(page.getByRole("dialog", {
+    name: "Leave Agent Tasks with an unsaved draft?",
+  })).toBeVisible();
+  await page.getByRole("button", { name: "Stay here" }).click();
+  await expect(page).toHaveURL(/#\/tasks$/);
+  await expect(name).toHaveValue("Protected browser draft");
+
+  await page.locator("body").dispatchEvent("keydown", {
+    key: "w",
+    ctrlKey: true,
+    shiftKey: true,
+  });
+  await expect(page.getByRole("dialog", {
+    name: "Save task draft before continuing?",
+  })).toBeVisible();
+  await page.getByRole("button", { name: "Stay here" }).click();
+  await expect(name).toHaveValue("Protected browser draft");
+
+  await page.getByRole("link", { name: "Board", exact: true }).click();
+  await page.getByRole("button", { name: "Discard draft", exact: true }).click();
+  await expect(page).toHaveURL(/#\/board$/);
+  await expect.poll(() => page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  })).toBe(false);
+});
