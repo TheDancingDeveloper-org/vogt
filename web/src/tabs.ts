@@ -8,7 +8,7 @@ export type Tab =
   | { id: string; kind: "git"; repo: string; label: string }
   | { id: string; kind: "gui"; label: string }
   | { id: string; kind: "history"; label: string }
-  | { id: string; kind: "tasks"; label: string }
+  | { id: string; kind: "tasks"; label: string; dirty?: boolean }
   | { id: string; kind: "assistant"; label: string }
   | { id: string; kind: "workitem"; ref: string; label: string };
 
@@ -79,9 +79,16 @@ function normalizeTab(value: unknown): Tab | null {
         ref: raw.ref,
         label: raw.label,
       };
+    case "tasks":
+      if (typeof raw.label !== "string") return null;
+      return {
+        id: raw.id,
+        kind: "tasks",
+        label: raw.label,
+        dirty: Boolean(raw.dirty),
+      };
     case "gui":
     case "history":
-    case "tasks":
     case "assistant":
       if (typeof raw.label !== "string") return null;
       return {
@@ -103,7 +110,9 @@ function normalizeState(value: unknown): TabsStateSnapshot {
   const active = typeof raw.active === "string" ? raw.active : null;
   return {
     tabs: tabs.map((tab) =>
-      tab.kind === "editor" ? { ...tab, dirty: false } : tab,
+      tab.kind === "editor" || tab.kind === "tasks"
+        ? { ...tab, dirty: false }
+        : tab,
     ),
     active: active && tabs.some((tab) => tab.id === active) ? active : tabs[0]?.id ?? null,
   };
@@ -465,6 +474,15 @@ export function setEditorDirty(id: string, dirty: boolean) {
     produce((s) => {
       const t = s.tabs.find((t) => t.id === id);
       if (t && t.kind === "editor") t.dirty = dirty;
+    }),
+  );
+}
+
+export function setTasksDirty(dirty: boolean) {
+  setStore(
+    produce((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === "tasks");
+      if (tab?.kind === "tasks") tab.dirty = dirty;
     }),
   );
 }

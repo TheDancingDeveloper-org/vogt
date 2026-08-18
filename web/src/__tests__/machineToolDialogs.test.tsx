@@ -52,10 +52,17 @@ describe("machine tool destructive decisions", () => {
       .mockResolvedValueOnce(true);
     const onError = vi.fn();
     render(() => (
-      <AgentTasks
-        confirmAction={confirmAction}
-        onError={onError}
-      />
+      <Router>
+        <Route
+          path="*"
+          component={() => (
+            <AgentTasks
+              confirmAction={confirmAction}
+              onError={onError}
+            />
+          )}
+        />
+      </Router>
     ));
 
     expect((await screen.findAllByText("Nightly review"))[0]).toBeVisible();

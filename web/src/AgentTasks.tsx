@@ -7,6 +7,7 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
+import { useBeforeLeave } from "@solidjs/router";
 import type {
   AgentTask,
   AgentTaskRun,
@@ -14,12 +15,20 @@ import type {
   AgentTaskUpsertRequest,
 } from "./api";
 import { api } from "./api";
+import Dialog from "./Dialog";
+import { focusTab, setTasksDirty } from "./tabs";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
+
+export interface AgentTaskDraftGuard {
+  dirty: () => boolean;
+  requestLeave: (action: () => void) => void;
+}
 
 interface Props {
   onError?: (message: string) => void;
   onOpenSession?: (sessionId: string, label: string) => void;
   confirmAction?: (title: string, body?: string) => Promise<boolean>;
+  registerDraftGuard?: (guard: AgentTaskDraftGuard | null) => void;
 }
 
 interface TaskDraft {
@@ -42,6 +51,13 @@ interface TasksViewDraft {
   selectedTaskId: string | null;
   draft: TaskDraft;
   creating: boolean;
+  baseline?: TaskDraft;
+}
+
+interface PendingDraftDecision {
+  title: string;
+  body: string;
+  action: () => void;
 }
 
 const EMPTY_DRAFT: TaskDraft = {
@@ -59,6 +75,18 @@ const EMPTY_DRAFT: TaskDraft = {
   notifyOnPhrase: "MYDEVENV2_NOTIFY:",
   autoRetryOnRateLimit: true,
 };
+
+function cloneDraft(value: TaskDraft): TaskDraft {
+  return { ...value };
+}
+
+function draftsEqual(left: TaskDraft, right: TaskDraft): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function taskToDraft(task: AgentTask): TaskDraft {
   return {
@@ -181,15 +209,28 @@ const AgentTasks = (props: Props) => {
     creating: false,
   });
   const [tasks, setTasks] = createSignal<AgentTask[]>([]);
-  const [loading, setLoading] = createSignal(true);
+  const [tasksLoaded, setTasksLoaded] = createSignal(false);
+  const [loading, setLoading] = createSignal(false);
+  const [tasksError, setTasksError] = createSignal<string | null>(null);
+  const [tasksStale, setTasksStale] = createSignal(false);
   const [saving, setSaving] = createSignal(false);
   const [runningTaskId, setRunningTaskId] = createSignal<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(
     restored.selectedTaskId,
   );
-  const [draft, setDraft] = createSignal<TaskDraft>({ ...restored.draft });
+  const [draft, setDraft] = createSignal<TaskDraft>(cloneDraft(restored.draft));
   const [creating, setCreating] = createSignal(restored.creating);
+  const [baseline, setBaseline] = createSignal<TaskDraft>(
+    cloneDraft(restored.baseline ?? (restored.creating ? EMPTY_DRAFT : restored.draft)),
+  );
+  const [actionError, setActionError] = createSignal<string | null>(null);
+  const [retryAction, setRetryAction] = createSignal<(() => void) | null>(null);
+  const [pendingDecision, setPendingDecision] =
+    createSignal<PendingDraftDecision | null>(null);
   let restoreDraftPending = restored.selectedTaskId !== null && !restored.creating;
+  let listRequest = 0;
+
+  const dirty = createMemo(() => !draftsEqual(draft(), baseline()));
 
   const sortedTasks = createMemo(() =>
     [...tasks()].sort((a, b) => {
@@ -215,89 +256,194 @@ const AgentTasks = (props: Props) => {
     () => tasks().filter((task) => task.status === "paused").length,
   );
 
-  const loadTasks = async (preferredTaskId?: string | null) => {
+  const setDraftForTask = (task: AgentTask): void => {
+    const next = taskToDraft(task);
+    setDraft(cloneDraft(next));
+    setBaseline(cloneDraft(next));
+  };
+
+  const setEmptyDraft = (): void => {
+    setDraft(cloneDraft(EMPTY_DRAFT));
+    setBaseline(cloneDraft(EMPTY_DRAFT));
+  };
+
+  const loadTasks = async (
+    preferredTaskId?: string | null,
+    preserveDraft = false,
+  ): Promise<boolean> => {
+    const request = ++listRequest;
     setLoading(true);
     try {
       const list = await api.listAgentTasks();
+      if (request !== listRequest) return false;
       setTasks(list);
+      setTasksLoaded(true);
+      setTasksError(null);
+      setTasksStale(false);
+      const preserveCurrentDraft = preserveDraft || dirty();
+      const currentSelected = selectedTaskId();
       const nextSelected = creating()
         ? null
-        : preferredTaskId && list.some((task) => task.id === preferredTaskId)
-          ? preferredTaskId
-          : selectedTaskId() && list.some((task) => task.id === selectedTaskId())
-            ? selectedTaskId()
+        : currentSelected && list.some((task) => task.id === currentSelected)
+          ? currentSelected
+          : preferredTaskId && list.some((task) => task.id === preferredTaskId)
+            ? preferredTaskId
             : list[0]?.id ?? null;
       setSelectedTaskId(nextSelected);
-      if (!nextSelected && !creating()) {
-        setDraft({ ...EMPTY_DRAFT });
+      const nextTask = list.find((task) => task.id === nextSelected) ?? null;
+      if (nextTask) {
+        if (restoreDraftPending && nextTask.id === restored.selectedTaskId) {
+          restoreDraftPending = false;
+          setBaseline(taskToDraft(nextTask));
+        } else if (!preserveCurrentDraft) {
+          setDraftForTask(nextTask);
+        }
+      } else if (!creating() && !preserveCurrentDraft) {
+        setEmptyDraft();
       }
-    } catch (e) {
-      props.onError?.(`Failed to load tasks: ${(e as Error).message}`);
+      return true;
+    } catch (error) {
+      if (request !== listRequest) return false;
+      setTasksError(`Failed to load tasks: ${errorMessage(error)}`);
+      setTasksStale(tasksLoaded());
+      return false;
     } finally {
-      setLoading(false);
+      if (request === listRequest) setLoading(false);
     }
   };
 
   onMount(() => {
+    props.registerDraftGuard?.({ dirty, requestLeave: requestDraftDecision });
     void loadTasks();
   });
 
-  createEffect(() => {
-    const task = selectedTask();
-    if (task) {
-      if (restoreDraftPending && task.id === restored.selectedTaskId) {
-        restoreDraftPending = false;
-        return;
-      }
-      restoreDraftPending = false;
-      setDraft(taskToDraft(task));
-    }
-  });
+  createEffect(() => setTasksDirty(dirty()));
 
   onCleanup(() => {
+    listRequest += 1;
+    props.registerDraftGuard?.(null);
+    setTasksDirty(false);
     writeToolDraft<TasksViewDraft>("tasks", {
       selectedTaskId: selectedTaskId(),
-      draft: { ...draft() },
+      draft: cloneDraft(draft()),
       creating: creating(),
+      baseline: cloneDraft(baseline()),
     });
   });
 
-  const startCreate = () => {
+  const startCreate = (): void => {
     setCreating(true);
     setSelectedTaskId(null);
-    setDraft({ ...EMPTY_DRAFT });
+    setEmptyDraft();
+    setActionError(null);
+    setRetryAction(null);
   };
 
-  const saveTask = async () => {
+  const reportActionFailure = (
+    label: string,
+    error: unknown,
+    retry: () => void,
+  ): void => {
+    const message = `${label}: ${errorMessage(error)}`;
+    setActionError(message);
+    setRetryAction(() => retry);
+    props.onError?.(message);
+  };
+
+  const saveTask = async (): Promise<boolean> => {
+    if (saving()) return false;
+    const submittedDraft = cloneDraft(draft());
     setSaving(true);
+    setActionError(null);
+    setRetryAction(null);
     try {
-      const request = buildRequest(draft());
+      const request = buildRequest(submittedDraft);
+      let saved: AgentTask;
       if (selectedTaskId()) {
-        const saved = await api.updateAgentTask(selectedTaskId()!, request);
-        setCreating(false);
-        await loadTasks(saved.id);
+        saved = await api.updateAgentTask(selectedTaskId()!, request);
       } else {
-        const created = await api.createAgentTask(request);
-        setCreating(false);
-        await loadTasks(created.id);
+        saved = await api.createAgentTask(request);
       }
-    } catch (e) {
-      props.onError?.(`Failed to save task: ${(e as Error).message}`);
+      setCreating(false);
+      setSelectedTaskId(saved.id);
+      const savedDraft = taskToDraft(saved);
+      const submittedDraftStillCurrent = draftsEqual(draft(), submittedDraft);
+      if (submittedDraftStillCurrent) {
+        setDraft(cloneDraft(savedDraft));
+      }
+      setBaseline(cloneDraft(savedDraft));
+      setTasks((current) => {
+        const index = current.findIndex((task) => task.id === saved.id);
+        if (index < 0) return [...current, saved];
+        const next = [...current];
+        next[index] = saved;
+        return next;
+      });
+      void loadTasks(saved.id, true);
+      return submittedDraftStillCurrent;
+    } catch (error) {
+      reportActionFailure("Failed to save task", error, () => void saveTask());
+      return false;
     } finally {
       setSaving(false);
     }
   };
 
-  const toggleTask = async (task: AgentTask) => {
+  const discardDraft = (): void => {
+    setDraft(cloneDraft(baseline()));
+    setActionError(null);
+    setRetryAction(null);
+  };
+
+  const requestDraftDecision = (
+    action: () => void,
+    title = "Save task draft before continuing?",
+    body = "This task has unsaved changes. Save them, discard them, or stay here.",
+  ): void => {
+    if (!dirty()) {
+      action();
+      return;
+    }
+    focusTab("tasks");
+    setPendingDecision({ title, body, action });
+  };
+
+  useBeforeLeave((event) => {
+    if (!dirty() || event.defaultPrevented) return;
+    event.preventDefault();
+    requestDraftDecision(
+      () => event.retry(true),
+      "Leave Agent Tasks with an unsaved draft?",
+      "Save the task, discard the draft, or remain on Agent Tasks.",
+    );
+  });
+
+  const selectTask = (task: AgentTask): void => {
+    requestDraftDecision(() => {
+      restoreDraftPending = false;
+      setCreating(false);
+      setSelectedTaskId(task.id);
+      setDraftForTask(task);
+      setActionError(null);
+      setRetryAction(null);
+    });
+  };
+
+  const refreshTasks = (): void => {
+    requestDraftDecision(() => void loadTasks(selectedTaskId()));
+  };
+
+  const toggleTask = async (task: AgentTask): Promise<void> => {
+    setActionError(null);
     try {
       if (task.status === "active") {
         await api.pauseAgentTask(task.id);
       } else {
         await api.resumeAgentTask(task.id);
       }
-      await loadTasks(task.id);
-    } catch (e) {
-      props.onError?.(`Failed to update task: ${(e as Error).message}`);
+      await loadTasks(task.id, dirty());
+    } catch (error) {
+      reportActionFailure("Failed to update task", error, () => void toggleTask(task));
     }
   };
 
@@ -314,9 +460,13 @@ const AgentTasks = (props: Props) => {
       const next = remaining[0]?.id ?? null;
       setCreating(false);
       setSelectedTaskId(next);
-      if (!next) setDraft({ ...EMPTY_DRAFT });
-    } catch (e) {
-      props.onError?.(`Failed to delete task: ${(e as Error).message}`);
+      const nextTask = remaining.find((candidate) => candidate.id === next);
+      if (nextTask) setDraftForTask(nextTask);
+      else setEmptyDraft();
+      setActionError(null);
+      setRetryAction(null);
+    } catch (error) {
+      reportActionFailure("Failed to delete task", error, () => void deleteTask(task));
     }
   };
 
@@ -324,10 +474,10 @@ const AgentTasks = (props: Props) => {
     setRunningTaskId(task.id);
     try {
       const run = await api.runAgentTask(task.id);
-      await loadTasks(task.id);
+      await loadTasks(task.id, dirty());
       props.onOpenSession?.(run.session_id, run.session_name);
-    } catch (e) {
-      props.onError?.(`Failed to run task: ${(e as Error).message}`);
+    } catch (error) {
+      reportActionFailure("Failed to run task", error, () => void runTaskNow(task));
     } finally {
       setRunningTaskId(null);
     }
@@ -343,23 +493,59 @@ const AgentTasks = (props: Props) => {
         <div>
           <h2>Agent Tasks</h2>
           <div class="agent-tasks-summary">
-            <span>{tasks().length} total</span>
-            <span>{activeCount()} active</span>
-            <span>{pausedCount()} paused</span>
+            <Show
+              when={tasksLoaded()}
+              fallback={<span>Task count unavailable</span>}
+            >
+              <span>{tasks().length} total</span>
+              <span>{activeCount()} active</span>
+              <span>{pausedCount()} paused</span>
+            </Show>
+            <Show when={dirty()}>
+              <span class="agent-task-dirty">Unsaved draft</span>
+            </Show>
           </div>
         </div>
         <div class="agent-tasks-header-actions">
-          <button onClick={() => void loadTasks(selectedTaskId())}>Refresh</button>
-          <button onClick={startCreate}>New Task</button>
+          <button disabled={loading()} onClick={refreshTasks}>
+            {loading() && tasksLoaded() ? "Refreshing..." : "Refresh"}
+          </button>
+          <button onClick={() => requestDraftDecision(startCreate)}>New Task</button>
         </div>
       </div>
 
+      <Show when={actionError()}>
+        {(message) => (
+          <div class="agent-task-action-error" role="alert">
+            <strong>{message()}</strong>
+            <Show when={retryAction()}>
+              {(retry) => <button onClick={() => retry()()}>Retry action</button>}
+            </Show>
+          </div>
+        )}
+      </Show>
+
       <div class="agent-tasks-layout">
-        <section class="agent-tasks-list">
-          <Show
-            when={!loading()}
-            fallback={<div class="agent-tasks-empty">Loading tasks...</div>}
-          >
+        <section class={`agent-tasks-list ${tasksStale() ? "stale" : ""}`}>
+          <Show when={tasksError()}>
+            {(message) => (
+              <div class="agent-tasks-read-error" role="alert">
+                <div>
+                  <strong>{message()}</strong>
+                  <Show when={tasksStale()}>
+                    <span> Last successful task list is retained and may be stale.</span>
+                  </Show>
+                </div>
+                <button onClick={() => void loadTasks(selectedTaskId(), dirty())}>
+                  Retry tasks
+                </button>
+              </div>
+            )}
+          </Show>
+          <Show when={loading() && !tasksLoaded()}>
+            <div class="agent-tasks-empty">Loading tasks...</div>
+          </Show>
+          <Show when={tasksLoaded()}>
             <Show
               when={sortedTasks().length > 0}
               fallback={
@@ -374,10 +560,7 @@ const AgentTasks = (props: Props) => {
                     class={`agent-task-row ${
                       selectedTaskId() === task.id ? "active" : ""
                     }`}
-                    onClick={() => {
-                      setCreating(false);
-                      setSelectedTaskId(task.id);
-                    }}
+                    onClick={() => selectTask(task)}
                   >
                     <div class="agent-task-row-main">
                       <div class="agent-task-row-top">
@@ -606,7 +789,10 @@ const AgentTasks = (props: Props) => {
                   : "Create Task"}
             </button>
             <Show when={selectedTaskId()}>
-              <button onClick={startCreate}>New Draft</button>
+              <button onClick={() => requestDraftDecision(startCreate)}>New Draft</button>
+            </Show>
+            <Show when={dirty()}>
+              <button onClick={discardDraft}>Discard Draft Changes</button>
             </Show>
           </div>
 
@@ -652,6 +838,54 @@ const AgentTasks = (props: Props) => {
           </Show>
         </section>
       </div>
+
+      <Show when={pendingDecision()}>
+        {(decision) => (
+          <Dialog
+            title={decision().title}
+            description={decision().body}
+            closeOnEscape={false}
+            onClose={() => setPendingDecision(null)}
+          >
+            <Show when={actionError()}>
+              {(message) => <div class="agent-task-dialog-error">{message()}</div>}
+            </Show>
+            <div class="modal-actions">
+              <button type="button" onClick={() => setPendingDecision(null)}>
+                Stay here
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = pendingDecision();
+                  if (!next) return;
+                  discardDraft();
+                  setPendingDecision(null);
+                  next.action();
+                }}
+              >
+                Discard draft
+              </button>
+              <button
+                type="button"
+                data-dialog-initial-focus
+                disabled={saving()}
+                onClick={() => {
+                  const next = pendingDecision();
+                  if (!next) return;
+                  void saveTask().then((saved) => {
+                    if (!saved) return;
+                    setPendingDecision(null);
+                    next.action();
+                  });
+                }}
+              >
+                {saving() ? "Saving..." : "Save and continue"}
+              </button>
+            </div>
+          </Dialog>
+        )}
+      </Show>
     </div>
   );
 };
