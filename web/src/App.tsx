@@ -1100,7 +1100,7 @@ const App: Component = () => {
       </div>
 
       <nav class="phone-bottom-nav" aria-label="Primary navigation">
-        <a href="#/sessions" class={location.pathname.startsWith("/sessions") || location.pathname.startsWith("/t/") ? "active" : ""}>Sessions</a>
+        <a href="#/sessions" class={location.pathname.startsWith("/sessions") || location.pathname.startsWith("/t/") ? "active" : ""}>Sessions <span class="phone-place-count">{sessionsStore.order.length}</span></a>
         <a href="#/inbox" class={location.pathname === "/inbox" ? "active" : ""}>Inbox</a>
         <a href="#/board" class={location.pathname === "/board" ? "active" : ""}>Board</a>
         <a href="#/backlog" class={location.pathname === "/backlog" ? "active" : ""}>Backlog</a>

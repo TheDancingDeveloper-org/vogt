@@ -1,4 +1,4 @@
-import { Component, For, Show, createSignal, onMount } from "solid-js";
+import { Component, For, Show, createMemo, createSignal, onMount } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 import { api, type AssistantPendingAction } from "./api";
 import { sessionsStore, sessionsError, isConnected } from "./store";
@@ -9,6 +9,31 @@ function activityLabel(session: SessionSummary): string {
   return session.activity === "waiting-for-input" ? "waiting for input" : session.activity;
 }
 
+const ATTENTION_ORDER: Record<string, number> = {
+  "waiting-for-input": 0,
+  errored: 1,
+  running: 2,
+  idle: 3,
+  exited: 4,
+};
+
+function attentionRank(session: SessionSummary): number {
+  if (session.exit_code !== null) return session.exit_code === 0 ? 4 : 1;
+  return ATTENTION_ORDER[session.activity] ?? 3;
+}
+
+function activitySince(session: SessionSummary): string {
+  const instant = session.activity_changed_at || session.created_at;
+  if (!instant) return "activity time unavailable";
+  const elapsed = Date.now() - new Date(instant).getTime();
+  if (!Number.isFinite(elapsed) || elapsed < 0) return instant;
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
+}
+
 const Sessions: Component = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -17,7 +42,10 @@ const Sessions: Component = () => {
   const [pendingBusy, setPendingBusy] = createSignal(false);
   const [reasonDraft, setReasonDraft] = createSignal("");
   const [reasonBusy, setReasonBusy] = createSignal(false);
-  const sessions = () => sessionsStore.order.map((id) => sessionsStore.sessions[id]).filter((session): session is SessionSummary => Boolean(session));
+  const sessions = createMemo(() => sessionsStore.order
+    .map((id) => sessionsStore.sessions[id])
+    .filter((session): session is SessionSummary => Boolean(session))
+    .sort((left, right) => attentionRank(left) - attentionRank(right)));
 
   const readPending = async () => {
     try {
@@ -69,7 +97,7 @@ const Sessions: Component = () => {
         <div>
           <p class="place-kicker">Machine</p>
           <h1>Sessions</h1>
-          <p>Terminal panes and machine tools live here. Select a session to attach.</p>
+          <p>{sessions().length} live · sorted by attention</p>
         </div>
         <span class={`connection-state ${isConnected() ? "connected" : "disconnected"}`}>
           {isConnected() ? "Connected" : "Engine unavailable"}
@@ -133,14 +161,21 @@ const Sessions: Component = () => {
         <div class="sessions-place-list">
           <For each={sessions()}>
             {(session) => (
-              <button type="button" class="session-place-row" onClick={() => navigate(`/t/${session.id}`)}>
+              <article class={`session-place-row ${session.activity === "waiting-for-input" ? "session-place-row--waiting" : ""}`}>
                 <span class={`activity-dot ${session.exit_code !== null ? (session.exit_code === 0 ? "done" : "errored") : session.activity}`} aria-hidden="true" />
                 <span class="session-place-main">
                   <strong>{session.name}</strong>
-                  <small>{session.cwd}</small>
+                  <span class="session-place-context">
+                    <small>{session.cwd || "default workspace"}</small>
+                    <small>{session.continuity ? `${session.continuity.provider} · ${session.continuity.state}` : "continuity unavailable"}</small>
+                  </span>
                 </span>
-                <span class="session-place-status">{activityLabel(session)}</span>
-              </button>
+                <span class="session-place-status">
+                  <strong>{activityLabel(session)}</strong>
+                  <small>{activitySince(session)}</small>
+                </span>
+                <button type="button" class="session-place-open" onClick={() => navigate(`/t/${session.id}`)}>Open session</button>
+              </article>
             )}
           </For>
         </div>

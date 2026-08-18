@@ -39,6 +39,8 @@ export interface SessionSummary {
   /** Explicit command the session was created with (absent for default-shell sessions). */
   command?: string | null;
   created_at: string;
+  /** Wall-clock instant when the current activity state began. */
+  activity_changed_at?: string;
 }
 
 export interface CreateSessionRequest {

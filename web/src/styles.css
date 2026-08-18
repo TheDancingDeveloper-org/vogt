@@ -811,12 +811,26 @@ textarea {
     backdrop-filter: blur(10px);
   }
   .phone-bottom-nav a {
+    position: relative;
     padding: 8px 4px;
     color: var(--fg-muted);
     border-radius: 5px;
     text-align: center;
     text-decoration: none;
     font-size: 12px;
+  }
+  .phone-place-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    margin-left: 3px;
+    padding: 0 4px;
+    border: 1px solid currentColor;
+    border-radius: 10px;
+    font-size: 10px;
+    line-height: 1;
   }
   .phone-bottom-nav a.active,
   .phone-bottom-nav a:focus-visible {
@@ -841,6 +855,80 @@ textarea {
     flex: 1;
     min-height: 44px;
   }
+}
+
+.sessions-place {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  overflow: auto;
+}
+.sessions-place-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.session-place-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--bd);
+  border-radius: 7px;
+  background: var(--bg-elev);
+}
+.session-place-row--waiting {
+  border-color: var(--activity-waiting);
+  border-left-width: 4px;
+}
+.session-place-main,
+.session-place-context,
+.session-place-status {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.session-place-main strong,
+.session-place-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-place-context,
+.session-place-status small { color: var(--fg-muted); }
+.session-place-status { align-items: flex-end; font-size: 12px; }
+.session-place-open { min-height: 36px; }
+.sessions-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--bd);
+}
+.sessions-tools > span {
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+@media (max-width: 768px) {
+  .sessions-place { padding: 10px; }
+  .session-place-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    padding: 12px 10px;
+  }
+  .session-place-status { align-items: flex-start; }
+  .session-place-open {
+    grid-column: 2 / -1;
+    min-height: 44px;
+  }
+  .session-place-row--waiting .session-place-open::after { content: " · prompt needs attention"; }
 }
 
 .connection-banner {
