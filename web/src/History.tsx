@@ -23,6 +23,7 @@ import {
 
 interface Props {
   onError?: (message: string) => void;
+  confirmAction?: (title: string, body?: string) => Promise<boolean>;
 }
 
 type StatusFilter = "all" | "success" | "error" | "unfinished";
@@ -205,7 +206,11 @@ const History: Component<Props> = (props) => {
   };
 
   const deleteSession = async (session: HistorySessionMetadata) => {
-    if (!window.confirm(`Delete archived session "${session.name}"?`)) return;
+    if (!props.confirmAction) return;
+    if (!await props.confirmAction(
+      `Delete archived session "${session.name}"?`,
+      "Its metadata and saved scrollback will be permanently deleted.",
+    )) return;
     try {
       await api.deleteHistorySession(session.id);
       setPinnedIds(removeHistoryPin(session.id));

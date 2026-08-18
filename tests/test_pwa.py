@@ -130,6 +130,26 @@ def test_the_vogt_client_reaches_no_other_origin() -> None:
     assert not offenders, f"the Vogt client reaches outside the origin: {offenders}"
 
 
+def test_all_pwa_dialogs_use_the_shared_accessible_foundation() -> None:
+    """One modal implementation and no browser-native decision surfaces."""
+    components = {path.name: source(path) for path in sorted(WEB_SRC.glob("*.tsx"))}
+    native = {
+        name: token
+        for name, text in components.items()
+        for token in ("window.confirm(", "window.alert(")
+        if token in text
+    }
+    assert not native, f"PWA components use browser-native dialogs: {native}"
+
+    owners = sorted(
+        name for name, text in components.items() if 'role="dialog"' in text
+    )
+    assert owners == ["Dialog.tsx"], (
+        "modal semantics must stay in Dialog.tsx so focus, Escape, stacking, "
+        f"and naming do not diverge; found dialog owners {owners}"
+    )
+
+
 # -- half two: every engine path is a route the engine serves ---------------
 
 

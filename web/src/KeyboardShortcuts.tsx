@@ -1,4 +1,5 @@
 import { Component, For, Show, createSignal } from "solid-js";
+import Dialog from "./Dialog";
 
 interface Shortcut {
   keys: string[];
@@ -84,15 +85,14 @@ const KeyboardShortcuts: Component<Props> = (props) => {
 
   return (
     <Show when={props.open}>
-      <div
-        class="modal-backdrop"
-        onClick={(e) => {
-          if (e.target === e.currentTarget) props.onClose();
-        }}
+      <Dialog
+        labelledBy="shortcuts-title"
+        onClose={props.onClose}
+        dialogClass="shortcuts-modal"
+        dismissOnBackdrop
       >
-        <div class="shortcuts-modal" onClick={(e) => e.stopPropagation()}>
           <div class="shortcuts-header">
-            <h2>Keyboard Shortcuts</h2>
+            <h2 id="shortcuts-title">Keyboard Shortcuts</h2>
             <button class="shortcuts-close" onClick={props.onClose}>
               ×
             </button>
@@ -151,8 +151,7 @@ const KeyboardShortcuts: Component<Props> = (props) => {
           <div class="shortcuts-footer">
             Press <kbd>Esc</kbd> to close
           </div>
-        </div>
-      </div>
+      </Dialog>
     </Show>
   );
 };

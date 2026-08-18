@@ -28,6 +28,7 @@ import {
 
 interface Props {
   repo: string;
+  confirmAction?: (title: string, body?: string) => Promise<boolean>;
 }
 
 const kindOrder: GitStatusKind[] = [
@@ -353,7 +354,11 @@ const GitTab: Component<Props> = (props) => {
   const discardSelected = async () => {
     const entry = selectedEntry();
     if (!entry) return;
-    if (!window.confirm(`Discard changes in ${entry.path}?`)) return;
+    if (!props.confirmAction) return;
+    if (!await props.confirmAction(
+      `Discard changes in "${entry.path}"?`,
+      "Uncommitted working-tree changes in this file will be permanently lost.",
+    )) return;
     const response = await runGitOp({ op: "discard", repo: props.repo, path: entry.path });
     if (!response) return;
     setActionInfo(`Discarded ${entry.path}`);

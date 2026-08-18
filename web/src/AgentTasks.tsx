@@ -10,6 +10,7 @@ import { api } from "./api";
 interface Props {
   onError?: (message: string) => void;
   onOpenSession?: (sessionId: string, label: string) => void;
+  confirmAction?: (title: string, body?: string) => Promise<boolean>;
 }
 
 interface TaskDraft {
@@ -260,7 +261,11 @@ const AgentTasks = (props: Props) => {
   };
 
   const deleteTask = async (task: AgentTask) => {
-    if (!window.confirm(`Delete task "${task.name}"?`)) return;
+    if (!props.confirmAction) return;
+    if (!await props.confirmAction(
+      `Delete task "${task.name}"?`,
+      "The schedule, prompt, and saved task definition will be permanently deleted. Existing session history is retained.",
+    )) return;
     try {
       await api.deleteAgentTask(task.id);
       const remaining = tasks().filter((candidate) => candidate.id !== task.id);

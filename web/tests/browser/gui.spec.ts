@@ -48,7 +48,24 @@ async function installFixtures(page: Page) {
   await page.addInitScript(() => {
     localStorage.setItem("mydevenv2.token", "browser-test-token");
   });
-  await page.route("**/api/status**", async (route) => route.fulfill({ json: { version: "test" } }));
+  await page.route("**/api/status**", async (route) => route.fulfill({ json: {
+    version: "test",
+    session_count: 0,
+    push_subscription_count: 0,
+    gui_process_count: 0,
+    gui_stream_configured: false,
+    fcm_enabled: false,
+    history: {
+      enabled: true, archived_session_count: 0, log_file_count: 0,
+      log_bytes: 0, db_bytes: 0,
+    },
+    agent_tasks: {
+      task_count: 0, prompt_task_dir_count: 0, prompt_file_count: 0,
+      context_file_count: 0, prompt_bytes: 0, orphan_task_dir_count: 0,
+    },
+    auth_broker: { auto_agent_auth: false, helper: "disabled" },
+    storage: { state_dir: "/tmp/vogt", workspace_root: "/workspace/vogt" },
+  } }));
   await page.route("**/api/config**", async (route) => route.fulfill({ json: {
     assistant_enabled: false, gui_stream_url: null, session_templates: [],
     vogt: { configured: true },
@@ -120,8 +137,61 @@ test("Phone shell keeps labelled primary navigation and Go to reachability", asy
   await expect(page.getByRole("link", { name: "Inbox" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Go to…" })).toBeVisible();
   await page.getByRole("button", { name: "Go to…" }).click();
-  await expect(page.locator(".command-palette")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
   await expect(page.getByText("Open Audit")).toBeVisible();
+});
+
+test("Dialog focus is contained and restored, and feedback matches its live region", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Settings is a desktop route");
+  await installFixtures(page);
+  await page.goto("/#/sessions");
+
+  const goTo = page.getByRole("button", { name: "Go to…" });
+  await goTo.click();
+  const palette = page.getByRole("dialog", { name: "Command palette" });
+  await expect(palette).toBeVisible();
+  await expect(palette.locator("input")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(palette).toBeHidden();
+  await expect(goTo).toBeFocused();
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", includeHidden: true });
+  await expect(settings).toBeVisible();
+  const saveLayout = settings.getByRole("button", { name: "Save Current Layout" });
+  await saveLayout.click();
+  const layoutPrompt = page.getByRole("dialog", { name: "Save workspace layout" });
+  await expect(layoutPrompt).toBeVisible();
+  await expect(settings).toHaveAttribute("aria-hidden", "true");
+  await layoutPrompt.locator("input").fill("Browser layout");
+  await layoutPrompt.getByRole("button", { name: "Save" }).click();
+  await expect(
+    page.getByRole("region", { name: "Notifications" }).getByRole("status"),
+  ).toContainText('Saved layout "Browser layout"');
+  await expect(saveLayout).toBeFocused();
+  await settings.getByRole("button", { name: "Cancel" }).click();
+
+  await page.route("**/api/sessions", async (route) => {
+    if (route.request().method() === "POST") {
+      return route.fulfill({ status: 503, json: { error: "session service offline" } });
+    }
+    return route.fulfill({ json: [] });
+  });
+  await page.getByRole("button", { name: "Go to…" }).click();
+  const createPalette = page.getByRole("dialog", { name: "Command palette" });
+  await createPalette.getByText("New Terminal Session", { exact: true }).click();
+  const prompt = page.getByRole("dialog", { name: "New session" });
+  await expect(prompt).toBeVisible();
+  await prompt.locator("input").fill("browser-failure");
+  await prompt.getByRole("button", { name: "Save" }).click();
+  const error = page.getByRole("alert");
+  await expect(error).toContainText("Error");
+  await expect(error).toContainText("Session creation failed");
+  await expect(error.getByText("Open details")).toBeVisible();
+  await expect(error.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(
+    error.getByRole("button", { name: "Dismiss Session creation failed" }),
+  ).toBeVisible();
 });
 
 test("Files rail keeps names legible and puts secondary actions behind one control", async ({ page }) => {
