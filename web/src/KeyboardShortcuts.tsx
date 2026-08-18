@@ -1,86 +1,39 @@
 import { Component, For, Show, createSignal } from "solid-js";
 import Dialog from "./Dialog";
-
-interface Shortcut {
-  keys: string[];
-  description: string;
-  category: string;
-}
+import { KEYBOARD_SHORTCUTS, type KeyboardShortcut } from "./keyboardShortcuts";
 
 interface Props {
   open: boolean;
   onClose: () => void;
 }
 
-const shortcuts: Shortcut[] = [
-  // Global Navigation
-  { keys: ["Ctrl", "K"], description: "Open command palette", category: "Navigation" },
-  { keys: ["Cmd", "K"], description: "Open command palette (Mac)", category: "Navigation" },
-  { keys: ["Ctrl", "Shift", "T"], description: "New terminal session", category: "Navigation" },
-  { keys: ["Ctrl", "Shift", "W"], description: "Close active tab", category: "Navigation" },
-  { keys: ["Ctrl", "Alt", "←"], description: "Previous tab", category: "Navigation" },
-  { keys: ["Ctrl", "Alt", "→"], description: "Next tab", category: "Navigation" },
-
-  // Terminal
-  { keys: ["Ctrl", "Shift", "C"], description: "Copy selection", category: "Terminal" },
-  { keys: ["Ctrl", "Shift", "V"], description: "Paste", category: "Terminal" },
-  { keys: ["Ctrl", "Shift", "A"], description: "Select all", category: "Terminal" },
-  { keys: ["Ctrl", "C"], description: "Copy (with selection) or interrupt", category: "Terminal" },
-  { keys: ["Right-click"], description: "Copy or paste", category: "Terminal" },
-  { keys: ["Middle-click"], description: "Paste (Linux)", category: "Terminal" },
-
-  // Editor
-  { keys: ["Ctrl", "S"], description: "Save file", category: "Editor" },
-  { keys: ["Ctrl", "F"], description: "Find", category: "Editor" },
-  { keys: ["Ctrl", "H"], description: "Find and replace", category: "Editor" },
-  { keys: ["Ctrl", "G"], description: "Go to line", category: "Editor" },
-  { keys: ["Ctrl", "/"], description: "Toggle comment", category: "Editor" },
-  { keys: ["Alt", "↑"], description: "Move line up", category: "Editor" },
-  { keys: ["Alt", "↓"], description: "Move line down", category: "Editor" },
-  { keys: ["Ctrl", "D"], description: "Add cursor to next match", category: "Editor" },
-
-  // Command Palette
-  { keys: ["↑"], description: "Navigate up", category: "Command Palette" },
-  { keys: ["↓"], description: "Navigate down", category: "Command Palette" },
-  { keys: ["Enter"], description: "Execute command", category: "Command Palette" },
-  { keys: ["Esc"], description: "Close palette", category: "Command Palette" },
-
-  // Special
-  { keys: ["?"], description: "Show this help", category: "Help" },
-];
-
 const KeyboardShortcuts: Component<Props> = (props) => {
   const [searchQuery, setSearchQuery] = createSignal("");
 
   const categories = () => {
-    const cats = new Set(shortcuts.map((s) => s.category));
+    const cats = new Set(KEYBOARD_SHORTCUTS.map((s) => s.category));
     return Array.from(cats);
   };
 
   const filteredShortcuts = () => {
     const query = searchQuery().toLowerCase();
-    if (!query) return shortcuts;
-    return shortcuts.filter(
+    if (!query) return KEYBOARD_SHORTCUTS;
+    return KEYBOARD_SHORTCUTS.filter(
       (s) =>
         s.description.toLowerCase().includes(query) ||
-        s.keys.some((k) => k.toLowerCase().includes(query)),
+        s.keys.some((k) => k.toLowerCase().includes(query)) ||
+        s.contextLabel.toLowerCase().includes(query),
     );
   };
 
   const shortcutsByCategory = () => {
     const filtered = filteredShortcuts();
-    const byCategory: Record<string, Shortcut[]> = {};
+    const byCategory: Record<string, KeyboardShortcut[]> = {};
     filtered.forEach((s) => {
       if (!byCategory[s.category]) byCategory[s.category] = [];
       byCategory[s.category]!.push(s);
     });
     return byCategory;
-  };
-
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.key === "Escape") {
-      props.onClose();
-    }
   };
 
   return (
@@ -91,22 +44,25 @@ const KeyboardShortcuts: Component<Props> = (props) => {
         dialogClass="shortcuts-modal"
         dismissOnBackdrop
       >
-          <div class="shortcuts-header">
-            <h2 id="shortcuts-title">Keyboard Shortcuts</h2>
-            <button class="shortcuts-close" onClick={props.onClose}>
-              ×
-            </button>
-          </div>
+        <div class="shortcuts-header">
+          <h2 id="shortcuts-title">Keyboard Shortcuts</h2>
+          <button
+            class="shortcuts-close"
+            aria-label="Close keyboard shortcuts"
+            onClick={props.onClose}
+          >
+            ×
+          </button>
+        </div>
 
-          <input
-            type="search"
-            class="shortcuts-search"
-            placeholder="Search shortcuts..."
-            value={searchQuery()}
-            onInput={(e) => setSearchQuery(e.currentTarget.value)}
-            onKeyDown={handleKeyDown}
-            autofocus
-          />
+        <input
+          type="search"
+          class="shortcuts-search"
+          placeholder="Search shortcuts..."
+          value={searchQuery()}
+          onInput={(e) => setSearchQuery(e.currentTarget.value)}
+          data-dialog-initial-focus
+        />
 
           <div class="shortcuts-content">
             <For each={categories()}>
@@ -120,7 +76,10 @@ const KeyboardShortcuts: Component<Props> = (props) => {
                         <For each={categoryShortcuts}>
                           {(shortcut) => (
                             <div class="shortcut-item">
-                              <span class="shortcut-description">{shortcut.description}</span>
+                              <span class="shortcut-description">
+                                {shortcut.description}
+                                <small class="shortcut-context">{shortcut.contextLabel}</small>
+                              </span>
                               <div class="shortcut-keys">
                                 <For each={shortcut.keys}>
                                   {(key, idx) => (
@@ -148,9 +107,9 @@ const KeyboardShortcuts: Component<Props> = (props) => {
             </Show>
           </div>
 
-          <div class="shortcuts-footer">
-            Press <kbd>Esc</kbd> to close
-          </div>
+        <div class="shortcuts-footer">
+          Press <kbd>Esc</kbd> to close
+        </div>
       </Dialog>
     </Show>
   );

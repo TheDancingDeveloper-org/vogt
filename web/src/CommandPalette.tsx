@@ -4,8 +4,8 @@ import {
   Show,
   createEffect,
   createSignal,
+  createUniqueId,
   onCleanup,
-  onMount,
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { createSession, sessionsStore } from "./store";
@@ -187,11 +187,24 @@ const CommandPalette: Component<Props> = (props) => {
     { slug: string; name: string }[]
   >([]);
   const [savedLayouts, setSavedLayouts] = createSignal<SavedWorkspaceLayout[]>([]);
-  let inputRef: HTMLInputElement | undefined;
+  const paletteId = createUniqueId();
+  const inputId = `command-palette-input-${paletteId}`;
+  const listboxId = `command-palette-results-${paletteId}`;
+  const instructionsId = `command-palette-instructions-${paletteId}`;
+  const statusId = `command-palette-status-${paletteId}`;
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
   createEffect(() => {
     if (!props.open) return;
+    // Each invocation is a fresh navigation act. A closed palette does not
+    // retain a stale query or selection that could make Enter run a command
+    // the user cannot see when reopening it later.
+    setQuery("");
+    setSelectedIndex(0);
+    setHistoryResults([]);
+    setFileResults([]);
+    setSymbolResults([]);
+    setSymbolMessage(null);
     setSavedLayouts(listWorkspaceLayouts());
     void api
       .listAgentTasks()
@@ -1063,11 +1076,34 @@ const CommandPalette: Component<Props> = (props) => {
     );
   };
 
+  const selectedCommand = () => filteredCommands()[selectedIndex()];
+  const optionId = (command: Command) =>
+    `command-palette-option-${paletteId}-${encodeURIComponent(command.id)}`;
+
+  createEffect(() => {
+    const last = filteredCommands().length - 1;
+    if (last < 0) {
+      if (selectedIndex() !== 0) setSelectedIndex(0);
+    } else if (selectedIndex() > last) {
+      setSelectedIndex(last);
+    }
+  });
+
+  createEffect(() => {
+    const command = selectedCommand();
+    if (!command) return;
+    queueMicrotask(() => {
+      document.getElementById(optionId(command))?.scrollIntoView?.({ block: "nearest" });
+    });
+  });
+
   const handleKeyDown = (e: KeyboardEvent) => {
     const cmds = filteredCommands();
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setSelectedIndex((i) => Math.min(i + 1, cmds.length - 1));
+      if (cmds.length > 0) {
+        setSelectedIndex((i) => Math.min(i + 1, cmds.length - 1));
+      }
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setSelectedIndex((i) => Math.max(i - 1, 0));
@@ -1077,17 +1113,8 @@ const CommandPalette: Component<Props> = (props) => {
       if (cmd) {
         void cmd.action();
       }
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      props.onClose();
     }
   };
-
-  onMount(() => {
-    if (props.open) {
-      inputRef?.focus();
-    }
-  });
 
   // Reset selection when query changes
   const handleInput = (e: InputEvent) => {
@@ -1106,56 +1133,80 @@ const CommandPalette: Component<Props> = (props) => {
         backdropClass="command-palette-backdrop"
         dismissOnBackdrop
       >
-          <div class="command-palette-header">
-            <input
-              ref={inputRef}
-              type="text"
-              class="command-palette-input"
-              placeholder="Type a command, @ for symbols, / for files, or > for history..."
-              value={query()}
-              onInput={handleInput}
-              onKeyDown={handleKeyDown}
-              autofocus
-            />
-          </div>
-          <div class="command-palette-results">
-            <Show
-              when={filteredCommands().length > 0}
-              fallback={
-                <div class="command-palette-empty">No commands found</div>
-              }
-            >
-              <For each={filteredCommands()}>
-                {(cmd, index) => (
-                  <button
-                    class={`command-palette-item ${
-                      selectedIndex() === index() ? "selected" : ""
-                    }`}
-                    onClick={() => void cmd.action()}
-                    onMouseEnter={() => setSelectedIndex(index())}
-                  >
-                    <Show when={cmd.icon}>
-                      <span class="command-icon">{cmd.icon}</span>
+        <div class="command-palette-header">
+          <label class="visually-hidden" for={inputId}>Search commands</label>
+          <input
+            id={inputId}
+            type="text"
+            class="command-palette-input"
+            placeholder="Type a command, @ for symbols, / for files, or > for history..."
+            value={query()}
+            onInput={handleInput}
+            onKeyDown={handleKeyDown}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded="true"
+            aria-controls={listboxId}
+            aria-activedescendant={
+              selectedCommand() ? optionId(selectedCommand()!) : undefined
+            }
+            aria-describedby={`${instructionsId} ${statusId}`}
+            data-dialog-initial-focus
+          />
+        </div>
+        <div
+          id={listboxId}
+          class="command-palette-results"
+          role="listbox"
+          aria-label="Command results"
+        >
+          <Show
+            when={filteredCommands().length > 0}
+            fallback={
+              <div class="command-palette-empty" role="presentation">
+                No commands found
+              </div>
+            }
+          >
+            <For each={filteredCommands()}>
+              {(cmd, index) => (
+                <div
+                  id={optionId(cmd)}
+                  role="option"
+                  aria-selected={selectedIndex() === index()}
+                  class={`command-palette-item ${
+                    selectedIndex() === index() ? "selected" : ""
+                  }`}
+                  onClick={() => void cmd.action()}
+                  onPointerMove={() => setSelectedIndex(index())}
+                >
+                  <Show when={cmd.icon}>
+                    <span class="command-icon">{cmd.icon}</span>
+                  </Show>
+                  <div class="command-content">
+                    <div class="command-label">{cmd.label}</div>
+                    <Show when={cmd.description}>
+                      <div class="command-description">{cmd.description}</div>
                     </Show>
-                    <div class="command-content">
-                      <div class="command-label">{cmd.label}</div>
-                      <Show when={cmd.description}>
-                        <div class="command-description">{cmd.description}</div>
-                      </Show>
-                    </div>
-                    <Show when={cmd.category}>
-                      <span class="command-category">{cmd.category}</span>
-                    </Show>
-                  </button>
-                )}
-              </For>
-            </Show>
-          </div>
-          <div class="command-palette-footer">
-            <span>↑↓ Navigate</span>
-            <span>↵ Select</span>
-            <span>ESC Close</span>
-          </div>
+                  </div>
+                  <Show when={cmd.category}>
+                    <span class="command-category">{cmd.category}</span>
+                  </Show>
+                </div>
+              )}
+            </For>
+          </Show>
+        </div>
+        <div id={statusId} class="visually-hidden" role="status" aria-live="polite">
+          {filteredCommands().length === 0
+            ? "No commands found"
+            : `${filteredCommands().length} command${filteredCommands().length === 1 ? "" : "s"} found. ${selectedCommand()?.label ?? ""} selected.`}
+        </div>
+        <div class="command-palette-footer">
+          <span id={instructionsId}>↑↓ Navigate</span>
+          <span>↵ Select</span>
+          <span>Esc Close</span>
+        </div>
       </Dialog>
     </Show>
   );
