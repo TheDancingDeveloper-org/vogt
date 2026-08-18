@@ -65,6 +65,14 @@ on any surface.
   engine's image is built by `.github/workflows/build.yml`, and the pre-merge
   Forgejo repository keeps its own pipeline. Read `engine/AGENTS.md` before
   changing anything in there.
+- `engine/Dockerfile.pod` — the dev-pod toolchain (Node, the Rust dev
+  toolchain, sway, selkies, Java/Gradle, the Android SDK, Flutter), split out
+  of the merged image's runtime stage because it was 22 of that build's 34
+  minutes and depends on none of this repository's source. Published as
+  `vogt-pod-base:{lean,full}-<hash>-<week>` by
+  `.github/workflows/pod-base.yml` and consumed by digest as `POD_BASE_IMAGE`.
+  **Adding a tool to the pod means editing this file**, not `engine/Dockerfile`;
+  `docs/DEPLOYMENT.md` §10 documents what it carries.
 - `web/` — the Solid/Vite PWA, and the product's GUI going forward. It is baked
   into the Rust binary at compile time (`engine/server/src/assets.rs` embeds
   `../../web/dist/`), so a `cargo build` without a fresh `pnpm build` ships a

@@ -1013,6 +1013,24 @@ This section is the source of truth for the toolchain the merged image ships,
 and replaces `docs/engine/TOOLING.md`. It describes the image, not the stack:
 stack shape, environment and rollout are §2.2, §9 and §11.
 
+**Where it is defined:** `engine/Dockerfile.pod`, not `engine/Dockerfile`. The
+toolchain moved out of the merged image's runtime stage into a base image of
+its own — `ghcr.io/thedancingdeveloper-org/vogt-pod-base`, built by
+`.github/workflows/pod-base.yml` and consumed by digest as `POD_BASE_IMAGE` —
+because it was 1344s of a 34-minute build and none of it depends on a line of
+this repository's source. Everything §10.1 to §10.3 lists is installed there.
+
+So **adding a tool to the pod means editing `engine/Dockerfile.pod`**, and the
+next build picks it up automatically: the image is tagged
+`<variant>-<hash>-<week>` where the hash is of that file, so a change
+republishes on the next run and an unchanged file is reused. `engine/Dockerfile`
+keeps only what depends on the source — the two halves, the entrypoint, and the
+agent CLIs (§10.3), which stay behind because they are deliberately unpinned and
+a weekly-rebuilt base would have frozen them.
+
+Two variants are published, and §10.2's Flutter note is the only difference
+between them: `full` for `dev`, `lean` for main and every release.
+
 The pod is a **neutral development baseline** for builds under
 `~/Working/Active/apps/`. It is not tuned for one language, because the estate
 it serves is not.
