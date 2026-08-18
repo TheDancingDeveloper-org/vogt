@@ -190,6 +190,15 @@ working tree, a repository with no branches or commits, a selected path that
 is not a repository, and a missing/unavailable path are therefore separate
 states rather than different ways to draw an empty panel.
 
+History loads archived sessions in pages and says how many are loaded versus
+the server-reported total when that count is available. If no total is
+available, a full page says that more may exist until **Load more** reaches a
+short page. Metadata filters apply only to the pages already loaded; archived
+output search runs across the server's full archive (up to the displayed result
+limit). A failed archive, search, detail or replay read stays attached to that
+panel with **Retry**. Previously loaded content remains visible but is marked
+stale; an empty archive is shown only after a successful empty response.
+
 Session templates pre-configure command, cwd and environment, and can be
 matched to a repository name or path prefix. Custom ones live in the engine's
 TOML config:
