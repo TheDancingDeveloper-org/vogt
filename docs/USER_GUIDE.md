@@ -270,8 +270,11 @@ so UI changes ship without a new APK; only native plumbing needs one.
 | `?` | Open shortcut help outside text fields, editors and terminals |
 
 **The command palette reaches every read surface by fuzzy name** — projects and
-work items included, so `rstnz` finds `rustnzb`. It never performs a write.
-Mutating verbs whose collector is a *place* — quick-create, the drift inbox,
+work items included, so `rstnz` finds `rustnzb`. **New File** opens a form with
+separate workspace destination and filename fields; **Open File…** opens a
+searchable workspace-file chooser. Cancelling either returns focus to the
+palette invoker, and creation writes only after **Create file** succeeds.
+Other mutating verbs whose collector is a *place* — quick-create, the drift inbox,
 the import form — open that view and do nothing else; per-item verbs
 (transition, comment, start session) are reached through the item's own entry,
 which opens the page carrying all three forms.
