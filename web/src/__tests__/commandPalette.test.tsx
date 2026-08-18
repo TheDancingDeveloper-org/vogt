@@ -9,7 +9,7 @@
 // reason. What it cannot check is whether the reads are *reachable by name*,
 // which is the clause this file covers.
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { createSignal } from "solid-js";
@@ -19,7 +19,10 @@ import { fakeVogt, settle, workItem, type FakeVogt } from "./harness";
 
 const PROJECT_MANIFEST_REQUEST_COUNT = 9;
 
-function palette() {
+function palette(fileCallbacks: {
+  onNewFile?: () => void;
+  onChooseFile?: () => void;
+} = {}) {
   const history = createMemoryHistory();
   history.set({ value: "/board" });
   let closed = 0;
@@ -28,16 +31,20 @@ function palette() {
       <Route
         path="*rest"
         component={() => (
-          <CommandPalette open={true} onClose={() => (closed += 1)} />
+          <CommandPalette
+            open={true}
+            onClose={() => (closed += 1)}
+            {...fileCallbacks}
+          />
         )}
       />
     </MemoryRouter>
   ));
   return {
     container: rendered.container,
+    unmount: rendered.unmount,
     url: () => history.get(),
     closed: () => closed,
-    unmount: rendered.unmount,
     type(text: string) {
       const input = rendered.container.querySelector("input")!;
       fireEvent.input(input, { target: { value: text } });
@@ -58,6 +65,45 @@ function palette() {
 }
 
 afterEach(() => invalidateCommandPaletteProviders());
+
+describe("file workflow commands", () => {
+  it("offers only file commands backed by a real workflow", async () => {
+    fakeVogt(ESTATE);
+    const unsupported = palette();
+    await settle();
+    expect(unsupported.text()).not.toContain("New File");
+    expect(unsupported.text()).not.toContain("Open File...");
+    unsupported.unmount();
+
+    const supported = palette({ onNewFile: vi.fn(), onChooseFile: vi.fn() });
+    await settle();
+    expect(supported.text()).toContain("New File");
+    expect(supported.text()).toContain("Open File...");
+  });
+
+  it("hands New File and Open File to different workflows", async () => {
+    vi.useFakeTimers();
+    try {
+      fakeVogt(ESTATE);
+      const onNewFile = vi.fn();
+      const newView = palette({ onNewFile, onChooseFile: vi.fn() });
+      newView.type("New File");
+      newView.click("New File");
+      vi.runAllTimers();
+      expect(onNewFile).toHaveBeenCalledOnce();
+      newView.unmount();
+
+      const onChooseFile = vi.fn();
+      const openView = palette({ onNewFile: vi.fn(), onChooseFile });
+      openView.type("Open File");
+      openView.click("Open File...");
+      vi.runAllTimers();
+      expect(onChooseFile).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 const ESTATE = {
   "GET /projects": {

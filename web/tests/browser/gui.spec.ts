@@ -336,6 +336,95 @@ test("Files rail keeps names legible and puts secondary actions behind one contr
   await expect(page.getByRole("button", { name: "Delete" })).toBeVisible();
 });
 
+test("palette file commands open distinct real workflows and cancellation is inert", async ({ page }) => {
+  await installFixtures(page);
+  let createdPath: string | null = null;
+  let manifestRequests = 0;
+  const manifests = new Set([
+    "package.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "package-lock.json",
+    "Cargo.toml",
+    "pyproject.toml",
+    "Justfile",
+    "justfile",
+    "Makefile",
+  ]);
+  await page.route("**/api/search/files**", async (route) => {
+    const query = new URL(route.request().url()).searchParams.get("q") ?? "";
+    if (manifests.has(query)) manifestRequests += 1;
+    return route.fulfill({ json: query === "identifiable" ? [
+      { name: "an-identifiable-long-filename.tsx", path: "src/an-identifiable-long-filename.tsx" },
+    ] : [] });
+  });
+  await page.route("**/api/files**", async (route) => {
+    if (route.request().method() === "PUT") {
+      createdPath = (route.request().postDataJSON() as { path: string }).path;
+      return route.fulfill({ json: { ok: true, path: createdPath, bytes: 0 } });
+    }
+    const path = new URL(route.request().url()).searchParams.get("path") ?? "";
+    return route.fulfill({ json: {
+      path,
+      size: 0,
+      content: "",
+      content_base64: null,
+      is_binary: false,
+    } });
+  });
+  await page.goto("/#/sessions");
+
+  const goTo = page.getByRole("button", { name: "Go to…" });
+  await goTo.click();
+  const palette = page.getByRole("dialog", { name: "Command palette" });
+  await palette.getByRole("combobox", { name: "Search commands" }).fill("#workspace");
+  await expect.poll(() => manifestRequests).toBe(9);
+  await page.keyboard.press("Escape");
+
+  await goTo.click();
+  await palette
+    .getByText("New File", { exact: true })
+    .click();
+  const create = page.getByRole("dialog", { name: "New file" });
+  await expect(create.getByLabel("Destination folder")).toBeVisible();
+  await expect(create.getByLabel("Filename")).toBeVisible();
+  await create.getByRole("button", { name: "Cancel" }).click();
+  await expect(goTo).toBeFocused();
+  expect(createdPath).toBeNull();
+  expect(manifestRequests).toBe(9);
+
+  await goTo.click();
+  await palette
+    .getByText("Open File...", { exact: true })
+    .click();
+  const chooser = page.getByRole("dialog", { name: "Open file" });
+  await expect(chooser.getByLabel("Search workspace files")).toBeFocused();
+  await chooser.getByLabel("Search workspace files").fill("identifiable");
+  const existing = chooser.getByRole("button", {
+    name: "an-identifiable-long-filename.tsx — src/an-identifiable-long-filename.tsx",
+  });
+  await expect(existing).toBeVisible();
+  await existing.click();
+  await expect(page).toHaveURL(/#\/e\/src%2Fan-identifiable-long-filename\.tsx$/);
+  expect(manifestRequests).toBe(9);
+
+  await goTo.click();
+  await palette
+    .getByText("New File", { exact: true })
+    .click();
+  const createAgain = page.getByRole("dialog", { name: "New file" });
+  await createAgain.getByLabel("Destination folder").fill("notes");
+  await createAgain.getByLabel("Filename").fill("palette.md");
+  await expect(createAgain.getByText("Create notes/palette.md")).toBeVisible();
+  await createAgain.getByRole("button", { name: "Create file" }).click();
+  await expect.poll(() => createdPath).toBe("notes/palette.md");
+  await expect(page).toHaveURL(/#\/e\/notes%2Fpalette\.md$/);
+
+  await goTo.click();
+  await palette.getByRole("combobox", { name: "Search commands" }).fill("#workspace");
+  await expect.poll(() => manifestRequests).toBe(18);
+});
+
 test("Route truth owns unavailable links, current navigation and Settings return", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/board?project=vogt");

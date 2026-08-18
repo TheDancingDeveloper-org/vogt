@@ -31,7 +31,8 @@ import { matchAppShortcut } from "./keyboardShortcuts";
 import ModKeyRow from "./ModKeyRow";
 import Settings from "./Settings";
 import FileTree from "./FileTree";
-import CommandPalette from "./CommandPalette";
+import FileWorkflowDialog, { type FileWorkflow } from "./FileWorkflowDialog";
+import CommandPalette, { invalidateCommandPaletteProviders } from "./CommandPalette";
 import TemplateSelector from "./TemplateSelector";
 import Dialog from "./Dialog";
 import FeedbackCenter, {
@@ -289,6 +290,7 @@ const App: Component = () => {
   let settingsRouted = false;
   let settingsHasHistoryReturn = false;
   const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
+  const [fileWorkflow, setFileWorkflow] = createSignal<FileWorkflow | null>(null);
   const [templateSelectorOpen, setTemplateSelectorOpen] = createSignal(false);
   const [templateSelectorContext, setTemplateSelectorContext] =
     createSignal<TemplateContext | null>(null);
@@ -1375,7 +1377,8 @@ const App: Component = () => {
         open={commandPaletteOpen()}
         onClose={() => setCommandPaletteOpen(false)}
         onCreateSession={() => void onCreate()}
-        onOpenFile={() => navigate("/sessions")}
+        onNewFile={() => setFileWorkflow("new")}
+        onChooseFile={() => setFileWorkflow("open")}
         onOpenSettings={openSettings}
         guiEnabled={guiEnabled()}
         onShowShortcuts={() => setShortcutsOpen(true)}
@@ -1385,6 +1388,20 @@ const App: Component = () => {
         onSaveWorkspaceLayout={() => onSaveWorkspaceLayout()}
         onRestoreWorkspaceLayout={(layoutId) => onRestoreWorkspaceLayout(layoutId)}
       />
+
+      <Show when={fileWorkflow()} keyed>
+        {(workflow) => (
+          <FileWorkflowDialog
+            workflow={workflow}
+            onClose={() => setFileWorkflow(null)}
+            onFileCreated={() => invalidateCommandPaletteProviders()}
+            onOpenFile={(path) => {
+              openEditorTab(path);
+              navigate(`/e/${encodeURIComponent(path)}`);
+            }}
+          />
+        )}
+      </Show>
 
       <TemplateSelector
         open={templateSelectorOpen()}

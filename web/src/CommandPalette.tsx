@@ -81,6 +81,7 @@ interface PaletteProviderCache {
 }
 
 let providerCache: PaletteProviderCache = { key: "" };
+let providerCacheGeneration = 0;
 
 /**
  * Explicit invalidation seam for writes, credential changes, and the palette's
@@ -88,6 +89,7 @@ let providerCache: PaletteProviderCache = { key: "" };
  */
 export function invalidateCommandPaletteProviders(): void {
   providerCache = { key: "" };
+  providerCacheGeneration += 1;
 }
 
 function currentProviderCache(): PaletteProviderCache {
@@ -200,7 +202,8 @@ interface Props {
   open: boolean;
   onClose: () => void;
   onCreateSession?: () => void;
-  onOpenFile?: () => void;
+  onNewFile?: () => void;
+  onChooseFile?: () => void;
   onOpenSettings?: () => void;
   guiEnabled?: boolean;
   onShowShortcuts?: () => void;
@@ -254,6 +257,8 @@ const CommandPalette: Component<Props> = (props) => {
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let specialSearchAbort: AbortController | undefined;
   const providerControllers = new Set<AbortController>();
+  let loadedProviderGeneration = providerCacheGeneration;
+  let loadedProviderKey = "";
 
   const setProviderStatus = (
     name: ProviderName,
@@ -281,14 +286,31 @@ const CommandPalette: Component<Props> = (props) => {
     }
   };
 
+  const clearLoadedProviders = () => {
+    setAgentTasks([]);
+    setWorkItems([]);
+    setVogtProjects([]);
+    setProjectCommands([]);
+    setProviderStates({});
+    setProviderErrors({});
+  };
+
   function loadKnownProviders(force = false): void {
     if (force) {
       for (const controller of providerControllers) controller.abort();
       invalidateCommandPaletteProviders();
-      setProjectCommands([]);
-      setProviderStatus("workspace actions", "idle");
     }
     const cache = currentProviderCache();
+    if (
+      force ||
+      loadedProviderGeneration !== providerCacheGeneration ||
+      (loadedProviderKey && loadedProviderKey !== cache.key)
+    ) {
+      for (const controller of providerControllers) controller.abort();
+      clearLoadedProviders();
+    }
+    loadedProviderGeneration = providerCacheGeneration;
+    loadedProviderKey = cache.key;
 
     if (cache.agentTasks) {
       setAgentTasks(cache.agentTasks);
@@ -936,29 +958,30 @@ const CommandPalette: Component<Props> = (props) => {
       },
       category: "Sessions",
       },
-      {
+      ...(props.onNewFile ? [{
       id: "new-file",
       label: "New File",
-      description: "Create a new file in the workspace",
+      description: "Choose a destination and filename in the workspace",
       icon: "file",
       action: () => {
         props.onClose();
-        props.onOpenFile?.();
+        // Let Dialog restore the palette invoker before the next dialog
+        // captures it. Cancellation can then return focus to the real caller.
+        window.setTimeout(() => props.onNewFile?.(), 0);
       },
       category: "Files",
-      },
-      {
+      }] : []),
+      ...(props.onChooseFile ? [{
       id: "open-file",
       label: "Open File...",
-      description: "Browse and open a file from workspace",
+      description: "Search workspace files and open one in the editor",
       icon: "dir",
       action: () => {
         props.onClose();
-        // This would trigger file tree focus or file picker
-        props.onOpenFile?.();
+        window.setTimeout(() => props.onChooseFile?.(), 0);
       },
       category: "Files",
-      },
+      }] : []),
       {
       id: "git-status",
       label: "Git Status",

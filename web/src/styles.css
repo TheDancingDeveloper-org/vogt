@@ -1507,6 +1507,45 @@ textarea {
   justify-content: flex-end;
 }
 
+.file-workflow-dialog {
+  max-width: 560px;
+}
+.file-workflow-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.file-workflow-destination,
+.file-workflow-status {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.file-workflow-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 72px;
+  max-height: min(50vh, 360px);
+  overflow-y: auto;
+}
+.file-workflow-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  width: 100%;
+  padding: 9px 10px;
+  text-align: left;
+}
+.file-workflow-result small {
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+.file-workflow-error {
+  color: var(--activity-errored);
+  font-size: 12px;
+}
+
 /* File tree */
 .file-tree {
   display: flex;
