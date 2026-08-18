@@ -689,7 +689,7 @@ export const api = {
     "/api/push/update",
     { id, ...update },
   ),
-  pushTest: (title = "MyDevEnv2 test", body = "Push notifications are working.") =>
+  pushTest: (title = "Vogt test", body = "Push notifications are working.") =>
     req<{ ok: number; fail: number; queued: number }>("POST", "/api/push/test", { title, body }),
   flushPushDigests: () =>
     req<{ ok: number; fail: number; queued: number }>("POST", "/api/push/flush-digests"),

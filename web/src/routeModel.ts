@@ -1,4 +1,5 @@
 /** Route truth shared by rendering and every navigation surface. */
+import { productDocumentTitle } from "./identity";
 export type PrimaryPlace =
   | "sessions"
   | "inbox"
@@ -150,6 +151,60 @@ export function isCurrentPlace(outcome: RouteOutcome | null, place: PrimaryPlace
 export function isCurrentTool(outcome: RouteOutcome | null, tool: SessionTool): boolean {
   return (outcome?.kind === "tool" || outcome?.kind === "settings")
     && outcome.tool === tool;
+}
+
+const PLACE_TITLES: Record<PrimaryPlace, string> = {
+  sessions: "Sessions",
+  inbox: "Inbox",
+  board: "Board",
+  backlog: "Backlog",
+  projects: "Projects",
+  audit: "Audit",
+};
+
+const TOOL_TITLES: Record<SessionTool, string> = {
+  terminal: "Terminal",
+  editor: "Editor",
+  git: "Git",
+  history: "History",
+  tasks: "Tasks",
+  gui: "GUI stream",
+  assistant: "Assistant",
+};
+
+/**
+ * Name the current document from the same interpreted route that renders it.
+ * This is deliberately a switch over RouteOutcome, not another pathname table:
+ * a route cannot acquire a title without first becoming part of route truth.
+ */
+export function documentTitleForRoute(
+  outcome: RouteOutcome | null,
+  pathname: string,
+): string {
+  if (!outcome) return productDocumentTitle("Not found");
+  switch (outcome.kind) {
+    case "place":
+      return productDocumentTitle(PLACE_TITLES[outcome.place]);
+    case "tool":
+      return productDocumentTitle(TOOL_TITLES[outcome.tool]);
+    case "work-item": {
+      const encoded = pathname.startsWith("/w/") ? pathname.slice(3) : "";
+      let ref = encoded;
+      try {
+        ref = decodeURIComponent(encoded);
+      } catch {
+        // The router will present its own not-found result for an invalid URL;
+        // a title must never make that failure fatal.
+      }
+      return productDocumentTitle(ref || "Work item");
+    }
+    case "settings":
+      return productDocumentTitle("Settings");
+    case "loading":
+    case "unavailable":
+    case "not-found":
+      return productDocumentTitle(outcome.title);
+  }
 }
 
 export function isRestorableRoute(path: string): boolean {

@@ -280,6 +280,22 @@ test("History palette results restore the selected session, query and match", as
   await expect(page.getByLabel("Search all archived output")).toBeFocused();
 });
 
+test("Login and authentication errors present Vogt as the only product", async ({ page }) => {
+  await page.route("**/api/public-config", async (route) => route.fulfill({ json: {} }));
+  await page.route("**/api/status", async (route) => route.fulfill({
+    status: 401,
+    json: { error: "unauthorized" },
+  }));
+  await page.goto("/#/sessions");
+
+  await expect(page).toHaveTitle("Sign in · Vogt");
+  await expect(page.getByRole("heading", { name: "Sign in to Vogt" })).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("MyDevEnv2");
+  await page.getByLabel("Bearer token").fill("rejected-browser-token");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("alert")).toContainText("current Vogt token");
+});
+
 test("Board dragover/drop uses the real browser gesture and keeps its filter on reload", async ({ page }) => {
   test.skip(test.info().project.name === "phone", "Drag/drop is validated in the desktop browser project");
   await installFixtures(page);
@@ -293,6 +309,37 @@ test("Board dragover/drop uses the real browser gesture and keeps its filter on 
   await page.reload();
   await expect(page).toHaveURL(/#\/board\?project=vogt/);
   await expect(page.getByLabel("Board filters")).toBeVisible();
+});
+
+test("Vogt identity and route-aware titles survive navigation and reload", async ({ page }) => {
+  await installFixtures(page, { assistant_enabled: true });
+  await page.goto("/#/board?project=vogt");
+  await expect(page).toHaveTitle("Board · Vogt");
+  await expect(page.locator(".places-brand")).toHaveText("Vogt");
+
+  await page.goto("/#/history");
+  await expect(page).toHaveTitle("History · Vogt");
+  await page.reload();
+  await expect(page).toHaveTitle("History · Vogt");
+
+  const manifest = await page.evaluate(async () => {
+    const response = await fetch("/manifest.webmanifest");
+    return response.json() as Promise<Record<string, unknown>>;
+  });
+  expect(manifest).toMatchObject({ id: "/", name: "Vogt", short_name: "Vogt" });
+
+  const serviceWorker = await page.evaluate(async () => {
+    const registration = await navigator.serviceWorker.ready;
+    await registration.update();
+    const source = await fetch("/sw.js").then((response) => response.text());
+    return {
+      script: registration.active?.scriptURL,
+      source,
+    };
+  });
+  expect(serviceWorker.script).toMatch(/\/sw\.js$/);
+  expect(serviceWorker.source).toContain('const title = payload.title || "Vogt"');
+  expect(serviceWorker.source).not.toContain("MyDevEnv2");
 });
 
 test("Inbox evidence, source filter and batch reason survive a desktop browser", async ({ page }) => {

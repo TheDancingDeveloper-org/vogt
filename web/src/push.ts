@@ -273,9 +273,12 @@ async function ensureNativeNotificationChannel() {
   }
   const { PushNotifications } = await import("@capacitor/push-notifications");
   await PushNotifications.createChannel({
+    // Keep the historical id: changing it would strand user settings on an
+    // obsolete channel. Android permits its visible name/description to be
+    // refreshed in place when this channel is created again during upgrade.
     id: "mydevenv2-alerts",
-    name: "MyDevEnv2 alerts",
-    description: "Session and assistant alerts from MyDevEnv2",
+    name: "Vogt alerts",
+    description: "Session, work, and assistant alerts from Vogt",
     importance: 5,
     visibility: 1,
     sound: "default",

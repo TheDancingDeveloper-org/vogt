@@ -713,7 +713,7 @@ fn digest_notification_payload(digest: &PendingDigest) -> (String, String, serde
         "last_event_at": digest.last_event_at.to_string(),
         "url": digest.latest_url,
     });
-    ("MyDevEnv2 digest".to_string(), body, data)
+    ("Vogt digest".to_string(), body, data)
 }
 
 /// Mint an EC P-256 keypair for VAPID. Returns the private key as PKCS8 PEM
@@ -865,7 +865,7 @@ mod tests {
             latest_url: Some("/#/tasks".into()),
         };
         let (title, body, data) = digest_notification_payload(&digest);
-        assert_eq!(title, "MyDevEnv2 digest");
+        assert_eq!(title, "Vogt digest");
         assert!(body.contains("2 waiting-for-input"));
         assert!(body.contains("1 task started"));
         assert!(body.contains("2 drift"));

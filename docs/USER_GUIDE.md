@@ -1,5 +1,19 @@
 # Vogt — User Guide
 
+Vogt is the product name everywhere a person encounters it: the browser and
+route titles, sign-in screen, installed web/Android app and notifications. The
+installed PWA keeps `/` as its manifest identity, so an installation formerly
+labelled MyDevEnv2 upgrades in place to Vogt instead of appearing as a second
+app. Refresh an already-open window once after deployment to receive the new
+service worker, offline page and notification artwork.
+
+Some deliberately invisible compatibility identifiers retain the historical
+name: browser storage and event keys, Rust crate/config names, the Android
+package and notification-channel IDs, and the `MYDEVENV2_NOTIFY:` task hook.
+Changing those as presentation copy would instead discard local preferences,
+break protocols or FCM, create a second Android app, or invalidate existing
+task definitions. Their user-facing labels and messages still say Vogt.
+
 Status: **current as of 2026-08-18**, and describing one product. It replaced
 `docs/engine/USER_GUIDE.md`, which was written in June 2026 for MyDevEnv2
 standing alone and therefore documented terminals, the editor and git while

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   describeRoute,
+  documentTitleForRoute,
   isCurrentPlace,
   isCurrentTool,
   isRestorableRoute,
@@ -83,5 +84,22 @@ describe("route truth", () => {
       place: "sessions",
       tool: "history",
     });
+  });
+
+  it.each([
+    ["/board", "Board · Vogt"],
+    ["/history", "History · Vogt"],
+    ["/e/src%2Fmain.ts", "Editor · Vogt"],
+    ["/w/WI-7", "WI-7 · Vogt"],
+    ["/settings", "Settings · Vogt"],
+  ])("derives the %s title from route truth", (path, title) => {
+    const outcome = describeRoute(path, capabilities, "/board");
+    expect(documentTitleForRoute(outcome, path)).toBe(title);
+  });
+
+  it("titles route outcomes without a second pathname table", () => {
+    const missing = describeRoute("/t/missing", capabilities);
+    expect(documentTitleForRoute(missing, "/t/missing")).toBe("Session not found · Vogt");
+    expect(documentTitleForRoute(null, "/not-a-route")).toBe("Not found · Vogt");
   });
 });
