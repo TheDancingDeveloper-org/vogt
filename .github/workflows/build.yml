@@ -56,6 +56,27 @@ env:
   # Vogt alone (NFR-PO4), and this is the estate's own stack. One repository
   # with two kinds of tag in it is how somebody eventually pins the wrong one.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+  # Where BuildKit's layer cache lives.
+  #
+  # A registry, not a cache mount and not a persistent named builder, and that
+  # choice is forced by the runners rather than preferred: `node-b` is a fleet
+  # of three workers and a job lands on whichever is free. Anything held in a
+  # builder's local state — `--mount=type=cache`, `keep-state`, a reused
+  # buildkitd container — is therefore cold on most runs *by construction*,
+  # which is precisely what was happening. `docker/setup-buildx-action` also
+  # provisions a fresh, randomly-named builder per job and tears it down
+  # afterwards, so even a repeat landing on the same worker started from
+  # nothing: every one of these builds logged `booting buildkit` and not one
+  # `CACHED` layer.
+  #
+  # A registry is the only cache all three workers can see, and GHCR is
+  # already on the critical path for the bases, so it needs nothing built,
+  # deployed or maintained on Node B to hold it.
+  #
+  # Its own repository rather than tags alongside the images, for the reason
+  # `vogt` and `vogt-stack` are two repositories: one repository holding two
+  # kinds of tag is how somebody eventually pins the wrong one.
+  CACHE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-buildcache
 
 concurrency:
   # Only the newest commit on a branch is worth an image; older ones in
@@ -153,17 +174,38 @@ jobs:
       # Built and run before it is pushed. v0.1.0 shipped an image whose
       # entrypoint did not exist and v0.1.1 one that imported no application;
       # both builds were green and both artefacts had never been started.
+      # Built **once**, then promoted. It used to be built twice: once with
+      # `load: true` to smoke-test and again with `push: true` to publish.
+      # That cost 259s exporting a tarball into the local Docker daemon (96s
+      # exporting layers, 163s sending it) purely so four `docker run`s could
+      # reach it, and then a second export-and-push on top.
+      #
+      # Now it is pushed once under a candidate tag, tested *at its digest*,
+      # and the final tags are moved onto that same digest with
+      # `imagetools create` — a manifest copy, no rebuild and no re-push. The
+      # image that carries `:dev` is then provably the bytes the smoke test
+      # ran, rather than a second build that ought to have been identical.
+      #
+      # The candidate tag is published before the test passes, which is the
+      # one thing this trades away. It is deliberately outside both release
+      # streams — never `sha-*`, never `dev`, never `latest` — so "which build
+      # is that?" stays answerable, and a failed run leaves a tag that nothing
+      # references and the next run overwrites.
       - uses: docker/build-push-action@v6
         id: candidate
         with:
           context: .
-          load: true
-          tags: ${{ env.IMAGE }}:smoke-test
+          push: true
+          tags: ${{ env.IMAGE }}:candidate-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }},mode=max
 
       - name: the image runs
         env:
-          CANDIDATE: ${{ env.IMAGE }}:smoke-test
+          CANDIDATE: ${{ env.IMAGE }}@${{ steps.candidate.outputs.digest }}
         run: |
           set -euo pipefail
           docker run --rm "$CANDIDATE" --version
@@ -180,15 +222,42 @@ jobs:
           fi
           echo "image runs, has git, and still refuses to guess an address"
 
-      - uses: docker/build-push-action@v6
+      # A manifest copy onto the tested digest, not a rebuild. `imagetools
+      # create` copies the index and everything it references — the platform
+      # manifest and the provenance and SBOM attestations alike.
+      - name: promote the tested image
         id: push
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          provenance: true
-          sbom: true
+        env:
+          TESTED: ${{ env.IMAGE }}@${{ steps.candidate.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            args+=(--tag "$tag")
+          done <<< "$TAGS"
+          # `imagetools create` with no --tag copies to a digest and publishes
+          # nothing, so an empty tag list would leave a green job that shipped
+          # no image. Fail where it is legible instead.
+          [ "${#args[@]}" -gt 0 ] || {
+            echo "metadata-action produced no tags; nothing to promote" >&2
+            exit 1
+          }
+          docker buildx imagetools create "${args[@]}" "$TESTED"
+
+          # Read the digest back off a published tag rather than reusing the
+          # candidate's. Creating an index from an index is a copy, but it is
+          # a copy this step does not get to assume: what gets signed has to
+          # be what the tags actually resolve to.
+          first="$(printf '%s\n' "$TAGS" | head -n1)"
+          digest="$(docker buildx imagetools inspect "$first" \
+            --format '{{.Manifest.Digest}}')"
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "could not resolve a digest for ${first}" >&2; exit 1 ;;
+          esac
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - uses: sigstore/cosign-installer@v3
 
@@ -225,9 +294,27 @@ jobs:
             echo "semver tag was created, and \`latest\` did not move."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # The dev-pod toolchain, built (or found already published) before anything
+  # that consumes it. Same prerequisite shape as `base-images` and for the
+  # same reason: the common case is a lookup that costs seconds, and having it
+  # as a companion job instead would mean the image build racing the thing it
+  # is built on.
+  pod-base:
+    name: the pod base is in GHCR
+    needs: base-images
+    uses: ./.github/workflows/pod-base.yml
+    with:
+      # Flutter and the dev/prod split used to be build args on the merged
+      # image; they are the difference between the two published pod variants
+      # now, so the split is made once, here.
+      variant: ${{ github.ref == 'refs/heads/dev' && 'full' || 'lean' }}
+    permissions:
+      contents: read
+      packages: write
+
   stack-image:
     name: build and publish the merged image
-    needs: base-images
+    needs: [base-images, pod-base]
     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
     permissions:
       contents: read
@@ -238,21 +325,16 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: build the PWA
-        # `rust-embed` reads `web/dist/` at compile time, so the bundle is a
-        # build input to the Rust half rather than a separate artefact. An
-        # image built without this step compiles — and serves a placeholder
-        # where the product's front end should be.
-        run: |
-          set -euo pipefail
-          corepack enable
-          cd web
-          pnpm install --frozen-lockfile
-          pnpm build
+      # There is deliberately no `pnpm build` here any more.
+      #
+      # There was one, and it never reached the image. `rust-embed` does read
+      # `web/dist/` at compile time — that part of the old comment was right —
+      # but the bundle it reads is the one stage 1 of `engine/Dockerfile`
+      # builds inside the build itself, and `engine/Dockerfile.dockerignore`
+      # lists `web/dist`, so the runner's copy was excluded from the context it
+      # would have had to arrive through. It was a step that looked
+      # load-bearing, cost a Node toolchain and a pnpm install, and produced a
+      # directory nothing read.
 
       # No Docker Hub login, deliberately — and this is a trap worth naming,
       # because the obvious "improvement" is to add one back.
@@ -297,6 +379,21 @@ jobs:
           flavor: |
             latest=false
 
+      # The agent CLIs are the one part of the toolchain that is meant to be
+      # latest-at-build-time, and turning on a layer cache would have frozen
+      # them: their RUN line is textually identical from commit to commit, so
+      # a warm cache reuses it indefinitely. Bucketing by day keeps the
+      # promise: fresh clients daily, cached within the day. `engine/Dockerfile`
+      # places that layer above the two halves precisely so this arg's rate of
+      # change — daily — is what it costs, rather than the commit rate it would
+      # inherit sitting below them.
+      - name: today
+        id: epoch
+        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      # One build, pushed under a candidate tag, tested at its digest, then
+      # promoted by moving the real tags onto that same digest. See the note
+      # on the core image above for what this replaces and what it trades.
       - uses: docker/build-push-action@v6
         id: candidate
         with:
@@ -304,16 +401,30 @@ jobs:
           # `web/dist`, `pyproject.toml` and `src/` as well as the crates.
           context: .
           file: engine/Dockerfile
-          load: true
-          tags: ${{ env.STACK_IMAGE }}:smoke-test
+          push: true
+          tags: ${{ env.STACK_IMAGE }}:candidate-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
           build-args: |
+            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
-            INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
+            AI_CLIENTS_EPOCH=${{ steps.epoch.outputs.day }}
+          # Per-branch, because `INSTALL_AI_CLIENTS` differs between dev and
+          # main and forks the layer graph from that point down. One shared
+          # cache tag would have the two streams evicting each other's layers
+          # and neither hitting.
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }},mode=max
 
+      # Tested at the digest, which means `docker run` pulls it back rather
+      # than finding it in the local daemon. That is the cost of not exporting
+      # a multi-gigabyte tarball into the daemon first, and it falls almost
+      # entirely on a worker's first run: the layers stay in its daemon
+      # afterwards, and the pod base underneath them changes weekly at most.
       - name: the merged image runs both halves
         env:
-          CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
+          CANDIDATE: ${{ env.STACK_IMAGE }}@${{ steps.candidate.outputs.digest }}
           DEV_IMAGE: ${{ github.ref == 'refs/heads/dev' }}
         run: |
           set -euo pipefail
@@ -344,26 +455,46 @@ jobs:
             echo "dev image carries the AI clients and the mobile SDK"
           fi
 
-      - uses: docker/build-push-action@v6
+      # A manifest copy onto the tested digest — no rebuild, no second push.
+      #
+      # This is where the old comment's intent finally holds literally. It said
+      # the second build's args were "identical to the candidate build's, so
+      # the pushed image is the layers the smoke test just ran, not a rebuild
+      # that happens to look similar". That was an argument that two builds
+      # *ought* to agree; there is now only one build, so the tags cannot name
+      # anything else. The `dev` branch is still the only one that carries the
+      # AI clients and the mobile SDK — the same split `.woodpecker/server.yml`
+      # made and the migration to Actions dropped (#23) — but the mobile SDK
+      # half of it is now the pod variant chosen in `needs.pod-base`.
+      - name: promote the tested image
         id: push
-        with:
-          context: .
-          file: engine/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # Identical to the candidate build's, so the pushed image is the
-          # layers the smoke test just ran, not a rebuild that happens to
-          # look similar. The `dev` branch is the dev image (`:dev`,
-          # `dev-<sha>`) and is the only one that carries the AI clients and
-          # the mobile SDK — the same split `.woodpecker/server.yml`'s
-          # `build-and-push-dev` used to make, which the migration to Actions
-          # dropped without replacing (#23).
-          build-args: |
-            INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
-            INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
-          provenance: true
-          sbom: true
+        env:
+          TESTED: ${{ env.STACK_IMAGE }}@${{ steps.candidate.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            args+=(--tag "$tag")
+          done <<< "$TAGS"
+          # `imagetools create` with no --tag copies to a digest and publishes
+          # nothing, so an empty tag list would leave a green job that shipped
+          # no image. Fail where it is legible instead.
+          [ "${#args[@]}" -gt 0 ] || {
+            echo "metadata-action produced no tags; nothing to promote" >&2
+            exit 1
+          }
+          docker buildx imagetools create "${args[@]}" "$TESTED"
+
+          first="$(printf '%s\n' "$TAGS" | head -n1)"
+          digest="$(docker buildx imagetools inspect "$first" \
+            --format '{{.Manifest.Digest}}')"
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "could not resolve a digest for ${first}" >&2; exit 1 ;;
+          esac
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - uses: sigstore/cosign-installer@v3
 

@@ -27,6 +27,9 @@ env:
   # Published, versioned and signed; not recommended to anybody who wants
   # Vogt rather than this estate's pod.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+  # See `build.yml` for why the cache is a registry and not a builder-local
+  # mount: `node-b` is a fleet, and a job lands on whichever worker is free.
+  CACHE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-buildcache
 
 jobs:
   # Docker Hub is not on the critical path (#33): both Dockerfiles build
@@ -139,17 +142,30 @@ jobs:
       # build was green, the signature was valid, and the artefact had never
       # been executed. A publish gate that only proves an image assembles
       # proves the wrong thing.
+      # One build, pushed under a candidate tag and tested at its digest, then
+      # promoted onto the release tags. See `build.yml` for the full note; the
+      # property that matters more here than there is that what gets signed is
+      # provably the bytes that were run, rather than a second build asserted
+      # to be equivalent.
+      #
+      # `cache-from` only, and from `main`: a release is cut from a tag, it is
+      # rare, and it has no later run to hand a cache to. It reads what main's
+      # builds already deposited — the same `INSTALL_AI_CLIENTS=false` layer
+      # graph — and writes nothing back.
       - uses: docker/build-push-action@v6
         id: candidate
         with:
           context: .
-          load: true
-          tags: ${{ env.IMAGE }}:smoke-test
+          push: true
+          tags: ${{ env.IMAGE }}:candidate-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-main
 
       - name: the image runs
         env:
-          CANDIDATE: ${{ env.IMAGE }}:smoke-test
+          CANDIDATE: ${{ env.IMAGE }}@${{ steps.candidate.outputs.digest }}
         run: |
           set -euo pipefail
           # The entrypoint resolves and the interpreter behind it exists.
@@ -164,15 +180,37 @@ jobs:
           fi
           echo "image runs, and still refuses to guess an address"
 
-      - uses: docker/build-push-action@v6
+      # A manifest copy onto the tested digest — index, platform manifest and
+      # both attestations — not a rebuild.
+      - name: promote the tested image
         id: push
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          provenance: true
-          sbom: true
+        env:
+          TESTED: ${{ env.IMAGE }}@${{ steps.candidate.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            args+=(--tag "$tag")
+          done <<< "$TAGS"
+          # `imagetools create` with no --tag copies to a digest and publishes
+          # nothing, so an empty tag list would leave a green job that shipped
+          # no image. Fail where it is legible instead.
+          [ "${#args[@]}" -gt 0 ] || {
+            echo "metadata-action produced no tags; nothing to promote" >&2
+            exit 1
+          }
+          docker buildx imagetools create "${args[@]}" "$TESTED"
+
+          first="$(printf '%s\n' "$TAGS" | head -n1)"
+          digest="$(docker buildx imagetools inspect "$first" \
+            --format '{{.Manifest.Digest}}')"
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "could not resolve a digest for ${first}" >&2; exit 1 ;;
+          esac
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - uses: sigstore/cosign-installer@v3
 
@@ -201,9 +239,22 @@ jobs:
             echo "and \`DeployStack\` runs for \`personal-vogt\` (NFR-D10)."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # The dev-pod toolchain base, found already published in the ordinary case.
+  # A release is `lean`: no Flutter, matching main and the `INSTALL_FLUTTER`
+  # default this job has always built with.
+  pod-base:
+    name: the pod base is in GHCR
+    needs: base-images
+    uses: ./.github/workflows/pod-base.yml
+    with:
+      variant: lean
+    permissions:
+      contents: read
+      packages: write
+
   stack-image:
     name: build, sign and publish the merged image
-    needs: [distribution, base-images]
+    needs: [distribution, base-images, pod-base]
     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
     permissions:
       contents: read
@@ -214,21 +265,11 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: build the PWA
-        # `rust-embed` reads `web/dist/` at compile time, so the bundle is a
-        # build input rather than a separate artefact: an image built without
-        # this step compiles and serves a placeholder where the product's
-        # front end should be.
-        run: |
-          set -euo pipefail
-          corepack enable
-          cd web
-          pnpm install --frozen-lockfile
-          pnpm build
+      # No `pnpm build` here any more. There was one, and its output never
+      # reached the image: `engine/Dockerfile.dockerignore` lists `web/dist`,
+      # so the runner's bundle was excluded from the build context, and the
+      # one the image actually embeds is built by stage 1 of the Dockerfile.
+      # See the same note in `build.yml`.
 
       # No Docker Hub login, deliberately — and this is a trap worth naming,
       # because the obvious "improvement" is to add one back.
@@ -278,29 +319,55 @@ jobs:
           # `pyproject.toml` and `src/` as well as the crates.
           context: .
           file: engine/Dockerfile
-          load: true
-          tags: ${{ env.STACK_IMAGE }}:smoke-test
+          push: true
+          tags: ${{ env.STACK_IMAGE }}:candidate-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          build-args: |
+            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
+          # Reads main's cache, writes nothing back: see the core image above.
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-main
 
       - name: both halves run
         env:
-          CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
+          CANDIDATE: ${{ env.STACK_IMAGE }}@${{ steps.candidate.outputs.digest }}
         run: |
           set -euo pipefail
           docker run --rm --entrypoint vogt "$CANDIDATE" --version
           docker run --rm --entrypoint mydevenv2-server "$CANDIDATE" --help >/dev/null
           echo "both halves are present and start"
 
-      - uses: docker/build-push-action@v6
+      # A manifest copy onto the tested digest, not a rebuild.
+      - name: promote the tested image
         id: push
-        with:
-          context: .
-          file: engine/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          provenance: true
-          sbom: true
+        env:
+          TESTED: ${{ env.STACK_IMAGE }}@${{ steps.candidate.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            args+=(--tag "$tag")
+          done <<< "$TAGS"
+          # `imagetools create` with no --tag copies to a digest and publishes
+          # nothing, so an empty tag list would leave a green job that shipped
+          # no image. Fail where it is legible instead.
+          [ "${#args[@]}" -gt 0 ] || {
+            echo "metadata-action produced no tags; nothing to promote" >&2
+            exit 1
+          }
+          docker buildx imagetools create "${args[@]}" "$TESTED"
+
+          first="$(printf '%s\n' "$TAGS" | head -n1)"
+          digest="$(docker buildx imagetools inspect "$first" \
+            --format '{{.Manifest.Digest}}')"
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "could not resolve a digest for ${first}" >&2; exit 1 ;;
+          esac
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - uses: sigstore/cosign-installer@v3
 

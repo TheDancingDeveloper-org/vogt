@@ -852,16 +852,35 @@ root, not `engine/`, because `rust-embed` pulls `web/dist/` and the core is
 `pyproject.toml` and `src/`:
 
 ```bash
-cd web && pnpm install --frozen-lockfile && pnpm build && cd ..
 docker build -f engine/Dockerfile -t <registry>/vogt:<sha> .
+```
+
+There is no `pnpm build` in front of that any more, and there never usefully
+was: `engine/Dockerfile.dockerignore` lists `web/dist`, so a locally built
+bundle is excluded from the build context. Stage 1 of the Dockerfile builds the
+one the image embeds. The workflows carried the same superfluous step until it
+was removed along with it.
+
+A hand-build resolves `POD_BASE_IMAGE` to its default, which is a *moving tag*
+— fine for a local check, not for anything shipped. To reproduce a CI image,
+pass the digest that build used:
+
+```bash
+docker build -f engine/Dockerfile \
+  --build-arg POD_BASE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-pod-base@sha256:... \
+  --build-arg AI_CLIENTS_EPOCH=pinned \
+  -t <registry>/vogt:<sha> .
 ```
 
 **The registry is settled (M14)** — see §9.0. This step is the hand-build, for
 a change that has not been through `build.yml` yet.
 
-The job also smoke-tests both halves before pushing, for the reason the
-core-only job records: two releases shipped images that had never been
-started. It proves the halves start. It does **not** prove the front door
+The job also smoke-tests both halves before the image acquires a tag anything
+follows, for the reason the core-only job records: two releases shipped images
+that had never been started. It builds once, pushes under a `candidate-<sha>`
+tag in neither release stream, tests that digest, and then moves the real tags
+onto it with `docker buildx imagetools create` — so what is signed and pinned
+is the same bytes that ran, not a second build asserted to match. It proves the halves start. It does **not** prove the front door
 reaches a core — that is §9.2, and it needs a running pair.
 
 ### 9.2 Smoke-test it locally, before any stack sees it
@@ -1053,7 +1072,11 @@ and `ANDROID_SDK_ROOT` pointing there and `sdkmanager`, `adb`, `apkanalyzer` on
 compile/target SDK 35; 36 is installed ahead of the bump.
 
 **Flutter (dev image only)** — 3.44.9 stable with its bundled Dart 3.12.2, at
-`/opt/flutter`, behind `INSTALL_FLUTTER=true`. Production does not carry it.
+`/opt/flutter`. Production does not carry it. This is no longer a build arg on
+the merged image: it is the difference between the two published variants of
+the pod base (`engine/Dockerfile.pod`), so the dev stream is built on
+`vogt-pod-base:full-*` and main and every release on `:lean-*`. `build.yml`
+makes that choice once, in the `variant:` it calls `pod-base.yml` with.
 
 ### 10.3 Container, cloud and agent tooling
 

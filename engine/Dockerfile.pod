@@ -1,0 +1,396 @@
+# syntax=docker/dockerfile:1
+#
+# The dev-pod toolchain base (`ghcr.io/thedancingdeveloper-org/vogt-pod-base`).
+#
+# This file is everything the merged image's runtime stage used to install
+# inline and none of what it builds. That split exists because the two halves
+# have completely different rates of change and the build was paying the slow
+# one's price on every push of the fast one.
+#
+# Measured on the `dev` build of 2026-08-18, before the split: the merged
+# image took 34 minutes, of which **1344s — 22 minutes — was this file's
+# contents**, against 215s for `cargo build --release` and 178s for the core's
+# venv. Nothing in here reads a line of `src/`, `engine/*/src/` or `web/`, so
+# every one of those 22 minutes was spent reinstalling an unchanged toolchain
+# because a Python module or a stylesheet had moved.
+#
+# Published as two variants, because the pod's shape is a per-stream decision
+# and always was (`.github/workflows/build.yml` has passed the dev/prod split
+# as build args since #23):
+#
+#   lean  — INSTALL_FLUTTER=false. main, and every release.
+#   full  — INSTALL_FLUTTER=true.  dev, which is where the mobile work lands.
+#
+# **Tagged by content, not by a moving name.** `.github/workflows/pod-base.yml`
+# tags each build `<variant>-<hash>-<week>`, where `<hash>` is a digest of this
+# file and `<week>` is the ISO week. A change here therefore produces a new tag
+# immediately, and an unchanged file still gets rebuilt once a week — which is
+# not cosmetic: `rclone`, `sccache`, `gh`, the `step` CLI, `github-mcp-server`,
+# Gradle and `selkies` all resolve *latest* at build time, so a purely
+# content-addressed tag would freeze them at whatever the first build saw and
+# call it reproducibility. The weekly component is what keeps "latest" meaning
+# something while still letting an ordinary push hit a cache.
+#
+# The consuming build passes the resolved reference in by **digest**, as
+# `POD_BASE_IMAGE` (see `engine/Dockerfile`), so what the merged image is built
+# on is pinned in the same way and to the same standard as every other base here.
+#
+# What deliberately did *not* move into this file: the agent CLIs
+# (`@openai/codex`, `@anthropic-ai/claude-code`, `theclawbay`). They are the
+# one part of the toolchain that is documented as intentionally unpinned and
+# expected to move fast, and a base image rebuilt weekly would have quietly
+# turned "latest at build time" into "latest as of last Monday". They stay in
+# `engine/Dockerfile`, cache-bucketed by day. See the note there.
+
+ARG RUNTIME_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/ubuntu:26.04
+ARG ANDROID_CMDLINE_TOOLS_VERSION=15859902
+ARG ANDROID_CMDLINE_TOOLS_SHA256=4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
+ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.1
+ARG ANDROID_PLATFORM_TOOLS_SHA256=d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
+ARG FLUTTER_VERSION=3.44.9
+ARG FLUTTER_SHA256=a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4efcb
+# Flutter is dev-only: app CI pins this exact stable release, while production
+# has no reason to carry the large mobile SDK. This is what separates the two
+# published variants.
+ARG INSTALL_FLUTTER=false
+
+FROM ${RUNTIME_IMAGE}
+# Android SDK lives in /opt (NOT ~/Android/Sdk): the runtime bind-mounts the
+# host home over /home/sprooty, so anything under $HOME vanishes at runtime —
+# same reason gradle/uv/pnpm are installed system-wide below.
+#
+# PATH puts /usr/local/{s,}bin ahead of the per-user npm-global/local dirs so
+# pod-provided tools (notably the `codex` full-access wrapper that
+# `engine/Dockerfile` installs on top of this base when INSTALL_AI_CLIENTS=true)
+# always win over a same-named binary a user or a tool like theclawbay installs
+# into their persisted $HOME. Confirmed
+# 2026-07-31: a theclawbay-managed ~/.npm-global/bin/codex shadowed the
+# system wrapper under the old ordering, silently running Codex with its
+# nested sandbox/approvals still active instead of the pod-level bypass.
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    NPM_CONFIG_PREFIX=/home/sprooty/.npm-global \
+    JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+    ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
+    FLUTTER_ROOT=/opt/flutter \
+    RUSTUP_HOME=/opt/rust/rustup \
+    CARGO_HOME=/opt/rust/cargo \
+    PATH=/usr/local/sbin:/usr/local/bin:/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/opt/flutter/bin:/opt/flutter/bin/cache/dart-sdk/bin:/opt/rust/cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Core system + dev utilities (per TOOLING.md)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget gnupg lsb-release \
+        git git-lfs vim nano less man-db sudo \
+        build-essential pkg-config cmake clang lld nasm \
+        jq ripgrep fd-find bat rsync \
+        openssh-client openssh-server iputils-ping netcat-openbsd dnsutils xdg-utils \
+        htop tree file unzip zip \
+        musl-tools gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+        libssl-dev libclang-dev protobuf-compiler \
+        python3 python3-pip python3-venv python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 22 + pnpm. Override NPM_CONFIG_PREFIX for this one install so pnpm
+# lands in /usr/local (survives the runtime /home/sprooty bind mount).
+# User-installed globals go to $NPM_CONFIG_PREFIX (/home/sprooty/.npm-global).
+ARG NODE_MAJOR=22
+RUN install -m 0755 -d /usr/share/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+       | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+    && chmod 0644 /usr/share/keyrings/nodesource.gpg \
+    && arch="$(dpkg --print-architecture)" \
+    && printf 'Types: deb\nURIs: https://deb.nodesource.com/node_%s.x\nSuites: nodistro\nComponents: main\nArchitectures: %s\nSigned-By: /usr/share/keyrings/nodesource.gpg\n' \
+       "${NODE_MAJOR}" "${arch}" > /etc/apt/sources.list.d/nodesource.sources \
+    && printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' \
+       > /etc/apt/preferences.d/nodejs \
+    && printf 'Package: nsolid\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' \
+       > /etc/apt/preferences.d/nsolid \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g --prefix=/usr/local pnpm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI (DooD pattern — docker.sock mounted from host)
+RUN . /etc/os-release \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+            https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker-ce-cli \
+        docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
+            https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub MCP server — agent-facing MCP access to the GitHub API (issues, PRs,
+# repos, actions, ...). No apt repo; resolve the latest release via the API
+# and verify the Linux amd64 tarball against the sha256 digest that same API
+# response publishes, same pattern as the step CLI and sccache installs above.
+RUN api="https://api.github.com/repos/github/github-mcp-server/releases/latest" \
+    && curl -fsSL "$api" -o /tmp/github-mcp-server-release.json \
+    && asset_url=$(jq -r '.assets[] | select(.name == "github-mcp-server_Linux_x86_64.tar.gz") | .browser_download_url' /tmp/github-mcp-server-release.json) \
+    && asset_digest=$(jq -r '.assets[] | select(.name == "github-mcp-server_Linux_x86_64.tar.gz") | .digest | ltrimstr("sha256:")' /tmp/github-mcp-server-release.json) \
+    && curl -fsSL "$asset_url" -o /tmp/github-mcp-server.tar.gz \
+    && echo "${asset_digest}  /tmp/github-mcp-server.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/github-mcp-server.tar.gz -C /tmp \
+    && install -m 755 /tmp/github-mcp-server /usr/local/bin/github-mcp-server \
+    && rm -f /tmp/github-mcp-server-release.json /tmp/github-mcp-server.tar.gz /tmp/github-mcp-server
+
+# Tailscale (TUN device must be passed in at runtime)
+RUN . /etc/os-release \
+    && curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${VERSION_CODENAME}.noarmor.gpg" \
+       > /usr/share/keyrings/tailscale-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] \
+            https://pkgs.tailscale.com/stable/ubuntu ${VERSION_CODENAME} main" \
+       > /etc/apt/sources.list.d/tailscale.list \
+    && apt-get update && apt-get install -y --no-install-recommends tailscale \
+    && rm -rf /var/lib/apt/lists/*
+
+# rclone — official installer resolves + verifies latest itself.
+RUN curl -fsSL https://rclone.org/install.sh | bash
+
+# Infisical CLI
+RUN install -m 0755 -d /usr/share/keyrings \
+    && curl -1sLf https://artifacts-cli.infisical.com/infisical.gpg \
+       | gpg --dearmor -o /usr/share/keyrings/infisical-archive-keyring.gpg \
+    && chmod 0644 /usr/share/keyrings/infisical-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/infisical-archive-keyring.gpg] https://artifacts-cli.infisical.com/deb stable main" \
+       > /etc/apt/sources.list.d/infisical.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends infisical \
+    && rm -rf /var/lib/apt/lists/*
+
+# Smallstep `step` CLI — used to self-issue short-lived SSH certificates against
+# the step-ca on Node B (`step ssh certificate ...`), the only path to host-shell
+# SSH for in-pod agents. Installed from the official .deb (lands at /usr/bin/step).
+# No apt repo for this one, and GitHub doesn't offer a stable "latest" download
+# URL — resolve the latest release tag via the API, then verify the asset
+# against the sha256 digest that same API response publishes.
+RUN api="https://api.github.com/repos/smallstep/cli/releases/latest" \
+    && curl -fsSL "$api" -o /tmp/step-release.json \
+    && step_version=$(jq -r '.tag_name | ltrimstr("v")' /tmp/step-release.json) \
+    && asset_url=$(jq -r --arg v "$step_version" '.assets[] | select(.name == "step-cli_" + $v + "-1_amd64.deb") | .browser_download_url' /tmp/step-release.json) \
+    && asset_digest=$(jq -r --arg v "$step_version" '.assets[] | select(.name == "step-cli_" + $v + "-1_amd64.deb") | .digest | ltrimstr("sha256:")' /tmp/step-release.json) \
+    && curl -fsSL "$asset_url" -o /tmp/step-cli.deb \
+    && echo "${asset_digest}  /tmp/step-cli.deb" | sha256sum -c - \
+    && apt-get install -y --no-install-recommends /tmp/step-cli.deb \
+    && rm -f /tmp/step-cli.deb /tmp/step-release.json \
+    && rm -rf /var/lib/apt/lists/*
+
+# Sway (headless Wayland compositor) + minimal apps for in-pod GUI testing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        sway swaybg foot wofi grim slurp wl-clipboard xdg-desktop-portal-wlr \
+        xwayland chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+# GStreamer + WebRTC bits for in-pod GUI streaming.
+#
+# Selkies-GStreamer was previously installed best-effort because the PyPI name
+# was unstable. Installs latest and records the resolved version (via `pip3
+# show`) in /etc/mydevenv2/features.json so the server can expose accurate
+# "what's available" state via /api/config without misleading users about GUI
+# support.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+        gstreamer1.0-libav gstreamer1.0-tools \
+        python3-pip libgstreamer1.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN install -d /etc/mydevenv2 \
+    && if pip3 install --break-system-packages --no-cache-dir selkies; then \
+        resolved="$(pip3 show selkies 2>/dev/null | sed -n 's/^Version: //p')"; \
+        echo "{\"selkies\":\"${resolved}\"}" > /etc/mydevenv2/features.json; \
+    else \
+        echo "selkies unavailable — GUI streaming disabled in this image" >&2; \
+        echo "{\"selkies\":null}" > /etc/mydevenv2/features.json; \
+    fi
+
+# Rust toolchain (full dev env so user can build inside the pod too)
+ARG SPROOTY_UID=1000
+ARG SPROOTY_GID=1000
+# Ubuntu 26.04 ships a default `ubuntu` user at UID/GID 1000 — remove it so
+# we own those numbers (matters because the host bind-mounts /home/sprooty
+# expect that uid).
+RUN userdel -r ubuntu 2>/dev/null || true \
+    && groupdel ubuntu 2>/dev/null || true \
+    && groupadd -g ${SPROOTY_GID} sprooty \
+    && useradd -m -s /bin/bash -u ${SPROOTY_UID} -g ${SPROOTY_GID} sprooty \
+    && usermod -aG sudo sprooty \
+    && echo 'sprooty ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-sprooty
+
+# Rust lives in /opt/rust, NOT ~/.rustup + ~/.cargo — same rule as the Android
+# SDK above: the runtime bind-mounts the host home over /home/sprooty, so a
+# toolchain installed under $HOME is invisible at runtime. It was installed
+# under $HOME until 2026-07-31, which silently cost the pod every cargo-installed
+# tool (cargo-deb, cargo-zigbuild, cargo-xwin, cargo-watch, rust-analyzer-mcp,
+# sccache) and every cross-compile target; only whatever rustup the home volume
+# happened to hold was actually reachable.
+#
+# Consequence to keep in mind: the crate registry cache now lives at
+# /opt/rust/cargo/registry inside the image rather than on the persisted home
+# volume, so crates re-download after an image redeploy. sccache -> Redis on
+# Node B still covers recompilation.
+RUN mkdir -p /opt/rust && chown -R sprooty:sprooty /opt/rust
+
+USER sprooty
+WORKDIR /home/sprooty
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+       | sh -s -- -y --default-toolchain stable --profile minimal \
+           --no-modify-path \
+           --component rustfmt --component clippy \
+    && rustup component add rust-analyzer \
+    && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-pc-windows-gnu \
+    && cargo install --locked cargo-deb \
+    && cargo install --locked cargo-zigbuild \
+    && cargo install --locked cargo-xwin \
+    && cargo install --locked cargo-watch \
+    && cargo install --locked rust-analyzer-mcp \
+    && test -x /opt/rust/cargo/bin/cargo-zigbuild \
+    && test -x /opt/rust/cargo/bin/rust-analyzer-mcp
+
+# opencode's installer hardcodes $HOME/.opencode/bin with no override, so
+# relocate the binary to /usr/local/bin afterwards — otherwise the runtime
+# /home/sprooty bind mount hides it, same as the Rust tools above.
+RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
+    && sudo install -m 755 /home/sprooty/.opencode/bin/opencode /usr/local/bin/opencode \
+    && rm -rf /home/sprooty/.opencode
+
+# sccache (apt package lacks Redis support; pull from GitHub). Resolve latest
+# release via the API and verify against the sha256 digest that same
+# response publishes for the asset — no hardcoded checksum to keep in sync.
+RUN api="https://api.github.com/repos/mozilla/sccache/releases/latest" \
+    && curl -fsSL "$api" -o /tmp/sccache-release.json \
+    && sccache_version=$(jq -r '.tag_name | ltrimstr("v")' /tmp/sccache-release.json) \
+    && asset_name="sccache-v${sccache_version}-x86_64-unknown-linux-musl.tar.gz" \
+    && asset_url=$(jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .browser_download_url' /tmp/sccache-release.json) \
+    && asset_digest=$(jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .digest | ltrimstr("sha256:")' /tmp/sccache-release.json) \
+    && curl -fsSL "$asset_url" -o /tmp/sccache.tar.gz \
+    && echo "${asset_digest}  /tmp/sccache.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+    && mv "/tmp/sccache-v${sccache_version}-x86_64-unknown-linux-musl/sccache" /opt/rust/cargo/bin/sccache \
+    && chmod +x /opt/rust/cargo/bin/sccache \
+    && rm -f /tmp/sccache-release.json /tmp/sccache.tar.gz
+
+USER root
+
+# Java + Gradle. Installed globally (/opt + a /usr/local/bin symlink) so they
+# survive the /home/sprooty bind mount at runtime. gradle finds the JDK via
+# `java` on PATH, so no JAVA_HOME juggling needed. This system gradle is only
+# a convenience for ad-hoc use — the actual mobile build is driven by the
+# committed wrapper (mobile/android/gradlew), which pins its own version
+# independently, so unpinning this one doesn't affect build reproducibility.
+# services.gradle.org publishes a "current" endpoint with the download URL
+# and checksum together, so no separate lookup needed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openjdk-21-jdk-headless \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://services.gradle.org/versions/current -o /tmp/gradle-current.json \
+    && gradle_version=$(jq -r '.version' /tmp/gradle-current.json) \
+    && gradle_checksum=$(jq -r '.checksum' /tmp/gradle-current.json) \
+    && curl -fsSL "https://services.gradle.org/distributions/gradle-${gradle_version}-bin.zip" \
+       -o /tmp/gradle.zip \
+    && echo "${gradle_checksum}  /tmp/gradle.zip" | sha256sum -c - \
+    && unzip -q /tmp/gradle.zip -d /opt \
+    && ln -s "/opt/gradle-${gradle_version}/bin/gradle" /usr/local/bin/gradle \
+    && rm /tmp/gradle.zip /tmp/gradle-current.json
+
+# Android SDK (for the Capacitor android project under mobile/). Installed to
+# /opt/android-sdk so it survives the /home/sprooty bind mount at runtime — a
+# ~/Android/Sdk install would be shadowed. sdkmanager/adb/apkanalyzer are put
+# on PATH via the ANDROID_HOME entries in the stage-3 ENV above. The committed
+# Gradle wrapper (mobile/android/gradlew) drives builds; system gradle is only
+# a convenience for ad-hoc use.
+#
+# Package set per the dev-pod spec: pinned command-line tools + platform-tools,
+# platforms;android-35 + android-36, build-tools;35.0.0 + 36.0.0.
+ARG ANDROID_CMDLINE_TOOLS_VERSION
+ARG ANDROID_CMDLINE_TOOLS_SHA256
+ARG ANDROID_PLATFORM_TOOLS_VERSION
+ARG ANDROID_PLATFORM_TOOLS_SHA256
+RUN install -d /opt/android-sdk/cmdline-tools \
+    && curl -fsSL \
+        "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" \
+        -o /tmp/cmdline-tools.zip \
+    && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/cmdline-tools.zip" | sha256sum -c - \
+    && unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools \
+    # The zip unpacks to a top-level cmdline-tools/; sdkmanager expects it at
+    # cmdline-tools/latest/.
+    && mv /tmp/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest \
+    && curl -fsSL \
+        "https://dl.google.com/android/repository/platform-tools_r${ANDROID_PLATFORM_TOOLS_VERSION}-linux.zip" \
+        -o /tmp/platform-tools.zip \
+    && echo "${ANDROID_PLATFORM_TOOLS_SHA256}  /tmp/platform-tools.zip" | sha256sum -c - \
+    && unzip -q /tmp/platform-tools.zip -d /opt/android-sdk \
+    && rm -rf /tmp/cmdline-tools.zip /tmp/cmdline-tools \
+        /tmp/platform-tools.zip \
+    # Accept licenses first (yes feeds the interactive prompts), then install.
+    && yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null \
+    && /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --install \
+        "platforms;android-35" \
+        "platforms;android-36" \
+        "build-tools;35.0.0" \
+        "build-tools;36.0.0" \
+    # Owned by sprooty so in-pod Gradle builds can write license acks and any
+    # auto-managed SDK components at runtime (the SDK lives in /opt, which is
+    # not bind-mounted, so this ownership persists from the image).
+    && chown -R ${SPROOTY_UID}:${SPROOTY_GID} /opt/android-sdk
+
+# Flutter + its bundled Dart SDK are installed only in the dev image. Keep the
+# SDK under /opt so the runtime /home/sprooty bind mount cannot hide it. The
+# archive and checksum are pinned to the official stable Linux release entry;
+# leave the tree sprooty-owned because Flutter manages its artifact cache there.
+ARG INSTALL_FLUTTER
+ARG FLUTTER_VERSION
+ARG FLUTTER_SHA256
+RUN if [ "$INSTALL_FLUTTER" = "true" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends xz-utils libglu1-mesa \
+        && rm -rf /var/lib/apt/lists/* \
+        && curl -fsSL \
+          "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
+          -o /tmp/flutter.tar.xz \
+        && echo "${FLUTTER_SHA256}  /tmp/flutter.tar.xz" | sha256sum -c - \
+        && tar -xJf /tmp/flutter.tar.xz -C /opt \
+        && rm /tmp/flutter.tar.xz \
+        && chown -R ${SPROOTY_UID}:${SPROOTY_GID} /opt/flutter \
+        && command -v flutter \
+        && command -v dart \
+        && sudo -H -u sprooty env "PATH=${PATH}" flutter --version \
+        && sudo -H -u sprooty env "PATH=${PATH}" dart --version ; \
+    fi
+
+# Python tools the user expects (uv, ruff, pytest). Installed globally into
+# /usr/local (system pip lands scripts in /usr/local/bin) so they survive the
+# /home/sprooty bind mount — a --user install would be shadowed at runtime.
+# Fail the build if they don't install — silent fallback would leave the pod
+# with broken Python tooling that surfaces as cryptic command-not-found errors.
+#
+# cadastre[mcp-client] lands the cadastre-mcp-remote console script the
+# mydevenv2-cadastre-mcp wrapper execs. Now installable at build time because
+# cadastre publishes to PyPI as of v0.1.0 — previously this had to happen at
+# runtime (deploy/mcp-bootstrap.sh's install_bridge) from the mounted
+# workspace checkout, since the package wasn't available to the build
+# context at all. That runtime install is left in place as a no-op fallback
+# (it checks `command -v cadastre-mcp-remote` first) for a workspace with a
+# newer cadastre than this image shipped.
+RUN pip3 install --break-system-packages --no-cache-dir uv ruff pytest "cadastre[mcp-client]"
+
+# Left as root on purpose. `engine/Dockerfile` continues from here and needs
+# to install into /usr/local before it drops to `sprooty` at the very end; a
+# base that ended as an unprivileged user would make every consumer's first
+# instruction a `USER` switch.
+USER root

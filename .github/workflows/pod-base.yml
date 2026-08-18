@@ -1,0 +1,263 @@
+name: pod-base
+
+# The dev-pod toolchain base image (`engine/Dockerfile.pod`).
+#
+# Why this workflow exists, in one measurement: on the `dev` build of
+# 2026-08-18 the merged image took 34 minutes, and 1344s of that — 22 minutes —
+# was installing a toolchain that no commit in this repository had touched.
+# apt, rustup, five `cargo install`s, sway, GStreamer, the JDK, Gradle, the
+# Android SDK, Flutter. It was rebuilt every push because it lived in the same
+# Dockerfile as the product, and because nothing was cached between runs.
+#
+# So it is built here instead, published, and consumed by digest. An ordinary
+# push now *pulls* the toolchain rather than building it.
+#
+# ── Tagging ────────────────────────────────────────────────────────────────
+#
+#   <variant>-<hash>-<week>      e.g. full-9f3c1a7b2e40-2026W34
+#
+# `<hash>` is a digest of `engine/Dockerfile.pod`, so editing that file
+# produces a new tag on the next build and the old one stays exactly as it
+# was. `<week>` is the ISO week, so an unchanged file is still rebuilt once a
+# week — which is load-bearing rather than tidy-minded: `rclone`, `sccache`,
+# `gh`, `step`, `github-mcp-server`, Gradle and `selkies` all resolve *latest*
+# at build time, and a purely content-addressed tag would have frozen every
+# one of them at whatever the first build happened to see while looking like
+# reproducibility.
+#
+# A build is skipped entirely when its tag already exists in GHCR — the same
+# shape as `mirror-base-images.yml`, and for the same reason: this runs as a
+# prerequisite of every image build, so the common case has to be a lookup.
+#
+# ── What this is not ───────────────────────────────────────────────────────
+#
+# It is not in the `vogt-base/` namespace, deliberately. That prefix means
+# "a verbatim mirror of an upstream library image" and `mirror-base-images.yml`
+# greps the Dockerfiles for it to decide what to copy from Docker Hub. This
+# image is built here and has no upstream, so it is `vogt-pod-base` and the
+# mirror correctly ignores it. `engine/Dockerfile.pod`'s own `FROM` still names
+# a mirrored base, and that file is now in the mirror's file list.
+#
+# It is also not deployed. Nothing here reaches Node B: the image lives in
+# GHCR, `build.yml` consumes it by digest, and production still moves only when
+# the digest pinned in `indexarr/ops` changes and Komodo runs `DeployStack`
+# (NFR-D10). This workflow adds no infrastructure to the estate.
+
+on:
+  workflow_call:
+    inputs:
+      variant:
+        description: lean (no Flutter — main and releases) or full (dev)
+        required: true
+        type: string
+    outputs:
+      image:
+        description: The pod base, by digest, for POD_BASE_IMAGE
+        value: ${{ jobs.build.outputs.image }}
+
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: Which variant to build
+        required: false
+        default: both
+        type: choice
+        options: [both, lean, full]
+
+  # Deliberately no `push` trigger. `build.yml` calls this workflow on every
+  # push to main and dev, so a push trigger would start a second run computing
+  # the same tag and racing its own caller to publish it.
+
+  schedule:
+    # Weekly, early Monday UTC — the rebuild that keeps the "latest at build
+    # time" tools from silently freezing. Deliberately before the working week
+    # rather than during it: the first build of the week is the slow one, and
+    # it should be the schedule that pays for it and not somebody's push.
+    - cron: "40 4 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  POD_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-pod-base
+  # Layer cache. A separate repository from the image so that a cache tag can
+  # never be mistaken for something deployable — the same reason `vogt` and
+  # `vogt-stack` are two repositories rather than two tags.
+  CACHE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-buildcache
+
+concurrency:
+  # Never cancelled. Two runs racing on the same tag is harmless (the second
+  # finds it published and skips), but a cancelled push leaves the tag absent
+  # and the next image build is what discovers it.
+  # Keyed on the variant, not the caller: dev (`full`) and a release
+  # (`lean`) must not queue behind each other. `github.event.inputs` would be
+  # the *caller's* event on a workflow_call and hold nothing.
+  group: pod-base-${{ inputs.variant || 'both' }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: which variants
+    runs-on: [self-hosted, node-b, linux, x64]
+    outputs:
+      variants: ${{ steps.plan.outputs.variants }}
+    steps:
+      - id: plan
+        env:
+          # `inputs.variant` is set on workflow_call and workflow_dispatch and
+          # empty on push/schedule, where both variants are wanted.
+          WANTED: ${{ inputs.variant }}
+        run: |
+          set -euo pipefail
+          case "${WANTED:-both}" in
+            lean) variants='["lean"]' ;;
+            full) variants='["full"]' ;;
+            both) variants='["lean","full"]' ;;
+            *)
+              echo "unknown variant '${WANTED}'; expected lean, full or both" >&2
+              exit 1
+              ;;
+          esac
+          echo "variants=${variants}" >> "$GITHUB_OUTPUT"
+          echo "building: ${variants}"
+
+  build:
+    name: ${{ matrix.variant }}
+    needs: plan
+    # `docker`/`publish` is advertised only by the Docker-in-Docker workers.
+    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # One variant must not take the other down: a Flutter checksum drift
+      # should not cost main its base image.
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.plan.outputs.variants) }}
+    outputs:
+      # Only ever read through `workflow_call`, which passes exactly one
+      # variant, so this is a single-entry matrix at the only time it is
+      # consumed. On push/schedule both variants build and this output is
+      # last-writer-wins and nothing reads it.
+      image: ${{ steps.resolve.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: name this build
+        id: tag
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          # Only the Dockerfile: everything else about this image — the base
+          # digest, the SDK pins, the Flutter checksum — is inside it, which is
+          # exactly why the pins were moved there rather than passed in.
+          hash="$(sha256sum engine/Dockerfile.pod | cut -c1-12)"
+          week="$(date -u +%GW%V)"
+          tag="${VARIANT}-${hash}-${week}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "ref=${POD_IMAGE}:${tag}" >> "$GITHUB_OUTPUT"
+          echo "pod base for this commit: ${POD_IMAGE}:${tag}"
+
+      # Before the probe, and not conditional on it: `imagetools` is a buildx
+      # subcommand, and `mirror-base-images.yml` — the other workflow that
+      # copies manifests around on these runners — sets buildx up before
+      # reaching for it as well. Thirty seconds against a job whose entire
+      # purpose is to save twenty-two minutes.
+      - uses: docker/setup-buildx-action@v3
+
+      - name: is it already published?
+        id: probe
+        env:
+          REF: ${{ steps.tag.outputs.ref }}
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$REF" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "already in GHCR; skipping the build"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "not published yet; building"
+          fi
+
+      - uses: docker/build-push-action@v6
+        if: steps.probe.outputs.exists != 'true'
+        with:
+          # `engine/Dockerfile.pod.dockerignore` empties the context: this
+          # build has no COPY from it.
+          context: .
+          file: engine/Dockerfile.pod
+          push: true
+          tags: ${{ steps.tag.outputs.ref }}
+          build-args: |
+            INSTALL_FLUTTER=${{ matrix.variant == 'full' }}
+          # Registry cache, not a cache mount and not a named builder. The
+          # runners are a fleet: a job lands on whichever node-b worker is
+          # free, so anything held in a builder's local state is cold on most
+          # runs by construction. A registry is the only cache all three
+          # workers can see, and it needs nothing deployed to hold it.
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:pod-${{ matrix.variant }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:pod-${{ matrix.variant }},mode=max
+          provenance: true
+
+      - name: resolve the digest
+        id: resolve
+        env:
+          REF: ${{ steps.tag.outputs.ref }}
+        run: |
+          set -euo pipefail
+          # Read back rather than trusting the push output, because the skip
+          # path has no push output to trust. The digest is what gets passed
+          # to the image build, so a tag is never what anything is built on.
+          digest="$(docker buildx imagetools inspect "$REF" \
+            --format '{{.Manifest.Digest}}')"
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "could not resolve a digest for ${REF}" >&2; exit 1 ;;
+          esac
+          echo "image=${POD_IMAGE}@${digest}" >> "$GITHUB_OUTPUT"
+          echo "resolved ${REF} -> ${digest}"
+
+      # A moving `lean` / `full` alias alongside the content tag, pointed at
+      # whatever this run resolved — updated on the skip path too, which is why
+      # it is its own step rather than a second entry in `tags:`.
+      #
+      # This is the one moving tag in the arrangement and it exists for exactly
+      # one job: `engine/Dockerfile`'s `POD_BASE_IMAGE` default, so that a hand
+      # `docker build -f engine/Dockerfile .` resolves without anybody having
+      # to look a digest up first. Nothing CI publishes is ever built on it —
+      # `build.yml` and `release.yml` pass the digest from `outputs.image` —
+      # and `docs/DEPLOYMENT.md` §9 says so where the hand-build is documented.
+      - name: point the convenience alias at it
+        env:
+          VARIANT: ${{ matrix.variant }}
+          IMAGE: ${{ steps.resolve.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${POD_IMAGE}:${VARIANT}" "$IMAGE"
+          echo "${POD_IMAGE}:${VARIANT} -> ${IMAGE}"
+
+      - name: summary
+        env:
+          REF: ${{ steps.tag.outputs.ref }}
+          IMAGE: ${{ steps.resolve.outputs.image }}
+          BUILT: ${{ steps.probe.outputs.exists != 'true' }}
+        run: |
+          {
+            if [ "$BUILT" = "true" ]; then
+              echo "### Built \`${REF}\`"
+            else
+              echo "### Reused \`${REF}\` (already published)"
+            fi
+            echo
+            echo '```'
+            echo "${IMAGE}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

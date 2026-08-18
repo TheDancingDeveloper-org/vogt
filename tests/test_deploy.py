@@ -195,8 +195,17 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
     test outlives the file it was written about because the property was never
     "a pipeline sets this" — it was "something that actually runs does".
 
-    Both build steps must pass them — the candidate as well as the push, or
-    the image that gets smoke-tested is not the image that gets published.
+    There is one build step to pass them to now, not two. The candidate is
+    pushed and then promoted onto the real tags by a manifest copy, so "the
+    image that gets smoke-tested is not the image that gets published" is no
+    longer a thing a build arg can cause — there is only one image.
+
+    Flutter left by a different door: it is no longer a build arg on this
+    image at all, but the difference between the two published variants of
+    the pod base (`engine/Dockerfile.pod`). The property is unchanged and so
+    is what it is worth — the dev stream carries the mobile SDK and the prod
+    stream does not — so it is asserted where the decision now lives, on the
+    `variant:` the `pod-base` job is called with.
 
     `theclawbay` joined the probed set after WI-17, by a different route to the
     same place: it was installed by no image at all, living only in a persisted
@@ -212,12 +221,20 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
     """
     text = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
     on_dev = r"=\$\{\{ github\.ref == 'refs/heads/dev' \}\}"
-    for arg in ("INSTALL_AI_CLIENTS", "INSTALL_FLUTTER"):
-        wired = re.findall(arg + on_dev, text)
-        assert len(wired) == 2, (
-            f"{arg} must be passed to both the candidate and the pushed "
-            f"build of engine/Dockerfile; found {len(wired)}"
-        )
+    wired = re.findall("INSTALL_AI_CLIENTS" + on_dev, text)
+    assert len(wired) == 1, (
+        "INSTALL_AI_CLIENTS must be passed to the build of engine/Dockerfile "
+        f"and tied to the dev branch; found {len(wired)}"
+    )
+    assert re.search(
+        r"variant: \$\{\{ github\.ref == 'refs/heads/dev' "
+        r"&& 'full' \|\| 'lean' \}\}",
+        text,
+    ), (
+        "the dev stream must be built on the `full` pod base and every other "
+        "stream on `lean`: that is where Flutter now comes from (#23's lesson "
+        "moved, not retired)"
+    )
     loop = re.search(r"for tool in ([^;]+); do", text)
     assert loop, (
         "the dev image's smoke test must loop over the tools the image carries "
@@ -459,36 +476,118 @@ def test_the_merged_image_is_built_from_the_engine_dockerfile(workflow: str) -> 
     )
 
 
-@pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
-def test_the_pwa_is_built_before_the_merged_image(workflow: str) -> None:
+def test_the_pwa_is_built_before_the_engine_that_embeds_it() -> None:
     """`rust-embed` reads `web/dist/` at compile time.
 
-    An image built without this step compiles, starts, serves a placeholder
-    where the product's front end should be, and passes every check that
-    asks whether it is running.
+    An image built without the bundle compiles, starts, serves a placeholder
+    where the product's front end should be, and passes every check that asks
+    whether it is running. So the ordering is worth a test.
+
+    This used to read the *workflows*, asserting that a `pnpm build` step ran
+    before the `docker build`. It passed, and it was watching the wrong thing:
+    `engine/Dockerfile.dockerignore` lists `web/dist`, so the bundle that step
+    produced was excluded from the build context and no image ever contained
+    it. The step could have been deleted — it since has been — without this
+    test noticing, because what it asserted was never what made the guarantee
+    true. A green test over an inert step is worse than no test: it says the
+    question has been asked.
+
+    What actually makes it true is inside `engine/Dockerfile`, so that is what
+    is read now — the `web-build` stage produces the bundle, and `server-build`
+    copies it in *before* `cargo build`, which is the only ordering rust-embed
+    can observe.
     """
-    job = (WORKFLOWS / workflow).read_text(encoding="utf-8")
-    job = job[job.index("  stack-image:") :]
-    assert job.index("pnpm build") < job.index("file: engine/Dockerfile"), (
-        f"{workflow}: the bundle is a build input, not a later artefact"
+    dockerfile = (REPO_ROOT / "engine" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "FROM ${NODE_IMAGE} AS web-build" in dockerfile, (
+        "the bundle is built inside the image build, not handed to it"
+    )
+    copy_bundle = dockerfile.index("COPY --from=web-build /app/web/dist")
+    compile_engine = dockerfile.index("cargo build --release -p mydevenv2-server")
+    assert copy_bundle < compile_engine, (
+        "the bundle is a compile-time input to the engine, not a later artefact"
+    )
+
+    # And the dependency bake must come *before* the bundle, or a stylesheet
+    # change recompiles every dependency to embed a different CSS file — which
+    # is what it did, and what most of this repository's Rust rebuilds were.
+    cook = dockerfile.index("cargo chef cook --release")
+    assert cook < copy_bundle, (
+        "dependencies are compiled before web/dist is copied in, so a "
+        "web-only change cannot invalidate them"
+    )
+
+
+def _job(workflow: str, name: str) -> str:
+    """One job's text, bounded by the next top-level job key.
+
+    Slicing from a job header to the end of the file is fine until the file
+    grows a job that legitimately contains what you are asserting is absent —
+    `release.yml`'s `android` job installs pnpm, which is exactly what the
+    merged image build must not do.
+    """
+    raw = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+    start = raw.index(f"\n  {name}:\n")
+    rest = raw[start + 1 :]
+    end = re.search(r"\n  [a-z][a-z-]*:\n", rest)
+    return rest[: end.start()] if end else rest
+
+
+@pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
+def test_the_merged_image_build_does_not_rebuild_the_pwa_on_the_runner(
+    workflow: str,
+) -> None:
+    """The step that was deleted must stay deleted.
+
+    It cost a Node toolchain and a pnpm install per build and produced a
+    directory the build context excluded. The reason to assert its absence
+    rather than just remove it is that it reads as load-bearing: the next
+    person to notice `rust-embed` needs `web/dist` will reach for exactly
+    this, and the comment left in its place explains why that is a trap.
+    """
+    job = _job(workflow, "stack-image")
+    assert "pnpm install --frozen-lockfile" not in job, (
+        f"{workflow}: web/dist is dockerignored, so a runner-side PWA build "
+        f"cannot reach the image — stage 1 of engine/Dockerfile builds it"
     )
 
 
 @pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
-def test_both_halves_run_before_the_merged_image_is_pushed(workflow: str) -> None:
+def test_both_halves_run_before_the_merged_image_is_promoted(
+    workflow: str,
+) -> None:
     """The failure this catches is a stack missing the half nobody looked at.
 
-    Both entrypoints are exercised in the candidate image, and the push step
-    comes after — so an image that builds and cannot run one of its two
-    products never reaches the registry.
+    Both entrypoints are exercised before the image acquires a tag anything
+    follows, so an image that builds and cannot run one of its two products
+    never becomes `:dev`, `dev-<sha>`, `sha-<commit>` or a version.
+
+    The mechanism moved and the guarantee got *stronger*. It used to be
+    "build, smoke-test the loaded copy, then build again and push", which
+    proved the tested image and the published image were produced by
+    equivalent inputs. Now it is one build, pushed under a candidate tag that
+    is in neither release stream, tested at its digest, and promoted by a
+    manifest copy onto that same digest — so the published image is not
+    merely equivalent to the tested one, it is the identical bytes.
+
+    Which is why this reads the promotion and not `push: true`: the push now
+    comes first by design, and a test that still looked for it would fail
+    while describing a weaker property than the one that holds.
     """
-    job = (WORKFLOWS / workflow).read_text(encoding="utf-8")
-    job = job[job.index("  stack-image:") :]
+    job = _job(workflow, "stack-image")
     smoke_vogt = job.index("--entrypoint vogt")
     smoke_engine = job.index("--entrypoint mydevenv2-server")
-    push = job.index("push: true")
-    assert max(smoke_vogt, smoke_engine) < push, (
-        f"{workflow}: smoke-test the candidate, then push it"
+    promote = job.index("docker buildx imagetools create")
+    assert max(smoke_vogt, smoke_engine) < promote, (
+        f"{workflow}: smoke-test the candidate, then promote it"
+    )
+    assert "tags: ${{ steps.meta.outputs.tags }}" not in job, (
+        f"{workflow}: the real tags are applied by the promotion, not by a "
+        f"build — otherwise an untested image carries them"
+    )
+    assert re.search(r"tags: \$\{\{ env\.STACK_IMAGE \}\}:candidate-", job), (
+        f"{workflow}: the build publishes a candidate tag, outside both "
+        f"release streams (NFR-D12)"
     )
 
 

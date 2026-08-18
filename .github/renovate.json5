@@ -62,6 +62,21 @@
 
   packageRules: [
     {
+      // The pod base is built by this repository, not mirrored from anywhere,
+      // so there is no upstream for Renovate to check and nothing for it to
+      // bump. `engine/Dockerfile`'s `POD_BASE_IMAGE` default names a moving
+      // convenience tag for local builds; every image CI produces is built on
+      // a **digest** that `.github/workflows/pod-base.yml` resolves at build
+      // time and passes in as a build arg. Pinning the placeholder would
+      // therefore be PR noise over a value nothing shipped ever uses — and,
+      // worse, would read as the pin when it is not one.
+      //
+      // The pin that matters is inside `engine/Dockerfile.pod`, on the
+      // mirrored Ubuntu base, and Renovate still maintains that one.
+      matchPackageNames: ["ghcr.io/thedancingdeveloper-org/vogt-pod-base"],
+      enabled: false,
+    },
+    {
       matchManagers: ["github-actions"],
       groupName: "github actions",
     },
