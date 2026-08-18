@@ -12,15 +12,30 @@ vi.mock("../store", async () => {
 describe("FileTree", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("keeps actual names readable and moves secondary actions behind a labelled control", async () => {
-    vi.spyOn(api, "tree").mockResolvedValue([
-      { name: "source", path: "source", is_dir: true },
-      {
-        name: "a-very-long-and-identifiable-component-name.tsx",
-        path: "source/a-very-long-and-identifiable-component-name.tsx",
-        is_dir: false,
-      },
-    ]);
+  it("puts the Files hierarchy first, keeps names dominant, and progressively discloses every secondary action", async () => {
+    vi.spyOn(api, "tree").mockImplementation(async (path) => path === "source"
+      ? [{ name: "nested.tsx", path: "source/nested.tsx", is_dir: false }]
+      : [
+          { name: "source", path: "source", is_dir: true },
+          {
+            name: "a-very-long-and-identifiable-component-name.tsx",
+            path: "a-very-long-and-identifiable-component-name.tsx",
+            is_dir: false,
+          },
+        ]);
+    vi.spyOn(api, "gitStatus").mockResolvedValue({
+      repo: "",
+      is_repo: true,
+      branch: "dev",
+      ahead: 0,
+      behind: 0,
+      entries: [{
+        path: "a-very-long-and-identifiable-component-name.tsx",
+        index: " ",
+        worktree: "M",
+        kind: "modified",
+      }],
+    });
 
     render(() => (
       <Router>
@@ -30,20 +45,43 @@ describe("FileTree", () => {
 
     expect(await screen.findByText("source")).toBeVisible();
     expect(screen.getByText("a-very-long-and-identifiable-component-name.tsx")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Files" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Files" }))
+      .toAppearBefore(screen.getByRole("searchbox", { name: "Search files" }));
+    expect(screen.getByLabelText("Modified file")).toHaveTextContent("M");
     expect(screen.getByLabelText("Expand source")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("DIR", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText("TSX", { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New file" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Refresh files" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "New folder" })).not.toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole("button", { name: "More file actions" }));
+    expect(screen.getByRole("button", { name: "New folder" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Upload files" })).toBeVisible();
+
+    await fireEvent.click(screen.getByLabelText("Expand source"));
+    expect(await screen.findByText("nested.tsx")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
 
     await fireEvent.click(screen.getByLabelText("Actions for source"));
     expect(screen.getByRole("button", { name: "Open terminal" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Delete" })).toBeVisible();
-    expect(document.querySelector(".tree-icon")?.textContent).toContain("DIR");
-    await waitFor(() => expect(api.tree).toHaveBeenCalled());
+    await waitFor(() => expect(api.tree).toHaveBeenCalledWith("source", 0));
   });
 
   it("uses the in-product decision for delete, defaults to cancel, and reports failures", async () => {
     vi.spyOn(api, "tree").mockResolvedValue([
       { name: "notes.txt", path: "docs/notes.txt", is_dir: false },
     ]);
+    vi.spyOn(api, "gitStatus").mockResolvedValue({
+      repo: "",
+      is_repo: false,
+      branch: "",
+      ahead: 0,
+      behind: 0,
+      entries: [],
+    });
     const fileOp = vi.spyOn(api, "fileOp").mockRejectedValue(new Error("disk is read-only"));
     const confirmAction = vi
       .fn<(title: string, body?: string) => Promise<boolean>>()

@@ -5,13 +5,19 @@ import {
   createEffect,
   createResource,
   createSignal,
+  createUniqueId,
   onCleanup,
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
-import { api, type FileSearchResult, type TreeNode } from "./api";
+import {
+  api,
+  type FileSearchResult,
+  type GitStatusEntry,
+  type GitStatusKind,
+  type TreeNode,
+} from "./api";
 import { openEditorTab, openTerminalTab } from "./tabs";
 import { createSession } from "./store";
-import { getFileIcon, getFolderIcon } from "./fileIcons";
 
 interface Props {
   onOpen?: () => void;
@@ -35,6 +41,25 @@ interface NodeProps {
   onDuplicate: (node: TreeNode) => void;
   onDelete: (node: TreeNode) => void;
   onUploadHere: (path: string) => void;
+  statusEntries: GitStatusEntry[];
+}
+
+const FILE_STATUS: Record<GitStatusKind, { marker: string; label: string }> = {
+  modified: { marker: "M", label: "Modified" },
+  staged: { marker: "S", label: "Staged" },
+  untracked: { marker: "?", label: "Untracked" },
+  conflicted: { marker: "!", label: "Conflicted" },
+  renamed: { marker: "R", label: "Renamed" },
+  deleted: { marker: "D", label: "Deleted" },
+};
+
+function statusForPath(
+  entries: GitStatusEntry[],
+  path: string,
+): { marker: string; label: string; kind: GitStatusKind } | null {
+  const entry = entries.find((candidate) => candidate.path === path);
+  if (!entry) return null;
+  return { ...FILE_STATUS[entry.kind], kind: entry.kind };
 }
 
 function joinPath(dir: string, name: string): string {
@@ -60,6 +85,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     props.node.children ?? null,
   );
   const [loading, setLoading] = createSignal(false);
+  const status = () => statusForPath(props.statusEntries, props.node.path);
 
   const toggle = async () => {
     if (!props.node.is_dir) {
@@ -92,10 +118,18 @@ const TreeNodeView: Component<NodeProps> = (props) => {
           <span class="tree-disclosure" aria-hidden="true">
             {props.node.is_dir ? (open() ? "▾" : "▸") : " "}
           </span>
-          <span class="tree-icon" aria-hidden="true">
-            {props.node.is_dir ? getFolderIcon(open()) : getFileIcon(props.node.path)}
-          </span>
           <span class="tree-label">{props.node.name}</span>
+          <Show when={status()}>
+            {(value) => (
+              <span
+                class={`tree-status tree-status-${value().kind}`}
+                aria-label={`${value().label} file`}
+                title={value().label}
+              >
+                {value().marker}
+              </span>
+            )}
+          </Show>
         </button>
         <button
           type="button"
@@ -104,7 +138,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
           aria-expanded={actionsOpen()}
           onClick={() => setActionsOpen((value) => !value)}
         >
-          Actions
+          <span aria-hidden="true">⋯</span>
         </button>
       </div>
       <Show when={actionsOpen()}>
@@ -143,6 +177,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
                 onDuplicate={props.onDuplicate}
                 onDelete={props.onDelete}
                 onUploadHere={props.onUploadHere}
+                statusEntries={props.statusEntries}
               />
             )}
           </For>
@@ -154,9 +189,21 @@ const TreeNodeView: Component<NodeProps> = (props) => {
 
 const FileTree: Component<Props> = (props) => {
   const [tree, { refetch }] = createResource(() => api.tree("", 0));
+  const [gitStatus, { refetch: refetchGitStatus }] = createResource(async () => {
+    try {
+      const status = await api.gitStatus("");
+      return status.is_repo === false ? [] : status.entries;
+    } catch {
+      // File browsing is independent of Git. A non-repository workspace or a
+      // local Git read failure removes optional markers, never the file tree.
+      return [];
+    }
+  });
   const [searchQuery, setSearchQuery] = createSignal("");
   const [debouncedSearchQuery, setDebouncedSearchQuery] = createSignal("");
   const [uploadTarget, setUploadTarget] = createSignal<string>("");
+  const [moreActionsOpen, setMoreActionsOpen] = createSignal(false);
+  const moreActionsId = `file-tree-more-actions-${createUniqueId()}`;
   const [fileSearchResults] = createResource(
     debouncedSearchQuery,
     async (query): Promise<FileSearchResult[]> => {
@@ -175,6 +222,7 @@ const FileTree: Component<Props> = (props) => {
 
   const refreshTree = () => {
     void refetch();
+    void refetchGitStatus();
   };
 
   createEffect(() => {
@@ -344,46 +392,62 @@ const FileTree: Component<Props> = (props) => {
         onChange={(e) => void uploadFiles(e.currentTarget.files)}
       />
       <div class="file-tree-header">
+        <h2 class="places-section-header">
+          <span>Files</span>
+          <span class="places-section-header-actions">
+            <button
+              type="button"
+              class="file-tree-primary-action"
+              onClick={() => void newFile()}
+              title="New file"
+              aria-label="New file"
+            >
+              <span aria-hidden="true">+</span>
+            </button>
+            <button
+              type="button"
+              class="file-tree-primary-action"
+              onClick={refreshTree}
+              title="Refresh files"
+              aria-label="Refresh files"
+            >
+              <span aria-hidden="true">↻</span>
+            </button>
+            <button
+              type="button"
+              class="file-tree-more-toggle"
+              onClick={() => setMoreActionsOpen((open) => !open)}
+              title="More file actions"
+              aria-label="More file actions"
+              aria-expanded={moreActionsOpen()}
+              aria-controls={moreActionsId}
+            >
+              <span aria-hidden="true">⋯</span>
+            </button>
+          </span>
+        </h2>
+        <Show when={moreActionsOpen()}>
+          <div
+            id={moreActionsId}
+            class="file-tree-more-actions"
+            aria-label="More file actions"
+          >
+            <button type="button" onClick={() => { setMoreActionsOpen(false); void newFolder(); }}>
+              New folder
+            </button>
+            <button type="button" onClick={() => { setMoreActionsOpen(false); triggerUpload(""); }}>
+              Upload files
+            </button>
+          </div>
+        </Show>
         <input
           type="search"
           class="file-tree-search"
-          placeholder="Search files..."
+          aria-label="Search files"
+          placeholder="Search files…"
           value={searchQuery()}
           onInput={(e) => setSearchQuery(e.currentTarget.value)}
         />
-      </div>
-      <div class="places-section-header">
-        <span>Files</span>
-        <span class="places-section-header-actions">
-          <button
-            onClick={() => void newFile()}
-            title="New file"
-            aria-label="New file"
-          >
-            New file
-          </button>
-          <button
-            onClick={() => void newFolder()}
-            title="New folder"
-            aria-label="New folder"
-          >
-            New folder
-          </button>
-          <button
-            onClick={() => triggerUpload("")}
-            title="Upload files"
-            aria-label="Upload files"
-          >
-            Upload
-          </button>
-          <button
-            onClick={refreshTree}
-            title="Refresh"
-            aria-label="Refresh files"
-          >
-            Refresh
-          </button>
-        </span>
       </div>
       <Show when={tree.error}>
         <div style={{ padding: "8px 10px", color: "#ff7b72", "font-size": "12px" }}>
@@ -406,6 +470,7 @@ const FileTree: Component<Props> = (props) => {
                   onDuplicate={(entry) => void duplicateNode(entry)}
                   onDelete={(entry) => void deleteNode(entry)}
                   onUploadHere={triggerUpload}
+                  statusEntries={gitStatus() ?? []}
                 />
               )}
             </For>
@@ -429,11 +494,21 @@ const FileTree: Component<Props> = (props) => {
                     onClick={() => openFile(file.path)}
                     title={file.path}
                   >
-                    <span class="tree-icon">{getFileIcon(file.path)}</span>
                     <span class="tree-search-main">
                       <span class="tree-search-name">{file.name}</span>
                       <span class="tree-search-path">{file.path}</span>
                     </span>
+                    <Show when={statusForPath(gitStatus() ?? [], file.path)}>
+                      {(value) => (
+                        <span
+                          class={`tree-status tree-status-${value().kind}`}
+                          aria-label={`${value().label} file`}
+                          title={value().label}
+                        >
+                          {value().marker}
+                        </span>
+                      )}
+                    </Show>
                   </button>
                 )}
               </For>
