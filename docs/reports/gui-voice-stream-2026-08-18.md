@@ -221,3 +221,37 @@ Run the GUI and voice acceptance as one sequence:
 - **GUI:** shell/Inbox/route skeleton exists, but the live Files sidebar is critically broken and Board/Backlog/Sessions/phone remain materially off-design. See `docs/reports/restructure-live-2026-08-17/REPORT.md`.
 - **Voice:** Checkpoint A is implemented and tested on `feat/voice-poc` at `5320200`; desktop microphone Checkpoint B is not run; server STT/TTS and phone background Checkpoint D are not started.
 - **Integration:** not yet performed. The current checkout is `design/restructure-wireframes`; this document is the workstream plan, not an assertion that the branches have been combined.
+
+## Execution record — `work/gui-voice-dev`
+
+**Executed:** 2026-08-18 from `dev` commit `373b742` in the separate worktree
+`/home/sprooty/Working/Active/apps/vogt-gui-voice-dev`.
+
+The integration stream now contains the two recovered Checkpoint A commits,
+with migration `0010_session_model.sql` and the authoritative
+`docs/VOICE_POC.md`. The before report and its 1440×1000 / 390×664 captures
+are committed as evidence.
+
+Delivered in the GUI lane so far:
+
+- the Files rail uses stable text markers rather than platform-dependent emoji,
+  preserves readable file/folder names, and contains secondary actions behind
+  one labelled control with coarse-pointer targets;
+- Sessions sorts by attention and renders name, cwd, activity age and honest
+  continuity state as separate fields; the phone nav now carries the live
+  session count.
+
+Validation run at this checkpoint:
+
+- web typecheck, 272 Vitest tests, 6 Playwright browser tests (2 intentionally
+  skipped by device), and a fresh production bundle: pass;
+- Rust format, Clippy with warnings denied, and all 238 Rust tests: pass;
+- 30 focused session tests, strict mypy, Ruff and documentation links: pass;
+- the parity subset is not a valid isolated gate in this checkout: its fixture
+  tried to import `parity-org/parity-import` from real GitHub and failed before
+  parity assertions; the subset's coverage was therefore also below the
+  full-suite threshold. No product failure was hidden by that result.
+
+Checkpoint B still requires a person with a laptop microphone. Checkpoints C
+and D remain unstarted. No image was published and no stack was deployed; that
+would require the normal signed-image and Komodo path after review.
