@@ -743,8 +743,8 @@ def test_the_access_check_probes_vogt_and_not_only_cadastre() -> None:
     one place that can catch a per-instance token mismatch.
     """
     body = _without_comments(AGENT_AUTH.read_text(encoding="utf-8"))
-    assert "ok: Vogt MCP" in body, (
-        "the check must probe Vogt and say so by name, as it does Cadastre"
+    assert 'probe_mcp "Vogt MCP"' in body, (
+        "the check must probe Vogt and name it, as it does Cadastre"
     )
     assert '"method":"initialize"' in body, "probed the way a client connects"
     # Absent is not broken: an instance may legitimately not be deployed, and
@@ -783,10 +783,88 @@ def test_the_vogt_probe_reads_the_answer_and_not_only_the_status() -> None:
     assert "*'\"error\"'*" in body, (
         "a JSON-RPC error is carried on a 200; the body has to be read"
     )
-    assert "$vogt_status" in body and "$vogt_detail" in body, (
+    assert "$status" in body and "$detail" in body, (
         "the failure must report what the server actually said, not only that "
         "it said no"
     )
+    assert 'probe_mcp "Cadastre MCP"' in body
+    assert 'probe_mcp "Vogt MCP"' in body, (
+        "both endpoints must use the same JSON-RPC-aware probe"
+    )
+
+
+@needs_engine
+@pytest.mark.parametrize(
+    ("status", "body", "curl_error", "curl_exit", "expected_exit", "message"),
+    [
+        ("200", '{"jsonrpc":"2.0","id":1,"result":{}}', "", 0, 0, "ok: Test MCP"),
+        (
+            "200",
+            '{"jsonrpc":"2.0","id":1,"error":{"code":-32001}}',
+            "",
+            0,
+            1,
+            "refused the handshake",
+        ),
+        (
+            "403",
+            '{"detail":"wrong token"}',
+            "",
+            0,
+            1,
+            "rejected TEST_TOKEN at https://mcp.invalid (HTTP 403)",
+        ),
+        ("000", "", "connection refused", 7, 1, "is unreachable"),
+    ],
+    ids=["success", "json-rpc-error", "http-rejection", "unreachable"],
+)
+def test_the_shared_mcp_probe_classifies_transport_and_json_rpc_outcomes(
+    tmp_path: Path,
+    status: str,
+    body: str,
+    curl_error: str,
+    curl_exit: int,
+    expected_exit: int,
+    message: str,
+) -> None:
+    """#35: both MCP checks trust the handshake, not merely HTTP 200."""
+    response_file = tmp_path / "response"
+    error_file = tmp_path / "error"
+    script = f"""
+source {AGENT_AUTH!s}
+curl() {{
+    local output_file="" error_target=""
+    while (($#)); do
+        case "$1" in
+            -o) output_file="$2"; shift 2 ;;
+            -w) shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    printf '%s' "$PROBE_BODY" >"$output_file"
+    printf '%s' "$PROBE_ERROR" >&2
+    printf '%s' "$PROBE_STATUS"
+    return "$PROBE_EXIT"
+}}
+probe_mcp "Test MCP" "https://mcp.invalid" "secret" "TEST_TOKEN" \\
+    {response_file!s} {error_file!s} ""
+"""
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "PROBE_STATUS": status,
+            "PROBE_BODY": body,
+            "PROBE_ERROR": curl_error,
+            "PROBE_EXIT": str(curl_exit),
+        },
+        check=False,
+    )
+
+    assert completed.returncode == expected_exit
+    assert message in completed.stdout + completed.stderr
 
 
 @needs_engine

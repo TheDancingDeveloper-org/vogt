@@ -57,6 +57,38 @@ require_identity() {
         "INFISICAL_CLIENT_SECRET is not configured; add the MyDevEnv2 machine identity to the Komodo stack"
 }
 
+probe_mcp() {
+    local service="$1" url="$2" token="$3" credential="$4"
+    local response_file="$5" error_file="$6" failure_hint="$7"
+    local status detail
+    shift 7
+
+    # One JSON-RPC-aware probe serves every MCP endpoint. Keep the response
+    # files caller-owned so credentials and refusal details remain in the
+    # protected agent-auth temporary lifecycle.
+    : >"$response_file"
+    : >"$error_file"
+    status="$(curl -sS --max-time 15 "$@" \
+        -o "$response_file" -w '%{http_code}' \
+        -H "Authorization: Bearer $token" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mydevenv2-agent-auth","version":"1"}}}' \
+        "$url" 2>"$error_file")" || status="000"
+    detail="$(tr -d '\r\n' <"$response_file" | cut -c1-300)"
+
+    if [[ "$status" == "000" ]]; then
+        die "$service is unreachable at $url: $(tr -d '\r\n' <"$error_file" | cut -c1-200)"
+    elif [[ "$status" != "200" ]]; then
+        die "$service rejected $credential at $url (HTTP $status): ${detail:-<empty body>}$failure_hint"
+    elif [[ "$detail" == *'"error"'* ]]; then
+        # JSON-RPC refusals normally ride on HTTP 200. Treating transport
+        # success as service success is the false green this helper prevents.
+        die "$service answered at $url but refused the handshake: $detail$failure_hint"
+    fi
+    printf 'ok: %s (%s)\n' "$service" "$url"
+}
+
 mint_access_token() {
     local temp_home token
     temp_home="$(mktemp -d)"
@@ -187,7 +219,8 @@ load_agent_environment() {
 
 check_access() {
     local response_file error_file gh_login mcp_url vogt_url vogt_mcp_url
-    local vogt_status vogt_detail
+    local vogt_failure_hint
+    local -a mcp_curl_args
     require_command curl
     require_command git
     require_command gh
@@ -232,13 +265,9 @@ check_access() {
     if [[ -n "${MYDEVENV2_CADASTRE_MCP_RESOLVE:-$DEFAULT_CADASTRE_MCP_RESOLVE}" ]]; then
         mcp_curl_args+=(--resolve "${MYDEVENV2_CADASTRE_MCP_RESOLVE}")
     fi
-    curl -fsS --max-time 15 "${mcp_curl_args[@]}" \
-        -H "Authorization: Bearer $CADASTRE_HTTP_TOKEN" \
-        -H 'Content-Type: application/json' \
-        -H 'Accept: application/json, text/event-stream' \
-        --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mydevenv2-agent-auth","version":"1"}}}' \
-        "$mcp_url" >"$response_file"
-    printf 'ok: Cadastre MCP (%s)\n' "$mcp_url"
+    probe_mcp "Cadastre MCP" "$mcp_url" "$CADASTRE_HTTP_TOKEN" \
+        "$CADASTRE_SECRET_NAME" "$response_file" "$error_file" "" \
+        "${mcp_curl_args[@]}"
 
     # Vogt, probed the same way Cadastre is — because until this existed, the
     # check reported seven services green while Vogt was completely unusable
@@ -273,59 +302,44 @@ check_access() {
         # named failure rather than the `skip` above, which means no instance.
         [[ -s "${VOGT_TOKEN_FILE:-}" ]] || die \
             "Vogt token loaded but VOGT_TOKEN_FILE (${VOGT_TOKEN_FILE:-<unset>}) is missing or empty; every registered client reads the credential from that file"
-        # `-w`, not `-f`: `-f` collapses every refusal into exit 22 and throws
-        # the body away, and the body is where the server says what it
-        # refused. The status is captured instead so it can be reported.
-        vogt_status="$(curl -sS --max-time 15 \
-            -o "$response_file" -w '%{http_code}' \
-            -H "Authorization: Bearer $VOGT_HTTP_TOKEN" \
-            -H 'Content-Type: application/json' \
-            -H 'Accept: application/json, text/event-stream' \
-            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mydevenv2-agent-auth","version":"1"}}}' \
-            "$vogt_mcp_url" 2>"$error_file")" || vogt_status="000"
-        vogt_detail="$(tr -d '\r\n' <"$response_file" | cut -c1-300)"
-        if [[ "$vogt_status" == "000" ]]; then
-            die "Vogt MCP is unreachable at $vogt_mcp_url: $(tr -d '\r\n' <"$error_file" | cut -c1-200)"
-        elif [[ "$vogt_status" != "200" ]]; then
-            # Named, because the likely cause is not the one the endpoint's
-            # own error suggests: a Vogt token is minted by one instance and
-            # stored hashed there, so a token from another instance is
-            # refused however fresh it is, and the message the agent finally
-            # sees points at the token file (#29).
-            die "Vogt MCP rejected ${VOGT_SECRET_NAME} at $vogt_mcp_url (HTTP $vogt_status): ${vogt_detail:-<empty body>} — if the token is current, check it was issued by *this* instance; tokens are not shared between Vogt instances"
-        elif [[ "$vogt_detail" == *'"error"'* ]]; then
-            # A JSON-RPC error is carried on a 200, so status alone is not the
-            # answer — this is the shape #29 reached the client in (-32001),
-            # and a probe that stopped at the status code would have called it
-            # green.
-            die "Vogt MCP answered at $vogt_mcp_url but refused the handshake: $vogt_detail — if the token is current, check it was issued by *this* instance; tokens are not shared between Vogt instances"
-        fi
-        printf 'ok: Vogt MCP (%s)\n' "$vogt_mcp_url"
+        # Named, because a Vogt token is minted by one instance and stored
+        # hashed there. A token from another instance is refused however
+        # fresh it is, and the message an agent sees points at the token file.
+        vogt_failure_hint=" — if the token is current, check it was issued by *this* instance; tokens are not shared between Vogt instances"
+        probe_mcp "Vogt MCP" "$vogt_mcp_url" "$VOGT_HTTP_TOKEN" \
+            "$VOGT_SECRET_NAME" "$response_file" "$error_file" \
+            "$vogt_failure_hint"
     fi
 }
 
-case "${1:-}" in
-    check)
-        check_access
-        ;;
-    run)
-        shift
-        [[ "${1:-}" == "--" ]] && shift
-        [[ $# -gt 0 ]] || die "run requires a command"
-    load_agent_environment
-        trap cleanup_auth_artifacts EXIT
-        "$@"
-        ;;
-    shell)
-        load_agent_environment
-        trap cleanup_auth_artifacts EXIT
-        "${SHELL:-/bin/bash}" -l
-        ;;
-    -h|--help|help)
-        usage
-        ;;
-    *)
-        usage >&2
-        exit 2
-        ;;
-esac
+main() {
+    case "${1:-}" in
+        check)
+            check_access
+            ;;
+        run)
+            shift
+            [[ "${1:-}" == "--" ]] && shift
+            [[ $# -gt 0 ]] || die "run requires a command"
+            load_agent_environment
+            trap cleanup_auth_artifacts EXIT
+            "$@"
+            ;;
+        shell)
+            load_agent_environment
+            trap cleanup_auth_artifacts EXIT
+            "${SHELL:-/bin/bash}" -l
+            ;;
+        -h|--help|help)
+            usage
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
