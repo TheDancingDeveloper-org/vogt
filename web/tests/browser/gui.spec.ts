@@ -649,3 +649,30 @@ test("dirty editor requests browser exit confirmation only until save", async ({
     return event.defaultPrevented;
   })).toBe(false);
 });
+
+test("History distinguishes an archive outage from an empty archive and recovers", async ({ page }) => {
+  await installFixtures(page);
+  let failed = false;
+  await page.route("**/api/history/sessions**", async (route) => {
+    if (!failed) {
+      failed = true;
+      return route.fulfill({ status: 503, json: { error: "archive offline" } });
+    }
+    return route.fulfill({ json: [] });
+  });
+
+  await page.goto("/#/history");
+  const error = page.getByRole("alert");
+  await expect(error).toContainText("Failed to load history");
+  await expect(error).toContainText("archive offline");
+  await expect(page.getByText("0 archived sessions")).toHaveCount(0);
+  await expect(page.getByText("No archived sessions.")).toHaveCount(0);
+
+  const retry = page.getByRole("button", { name: "Retry history" });
+  if (test.info().project.name === "phone") await retry.tap();
+  else await retry.click();
+
+  await expect(page.getByText("0 archived sessions")).toBeVisible();
+  await expect(page.getByText("No archived sessions.")).toBeVisible();
+  await expect(error).toHaveCount(0);
+});

@@ -2782,6 +2782,12 @@ textarea {
   gap: 12px;
 }
 
+.history-scope-note {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
 .history-field {
   display: flex;
   flex-direction: column;
@@ -2849,6 +2855,41 @@ textarea {
   gap: 8px;
   overflow-y: auto;
   padding: 8px;
+}
+
+.history-list.stale > :not(.history-panel-error),
+.history-search-results.stale > :not(.history-panel-error),
+.history-detail-content.stale > :not(.history-panel-error),
+.history-replay.stale > :not(.history-panel-error) {
+  opacity: 0.58;
+}
+
+.history-panel-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(248, 81, 73, 0.45);
+  border-radius: 6px;
+  background: rgba(248, 81, 73, 0.1);
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.history-panel-error strong {
+  color: var(--activity-errored);
+}
+
+.history-panel-error button,
+.history-load-more {
+  flex: 0 0 auto;
+}
+
+.history-load-more {
+  align-self: center;
+  margin: 4px 8px 8px;
 }
 
 .history-session,
@@ -3131,6 +3172,7 @@ textarea {
 @media (max-width: 768px) {
   .history-view {
     padding: 12px;
+    overflow-y: auto;
   }
 
   .history-header,
@@ -3148,6 +3190,25 @@ textarea {
 
   .history-field-wide {
     grid-column: span 1;
+  }
+
+  .history-layout {
+    flex: 0 0 auto;
+    min-height: auto;
+  }
+
+  .history-sidebar,
+  .history-detail {
+    min-height: min(55dvh, 520px);
+  }
+
+  .history-panel-error {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .history-panel-error button {
+    min-height: 44px;
   }
 }
 

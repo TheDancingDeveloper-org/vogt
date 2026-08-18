@@ -4,10 +4,10 @@ import {
   Show,
   createEffect,
   createMemo,
-  createResource,
   createSignal,
   onCleanup,
   onMount,
+  untrack,
 } from "solid-js";
 import {
   api,
@@ -29,6 +29,8 @@ interface Props {
 
 type StatusFilter = "all" | "success" | "error" | "unfinished";
 type SortMode = "recent" | "oldest" | "largest";
+type SessionLoad = "initial" | "refresh" | "more" | null;
+type SessionRetry = "refresh" | "more";
 
 interface HistoryDraft {
   selectedId: string | null;
@@ -40,6 +42,16 @@ interface HistoryDraft {
   tailBytes: number;
 }
 
+interface PanelErrorProps {
+  message: string;
+  retryLabel: string;
+  onRetry: () => void;
+  stale?: boolean;
+}
+
+const HISTORY_PAGE_SIZE = 200;
+const HISTORY_SEARCH_LIMIT = 100;
+
 const EMPTY_HISTORY_DRAFT: HistoryDraft = {
   selectedId: null,
   metadataQuery: "",
@@ -49,6 +61,24 @@ const EMPTY_HISTORY_DRAFT: HistoryDraft = {
   showPinnedOnly: false,
   tailBytes: 64 * 1024,
 };
+
+const PanelError: Component<PanelErrorProps> = (props) => (
+  <div class="history-panel-error" role="alert">
+    <div>
+      <strong>{props.message}</strong>
+      <Show when={props.stale}>
+        <span> Last successful data is retained and may be stale.</span>
+      </Show>
+    </div>
+    <button type="button" onClick={props.onRetry}>
+      {props.retryLabel}
+    </button>
+  </div>
+);
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function formatDate(value: string | null): string {
   if (!value) return "Unknown";
@@ -83,7 +113,6 @@ function matchesStatus(
 
 const History: Component<Props> = (props) => {
   const restored = readToolDraft("history", EMPTY_HISTORY_DRAFT);
-  const [reloadKey, setReloadKey] = createSignal(0);
   const [selectedId, setSelectedId] = createSignal<string | null>(restored.selectedId);
   const [metadataQuery, setMetadataQuery] = createSignal(restored.metadataQuery);
   const [outputQuery, setOutputQuery] = createSignal(restored.outputQuery);
@@ -93,17 +122,56 @@ const History: Component<Props> = (props) => {
   const [pinnedIds, setPinnedIds] = createSignal<string[]>(getPinnedHistoryIds());
   const [tailBytes, setTailBytes] = createSignal(restored.tailBytes);
 
-  onCleanup(() => writeToolDraft<HistoryDraft>("history", {
-    selectedId: selectedId(),
-    metadataQuery: metadataQuery(),
-    outputQuery: outputQuery(),
-    statusFilter: statusFilter(),
-    sortMode: sortMode(),
-    showPinnedOnly: showPinnedOnly(),
-    tailBytes: tailBytes(),
-  }));
+  const [sessions, setSessions] = createSignal<HistorySessionMetadata[]>([]);
+  const [sessionsLoaded, setSessionsLoaded] = createSignal(false);
+  const [sessionsLoading, setSessionsLoading] = createSignal<SessionLoad>(null);
+  const [sessionsError, setSessionsError] = createSignal<string | null>(null);
+  const [sessionsStale, setSessionsStale] = createSignal(false);
+  const [sessionsRetry, setSessionsRetry] = createSignal<SessionRetry>("refresh");
+  const [archiveTotal, setArchiveTotal] = createSignal<number | null>(null);
+  const [archiveComplete, setArchiveComplete] = createSignal(false);
+  const [hasMoreSessions, setHasMoreSessions] = createSignal(false);
 
-  const refresh = () => setReloadKey((value) => value + 1);
+  const [searchResults, setSearchResults] = createSignal<HistorySearchResult[]>([]);
+  const [searchKey, setSearchKey] = createSignal("");
+  const [searchLoaded, setSearchLoaded] = createSignal(false);
+  const [searchLoading, setSearchLoading] = createSignal(false);
+  const [searchError, setSearchError] = createSignal<string | null>(null);
+  const [searchStale, setSearchStale] = createSignal(false);
+
+  const [selectedSession, setSelectedSession] = createSignal<HistorySessionMetadata | null>(null);
+  const [detailKey, setDetailKey] = createSignal<string | null>(null);
+  const [detailLoading, setDetailLoading] = createSignal(false);
+  const [detailError, setDetailError] = createSignal<string | null>(null);
+  const [detailStale, setDetailStale] = createSignal(false);
+
+  const [logPreview, setLogPreview] = createSignal<HistoryLogPreview | null>(null);
+  const [logKey, setLogKey] = createSignal("");
+  const [logLoading, setLogLoading] = createSignal(false);
+  const [logError, setLogError] = createSignal<string | null>(null);
+  const [logStale, setLogStale] = createSignal(false);
+
+  let sessionsRequest = 0;
+  let searchRequest = 0;
+  let detailRequest = 0;
+  let logRequest = 0;
+
+  onCleanup(() => {
+    sessionsRequest += 1;
+    searchRequest += 1;
+    detailRequest += 1;
+    logRequest += 1;
+    writeToolDraft<HistoryDraft>("history", {
+      selectedId: selectedId(),
+      metadataQuery: metadataQuery(),
+      outputQuery: outputQuery(),
+      statusFilter: statusFilter(),
+      sortMode: sortMode(),
+      showPinnedOnly: showPinnedOnly(),
+      tailBytes: tailBytes(),
+    });
+  });
+
   const refreshPins = () => setPinnedIds(getPinnedHistoryIds());
 
   onMount(() => {
@@ -121,88 +189,214 @@ const History: Component<Props> = (props) => {
     });
   });
 
-  const [sessions] = createResource(
-    reloadKey,
-    async (): Promise<HistorySessionMetadata[]> => {
-      try {
-        return await api.listHistorySessions(200, 0);
-      } catch (e) {
-        props.onError?.(`Failed to load history: ${(e as Error).message}`);
-        return [];
-      }
-    },
-  );
+  const loadFirstPage = async (): Promise<void> => {
+    const request = ++sessionsRequest;
+    setSessionsLoading(sessionsLoaded() ? "refresh" : "initial");
+    const statusRequest = api.operationalStatus().catch(() => null);
+    try {
+      const items = await api.listHistorySessions(HISTORY_PAGE_SIZE, 0);
+      if (request !== sessionsRequest) return;
+      const pageComplete = items.length < HISTORY_PAGE_SIZE;
+      setSessions(items);
+      setSessionsLoaded(true);
+      setSessionsError(null);
+      setSessionsStale(false);
+      setSessionsRetry("refresh");
+      setArchiveTotal(null);
+      setArchiveComplete(pageComplete);
+      setHasMoreSessions(!pageComplete);
+
+      void statusRequest.then((status) => {
+        if (request !== sessionsRequest || status === null) return;
+        const reportedTotal = status.history.archived_session_count;
+        const usableTotal = reportedTotal !== null
+          && reportedTotal >= items.length
+          && (!pageComplete || reportedTotal === items.length)
+          ? reportedTotal
+          : null;
+        setArchiveTotal(usableTotal);
+        setArchiveComplete(
+          pageComplete || (usableTotal !== null && items.length >= usableTotal),
+        );
+        setHasMoreSessions(
+          !pageComplete && (usableTotal === null || items.length < usableTotal),
+        );
+      });
+    } catch (error) {
+      if (request !== sessionsRequest) return;
+      setSessionsError(`Failed to load history: ${errorMessage(error)}`);
+      setSessionsStale(sessionsLoaded());
+      setSessionsRetry("refresh");
+    } finally {
+      if (request === sessionsRequest) setSessionsLoading(null);
+    }
+  };
+
+  const loadMore = async (): Promise<void> => {
+    if (sessionsLoading() !== null || !sessionsLoaded()) return;
+    const request = ++sessionsRequest;
+    const offset = sessions().length;
+    setSessionsLoading("more");
+    try {
+      const items = await api.listHistorySessions(HISTORY_PAGE_SIZE, offset);
+      if (request !== sessionsRequest) return;
+      const existing = new Set(sessions().map((session) => session.id));
+      const additions = items.filter((session) => !existing.has(session.id));
+      const combined = [...sessions(), ...additions];
+      const total = archiveTotal();
+      const pageComplete = items.length < HISTORY_PAGE_SIZE;
+      const usableTotal = total !== null
+        && total >= combined.length
+        && (!pageComplete || total === combined.length)
+        ? total
+        : null;
+      setSessions(combined);
+      setSessionsError(null);
+      setSessionsStale(false);
+      setSessionsRetry("more");
+      setArchiveTotal(usableTotal);
+      setArchiveComplete(
+        pageComplete || (usableTotal !== null && combined.length >= usableTotal),
+      );
+      setHasMoreSessions(
+        !pageComplete && (usableTotal === null || combined.length < usableTotal),
+      );
+    } catch (error) {
+      if (request !== sessionsRequest) return;
+      setSessionsError(`Failed to load the next history page: ${errorMessage(error)}`);
+      setSessionsStale(true);
+      setSessionsRetry("more");
+    } finally {
+      if (request === sessionsRequest) setSessionsLoading(null);
+    }
+  };
+
+  const retrySessions = (): void => {
+    if (sessionsRetry() === "more") {
+      void loadMore();
+    } else {
+      void loadFirstPage();
+    }
+  };
+
+  const loadSearch = async (query: string): Promise<void> => {
+    const request = ++searchRequest;
+    if (!query) {
+      setSearchKey("");
+      setSearchResults([]);
+      setSearchLoaded(false);
+      setSearchLoading(false);
+      setSearchError(null);
+      setSearchStale(false);
+      return;
+    }
+
+    const sameQuery = searchKey() === query;
+    if (!sameQuery) {
+      setSearchKey(query);
+      setSearchResults([]);
+      setSearchLoaded(false);
+      setSearchError(null);
+      setSearchStale(false);
+    }
+    setSearchLoading(true);
+    try {
+      const results = await api.searchHistory(query, HISTORY_SEARCH_LIMIT);
+      if (request !== searchRequest || outputQuery().trim() !== query) return;
+      setSearchResults(results);
+      setSearchLoaded(true);
+      setSearchError(null);
+      setSearchStale(false);
+    } catch (error) {
+      if (request !== searchRequest || outputQuery().trim() !== query) return;
+      setSearchError(`Search failed: ${errorMessage(error)}`);
+      setSearchStale(sameQuery && searchLoaded());
+    } finally {
+      if (request === searchRequest) setSearchLoading(false);
+    }
+  };
+
+  const loadDetail = async (id: string): Promise<void> => {
+    const request = ++detailRequest;
+    const sameSession = detailKey() === id;
+    if (!sameSession) {
+      setDetailKey(id);
+      setSelectedSession(null);
+      setDetailError(null);
+      setDetailStale(false);
+    }
+    setDetailLoading(true);
+    try {
+      const session = await api.getHistorySession(id);
+      if (request !== detailRequest || selectedId() !== id) return;
+      setSelectedSession(session);
+      setDetailError(null);
+      setDetailStale(false);
+    } catch (error) {
+      if (request !== detailRequest || selectedId() !== id) return;
+      setDetailError(`Failed to load session detail: ${errorMessage(error)}`);
+      setDetailStale(sameSession && selectedSession() !== null);
+    } finally {
+      if (request === detailRequest) setDetailLoading(false);
+    }
+  };
+
+  const loadLog = async (id: string, bytes: number): Promise<void> => {
+    const request = ++logRequest;
+    const key = `${id}:${bytes}`;
+    const sameLog = logKey() === key;
+    if (!sameLog) {
+      setLogKey(key);
+      setLogPreview(null);
+      setLogError(null);
+      setLogStale(false);
+    }
+    setLogLoading(true);
+    try {
+      const preview = await api.getHistorySessionLog(id, bytes);
+      if (
+        request !== logRequest
+        || selectedId() !== id
+        || tailBytes() !== bytes
+      ) return;
+      setLogPreview(preview);
+      setLogError(null);
+      setLogStale(false);
+    } catch (error) {
+      if (
+        request !== logRequest
+        || selectedId() !== id
+        || tailBytes() !== bytes
+      ) return;
+      setLogError(`Failed to load replay: ${errorMessage(error)}`);
+      setLogStale(sameLog && logPreview() !== null);
+    } finally {
+      if (request === logRequest) setLogLoading(false);
+    }
+  };
 
   const outputSearchEnabled = createMemo(() => outputQuery().trim().length > 0);
 
-  const [searchResults] = createResource(
-    () => [reloadKey(), outputQuery().trim()] as const,
-    async ([, query]): Promise<HistorySearchResult[]> => {
-      if (!query) return [];
-      try {
-        return await api.searchHistory(query, 50);
-      } catch (e) {
-        props.onError?.(`Search failed: ${(e as Error).message}`);
-        return [];
-      }
-    },
-  );
-
   const selectedSearchMatches = createMemo(() =>
-    (searchResults() ?? []).filter((result) => result.session_id === selectedId()),
-  );
-
-  const [selectedSession] = createResource(
-    selectedId,
-    async (id): Promise<HistorySessionMetadata | null> => {
-      if (!id) return null;
-      try {
-        return await api.getHistorySession(id);
-      } catch (e) {
-        props.onError?.(`Failed to load session detail: ${(e as Error).message}`);
-        return null;
-      }
-    },
-  );
-
-  const [logPreview] = createResource(
-    () => {
-      const id = selectedId();
-      return id ? ([id, tailBytes()] as const) : null;
-    },
-    async (key): Promise<HistoryLogPreview | null> => {
-      if (!key) return null;
-      const [id, bytes] = key;
-      try {
-        return await api.getHistorySessionLog(id, bytes);
-      } catch (e) {
-        props.onError?.(`Failed to load replay: ${(e as Error).message}`);
-        return null;
-      }
-    },
+    searchResults().filter((result) => result.session_id === selectedId()),
   );
 
   const filteredSessions = createMemo(() => {
-    const items = [...(sessions() ?? [])];
+    const items = [...sessions()];
     const metadataNeedle = metadataQuery().trim().toLowerCase();
     const pinned = new Set(pinnedIds());
     const filtered = items.filter((session) => {
       if (showPinnedOnly() && !pinned.has(session.id)) return false;
       if (!matchesStatus(session, statusFilter())) return false;
       if (!metadataNeedle) return true;
-      const haystack = [
-        session.name,
-        session.cwd ?? "",
-        session.command ?? "",
-      ]
+      const haystack = [session.name, session.cwd ?? "", session.command ?? ""]
         .join("\n")
         .toLowerCase();
       return haystack.includes(metadataNeedle);
     });
 
     filtered.sort((a, b) => {
-      const pinDelta =
-        Number(pinned.has(b.id)) - Number(pinned.has(a.id));
+      const pinDelta = Number(pinned.has(b.id)) - Number(pinned.has(a.id));
       if (pinDelta !== 0) return pinDelta;
       if (sortMode() === "largest") {
         return b.scrollback_bytes - a.scrollback_bytes;
@@ -214,32 +408,87 @@ const History: Component<Props> = (props) => {
     return filtered;
   });
 
+  const archiveSummary = createMemo(() => {
+    if (!sessionsLoaded()) {
+      return sessionsLoading() === "initial"
+        ? "Loading archived sessions…"
+        : "Archive count unavailable";
+    }
+    const loaded = sessions().length;
+    const total = archiveTotal();
+    if (total === 0) return "0 archived sessions";
+    if (total !== null) return `${loaded} of ${total} archived sessions loaded`;
+    if (archiveComplete()) return `${loaded} archived sessions loaded (all reached)`;
+    return `${loaded} archived sessions loaded; more may be available`;
+  });
+
   createEffect(() => {
-    const loadedSessions = sessions();
-    if (loadedSessions === undefined) return;
-    const current = selectedId();
-    if (current && loadedSessions.some((session) => session.id === current)) {
+    const query = outputQuery().trim();
+    void untrack(() => loadSearch(query));
+  });
+
+  createEffect(() => {
+    const id = selectedId();
+    if (!id) {
+      detailRequest += 1;
+      setDetailKey(null);
+      setSelectedSession(null);
+      setDetailLoading(false);
+      setDetailError(null);
+      setDetailStale(false);
       return;
     }
-    const fallback = outputSearchEnabled()
-      ? searchResults()?.[0]?.session_id ?? null
-      : filteredSessions()[0]?.id ?? null;
-    setSelectedId(fallback);
+    void untrack(() => loadDetail(id));
   });
 
   createEffect(() => {
-    if (!outputSearchEnabled()) return;
-    const first = searchResults()?.[0]?.session_id ?? null;
-    if (first && !(selectedId() && searchResults()?.some((result) => result.session_id === selectedId()))) {
-      setSelectedId(first);
+    const id = selectedId();
+    const bytes = tailBytes();
+    if (!id) {
+      logRequest += 1;
+      setLogKey("");
+      setLogPreview(null);
+      setLogLoading(false);
+      setLogError(null);
+      setLogStale(false);
+      return;
+    }
+    void untrack(() => loadLog(id, bytes));
+  });
+
+  createEffect(() => {
+    if (!selectedId() && !outputSearchEnabled() && sessionsLoaded()) {
+      setSelectedId(filteredSessions()[0]?.id ?? null);
     }
   });
 
-  const togglePin = (id: string) => {
+  createEffect(() => {
+    if (!outputSearchEnabled() || !searchLoaded()) return;
+    const results = searchResults();
+    const current = selectedId();
+    if (results.length > 0 && !results.some((result) => result.session_id === current)) {
+      setSelectedId(results[0]!.session_id);
+    }
+  });
+
+  onMount(() => void loadFirstPage());
+
+  const refresh = (): void => {
+    void loadFirstPage();
+    const query = outputQuery().trim();
+    if (query) void loadSearch(query);
+    const id = selectedId();
+    if (id) {
+      void loadDetail(id);
+      void loadLog(id, tailBytes());
+    }
+  };
+
+  const togglePin = (id: string): void => {
     setPinnedIds(toggleHistoryPin(id));
   };
 
-  const deleteSession = async (session: HistorySessionMetadata) => {
+  const deleteSession = async (session: HistorySessionMetadata): Promise<void> => {
     if (!props.confirmAction) return;
     if (!await props.confirmAction(
       `Delete archived session "${session.name}"?`,
@@ -248,20 +497,18 @@ const History: Component<Props> = (props) => {
     try {
       await api.deleteHistorySession(session.id);
       setPinnedIds(removeHistoryPin(session.id));
-      if (selectedId() === session.id) {
-        setSelectedId(null);
-      }
-      refresh();
-    } catch (e) {
-      props.onError?.(`Delete failed: ${(e as Error).message}`);
+      if (selectedId() === session.id) setSelectedId(null);
+      await loadFirstPage();
+    } catch (error) {
+      props.onError?.(`Delete failed: ${errorMessage(error)}`);
     }
   };
 
-  const exportSession = async (session: HistorySessionMetadata) => {
+  const exportSession = async (session: HistorySessionMetadata): Promise<void> => {
     try {
       await api.downloadHistorySession(session.id);
-    } catch (e) {
-      props.onError?.(`Export failed: ${(e as Error).message}`);
+    } catch (error) {
+      props.onError?.(`Export failed: ${errorMessage(error)}`);
     }
   };
 
@@ -271,20 +518,31 @@ const History: Component<Props> = (props) => {
         <div>
           <h2>Session History</h2>
           <div class="history-summary">
-            <span>{sessions()?.length ?? 0} archived sessions</span>
+            <span>{archiveSummary()}</span>
             <span>{pinnedIds().length} pinned</span>
             <Show when={outputSearchEnabled()}>
-              <span>{searchResults()?.length ?? 0} output matches</span>
+              <Show
+                when={searchLoaded()}
+                fallback={<span>Output search unavailable</span>}
+              >
+                <span>{searchResults().length} output matches (up to {HISTORY_SEARCH_LIMIT})</span>
+              </Show>
             </Show>
           </div>
         </div>
-        <button onClick={refresh}>Refresh</button>
+        <button
+          type="button"
+          disabled={sessionsLoading() === "refresh"}
+          onClick={refresh}
+        >
+          {sessionsLoading() === "refresh" ? "Refreshing…" : "Refresh"}
+        </button>
       </div>
 
       <div class="history-toolbar">
         <div class="history-filter-grid">
           <label class="history-field history-field-wide">
-            <span>Filter sessions</span>
+            <span>Filter loaded sessions</span>
             <input
               type="search"
               class="history-search"
@@ -294,7 +552,7 @@ const History: Component<Props> = (props) => {
             />
           </label>
           <label class="history-field history-field-wide">
-            <span>Search archived output</span>
+            <span>Search all archived output</span>
             <input
               type="search"
               class="history-search"
@@ -307,9 +565,7 @@ const History: Component<Props> = (props) => {
             <span>Status</span>
             <select
               value={statusFilter()}
-              onInput={(event) =>
-                setStatusFilter(event.currentTarget.value as StatusFilter)
-              }
+              onInput={(event) => setStatusFilter(event.currentTarget.value as StatusFilter)}
             >
               <option value="all">All</option>
               <option value="success">Success</option>
@@ -321,9 +577,7 @@ const History: Component<Props> = (props) => {
             <span>Sort</span>
             <select
               value={sortMode()}
-              onInput={(event) =>
-                setSortMode(event.currentTarget.value as SortMode)
-              }
+              onInput={(event) => setSortMode(event.currentTarget.value as SortMode)}
             >
               <option value="recent">Newest first</option>
               <option value="oldest">Oldest first</option>
@@ -339,6 +593,9 @@ const History: Component<Props> = (props) => {
             <span>Pinned only</span>
           </label>
         </div>
+        <div class="history-scope-note">
+          Metadata filters apply to loaded pages. Output search runs server-wide across the full archive.
+        </div>
       </div>
 
       <div class="history-layout">
@@ -346,33 +603,37 @@ const History: Component<Props> = (props) => {
           <Show
             when={!outputSearchEnabled()}
             fallback={
-              <div class="history-search-results">
-                <Show
-                  when={!searchResults.loading}
-                  fallback={<div class="history-loading">Searching archived output...</div>}
-                >
+              <div class={`history-search-results ${searchStale() ? "stale" : ""}`}>
+                <Show when={searchError()}>
+                  {(message) => (
+                    <PanelError
+                      message={message()}
+                      retryLabel="Retry output search"
+                      stale={searchStale()}
+                      onRetry={() => void loadSearch(outputQuery().trim())}
+                    />
+                  )}
+                </Show>
+                <Show when={searchLoading() && !searchLoaded()}>
+                  <div class="history-loading">Searching all archived output...</div>
+                </Show>
+                <Show when={searchLoaded()}>
                   <Show
-                    when={(searchResults()?.length ?? 0) > 0}
+                    when={searchResults().length > 0}
                     fallback={<div class="history-empty">No output matches found.</div>}
                   >
                     <For each={searchResults()}>
                       {(result) => (
                         <button
-                          class={`history-search-result ${
-                            selectedId() === result.session_id ? "active" : ""
-                          }`}
+                          type="button"
+                          class={`history-search-result ${selectedId() === result.session_id ? "active" : ""}`}
                           onClick={() => setSelectedId(result.session_id)}
                         >
                           <div class="history-result-header">
                             <strong>{result.session_name}</strong>
-                            <span class="history-result-date">
-                              {formatDate(result.created_at)}
-                            </span>
+                            <span class="history-result-date">{formatDate(result.created_at)}</span>
                           </div>
-                          <div
-                            class="history-result-snippet"
-                            innerHTML={result.match_snippet}
-                          />
+                          <div class="history-result-snippet" innerHTML={result.match_snippet} />
                         </button>
                       )}
                     </For>
@@ -381,25 +642,38 @@ const History: Component<Props> = (props) => {
               </div>
             }
           >
-            <div class="history-list">
-              <Show
-                when={!sessions.loading}
-                fallback={<div class="history-loading">Loading archived sessions...</div>}
-              >
+            <div class={`history-list ${sessionsStale() ? "stale" : ""}`}>
+              <Show when={sessionsError()}>
+                {(message) => (
+                  <PanelError
+                    message={message()}
+                    retryLabel={sessionsRetry() === "more" ? "Retry next page" : "Retry history"}
+                    stale={sessionsStale()}
+                    onRetry={retrySessions}
+                  />
+                )}
+              </Show>
+              <Show when={sessionsLoading() === "initial"}>
+                <div class="history-loading">Loading archived sessions...</div>
+              </Show>
+              <Show when={sessionsLoaded()}>
                 <Show
                   when={filteredSessions().length > 0}
-                  fallback={<div class="history-empty">No archived sessions match these filters.</div>}
+                  fallback={
+                    <div class="history-empty">
+                      {sessions().length === 0
+                        ? "No archived sessions."
+                        : "No loaded sessions match these filters."}
+                    </div>
+                  }
                 >
                   <For each={filteredSessions()}>
                     {(session) => {
-                      const pinned = createMemo(() =>
-                        pinnedIds().includes(session.id),
-                      );
+                      const pinned = createMemo(() => pinnedIds().includes(session.id));
                       return (
                         <button
-                          class={`history-session ${
-                            selectedId() === session.id ? "active" : ""
-                          }`}
+                          type="button"
+                          class={`history-session ${selectedId() === session.id ? "active" : ""}`}
                           onClick={() => setSelectedId(session.id)}
                           title={session.cwd || session.name}
                         >
@@ -412,7 +686,11 @@ const History: Component<Props> = (props) => {
                             </div>
                             <span
                               class={`history-exit-code ${
-                                session.exit_code === 0 ? "success" : session.exit_code === null ? "" : "error"
+                                session.exit_code === 0
+                                  ? "success"
+                                  : session.exit_code === null
+                                    ? ""
+                                    : "error"
                               }`}
                             >
                               {session.exit_code === null ? "No exit" : `Exit ${session.exit_code}`}
@@ -430,6 +708,16 @@ const History: Component<Props> = (props) => {
                     }}
                   </For>
                 </Show>
+                <Show when={hasMoreSessions() || sessionsLoading() === "more"}>
+                  <button
+                    type="button"
+                    class="history-load-more"
+                    disabled={sessionsLoading() === "more"}
+                    onClick={() => void loadMore()}
+                  >
+                    {sessionsLoading() === "more" ? "Loading more…" : "Load more"}
+                  </button>
+                </Show>
               </Show>
             </div>
           </Show>
@@ -440,12 +728,25 @@ const History: Component<Props> = (props) => {
             when={selectedId()}
             fallback={<div class="history-empty">Select an archived session to inspect it.</div>}
           >
-            <Show
-              when={!selectedSession.loading && selectedSession()}
-              fallback={<div class="history-loading">Loading archived session...</div>}
-            >
+            <Show when={detailError()}>
+              {(message) => (
+                <PanelError
+                  message={message()}
+                  retryLabel="Retry session detail"
+                  stale={detailStale()}
+                  onRetry={() => {
+                    const id = selectedId();
+                    if (id) void loadDetail(id);
+                  }}
+                />
+              )}
+            </Show>
+            <Show when={detailLoading() && selectedSession() === null}>
+              <div class="history-loading">Loading archived session...</div>
+            </Show>
+            <Show when={selectedSession()}>
               {(session) => (
-                <>
+                <div class={`history-detail-content ${detailStale() ? "stale" : ""}`}>
                   <div class="history-detail-header">
                     <div class="history-detail-heading">
                       <h3>{session().name}</h3>
@@ -458,11 +759,12 @@ const History: Component<Props> = (props) => {
                       </div>
                     </div>
                     <div class="history-detail-actions">
-                      <button onClick={() => togglePin(session().id)}>
+                      <button type="button" onClick={() => togglePin(session().id)}>
                         {pinnedIds().includes(session().id) ? "Unpin" : "Pin"}
                       </button>
-                      <button onClick={() => void exportSession(session())}>Export</button>
+                      <button type="button" onClick={() => void exportSession(session())}>Export</button>
                       <button
+                        type="button"
                         class="danger"
                         onClick={() => void deleteSession(session())}
                       >
@@ -474,15 +776,11 @@ const History: Component<Props> = (props) => {
                   <div class="history-detail-grid">
                     <div class="history-detail-card">
                       <div class="history-detail-label">Working directory</div>
-                      <div class="history-detail-value">
-                        {session().cwd || "Unknown"}
-                      </div>
+                      <div class="history-detail-value">{session().cwd || "Unknown"}</div>
                     </div>
                     <div class="history-detail-card">
                       <div class="history-detail-label">Command</div>
-                      <div class="history-detail-value">
-                        {session().command || "Default shell"}
-                      </div>
+                      <div class="history-detail-value">{session().command || "Default shell"}</div>
                     </div>
                   </div>
 
@@ -495,10 +793,7 @@ const History: Component<Props> = (props) => {
                       <div class="history-match-list">
                         <For each={selectedSearchMatches()}>
                           {(result) => (
-                            <div
-                              class="history-result-snippet"
-                              innerHTML={result.match_snippet}
-                            />
+                            <div class="history-result-snippet" innerHTML={result.match_snippet} />
                           )}
                         </For>
                       </div>
@@ -508,17 +803,13 @@ const History: Component<Props> = (props) => {
                   <div class="history-replay-toolbar">
                     <div>
                       <strong>Replay preview</strong>
-                      <div class="history-replay-note">
-                        Tail view of the archived raw terminal log.
-                      </div>
+                      <div class="history-replay-note">Tail view of the archived raw terminal log.</div>
                     </div>
                     <label class="history-field">
                       <span>Tail size</span>
                       <select
                         value={String(tailBytes())}
-                        onInput={(event) =>
-                          setTailBytes(Number.parseInt(event.currentTarget.value, 10))
-                        }
+                        onInput={(event) => setTailBytes(Number.parseInt(event.currentTarget.value, 10))}
                       >
                         <option value={16 * 1024}>16 KB</option>
                         <option value={64 * 1024}>64 KB</option>
@@ -527,31 +818,40 @@ const History: Component<Props> = (props) => {
                     </label>
                   </div>
 
-                  <div class="history-replay">
-                    <Show
-                      when={!logPreview.loading}
-                      fallback={<div class="history-loading">Loading archived output...</div>}
-                    >
-                      <Show
-                        when={logPreview()}
-                        fallback={<div class="history-empty">No archived output available.</div>}
-                      >
-                        <div class="history-replay-meta">
-                          <span>
-                            Showing {formatSize(logPreview()!.bytes)} of{" "}
-                            {formatSize(logPreview()!.total_bytes)}
-                          </span>
-                          <Show when={logPreview()!.truncated}>
-                            <span>Preview is truncated to the requested tail size.</span>
-                          </Show>
-                        </div>
-                        <pre class="history-replay-output">
-                          {logPreview()!.text || "No output captured."}
-                        </pre>
-                      </Show>
+                  <div class={`history-replay ${logStale() ? "stale" : ""}`}>
+                    <Show when={logError()}>
+                      {(message) => (
+                        <PanelError
+                          message={message()}
+                          retryLabel="Retry replay"
+                          stale={logStale()}
+                          onRetry={() => {
+                            const id = selectedId();
+                            if (id) void loadLog(id, tailBytes());
+                          }}
+                        />
+                      )}
+                    </Show>
+                    <Show when={logLoading() && logPreview() === null}>
+                      <div class="history-loading">Loading archived output...</div>
+                    </Show>
+                    <Show when={logPreview()}>
+                      {(preview) => (
+                        <>
+                          <div class="history-replay-meta">
+                            <span>
+                              Showing {formatSize(preview().bytes)} of {formatSize(preview().total_bytes)}
+                            </span>
+                            <Show when={preview().truncated}>
+                              <span>Preview is truncated to the requested tail size.</span>
+                            </Show>
+                          </div>
+                          <pre class="history-replay-output">{preview().text || "No output captured."}</pre>
+                        </>
+                      )}
                     </Show>
                   </div>
-                </>
+                </div>
               )}
             </Show>
           </Show>
