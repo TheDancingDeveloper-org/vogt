@@ -513,8 +513,14 @@ export const bugs = (params: Record<string, unknown> = {}) =>
 
 export const why = (ref: string) => call<WhyResult>("why", { ref });
 
+export interface ProjectListEntry {
+  slug: string;
+  name: string;
+  root_path: string;
+}
+
 export const listProjects = (params: Record<string, unknown> = {}) =>
-  call<{ projects: { slug: string; name: string }[] }>("project.list", params);
+  call<{ projects: ProjectListEntry[]; total: number }>("project.list", params);
 
 export const listLabels = () =>
   call<{ labels: { name: string; color?: string }[] }>("label.list");

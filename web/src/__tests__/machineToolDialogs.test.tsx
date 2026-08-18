@@ -93,7 +93,14 @@ describe("machine tool destructive decisions", () => {
       .fn<(title: string, body?: string) => Promise<boolean>>()
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
-    render(() => <GitTab repo="vogt" confirmAction={confirmAction} />);
+    render(() => (
+      <Router>
+        <Route
+          path="*"
+          component={() => <GitTab repo="vogt" confirmAction={confirmAction} />}
+        />
+      </Router>
+    ));
 
     await fireEvent.click(await screen.findByText("src/App.tsx"));
     const discard = screen.getByRole("button", { name: "Discard" });

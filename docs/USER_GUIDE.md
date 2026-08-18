@@ -58,7 +58,7 @@ pasted link restores the view it names (FR-U11). Open panes persist per device.
 | **Audit** | `#/audit`, `#/audit?ref=WI-7` | Every write: who, what, and why. Filterable by actor, project, operation and time. |
 | **Terminal** | `#/t/<session-id>` | A PTY, attached over WebSocket with scrollback replayed before live output. |
 | **Editor** | `#/e/<path>` | Monaco over the workspace file API. |
-| **Git** | `#/g/<repo>` | Status, diff, log, branch — and stage/unstage/discard/commit/checkout. |
+| **Git** | `#/g`, `#/g/<repo>` | Choose a registered project, then inspect status, diff, log and branches or stage/unstage/discard/commit/checkout. |
 | **Tasks** | `#/tasks` | Scheduled agent runs: create, edit, pause, resume, run now, inspect. |
 | **History** | `#/history` | Archived scrollback from sessions that have ended, full-text searchable. |
 | **Assistant** | `#/assistant` | The conversational surface — absent entirely unless the deployment provisioned it. |
@@ -175,6 +175,20 @@ heuristic** and should be read as a hint: `errored` is a real non-zero exit,
 but `waiting-for-input` is a pattern match on the last ~512 visible bytes, and
 a session that goes quiet without printing a recognizable prompt reads as
 `idle`.
+
+Open `#/g` to choose a repository from Vogt's registered project list. The
+chooser maps each project's declared absolute root into the engine's workspace
+boundary; projects outside that boundary remain visible but unavailable. It
+does not crawl the workspace or discover unregistered repositories. Choosing a
+project writes its workspace-relative path into `#/g/<repo>`, so reload and
+browser Back/Forward preserve the selection.
+
+Git status, branches, commit history and the selected diff report failures in
+their own panels and offer Retry. If a refresh fails after a successful read,
+the previous answer remains visible but is explicitly marked stale. A clean
+working tree, a repository with no branches or commits, a selected path that
+is not a repository, and a missing/unavailable path are therefore separate
+states rather than different ways to draw an empty panel.
 
 Session templates pre-configure command, cwd and environment, and can be
 matched to a repository name or path prefix. Custom ones live in the engine's

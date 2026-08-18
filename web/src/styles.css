@@ -1810,6 +1810,85 @@ textarea {
   color: #ffb4b4;
   background: rgba(248, 81, 73, 0.14);
 }
+.git-panel-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  color: #ffb4b4;
+  background: rgba(248, 81, 73, 0.12);
+  border-bottom: 1px solid rgba(248, 81, 73, 0.28);
+  font-size: 11px;
+}
+.git-panel-error span { overflow-wrap: anywhere; }
+.git-panel-error button { flex: 0 0 auto; }
+.git-panel-loading {
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.git-panel-empty {
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.git-status-panel.stale .git-entry,
+.git-branches-panel.stale .git-controls,
+.git-log-panel.stale .git-commit,
+.diff-shell.stale .diff-host { opacity: 0.72; }
+.git-non-repository {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 12px 10px;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--bd);
+}
+.git-non-repository strong { color: var(--fg); }
+.git-repository-picker {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: clamp(16px, 4vw, 42px);
+}
+.git-repository-picker h2 { margin: 2px 0 6px; }
+.git-repository-picker p { max-width: 70ch; color: var(--fg-muted); }
+.git-repository-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 10px;
+}
+.git-repository-choices button {
+  min-height: 72px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 12px;
+  text-align: left;
+}
+.git-repository-choices button > span {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.git-repository-choices code {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent);
+}
+.git-repository-choices small,
+.git-picker-empty { color: var(--fg-muted); }
 .git-controls {
   display: flex;
   flex-direction: column;
@@ -1871,10 +1950,14 @@ textarea {
   background: rgba(255, 255, 255, 0.03);
 }
 .git-entry {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 3px 10px;
+  border: 0;
+  border-radius: 0;
+  text-align: left;
   cursor: pointer;
 }
 .git-entry:hover {

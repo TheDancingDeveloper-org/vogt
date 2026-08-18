@@ -4,19 +4,17 @@ import {
   Show,
   createEffect,
   createMemo,
-  createResource,
   createSignal,
   onCleanup,
 } from "solid-js";
+import { useNavigate } from "@solidjs/router";
 import {
   api,
   type GitBranch,
-  type GitLogEntry,
   type GitOpRequest,
   type GitOpResponse,
   type GitStatusEntry,
   type GitStatusKind,
-  type GitStatusResp,
 } from "./api";
 import {
   languageFor,
@@ -26,6 +24,9 @@ import {
   type TextModel,
 } from "./monaco";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
+import { listProjects } from "./vogtApi";
+import { repositoryChoices } from "./gitRepositories";
+import { createRetainedRead } from "./retainedRead";
 
 interface Props {
   repo: string;
@@ -86,29 +87,29 @@ const EMPTY_BRANCH_INFO: GitBranch = {
   all: [],
 };
 
-function isNotGitRepoError(message: string): boolean {
-  return (
-    message.includes("not found") ||
-    message.includes("not a git repository") ||
-    message.includes("Stopping at filesystem boundary")
-  );
-}
-
 function formatApiError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/^HTTP \d+:\s*/, "").trim() || message;
 }
 
-const DiffView: Component<{ repo: string; path: string; staged: boolean }> = (props) => {
+const DiffView: Component<{
+  repo: string;
+  path: string;
+  staged: boolean;
+  refreshKey: number;
+}> = (props) => {
   let host: HTMLDivElement | undefined;
   let editor: DiffEditor | null = null;
   let originalModel: TextModel | null = null;
   let modifiedModel: TextModel | null = null;
   let resizeObserver: ResizeObserver | null = null;
   const [err, setErr] = createSignal<string | null>(null);
+  const [loading, setLoading] = createSignal(false);
+  const [reloadKey, setReloadKey] = createSignal(0);
   let disposed = false;
   let loadGeneration = 0;
   let monaco: MonacoNamespace | null = null;
+  let displayedKey = "";
 
   const disposeModels = () => {
     editor?.setModel(null);
@@ -116,6 +117,7 @@ const DiffView: Component<{ repo: string; path: string; staged: boolean }> = (pr
     modifiedModel?.dispose();
     originalModel = null;
     modifiedModel = null;
+    displayedKey = "";
   };
 
   const disposeDiff = () => {
@@ -148,8 +150,13 @@ const DiffView: Component<{ repo: string; path: string; staged: boolean }> = (pr
   const loadDiff = async (repo: string, path: string, staged: boolean, generation: number) => {
     const mountedHost = host;
     if (!mountedHost) return;
-    try {
+    const key = `${repo}\0${path}\0${staged}`;
+    if (displayedKey !== key) {
+      disposeModels();
       setErr(null);
+    }
+    try {
+      setLoading(true);
       const [nextEditor, d] = await Promise.all([
         ensureEditor(mountedHost),
         api.gitDiff(repo, path, staged),
@@ -167,11 +174,15 @@ const DiffView: Component<{ repo: string; path: string; staged: boolean }> = (pr
       originalModel = original;
       modifiedModel = modified;
       nextEditor.setModel({ original, modified });
+      displayedKey = key;
+      setErr(null);
     } catch (e) {
       if (!disposed && generation === loadGeneration) {
-        disposeModels();
+        if (displayedKey !== key) disposeModels();
         setErr(formatApiError(e));
       }
+    } finally {
+      if (!disposed && generation === loadGeneration) setLoading(false);
     }
   };
 
@@ -179,6 +190,8 @@ const DiffView: Component<{ repo: string; path: string; staged: boolean }> = (pr
     const repo = props.repo;
     const path = props.path;
     const staged = props.staged;
+    props.refreshKey;
+    reloadKey();
     loadGeneration += 1;
     void loadDiff(repo, path, staged, loadGeneration);
   });
@@ -190,10 +203,13 @@ const DiffView: Component<{ repo: string; path: string; staged: boolean }> = (pr
   });
 
   return (
-    <div class="diff-shell">
+    <div class={`diff-shell ${err() && displayedKey ? "stale" : ""}`}>
       <Show when={err()}>
-        <div class="empty" style={{ color: "#ff7b72" }}>
-          {err()}
+        <div class="git-panel-error" role="alert">
+          <span>Diff {displayedKey ? "is stale" : "could not be read"}: {err()}</span>
+          <button type="button" disabled={loading()} onClick={() => setReloadKey((value) => value + 1)}>
+            Retry diff
+          </button>
         </div>
       </Show>
       <div class="diff-host" ref={host} />
@@ -202,8 +218,8 @@ const DiffView: Component<{ repo: string; path: string; staged: boolean }> = (pr
 };
 
 const GitTab: Component<Props> = (props) => {
+  const navigate = useNavigate();
   const restored = readToolDraft(gitDraftKey(props.repo), emptyGitDraft());
-  const [gitError, setGitError] = createSignal<string | null>(null);
   const [actionError, setActionError] = createSignal<string | null>(null);
   const [actionInfo, setActionInfo] = createSignal<string | null>(null);
   const [selected, setSelected] = createSignal<string | null>(restored.selected);
@@ -212,6 +228,7 @@ const GitTab: Component<Props> = (props) => {
   const [branchTarget, setBranchTarget] = createSignal(restored.branchTarget);
   const [newBranch, setNewBranch] = createSignal(restored.newBranch);
   const [busyAction, setBusyAction] = createSignal<string | null>(null);
+  const [diffRefreshKey, setDiffRefreshKey] = createSignal(0);
 
   const snapshotDraft = (): GitDraft => ({
     selected: selected(),
@@ -221,45 +238,57 @@ const GitTab: Component<Props> = (props) => {
     newBranch: newBranch(),
   });
 
-  const [status, { refetch: refetchStatus }] = createResource(
-    () => props.repo,
-    async (repo): Promise<GitStatusResp | null> => {
-      try {
-        const result = await api.gitStatus(repo);
-        setGitError(null);
-        return result;
-      } catch (e) {
-        const message = formatApiError(e);
-        setGitError(isNotGitRepoError(message) ? "Not a git repository" : message);
-        return null;
-      }
+  const statusRead = createRetainedRead(
+    () => props.repo || false,
+    (repo) => api.gitStatus(repo),
+    (error) => formatApiError(error),
+  );
+  const branchesRead = createRetainedRead(
+    () => props.repo || false,
+    (repo) => api.gitBranch(repo),
+    (error) => formatApiError(error),
+  );
+  const logRead = createRetainedRead(
+    () => props.repo || false,
+    (repo) => api.gitLog(repo, 30),
+    (error) => formatApiError(error),
+  );
+  const projectsRead = createRetainedRead(
+    () => !props.repo,
+    async () => {
+      const projects = [];
+      let offset = 0;
+      let total = 0;
+      do {
+        const page = await listProjects({ limit: 500, offset });
+        projects.push(...page.projects);
+        total = page.total;
+        offset += page.projects.length;
+        if (page.projects.length === 0) break;
+      } while (projects.length < total);
+      return { projects, total };
     },
+    (error) => formatApiError(error),
+  );
+  const workspaceRead = createRetainedRead(
+    () => !props.repo,
+    () => api.operationalStatus(),
+    (error) => formatApiError(error),
   );
 
-  const [branches, { refetch: refetchBranches }] = createResource(
-    () => props.repo,
-    async (repo): Promise<GitBranch> => {
-      try {
-        return await api.gitBranch(repo);
-      } catch {
-        return EMPTY_BRANCH_INFO;
-      }
-    },
-  );
+  const status = statusRead.data;
+  const branches = branchesRead.data;
+  const log = logRead.data;
 
-  const [log, { refetch: refetchLog }] = createResource(
-    () => props.repo,
-    async (repo): Promise<GitLogEntry[]> => {
-      try {
-        return await api.gitLog(repo, 30);
-      } catch {
-        return [];
-      }
-    },
-  );
+  const choices = createMemo(() => {
+    const projects = projectsRead.data()?.projects;
+    const workspace = workspaceRead.data()?.storage.workspace_root;
+    return projects && workspace ? repositoryChoices(projects, workspace) : [];
+  });
 
-  const notRepo = () =>
-    status()?.is_repo === false || gitError() === "Not a git repository";
+  const notRepo = () => status()?.is_repo === false;
+  const readsLoading = () =>
+    statusRead.loading() || branchesRead.loading() || logRead.loading();
 
   const branchInfo = createMemo(() => branches() ?? EMPTY_BRANCH_INFO);
 
@@ -361,7 +390,12 @@ const GitTab: Component<Props> = (props) => {
 
   const refresh = async () => {
     setActionError(null);
-    await Promise.all([refetchStatus(), refetchBranches(), refetchLog()]);
+    await Promise.all([
+      statusRead.retry(),
+      branchesRead.retry(),
+      logRead.retry(),
+    ]);
+    setDiffRefreshKey((value) => value + 1);
   };
 
   const runGitOp = async (request: GitOpRequest): Promise<GitOpResponse | null> => {
@@ -370,7 +404,12 @@ const GitTab: Component<Props> = (props) => {
     setActionInfo(null);
     try {
       const response = await api.gitOp(request);
-      await Promise.all([refetchStatus(), refetchBranches(), refetchLog()]);
+      await Promise.all([
+        statusRead.retry(),
+        branchesRead.retry(),
+        logRead.retry(),
+      ]);
+      setDiffRefreshKey((value) => value + 1);
       return response;
     } catch (e) {
       setActionError(formatApiError(e));
@@ -460,24 +499,39 @@ const GitTab: Component<Props> = (props) => {
 
   const busy = (op: string) => busyAction() === op;
 
+  const openRepository = (repo: string) => {
+    void navigate(`/g/${encodeURIComponent(repo)}`);
+  };
+
   return (
     <div class="git-shell">
       <div class="git-toolbar">
         <span class="git-repo">
-          {status()?.repo || props.repo || "(workspace root)"}
+          {status()?.repo || props.repo || "Choose a registered project"}
         </span>
-        <span class="git-branch">
-          {"\u2387"} {notRepo() ? "Not a git repository" : status()?.branch || gitError() || "?"}
-          <Show when={status()?.ahead}>
-            <span class="git-ab"> {"\u2191"}{status()!.ahead}</span>
-          </Show>
-          <Show when={status()?.behind}>
-            <span class="git-ab"> {"\u2193"}{status()!.behind}</span>
-          </Show>
-        </span>
-        <button onClick={() => void refresh()} disabled={busyAction() !== null}>
-          {busyAction() === null ? "\u27f3 Refresh" : "Working..."}
-        </button>
+        <Show when={props.repo}>
+          <span class="git-branch">
+            {"\u2387"} {notRepo()
+              ? "Not a Git repository"
+              : status()?.branch || (statusRead.loading() ? "Loading…" : "Unknown")}
+            <Show when={status()?.ahead}>
+              <span class="git-ab"> {"\u2191"}{status()!.ahead}</span>
+            </Show>
+            <Show when={status()?.behind}>
+              <span class="git-ab"> {"\u2193"}{status()!.behind}</span>
+            </Show>
+          </span>
+          <button
+            onClick={() => void refresh()}
+            disabled={busyAction() !== null || readsLoading()}
+          >
+            {busyAction() !== null
+              ? "Working..."
+              : readsLoading()
+                ? "Refreshing..."
+                : "\u27f3 Refresh"}
+          </button>
+        </Show>
       </div>
 
       <Show when={actionError()}>
@@ -486,160 +540,323 @@ const GitTab: Component<Props> = (props) => {
       <Show when={!actionError() && actionInfo()}>
         <div class="git-banner git-banner-info">{actionInfo()}</div>
       </Show>
-      <Show when={gitError()}>
-        <div
-          class="empty"
-          style={{
-            color: gitError() === "Not a git repository" ? "var(--fg-muted)" : "#ff7b72",
-          }}
-        >
-          {gitError()}
-        </div>
-      </Show>
-
-      <div class="git-body">
-        <div class="git-left">
-          <div class="git-section-title">Workflow</div>
-          <div class="git-controls">
-            <div class="git-control-block">
-              <div class="git-control-label">Branch</div>
-              <div class="git-control-row">
-                <select
-                  value={branchTarget()}
-                  disabled={notRepo() || busyAction() !== null || branchOptions().length === 0}
-                  onInput={(event) => setBranchTarget(event.currentTarget.value)}
-                >
-                  <Show when={branchOptions().length > 0} fallback={<option value="">No branches</option>}>
-                    <For each={branchOptions()}>
-                      {(branch) => <option value={branch}>{branch}</option>}
-                    </For>
-                  </Show>
-                </select>
-                <button
-                  onClick={() => void checkoutBranch()}
-                  disabled={
-                    notRepo() ||
-                    busyAction() !== null ||
-                    !branchTarget().trim() ||
-                    branchTarget().trim() === branchInfo().current
-                  }
-                >
-                  {busy("checkout") ? "Switching..." : "Checkout"}
-                </button>
-              </div>
-              <div class="git-control-row">
-                <input
-                  type="text"
-                  value={newBranch()}
-                  placeholder="new branch"
-                  disabled={notRepo() || busyAction() !== null}
-                  onInput={(event) => setNewBranch(event.currentTarget.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void createBranch();
-                    }
-                  }}
-                />
-                <button
-                  onClick={() => void createBranch()}
-                  disabled={notRepo() || busyAction() !== null || !newBranch().trim()}
-                >
-                  {busy("checkout") ? "Creating..." : "Create"}
-                </button>
-              </div>
-            </div>
-
-            <div class="git-control-block">
-              <div class="git-control-topline">
-                <div class="git-control-label">Commit</div>
-                <span class="meta">
-                  {stagedCount()} staged file{stagedCount() === 1 ? "" : "s"}
-                </span>
-              </div>
-              <textarea
-                rows={3}
-                value={commitMessage()}
-                placeholder="Commit message"
-                disabled={notRepo() || busyAction() !== null}
-                onInput={(event) => setCommitMessage(event.currentTarget.value)}
-                onKeyDown={(event) => {
-                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                    event.preventDefault();
-                    void commitChanges();
-                  }
-                }}
-              />
-              <div class="git-control-row git-control-row-end">
-                <button
-                  onClick={() => void commitChanges()}
-                  disabled={
-                    notRepo() ||
-                    busyAction() !== null ||
-                    stagedCount() === 0 ||
-                    !commitMessage().trim()
-                  }
-                >
-                  {busy("commit") ? "Committing..." : "Commit staged"}
-                </button>
-              </div>
-            </div>
+      <Show when={!props.repo}>
+        <section class="git-repository-picker" aria-labelledby="git-repository-picker-title">
+          <div>
+            <p class="place-kicker">Registered scope</p>
+            <h2 id="git-repository-picker-title">Choose a repository</h2>
+            <p>
+              Git operates only on projects already registered with Vogt. No
+              workspace crawling or repository discovery is performed.
+            </p>
           </div>
-
-          <div class="git-section-title">Status</div>
-          <Show
-            when={!notRepo() && (status()?.entries.length ?? 0) > 0}
-            fallback={
-              <div class="meta" style={{ padding: "8px 10px" }}>
-                {notRepo() ? "not a git repository" : "clean working tree"}
-              </div>
-            }
-          >
-            <For each={kindOrder}>
-              {(kind) => (
-                <Show when={grouped()[kind].length > 0}>
-                  <div class="git-group">{kindLabel[kind]}</div>
-                  <For each={grouped()[kind]}>
-                    {(entry) => (
-                      <div
-                        class={`git-entry ${selected() === entry.path ? "selected" : ""}`}
-                        onClick={() => setSelected(entry.path)}
-                        title={`${entry.index}${entry.worktree} ${entry.path}`}
-                      >
-                        <span class={`git-badge git-${kind}`}>{kindBadge[kind]}</span>
-                        <span class="git-path">{entry.path}</span>
-                      </div>
-                    )}
-                  </For>
-                </Show>
-              )}
-            </For>
-          </Show>
-
-          <div class="git-section-title">Recent commits</div>
-          <For each={log() ?? []}>
-            {(commit) => (
-              <div class="git-commit" title={commit.hash}>
-                <span class="git-commit-short">{commit.short}</span>
-                <span class="git-commit-subject">{commit.subject}</span>
-                <span class="git-commit-meta">
-                  {commit.author} {"\u00b7"} {commit.date.split("T")[0]}
+          <Show when={projectsRead.error()}>
+            {(message) => (
+              <div class="git-panel-error" role="alert">
+                <span>
+                  Registered projects {projectsRead.stale() ? "are stale" : "could not be read"}: {message()}
                 </span>
+                <button
+                  type="button"
+                  disabled={projectsRead.loading()}
+                  onClick={() => void projectsRead.retry()}
+                >
+                  Retry projects
+                </button>
               </div>
             )}
-          </For>
-        </div>
+          </Show>
+          <Show when={workspaceRead.error()}>
+            {(message) => (
+              <div class="git-panel-error" role="alert">
+                <span>
+                  Engine workspace {workspaceRead.stale() ? "is stale" : "could not be read"}: {message()}
+                </span>
+                <button
+                  type="button"
+                  disabled={workspaceRead.loading()}
+                  onClick={() => void workspaceRead.retry()}
+                >
+                  Retry engine
+                </button>
+              </div>
+            )}
+          </Show>
+          <Show when={projectsRead.loading() || workspaceRead.loading()}>
+            <p class="meta">Loading registered projects and engine scope…</p>
+          </Show>
+          <Show when={projectsRead.data() && workspaceRead.data()}>
+            <Show
+              when={choices().length > 0}
+              fallback={<p class="git-picker-empty">No projects are registered.</p>}
+            >
+              <div class="git-repository-choices">
+                <For each={choices()}>
+                  {(choice) => (
+                    <button
+                      type="button"
+                      disabled={!choice.repo}
+                      onClick={() => choice.repo && openRepository(choice.repo)}
+                    >
+                      <span>
+                        <strong>{choice.name}</strong>
+                        <small>{choice.slug}</small>
+                      </span>
+                      <code>{choice.repo ?? choice.root_path}</code>
+                      <Show when={choice.unavailableReason}>
+                        <small>{choice.unavailableReason}</small>
+                      </Show>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </Show>
+        </section>
+      </Show>
 
-        <div class="git-right">
-          <Show
-            when={selectedEntry()}
-            fallback={<div class="empty">Select a file on the left to view its diff.</div>}
-          >
-            {(entry) => (
-              <>
-                <div class="git-diff-toolbar">
-                  <div class="git-diff-path">{entry().path}</div>
-                  <div class="git-diff-actions">
+      <Show when={props.repo}>
+        <div class="git-body">
+          <div class="git-left">
+            <section
+              class={`git-status-panel ${statusRead.stale() ? "stale" : ""}`}
+              aria-label="Repository status"
+            >
+              <Show when={statusRead.error()}>
+                {(message) => (
+                  <div class="git-panel-error" role="alert">
+                    <span>Status {statusRead.stale() ? "is stale" : "could not be read"}: {message()}</span>
+                    <button
+                      type="button"
+                      disabled={statusRead.loading()}
+                      onClick={() => void statusRead.retry()}
+                    >
+                      Retry status
+                    </button>
+                  </div>
+                )}
+              </Show>
+              <Show when={statusRead.loading() && !status()}>
+                <p class="git-panel-loading">Loading repository status…</p>
+              </Show>
+              <Show when={status()?.is_repo === false}>
+                <div class="git-non-repository">
+                  <strong>Not a Git repository</strong>
+                  <span>
+                    The selected registered project exists, but Git does not
+                    identify it as a repository.
+                  </span>
+                  <button type="button" onClick={() => void navigate("/g")}>Choose another project</button>
+                </div>
+              </Show>
+            </section>
+            <section
+              class={`git-branches-panel ${branchesRead.stale() ? "stale" : ""}`}
+              aria-label="Repository workflow"
+            >
+              <div class="git-section-title">Workflow</div>
+              <Show when={branchesRead.error()}>
+                {(message) => (
+                  <div class="git-panel-error" role="alert">
+                    <span>
+                      Branches {branchesRead.stale() ? "are stale" : "could not be read"}: {message()}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={branchesRead.loading()}
+                      onClick={() => void branchesRead.retry()}
+                    >
+                      Retry branches
+                    </button>
+                  </div>
+                )}
+              </Show>
+              <div class="git-controls">
+                <div class="git-control-block">
+                  <div class="git-control-label">Branch</div>
+                  <div class="git-control-row">
+                    <select
+                      value={branchTarget()}
+                      disabled={notRepo() || busyAction() !== null || branchOptions().length === 0}
+                      onInput={(event) => setBranchTarget(event.currentTarget.value)}
+                    >
+                    <Show
+                      when={branchOptions().length > 0}
+                      fallback={
+                        <option value="">
+                          {branchesRead.error() && !branches()
+                            ? "Branch data unavailable"
+                            : "No branches"}
+                        </option>
+                      }
+                    >
+                      <For each={branchOptions()}>
+                        {(branch) => <option value={branch}>{branch}</option>}
+                      </For>
+                    </Show>
+                    </select>
+                    <button
+                      onClick={() => void checkoutBranch()}
+                      disabled={
+                        notRepo() ||
+                        busyAction() !== null ||
+                        !branchTarget().trim() ||
+                        branchTarget().trim() === branchInfo().current
+                      }
+                    >
+                      {busy("checkout") ? "Switching..." : "Checkout"}
+                    </button>
+                  </div>
+                  <div class="git-control-row">
+                    <input
+                      type="text"
+                      value={newBranch()}
+                      placeholder="new branch"
+                      disabled={notRepo() || busyAction() !== null}
+                      onInput={(event) => setNewBranch(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void createBranch();
+                        }
+                      }}
+                    />
+                    <button
+                      onClick={() => void createBranch()}
+                      disabled={notRepo() || busyAction() !== null || !newBranch().trim()}
+                    >
+                      {busy("checkout") ? "Creating..." : "Create"}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="git-control-block">
+                  <div class="git-control-topline">
+                    <div class="git-control-label">Commit</div>
+                    <span class="meta">
+                      {stagedCount()} staged file{stagedCount() === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  <textarea
+                    rows={3}
+                    value={commitMessage()}
+                    placeholder="Commit message"
+                    disabled={notRepo() || busyAction() !== null}
+                    onInput={(event) => setCommitMessage(event.currentTarget.value)}
+                    onKeyDown={(event) => {
+                      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                        event.preventDefault();
+                        void commitChanges();
+                      }
+                    }}
+                  />
+                  <div class="git-control-row git-control-row-end">
+                    <button
+                      onClick={() => void commitChanges()}
+                      disabled={
+                        notRepo() ||
+                        busyAction() !== null ||
+                        stagedCount() === 0 ||
+                        !commitMessage().trim()
+                      }
+                    >
+                      {busy("commit") ? "Committing..." : "Commit staged"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section
+              class={`git-status-panel ${statusRead.stale() ? "stale" : ""}`}
+              aria-label="Working tree status"
+            >
+              <div class="git-section-title">Status</div>
+              <Show
+                when={!notRepo() && (status()?.entries.length ?? 0) > 0}
+                fallback={
+                  <div class="meta" style={{ padding: "8px 10px" }}>
+                    {statusRead.loading() && !status()
+                      ? "loading status…"
+                      : statusRead.error() && !status()
+                        ? "status unavailable"
+                        : notRepo()
+                          ? "selected path is not a Git repository"
+                          : "clean working tree"}
+                  </div>
+                }
+              >
+                <For each={kindOrder}>
+                  {(kind) => (
+                    <Show when={grouped()[kind].length > 0}>
+                      <div class="git-group">{kindLabel[kind]}</div>
+                      <For each={grouped()[kind]}>
+                        {(entry) => (
+                          <button
+                            type="button"
+                            class={`git-entry ${selected() === entry.path ? "selected" : ""}`}
+                            onClick={() => setSelected(entry.path)}
+                            title={`${entry.index}${entry.worktree} ${entry.path}`}
+                          >
+                            <span class={`git-badge git-${kind}`}>{kindBadge[kind]}</span>
+                            <span class="git-path">{entry.path}</span>
+                          </button>
+                        )}
+                      </For>
+                    </Show>
+                  )}
+                </For>
+              </Show>
+            </section>
+
+            <section class={`git-log-panel ${logRead.stale() ? "stale" : ""}`} aria-label="Commit history">
+              <div class="git-section-title">Recent commits</div>
+              <Show when={logRead.error()}>
+                {(message) => (
+                  <div class="git-panel-error" role="alert">
+                    <span>
+                      Commit history {logRead.stale() ? "is stale" : "could not be read"}: {message()}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={logRead.loading()}
+                      onClick={() => void logRead.retry()}
+                    >
+                      Retry history
+                    </button>
+                  </div>
+                )}
+              </Show>
+              <Show when={logRead.loading() && !log()}>
+                <p class="git-panel-loading">Loading commit history…</p>
+              </Show>
+              <Show when={log() && log()!.length === 0}>
+                <p class="git-panel-empty">No commits yet.</p>
+              </Show>
+              <For each={log() ?? []}>
+                {(commit) => (
+                  <div class="git-commit" title={commit.hash}>
+                    <span class="git-commit-short">{commit.short}</span>
+                    <span class="git-commit-subject">{commit.subject}</span>
+                    <span class="git-commit-meta">
+                      {commit.author} {"\u00b7"} {commit.date.split("T")[0]}
+                    </span>
+                  </div>
+                )}
+              </For>
+            </section>
+          </div>
+
+          <div class="git-right">
+            <Show
+              when={selectedEntry()}
+              fallback={<div class="empty">Select a file on the left to view its diff.</div>}
+            >
+              {(entry) => (
+                <>
+                  <div class="git-diff-toolbar">
+                    <div class="git-diff-path">{entry().path}</div>
+                    <div class="git-diff-actions">
                     <button
                       class={diffStaged() ? "" : "active"}
                       onClick={() => setDiffStaged(false)}
@@ -671,14 +888,20 @@ const GitTab: Component<Props> = (props) => {
                     >
                       {busy("discard") ? "Discarding..." : "Discard"}
                     </button>
+                    </div>
                   </div>
-                </div>
-                <DiffView repo={props.repo} path={entry().path} staged={diffStaged()} />
-              </>
-            )}
-          </Show>
+                  <DiffView
+                    repo={props.repo}
+                    path={entry().path}
+                    staged={diffStaged()}
+                    refreshKey={diffRefreshKey()}
+                  />
+                </>
+              )}
+            </Show>
+          </div>
         </div>
-      </div>
+      </Show>
     </div>
   );
 };
