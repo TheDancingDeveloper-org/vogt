@@ -80,7 +80,7 @@ async function installFixtures(
       context_file_count: 0, prompt_bytes: 0, orphan_task_dir_count: 0,
     },
     auth_broker: { auto_agent_auth: false, helper: "disabled" },
-    storage: { state_dir: "/tmp/vogt", workspace_root: "/workspace/vogt" },
+    storage: { state_dir: "/tmp/vogt", workspace_root: "/workspace" },
   } }));
   await page.route("**/api/config**", async (route) => route.fulfill({ json: {
     assistant_enabled: false, gui_stream_url: null, session_templates: [],
@@ -144,7 +144,10 @@ async function installFixtures(
       return route.fulfill({ json: { workflows: [{ kind: "feature", initial_state: "open", states: ["open", "done"], transitions: { open: ["done"], done: [] } }] } });
     }
     if (url.pathname.endsWith("/work")) return route.fulfill({ json: { items: boardItems, total: 1, freshness: { status: "fresh" } } });
-    if (url.pathname.endsWith("/projects")) return route.fulfill({ json: { projects: [{ slug: "vogt", name: "Vogt" }] } });
+    if (url.pathname.endsWith("/projects")) return route.fulfill({ json: {
+      projects: [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }],
+      total: 1,
+    } });
     if (url.pathname.endsWith("/labels")) return route.fulfill({ json: { labels: [] } });
     if (url.pathname.endsWith("/initiatives")) return route.fulfill({ json: { initiatives: [] } });
     if (url.pathname.endsWith("/actors")) return route.fulfill({ json: { actors: [] } });
@@ -414,6 +417,50 @@ test("Sessions owns the tool workspace and retains only terminal continuity", as
   await expect(page.locator('[data-tab-kind="terminal"]')).toHaveCount(1);
   await expect(page.locator('[data-tab-kind="history"]')).toHaveCount(0);
   await expect(page.locator('[data-tab-kind="tasks"]')).toHaveCount(1);
+});
+
+test("Git chooser is addressable and a failed panel recovers in place", async ({ page }) => {
+  await installFixtures(page);
+  let historyUnavailable = true;
+  await page.route("**/api/git/status**", async (route) => route.fulfill({ json: {
+    repo: "vogt", is_repo: true, branch: "main", ahead: 0, behind: 0, entries: [],
+  } }));
+  await page.route("**/api/git/branch**", async (route) =>
+    route.fulfill({ json: { current: "main", all: ["main"] } }),
+  );
+  await page.route("**/api/git/log**", async (route) => {
+    if (historyUnavailable) {
+      return route.fulfill({ status: 503, body: "history service offline" });
+    }
+    return route.fulfill({ json: [{
+      hash: "abc1234", short: "abc1234", author: "Ada",
+      date: "2026-08-18T08:00:00Z", subject: "Recovered in browser",
+    }] });
+  });
+
+  await page.goto("/#/g");
+  await expect(page.getByRole("heading", { name: "Choose a repository" })).toBeVisible();
+  const choice = page.getByRole("button", { name: /Vogt/ });
+  if (test.info().project.name === "phone") {
+    await choice.tap();
+  } else {
+    await choice.focus();
+    await page.keyboard.press("Enter");
+  }
+  await expect(page).toHaveURL(/#\/g\/vogt$/);
+
+  const error = page.getByRole("alert").filter({ hasText: "Commit history" });
+  await expect(error).toContainText("history service offline");
+  historyUnavailable = false;
+  await error.getByRole("button", { name: "Retry history" }).click();
+  await expect(page.getByText("Recovered in browser")).toBeVisible();
+
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "Choose a repository" })).toBeVisible();
+  await page.goForward();
+  await expect(page).toHaveURL(/#\/g\/vogt$/);
+  await page.reload();
+  await expect(page.getByText("Recovered in browser")).toBeVisible();
 });
 
 test("terminal split commits atomically, nests, closes and survives reload", async ({ page }) => {
