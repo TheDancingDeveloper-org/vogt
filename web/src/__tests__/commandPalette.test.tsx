@@ -330,6 +330,39 @@ describe("command palette provider lifecycle", () => {
   });
 });
 
+describe("History palette deep links", () => {
+  it("opens a selected output match with its query, session and excerpt", async () => {
+    fakeVogt(ESTATE, {
+      "GET /api/history/search": { body: [{
+        session_id: "archive-beta",
+        session_name: "beta archive",
+        created_at: "2026-08-18T10:00:00Z",
+        match_snippet: "beta says <mark>needle</mark>",
+        rank: -1,
+      }] },
+    });
+    const view = palette();
+
+    view.type("> needle");
+    await waitFor(() => expect(view.text()).toContain("beta archive"));
+    view.click("beta archive");
+
+    await waitFor(() => expect(view.url()).toMatch(
+      /^\/history\?q=needle&session=archive-beta&match=m[0-9a-f]{8}$/,
+    ));
+    expect(view.closed()).toBe(1);
+  });
+
+  it("opens Search History with the archived-output field requested", async () => {
+    fakeVogt(ESTATE);
+    const view = palette();
+    await waitFor(() => expect(view.text()).toContain("Search History"));
+
+    view.click("Search History");
+
+    await waitFor(() => expect(view.url()).toBe("/history?focus=search"));
+  });
+});
 
 describe("FR-U16 — a mutating verb opens the view that collects its reason", () => {
   it("opens the drift inbox rather than resolving anything", async () => {

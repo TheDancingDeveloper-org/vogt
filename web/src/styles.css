@@ -3062,6 +3062,15 @@ textarea {
   border-radius: 2px;
 }
 
+.history-result-snippet.qualified-match {
+  scroll-margin: 24px;
+  padding: 8px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: rgba(88, 166, 255, 0.1);
+  color: var(--fg);
+}
+
 .history-detail {
   display: flex;
   flex-direction: column;

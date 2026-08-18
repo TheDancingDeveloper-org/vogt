@@ -9,6 +9,7 @@ import {
   onMount,
   untrack,
 } from "solid-js";
+import { useLocation, useNavigate } from "@solidjs/router";
 import {
   api,
   type HistoryLogPreview,
@@ -21,6 +22,12 @@ import {
   toggleHistoryPin,
 } from "./historyPins";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
+import {
+  historyMatchKey,
+  historyResultUrl,
+  historyUrl,
+  readHistoryRoute,
+} from "./historyRoute";
 
 interface Props {
   onError?: (message: string) => void;
@@ -112,15 +119,28 @@ function matchesStatus(
 }
 
 const History: Component<Props> = (props) => {
+  const location = useLocation();
+  const navigate = useNavigate();
   const restored = readToolDraft("history", EMPTY_HISTORY_DRAFT);
-  const [selectedId, setSelectedId] = createSignal<string | null>(restored.selectedId);
+  const initialRoute = readHistoryRoute(location.search);
+  const [selectedId, setSelectedId] = createSignal<string | null>(
+    initialRoute.hasState ? initialRoute.sessionId : restored.selectedId,
+  );
+  const [selectedMatch, setSelectedMatch] = createSignal<string | null>(
+    initialRoute.hasState ? initialRoute.matchKey : null,
+  );
   const [metadataQuery, setMetadataQuery] = createSignal(restored.metadataQuery);
-  const [outputQuery, setOutputQuery] = createSignal(restored.outputQuery);
+  const [outputQuery, setOutputQuery] = createSignal(
+    initialRoute.hasState ? initialRoute.query : restored.outputQuery,
+  );
   const [statusFilter, setStatusFilter] = createSignal<StatusFilter>(restored.statusFilter);
   const [sortMode, setSortMode] = createSignal<SortMode>(restored.sortMode);
   const [showPinnedOnly, setShowPinnedOnly] = createSignal(restored.showPinnedOnly);
   const [pinnedIds, setPinnedIds] = createSignal<string[]>(getPinnedHistoryIds());
   const [tailBytes, setTailBytes] = createSignal(restored.tailBytes);
+  let outputSearchInput: HTMLInputElement | undefined;
+  let routeEffectReady = false;
+  let lastFocusedRoute = "";
 
   const [sessions, setSessions] = createSignal<HistorySessionMetadata[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = createSignal(false);
@@ -187,6 +207,30 @@ const History: Component<Props> = (props) => {
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("focus", onFocus);
     });
+  });
+
+  // The route is authoritative when a shared link, Back or Forward changes
+  // it. The first render was already initialised from the same URL above; a
+  // generic first mount deliberately keeps the existing browser-local draft.
+  createEffect(() => {
+    const search = location.search;
+    const route = readHistoryRoute(search);
+    if (!routeEffectReady) {
+      routeEffectReady = true;
+    } else if (route.hasState) {
+      setOutputQuery(route.query);
+      setSelectedId(route.sessionId);
+      setSelectedMatch(route.matchKey);
+    } else {
+      setOutputQuery("");
+      setSelectedId(null);
+      setSelectedMatch(null);
+    }
+
+    if (routeEffectReady && route.focusSearch && lastFocusedRoute !== search) {
+      lastFocusedRoute = search;
+      queueMicrotask(() => outputSearchInput?.focus());
+    }
   });
 
   const loadFirstPage = async (): Promise<void> => {
@@ -314,6 +358,16 @@ const History: Component<Props> = (props) => {
     } finally {
       if (request === searchRequest) setSearchLoading(false);
     }
+  };
+
+  const replaceQualifiedRoute = (
+    result: HistorySearchResult,
+    replace: boolean,
+  ): void => {
+    const matchKey = historyMatchKey(result);
+    setSelectedId(result.session_id);
+    setSelectedMatch(matchKey);
+    navigate(historyResultUrl(outputQuery(), result), { replace });
   };
 
   const loadDetail = async (id: string): Promise<void> => {
@@ -465,10 +519,31 @@ const History: Component<Props> = (props) => {
   createEffect(() => {
     if (!outputSearchEnabled() || !searchLoaded()) return;
     const results = searchResults();
-    const current = selectedId();
-    if (results.length > 0 && !results.some((result) => result.session_id === current)) {
-      setSelectedId(results[0]!.session_id);
+    if (!results.length) return;
+    const routedMatch = selectedMatch();
+    const exact = routedMatch
+      ? results.find((result) =>
+          result.session_id === selectedId() && historyMatchKey(result) === routedMatch)
+      : undefined;
+    if (exact) return;
+    // A shared URL remains authoritative even when its excerpt is no longer
+    // returned (for example after archive maintenance). Keep its session and
+    // query without silently qualifying a different result.
+    if (readHistoryRoute(location.search).matchKey) return;
+    const sameSession = results.find((result) => result.session_id === selectedId());
+    const fallback = sameSession ?? results[0]!;
+    replaceQualifiedRoute(fallback, true);
+  });
+
+  createEffect(() => {
+    const match = selectedMatch();
+    if (!match || !selectedSearchMatches().some((result) => historyMatchKey(result) === match)) {
+      return;
     }
+    queueMicrotask(() => {
+      const element = document.querySelector<HTMLElement>(`[data-history-match="${match}"]`);
+      element?.scrollIntoView?.({ block: "center" });
+    });
   });
 
   onMount(() => void loadFirstPage());
@@ -554,11 +629,24 @@ const History: Component<Props> = (props) => {
           <label class="history-field history-field-wide">
             <span>Search all archived output</span>
             <input
+              ref={outputSearchInput}
               type="search"
+              autofocus={initialRoute.focusSearch}
               class="history-search"
               placeholder="Needle inside scrollback"
               value={outputQuery()}
-              onInput={(event) => setOutputQuery(event.currentTarget.value)}
+              onInput={(event) => {
+                const query = event.currentTarget.value;
+                setOutputQuery(query);
+                setSelectedId(null);
+                setSelectedMatch(null);
+                navigate(historyUrl({
+                  query,
+                  sessionId: null,
+                  matchKey: null,
+                  focusSearch: true,
+                }, location.search), { replace: true });
+              }}
             />
           </label>
           <label class="history-field">
@@ -623,11 +711,16 @@ const History: Component<Props> = (props) => {
                     fallback={<div class="history-empty">No output matches found.</div>}
                   >
                     <For each={searchResults()}>
-                      {(result) => (
+                      {(result) => {
+                        const matchKey = historyMatchKey(result);
+                        return (
                         <button
                           type="button"
-                          class={`history-search-result ${selectedId() === result.session_id ? "active" : ""}`}
-                          onClick={() => setSelectedId(result.session_id)}
+                          class={`history-search-result ${
+                            selectedMatch() === matchKey ? "active" : ""
+                          }`}
+                          aria-current={selectedMatch() === matchKey ? "true" : undefined}
+                          onClick={() => replaceQualifiedRoute(result, false)}
                         >
                           <div class="history-result-header">
                             <strong>{result.session_name}</strong>
@@ -635,7 +728,8 @@ const History: Component<Props> = (props) => {
                           </div>
                           <div class="history-result-snippet" innerHTML={result.match_snippet} />
                         </button>
-                      )}
+                        );
+                      }}
                     </For>
                   </Show>
                 </Show>
@@ -792,9 +886,18 @@ const History: Component<Props> = (props) => {
                       </div>
                       <div class="history-match-list">
                         <For each={selectedSearchMatches()}>
-                          {(result) => (
-                            <div class="history-result-snippet" innerHTML={result.match_snippet} />
-                          )}
+                          {(result) => {
+                            const matchKey = historyMatchKey(result);
+                            const qualified = () => selectedMatch() === matchKey;
+                            return (
+                            <div
+                              class={`history-result-snippet ${qualified() ? "qualified-match" : ""}`}
+                              data-history-match={matchKey}
+                              aria-current={qualified() ? "true" : undefined}
+                              innerHTML={result.match_snippet}
+                            />
+                            );
+                          }}
                         </For>
                       </div>
                     </div>

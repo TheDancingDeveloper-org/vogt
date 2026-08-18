@@ -44,6 +44,7 @@ import {
   type SavedWorkspaceLayout,
 } from "./workspaceLayouts";
 import Dialog from "./Dialog";
+import { historyResultUrl } from "./historyRoute";
 
 interface HistorySearchResult {
   session_id: string;
@@ -772,7 +773,7 @@ const CommandPalette: Component<Props> = (props) => {
       icon: "?",
       action: () => {
         openHistoryTab();
-        navigate("/history");
+        navigate(historyResultUrl(query().slice(1), r));
         props.onClose();
       },
       category: "History Matches",
@@ -1001,7 +1002,7 @@ const CommandPalette: Component<Props> = (props) => {
       icon: "?",
       action: () => {
         openHistoryTab();
-        navigate("/history");
+        navigate("/history?focus=search");
         props.onClose();
       },
       category: "History",
