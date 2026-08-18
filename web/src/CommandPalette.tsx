@@ -151,6 +151,7 @@ interface Props {
   onCreateSession?: () => void;
   onOpenFile?: () => void;
   onOpenSettings?: () => void;
+  guiEnabled?: boolean;
   onShowShortcuts?: () => void;
   onError?: (message: string) => void;
   templates?: SessionTemplate[];
@@ -814,18 +815,6 @@ const CommandPalette: Component<Props> = (props) => {
       category: "Tasks",
       },
       {
-      id: "open-gui",
-      label: "Open GUI Stream",
-      description: "Open the GUI stream tab",
-      icon: ">_",
-      action: () => {
-        openGuiTab();
-        navigate("/gui");
-        props.onClose();
-      },
-      category: "View",
-      },
-      {
       id: "open-settings",
       label: "Open Settings",
       description: "Configure token, layout, templates, notifications",
@@ -849,6 +838,21 @@ const CommandPalette: Component<Props> = (props) => {
       },
     ];
 
+    if (props.guiEnabled) {
+      commands.splice(commands.length - 2, 0, {
+        id: "open-gui",
+        label: "Open GUI Stream",
+        description: "Open the configured GUI stream tab",
+        icon: ">_",
+        action: () => {
+          openGuiTab();
+          navigate("/gui");
+          props.onClose();
+        },
+        category: "View",
+      });
+    }
+
     if (props.onSaveWorkspaceLayout) {
       commands.splice(commands.length - 2, 0, {
         id: "save-workspace-layout",
@@ -868,53 +872,55 @@ const CommandPalette: Component<Props> = (props) => {
   };
 
   const tabCommands = (): Command[] => {
-    return tabsStore.tabs.map((tab) => ({
-      id: `tab-${tab.id}`,
-      label: tab.label,
-      description:
-        tab.kind === "terminal"
-          ? "Switch to terminal tab"
-          : tab.kind === "editor"
-            ? (tab.path || "Switch to editor tab")
+    return tabsStore.tabs
+      .filter((tab) => tab.kind !== "gui" || props.guiEnabled)
+      .map((tab) => ({
+        id: `tab-${tab.id}`,
+        label: tab.label,
+        description:
+          tab.kind === "terminal"
+            ? "Switch to terminal tab"
+            : tab.kind === "editor"
+              ? (tab.path || "Switch to editor tab")
+              : tab.kind === "git"
+                ? `Git ${tab.repo || "(workspace root)"}`
+                : `Switch to ${tab.kind} tab`,
+        icon:
+          tab.kind === "editor"
+            ? "file"
             : tab.kind === "git"
-              ? `Git ${tab.repo || "(workspace root)"}`
-              : `Switch to ${tab.kind} tab`,
-      icon:
-        tab.kind === "editor"
-          ? "file"
-          : tab.kind === "git"
-            ? "git"
-            : tab.kind === "gui"
-              ? ">_"
-              : tab.kind === "history"
-                ? "hist"
-                : tab.kind === "tasks"
-                  ? "tasks"
-                  : ">_",
-      action: () => {
-        if (tab.kind === "terminal") {
-          openTerminalTab(tab.sessionId, tab.label);
-          navigate(`/t/${tab.sessionId}`);
-        } else if (tab.kind === "editor") {
-          openEditorTab(tab.path);
-          navigate(`/e/${encodeURIComponent(tab.path)}`);
-        } else if (tab.kind === "git") {
-          openGitTab(tab.repo);
-          navigate(tab.repo ? `/g/${encodeURIComponent(tab.repo)}` : "/g/");
-        } else if (tab.kind === "gui") {
-          openGuiTab();
-          navigate("/gui");
-        } else if (tab.kind === "history") {
-          openHistoryTab();
-          navigate("/history");
-        } else {
-          openTasksTab();
-          navigate("/tasks");
-        }
-        props.onClose();
-      },
-      category: "Open Tabs",
-    }));
+              ? "git"
+              : tab.kind === "gui"
+                ? ">_"
+                : tab.kind === "history"
+                  ? "hist"
+                  : tab.kind === "tasks"
+                    ? "tasks"
+                    : ">_",
+        action: () => {
+          if (tab.kind === "terminal") {
+            openTerminalTab(tab.sessionId, tab.label);
+            navigate(`/t/${tab.sessionId}`);
+          } else if (tab.kind === "editor") {
+            openEditorTab(tab.path);
+            navigate(`/e/${encodeURIComponent(tab.path)}`);
+          } else if (tab.kind === "git") {
+            openGitTab(tab.repo);
+            navigate(tab.repo ? `/g/${encodeURIComponent(tab.repo)}` : "/g/");
+          } else if (tab.kind === "gui") {
+            openGuiTab();
+            navigate("/gui");
+          } else if (tab.kind === "history") {
+            openHistoryTab();
+            navigate("/history");
+          } else {
+            openTasksTab();
+            navigate("/tasks");
+          }
+          props.onClose();
+        },
+        category: "Open Tabs",
+      }));
   };
 
   const savedLayoutCommands = (): Command[] => {

@@ -424,7 +424,9 @@ engine/        the Rust session engine (server + contract crates): PTYs,
                proxying /api/vogt and /mcp to vogt-core on loopback
 web/           the Solid PWA, the product's front end from M11; consumes
                the engine's API and, through /api/vogt, the same public
-               operations the CLI and MCP see
+               operations the CLI and MCP see. One route model supplies the
+               desktop rail, phone bar and Sessions tools with their current
+               place/tool and owns loading, unavailable and not-found states.
 mobile/        the Capacitor shell that loads that PWA
 src/vogt/      unchanged, and still the only definition of an operation
 ```

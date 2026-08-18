@@ -3,6 +3,29 @@ import { useLocation, useNavigate } from "@solidjs/router";
 import { api, type AssistantPendingAction } from "./api";
 import { sessionsStore, sessionsError, isConnected } from "./store";
 import type { SessionSummary } from "./api";
+import type { SessionTool } from "./routeModel";
+
+interface Props {
+  currentTool?: SessionTool | null;
+  guiEnabled?: boolean;
+  assistantEnabled?: boolean;
+}
+
+export const SessionTools: Component<Props> = (props) => (
+  <nav class="sessions-tools" aria-label="Session tools">
+    <span>Tools</span>
+    <a href="#/sessions" aria-current={!props.currentTool ? "page" : undefined}>Overview</a>
+    <a href="#/g" aria-current={props.currentTool === "git" ? "page" : undefined}>Git</a>
+    <a href="#/history" aria-current={props.currentTool === "history" ? "page" : undefined}>History</a>
+    <a href="#/tasks" aria-current={props.currentTool === "tasks" ? "page" : undefined}>Tasks</a>
+    <Show when={props.guiEnabled}>
+      <a href="#/gui" aria-current={props.currentTool === "gui" ? "page" : undefined}>GUI stream</a>
+    </Show>
+    <Show when={props.assistantEnabled}>
+      <a href="#/assistant" aria-current={props.currentTool === "assistant" ? "page" : undefined}>Assistant</a>
+    </Show>
+  </nav>
+);
 
 function activityLabel(session: SessionSummary): string {
   if (session.exit_code !== null) return session.exit_code === 0 ? "exited" : "errored";
@@ -34,7 +57,7 @@ function activitySince(session: SessionSummary): string {
   return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }
 
-const Sessions: Component = () => {
+const Sessions: Component<Props> = (props) => {
   const navigate = useNavigate();
   const location = useLocation();
   const [pending, setPending] = createSignal<AssistantPendingAction | null>(null);
@@ -180,13 +203,11 @@ const Sessions: Component = () => {
           </For>
         </div>
       </Show>
-      <nav class="sessions-tools" aria-label="Session tools">
-        <span>Tools</span>
-        <button type="button" onClick={() => navigate("/g")}>Git</button>
-        <button type="button" onClick={() => navigate("/history")}>History</button>
-        <button type="button" onClick={() => navigate("/tasks")}>Tasks</button>
-        <button type="button" onClick={() => navigate("/gui")}>GUI stream</button>
-      </nav>
+      <SessionTools
+        currentTool={props.currentTool}
+        guiEnabled={props.guiEnabled}
+        assistantEnabled={props.assistantEnabled}
+      />
     </section>
   );
 };

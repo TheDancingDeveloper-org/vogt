@@ -19,7 +19,8 @@ import AuditBrowser from "./AuditBrowser";
 import Backlog from "./Backlog";
 import Board from "./Board";
 import Inbox from "./Inbox";
-import Sessions from "./Sessions";
+import Sessions, { SessionTools } from "./Sessions";
+import RouteOutcomeView from "./RouteOutcome";
 import GitTab from "./Git";
 import GuiTab from "./Gui";
 import Projects from "./Projects";
@@ -87,6 +88,13 @@ import {
   getWorkspaceLayout,
   saveWorkspaceLayout,
 } from "./workspaceLayouts";
+import {
+  describeRoute,
+  isCurrentPlace,
+  isCurrentTool,
+  settingsReturnRoute,
+  type PrimaryPlace,
+} from "./routeModel";
 
 interface LoginScreenProps {
   initialToken: string;
@@ -271,11 +279,21 @@ const App: Component = () => {
   const params = useParams<{ id?: string; path?: string; ref?: string }>();
   const location = useLocation();
   const [settingsOpen, setSettingsOpen] = createSignal(false);
+  let settingsReturnUrl = "/sessions";
+  let settingsRouted = false;
+  let settingsHasHistoryReturn = false;
   const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
   const [templateSelectorOpen, setTemplateSelectorOpen] = createSignal(false);
   const [templateSelectorContext, setTemplateSelectorContext] =
     createSignal<TemplateContext | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = createSignal(false);
+
+  const openSettings = () => {
+    const here = `${location.pathname}${location.search}`;
+    settingsReturnUrl = settingsReturnRoute(here, settingsReturnUrl);
+    settingsHasHistoryReturn = true;
+    navigate("/settings");
+  };
 
   const feedback = createFeedbackQueue();
   const showToast = (message: string, options: FeedbackOptions = {}) =>
@@ -340,6 +358,7 @@ const App: Component = () => {
   };
 
   const [publicCfg, setPublicCfg] = createSignal<PublicConfig | null>(null);
+  const [configReady, setConfigReady] = createSignal(false);
   const [authState, setAuthState] = createSignal<"checking" | "unauthenticated" | "authenticated">("checking");
   const [authError, setAuthError] = createSignal<string | null>(null);
   const layoutMode = getLayoutMode();
@@ -350,6 +369,40 @@ const App: Component = () => {
     tabsStore.tabs.find((tab) => tab.id === tabsStore.active)?.kind ?? null;
   const editorWorkspaceActive = () =>
     isIDEMode && activeKind() === "editor" && location.pathname.startsWith("/e/");
+  const guiEnabled = () => Boolean(publicCfg()?.gui_stream_available);
+  const routeOutcome = () => describeRoute(
+    location.pathname,
+    {
+      configReady: configReady(),
+      sessionsState: sessionsStore.ready
+        ? "ready"
+        : sessionsError()
+          ? "unavailable"
+          : "loading",
+      sessionExists: (id) => Boolean(sessionsStore.sessions[id]),
+      assistantEnabled: Boolean(publicCfg()?.assistant_enabled),
+      guiAvailable: guiEnabled(),
+    },
+    settingsReturnUrl,
+  );
+  const currentPlace = (place: PrimaryPlace) =>
+    isCurrentPlace(routeOutcome(), place);
+  const currentTool = () => {
+    const outcome = routeOutcome();
+    return outcome?.kind === "tool" || outcome?.kind === "settings"
+      ? outcome.tool ?? null
+      : null;
+  };
+  const routeProblem = () => {
+    const outcome = routeOutcome();
+    return outcome && (
+      outcome.kind === "loading" ||
+      outcome.kind === "unavailable" ||
+      outcome.kind === "not-found"
+    )
+      ? outcome
+      : null;
+  };
 
   onMount(() => {
     const unsubscribeAuthState = subscribeAuthState(() => {
@@ -362,7 +415,8 @@ const App: Component = () => {
       .then((c) => setPublicCfg(c))
       .catch(() => {
         /* server may be down; non-fatal */
-      });
+      })
+      .finally(() => setConfigReady(true));
 
     void (async () => {
       const token = getToken();
@@ -411,11 +465,29 @@ const App: Component = () => {
     if (location.pathname === pathFor(active)) lastUrlByTab.set(active.id, here);
   });
 
+  createEffect(() => {
+    if (!configReady() || guiEnabled()) return;
+    for (const tab of tabsStore.tabs.filter((candidate) => candidate.kind === "gui")) {
+      closeTab(tab.id);
+    }
+  });
+
   // URL syncing. createEffect (not createMemo) — we want side effects,
   // not a memoised value.
   createEffect(() => {
     const path = location.pathname;
     const currentSearch = location.search;
+    if (path !== "/settings") {
+      settingsReturnUrl = settingsReturnRoute(
+        `${path}${currentSearch}`,
+        settingsReturnUrl,
+      );
+    }
+    if (path !== "/settings" && settingsOpen() && settingsRouted) {
+      settingsRouted = false;
+      settingsHasHistoryReturn = false;
+      setSettingsOpen(false);
+    }
     if (path === "/") {
       const narrow = window.matchMedia("(max-width: 768px)").matches ||
         (navigator.maxTouchPoints > 0 && window.innerWidth < 1024);
@@ -425,8 +497,12 @@ const App: Component = () => {
       // routes below and are never represented as a product tab.
     } else if (path.startsWith("/t/") && params.id) {
       const sess = sessionsStore.sessions[params.id];
-      // Don't auto-create phantoms for ids the server doesn't know about.
-      if (!sess && sessionsStore.ready) return;
+      // Resolve the live roster before opening anything. On a cold deep link,
+      // treating "not loaded yet" as a session and persisting that phantom
+      // made the later stale-tab cleanup navigate away from the not-found
+      // route as soon as the roster arrived.
+      if (!sessionsStore.ready && !sessionsError()) return;
+      if (!sess) return;
       const label = sess?.name ?? params.id.slice(0, 6);
       openTerminalTab(params.id, label);
     } else if (path.startsWith("/e/") && params.path) {
@@ -436,7 +512,7 @@ const App: Component = () => {
     } else if (path === "/g") {
       openGitTab("");
     } else if (path === "/gui") {
-      openGuiTab();
+      if (guiEnabled()) openGuiTab();
     } else if (path === "/history") {
       openHistoryTab();
     } else if (path === "/tasks") {
@@ -449,6 +525,7 @@ const App: Component = () => {
       // than no tab.
       if (publicCfg()?.assistant_enabled) openAssistantTab();
     } else if (path === "/settings") {
+      settingsRouted = true;
       setSettingsOpen(true);
     } else if (path.startsWith("/w/") && params.ref) {
       // Unlike a terminal id, a work item ref is not checked against a store
@@ -457,7 +534,14 @@ const App: Component = () => {
       // to open the tab would turn a typo into a blank screen.
       openWorkItemTab(decodeURIComponent(params.ref));
     }
-    if (path !== "/") {
+    const outcome = routeOutcome();
+    if (
+      path !== "/" &&
+      path !== "/settings" &&
+      outcome?.kind !== "loading" &&
+      outcome?.kind !== "unavailable" &&
+      outcome?.kind !== "not-found"
+    ) {
       const labels: Record<string, string> = {
         "/board": "Board",
         "/backlog": "Backlog",
@@ -638,9 +722,12 @@ const App: Component = () => {
 
     const tabs = layout.tabs.filter(
       (tab) =>
-        tab.kind !== "terminal" ||
-        !sessionsStore.ready ||
-        Boolean(sessionsStore.sessions[tab.sessionId]),
+        (tab.kind !== "gui" || guiEnabled()) &&
+        (
+          tab.kind !== "terminal" ||
+          !sessionsStore.ready ||
+          Boolean(sessionsStore.sessions[tab.sessionId])
+        ),
     );
     const skipped = layout.tabs.length - tabs.length;
     const active =
@@ -729,7 +816,16 @@ const App: Component = () => {
       )
     );
     for (const tab of stale) {
-      closeTabAndNavigate(tab.id);
+      if (
+        tab.kind === "terminal"
+        && location.pathname === `/t/${encodeURIComponent(tab.sessionId)}`
+      ) {
+        senders.delete(tab.id);
+        actions.delete(tab.id);
+        closeTab(tab.id);
+      } else {
+        closeTabAndNavigate(tab.id);
+      }
     }
   });
 
@@ -828,25 +924,29 @@ const App: Component = () => {
           <nav class="places-nav">
             <div class="places-group">
               <span class="places-group-label">Work</span>
-              <a class={location.pathname === "/board" ? "active" : ""} href="#/board">Board</a>
-              <a class={location.pathname === "/backlog" ? "active" : ""} href="#/backlog">Backlog</a>
-              <a class={location.pathname === "/inbox" ? "active" : ""} href="#/inbox">Inbox</a>
+              <a class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined} href="#/board">Board</a>
+              <a class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined} href="#/backlog">Backlog</a>
+              <a class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined} href="#/inbox">Inbox</a>
             </div>
             <Show when={publicCfg()?.vogt?.configured}>
               <div class="places-group">
                 <span class="places-group-label">Estate</span>
-                <a class={location.pathname === "/projects" ? "active" : ""} href="#/projects">Projects</a>
-                <a class={location.pathname === "/audit" ? "active" : ""} href="#/audit">Audit</a>
+                <a class={currentPlace("projects") ? "active" : ""} aria-current={currentPlace("projects") ? "page" : undefined} href="#/projects">Projects</a>
+                <a class={currentPlace("audit") ? "active" : ""} aria-current={currentPlace("audit") ? "page" : undefined} href="#/audit">Audit</a>
               </div>
             </Show>
             <div class="places-group">
               <span class="places-group-label">Machine</span>
-              <a class={location.pathname.startsWith("/sessions") || location.pathname.startsWith("/t/") ? "active" : ""} href="#/sessions">Sessions</a>
-              <a href="#/g">Git</a>
-              <a href="#/history">History</a>
-              <a href="#/tasks">Tasks</a>
-              <a href="#/gui">GUI stream</a>
-              <Show when={publicCfg()?.assistant_enabled}><a href="#/assistant">Assistant</a></Show>
+              <a
+                class={currentPlace("sessions") ? "active" : ""}
+                aria-current={currentPlace("sessions") && !["git", "history", "tasks", "gui", "assistant"].includes(currentTool() ?? "") ? "page" : undefined}
+                href="#/sessions"
+              >Sessions</a>
+              <a class={isCurrentTool(routeOutcome(), "git") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "git") ? "page" : undefined} href="#/g">Git</a>
+              <a class={isCurrentTool(routeOutcome(), "history") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "history") ? "page" : undefined} href="#/history">History</a>
+              <a class={isCurrentTool(routeOutcome(), "tasks") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "tasks") ? "page" : undefined} href="#/tasks">Tasks</a>
+              <Show when={guiEnabled()}><a class={isCurrentTool(routeOutcome(), "gui") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "gui") ? "page" : undefined} href="#/gui">GUI stream</a></Show>
+              <Show when={publicCfg()?.assistant_enabled}><a class={isCurrentTool(routeOutcome(), "assistant") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "assistant") ? "page" : undefined} href="#/assistant">Assistant</a></Show>
             </div>
           </nav>
           <div class="places-rail-session-area">
@@ -916,7 +1016,7 @@ const App: Component = () => {
           <Show when={recentPlacesStore.places.length > 0}>
             <div class="places-recent" aria-label="Recent places">
               <div class="places-section-label">Recent places</div>
-              <For each={recentPlacesStore.places.slice(0, 6)}>
+              <For each={recentPlacesStore.places.filter((place) => place.path !== "/gui" || guiEnabled()).slice(0, 6)}>
                 {(place) => <a href={`#${place.path}`}>{place.label}</a>}
               </For>
             </div>
@@ -929,7 +1029,7 @@ const App: Component = () => {
             onError={(message) => showToast(message, { kind: "error" })}
           />
           <div class="places-rail-footer">
-            <button type="button" onClick={() => navigate("/settings")}>Settings</button>
+            <button type="button" onClick={openSettings}>Settings</button>
             <span class="rail-connection">{isConnected() ? "Connected" : "Offline"}</span>
           </div>
         </aside>
@@ -957,7 +1057,12 @@ const App: Component = () => {
             />
           </Show>
           <Show when={location.pathname === "/sessions"}>
-            <div class="stable-place"><Sessions /></div>
+            <div class="stable-place">
+              <Sessions
+                guiEnabled={guiEnabled()}
+                assistantEnabled={Boolean(publicCfg()?.assistant_enabled)}
+              />
+            </div>
           </Show>
           <Show when={location.pathname === "/board"}>
             <div class="stable-place"><Board onError={(msg) => showToast(msg, { kind: "error" })} /></div>
@@ -974,10 +1079,32 @@ const App: Component = () => {
           <Show when={location.pathname === "/audit"}>
             <div class="stable-place"><AuditBrowser onError={(msg) => showToast(msg, { kind: "error" })} /></div>
           </Show>
+          <Show when={routeProblem()} keyed>
+            {(problem) => (
+              <div class="stable-place">
+                <RouteOutcomeView
+                  title={problem.title}
+                  message={problem.message}
+                  onRecover={problem.kind === "loading" ? undefined : () => navigate("/sessions")}
+                />
+              </div>
+            )}
+          </Show>
+          <Show when={
+            currentPlace("sessions")
+              && (routeOutcome()?.kind === "tool" || Boolean(currentTool()))
+          }>
+            <SessionTools
+              currentTool={currentTool()}
+              guiEnabled={guiEnabled()}
+              assistantEnabled={Boolean(publicCfg()?.assistant_enabled)}
+            />
+          </Show>
           <div
             class="tab-view"
             style={{
               display:
+                routeProblem() ||
                 editorWorkspaceActive() ||
                 ["/sessions", "/board", "/backlog", "/inbox", "/projects", "/audit"].includes(location.pathname)
                   ? "none"
@@ -1115,17 +1242,25 @@ const App: Component = () => {
       </div>
 
       <nav class="phone-bottom-nav" aria-label="Primary navigation">
-        <a href="#/sessions" class={location.pathname.startsWith("/sessions") || location.pathname.startsWith("/t/") ? "active" : ""}>Sessions <span class="phone-place-count">{sessionsStore.order.length}</span></a>
-        <a href="#/inbox" class={location.pathname === "/inbox" ? "active" : ""}>Inbox</a>
-        <a href="#/board" class={location.pathname === "/board" ? "active" : ""}>Board</a>
-        <a href="#/backlog" class={location.pathname === "/backlog" ? "active" : ""}>Backlog</a>
+        <a href="#/sessions" class={currentPlace("sessions") ? "active" : ""} aria-current={currentPlace("sessions") ? "page" : undefined}>Sessions <span class="phone-place-count">{sessionsStore.order.length}</span></a>
+        <a href="#/inbox" class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined}>Inbox</a>
+        <a href="#/board" class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined}>Board</a>
+        <a href="#/backlog" class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined}>Backlog</a>
       </nav>
 
       <Settings
         open={settingsOpen()}
         onClose={() => {
           setSettingsOpen(false);
-          if (location.pathname === "/settings") navigate("/sessions");
+          if (location.pathname === "/settings") {
+            settingsRouted = false;
+            if (settingsHasHistoryReturn) {
+              settingsHasHistoryReturn = false;
+              navigate(-1);
+            } else {
+              navigate(settingsReturnUrl, { replace: true });
+            }
+          }
         }}
         onSaveWorkspaceLayout={() => onSaveWorkspaceLayout()}
         onRestoreWorkspaceLayout={(layoutId) => onRestoreWorkspaceLayout(layoutId)}
@@ -1221,7 +1356,8 @@ const App: Component = () => {
         onClose={() => setCommandPaletteOpen(false)}
         onCreateSession={() => void onCreate()}
         onOpenFile={() => navigate("/sessions")}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={openSettings}
+        guiEnabled={guiEnabled()}
         onShowShortcuts={() => setShortcutsOpen(true)}
         onError={(message) => showToast(message, { kind: "error" })}
         templates={availableTemplates()}

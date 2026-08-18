@@ -43,7 +43,10 @@ const boardItems = [
   },
 ];
 
-async function installFixtures(page: Page) {
+async function installFixtures(
+  page: Page,
+  config: Record<string, unknown> = {},
+) {
   let inboxCalls = 0;
   await page.addInitScript(() => {
     localStorage.setItem("mydevenv2.token", "browser-test-token");
@@ -68,7 +71,9 @@ async function installFixtures(page: Page) {
   } }));
   await page.route("**/api/config**", async (route) => route.fulfill({ json: {
     assistant_enabled: false, gui_stream_url: null, session_templates: [],
+    gui_stream_available: false,
     vogt: { configured: true },
+    ...config,
   } }));
   await page.route("**/api/sessions", async (route) => route.fulfill({ json: [] }));
   await page.route("**/api/events", async (route) => route.fulfill({ status: 200, contentType: "text/event-stream", body: "" }));
@@ -205,4 +210,126 @@ test("Files rail keeps names legible and puts secondary actions behind one contr
   await page.getByRole("button", { name: "Actions for src", exact: true }).click();
   await expect(page.getByRole("button", { name: "Open terminal" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Delete" })).toBeVisible();
+});
+
+test("Route truth owns unavailable links, current navigation and Settings return", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/board?project=vogt");
+
+  const phone = test.info().project.name === "phone";
+  const currentNavigation = phone ? page.locator('.phone-bottom-nav a[aria-current="page"]') : page.locator('.places-nav a[aria-current="page"]');
+  await expect(currentNavigation).toHaveText("Board");
+  await expect(page.getByRole("link", { name: "GUI stream" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Go to…" }).click();
+  await expect(page.getByRole("dialog", { name: "Command palette" }).getByText("Open GUI Stream", { exact: true }))
+    .toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  if (phone) await page.getByRole("button", { name: "Go to…" }).click();
+  if (phone) {
+    await page.getByRole("dialog", { name: "Command palette" })
+      .getByText("Open Settings", { exact: true })
+      .click();
+  } else await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page).toHaveURL(/#\/settings$/);
+  await expect(currentNavigation).toHaveText("Board");
+  await page.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: "Cancel" }).click();
+  await expect(page).toHaveURL(/#\/board\?project=vogt$/);
+
+  if (!phone) {
+    await page.getByRole("button", { name: "Settings" }).click();
+    await expect(page).toHaveURL(/#\/settings$/);
+    await page.goBack();
+    await expect(page).toHaveURL(/#\/board\?project=vogt$/);
+    await expect(page.getByRole("dialog", { name: "Settings" })).toHaveCount(0);
+  }
+
+  await page.goto("/#/history");
+  if (phone) {
+    await expect(page.locator('.phone-bottom-nav a[aria-current="page"]')).toContainText("Sessions");
+  } else {
+    await expect(page.locator('.places-nav a[aria-current="page"]')).toHaveText("History");
+  }
+  await expect(page.getByRole("navigation", { name: "Session tools" }).getByRole("link", { name: "History" }))
+    .toHaveAttribute("aria-current", "page");
+
+  if (phone) await page.getByRole("button", { name: "Go to…" }).click();
+  if (phone) {
+    await page.getByRole("dialog", { name: "Command palette" })
+      .getByText("Open Settings", { exact: true })
+      .click();
+  } else await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page).toHaveURL(/#\/settings$/);
+  await expect(page.getByRole("navigation", { name: "Session tools" })
+    .getByRole("link", { name: "History" }))
+    .toHaveAttribute("aria-current", "page");
+  await page.getByRole("dialog", { name: "Settings" })
+    .getByRole("button", { name: "Cancel" })
+    .click();
+  await expect(page).toHaveURL(/#\/history$/);
+
+  await page.goto("/#/history");
+  await page.evaluate(() => {
+    window.location.hash = "#/t/missing-session";
+  });
+  await expect(page).toHaveURL(/#\/t\/missing-session$/);
+  await expect(page.getByRole("heading", { name: "Session not found" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Return to Sessions" })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Session not found" })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/history$/);
+  await expect(page.locator(".history-view")).toBeVisible();
+  await page.goForward();
+  await expect(page.getByRole("heading", { name: "Session not found" })).toBeVisible();
+
+  await page.goto("/#/history");
+  await page.evaluate(() => {
+    window.location.hash = "#/assistant";
+  });
+  await expect(page).toHaveURL(/#\/assistant$/);
+  await expect(page.getByRole("heading", { name: "Assistant is unavailable" })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Assistant is unavailable" })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/history$/);
+  await expect(page.locator(".history-view")).toBeVisible();
+  await page.goForward();
+  await expect(page.getByRole("heading", { name: "Assistant is unavailable" })).toBeVisible();
+
+  await page.goto("/#/gui");
+  await expect(page.getByRole("heading", { name: "GUI stream is unavailable" })).toBeVisible();
+
+  await page.goto("/#/settings");
+  await page.reload();
+  await page.getByRole("dialog", { name: "Settings" })
+    .getByRole("button", { name: "Cancel" })
+    .click();
+  await expect(page).toHaveURL(/#\/sessions$/);
+});
+
+test("Enabled GUI capability is reachable and renders its configured stream", async ({ page }) => {
+  await page.route("https://stream.example.test/**", async (route) =>
+    route.fulfill({ contentType: "text/html", body: "<main>fixture stream</main>" }),
+  );
+  await installFixtures(page, {
+    gui_stream_url: "https://stream.example.test/view",
+    gui_stream_available: true,
+    features: { selkies: "1.6.2" },
+  });
+  await page.route("**/api/gui/processes", async (route) => route.fulfill({ json: [] }));
+  await page.goto("/#/sessions");
+
+  await expect(page.getByRole("link", { name: "GUI stream" }).first()).toBeVisible();
+  await page.getByRole("button", { name: "Go to…" }).click();
+  await page.getByRole("dialog", { name: "Command palette" })
+    .getByText("Open GUI Stream", { exact: true })
+    .click();
+
+  await expect(page).toHaveURL(/#\/gui$/);
+  const frame = page.getByTitle("GUI stream");
+  await expect(frame).toBeVisible();
+  await expect(frame).toHaveAttribute("src", "https://stream.example.test/view");
+  await expect(frame.contentFrame().getByText("fixture stream")).toBeVisible();
 });

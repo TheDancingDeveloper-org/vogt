@@ -187,6 +187,10 @@ pub struct Config {
     /// URL the web UI's GUI tab should iframe. Phase 5: point this at
     /// Selkies-GStreamer or KasmVNC. None disables the GUI tab.
     pub gui_stream_url: Option<String>,
+    /// Operator attestation that the configured stream has passed an
+    /// end-to-end launch-and-render check. False keeps every GUI affordance
+    /// withdrawn even when a URL and streamer package are present.
+    pub gui_stream_verified: bool,
     /// Where persistent state lives (push subscriptions, VAPID keys).
     /// Defaults to $HOME/.local/share/mydevenv2.
     pub state_dir: std::path::PathBuf,
@@ -297,6 +301,7 @@ struct FileConfig {
     idle_stall_after_ms: Option<u64>,
     workspace_root: Option<String>,
     gui_stream_url: Option<String>,
+    gui_stream_verified: Option<bool>,
     state_dir: Option<String>,
     fcm_service_account_json: Option<String>,
     vapid_subject: Option<String>,
@@ -407,6 +412,18 @@ pub fn load(
     .or(from_file.auto_agent_auth)
     .unwrap_or(false);
 
+    let gui_stream_verified = match std::env::var("GUI_STREAM_VERIFIED") {
+        Ok(value) => Some(parse_bool_env("GUI_STREAM_VERIFIED", &value)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            return Err(ApiError::Config(format!(
+                "reading GUI_STREAM_VERIFIED: {error}"
+            )));
+        }
+    }
+    .or(from_file.gui_stream_verified)
+    .unwrap_or(false);
+
     let agent_auth_helper = std::env::var("MYDEVENV2_AGENT_AUTH_HELPER")
         .ok()
         .or(from_file.agent_auth_helper)
@@ -460,6 +477,7 @@ pub fn load(
             .gui_stream_url
             .or_else(|| std::env::var("GUI_STREAM_URL").ok())
             .filter(|s| !s.is_empty()),
+        gui_stream_verified,
         state_dir: from_file
             .state_dir
             .map(std::path::PathBuf::from)
