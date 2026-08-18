@@ -21,6 +21,23 @@ COMPOSE = REPO_ROOT / "deploy" / "personal-vogt.compose.yml"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
+#: Some tests here read the *engine's* tree — its Dockerfile, its deploy
+#: scripts — which a core-only checkout does not have. NFR-Q6's `core` job
+#: proves the core stands alone by deleting `engine/`, `web/` and `mobile/`
+#: and running this suite, and it earns its keep every time: it caught the
+#: deploy-script tests on their first run, and it caught the Dockerfile one
+#: the day the PWA-ordering assertion moved off the workflows and onto
+#: `engine/Dockerfile`. A merged repository makes it very easy to write a
+#: core test that quietly needs the engine.
+#:
+#: Keyed on the directory rather than on any one file inside it, because the
+#: condition being described is "the engine tree is absent" and every file
+#: under it disappears together.
+needs_engine = pytest.mark.skipif(
+    not (REPO_ROOT / "engine").is_dir(),
+    reason="the merged tree carries the engine; a core-only checkout does not",
+)
+
 
 def _without_comments(text: str) -> str:
     """Strip comments before asserting on content.
@@ -476,6 +493,7 @@ def test_the_merged_image_is_built_from_the_engine_dockerfile(workflow: str) -> 
     )
 
 
+@needs_engine
 def test_the_pwa_is_built_before_the_engine_that_embeds_it() -> None:
     """`rust-embed` reads `web/dist/` at compile time.
 
@@ -636,19 +654,6 @@ MCP_BOOTSTRAP = REPO_ROOT / "engine" / "deploy" / "mcp-bootstrap.sh"
 VOGT_MCP_WRAPPER = REPO_ROOT / "engine" / "deploy" / "vogt-mcp-auth.sh"
 AGENT_AUTH = REPO_ROOT / "engine" / "deploy" / "agent-auth.sh"
 RETIRED_CORE_STACK = "winrarhost.tailc7d3c.ts.net:18094"
-
-#: These three read the *engine's* deploy scripts, which a core-only checkout
-#: does not have — and NFR-Q6's `core` job proves the core stands alone by
-#: deleting `engine/`, `web/` and `mobile/` and running this suite. It found
-#: these on their first run, which is the job working: a merged repository
-#: makes it very easy to write a core test that quietly needs the engine.
-needs_engine = pytest.mark.skipif(
-    not MCP_BOOTSTRAP.is_file(),
-    reason=(
-        "the merged tree carries the engine's deploy scripts; "
-        "a core-only checkout does not"
-    ),
-)
 
 
 @needs_engine
