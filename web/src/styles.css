@@ -251,6 +251,10 @@ textarea {
   gap: 14px;
   background: var(--bg-elev);
   border-right: 1px solid var(--bd);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .places-brand {
   padding: 2px 8px;
@@ -265,12 +269,9 @@ textarea {
 }
 .places-nav {
   flex: 0 0 auto;
-  max-height: 38%;
-  overflow-y: auto;
 }
 .places-rail-session-area {
-  min-height: 0;
-  overflow-y: auto;
+  flex: 0 0 auto;
   padding-top: 2px;
 }
 .places-section-label {
@@ -334,8 +335,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-height: 22%;
-  overflow-y: auto;
+  flex: 0 0 auto;
 }
 
 .places-recent a {
@@ -705,6 +705,8 @@ textarea {
   gap: 4px;
 }
 .places-section-header-actions button {
+  min-width: 26px;
+  min-height: 24px;
   padding: 2px 5px;
   font-size: 10px;
 }
@@ -1554,11 +1556,63 @@ textarea {
   flex: 1;
   border-top: 1px solid var(--bd);
 }
+.places-rail > .file-tree {
+  /* The rail itself is the scroll viewport. Files keeps enough room for its
+     heading, search, several rows and progressive controls, then grows with
+     its contents instead of introducing another trapped scroll area. */
+  min-height: 260px;
+  flex: 0 0 auto;
+}
+.file-tree-header {
+  flex: 0 0 auto;
+  position: relative;
+}
+.file-tree-header .places-section-header {
+  margin: 0;
+  border-bottom: 0;
+  padding-bottom: 5px;
+}
+.file-tree-search {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 0 10px 7px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.file-tree-primary-action,
+.file-tree-more-toggle {
+  line-height: 1;
+}
+.file-tree-more-actions {
+  position: absolute;
+  z-index: 5;
+  top: 34px;
+  right: 10px;
+  display: grid;
+  gap: 3px;
+  min-width: 126px;
+  padding: 5px;
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  background: var(--bg-elev);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.32);
+}
+.file-tree-more-actions button {
+  min-height: 28px;
+  padding: 4px 7px;
+  text-align: left;
+  font-size: 11px;
+}
 .tree-scroll {
   flex: 1;
+  min-height: 140px;
   overflow-y: auto;
   padding: 4px 6px;
   font-size: 12px;
+}
+.places-rail > .file-tree .tree-scroll {
+  flex: 0 0 auto;
+  overflow-y: visible;
 }
 .tree-row {
   display: flex;
@@ -1587,19 +1641,6 @@ textarea {
   color: var(--fg-muted);
   text-align: center;
 }
-.tree-icon {
-  flex: 0 0 auto;
-  min-width: 25px;
-  padding: 1px 3px;
-  border: 1px solid var(--bd);
-  border-radius: 3px;
-  color: var(--fg-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 8px;
-  font-weight: 700;
-  line-height: 12px;
-  text-align: center;
-}
 .tree-label {
   flex: 1;
   min-width: 0;
@@ -1607,6 +1648,22 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.tree-status {
+  flex: 0 0 auto;
+  min-width: 12px;
+  color: var(--fg-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+}
+.tree-status-modified,
+.tree-status-staged,
+.tree-status-untracked,
+.tree-status-renamed { color: var(--activity-running); }
+.tree-status-conflicted,
+.tree-status-deleted { color: var(--activity-errored); }
 .tree-row:hover { background: rgba(255, 255, 255, 0.05); }
 .tree-search-meta {
   padding: 6px 8px;
@@ -2633,6 +2690,7 @@ textarea {
 .editor-sidebar-content .file-tree {
   height: 100%;
   min-height: 0;
+  flex: 1 1 auto;
 }
 
 .editor-main {

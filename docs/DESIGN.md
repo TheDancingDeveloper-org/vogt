@@ -427,6 +427,10 @@ web/           the Solid PWA, the product's front end from M11; consumes
                operations the CLI and MCP see. One route model supplies the
                desktop rail, phone bar and Sessions tools with their current
                place/tool and owns loading, unavailable and not-found states.
+               The desktop Places rail is its one vertical scroll container;
+               navigation, running sessions, recents, Files and the footer do
+               not compete for nested viewports. Its Files block keeps a
+               260px minimum for the heading, search, rows and controls.
                Sessions owns the machine workspace: terminal/editor panes and
                Git, History, Tasks, GUI and Assistant deep links compose there.
                Terminal panes alone stay mounted while inactive; other tools

@@ -57,6 +57,10 @@ async function installFixtures(
   page: Page,
   config: Record<string, unknown> = {},
   initialSessions: Record<string, unknown>[] = [],
+  tree: Record<string, unknown>[] = [
+    { name: "src", path: "src", is_dir: true },
+    { name: "an-identifiable-long-filename.tsx", path: "src/an-identifiable-long-filename.tsx", is_dir: false },
+  ],
 ) {
   let inboxCalls = 0;
   const sessions = [...initialSessions];
@@ -125,10 +129,15 @@ async function installFixtures(
     return route.fulfill({ status: 404, json: { error: "not found" } });
   });
   await page.route("**/api/events", async (route) => route.fulfill({ status: 200, contentType: "text/event-stream", body: "" }));
-  await page.route("**/api/tree**", async (route) => route.fulfill({ json: [
-    { name: "src", path: "src", is_dir: true },
-    { name: "an-identifiable-long-filename.tsx", path: "src/an-identifiable-long-filename.tsx", is_dir: false },
-  ] }));
+  await page.route("**/api/tree**", async (route) => {
+    const path = new URL(route.request().url()).searchParams.get("path") ?? "";
+    if (path === "src") {
+      return route.fulfill({ json: [
+        { name: "nested-component.tsx", path: "src/nested-component.tsx", is_dir: false },
+      ] });
+    }
+    return route.fulfill({ json: tree });
+  });
   await page.route("**/api/tasks**", async (route) => route.fulfill({ json: [] }));
   await page.route("**/api/vogt/**", async (route) => {
     const request = route.request();
@@ -401,17 +410,46 @@ test("Dialog focus is contained and restored, and feedback matches its live regi
   ).toBeVisible();
 });
 
-test("Files rail keeps names legible and puts secondary actions behind one control", async ({ page }) => {
+test("Files rail keeps its hierarchy compact and exposes real modified-file status", async ({ page }) => {
   test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
   await installFixtures(page);
+  await page.route("**/api/git/status**", async (route) => route.fulfill({ json: {
+    repo: "", is_repo: true, branch: "dev", ahead: 0, behind: 0,
+    entries: [{
+      path: "src/an-identifiable-long-filename.tsx",
+      index: " ", worktree: "M", kind: "modified",
+    }],
+  } }));
   await page.goto("/#/sessions");
+  const files = page.getByRole("heading", { name: "Files" });
+  const search = page.getByRole("searchbox", { name: "Search files" });
+  await expect(files).toBeVisible();
+  expect(await files.evaluate((element) => Boolean(
+    element.compareDocumentPosition(document.querySelector('.file-tree-search'))
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+  ))).toBe(true);
   await expect(page.getByText("an-identifiable-long-filename.tsx")).toBeVisible();
-  await expect(page.getByText("TSX", { exact: true })).toBeVisible();
+  await expect(search).toBeVisible();
+  await expect(page.getByLabel("Modified file")).toHaveText("M");
+  await expect(page.getByText("TSX", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "New file" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Refresh files" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "New folder" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "More file actions" }).click();
+  await expect(page.getByRole("button", { name: "New folder" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Upload files" })).toBeVisible();
+  await page.getByRole("button", { name: "More file actions" }).click();
+
+  await page.getByRole("button", { name: "Expand src" }).click();
+  await expect(page.getByText("nested-component.tsx")).toBeVisible();
   await expect(page.getByRole("button", { name: "Actions for src", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Delete" })).toHaveCount(0);
   await page.getByRole("button", { name: "Actions for src", exact: true }).click();
   await expect(page.getByRole("button", { name: "Open terminal" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Delete" })).toBeVisible();
+  await expect(page.locator(".places-rail > .file-tree"))
+    .toHaveScreenshot("files-rail-nested-modified.png");
 });
 
 test("palette file commands open distinct real workflows and cancellation is inert", async ({ page }) => {
@@ -502,6 +540,81 @@ test("palette file commands open distinct real workflows and cancellation is ine
   await palette.getByRole("combobox", { name: "Search commands" }).fill("#workspace");
   await expect.poll(() => manifestRequests).toBe(18);
 });
+
+test("Phone editor keeps the compact Files hierarchy and progressive controls usable", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "Phone geometry is validated in the phone browser project");
+  await installFixtures(page);
+  await page.addInitScript(() => {
+    localStorage.setItem("mydevenv2.layoutMode.v1", "ide");
+  });
+  await page.route("**/api/files**", async (route) => route.fulfill({ json: {
+    path: "src/an-identifiable-long-filename.tsx",
+    size: 26,
+    content: "export const answer = 42;\n",
+    content_base64: null,
+    is_binary: false,
+  } }));
+  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+
+  const fileTree = page.locator(".editor-sidebar .file-tree");
+  await expect(fileTree).toBeVisible();
+  await expect(fileTree.getByRole("heading", { name: "Files" })).toBeVisible();
+  await expect(fileTree.getByRole("searchbox", { name: "Search files" })).toBeVisible();
+  await expect(fileTree.getByRole("button", { name: "New file" })).toBeVisible();
+  await fileTree.getByRole("button", { name: "More file actions" }).tap();
+  await expect(fileTree.getByRole("button", { name: "New folder" })).toBeVisible();
+  await expect(fileTree.getByRole("button", { name: "Upload files" })).toBeVisible();
+});
+
+for (const height of [700, 900]) {
+  test(`Crowded desktop rail keeps Files and its footer reachable at ${height}px`, async ({ page }) => {
+    test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+    const crowdedSessions = Array.from({ length: 44 }, (_, index) => ({
+      ...liveSession,
+      id: `crowded-${index + 1}`,
+      name: `Crowded session ${String(index + 1).padStart(2, "0")}`,
+    }));
+    await installFixtures(page, {}, crowdedSessions);
+    await page.setViewportSize({ width: 1280, height });
+    await page.goto("/#/sessions");
+
+    const rail = page.getByRole("complementary", { name: "Places" });
+    const files = page.getByRole("heading", { name: "Files" });
+    const search = page.getByRole("searchbox", { name: "Search files" });
+    const row = page.getByText("an-identifiable-long-filename.tsx");
+    const settings = page.getByRole("button", { name: "Settings" });
+    const metrics = await rail.evaluate((element) => ({
+      overflowY: getComputedStyle(element).overflowY,
+      scrollHeight: element.scrollHeight,
+      clientHeight: element.clientHeight,
+      nestedOverflow: [
+        ".places-nav",
+        ".places-rail-session-area",
+        ".places-recent",
+        ".file-tree .tree-scroll",
+      ].map((selector) => getComputedStyle(element.querySelector(selector)!).overflowY),
+    }));
+    expect(metrics.overflowY).toBe("auto");
+    expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+    expect(metrics.nestedOverflow).not.toContain("auto");
+    expect(metrics.nestedOverflow).not.toContain("scroll");
+
+    await settings.focus();
+    await expect(settings).toBeFocused();
+    await expect(settings).toBeInViewport();
+    await expect(files).toBeInViewport();
+    await expect(search).toBeInViewport();
+    await expect(row).toBeInViewport();
+    await page.getByRole("link", { name: "Board" }).focus();
+    await expect(page.getByRole("link", { name: "Board" })).toBeInViewport();
+    await page.getByRole("button", { name: "New file" }).focus();
+    await expect(page.getByRole("button", { name: "New file" })).toBeInViewport();
+    const fileHeight = await page.locator(".file-tree").evaluate((element) =>
+      element.getBoundingClientRect().height,
+    );
+    expect(fileHeight).toBeGreaterThanOrEqual(259);
+  });
+}
 
 test("Route truth owns unavailable links, current navigation and Settings return", async ({ page }) => {
   await installFixtures(page);

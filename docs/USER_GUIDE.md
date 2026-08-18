@@ -49,6 +49,17 @@ non-closable places. Sessions contains the terminal/editor panes and machine
 tools; their existing deep links still select the named pane or tool, and a
 pasted link restores the view it names (FR-U11). Open panes persist per device.
 
+On desktop, the whole Places rail scrolls as one column when running sessions
+make it taller than the window. Files therefore remains reachable rather than
+being squeezed behind a separately scrolling session list; when visible it
+keeps a 260px minimum containing its heading, search, rows and controls. The
+compact header keeps **New file** and **Refresh** immediate, while **New
+folder** and **Upload files** sit under **More file actions**. Each row keeps
+the name first, folders disclose nested rows with a caret, Git-changed files
+show a quiet status letter such as `M`, and the labelled row menu retains
+rename/move, duplicate, download, delete, upload-here, terminal and preset
+operations where they apply.
+
 | Surface | Link | What it is |
 |---|---|---|
 | **Board** | `#/board` | Work items in columns. The columns *are* the workflow's states, read from the server — not written down anywhere in the client. |
