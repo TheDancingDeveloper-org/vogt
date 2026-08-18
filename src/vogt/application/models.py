@@ -627,6 +627,66 @@ class WorkListResult(Result):
     total: int
 
 
+BoardLaneMode = Literal["none", "project", "initiative"]
+
+
+class BoardCellParams(Params):
+    """One cell requested in a batched Board read."""
+
+    lane_key: str = Field(
+        default="",
+        description=(
+            "Project slug or initiative id for the selected lane mode; blank is "
+            "the sole lane in `none` mode and the unassigned lane otherwise."
+        ),
+    )
+    state: str
+    cursor: str | None = Field(
+        default=None,
+        description="Opaque continuation returned for this exact cell.",
+    )
+
+
+class BoardListParams(Params):
+    """One bounded, server-owned batch of independently pageable cells."""
+
+    project: str | None = Field(default=None, description="Project slug.")
+    kinds: list[WorkKind] | None = None
+    states: list[str] | None = None
+    priorities: list[Priority] | None = None
+    assignee: str | None = Field(default=None, description="Actor identity_ref.")
+    initiative: str | None = Field(default=None, description="Initiative slug.")
+    label: str | None = None
+    lane_mode: BoardLaneMode = "none"
+    cells: list[BoardCellParams] = Field(min_length=1, max_length=40)
+    page_size: int = Field(default=30, ge=1, le=100)
+    snapshot: str | None = Field(
+        default=None,
+        description=(
+            "Opaque snapshot returned by the first batch. Required when adding "
+            "another cell or continuing one against that same Board view."
+        ),
+    )
+
+
+class BoardCellResult(Result):
+    lane_key: str
+    state: str
+    items: list[WorkItem]
+    total: int
+    next_cursor: str | None = None
+
+
+class BoardListResult(Result):
+    cells: list[BoardCellResult]
+    column_totals: dict[str, int]
+    lane_totals: dict[str, int]
+    total: int
+    snapshot: str
+    snapshot_at: datetime
+    revision: int
+
+
 class UpdateWorkParams(Params):
     ref: str
     title: Name | None = None

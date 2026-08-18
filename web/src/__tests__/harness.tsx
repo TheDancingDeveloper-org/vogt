@@ -77,6 +77,72 @@ export function held(): {
 /** `"GET /work"`, `"POST /work/transition"` — the key a handler is filed under. */
 export type Routes = Record<string, Handler>;
 
+function boardFromWork(handler: Handler): Handler {
+  return async (call) => {
+    const source =
+      typeof handler === "function"
+        ? await handler({ ...call, method: "GET", path: "/work", body: null })
+        : handler;
+    if ((source.status ?? 200) >= 400 || source.text !== undefined) return source;
+    const work = (source.body ?? {}) as {
+      items?: Record<string, unknown>[];
+      total?: number;
+    };
+    const body = call.body ?? {};
+    const laneMode = String(body.lane_mode ?? "none");
+    const requested = Array.isArray(body.cells)
+      ? (body.cells as { lane_key?: string; state?: string; cursor?: string }[])
+      : [];
+    const items = work.items ?? [];
+    // Legacy fixtures describe an already-loaded Board. Preserve that unit
+    // test meaning; bounded paging tests install `/board/list` directly.
+    const pageSize = items.length;
+    const laneOf = (item: Record<string, unknown>) =>
+      laneMode === "project"
+        ? String(item.project_slug ?? "")
+        : laneMode === "initiative"
+          ? String(item.initiative_id ?? "")
+          : "";
+    const columnTotals: Record<string, number> = {};
+    const laneTotals: Record<string, number> = {};
+    for (const item of items) {
+      const state = String(item.state ?? "");
+      const lane = laneOf(item);
+      columnTotals[state] = (columnTotals[state] ?? 0) + 1;
+      laneTotals[lane] = (laneTotals[lane] ?? 0) + 1;
+    }
+    return {
+      body: {
+        cells: requested.map((cell) => {
+          const matching = items.filter(
+            (item) =>
+              laneOf(item) === String(cell.lane_key ?? "") &&
+              String(item.state ?? "") === String(cell.state ?? ""),
+          );
+          const offset = Number(/^test:(\d+)$/.exec(cell.cursor ?? "")?.[1] ?? 0);
+          const page = matching.slice(offset, offset + pageSize);
+          return {
+            lane_key: String(cell.lane_key ?? ""),
+            state: String(cell.state ?? ""),
+            items: page,
+            total: matching.length,
+            next_cursor:
+              offset + page.length < matching.length
+                ? `test:${offset + page.length}`
+                : null,
+          };
+        }),
+        column_totals: columnTotals,
+        lane_totals: laneTotals,
+        total: work.total ?? items.length,
+        snapshot: String(body.snapshot ?? "test-board-snapshot"),
+        snapshot_at: "2026-08-17T10:01:00Z",
+        revision: 1,
+      },
+    };
+  };
+}
+
 /** Vogt's own refusal shape: the message a surface must render verbatim. */
 export function refusal(status: number, message: string): Reply {
   return { status, body: { error: { code: "test.refused", message } } };
@@ -418,9 +484,26 @@ export function freshness(over: Record<string, unknown> = {}): Record<string, un
 }
 
 function defaults(): Routes {
+  const defaultItem = workItem();
   return {
     "GET /workflows": { body: { workflows: [FEATURE_WORKFLOW, BUG_WORKFLOW] } },
     "GET /work": { body: { items: [workItem()], total: 1 } },
+    "POST /board/list": {
+      body: {
+        cells: [
+          { lane_key: "", state: "open", items: [defaultItem], total: 1 },
+          { lane_key: "", state: "in_progress", items: [], total: 0 },
+          { lane_key: "", state: "done", items: [], total: 0 },
+          { lane_key: "", state: "wont_do", items: [], total: 0 },
+        ],
+        column_totals: { open: 1, in_progress: 0, done: 0, wont_do: 0 },
+        lane_totals: { "": 1 },
+        total: 1,
+        snapshot: "test-board-snapshot",
+        snapshot_at: "2026-08-17T10:01:00Z",
+        revision: 1,
+      },
+    },
     "GET /work/get": {
       body: { item: workItem(), comments: [], sessions: [] },
     },
@@ -462,7 +545,11 @@ function defaults(): Routes {
  * so there is nothing to undo here.
  */
 export function fakeVogt(routes: Routes = {}, engine: Routes = {}): FakeVogt {
-  const table: Routes = { ...defaults(), ...routes };
+  const compatible = { ...routes };
+  if (compatible["GET /work"] !== undefined && compatible["POST /board/list"] === undefined) {
+    compatible["POST /board/list"] = boardFromWork(compatible["GET /work"]);
+  }
+  const table: Routes = { ...defaults(), ...compatible };
   const calls: RecordedCall[] = [];
   const unhandled: RecordedCall[] = [];
   const engineCalls: RecordedCall[] = [];
@@ -539,9 +626,18 @@ export function fakeVogt(routes: Routes = {}, engine: Routes = {}): FakeVogt {
     engineCalls,
     route(key, handler) {
       table[key] = handler;
+      if (key === "GET /work") table["POST /board/list"] = boardFromWork(handler);
     },
     matching(key) {
-      const [method, path] = key.split(" ");
+      let [method, path] = key.split(" ");
+      // Board tests written before the bounded projection name the read they
+      // meant, not its new transport shape. Keep their request-count claims
+      // pointed at the Board read while new tests assert `/board/list`
+      // directly.
+      if (method === "GET" && path === "/work") {
+        method = "POST";
+        path = "/board/list";
+      }
       return calls.filter((call) => call.method === method && call.path === path);
     },
     stream,

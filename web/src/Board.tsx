@@ -45,11 +45,11 @@
 //     view still reports its own age and never calls itself current when it
 //     is not.
 //
-//  5. **Bounded reads.** `work.list` is paged and ordered oldest-first, so a
-//     truncated read is a *misleading* read on a board. The load pages until
-//     the filter is exhausted or a cap is reached, and if the cap wins the
-//     board says so and stops claiming its column counts are counts of the
-//     estate (NFR-S5).
+//  5. **Bounded reads.** `board.list` fixes one server snapshot, returns exact
+//     cell/column totals, and pages each cell independently. The first batch is
+//     bounded by visible cells and their overscan; a cell asks for its opaque
+//     continuation only as its measured window approaches the loaded end.
+//     A live change starts a fresh snapshot instead of mixing revisions.
 //
 //  6. **The columns window; they do not truncate, and they are projected
 //     once.** Two halves of NFR-S5, and they are the same decision.
@@ -101,12 +101,13 @@ import {
   VogtUnavailable,
   createWork,
   listActors,
+  listBoard,
   listInitiatives,
   listLabels,
   listProjects,
-  listWork,
   listWorkflows,
   transitionWork,
+  type BoardCellPage,
   type WorkItem,
   type Workflow,
   type WorkflowState,
@@ -119,11 +120,9 @@ interface Props {
 /** Grouping for swimlanes (FR-U13). */
 type LaneMode = "none" | "project" | "initiative";
 
-/** One bounded page of `work.list`; the server caps this at 500. */
-const PAGE_SIZE = 500;
-
-/** Safety ceiling for the compatibility path while `board.list` is absent. */
-const MAX_ITEMS = 2000;
+/** Rows fetched per visible cell. The server caps this independently too. */
+const CELL_PAGE_SIZE = 30;
+const INITIAL_LANE_PAGES = 2;
 
 /** Layout-free seed only; measured cards replace it as soon as they render. */
 export const CARD_ESTIMATE = 112;
@@ -701,6 +700,14 @@ interface PendingMove {
   phase: "reason" | "saving";
 }
 
+interface CellPageState {
+  items: WorkItem[];
+  total: number;
+  nextCursor: string | null;
+  loading: boolean;
+  error: string | null;
+}
+
 interface Refusal {
   ref: string;
   from: string;
@@ -759,8 +766,13 @@ const Board: Component<Props> = (props) => {
   const patch = (next: Partial<Filters>) => applyFilters({ ...filters(), ...next });
 
   const [workflows, setWorkflows] = createSignal<Workflow[] | null>(null);
+  const [metadataReady, setMetadataReady] = createSignal(false);
   const [items, setItems] = createSignal<WorkItem[]>([]);
   const [total, setTotal] = createSignal(0);
+  const [cellPages, setCellPages] = createSignal<Map<string, CellPageState>>(new Map());
+  const [columnTotals, setColumnTotals] = createSignal<Record<string, number>>({});
+  const [laneTotals, setLaneTotals] = createSignal<Record<string, number>>({});
+  const [boardSnapshot, setBoardSnapshot] = createSignal<string | null>(null);
   const [loadedAt, setLoadedAt] = createSignal<number | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [outage, setOutage] = createSignal<string | null>(null);
@@ -927,37 +939,103 @@ const Board: Component<Props> = (props) => {
     });
   };
 
+  const laneKeys = (active: Filters): string[] => {
+    if (active.lanes === "project") {
+      const keys = [
+        ...projects().map((project) => project.slug),
+        ...Object.keys(laneTotals()),
+      ].filter((slug) => !active.project || slug === active.project);
+      return [...keys, ""].filter((key, index, all) => all.indexOf(key) === index);
+    }
+    if (active.lanes === "initiative") {
+      const keys = [
+        ...initiatives().flatMap((initiative) =>
+          initiative.id ? [initiative.id] : [],
+        ),
+        ...Object.keys(laneTotals()),
+      ];
+      return [...keys, ""].filter((key, index, all) => all.indexOf(key) === index);
+    }
+    return [""];
+  };
+
+  const requestedStates = (active: Filters): string[] => {
+    if (active.states.length) return active.states;
+    return columnsFor(workflows() ?? [], Object.keys(columnTotals())).map(
+      (column) => column.state,
+    );
+  };
+
+  const boardCells = (active: Filters) =>
+    laneKeys(active)
+      .slice(
+        0,
+        typeof IntersectionObserver === "undefined"
+          ? undefined
+          : INITIAL_LANE_PAGES,
+      )
+      .flatMap((lane_key) =>
+      requestedStates(active).map((state) => ({ lane_key, state })),
+    );
+
+  const boardParams = (active: Filters) => ({
+    project: active.project || undefined,
+    kinds: active.kinds.length ? active.kinds : undefined,
+    states: active.states.length ? active.states : undefined,
+    label: active.label || undefined,
+    initiative: active.initiative || undefined,
+    assignee: active.assignee || undefined,
+    lane_mode: active.lanes,
+    page_size: CELL_PAGE_SIZE,
+  });
+
+  const mergeCellPage = (
+    previous: Map<string, CellPageState>,
+    page: BoardCellPage,
+    append: boolean,
+  ): Map<string, CellPageState> => {
+    const next = new Map(previous);
+    const key = cellKey(page.lane_key, page.state);
+    const old = previous.get(key);
+    const combined = append ? [...(old?.items ?? []), ...(page.items ?? [])] : page.items ?? [];
+    const unique = [...new Map(combined.map((item) => [item.ref, item])).values()];
+    next.set(key, {
+      items: mergeItems(unique),
+      total: page.total,
+      nextCursor: page.next_cursor ?? null,
+      loading: false,
+      error: null,
+    });
+    return next;
+  };
+
+  const syncItemsFromCells = (pages: Map<string, CellPageState>) => {
+    setItems(
+      mergeItems(
+        [...pages.values()].flatMap((page) => page.items),
+      ),
+    );
+  };
+
   const loadItems = async (quiet = false) => {
+    if (workflows() === null) return;
     const seq = ++loadSeq;
     if (!quiet) setLoading(true);
     const active = filters();
     try {
-      const collected: WorkItem[] = [];
-      let reported = 0;
-      for (let offset = 0; offset < MAX_ITEMS; offset += PAGE_SIZE) {
-        const page = await listWork({
-          project: active.project || undefined,
-          kinds: active.kinds.length ? active.kinds : undefined,
-          states: active.states.length ? active.states : undefined,
-          label: active.label || undefined,
-          initiative: active.initiative || undefined,
-          assignee: active.assignee || undefined,
-          // Always: the board draws a column for every workflow state, and a
-          // finished column that is empty because the *query* dropped it is a
-          // lie. Which states are shown is the `state` filter's job, and that
-          // is in the URL where it can be read.
-          include_finished: true,
-          limit: PAGE_SIZE,
-          offset,
-        });
-        collected.push(...(page.items ?? []));
-        reported = page.total ?? collected.length;
-        if ((page.items ?? []).length < PAGE_SIZE) break;
-        if (collected.length >= reported) break;
-      }
+      const answer = await listBoard({
+        ...boardParams(active),
+        cells: boardCells(active),
+      });
       if (seq !== loadSeq) return;
-      setItems(mergeItems(collected));
-      setTotal(Math.max(reported, collected.length));
+      let next = new Map<string, CellPageState>();
+      for (const page of answer.cells ?? []) next = mergeCellPage(next, page, false);
+      setCellPages(next);
+      syncItemsFromCells(next);
+      setTotal(answer.total);
+      setColumnTotals(answer.column_totals ?? {});
+      setLaneTotals(answer.lane_totals ?? {});
+      setBoardSnapshot(answer.snapshot);
       setLoadedAt(Date.now());
       setOutage(null);
       setLoadError(null);
@@ -970,17 +1048,97 @@ const Board: Component<Props> = (props) => {
     }
   };
 
+  const loadNextCell = async (laneKey: string, state: string) => {
+    const key = cellKey(laneKey, state);
+    const current = cellPages().get(key);
+    const snapshot = boardSnapshot();
+    if (!current?.nextCursor || current.loading || !snapshot) return;
+    setCellPages((previous) => {
+      const next = new Map(previous);
+      next.set(key, { ...current, loading: true, error: null });
+      return next;
+    });
+    try {
+      const answer = await listBoard({
+        ...boardParams(filters()),
+        cells: [{ lane_key: laneKey, state, cursor: current.nextCursor }],
+        snapshot,
+      });
+      const page = answer.cells[0];
+      if (!page || answer.snapshot !== snapshot) return;
+      let merged: Map<string, CellPageState> | undefined;
+      setCellPages((previous) => {
+        const next = mergeCellPage(previous, page, true);
+        merged = next;
+        return next;
+      });
+      if (merged) syncItemsFromCells(merged);
+    } catch (error) {
+      const message = serverReason(error);
+      setCellPages((previous) => {
+        const next = new Map(previous);
+        const latest = previous.get(key);
+        if (latest) next.set(key, { ...latest, loading: false, error: message });
+        return next;
+      });
+    }
+  };
+
+  const loadingLanes = new Set<string>();
+  const loadLane = async (laneKey: string) => {
+    const snapshot = boardSnapshot();
+    const missing = requestedStates(filters()).filter(
+      (state) => !cellPages().has(cellKey(laneKey, state)),
+    );
+    if (!snapshot || !missing.length || loadingLanes.has(laneKey)) return;
+    loadingLanes.add(laneKey);
+    try {
+      const answer = await listBoard({
+        ...boardParams(filters()),
+        cells: missing.map((state) => ({ lane_key: laneKey, state })),
+        snapshot,
+      });
+      if (answer.snapshot !== snapshot) return;
+      let merged: Map<string, CellPageState> | undefined;
+      setCellPages((previous) => {
+        let next = previous;
+        for (const page of answer.cells ?? []) next = mergeCellPage(next, page, false);
+        merged = next;
+        return next;
+      });
+      if (merged) syncItemsFromCells(merged);
+    } catch (error) {
+      const message = serverReason(error);
+      setCellPages((previous) => {
+        const next = new Map(previous);
+        for (const state of missing) {
+          next.set(cellKey(laneKey, state), {
+            items: [],
+            total: 0,
+            nextCursor: null,
+            loading: false,
+            error: message,
+          });
+        }
+        return next;
+      });
+    } finally {
+      loadingLanes.delete(laneKey);
+    }
+  };
+
   const reload = async () => {
-    await Promise.all([loadWorkflows(), loadItems()]);
+    await Promise.all([loadWorkflows(), loadTaxonomy()]);
+    setMetadataReady(true);
+    await loadItems();
   };
 
   onMount(() => {
-    void loadTaxonomy();
     void reload();
   });
 
   // Refetch whenever the server-side half of the filter changes. The lane
-  // mode and poll interval are client-side and deliberately not in here.
+  // mode is server-owned grouping; only the poll interval stays client-side.
   createEffect<string>((previous) => {
     const active = filters();
     const key = JSON.stringify([
@@ -990,8 +1148,12 @@ const Board: Component<Props> = (props) => {
       active.label,
       active.initiative,
       active.assignee,
+      active.lanes,
+      workflows()?.map((workflow) => [workflow.kind, workflow.states]),
+      projects().map((project) => project.slug),
+      initiatives().map((initiative) => initiative.id),
     ]);
-    if (previous !== undefined && previous !== key) void loadItems();
+    if (metadataReady() && previous !== undefined && previous !== key) void loadItems();
     return key;
   });
 
@@ -1037,7 +1199,7 @@ const Board: Component<Props> = (props) => {
   const allColumns = createMemo<Column[]>(() =>
     columnsFor(
       activeWorkflows(),
-      items().map((item) => item.state),
+      Object.keys(columnTotals()),
     ),
   );
 
@@ -1098,7 +1260,7 @@ const Board: Component<Props> = (props) => {
     // first thing an import's owner does is open the board, and the board's
     // answer for a correct import was to show nothing and label it "No
     // matching work", pointing at the filter rather than at the absence.
-    if (filters().lanes === "project") {
+    if (filters().lanes === "project" && boardSnapshot()) {
       for (const project of projects()) {
         if (filters().project && project.slug !== filters().project) continue;
         grouped.set(project.slug, {
@@ -1107,7 +1269,12 @@ const Board: Component<Props> = (props) => {
           items: [],
         });
       }
-    } else if (filters().lanes === "initiative") {
+      grouped.set("", {
+        key: "",
+        label: projects().length === 0 && total() === 0 ? "No work yet" : "No project",
+        items: [],
+      });
+    } else if (filters().lanes === "initiative" && boardSnapshot()) {
       for (const initiative of initiatives()) {
         // `laneOf` keys initiatives by id, so one without an id cannot be
         // matched to any item and would seed a lane nothing can ever join.
@@ -1118,6 +1285,7 @@ const Board: Component<Props> = (props) => {
           items: [],
         });
       }
+      grouped.set("", { key: "", label: "No initiative", items: [] });
     }
     for (const item of items()) {
       const { key, label } = laneOf(item);
@@ -1192,9 +1360,14 @@ const Board: Component<Props> = (props) => {
   const cellItems = (lane: Lane, state: string): readonly WorkItem[] =>
     projection().cells.get(cellKey(lane.key, state)) ?? NO_CARDS;
 
-  const columnCount = (state: string) => projection().counts.get(state) ?? 0;
+  const columnCount = (state: string) => {
+    const base = columnTotals()[state] ?? 0;
+    const move = pending();
+    if (!move || move.from === move.to) return base;
+    return base + (move.to === state ? 1 : 0) - (move.from === state ? 1 : 0);
+  };
 
-  const truncated = createMemo(() => total() > items().length);
+  const laneCount = (laneKey: string) => laneTotals()[laneKey] ?? 0;
 
   const itemByRef = createMemo(() => {
     const index = new Map<string, WorkItem>();
@@ -1261,6 +1434,11 @@ const Board: Component<Props> = (props) => {
     try {
       const answer = await transitionWork(move.ref, move.to, reason);
       const updated = answer?.item;
+      setColumnTotals((counts) => ({
+        ...counts,
+        [move.from]: Math.max(0, (counts[move.from] ?? 0) - 1),
+        [move.to]: (counts[move.to] ?? 0) + 1,
+      }));
       setPending(null);
       setStickyReason(reason);
       if (updated) applyItem(updated);
@@ -1582,9 +1760,7 @@ const Board: Component<Props> = (props) => {
         honesty={(
           <div class="board-summary" aria-live="polite">
             <span>{items().length} loaded</span>
-            <Show when={truncated()}>
-              <span>of {total()} matching</span>
-            </Show>
+            <span>of {total()} matching</span>
             <span>{columns().length} columns</span>
             <ViewAgeBadge
               age={freshness()}
@@ -1663,17 +1839,6 @@ const Board: Component<Props> = (props) => {
             <span>{message()}</span>
           </div>
         )}
-      </Show>
-
-      <Show when={truncated()}>
-        <div class="board-banner board-banner--warn">
-          <strong>Showing {items().length} of {total()} matching items.</strong>
-          <span>
-            <code>work.list</code> returns oldest first, so this is the oldest
-            slice of the filter, not a sample of it. Column counts below count
-            what is loaded. Narrow the filters to see the whole set.
-          </span>
-        </div>
       </Show>
 
       <Show when={ack()}>
@@ -1996,7 +2161,6 @@ const Board: Component<Props> = (props) => {
                     <span class="board-colhead-name">{humanState(column.state)}</span>
                     <span class="board-wip" title="Work in progress: loaded items in this column">
                       {columnCount(column.state)}
-                      {truncated() ? "+" : ""}
                     </span>
                     <Show when={!collapsedColumn(column.state) && !column.known}>
                       <span class="board-colhead-note">
@@ -2021,13 +2185,28 @@ const Board: Component<Props> = (props) => {
                         {collapsedLane(lane.key) ? "▸" : "▾"}
                       </span>
                       <span class="board-lane-label">{lane.label}</span>
-                      <span class="board-lane-count">{lane.items.length}</span>
+                      <span class="board-lane-count">{laneCount(lane.key)}</span>
                     </button>
                   </Show>
                   <Show when={!collapsedLane(lane.key) || filters().lanes === "none"}>
                     <div
                       class="board-row"
                       style={{ "grid-template-columns": gridTemplate() }}
+                      ref={(node) => {
+                        if (cellPages().has(cellKey(lane.key, columns()[0]?.state ?? ""))) return;
+                        if (typeof IntersectionObserver === "undefined") {
+                          void loadLane(lane.key);
+                          return;
+                        }
+                        const observer = new IntersectionObserver((entries) => {
+                          if (entries.some((entry) => entry.isIntersecting)) {
+                            void loadLane(lane.key);
+                            observer.disconnect();
+                          }
+                        }, { root: node.closest(".board-scroll"), rootMargin: "480px" });
+                        observer.observe(node);
+                        onCleanup(() => observer.disconnect());
+                      }}
                     >
                       <For each={columns()}>
                         {(column) => {
@@ -2038,6 +2217,7 @@ const Board: Component<Props> = (props) => {
                           const dropKey = `${lane.key}||${column.state}`;
                           const mine = cellKey(lane.key, column.state);
                           const cards = createMemo(() => cellItems(lane, column.state));
+                          const pageState = createMemo(() => cellPages().get(mine));
 
                           // -- measured windowing (NFR-S5 / FR-U25) --------
                           // The estimate is only the layout-free seed. Each
@@ -2144,7 +2324,7 @@ const Board: Component<Props> = (props) => {
                               // moved: at desk widths the head row is still
                               // the thing that labels the column.
                               data-state={humanState(column.state)}
-                              data-wip={`${columnCount(column.state)}${truncated() ? "+" : ""}`}
+                              data-wip={String(columnCount(column.state))}
                               onDragOver={(event) => {
                                 if (!dragRef() || writesDisabled()) return;
                                 event.preventDefault();
@@ -2310,6 +2490,14 @@ const Board: Component<Props> = (props) => {
                                     const at = event.currentTarget.scrollTop;
                                     cellScroll.set(mine, at);
                                     setScrollTop(at);
+                                    if (
+                                      event.currentTarget.scrollHeight -
+                                        event.currentTarget.clientHeight -
+                                        at <
+                                      OVERSCAN_PX * 2
+                                    ) {
+                                      void loadNextCell(lane.key, column.state);
+                                    }
                                   }}
                                 >
                                   {/* The full height of everything the filter
@@ -2467,13 +2655,32 @@ const Board: Component<Props> = (props) => {
                                   </div>
                                 </div>
 
-                                <Show when={cards().length === 0 && !move() && !refused()}>
+                                <Show when={pageState()?.loading}>
+                                  <div class="board-cell-status">Loading more…</div>
+                                </Show>
+                                <Show when={pageState()?.error}>
+                                  {(message) => (
+                                    <div class="board-cell-status board-cell-status--error" role="alert">
+                                      <span>{message()}</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => void loadNextCell(lane.key, column.state)}
+                                      >
+                                        Retry
+                                      </button>
+                                    </div>
+                                  )}
+                                </Show>
+                                <Show when={cards().length === 0 && !move() && !refused() && pageState()}>
                                   <div class="board-cell-empty">Nothing here</div>
+                                </Show>
+                                <Show when={!pageState()}>
+                                  <div class="board-cell-status">Loading cell…</div>
                                 </Show>
                               </Show>
                               <Show when={collapsedColumn(column.state)}>
                                 <div class="board-cell-collapsed">
-                                  {cards().length}
+                                  {pageState()?.total ?? 0}
                                 </div>
                               </Show>
                             </div>

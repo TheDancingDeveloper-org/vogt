@@ -12,6 +12,7 @@ from vogt.application.services.auth import (
     list_tokens,
     revoke_token,
 )
+from vogt.application.services.board import list_board
 from vogt.application.services.collect import coverage, deps, observations, sweep
 from vogt.application.services.connect import connect
 from vogt.application.services.contracts import (
@@ -123,6 +124,7 @@ __all__ = [
     "list_actors",
     "list_audit",
     "list_auth_decisions",
+    "list_board",
     "list_drift",
     "list_events",
     "list_inbox",
