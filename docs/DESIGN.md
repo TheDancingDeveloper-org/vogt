@@ -661,6 +661,47 @@ is easier than becoming compliant. Registering an existing non-compliant
 folder succeeds and reports its status — registration is never refused on
 contract grounds.
 
+### 5.0a The contract is adopted, not imposed (r14)
+
+Eight projects were checked on the dev instance and all eight came back
+`non_compliant`. `design/` failed 8 of 8 — which is a fact about the
+criterion. `LICENSE` failed 8 of 8 and was the one real finding. `src/`
+failed the three that were Cargo workspaces, which structurally cannot have
+a root `src/`. One word carried all three situations, so the word carried
+nothing, and a user who wanted an issue tracker was told their repository was
+faulty by machinery they never opted into.
+
+Four things follow, and they are the whole of FR-G16–G19:
+
+- **Adoption is per project and opt-in.** `contract adopt` is an audited
+  declaration with a reason, and `contract decline` withdraws it. A project
+  that has adopted nothing reports `not_applicable`, a check against it
+  records nothing, and no view calls it non-compliant. Asking Vogt to
+  *create* a project is itself the opting in: the skeleton and the adoption
+  are the same request. Being handed one is not.
+- **The scaffold reaches a project Vogt did not create.** `project scaffold`
+  runs the same skeleton `project create` writes against a registered
+  project, never overwrites — a path already there is *skipped*, and skipped
+  means untouched — and reports created and skipped paths the same way.
+  Reporting a gap the product can close, without offering to close it, is the
+  enforcing posture in a different costume.
+- **A reported gap carries its remedy.** Each failing criterion comes with
+  either the mechanical fix (`project scaffold` writes `AGENTS.md`) or, where
+  the content is a decision, an instruction addressed to an actor: which
+  licence to choose, what belongs in `design/`. `default_scaffold` refuses to
+  invent a licence, and the recommendation says so rather than quietly
+  writing MIT. It is advisory output, applied by nothing implicitly, and it
+  carries no authority beyond §2.1's rule.
+- **Unmet and unmeetable are different facts.** `contract inapplicable`
+  records that a criterion cannot apply here — with a reason and an author,
+  because the difference between "we have not done it" and "it does not
+  describe us" is an argument somebody has to make. The criterion is still
+  reported, with that argument attached; it is not counted as failing, and it
+  is absent from the recommendations. `contract applicable` withdraws it.
+
+None of this is a gate. FR-G13 is untouched: a project that declined the
+contract is refused nothing, and a recommendation is a sentence, not an act.
+
 ### 5.1 Registration is the scope (r3)
 
 **Collection scope is the list of registered projects.** `project

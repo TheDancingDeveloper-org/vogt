@@ -187,8 +187,31 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ("suppression.list", {}),
     # -- contract and drift -------------------------------------------------
     ("contract.evaluate", {"path": "{root}"}),
+    # Adoption first: the contract is opt-in, so a project that never adopted
+    # reports `not_applicable` and records nothing (FR-G16).
+    ("contract.adopt", {"project": "parity-fixture", "reason": WHY}),
+    ("project.scaffold", {"project": "parity-fixture", "reason": WHY}),
+    (
+        "contract.inapplicable",
+        {
+            "project": "parity-fixture",
+            "rule": "required_dir",
+            "target": "design",
+            "reason": WHY,
+        },
+    ),
     ("contract.check", {"project": "parity-fixture", "reason": WHY}),
+    (
+        "contract.applicable",
+        {
+            "project": "parity-fixture",
+            "rule": "required_dir",
+            "target": "design",
+            "reason": WHY,
+        },
+    ),
     ("compliance", {"project": "parity-fixture"}),
+    ("contract.decline", {"project": "parity-fixture", "reason": WHY}),
     ("drift.detect", {"reason": WHY}),
     ("drift.list", {"status": "open"}),
     ("inbox.list", {}),
@@ -339,6 +362,9 @@ VOLATILE_KEYS = frozenset(
         "created_at",
         "updated_at",
         "compliance_checked_at",
+        "contract_adopted_at",
+        "adopted_at",
+        "declared_at",
         "at",
         "data_dir",
         "payload_digest",

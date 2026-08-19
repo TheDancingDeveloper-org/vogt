@@ -1544,6 +1544,15 @@ const Projects: Component<Props> = (props) => {
                       <p class={`vogt-projects-status vogt-projects-status--${readString(data(), "compliance_status") ?? "not_checked"}`}>
                         {readString(data(), "compliance_status") ?? "not_checked"}
                       </p>
+                      {/* FR-G16: the contract is opt-in, so this status is
+                          not a criticism — a project that adopted nothing is
+                          not being measured, and the surface says which. */}
+                      <Show when={readString(data(), "compliance_status") === "not_applicable"}>
+                        <p class="vogt-projects-muted">
+                          This project has not adopted the contract, so there is
+                          nothing for it to comply with. `contract adopt` opts in.
+                        </p>
+                      </Show>
                       <Show when={contractValue()}>
                         {(result) => (
                           <>

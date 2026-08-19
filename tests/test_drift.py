@@ -23,6 +23,7 @@ import pytest
 
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    ContractAdoptParams,
     ContractCheckParams,
     DriftDetectParams,
     DriftListParams,
@@ -35,6 +36,7 @@ from vogt.application.models import (
 )
 from vogt.application.services import (
     brief_project,
+    contract_adopt,
     contract_check,
     detect_drift,
     get_project,
@@ -669,6 +671,10 @@ def test_m3_demo(instance: AppContext, tmp_path: Path) -> None:
         instance,
         RegisterProjectParams(name="Demo", root_path=str(project), reason=WHY),
     )
+    # The contract is opt-in (FR-G16), and this demo is about a project that
+    # adopted it — which is what makes its verdict a verdict rather than a
+    # judgement nobody asked for.
+    contract_adopt(instance, ContractAdoptParams(project="demo", reason=WHY))
 
     checked = contract_check(instance, ContractCheckParams(project="demo", reason=WHY))
     assert [c.target for c in checked.failing] == ["AGENTS.md"]

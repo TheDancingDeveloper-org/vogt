@@ -17,8 +17,12 @@ from vogt.application.services.collect import coverage, deps, observations, swee
 from vogt.application.services.connect import connect
 from vogt.application.services.contracts import (
     compliance,
+    contract_adopt,
+    contract_applicable,
     contract_check,
+    contract_decline,
     contract_evaluate,
+    contract_inapplicable,
 )
 from vogt.application.services.drift_service import (
     detect_drift,
@@ -59,6 +63,7 @@ from vogt.application.services.projects import (
     get_project,
     list_projects,
     register_project,
+    scaffold_project,
     transition_project,
     update_project,
 )
@@ -104,8 +109,12 @@ __all__ = [
     "comment_work",
     "compliance",
     "connect",
+    "contract_adopt",
+    "contract_applicable",
     "contract_check",
+    "contract_decline",
     "contract_evaluate",
+    "contract_inapplicable",
     "coverage",
     "create_actor",
     "create_initiative",
@@ -149,6 +158,7 @@ __all__ = [
     "restore_inbox",
     "revoke_suppression",
     "revoke_token",
+    "scaffold_project",
     "serve",
     "serve_mcp_stdio",
     "set_write_back",

@@ -127,7 +127,8 @@ through `idx_audit_at`, would both fix it without changing what is stored.
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `projects` | unit of the per-repo view; one explicitly registered repo or folder (FR-P5, FR-G15) | `id, slug, name, root_path, repo_url, lifecycle_state, current_version, contract_version, compliance_status(compliant\|non_compliant\|not_checked), compliance_checked_at, exclusions(json), trust_state, created_at, updated_at` |
+| `projects` | unit of the per-repo view; one explicitly registered repo or folder (FR-P5, FR-G15) | `id, slug, name, root_path, repo_url, lifecycle_state, current_version, contract_version, compliance_status(compliant\|non_compliant\|not_checked), compliance_checked_at, contract_adopted_at, exclusions(json), trust_state, created_at, updated_at` |
+| `contract_exemptions` | a criterion declared unmeetable by a project, with its reason and its author (FR-G19) | `id, project_id, rule, target, reason, declared_by, declared_at` |
 | `initiatives` | cross-project epics | `id, slug, title, body, state(open\|closed), weight, created_at, updated_at` |
 | ~~`project_dependencies`~~ | **Not built** — see below | — |
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from vogt.core.entities import CodingSession, Project
+from vogt.core.entities import CodingSession
 from vogt.errors import MigrationError, MigrationLocked
 from vogt.storage.sqlite.connection import connect, split_statements
 from vogt.storage.sqlite.declared import MIGRATIONS_DIR as DECLARED_MIGRATIONS
@@ -260,6 +260,28 @@ def test_a_pre_session_instance_migrates_forward_with_its_data(
     Migrator(store="declared", directory=old_migrations, holder="old/1").migrate(
         conn, now=NOW
     )
+    # The project is written in the old schema's own terms rather than through
+    # today's store: `insert_project` names columns that later migrations
+    # added, and what this test is about is a row an instance of *that*
+    # vintage really held surviving the upgrade.
+    conn.execute(
+        "INSERT INTO projects (id, slug, name, root_path, lifecycle_state, "
+        "compliance_status, exclusions, trust_state, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "prj_old",
+            "already-here",
+            "Already Here",
+            "/srv/already-here",
+            "active",
+            "not_checked",
+            "[]",
+            "unverified",
+            NOW.isoformat(),
+            NOW.isoformat(),
+        ),
+    )
+    conn.commit()
     conn.close()
 
     store = SqliteDeclaredStore(path, clock=StepClock())
@@ -269,16 +291,6 @@ def test_a_pre_session_instance_migrates_forward_with_its_data(
         actor = txn.actor_by_identity(TEST_PRINCIPAL.identity_ref)
         assert actor is not None
         actor_id = actor.id
-        txn.insert_project(
-            Project(
-                id="prj_old",
-                slug="already-here",
-                name="Already Here",
-                root_path="/srv/already-here",
-                created_at=NOW,
-                updated_at=NOW,
-            )
-        )
 
     report = store.migrate()
     assert "0007_sessions" in report.applied

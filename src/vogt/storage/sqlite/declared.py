@@ -23,6 +23,7 @@ from vogt.core.entities import (
     AuthDecision,
     CodingSession,
     Comment,
+    ContractExemption,
     DriftProposal,
     Event,
     InboxTriage,
@@ -699,6 +700,15 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_suppression(row) for row in rows]
 
+    def contract_exemptions(self, project_id: str) -> list[ContractExemption]:
+        rows = self._conn.execute(
+            "SELECT e.*, p.slug AS project_slug FROM contract_exemptions e "
+            "JOIN projects p ON p.id = e.project_id "
+            "WHERE e.project_id = ? ORDER BY e.rule, e.target",
+            (project_id,),
+        ).fetchall()
+        return [_row_to_contract_exemption(row) for row in rows]
+
     def suppression_by_id(self, suppression_id: str) -> Suppression | None:
         row = self._conn.execute(
             "SELECT s.*, a.identity_ref AS actor_identity_ref, "
@@ -1079,9 +1089,9 @@ class SqliteWriteTxn(SqliteReadView):
         self._conn.execute(
             "INSERT INTO projects (id, slug, name, root_path, repo_url, "
             "lifecycle_state, current_version, contract_version, "
-            "compliance_status, compliance_checked_at, write_back, exclusions, "
-            "trust_state, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "compliance_status, compliance_checked_at, contract_adopted_at, "
+            "write_back, exclusions, trust_state, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project.id,
                 project.slug,
@@ -1095,6 +1105,9 @@ class SqliteWriteTxn(SqliteReadView):
                 None
                 if project.compliance_checked_at is None
                 else to_iso(project.compliance_checked_at),
+                None
+                if project.contract_adopted_at is None
+                else to_iso(project.contract_adopted_at),
                 project.write_back,
                 json.dumps(project.exclusions),
                 project.trust_state,
@@ -1121,6 +1134,11 @@ class SqliteWriteTxn(SqliteReadView):
         if update.compliance_checked_at is not None:
             assignments.append("compliance_checked_at = ?")
             params.append(to_iso(update.compliance_checked_at))
+        if update.contract_adopted_at is not None:
+            assignments.append("contract_adopted_at = ?")
+            params.append(to_iso(update.contract_adopted_at))
+        elif update.clear_contract_adopted_at:
+            assignments.append("contract_adopted_at = NULL")
         if update.exclusions is not None:
             assignments.append("exclusions = ?")
             params.append(json.dumps(list(update.exclusions)))
@@ -1313,6 +1331,37 @@ class SqliteWriteTxn(SqliteReadView):
                 to_iso(suppression.created_at),
             ),
         )
+
+    def insert_contract_exemption(self, exemption: ContractExemption) -> None:
+        self._conn.execute(
+            "INSERT INTO contract_exemptions "
+            "(id, project_id, rule, target, reason, declared_by, declared_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            # Re-declaring is a fresh statement with a fresh reason, not a
+            # duplicate row and not an error: somebody looked again.
+            "ON CONFLICT (project_id, rule, target) DO UPDATE SET "
+            "reason = excluded.reason, declared_by = excluded.declared_by, "
+            "declared_at = excluded.declared_at",
+            (
+                exemption.id,
+                exemption.project_id,
+                exemption.rule,
+                exemption.target,
+                exemption.reason,
+                exemption.declared_by,
+                to_iso(exemption.declared_at),
+            ),
+        )
+
+    def delete_contract_exemption(
+        self, *, project_id: str, rule: str, target: str
+    ) -> bool:
+        cursor = self._conn.execute(
+            "DELETE FROM contract_exemptions "
+            "WHERE project_id = ? AND rule = ? AND target = ?",
+            (project_id, rule, target),
+        )
+        return cursor.rowcount > 0
 
     def revoke_suppression(
         self, suppression_id: str, *, actor_id: str, reason: str, at: datetime
@@ -1569,6 +1618,7 @@ def _row_to_actor(row: sqlite3.Row) -> Actor:
 
 def _row_to_project(row: sqlite3.Row) -> Project:
     checked_at = row["compliance_checked_at"]
+    adopted_at = row["contract_adopted_at"]
     return Project.model_validate(
         {
             "id": str(row["id"]),
@@ -1585,9 +1635,27 @@ def _row_to_project(row: sqlite3.Row) -> Project:
                 None if checked_at is None else from_iso(str(checked_at))
             ),
             "exclusions": json.loads(str(row["exclusions"])),
+            "contract_adopted_at": (
+                None if adopted_at is None else from_iso(str(adopted_at))
+            ),
             "trust_state": row["trust_state"],
             "created_at": from_iso(str(row["created_at"])),
             "updated_at": from_iso(str(row["updated_at"])),
+        }
+    )
+
+
+def _row_to_contract_exemption(row: sqlite3.Row) -> ContractExemption:
+    return ContractExemption.model_validate(
+        {
+            "id": str(row["id"]),
+            "project_id": str(row["project_id"]),
+            "project_slug": row["project_slug"],
+            "rule": str(row["rule"]),
+            "target": str(row["target"]),
+            "reason": str(row["reason"]),
+            "declared_by": str(row["declared_by"]),
+            "declared_at": from_iso(str(row["declared_at"])),
         }
     )
 

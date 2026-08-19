@@ -9,6 +9,7 @@ import pytest
 from vogt.application.context import AppContext
 from vogt.application.models import (
     ComplianceParams,
+    ContractAdoptParams,
     ContractCheckParams,
     ContractEvaluateParams,
     CreateProjectParams,
@@ -21,6 +22,7 @@ from vogt.application.models import (
 from vogt.application.services import (
     brief_project,
     compliance,
+    contract_adopt,
     contract_check,
     contract_evaluate,
     create_project,
@@ -192,6 +194,7 @@ def test_checking_a_registered_project_records_the_result(
         instance,
         RegisterProjectParams(name="Bare", root_path=str(tmp_path), reason=WHY),
     )
+    contract_adopt(instance, ContractAdoptParams(project="bare", reason=WHY))
     result = contract_check(instance, ContractCheckParams(project="bare", reason=WHY))
 
     assert result.recorded is True
@@ -214,6 +217,7 @@ def test_the_demo_case_names_exactly_the_missing_file(
         instance,
         RegisterProjectParams(name="Nearly", root_path=str(tmp_path), reason=WHY),
     )
+    contract_adopt(instance, ContractAdoptParams(project="nearly", reason=WHY))
     result = contract_check(instance, ContractCheckParams(project="nearly", reason=WHY))
     assert [c.target for c in result.failing] == ["AGENTS.md"]
     assert "AGENTS.md is missing" in result.failing[0].detail
@@ -225,6 +229,7 @@ def test_a_never_checked_project_says_so(instance: AppContext, tmp_path: Path) -
         instance,
         RegisterProjectParams(name="Fresh", root_path=str(tmp_path), reason=WHY),
     )
+    contract_adopt(instance, ContractAdoptParams(project="fresh", reason=WHY))
     status = compliance(instance, ComplianceParams(project="fresh"))
     assert status.status == "not_checked"
     assert status.checked_at is None
@@ -240,6 +245,7 @@ def test_the_status_is_never_refreshed_implicitly(
         instance,
         RegisterProjectParams(name="Static", root_path=str(tmp_path), reason=WHY),
     )
+    contract_adopt(instance, ContractAdoptParams(project="static", reason=WHY))
     contract_check(instance, ContractCheckParams(project="static", reason=WHY))
     first = compliance(instance, ComplianceParams(project="static"))
 
@@ -262,6 +268,7 @@ def test_the_brief_shows_compliance_with_its_age(
         instance,
         RegisterProjectParams(name="Briefed", root_path=str(tmp_path), reason=WHY),
     )
+    contract_adopt(instance, ContractAdoptParams(project="briefed", reason=WHY))
     contract_check(instance, ContractCheckParams(project="briefed", reason=WHY))
     brief = brief_project(instance, ProjectBriefParams(slug="briefed"))
     assert brief.compliance_status == "non_compliant"
@@ -276,6 +283,7 @@ def test_a_plain_sweep_does_not_check_the_contract(
         instance,
         RegisterProjectParams(name="Unchecked", root_path=str(tmp_path), reason=WHY),
     )
+    contract_adopt(instance, ContractAdoptParams(project="unchecked", reason=WHY))
     sweep(instance, SweepParams(offline_only=True, reason=WHY))
     assert compliance(instance, ComplianceParams(project="unchecked")).status == (
         "not_checked"
@@ -313,6 +321,7 @@ def test_a_non_compliant_project_refuses_nothing(
         instance,
         RegisterProjectParams(name="Messy", root_path=str(tmp_path), reason=WHY),
     )
+    contract_adopt(instance, ContractAdoptParams(project="messy", reason=WHY))
     contract_check(instance, ContractCheckParams(project="messy", reason=WHY))
     assert compliance(instance, ComplianceParams(project="messy")).status == (
         "non_compliant"

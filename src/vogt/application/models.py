@@ -1251,6 +1251,15 @@ class CriterionView(Result):
     target: str
     satisfied: bool
     detail: str
+    applicable: bool = Field(
+        default=True,
+        description=(
+            "Whether this criterion can apply to this project at all "
+            "(FR-G19). False is a declaration somebody made and gave a reason "
+            "for — a Cargo workspace has no root `src/` — and an inapplicable "
+            "criterion is reported but never counted as failing."
+        ),
+    )
     tracked: bool | None = Field(
         default=None,
         description=(
@@ -1260,6 +1269,21 @@ class CriterionView(Result):
             "present-but-untracked case: no clone would have it."
         ),
     )
+
+
+class RecommendationView(Result):
+    """What would close one failing criterion, and who has to decide it.
+
+    FR-G18: advisory output. A `scaffold` remedy is one `project scaffold`
+    performs; a `judgement` remedy is an instruction addressed to an actor —
+    readable by a person, executable by an agent, applied implicitly by
+    neither. Nothing may treat any of it as authority (FR-G13).
+    """
+
+    rule: str
+    target: str
+    remedy: Literal["scaffold", "judgement"]
+    instruction: str
 
 
 class ContractEvaluateParams(Params):
@@ -1296,8 +1320,24 @@ class ContractCheckResult(Result):
         description="Every rule evaluated — not only the failures (FR-G3)."
     )
     failing: list[CriterionView]
+    inapplicable: list[CriterionView] = Field(
+        default=[],
+        description="Criteria declared unmeetable here, with their reasons.",
+    )
+    recommendations: list[RecommendationView] = Field(
+        default=[],
+        description="What would close each failing criterion (FR-G18).",
+    )
     recorded: bool
     checked_at: datetime | None
+    detail: str | None = Field(
+        default=None,
+        description=(
+            "Why this answer is the answer, where the status alone would not "
+            "say: a project that has not adopted the contract, or a root path "
+            "that could not be read."
+        ),
+    )
 
 
 class ComplianceParams(Params):
@@ -1313,7 +1353,93 @@ class ComplianceResult(Result):
         description="How old this answer is. Never refreshed implicitly."
     )
     failing: list[CriterionView] = []
+    adopted: bool = Field(
+        default=False,
+        description=(
+            "Whether this project opted into the contract (FR-G16). A project "
+            "that has not is `not_applicable`, which is not a fault."
+        ),
+    )
+    adopted_at: datetime | None = None
+    inapplicable: list[CriterionView] = []
     detail: str | None = None
+
+
+class ContractAdoptParams(Params):
+    """Opt a registered project into the contract (FR-G16)."""
+
+    project: str = Field(description="A registered project slug.")
+    reason: Reason
+
+
+class ContractAdoptResult(Result):
+    project: str
+    adopted: bool
+    adopted_at: datetime | None
+    status: str = Field(
+        description="What compliance reports for this project after the change."
+    )
+    detail: str
+
+
+class ContractInapplicableParams(Params):
+    """Declare that a criterion cannot apply to a project (FR-G19)."""
+
+    project: str = Field(description="A registered project slug.")
+    rule: str = Field(
+        description="The criterion's rule, as an evaluation reports it: "
+        "`required_file` or `required_dir`."
+    )
+    target: str = Field(
+        description="The criterion's target, as an evaluation reports it: "
+        "`LICENSE`, `src`, `design`."
+    )
+    reason: Reason
+
+
+class ContractApplicableParams(Params):
+    """Withdraw an inapplicability declaration (FR-G19)."""
+
+    project: str
+    rule: str
+    target: str
+    reason: Reason
+
+
+class ContractExemptionView(Result):
+    rule: str
+    target: str
+    reason: str
+    declared_by: str
+    declared_at: datetime
+
+
+class ContractExemptionResult(Result):
+    project: str
+    declared: bool = Field(
+        description="True when the criterion is now inapplicable here."
+    )
+    exemptions: list[ContractExemptionView]
+    detail: str
+
+
+class ScaffoldProjectParams(Params):
+    """Lay the contract's skeleton into an already-registered project."""
+
+    project: str = Field(description="A registered project slug.")
+    reason: Reason
+
+
+class ScaffoldProjectResult(Result):
+    project: str
+    root_path: str
+    created: list[str] = Field(
+        description="Paths written, relative to the project's root."
+    )
+    skipped: list[str] = Field(
+        description="Paths already present and therefore left exactly as they were."
+    )
+    detail: str
 
 
 # -- drift -----------------------------------------------------------------
