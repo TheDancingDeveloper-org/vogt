@@ -1,5 +1,6 @@
 import {
   Component,
+  ErrorBoundary,
   For,
   Show,
   createEffect,
@@ -1179,6 +1180,31 @@ const App: Component = () => {
               </button>
             </div>
           </Show>
+          {/* A place arrives over the network now (#104). A chunk that fails
+              to load costs *this* region and says so, rather than reaching the
+              boundary at the root and replacing the whole product — the shell,
+              the navigation and the places that did load are still usable, and
+              the reader is told which part is missing. */}
+          <ErrorBoundary
+            fallback={(error) => (
+              <div class="stable-place">
+                <section class="route-outcome" role="alert">
+                  <h1>This place could not be loaded</h1>
+                  <p>
+                    {error instanceof Error ? error.message : String(error)}
+                  </p>
+                  <p>
+                    The rest of the app is still here. Reloading usually fixes
+                    it — a deploy that swapped the files under an open tab is
+                    the common cause.
+                  </p>
+                  <button type="button" onClick={() => window.location.reload()}>
+                    Reload
+                  </button>
+                </section>
+              </div>
+            )}
+          >
           <Show when={location.pathname === "/board"}>
             <div class="stable-place"><Board onError={(msg) => showToast(msg, { kind: "error" })} /></div>
           </Show>
@@ -1354,6 +1380,7 @@ const App: Component = () => {
               </div>
             </Sessions>
           </div>
+          </ErrorBoundary>
           <Show when={activeKind() === "terminal" && location.pathname.startsWith("/t/")}>
             <ModKeyRow
               send={(d) => activeSend(d)}
@@ -1373,6 +1400,13 @@ const App: Component = () => {
         <a href="#/backlog" class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined}><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
       </nav>
 
+      {/* A lazy component that is always mounted fetches its chunk at boot,
+          which is no saving at all — and turns a flaky fetch of a dialog
+          nobody opened into a failure of the whole shell (#104's split shipped
+          exactly that: `Settings-*.js` failed to load on a phone and the top
+          level error boundary replaced the product with its own message).
+          These three mount when they open, which is what makes them lazy. */}
+      <Show when={settingsOpen()}>
       <Settings
         open={settingsOpen()}
         onClose={() => {
@@ -1391,6 +1425,7 @@ const App: Component = () => {
         onRestoreWorkspaceLayout={(layoutId) => onRestoreWorkspaceLayout(layoutId)}
         onDeleteWorkspaceLayout={(layoutId) => onDeleteWorkspaceLayout(layoutId)}
       />
+      </Show>
 
       <Show when={promptReq()}>
         {(req) => (
@@ -1506,21 +1541,25 @@ const App: Component = () => {
         )}
       </Show>
 
-      <TemplateSelector
-        open={templateSelectorOpen()}
-        onClose={() => {
-          setTemplateSelectorOpen(false);
-          setTemplateSelectorContext(null);
-        }}
-        onSelect={onTemplateSelect}
-        templates={availableTemplates()}
-        context={templateSelectorContext()}
-      />
+      <Show when={templateSelectorOpen()}>
+        <TemplateSelector
+          open={templateSelectorOpen()}
+          onClose={() => {
+            setTemplateSelectorOpen(false);
+            setTemplateSelectorContext(null);
+          }}
+          onSelect={onTemplateSelect}
+          templates={availableTemplates()}
+          context={templateSelectorContext()}
+        />
+      </Show>
 
-      <KeyboardShortcuts
-        open={shortcutsOpen()}
-        onClose={() => setShortcutsOpen(false)}
-      />
+      <Show when={shortcutsOpen()}>
+        <KeyboardShortcuts
+          open={shortcutsOpen()}
+          onClose={() => setShortcutsOpen(false)}
+        />
+      </Show>
       </Show>
     </>
   );

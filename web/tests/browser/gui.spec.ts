@@ -2206,3 +2206,60 @@ test("A crowded places rail keeps the file tree reachable", async ({ page }) => 
   expect(reached).toBe(true);
   await expect(page.getByRole("searchbox", { name: "Search files" })).toBeVisible();
 });
+
+/**
+ * The other half of #104, learned the hard way on the dev instance: a lazy
+ * component that is *always mounted* fetches its chunk at boot anyway. Three
+ * dialogs did — Settings, the template selector and the shortcut help — so
+ * the split saved nothing on them, and when `Settings-*.js` failed to arrive
+ * the root error boundary replaced the entire product with its own message.
+ * A dialog nobody opened must not be on the boot path at all.
+ */
+test("A dialog nobody opened is not downloaded at boot", async ({ page }) => {
+  const dialogs = /(^|\/)(Settings|TemplateSelector|KeyboardShortcuts)[.-]/;
+  const asked: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (dialogs.test(path)) asked.push(path);
+  });
+
+  await installFixtures(page);
+  for (const route of ["board", "sessions", "inbox", "backlog"]) {
+    await page.goto(`/#/${route}`);
+    await page.waitForLoadState("networkidle");
+  }
+  expect(asked, "no dialog chunk on the boot path of any place").toEqual([]);
+
+  // And it does arrive when the reader asks for it — the deferral is not a
+  // deletion.
+  await page.goto("/#/settings");
+  await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
+  expect(asked.some((path) => /Settings/.test(path))).toBe(true);
+});
+
+/**
+ * And when a chunk genuinely does not arrive — a deploy swapped the files
+ * under an open tab, or the network dropped — the cost is that place, not the
+ * product. This is the failure the dev instance actually showed: one dialog
+ * chunk failed and the root boundary replaced the whole shell with "Vogt
+ * could not render this view".
+ */
+test("A place whose chunk never arrives costs that place, not the shell", async ({ page }) => {
+  await installFixtures(page);
+  await page.route(/Backlog\.tsx|Backlog-[A-Za-z0-9_-]+\.js/, (route) => route.abort());
+
+  await page.goto("/#/backlog");
+
+  await expect(page.getByText("This place could not be loaded")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reload" })).toBeVisible();
+  // The shell is still a shell: navigation is there, and the places that did
+  // load still work.
+  const shell = test.info().project.name === "phone"
+    ? page.getByRole("navigation", { name: "Primary navigation" })
+    : page.getByRole("complementary", { name: "Places" });
+  await expect(shell).toBeVisible();
+  await expect(page.getByText("Vogt could not render this view")).toHaveCount(0);
+
+  await page.goto("/#/board");
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+});
