@@ -565,7 +565,7 @@ test("Vogt identity and route-aware titles survive navigation and reload", async
   await installFixtures(page, { assistant_enabled: true });
   await page.goto("/#/board?project=vogt");
   await expect(page).toHaveTitle("Board · Vogt");
-  await expect(page.locator(".places-brand")).toHaveText("Vogt");
+  await expect(page.locator(".places-brand")).toContainText("Vogt");
 
   await page.goto("/#/history");
   await expect(page).toHaveTitle("History · Vogt");
@@ -2327,3 +2327,143 @@ test("The working header puts its controls and its action on one line", async ({
       .toBeLessThan(46);
   }
 });
+
+
+/**
+ * The Places rail and the Sessions live-list are drag-resizable and
+ * collapsible on a desk, and both remember what the reader set (r18: "make
+ * it more compact by default, resizable, and collapsible").
+ *
+ * Desktop only — below the shell's own narrow breakpoint the rail is not a
+ * grid column at all, it is `display: none` and replaced by the bottom nav,
+ * and the resizable-pane machinery deliberately does not touch that layout
+ * (a prior version of this feature bound its width inline regardless of
+ * viewport, which out-specificities the narrow stylesheet rule and starved
+ * every phone route of two thirds of its width — caught by the existing
+ * Inbox first-viewport test going red at exactly this feature's introduction).
+ */
+test("The Places rail resizes, collapses, and remembers both across reload", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The rail is a desktop surface");
+  await installFixtures(page);
+  await page.goto("/#/board");
+
+  const rail = page.locator(".places-rail");
+  const before = await rail.evaluate((node) => node.getBoundingClientRect().width);
+  expect(Math.round(before)).toBe(248);
+
+  const handle = page.locator(".rail-resize-handle");
+  const box = (await handle.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 120, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.up();
+
+  const widened = await rail.evaluate((node) => node.getBoundingClientRect().width);
+  expect(widened).toBeGreaterThan(before + 80);
+
+  // Reload before collapsing: the width survives on its own, independent of
+  // the collapsed flag.
+  await page.reload();
+  await expect(rail.evaluate((node) => node.getBoundingClientRect().width))
+    .resolves.toBeCloseTo(widened, 0);
+
+  await page.getByRole("button", { name: "Hide the Places rail" }).click();
+  await expect(rail).toBeHidden();
+  // The reopen control sits in `main`'s own flow, not fixed over the
+  // connection banner both claim the same corner of.
+  const reopen = page.getByRole("button", { name: "Show the Places rail" });
+  await expect(reopen).toBeVisible();
+  const overlap = await reopen.evaluate((node) => {
+    const banner = document.querySelector(".connection-banner");
+    if (!banner) return false;
+    const a = node.getBoundingClientRect();
+    const b = banner.getBoundingClientRect();
+    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+  });
+  expect(overlap).toBe(false);
+
+  await page.reload();
+  await expect(page.locator(".places-rail")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Show the Places rail" })).toBeVisible();
+
+  // And nothing about a collapsed, resized rail narrowed the surface it made
+  // room for — the whole point of collapsing it.
+  await page.getByRole("button", { name: "Show the Places rail" }).click();
+  await expect(page.locator(".places-rail")).toBeVisible();
+});
+
+test("A resized, collapsed rail does not leak its width into the narrow shell", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "seeds a desktop width, then narrows");
+  await installFixtures(page);
+  await page.goto("/#/board");
+  const handle = page.locator(".rail-resize-handle");
+  const box = (await handle.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 120, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.up();
+
+  // Narrow the same page rather than reloading at a narrow viewport: the
+  // regression this guards was the *inline* style outliving the width that
+  // made it correct, not a fresh render choosing the wrong one.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/#/inbox");
+  await page.waitForLoadState("networkidle");
+
+  const geometry = await page.evaluate(() => ({
+    entryWidth: document.querySelector(".inbox-entry")?.getBoundingClientRect().width ?? 0,
+    viewport: window.innerWidth,
+  }));
+  expect(geometry.entryWidth).toBeGreaterThan(geometry.viewport * 0.8);
+});
+
+test("The Sessions live list resizes, collapses, and remembers both across reload", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The live list is a desktop surface");
+  await installFixtures(page, {}, [liveSession]);
+  await page.goto("/#/sessions");
+
+  const sidebar = page.locator(".sessions-place-sidebar");
+  const before = await sidebar.evaluate((node) => node.getBoundingClientRect().width);
+  // Item 2 (r18): the fixed default used to be 220-280px regardless of
+  // content — narrower now, and it is what a reader without a request to
+  // resize sees by default.
+  expect(Math.round(before)).toBe(220);
+
+  const handle = page.locator(".sessions-resize-handle");
+  const box = (await handle.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 100, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.up();
+  const widened = await sidebar.evaluate((node) => node.getBoundingClientRect().width);
+  expect(widened).toBeGreaterThan(before + 60);
+
+  await page.getByRole("button", { name: "Hide live sessions" }).click();
+  await expect(sidebar).toBeHidden();
+  await expect(page.getByRole("button", { name: "Show live sessions" })).toBeVisible();
+  // The workspace took the room back — this is the point of collapsing it.
+  const workspaceWidth = await page.locator(".sessions-active-workspace")
+    .evaluate((node) => node.getBoundingClientRect().width);
+  expect(workspaceWidth).toBeGreaterThan(before + widened - 40);
+
+  await page.reload();
+  await expect(page.locator(".sessions-place-sidebar")).toBeHidden();
+  await page.getByRole("button", { name: "Show live sessions" }).click();
+  await expect(page.locator(".sessions-place-sidebar").evaluate((node) => node.getBoundingClientRect().width))
+    .resolves.toBeCloseTo(widened, 0);
+});
+
+/**
+ * History reads archived sessions only (`USER_GUIDE.md` §2: "Archived
+ * scrollback from sessions that have ended"), and a reader with live shells
+ * open has no way to tell that apart from a broken read without saying so.
+ */
+test("History explains an empty archive when live sessions are still running", async ({ page }) => {
+  await installFixtures(page, {}, [liveSession]);
+  await page.route("**/api/history/sessions*", (route) => route.fulfill({ json: [] }));
+  await page.goto("/#/history");
+
+  await expect(page.getByText("No archived sessions.", { exact: false })).toBeVisible();
+  await expect(page.getByText(/session is currently running/)).toBeVisible();
+});
+
