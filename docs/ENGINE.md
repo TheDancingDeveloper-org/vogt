@@ -313,10 +313,21 @@ section that documents it.
 - Every mutating request (POST/PUT/PATCH/DELETE) is rate limited per token —
   600 per minute by default, `mutating_requests_per_minute` per scoped token.
   Over the limit is `429` with `Retry-After` in whole seconds.
-- Every response from a gated route carries `X-Request-Id`, echoed from the
-  request when it sent one and minted otherwise. Mutating requests are written
-  to the audit log under the same id, with the token's *name* and never its
-  value.
+- **Every** response carries `X-Request-Id`, gated or not, adopted from the
+  request when it sent a usable identifier and minted otherwise (r19). One
+  request has exactly one id: the outermost layer assigns it, the audit lines
+  for mutating requests use it, the access line below quotes it, and
+  `/api/vogt` and `/mcp` send it to the core, which attaches it to every line
+  it writes while serving that request. That is what makes a slow request
+  followable across two runtimes with two logging stacks — `docs/DEPLOYMENT.md`
+  §12. A caller-supplied id is checked before it is logged (identifier
+  characters, 64 bytes) and replaced when it is not, and the audit lines still
+  carry the token's *name* and never its value.
+- Every request produces one `tracing` line: `request_id`, `method`, `path`,
+  `status`, `duration_ms`. Slower than a second or a `5xx` logs at `warn`;
+  probes and `/assets/*` log at `debug`, so a page load does not bury the one
+  line worth reading. Verbosity is `RUST_LOG`'s, as it always has been
+  (`engine/server/src/observability.rs`).
 - Errors are `{"error": "<message>"}` with the status on the HTTP line: `400`
   malformed or out-of-bounds input, `401` no or wrong token, `403` capability
   denied, `404` not found (also: feature not provisioned, see below), `409`

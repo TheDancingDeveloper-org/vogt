@@ -156,7 +156,55 @@ class VogtConfig(BaseSettings):
     )
     log_level: LogLevel = Field(
         default="info",
-        description="Verbosity of Vogt's own diagnostics.",
+        description=(
+            "Verbosity of Vogt's own diagnostics — the `vogt.*` logger "
+            "namespace, not its dependencies'."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    log_format: Literal["text", "json"] = Field(
+        default="text",
+        description=(
+            "How each line is rendered. `text` is for a person reading "
+            "`docker logs`; `json` is one object per line for a log that is "
+            "queried rather than read (Loki). The fields are the same either "
+            "way, so a query written against one describes the other."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    log_requests: bool = Field(
+        default=True,
+        description=(
+            "Whether every served request produces an access line carrying "
+            "its duration (NFR-OB1). On by default: the 2026-08-19 incident "
+            "was diagnosed by counting paths across three thousand stock "
+            "uvicorn lines that had no timing on them at all, and a single "
+            "slow endpoint would have left no trace. Turning this off still "
+            "leaves correlation ids honoured and echoed (NFR-OB3)."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    log_slow_request_ms: int = Field(
+        default=1000,
+        ge=0,
+        description=(
+            "A request whose response takes longer than this to *start* is "
+            "logged at WARNING rather than INFO (NFR-OB2). Judged on time to "
+            "first byte, so a long-lived `/mcp` stream is not reported as a "
+            "pathological request every time it ends."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    log_quiet_paths: tuple[str, ...] = Field(
+        default=("/health/live", "/health/ready", "/version"),
+        description=(
+            "Paths whose access lines drop to DEBUG (NFR-OB4). Probes, by "
+            "default: an orchestrator calls them every few seconds forever, "
+            "and a log that is 100% `/healthz` with no application output in "
+            "it is not a log. Suppressed and not dropped — a probe that "
+            "crosses `log_slow_request_ms` still warns, which is exactly what "
+            "`/health/ready` did for 25 seconds on 2026-08-19."
+        ),
         json_schema_extra={"default_policy": "behaviour"},
     )
     contract_required_files: tuple[str, ...] = Field(

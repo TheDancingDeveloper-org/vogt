@@ -16,6 +16,10 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `public_url` | `VOGT_PUBLIC_URL` | string, optional | *(no default — must be set)* | exposure |
 | `fronted` | `VOGT_FRONTED` | boolean | `False` | behaviour |
 | `log_level` | `VOGT_LOG_LEVEL` | one of `debug`, `info`, `warning`, `error` | `info` | behaviour |
+| `log_format` | `VOGT_LOG_FORMAT` | one of `text`, `json` | `text` | behaviour |
+| `log_requests` | `VOGT_LOG_REQUESTS` | boolean | `True` | behaviour |
+| `log_slow_request_ms` | `VOGT_LOG_SLOW_REQUEST_MS` | integer | `1000` | behaviour |
+| `log_quiet_paths` | `VOGT_LOG_QUIET_PATHS` | list of strings | `/health/live`, `/health/ready`, `/version` | behaviour |
 | `contract_required_files` | `VOGT_CONTRACT_REQUIRED_FILES` | list of strings | `AGENTS.md`, `README.md`, `LICENSE` | behaviour |
 | `contract_required_dirs` | `VOGT_CONTRACT_REQUIRED_DIRS` | list of strings | `docs`, `design`, `src` | behaviour |
 | `contract_required_meta` | `VOGT_CONTRACT_REQUIRED_META` | list of strings | `name`, `lifecycle_state`, `owner` | behaviour |
@@ -52,7 +56,23 @@ Whether this instance runs behind a front door that publishes it at a different 
 
 ### `log_level`
 
-Verbosity of Vogt's own diagnostics.
+Verbosity of Vogt's own diagnostics — the `vogt.*` logger namespace, not its dependencies'.
+
+### `log_format`
+
+How each line is rendered. `text` is for a person reading `docker logs`; `json` is one object per line for a log that is queried rather than read (Loki). The fields are the same either way, so a query written against one describes the other.
+
+### `log_requests`
+
+Whether every served request produces an access line carrying its duration (NFR-OB1). On by default: the 2026-08-19 incident was diagnosed by counting paths across three thousand stock uvicorn lines that had no timing on them at all, and a single slow endpoint would have left no trace. Turning this off still leaves correlation ids honoured and echoed (NFR-OB3).
+
+### `log_slow_request_ms`
+
+A request whose response takes longer than this to *start* is logged at WARNING rather than INFO (NFR-OB2). Judged on time to first byte, so a long-lived `/mcp` stream is not reported as a pathological request every time it ends.
+
+### `log_quiet_paths`
+
+Paths whose access lines drop to DEBUG (NFR-OB4). Probes, by default: an orchestrator calls them every few seconds forever, and a log that is 100% `/healthz` with no application output in it is not a log. Suppressed and not dropped — a probe that crosses `log_slow_request_ms` still warns, which is exactly what `/health/ready` did for 25 seconds on 2026-08-19.
 
 ### `contract_required_files`
 

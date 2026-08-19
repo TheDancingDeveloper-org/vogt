@@ -51,6 +51,7 @@ use crate::app::AppState;
 use crate::auth::AuthorizedIdentity;
 use crate::config::Config;
 use crate::events::ServerEvent;
+use crate::observability::{RequestId, REQUEST_ID_HEADER};
 
 /// Front-door mount points. Public so the router and its tests name the same
 /// strings, and so a change to one is a change to both.
@@ -259,6 +260,14 @@ impl VogtCore {
 
         let method = request.method().clone();
         let headers = request.headers().clone();
+        // Whatever `access_log` decided this request is called — either the
+        // caller's own id or the one minted for it. Stated to the core rather
+        // than forwarded from the caller, for the same reason the identity
+        // headers below are: what reaches the core is what this process said.
+        let request_id = request
+            .extensions()
+            .get::<RequestId>()
+            .map(|id| id.0.clone());
         let body = reqwest::Body::wrap_stream(request.into_body().into_data_stream());
 
         let mut outbound = self.client.request(method, &url);
@@ -279,7 +288,15 @@ impl VogtCore {
             if is_identity_header(name) {
                 continue;
             }
+            // Dropped here and set below, so the core reads one id and it is
+            // the one this door's own log line carries.
+            if name == REQUEST_ID_HEADER {
+                continue;
+            }
             outbound = outbound.header(name, value);
+        }
+        if let Some(id) = request_id.as_deref() {
+            outbound = outbound.header(REQUEST_ID_HEADER, id);
         }
         if let Some(token) = inject {
             outbound = outbound.header(header::AUTHORIZATION, format!("Bearer {token}"));

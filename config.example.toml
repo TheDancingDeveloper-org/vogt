@@ -20,9 +20,25 @@
 # default policy: behaviour
 # fronted = false
 
-# Verbosity of Vogt's own diagnostics.
+# Verbosity of Vogt's own diagnostics — the `vogt.*` logger namespace, not its dependencies'.
 # default policy: behaviour
 # log_level = "info"
+
+# How each line is rendered. `text` is for a person reading `docker logs`; `json` is one object per line for a log that is queried rather than read (Loki). The fields are the same either way, so a query written against one describes the other.
+# default policy: behaviour
+# log_format = "text"
+
+# Whether every served request produces an access line carrying its duration (NFR-OB1). On by default: the 2026-08-19 incident was diagnosed by counting paths across three thousand stock uvicorn lines that had no timing on them at all, and a single slow endpoint would have left no trace. Turning this off still leaves correlation ids honoured and echoed (NFR-OB3).
+# default policy: behaviour
+# log_requests = true
+
+# A request whose response takes longer than this to *start* is logged at WARNING rather than INFO (NFR-OB2). Judged on time to first byte, so a long-lived `/mcp` stream is not reported as a pathological request every time it ends.
+# default policy: behaviour
+# log_slow_request_ms = 1000
+
+# Paths whose access lines drop to DEBUG (NFR-OB4). Probes, by default: an orchestrator calls them every few seconds forever, and a log that is 100% `/healthz` with no application output in it is not a log. Suppressed and not dropped — a probe that crosses `log_slow_request_ms` still warns, which is exactly what `/health/ready` did for 25 seconds on 2026-08-19.
+# default policy: behaviour
+# log_quiet_paths = ["/health/live", "/health/ready", "/version"]
 
 # Files a compliant project must contain (FR-G1). The contract is a value you read, never a barrier you pass: changing this changes what `contract check` reports and gates nothing (FR-G13).
 # default policy: behaviour
