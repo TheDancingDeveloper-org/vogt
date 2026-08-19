@@ -8273,3 +8273,70 @@ textarea {
     gap: 10px;
   }
 }
+
+/* -- a session waiting for input, on a phone (Stage 9, FR-M1) --------------
+ *
+ * The card is above the roster rather than in it: what a reader came to the
+ * phone for is the prompt and the two answers to it. The tail scrolls inside
+ * its own box for the reason the work item's control gives — a long prompt
+ * must not push the answer off the screen it is asking on. */
+.sessions-waiting {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.session-waiting {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--activity-waiting, var(--accent));
+  border-radius: 6px;
+  background: var(--bg-elev);
+}
+
+.session-waiting-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+}
+
+.session-waiting-state {
+  color: var(--activity-waiting, var(--accent));
+  font-size: 12px;
+}
+
+.session-waiting-context {
+  color: var(--fg-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.session-waiting-tail {
+  margin: 0;
+  padding: 6px 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.session-waiting-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.session-waiting-note,
+.session-waiting-absent {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+}

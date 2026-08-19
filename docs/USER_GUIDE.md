@@ -316,6 +316,12 @@ so UI changes ship without a new APK; only native plumbing needs one.
   default: a session entering `waiting-for-input` or `errored`, new drift, and
   the agent-task notify hook. `idle_stall` and `agent_task_started` exist and
   default off. Quiet hours digest instead of sending.
+- **A session waiting for input becomes a card**, above the roster, showing
+  the prompt it is actually waiting on. **Send y + Enter** and **Send Ctrl-C**
+  send those keystrokes to that session's terminal — they are terminal input,
+  not Vogt approvals, and the card says so. If the prompt cannot be read, or
+  the session has exited, the card says that instead and offers nothing to
+  press.
 - **Modifier row** above the soft keyboard: `Esc`, `Tab`, sticky `Ctrl`,
   arrows, `/ | ~`, `Enter`. Tap `Ctrl` then a letter to send `Ctrl+letter`.
 - Use the terminal's labelled **A− / A+** controls for terminal-only font size;

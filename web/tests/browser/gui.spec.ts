@@ -60,6 +60,8 @@ interface PlaceMetricFixtures {
   boardTotal?: number | null;
   backlogTotal?: number | null;
   boardItems?: Record<string, unknown>[];
+  /** What a session's scrollback says, for the waiting-session card. */
+  scrollback?: string;
   backlogItems?: Record<string, unknown>[];
 }
 
@@ -83,6 +85,7 @@ async function installFixtures(
   };
   let inboxCalls = 0;
   const boardRequests: Record<string, unknown>[] = [];
+  const sessionInputs: { id: string; text: string; submit: boolean }[] = [];
   const sessions = [...initialSessions];
   let createdSessions = 0;
   await page.addInitScript(() => {
@@ -136,6 +139,12 @@ async function installFixtures(
   await page.route("**/api/sessions/*/kill", async (route) =>
     route.fulfill({ json: { ok: true } }),
   );
+  await page.route("**/api/sessions/*/input", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-2) ?? "";
+    const body = route.request().postDataJSON() as { text: string; submit: boolean };
+    sessionInputs.push({ id, ...body });
+    return route.fulfill({ json: { ok: true } });
+  });
   await page.route("**/api/sessions/*", async (route) => {
     if (
       route.request().method() === "POST"
@@ -148,6 +157,15 @@ async function installFixtures(
       const index = sessions.findIndex((session) => session.id === id);
       if (index >= 0) sessions.splice(index, 1);
       return route.fulfill({ json: { ok: true } });
+    }
+    if (route.request().method() === "GET") {
+      const id = new URL(route.request().url()).pathname.split("/").at(-1);
+      const session = sessions.find((one) => one.id === id);
+      if (!session) return route.fulfill({ status: 404, json: { error: "not found" } });
+      return route.fulfill({ json: {
+        ...session,
+        scrollback_base64: btoa(metrics.scrollback ?? "Apply this migration? (y/n) "),
+      } });
     }
     return route.fulfill({ status: 404, json: { error: "not found" } });
   });
@@ -269,7 +287,7 @@ async function installFixtures(
     }
     return route.fulfill({ json: {} });
   });
-  return { inboxCalls: () => inboxCalls, boardRequests, sessions };
+  return { inboxCalls: () => inboxCalls, boardRequests, sessions, sessionInputs };
 }
 
 test("History palette results restore the selected session, query and match", async ({ page }) => {
@@ -1986,3 +2004,73 @@ test("Phone secondary routes are contained, titled and addressable", async ({ pa
   await expect(page).toHaveURL(/#\/projects/);
 });
 
+
+/**
+ * Stage 9's waiting session, on the surface a phone actually steers from.
+ *
+ * The two things asserted here are the two the requirement is about: the card
+ * shows the session's real prompt before offering anything, and each control
+ * sends exactly the bytes a person at that terminal would have typed. Neither
+ * is an approval, and the card says so.
+ */
+test("Phone waiting sessions show the prompt and send terminal input", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "Waiting cards are the narrow shell's");
+  const waiting = {
+    ...liveSession,
+    id: "waiting-session",
+    name: "needs-attention",
+    activity: "waiting-for-input",
+  };
+  const exited = {
+    ...liveSession,
+    id: "exited-session",
+    name: "already-finished",
+    activity: "waiting-for-input",
+    exit_code: 0,
+  };
+  const fixture = await installFixtures(page, {}, [liveSession, waiting, exited], undefined, {
+    scrollback: "running migration 0011\nApply this migration? (y/n) ",
+  });
+
+  await page.goto("/#/sessions");
+
+  const card = page.locator(".session-waiting").filter({ hasText: "needs-attention" });
+  await expect(card).toBeVisible();
+  // Above the roster: the prompt is what the phone came for.
+  const order = await page.evaluate(() => {
+    const first = document.querySelector(".session-waiting");
+    const roster = document.querySelector(".sessions-place-list, .sessions-empty");
+    if (!first || !roster) return null;
+    return first.getBoundingClientRect().top < roster.getBoundingClientRect().top;
+  });
+  expect(order).toBe(true);
+
+  // It shows before it asks: the session's own output, and the target it belongs to.
+  await expect(card.getByTestId("waiting-tail")).toContainText("Apply this migration? (y/n)");
+  await expect(card).toContainText("/workspace/vogt");
+  await expect(card).toContainText("not Vogt approvals");
+
+  const acts = card.getByRole("group", { name: "Terminal input for needs-attention" });
+  await acts.getByRole("button", { name: "Send y + Enter" }).click();
+  await expect.poll(() => fixture.sessionInputs.length).toBe(1);
+  expect(fixture.sessionInputs[0]).toEqual({
+    id: "waiting-session",
+    text: "y",
+    submit: true,
+  });
+
+  await acts.getByRole("button", { name: "Send Ctrl-C" }).click();
+  await expect.poll(() => fixture.sessionInputs.length).toBe(2);
+  expect(fixture.sessionInputs[1]).toEqual({
+    id: "waiting-session",
+    text: "\u0003",
+    submit: false,
+  });
+
+  // An exited session refuses safely, and says why rather than offering a
+  // control that could only fail at whoever pressed it.
+  const dead = page.locator(".session-waiting").filter({ hasText: "already-finished" });
+  await expect(dead).toContainText("has exited");
+  await expect(dead.getByRole("button", { name: "Send y + Enter" })).toHaveCount(0);
+  await expect(dead.getByRole("button", { name: "Send Ctrl-C" })).toHaveCount(0);
+});
