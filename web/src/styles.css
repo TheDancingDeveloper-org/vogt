@@ -5746,6 +5746,13 @@ textarea {
 
 /* Long titles stay readable within the card; the card itself remains
    content-sized so measured offsets continue to match what is painted. */
+.board-card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
 .board-card-title {
   font-size: 13px;
   color: var(--fg);
@@ -5757,6 +5764,31 @@ textarea {
   -webkit-box-orient: vertical;
   overflow: hidden;
   flex: 0 0 auto;
+}
+
+.board-card-title.expanded {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+}
+
+.board-card-body {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.board-card-expand {
+  align-self: flex-start;
+  border: 0;
+  padding: 2px 0;
+  color: var(--accent);
+  background: transparent;
+  font-size: 11px;
 }
 
 .board-card-meta {
@@ -5964,6 +5996,38 @@ textarea {
 
   .board-filter-panel-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .board-phone-states {
+    display: flex;
+    flex: none;
+    gap: 7px;
+    overflow-x: auto;
+    padding: 2px 0 8px;
+    scrollbar-width: thin;
+  }
+
+  .board-phone-state {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+    min-height: 44px;
+    padding: 6px 13px;
+    border-radius: 999px;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+
+  .board-phone-state[aria-pressed="true"] {
+    border-color: var(--accent);
+    color: var(--fg);
+    background: var(--bg-elev);
+  }
+
+  .board-phone-state-count {
+    color: inherit;
+    font-variant-numeric: tabular-nums;
   }
 
   /* Quick-create is four columns of fields at desk width and one on a phone,
