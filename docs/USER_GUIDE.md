@@ -456,8 +456,21 @@ generated from one operation registry — that is what the parity tests assert.
 ```console
 $ uv run vogt backlog
 $ uv run vogt why --ref WI-1
+$ uv run vogt contract adopt --project vogt --reason "we keep these conventions"
 $ uv run vogt contract check --project vogt --reason "before release"
+$ uv run vogt project scaffold --project vogt --reason "close what the check found"
 ```
+
+**The contract is something a project opts into.** A project you register is
+not measured against it and is never called non-compliant: it reports
+`not_applicable` until somebody runs `contract adopt`, and it is refused
+nothing either way. Where a check does find a gap, it says what would close
+it — `project scaffold` writes the missing skeleton without overwriting
+anything already there, and where the content is a decision (which licence,
+what belongs in `design/`) it says that instead of choosing for you. A
+criterion your project cannot meet at all — a Cargo workspace has no root
+`src/` — is declared with `contract inapplicable` and a reason, and stops
+being counted as a failure while staying on the report.
 
 For an agent, `vogt-mcp` speaks MCP over stdio against the same data directory,
 and `vogt-mcp-remote` bridges stdio to a remote instance's `/mcp`. An agent's

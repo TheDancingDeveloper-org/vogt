@@ -14,7 +14,8 @@ barrier you pass (FR-G13, DESIGN §2.1, §5).
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -190,6 +191,14 @@ class CriterionResult:
     target: str
     satisfied: bool
     detail: str
+    applicable: bool = True
+    """Whether this criterion can apply to this project at all (FR-G19).
+
+    `False` is a declaration somebody made and gave a reason for, not an
+    inference: a Cargo workspace has no root `src/`, and reporting that as a
+    failure says something about the contract rather than about the project.
+    An inapplicable criterion is reported and is not counted as failing.
+    """
     tracked: bool | None = None
     """Whether the repository carries this, where that could be asked.
 
@@ -211,7 +220,11 @@ class ContractResult:
 
     @property
     def failing(self) -> tuple[CriterionResult, ...]:
-        return tuple(c for c in self.criteria if not c.satisfied)
+        return tuple(c for c in self.criteria if not c.satisfied and c.applicable)
+
+    @property
+    def inapplicable(self) -> tuple[CriterionResult, ...]:
+        return tuple(c for c in self.criteria if not c.applicable)
 
 
 #: The three answers a compliance status can take. `not_checked` is
@@ -220,6 +233,11 @@ class ContractResult:
 COMPLIANT = "compliant"
 NON_COMPLIANT = "non_compliant"
 NOT_CHECKED = "not_checked"
+
+#: The fourth answer, and the only one that is never stored on a project row
+#: (FR-G16): this project never adopted the contract, so there is nothing to
+#: comply with. It is not a fault, and no view may present it as one.
+NOT_APPLICABLE = "not_applicable"
 
 
 def _criterion(
@@ -255,11 +273,32 @@ def _criterion(
     )
 
 
+def _exempted(
+    criterion: CriterionResult, inapplicable: Mapping[tuple[str, str], str]
+) -> CriterionResult:
+    """Re-read a criterion somebody declared inapplicable here (FR-G19).
+
+    The declaration does not make the criterion *satisfied* — the file is
+    still absent, and pretending otherwise would be the silent exemption this
+    is arranged against. It makes it not-counted, and it carries the reason
+    given for that, so a reader sees both the fact and the argument.
+    """
+    reason = inapplicable.get((criterion.rule, criterion.target))
+    if reason is None or criterion.satisfied:
+        return criterion
+    return replace(
+        criterion,
+        applicable=False,
+        detail=f"declared inapplicable to this project: {reason}",
+    )
+
+
 def evaluate(
     path: Path,
     contract: Contract = DEFAULT_CONTRACT,
     *,
     tracked: frozenset[str] | None = None,
+    inapplicable: Mapping[tuple[str, str], str] | None = None,
 ) -> ContractResult:
     """Check a folder or repository against a contract.
 
@@ -280,6 +319,11 @@ def evaluate(
     This module stays pure: the caller does the asking, and passing `None`
     keeps the old filesystem-only behaviour for a path with no repository
     behind it.
+
+    `inapplicable` maps `(rule, target)` to the reason somebody declared that
+    the criterion cannot apply here (FR-G19). Those criteria are still
+    reported — an unmeetable criterion is a fact worth reading — but they are
+    not counted as failures, and their reason travels with them.
     """
     root = Path(path).expanduser()
     criteria: list[CriterionResult] = []
@@ -318,19 +362,146 @@ def evaluate(
             detail="directory exists",
         )
     )
+    exempt = dict(inapplicable or {})
     for name in contract.required_files:
         criteria.append(
-            _criterion("required_file", name, (root / name).is_file(), tracked)
+            _exempted(
+                _criterion("required_file", name, (root / name).is_file(), tracked),
+                exempt,
+            )
         )
     for name in contract.required_dirs:
         criteria.append(
-            _criterion("required_dir", name, (root / name).is_dir(), tracked)
+            _exempted(
+                _criterion("required_dir", name, (root / name).is_dir(), tracked),
+                exempt,
+            )
         )
 
-    failing = [c for c in criteria if not c.satisfied]
+    failing = [c for c in criteria if not c.satisfied and c.applicable]
     return ContractResult(
         contract_version=contract.version,
         path=str(root),
         status=NON_COMPLIANT if failing else COMPLIANT,
         criteria=tuple(criteria),
     )
+
+
+# -- recommendations (FR-G18, r14) -----------------------------------------
+#
+# Reporting a gap the product can close, without offering to close it, is the
+# enforcing posture in a different costume. So an evaluation can say what
+# would close each failing criterion — and it distinguishes the two kinds of
+# remedy, because they are addressed to different readers.
+#
+# A *mechanical* remedy is one the scaffold already writes: `AGENTS.md` has
+# template text, `docs/` is a directory. `project scaffold` performs it, and
+# the recommendation names that operation.
+#
+# A *judgement* remedy is one nothing here should make. Which licence a
+# project carries is its owner's decision — `default_scaffold` refuses to
+# invent one for exactly this reason — and what belongs in `design/` is a
+# question about the project, not about the contract. Those recommendations
+# are instructions addressed to an actor: readable by a person, executable by
+# an agent, applied by neither implicitly.
+
+
+@dataclass(frozen=True)
+class Recommendation:
+    """What would close one failing criterion, and who has to decide it."""
+
+    rule: str
+    target: str
+    #: `scaffold` where the product can write it; `judgement` where a person
+    #: or an agent has to decide what it should contain.
+    remedy: str
+    instruction: str
+
+
+#: Criteria whose content is a decision rather than a template. The scaffold
+#: writes a placeholder for `LICENSE` and nothing for `design/`; neither is a
+#: remedy, and calling them one would be the silent opinion r2 removed.
+JUDGEMENT_TARGETS: dict[str, str] = {
+    "LICENSE": (
+        "choose a licence for this project and write its full text to "
+        "LICENSE. Vogt deliberately does not pick one: a scaffold that "
+        "silently writes MIT makes that decision for the owner."
+    ),
+    "design": (
+        "decide what this project's design record is — diagrams, mockups, "
+        "exploratory notes — and put it in design/. An empty directory "
+        "satisfies the letter of the criterion and none of its point, and "
+        "git cannot carry one anyway."
+    ),
+}
+
+
+def recommendations(
+    result: ContractResult, *, scaffold: Scaffold | None = None
+) -> tuple[Recommendation, ...]:
+    """What would close each failing criterion of an evaluation (FR-G18).
+
+    Advisory output. Nothing here applies anything, and nothing that consumes
+    it may treat it as authority: FR-G13's rule that compliance is never a
+    precondition covers the remedy as surely as it covers the verdict.
+
+    Criteria declared inapplicable are absent, because there is nothing to
+    recommend about a criterion somebody has said cannot apply.
+    """
+    written = {file.path for file in (scaffold.files if scaffold else ())}
+    directories = set(scaffold.directories if scaffold else ())
+
+    advice: list[Recommendation] = []
+    for criterion in result.failing:
+        judgement = JUDGEMENT_TARGETS.get(criterion.target)
+        if judgement is not None:
+            advice.append(
+                Recommendation(
+                    rule=criterion.rule,
+                    target=criterion.target,
+                    remedy="judgement",
+                    instruction=judgement,
+                )
+            )
+            continue
+        if criterion.target in written or criterion.target in directories:
+            advice.append(
+                Recommendation(
+                    rule=criterion.rule,
+                    target=criterion.target,
+                    remedy="scaffold",
+                    instruction=(
+                        f"`project scaffold` writes {criterion.target}"
+                        f"{'/' if criterion.rule == 'required_dir' else ''} "
+                        "into this project without overwriting anything that "
+                        "is already there."
+                    ),
+                )
+            )
+            continue
+        if criterion.tracked is False:
+            advice.append(
+                Recommendation(
+                    rule=criterion.rule,
+                    target=criterion.target,
+                    remedy="judgement",
+                    instruction=(
+                        f"{criterion.target} is in the working tree but no "
+                        "clone carries it. Commit it, or decide it does not "
+                        "belong in this repository."
+                    ),
+                )
+            )
+            continue
+        advice.append(
+            Recommendation(
+                rule=criterion.rule,
+                target=criterion.target,
+                remedy="judgement",
+                instruction=(
+                    f"decide what {criterion.target} should contain for this "
+                    "project and add it. Nothing here can write it for you."
+                ),
+            )
+        )
+    return tuple(advice)

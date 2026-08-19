@@ -19,6 +19,7 @@ from vogt.core.entities import (
     AuthDecision,
     CodingSession,
     Comment,
+    ContractExemption,
     DepRef,
     DriftProposal,
     Event,
@@ -126,6 +127,10 @@ class ProjectUpdate:
     compliance_checked_at: datetime | None = None
     write_back: str | None = None
     exclusions: tuple[str, ...] | None = None
+    contract_adopted_at: datetime | None = None
+    #: Adoption is reversible, and `None` already means "leave alone", so
+    #: declining the contract needs a flag of its own rather than a value.
+    clear_contract_adopted_at: bool = False
 
 
 @dataclass(frozen=True)
@@ -240,6 +245,10 @@ class ReadView(Protocol):
     ) -> list[Suppression]: ...
 
     def suppression_by_id(self, suppression_id: str) -> Suppression | None: ...
+
+    # -- contract adoption (FR-G19) ----------------------------------------
+
+    def contract_exemptions(self, project_id: str) -> list[ContractExemption]: ...
 
     def work_links_for_subjects(self, subject_keys: list[str]) -> dict[str, str]:
         """Map subject key to the work item ref that adopted it."""
@@ -430,6 +439,12 @@ class WriteTxn(ReadView, Protocol):
 
     def revoke_suppression(
         self, suppression_id: str, *, actor_id: str, reason: str, at: datetime
+    ) -> bool: ...
+
+    def insert_contract_exemption(self, exemption: ContractExemption) -> None: ...
+
+    def delete_contract_exemption(
+        self, *, project_id: str, rule: str, target: str
     ) -> bool: ...
 
     def insert_work_link(self, link: WorkLink) -> None: ...

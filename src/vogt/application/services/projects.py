@@ -18,6 +18,8 @@ from vogt.application.models import (
     ProjectListResult,
     ProjectResult,
     RegisterProjectParams,
+    ScaffoldProjectParams,
+    ScaffoldProjectResult,
     TransitionProjectParams,
     UpdateProjectParams,
 )
@@ -26,11 +28,11 @@ from vogt.application.services.views import _gather, freshness_of
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.collectors.dep_refs import KIND_DEP_SCAN
 from vogt.core.checks import roll_up
-from vogt.core.contract import DEFAULT_CONTRACT, default_scaffold
+from vogt.core.contract import DEFAULT_CONTRACT, Scaffold, default_scaffold
 from vogt.core.entities import Actor, Project
 from vogt.core.ids import slugify
 from vogt.core.workflow import check_lifecycle_transition
-from vogt.errors import Conflict, InvalidRequest
+from vogt.errors import Conflict, InvalidRequest, NotFound
 from vogt.storage.interface import ProjectUpdate, WorkFilter, WriteTxn
 
 PROJECT_REGISTER = "project.register"
@@ -41,11 +43,24 @@ PROJECT_UPDATE = "project.update"
 PROJECT_REGISTERED_EVENT = "project.registered"
 PROJECT_TRANSITIONED_EVENT = "project.transitioned"
 PROJECT_UPDATED_EVENT = "project.updated"
+PROJECT_SCAFFOLD = "project.scaffold"
+PROJECT_SCAFFOLDED_EVENT = "project.scaffolded"
 
 
 def _new_project(
-    ctx: AppContext, *, slug: str, params: RegisterProjectParams
+    ctx: AppContext,
+    *,
+    slug: str,
+    params: RegisterProjectParams,
+    adopts_contract: bool = False,
 ) -> Project:
+    """A new project row.
+
+    `adopts_contract` is false for a project Vogt is *handed* (FR-G16): the
+    contract is opt-in, and registering a folder is not opting in. It is true
+    for one Vogt *creates*, because asking for a contract-shaped project is
+    the opting in — the skeleton and the adoption are the same request.
+    """
     now = ctx.clock()
     return Project(
         id=ctx.id_factory("prj"),
@@ -55,6 +70,7 @@ def _new_project(
         repo_url=params.repo_url,
         lifecycle_state=params.lifecycle_state,
         compliance_status="not_checked",
+        contract_adopted_at=now if adopts_contract else None,
         exclusions=(
             list(DEFAULT_EXCLUSIONS)
             if params.exclusions is None
@@ -91,6 +107,7 @@ def record_registration(
     *,
     operation: str = PROJECT_REGISTER,
     event_kind: str = PROJECT_REGISTERED_EVENT,
+    adopts_contract: bool = False,
 ) -> ProjectResult:
     """The declared half of registration, under a caller-named operation.
 
@@ -106,7 +123,9 @@ def record_registration(
         if txn.project_by_slug(slug) is not None:
             msg = f"a project with slug {slug!r} is already registered"
             raise Conflict(msg)
-        project = _new_project(ctx, slug=slug, params=params)
+        project = _new_project(
+            ctx, slug=slug, params=params, adopts_contract=adopts_contract
+        )
         txn.insert_project(project)
         return WriteOutcome(
             result=ProjectResult(project=project),
@@ -118,6 +137,99 @@ def record_registration(
         )
 
     return audited_write(ctx, operation=operation, reason=params.reason, body=body)
+
+
+def _lay_scaffold(
+    root: Path, scaffold: Scaffold, *, create_root: bool
+) -> tuple[list[str], list[str]]:
+    """Write a scaffold into a directory, never overwriting (FR-G11, FR-G17).
+
+    Shared by `project create` and `project scaffold` so the two report the
+    same way: a path that was already there is *skipped*, and skipped means
+    untouched — not merged, not backed up, not rewritten. That is the whole
+    guarantee that makes offering the scaffold to an existing project safe.
+    """
+    created: list[str] = []
+    skipped: list[str] = []
+
+    if not root.exists():
+        if not create_root:
+            raise NotFound(
+                f"{root} does not exist, so there is nothing to scaffold into"
+            )
+        root.mkdir(parents=True)
+        created.append(str(root))
+    for directory in scaffold.directories:
+        target = root / directory
+        if target.exists():
+            skipped.append(str(target))
+        else:
+            target.mkdir(parents=True)
+            created.append(str(target))
+    for entry in scaffold.files:
+        target = root / entry.path
+        if target.exists():
+            skipped.append(str(target))
+        else:
+            target.write_text(entry.content, encoding="utf-8")
+            created.append(str(target))
+    return created, skipped
+
+
+def scaffold_project(
+    ctx: AppContext, params: ScaffoldProjectParams
+) -> ScaffoldProjectResult:
+    """Lay the contract's skeleton into an already-registered project (FR-G17).
+
+    The asymmetry this closes: a project Vogt created got the template, and a
+    project Vogt was handed got a verdict. Reporting a gap the product can
+    close, without offering to close it, is the enforcing posture in a
+    different costume — so the same scaffold `project create` writes is
+    reachable here, against a project that already exists, and it still never
+    overwrites anything.
+
+    Nothing about this adopts the contract or changes a status: it writes
+    files. `contract adopt` is the declaration, and it is a separate act on
+    purpose.
+    """
+    with ctx.declared.read() as view:
+        project = _resolve.project(view, params.project)
+
+    root = Path(project.root_path).expanduser()
+    scaffold = default_scaffold(
+        name=project.name,
+        owner=ctx.principal.display_name,
+        lifecycle_state=project.lifecycle_state,
+    )
+    created, skipped = _lay_scaffold(root, scaffold, create_root=False)
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[ScaffoldProjectResult]:
+        del txn, actor
+        return WriteOutcome(
+            result=ScaffoldProjectResult(
+                project=project.slug,
+                root_path=str(root),
+                created=sorted(created),
+                skipped=sorted(skipped),
+                detail=(
+                    f"{len(created)} written, {len(skipped)} already there and "
+                    "left exactly as they were"
+                ),
+            ),
+            entity_kind="project",
+            entity_id=project.id,
+            payload={"created": sorted(created), "skipped": sorted(skipped)},
+            event_kind=PROJECT_SCAFFOLDED_EVENT,
+            summary={
+                "slug": project.slug,
+                "created": len(created),
+                "skipped": len(skipped),
+            },
+        )
+
+    return audited_write(
+        ctx, operation=PROJECT_SCAFFOLD, reason=params.reason, body=body
+    )
 
 
 def create_project(ctx: AppContext, params: CreateProjectParams) -> CreateProjectResult:
@@ -135,28 +247,9 @@ def create_project(ctx: AppContext, params: CreateProjectParams) -> CreateProjec
     scaffold = default_scaffold(
         name=params.name, owner=owner, lifecycle_state=params.lifecycle_state
     )
-    created: list[str] = []
-    skipped: list[str] = []
+    created, skipped = _lay_scaffold(root, scaffold, create_root=True)
 
-    if not root.exists():
-        root.mkdir(parents=True)
-        created.append(str(root))
-    for directory in scaffold.directories:
-        target = root / directory
-        if target.exists():
-            skipped.append(str(target))
-        else:
-            target.mkdir(parents=True)
-            created.append(str(target))
-    for entry in scaffold.files:
-        target = root / entry.path
-        if target.exists():
-            skipped.append(str(target))
-        else:
-            target.write_text(entry.content, encoding="utf-8")
-            created.append(str(target))
-
-    registered = register_project(
+    registered = record_registration(
         ctx,
         RegisterProjectParams(
             name=params.name,
@@ -165,6 +258,9 @@ def create_project(ctx: AppContext, params: CreateProjectParams) -> CreateProjec
             lifecycle_state=params.lifecycle_state,
             reason=params.reason,
         ),
+        # Asking Vogt to create a contract-shaped project *is* adopting the
+        # contract; a project handed to `project register` is not (FR-G16).
+        adopts_contract=True,
     )
     del slug
     return CreateProjectResult(

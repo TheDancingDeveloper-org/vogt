@@ -15,7 +15,13 @@ from pydantic import BaseModel, ConfigDict, StringConstraints
 from vogt.core.principal import ActorKind
 
 LifecycleState = Literal["incubating", "active", "maintenance", "archived"]
-ComplianceStatus = Literal["compliant", "non_compliant", "not_checked"]
+#: `not_applicable` is not stored on a project row: it is what a project that
+#: never adopted the contract *reports* (FR-G16). The three stored values are
+#: what a check found; the fourth is what a reader is told when no check was
+#: ever asked for.
+ComplianceStatus = Literal[
+    "compliant", "non_compliant", "not_checked", "not_applicable"
+]
 TrustState = Literal["verified", "stale", "unverified", "disputed"]
 
 WorkKind = Literal["feature", "bug", "chore", "question"]
@@ -64,6 +70,10 @@ class Project(Entity):
     contract_version: str | None = None
     compliance_status: ComplianceStatus = "not_checked"
     compliance_checked_at: datetime | None = None
+    #: When this project opted into the contract (FR-G16). Null is the
+    #: ordinary case and carries no fault: the contract is something a
+    #: project adopts, not something it is measured against by default.
+    contract_adopted_at: datetime | None = None
     write_back: Literal["none", "comment_only", "full"] = "none"
     exclusions: list[str] = []
     trust_state: TrustState = "unverified"
@@ -166,6 +176,27 @@ class Suppression(Entity):
     @property
     def active(self) -> bool:
         return self.revoked_at is None
+
+
+class ContractExemption(Entity):
+    """A declared statement that a criterion cannot apply to a project.
+
+    FR-G19: a criterion a project *has not met* and one it *cannot meet by
+    construction* are different facts, and a single word for both makes the
+    word useless. A Cargo workspace has no root `src/`; saying so is a
+    declaration with an author and a reason, not a silent exemption, which is
+    why this is a declared-store row and an audited write rather than a
+    heuristic about the ecosystem.
+    """
+
+    id: str
+    project_id: str
+    project_slug: str | None = None
+    rule: str
+    target: str
+    reason: str
+    declared_by: str
+    declared_at: datetime
 
 
 class WorkLink(Entity):
