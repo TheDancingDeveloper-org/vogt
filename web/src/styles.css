@@ -5217,13 +5217,85 @@ textarea {
 }
 
 .board-toolbar {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   padding: 12px;
   border: 1px solid var(--bd);
   border-radius: 6px;
   background: var(--bg-elev);
+}
+
+.board-filter-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.board-filter-summary-label {
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.board-filter-chips {
+  display: flex;
+  flex: 1 1 240px;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.board-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 4px 6px 4px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--fg);
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.board-filter-chip > span {
+  overflow-wrap: anywhere;
+}
+
+.board-filter-chip button {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--fg-muted);
+  background: transparent;
+}
+
+.board-add-filter {
+  white-space: nowrap;
+}
+
+.board-add-filter[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.board-filter-panel {
+  border-top: 1px solid var(--bd);
+  padding-top: 10px;
+}
+
+.board-filter-panel[hidden] {
+  display: none;
+}
+
+.board-filter-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding-top: 10px;
 }
 
 .board-field {
@@ -5845,7 +5917,7 @@ textarea {
 }
 
 @media (max-width: 900px) {
-  .board-toolbar {
+  .board-filter-panel-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .board-field--wide {
@@ -5886,12 +5958,12 @@ textarea {
     --board-cell-h: 70vh;
   }
 
-  .board-toolbar {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .board-field--wide {
     grid-column: span 1;
+  }
+
+  .board-filter-panel-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   /* Quick-create is four columns of fields at desk width and one on a phone,

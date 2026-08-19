@@ -1686,6 +1686,7 @@ const Board: Component<Props> = (props) => {
       label: "",
       initiative: "",
       assignee: "",
+      lanes: "none",
     });
 
   const hideFinishedColumns = () => {
@@ -1701,6 +1702,13 @@ const Board: Component<Props> = (props) => {
 
   const [savedFilters, setSavedFilters] = createSignal<SavedFilter[]>(readSavedFilters());
   const [saveName, setSaveName] = createSignal("");
+  const [filterPanelOpen, setFilterPanelOpen] = createSignal(false);
+  let addFilterButton: HTMLButtonElement | undefined;
+
+  const closeFilterPanel = () => {
+    setFilterPanelOpen(false);
+    queueMicrotask(() => addFilterButton?.focus());
+  };
 
   const saveCurrent = () => {
     const name = saveName().trim();
@@ -1740,9 +1748,35 @@ const Board: Component<Props> = (props) => {
       (active.states.length ? 1 : 0) +
       (active.label ? 1 : 0) +
       (active.initiative ? 1 : 0) +
-      (active.assignee ? 1 : 0)
+      (active.assignee ? 1 : 0) +
+      (active.lanes !== "none" ? 1 : 0)
     );
   });
+
+  const activeFilterChips = createMemo(() => {
+    const active = filters();
+    const chips: { key: string; label: string }[] = [];
+    if (active.project) chips.push({ key: "project", label: `Project: ${active.project}` });
+    if (active.kinds.length) chips.push({ key: "kind", label: `Type: ${active.kinds.join(", ")}` });
+    if (active.states.length) chips.push({ key: "state", label: `State: ${active.states.join(", ")}` });
+    if (active.label) chips.push({ key: "label", label: `Label: ${active.label}` });
+    if (active.initiative) chips.push({ key: "initiative", label: `Initiative: ${active.initiative}` });
+    if (active.assignee) chips.push({ key: "assignee", label: `Assignee: ${active.assignee}` });
+    if (active.lanes !== "none") chips.push({ key: "lanes", label: `Swimlanes: ${active.lanes}` });
+    return chips;
+  });
+
+  const removeFilter = (key: string) => {
+    switch (key) {
+      case "project": patch({ project: "" }); break;
+      case "kind": patch({ kinds: [] }); break;
+      case "state": patch({ states: [] }); break;
+      case "label": patch({ label: "" }); break;
+      case "initiative": patch({ initiative: "" }); break;
+      case "assignee": patch({ assignee: "" }); break;
+      case "lanes": patch({ lanes: "none" }); break;
+    }
+  };
 
   const kindOptions = createMemo(() =>
     (workflows() ?? []).map((workflow) => workflow.kind),
@@ -1846,6 +1880,47 @@ const Board: Component<Props> = (props) => {
       </Show>
 
       <div class="board-toolbar" role="group" aria-label="Board filters">
+        <div class="board-filter-summary">
+          <span class="board-filter-summary-label">Filters</span>
+          <Show when={activeFilterChips().length > 0} fallback={<span class="board-muted">No filters applied</span>}>
+            <div class="board-filter-chips">
+              <For each={activeFilterChips()}>
+                {(chip) => (
+                  <span class="board-filter-chip">
+                    <span>{chip.label}</span>
+                    <button type="button" aria-label={`Remove filter ${chip.label}`} onClick={() => removeFilter(chip.key)}>×</button>
+                  </span>
+                )}
+              </For>
+            </div>
+          </Show>
+          <button
+            type="button"
+            class="board-add-filter"
+            ref={addFilterButton}
+            aria-controls="board-filter-panel"
+            aria-expanded={filterPanelOpen()}
+            onClick={() => setFilterPanelOpen((open) => !open)}
+          >
+            + Filter
+          </button>
+          <button type="button" onClick={clearFilters} disabled={filterCount() === 0}>
+            Clear all
+          </button>
+        </div>
+        <div
+          id="board-filter-panel"
+          class="board-filter-panel"
+          role="group"
+          aria-label="Add Board filters"
+          hidden={!filterPanelOpen()}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.stopPropagation();
+            closeFilterPanel();
+          }}
+        >
+          <div class="board-filter-panel-grid">
         <label class="board-field">
           <span>Project</span>
           {/* Selection is declared on the options rather than on the select.
@@ -1947,13 +2022,14 @@ const Board: Component<Props> = (props) => {
         </label>
 
         <div class="board-field board-field--wide">
-          <span>Kind</span>
+          <span>Type</span>
           <div class="board-chips">
             <For each={kindOptions()}>
               {(kind) => (
                 <button
                   type="button"
                   class={`board-chip${filters().kinds.includes(kind) ? " active" : ""}`}
+                  aria-pressed={filters().kinds.includes(kind)}
                   onClick={() => toggleKind(kind)}
                 >
                   {kind}
@@ -1966,22 +2042,51 @@ const Board: Component<Props> = (props) => {
           </div>
         </div>
 
+        <div class="board-field board-field--wide">
+          <span>State</span>
+          <div class="board-chips">
+            <For each={allColumns()}>
+              {(column) => (
+                <button
+                  type="button"
+                  class={`board-chip${filters().states.includes(column.state) ? " active" : ""}`}
+                  aria-pressed={filters().states.includes(column.state)}
+                  onClick={() => {
+                    const active = filters().states;
+                    patch({
+                      states: active.includes(column.state)
+                        ? active.filter((state) => state !== column.state)
+                        : [...active, column.state],
+                    });
+                  }}
+                >
+                  {humanState(column.state)}
+                </button>
+              )}
+            </For>
+          </div>
+        </div>
+
         <div class="board-toolbar-actions">
           <button type="button" onClick={hideFinishedColumns}>
             Hide finished columns
           </button>
-          <button type="button" onClick={clearFilters} disabled={filterCount() === 0}>
-            Clear filters ({filterCount()})
+          <button type="button" onClick={closeFilterPanel}>
+            Done
           </button>
+        </div>
+          </div>
         </div>
       </div>
 
-      {/* FR-U14's second clause: a combined filter is nameable and recalled. */}
+      {/* FR-U14's second clause: a combined filter is a named lens. */}
       <div class="board-savedrow">
+        <span class="board-savedlabel">Saved lenses</span>
         <input
           type="text"
           class="board-savedname"
-          placeholder="Name this filter set"
+          placeholder="Name this lens"
+          aria-label="Lens name"
           value={saveName()}
           onInput={(event) => setSaveName(event.currentTarget.value)}
           onKeyDown={(event) => {
@@ -1991,7 +2096,7 @@ const Board: Component<Props> = (props) => {
           }}
         />
         <button type="button" onClick={saveCurrent} disabled={!saveName().trim()}>
-          Save filter
+          Save lens
         </button>
         <For each={savedFilters()}>
           {(entry) => (
@@ -2007,7 +2112,7 @@ const Board: Component<Props> = (props) => {
               <button
                 type="button"
                 class="board-saved-drop"
-                aria-label={`Forget the saved filter ${entry.name}`}
+                aria-label={`Forget the saved lens ${entry.name}`}
                 onClick={() => forgetSaved(entry.name)}
               >
                 ×
@@ -2016,7 +2121,7 @@ const Board: Component<Props> = (props) => {
           )}
         </For>
         <span class="board-muted">
-          saved filters are kept in this browser · the URL above carries the
+          saved lenses are kept in this browser · the URL above carries the
           same set to somebody else
         </span>
       </div>

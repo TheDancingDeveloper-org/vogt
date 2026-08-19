@@ -311,6 +311,47 @@ test("Board dragover/drop uses the real browser gesture and keeps its filter on 
   await expect(page.getByLabel("Board filters")).toBeVisible();
 });
 
+test("Board progressive filters survive reload, history, and saved-lens recall", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/board?project=vogt&lanes=project");
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+
+  const filters = page.getByRole("group", { name: "Board filters" });
+  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(filters.getByText("Swimlanes: project")).toBeVisible();
+  await expect(page.getByRole("group", { name: "Add Board filters" })).toBeHidden();
+
+  await filters.getByRole("button", { name: "+ Filter", exact: true }).click();
+  const addPanel = page.getByRole("group", { name: "Add Board filters" });
+  await expect(addPanel).toBeVisible();
+  await addPanel.getByText("Type", { exact: true }).click();
+  await addPanel.getByRole("button", { name: "feature", exact: true }).click();
+  await expect(page).toHaveURL(/kind=feature/);
+
+  await page.getByLabel("Lens name").fill("Vogt features");
+  await page.getByRole("button", { name: "Save lens" }).click();
+  await expect(page.locator(".board-saved-recall")).toHaveText("Vogt features");
+
+  await filters.getByRole("button", { name: "Remove filter Project: vogt" }).click();
+  await expect(page).not.toHaveURL(/project=vogt/);
+  await page.reload();
+  await expect(filters.getByText("Type: feature")).toBeVisible();
+  await expect(filters.getByText("Swimlanes: project")).toBeVisible();
+
+  await page.locator(".board-saved-recall").click();
+  await expect(page).toHaveURL(/project=vogt/);
+  await expect(page).toHaveURL(/kind=feature/);
+  await expect(page).toHaveURL(/lanes=project/);
+
+  await page.goto("/#/board?label=infra");
+  await expect(filters.getByText("Label: infra")).toBeVisible();
+  await page.goBack();
+  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(filters.getByText("Type: feature")).toBeVisible();
+  await page.goForward();
+  await expect(filters.getByText("Label: infra")).toBeVisible();
+});
+
 test("Vogt identity and route-aware titles survive navigation and reload", async ({ page }) => {
   await installFixtures(page, { assistant_enabled: true });
   await page.goto("/#/board?project=vogt");

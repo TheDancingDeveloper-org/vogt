@@ -122,10 +122,11 @@ state the server refused.
 
 - **Swimlanes** by project or initiative; per-column WIP counts; lanes and
   columns collapse, and the layout is remembered per device.
-- **Filters** by project, state, type, label, initiative and actor, combinable,
-  and written into the URL — so a filtered board is a link you can send. A
-  combination can be named and recalled as a saved filter (per device; shared
-  server-side filters are deliberately not built — `REQUIREMENTS.md` §3).
+- **Filters** by project, state, type, label, initiative and actor are added
+  through `+ Filter` and shown as individually removable chips. The URL remains
+  the shareable/restorable source of truth, and a combination can be named and
+  recalled as a saved lens (per device; shared server-side lenses are
+  deliberately not built — `REQUIREMENTS.md` §3).
 - **Quick-create** raises an item without leaving the board.
 - The board is operable from the keyboard: focus an item, move it between
   columns, open its detail, quick-create.
