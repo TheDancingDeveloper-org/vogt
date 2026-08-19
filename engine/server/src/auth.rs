@@ -19,6 +19,7 @@ use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::app::AppState;
+use crate::observability::RequestId;
 
 static AUTH_FAILURES: AtomicU64 = AtomicU64::new(0);
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
@@ -189,10 +190,22 @@ pub async fn require_bearer(
     mut request: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let request_id = headers
-        .get(&REQUEST_ID_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
+    // The id the access-log layer already assigned this request (#139). Taken
+    // from there rather than re-derived, because two ids for one request is
+    // worse than none: the audit lines below and the access line would name
+    // the same request differently, and the core — which is told this id —
+    // would agree with neither. The fallback keeps this middleware standing
+    // alone, as it did before there was an outer layer to ask.
+    let request_id = request
+        .extensions()
+        .get::<RequestId>()
+        .map(|id| id.0.clone())
+        .or_else(|| {
+            headers
+                .get(&REQUEST_ID_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        })
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let user_agent = headers
         .get(header::USER_AGENT)

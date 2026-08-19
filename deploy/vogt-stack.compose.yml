@@ -243,6 +243,14 @@ services:
       # ── vogt-core ────────────────────────────────────────────────────────
       VOGT_DATA_DIR: /var/lib/vogt
       VOGT_LOG_LEVEL: "${VOGT_LOG_LEVEL:-info}"
+      # The access log, and how it renders (r19, `DEPLOYMENT.md` §12). All
+      # behaviour values, so all defaulted: a stack that says nothing gets one
+      # timestamped line per request with a duration on it, which is what the
+      # 2026-08-19 incident had to be diagnosed without. `json` is for the
+      # deployment that ships these to Loki.
+      VOGT_LOG_FORMAT: "${VOGT_LOG_FORMAT:-text}"
+      VOGT_LOG_REQUESTS: "${VOGT_LOG_REQUESTS:-true}"
+      VOGT_LOG_SLOW_REQUEST_MS: "${VOGT_LOG_SLOW_REQUEST_MS:-1000}"
       # Where clients reach this instance (FR-A8). An exposure value, so it is
       # required rather than defaulted — the one category NFR-D2 still forbids
       # a default for. The engine binds 0.0.0.0:8910 in this container and is

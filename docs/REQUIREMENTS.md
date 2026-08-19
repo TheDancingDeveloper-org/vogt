@@ -1035,6 +1035,54 @@ proportional to time, not to change. The 60-day horizon is what bounds it, and
 that is why FR-E12 makes the horizon configured and scheduled rather than
 whatever the last caller of an endpoint happened to pass.
 
+### Revision r19 — a request that leaves no trace
+
+*2026-08-19. The core gains an access log with a duration on it, both halves
+of the product gain one correlation identifier, and probe noise becomes
+suppressible without silencing anything else. Written the day the product
+could not diagnose itself (#139).*
+
+`vogt-dev` served the GUI at fifteen seconds and answered `/health/ready` past
+twenty-five, on a request that touches no database. Diagnosis took host
+metrics from netdata, container metrics from cadvisor, a hand count of path
+frequencies across three thousand access-log lines, and a read of the PWA's
+source to work out what was generating the traffic. None of that came from
+the application, because the application emitted nothing to come from.
+
+The state r19 found, confirmed against `dev` rather than assumed:
+
+1. **The core was effectively unlogged.** Five logging references in the whole
+   of `src/`, one logger (`vogt.scheduler`), no middleware of any kind, no
+   `perf_counter` anywhere, and `uvicorn.run` with no `log_config`. What
+   shipped was uvicorn's stock line — no timestamp, no duration, and a client
+   port of `:0`, so two connections from one host could not be told apart.
+2. **The engine was structured, and separate.** `tracing` with an
+   `EnvFilter` across some thirty-five call sites with real fields — and no
+   identifier in common with the core it proxies `/api/vogt` and `/mcp`
+   straight through to. Two logging stacks, two formats, and no way to follow
+   one request across the hop between them.
+3. **The cause was found only because it was numerous.** #138 was 88% of the
+   request volume, which is visible in a frequency count. A single slow
+   endpoint would have left no trace at all, and that — not the badge polling
+   — is what this revision is about.
+
+Five requirements are appended:
+
+| New ID | What it names | Pri |
+|---|---|---|
+| NFR-OB1 | Every request the core serves shall produce **one** structured line carrying method, path, query, status, duration, response size, client and request id, and the actor it authenticated as when it authenticated as one. | M |
+| NFR-OB2 | A request slower than a configurable threshold shall be logged at `WARNING`, so a pathological endpoint surfaces without anybody trawling. Judged on time to first byte, so a long-lived stream is not reported as a slow request every time it ends. | M |
+| NFR-OB3 | A request shall be followable across the engine and the core by **one identifier**: honoured from the caller when usable, minted when not, stated by the door rather than forwarded from the caller, echoed to the client, and attached to every line either runtime writes while serving it. | M |
+| NFR-OB4 | Health and readiness probe noise shall be suppressible **without losing application logging**, and suppression shall not hide a probe that crossed NFR-OB2's threshold. | M |
+| NFR-OB5 | Log rendering shall be configurable between human-readable text and one JSON object per line, carrying the same fields either way, and every logger shall live under one documented namespace. | S |
+
+**No new runtime dependency.** `structlog`, `loguru` and OpenTelemetry were
+all considered and none adopted: the rendering is forty lines of stdlib
+`logging`, the context propagation is a `ContextVar` in any of them, and this
+product ships four runtime dependencies. A tracing *backend* is a different
+decision from a log line, and NFR-OB3's identifier is what would make it
+adoptable later without re-instrumenting anything.
+
 ## 1. Functional requirements
 
 ### FR-P — Projects & per-repo view
@@ -1380,6 +1428,16 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | NFR-O1 | The platform shall be **MIT licensed** (decided 2026-08-12; `LICENSE` in place, matching cadastre) and developed on GitHub — initially in a private repository under `TheDancingDeveloper-org`, going public at a milestone of the owner's choosing. | M |
 | NFR-O2 | Images published with SBOM, signature, and attestations. | S |
 | NFR-O3 | The project repository shall itself satisfy the default project contract (AGENTS.md, README, LICENSE, docs/, design/, src/). | M |
+
+### NFR-OB — Observability & diagnostics *(r19)*
+
+| ID | Requirement | Pri |
+|---|---|---|
+| NFR-OB1 | *(r19)* Every request served by the core shall produce one structured log line including its duration, alongside method, path, query, status, response size, client, request id, and the authenticated actor where there is one. | M |
+| NFR-OB2 | *(r19)* A request whose response takes longer than a configurable threshold to start shall be logged at `WARNING` rather than `INFO`. | M |
+| NFR-OB3 | *(r19)* One correlation identifier shall follow a request across the engine and the core: adopted from the caller when it is a usable identifier and minted otherwise, stated by the front door rather than forwarded from the caller, returned to the client, and attached to every line written while that request is served. | M |
+| NFR-OB4 | *(r19)* Probe traffic shall be suppressible to `DEBUG` by path without suppressing application logging, and a suppressed path shall still be logged when it crosses NFR-OB2's threshold. | M |
+| NFR-OB5 | *(r19)* Log output shall be configurable between text and JSON carrying identical fields, and every logger in the core shall live under the `vogt.*` namespace so verbosity is a decision about Vogt and not about its dependencies. | S |
 
 ---
 

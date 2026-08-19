@@ -52,6 +52,9 @@ struct Seen {
     /// test can tell "the door stated it" from "the caller did".
     public_url: Option<String>,
     api_path: Option<String>,
+    /// The correlation id the door stated (#139). Recorded so a test can
+    /// assert the core and the door name the same request.
+    request_id: Option<String>,
 }
 
 type Log = Arc<Mutex<Vec<Seen>>>;
@@ -76,6 +79,10 @@ async fn core_handler(
             .map(str::to_owned),
         api_path: headers
             .get("x-vogt-api-path")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        request_id: headers
+            .get("x-request-id")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
     });
@@ -1492,4 +1499,71 @@ async fn a_door_with_no_public_url_states_nothing() {
         .expect("the request reached the core");
     assert_eq!(seen.public_url, None);
     assert_eq!(seen.api_path, None);
+}
+
+// -- one request, two runtimes, one identifier (#139, NFR-OB3) -------------
+
+#[tokio::test]
+async fn the_core_is_told_which_request_this_is_and_the_caller_is_told_too() {
+    let (base, log) = front_door().await;
+    let res = client()
+        .get(format!("{base}/api/vogt/status"))
+        .headers(bearer(TEST_TOKEN))
+        .send()
+        .await
+        .unwrap();
+
+    let answered = res
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .expect("every answer carries the id of the request it answers");
+    let seen = proxied(&log).last().cloned().unwrap();
+    assert_eq!(
+        seen.request_id.as_deref(),
+        Some(answered.as_str()),
+        "the door's log line and the core's must name the same request, or a \
+         slow request cannot be followed across the two"
+    );
+}
+
+#[tokio::test]
+async fn a_callers_own_request_id_is_carried_through_to_the_core() {
+    let (base, log) = front_door().await;
+    let mut headers = bearer(TEST_TOKEN);
+    headers.insert("x-request-id", "caller-chosen-id-42".parse().unwrap());
+    let res = client()
+        .get(format!("{base}/api/vogt/status"))
+        .headers(headers)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.headers().get("x-request-id").unwrap(),
+        "caller-chosen-id-42"
+    );
+    let seen = proxied(&log).last().cloned().unwrap();
+    assert_eq!(seen.request_id.as_deref(), Some("caller-chosen-id-42"));
+}
+
+#[tokio::test]
+async fn an_unusable_request_id_is_replaced_before_it_reaches_a_log() {
+    let (base, log) = front_door().await;
+    let mut headers = bearer(TEST_TOKEN);
+    // A value shaped to forge a second log line if it were ever written out
+    // unchecked. The request is fine; only the label is unusable.
+    headers.insert("x-request-id", "forged status=200".parse().unwrap());
+    let res = client()
+        .get(format!("{base}/api/vogt/status"))
+        .headers(headers)
+        .send()
+        .await
+        .unwrap();
+
+    let answered = res.headers().get("x-request-id").unwrap().to_str().unwrap();
+    assert_ne!(answered, "forged status=200");
+    let seen = proxied(&log).last().cloned().unwrap();
+    assert_eq!(seen.request_id.as_deref(), Some(answered));
 }

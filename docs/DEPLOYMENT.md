@@ -1269,3 +1269,91 @@ The workspace-root `mutagen.yml` targets Node B at
 `sprooty@100.92.54.45:/mnt/2tnvme/docker/volumes/mydevenv2/workspace`. Do not
 target the retired MyDevEnv v1 endpoint. Synchronisation is handled outside the
 app; nothing in the engine or the core performs it.
+
+## 12. Reading the logs *(r19)*
+
+Written the day the product could not diagnose itself. On 2026-08-19 the GUI
+took fifteen seconds to load and `/health/ready` intermittently exceeded a
+25-second timeout on a request that does no database work, and answering
+*which endpoint is slow* took host metrics, container metrics, a hand count of
+three thousand access-log lines and a read of the PWA's source (#139).
+NFR-OB1–OB5 exist so the next one is answerable from the logs alone.
+
+### 12.1 What a line looks like
+
+Both processes log to **stderr**, so `docker logs` is the whole story and
+`vogt-mcp`'s JSON-RPC stdout stays a protocol stream rather than a log.
+
+The core, in the default text rendering:
+
+```text
+2026-08-19T11:02:03.418+00:00 INFO    vogt.http request request_id=8f2c1ab34d90e771 method=GET path=/api/backlog status=200 duration_ms=812.4 ttfb_ms=811.9 bytes=1841 query=limit=1 client=100.109.218.11 actor=agent:vogt-dev
+```
+
+`VOGT_LOG_FORMAT=json` renders the same fields as one JSON object per line,
+for a log that is queried rather than read. **Two durations**, deliberately:
+`ttfb_ms` is time to the response starting and is what says an endpoint is
+slow; `duration_ms` is the whole exchange. The slow-request warning is judged
+on the first, so a long-lived `/mcp` stream does not report itself as
+pathological every time a client disconnects.
+
+The engine's line is `tracing`'s, with the same field names:
+
+```text
+2026-08-19T11:02:03.402Z  INFO request: request_id=8f2c1ab34d90e771 method=GET path=/api/vogt/backlog status=200 duration_ms=815
+```
+
+### 12.2 One request, across both runtimes
+
+The engine assigns the id — the caller's `X-Request-Id` when it is a usable
+identifier, one it mints when it is not — puts it in its own line, sends it to
+the core on the proxied request, and returns it to the client. The core
+attaches it to **every** line it writes while serving that request, not only
+the access line. So a slow answer can be quoted in a bug report:
+
+```bash
+curl -sS -D- -o/dev/null https://vogt-dev.sprooty.com/api/vogt/backlog?limit=1 \
+  -H "authorization: Bearer $TOKEN" | grep -i x-request-id
+docker logs vogt-dev 2>&1 | grep 8f2c1ab34d90e771
+```
+
+A caller may state the id, which is how a script correlates a batch. It is
+checked before it is logged — identifier characters, 64 bytes — and replaced
+when it is not, because a value that reaches a log line unchecked is a
+log-injection primitive.
+
+### 12.3 The knobs, and what they are for
+
+| Setting | Default | What it decides |
+|---|---|---|
+| `VOGT_LOG_LEVEL` | `info` | Verbosity of the `vogt.*` namespace. Dependencies are left where they are, so `debug` is a decision about Vogt. |
+| `VOGT_LOG_FORMAT` | `text` | `json` for Loki; identical fields either way. |
+| `VOGT_LOG_REQUESTS` | `true` | The access line itself. Off still honours and echoes correlation ids. |
+| `VOGT_LOG_SLOW_REQUEST_MS` | `1000` | Above this, `WARNING` instead of `INFO`. |
+| `VOGT_LOG_QUIET_PATHS` | probes | Paths dropped to `DEBUG`. |
+
+The engine takes its level from `RUST_LOG` as it always has; its quiet paths
+and slow threshold are constants in `engine/server/src/observability.rs`.
+
+**Probe suppression is not probe silence.** `/health/live`, `/health/ready`
+and `/version` log at `DEBUG` because an orchestrator calls them every few
+seconds forever, and a log that is 100% `/healthz` with no application output
+in it is not a log — a neighbouring container on this host produced exactly
+that, three thousand consecutive lines of it. But the slow check runs first,
+so the `/health/ready` that took 25 seconds still warns. That was the single
+most diagnostic fact of the incident and suppressing it would defeat the
+purpose of having the setting.
+
+### 12.4 Answering "which endpoint was slow at 11:30"
+
+```bash
+# Everything the core thought was slow or failed, with its duration:
+docker logs vogt-dev --since 11:25 2>&1 | grep 'WARNING vogt.http'
+
+# The endpoints by request volume — the count that found #138:
+docker logs vogt-dev --since 1h 2>&1 | grep 'vogt.http request' \
+  | sed -n 's/.*path=\([^ ]*\).*/\1/p' | sort | uniq -c | sort -rn | head
+```
+
+With `VOGT_LOG_FORMAT=json` both of those are a `jq` filter or a LogQL query
+instead, which is the reason the format exists.

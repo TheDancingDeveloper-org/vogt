@@ -122,6 +122,15 @@ with request and response schemas, and an MCP tool. Then add a step to
 `SCRIPT` in `tests/test_parity.py`; the harness fails if you don't, and fails
 again if you exclude it from a surface without saying why.
 
+Logging has one convention and it is short (r19, `docs/DEPLOYMENT.md` §12):
+every logger comes from `vogt.observability.logger("<area>")`, never from
+`logging.getLogger`, so the whole core lives under `vogt.*` and verbosity is a
+decision about Vogt rather than about urllib3. Structured fields travel as
+`extra={"vogt": {...}}` and render as `key=value` in text and as top-level keys
+in JSON. Every line written while a request is being served carries that
+request's id automatically; the access line itself is
+`adapters/http/access_log.py` and nothing else should write one.
+
 Three rules the code enforces so review does not have to:
 
 - A **mutating** operation whose parameters lack a required `reason` fails at

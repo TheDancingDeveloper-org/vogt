@@ -21,6 +21,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 
+from vogt import __version__
+from vogt.adapters.http.access_log import AccessLogSettings, RequestLogMiddleware
 from vogt.adapters.http.app import API_PREFIX, build_app
 from vogt.adapters.http.health import ServerInfo, add_health_routes
 from vogt.adapters.http.scheduler import CollectorSchedule
@@ -30,7 +32,10 @@ from vogt.application.services.auth import Authenticated, authenticate, local
 from vogt.config import VogtConfig, load_config
 from vogt.core.principal import Principal
 from vogt.errors import InvalidRequest
+from vogt.observability import configure_logging, logger, set_request_actor
 from vogt.registry import OperationRegistry, default_registry
+
+log = logger("serve")
 
 
 @dataclass(frozen=True)
@@ -144,7 +149,9 @@ def build_server(
         """
         if not options.require_auth:
             ctx = context()
-            return ctx, local(ctx)
+            caller = local(ctx)
+            set_request_actor(caller.principal.identity_ref)
+            return ctx, caller
 
         header = request.headers.get("authorization", "")
         bearer = header[7:] if header.lower().startswith("bearer ") else None
@@ -154,6 +161,11 @@ def build_server(
         caller = authenticate(
             context(), bearer=bearer, writes_enabled=options.writes_enabled
         )
+        # The access line is written after the handler has run, so naming the
+        # actor here is what lets it say *who* made a request rather than only
+        # which address did (NFR-OB1). Set on the request's context, not on
+        # the application: two requests are two contexts.
+        set_request_actor(caller.principal.identity_ref)
         return context(caller.principal), caller
 
     app = build_app(
@@ -177,6 +189,17 @@ def build_server(
         mcp_path=MCP_PATH,
     )
     add_mcp_route(app, registry=active_registry, resolve=resolve, path=MCP_PATH)
+    # Outermost, so the line it writes covers everything inside it — routing,
+    # authentication, the error handlers, and the requests that never reach a
+    # route at all. A 404 that took four seconds is a fact worth having.
+    app.add_middleware(
+        RequestLogMiddleware,
+        settings=AccessLogSettings(
+            enabled=resolved_config.log_requests,
+            slow_request_ms=resolved_config.log_slow_request_ms,
+            quiet_paths=tuple(resolved_config.log_quiet_paths),
+        ),
+    )
     return app
 
 
@@ -186,12 +209,31 @@ def run(  # pragma: no cover - exercised by running the server, not by tests
     """Start the listener."""
     import uvicorn
 
-    app = build_server(options, config=config)
+    resolved = config if config is not None else load_config()
+    configure_logging(level=resolved.log_level, fmt=resolved.log_format)
+    app = build_server(options, config=resolved)
+    log.info(
+        "serving",
+        extra={
+            "vogt": {
+                "version": __version__,
+                "bind": f"{options.host}:{options.port}",
+                "scheme": options.scheme,
+                "auth": options.require_auth,
+                "writes": options.writes_enabled,
+            }
+        },
+    )
     uvicorn.run(
         app,
         host=options.host,
         port=options.port,
         ssl_certfile=None if options.tls_cert is None else str(options.tls_cert),
         ssl_keyfile=None if options.tls_key is None else str(options.tls_key),
-        log_level="info",
+        # Ours is already installed and carries the request id; uvicorn's
+        # dictConfig would replace it with handlers that do not.
+        log_config=None,
+        # Replaced by `RequestLogMiddleware`, which knows the duration.
+        access_log=False,
+        log_level=resolved.log_level,
     )

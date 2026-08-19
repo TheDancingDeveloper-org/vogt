@@ -22,7 +22,7 @@ use crate::{
     files, git,
     gui::GuiRegistry,
     history::SessionHistory,
-    history_api,
+    history_api, observability,
     push::PushManager,
     sessions::SessionRegistry,
     vogt_core::{self, VogtCore},
@@ -351,6 +351,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .merge(asset_routes)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        // Outermost, so every request gets an id and a line — including the
+        // ones CORS refuses and the ones no route claims (#139). It is also
+        // where the id `vogt_core::forward` sends to the core is minted, so
+        // the two halves of a proxied request share one identifier.
+        .layer(middleware::from_fn(observability::access_log))
         .with_state(Arc::clone(&state));
 
     (router, state)
