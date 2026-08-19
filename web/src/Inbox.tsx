@@ -2,13 +2,13 @@ import { Component, For, Show, createEffect, createSignal, onCleanup, onMount } 
 import { useLocation, useNavigate } from "@solidjs/router";
 import {
   VogtUnavailable,
-  adoptInbox,
+  adoptSubject,
   archiveInbox,
   listInbox,
   resolveInboxDrift,
   restoreInbox,
   snoozeInbox,
-  suppressInbox,
+  suppressSubject,
   type InboxEntry,
   type InboxListResult,
   type InboxSourceCoverage,
@@ -555,8 +555,8 @@ const Inbox: Component<Props> = (props) => {
     try {
       const target = entry.action?.subject_key ?? entry.source_subject_key;
       if (!target) throw new Error("Inbox entry has no adoptable source subject.");
-      if (kind === "adopt") await adoptInbox(target, reason);
-      else if (kind === "suppress") await suppressInbox(target, reason);
+      if (kind === "adopt") await adoptSubject(target, reason);
+      else if (kind === "suppress") await suppressSubject(target, reason);
       else if (entry.action?.kind === "drift" && entry.action.drift_id) {
         await resolveInboxDrift(entry.action.drift_id, kind === "accept" ? "accepted" : "rejected", reason);
       }

@@ -40,6 +40,7 @@ import {
 import { useLocation, useNavigate, useSearchParams } from "@solidjs/router";
 import {
   VogtUnavailable,
+  adoptSubject,
   backlog,
   bugs,
   createWork,
@@ -48,6 +49,8 @@ import {
   listLabels,
   listProjects,
   listWorkflows,
+  startSession,
+  suppressSubject,
   transitionWork,
   updateWork,
   why,
@@ -58,6 +61,7 @@ import { openWorkItemTab } from "./tabs";
 import { ViewAgeBadge, createLoadStamp, createViewAge } from "./viewAge";
 import { MeasuredWindow } from "./measuredWindow";
 import SurfaceHeader from "./SurfaceHeader";
+import { ProgressiveFilters, SavedLenses } from "./ProgressiveFilters";
 
 interface Props {
   onError?: (message: string) => void;
@@ -485,7 +489,6 @@ const Backlog: Component<Props> = (props) => {
   const [explained, setExplained] = createSignal<string[]>(many(query.why).slice(0, 2));
 
   const [savedFilters, setSavedFilters] = createSignal<SavedFilter[]>(loadSavedFilters());
-  const [saveName, setSaveName] = createSignal("");
 
   const [selected, setSelected] = createSignal<string[]>([]);
   const selectedSet = createMemo(() => new Set(selected()));
@@ -844,6 +847,120 @@ const Backlog: Component<Props> = (props) => {
     }
   };
 
+  // -- a row's own content and acts (FR-U25, Stage 7) ----------------------
+  //
+  // The collapsed row keeps the facts a reader ranks by — rank, ref, trust,
+  // age and score — and lets the title wrap to whatever it says. Everything
+  // else is one control away, in the row rather than in a dialog: provenance,
+  // the ranking factors, and the acts this row actually has.
+  //
+  // "Actually has" is the load-bearing half. A declared row has a work item
+  // to open, select and start a session against. An observed row has no work
+  // item at all, so it offers the two writes that exist for a subject —
+  // adopt and suppress — and neither of them is drawn on a declared row.
+
+  const [expandedRows, setExpandedRows] = createSignal<Set<string>>(new Set());
+
+  const toggleRow = (ref: string) => {
+    setExpandedRows((current) => {
+      const next = new Set(current);
+      if (next.has(ref)) next.delete(ref);
+      else next.add(ref);
+      return next;
+    });
+  };
+
+  type RowActKind = "session" | "adopt" | "suppress";
+
+  const [rowAct, setRowAct] = createSignal<{ ref: string; kind: RowActKind } | null>(null);
+  const [rowReason, setRowReason] = createSignal("");
+  const [rowRunning, setRowRunning] = createSignal(false);
+
+  const beginRowAct = (ref: string, kind: RowActKind) => {
+    setRowAct({ ref, kind });
+    // Each act collects its own reason: one left in the field could otherwise
+    // justify a different write on a different row (r6).
+    setRowReason("");
+  };
+
+  const ROW_ACT_WORDS: Record<RowActKind, string> = {
+    session: "Start a session on this item",
+    adopt: "Adopt this subject as a work item",
+    suppress: "Suppress this subject from ranked views",
+  };
+
+  const submitRowAct = async (event: Event) => {
+    event.preventDefault();
+    const act = rowAct();
+    const reason = rowReason().trim();
+    if (!act || !reason || rowRunning()) return;
+    setRowRunning(true);
+    try {
+      if (act.kind === "session") await startSession({ work_item: act.ref, reason });
+      else if (act.kind === "adopt") await adoptSubject(act.ref, reason);
+      else await suppressSubject(act.ref, reason);
+      setRowAct(null);
+      setRowReason("");
+      refresh();
+    } catch (error) {
+      props.onError?.(`${act.ref}: ${errorMessage(error)}`);
+    } finally {
+      setRowRunning(false);
+    }
+  };
+
+  const rowActions = (entry: RankedEntry) => (
+    <div class="vogt-backlog-row-actions">
+      <Show
+        when={entry.origin === "declared"}
+        fallback={
+          <>
+            <button type="button" onClick={() => beginRowAct(entry.ref, "adopt")}>
+              Adopt as work item…
+            </button>
+            <button type="button" onClick={() => beginRowAct(entry.ref, "suppress")}>
+              Suppress source…
+            </button>
+          </>
+        }
+      >
+        <button type="button" onClick={() => open(entry)}>
+          Open
+        </button>
+        <button type="button" onClick={() => toggleSelected(entry.ref)}>
+          {selectedSet().has(entry.ref) ? "Deselect" : "Select"}
+        </button>
+        <button type="button" onClick={() => beginRowAct(entry.ref, "session")}>
+          Start a session…
+        </button>
+      </Show>
+
+      <Show when={rowAct()?.ref === entry.ref ? rowAct() : null}>
+        {(act) => (
+          <form class="vogt-backlog-row-reason" onSubmit={(event) => void submitRowAct(event)}>
+            <label class="vogt-backlog-field vogt-backlog-field-wide">
+              <span>{ROW_ACT_WORDS[act().kind]} — why?</span>
+              <textarea
+                required
+                rows="2"
+                value={rowReason()}
+                onInput={(event) => setRowReason(event.currentTarget.value)}
+              />
+            </label>
+            <div class="vogt-backlog-row-reason-actions">
+              <button type="submit" disabled={!rowReason().trim() || rowRunning()}>
+                {rowRunning() ? "Asking Vogt…" : "Confirm"}
+              </button>
+              <button type="button" onClick={() => setRowAct(null)}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
+      </Show>
+    </div>
+  );
+
   // -- bulk transition (FR-U6) ---------------------------------------------
 
   const [bulkState, setBulkState] = createSignal("");
@@ -1061,19 +1178,54 @@ const Backlog: Component<Props> = (props) => {
     );
   };
 
-  const saveCurrent = () => {
-    const name = saveName().trim();
-    if (!name) return;
+  const saveCurrent = (name: string) => {
     const next = [
       { name, filter: filter() },
       ...savedFilters().filter((entry) => entry.name !== name),
     ];
     setSavedFilters(persistSavedFilters(next));
-    setSaveName("");
+  };
+
+  const recallSaved = (name: string) => {
+    const entry = savedFilters().find((one) => one.name === name);
+    if (entry) setFilter(entry.filter);
   };
 
   const removeSaved = (name: string) => {
     setSavedFilters(persistSavedFilters(savedFilters().filter((e) => e.name !== name)));
+  };
+
+  // -- what is filtering this view, said as chips (FR-U14, Stage 7) --------
+  //
+  // The view itself is not a chip: `backlog` and `bugs` are two ranked views
+  // over the same filter set, chosen by the tabs above, and dropping the view
+  // is not something a reader can mean. Page size is not a chip either — it
+  // is how much of the ranked answer is loaded, not which part of it.
+
+  const activeFilterChips = createMemo(() => {
+    const active = filter();
+    const chips: { key: string; label: string }[] = [];
+    if (active.project) chips.push({ key: "project", label: `Project: ${active.project}` });
+    if (active.kinds.length)
+      chips.push({ key: "kinds", label: `Type: ${active.kinds.join(", ")}` });
+    if (active.states.length)
+      chips.push({ key: "states", label: `State: ${active.states.join(", ")}` });
+    if (active.label) chips.push({ key: "label", label: `Label: ${active.label}` });
+    if (active.initiative)
+      chips.push({ key: "initiative", label: `Initiative: ${active.initiative}` });
+    if (active.actor) chips.push({ key: "actor", label: `Actor: ${active.actor}` });
+    return chips;
+  });
+
+  const removeFilter = (key: string) => {
+    switch (key) {
+      case "project": update("project", ""); break;
+      case "kinds": update("kinds", []); break;
+      case "states": update("states", []); break;
+      case "label": update("label", ""); break;
+      case "initiative": update("initiative", ""); break;
+      case "actor": update("actor", ""); break;
+    }
   };
 
   const counts = createMemo(() => {
@@ -1146,177 +1298,151 @@ const Backlog: Component<Props> = (props) => {
         )}
       />
 
-      <section class="vogt-backlog-filters" aria-label="Filters">
-        <div class="vogt-backlog-filter-grid">
-          <label class="vogt-backlog-field">
-            <span>Project</span>
-            <select
-              value={optionValue(filter().project, projectOptions())}
-              onInput={(event) => update("project", event.currentTarget.value)}
-            >
-              <option value="">Any project</option>
-              <For each={projectOptions()}>
-                {(slug) => <option value={slug}>{slug}</option>}
-              </For>
-            </select>
-          </label>
-
-          <label class="vogt-backlog-field">
-            <span>Label</span>
-            <select
-              value={optionValue(filter().label, labelOptions())}
-              onInput={(event) => update("label", event.currentTarget.value)}
-            >
-              <option value="">Any label</option>
-              <For each={labelOptions()}>
-                {(name) => <option value={name}>{name}</option>}
-              </For>
-            </select>
-          </label>
-
-          <label class="vogt-backlog-field">
-            <span>Initiative</span>
-            <select
-              value={optionValue(filter().initiative, initiativeOptions())}
-              disabled={filter().view === "bugs"}
-              title={
-                filter().view === "bugs"
-                  ? "The bugs view takes no initiative parameter"
-                  : undefined
-              }
-              onInput={(event) => update("initiative", event.currentTarget.value)}
-            >
-              <option value="">Any initiative</option>
-              <For each={initiativeOptions()}>
-                {(slug) => <option value={slug}>{slug}</option>}
-              </For>
-            </select>
-          </label>
-
-          <label class="vogt-backlog-field">
-            <span>Actor</span>
-            <select
-              value={optionValue(filter().actor, actorOptions())}
-              onInput={(event) => update("actor", event.currentTarget.value)}
-            >
-              <option value="">Anyone</option>
-              <For each={actorOptions()}>
-                {(ref) => <option value={ref}>{ref}</option>}
-              </For>
-            </select>
-          </label>
-
-          <label class="vogt-backlog-field">
-            <span>Page size</span>
-            <select
-              value={String(limit())}
-              onInput={(event) => setLimit(Number.parseInt(event.currentTarget.value, 10))}
-            >
-              <For each={PAGE_SIZES}>
-                {(size) => <option value={String(size)}>{size} rows</option>}
-              </For>
-            </select>
-          </label>
-        </div>
-
-        <div class="vogt-backlog-chiprow">
-          <span class="vogt-backlog-chiplabel">Type</span>
-          <For each={WORK_KINDS}>
-            {(kind) => (
-              <button
-                type="button"
-                class={`vogt-backlog-chip${filter().kinds.includes(kind) ? " on" : ""}`}
-                aria-pressed={filter().kinds.includes(kind)}
-                disabled={filter().view === "bugs"}
-                title={
-                  filter().view === "bugs"
-                    ? "The bugs view is kind=bug by definition"
-                    : undefined
-                }
-                onClick={() => toggleIn("kinds", kind)}
-              >
-                {kind}
-              </button>
-            )}
-          </For>
-        </div>
-
-        <div class="vogt-backlog-chiprow">
-          <span class="vogt-backlog-chiplabel">State</span>
-          <Show
-            when={stateOptions().length}
-            fallback={<span class="vogt-backlog-muted">no states on this page</span>}
+      <ProgressiveFilters
+        surface="Backlog"
+        prefix="vogt-backlog"
+        chips={activeFilterChips()}
+        onRemove={removeFilter}
+        onClear={() => setFilter({ ...EMPTY_FILTER, view: filter().view })}
+        clearDisabled={filterIsEmpty({ ...filter(), view: "backlog" })}
+      >
+        <label class="vogt-backlog-field">
+          <span>Project</span>
+          <select
+            value={optionValue(filter().project, projectOptions())}
+            onInput={(event) => update("project", event.currentTarget.value)}
           >
-            <For each={stateOptions()}>
-              {(state) => (
+            <option value="">Any project</option>
+            <For each={projectOptions()}>
+              {(slug) => <option value={slug}>{slug}</option>}
+            </For>
+          </select>
+        </label>
+
+        <label class="vogt-backlog-field">
+          <span>Label</span>
+          <select
+            value={optionValue(filter().label, labelOptions())}
+            onInput={(event) => update("label", event.currentTarget.value)}
+          >
+            <option value="">Any label</option>
+            <For each={labelOptions()}>
+              {(name) => <option value={name}>{name}</option>}
+            </For>
+          </select>
+        </label>
+
+        <label class="vogt-backlog-field">
+          <span>Initiative</span>
+          <select
+            value={optionValue(filter().initiative, initiativeOptions())}
+            disabled={filter().view === "bugs"}
+            title={
+              filter().view === "bugs"
+                ? "The bugs view takes no initiative parameter"
+                : undefined
+            }
+            onInput={(event) => update("initiative", event.currentTarget.value)}
+          >
+            <option value="">Any initiative</option>
+            <For each={initiativeOptions()}>
+              {(slug) => <option value={slug}>{slug}</option>}
+            </For>
+          </select>
+        </label>
+
+        <label class="vogt-backlog-field">
+          <span>Actor</span>
+          <select
+            value={optionValue(filter().actor, actorOptions())}
+            onInput={(event) => update("actor", event.currentTarget.value)}
+          >
+            <option value="">Anyone</option>
+            <For each={actorOptions()}>
+              {(ref) => <option value={ref}>{ref}</option>}
+            </For>
+          </select>
+        </label>
+
+        <label class="vogt-backlog-field">
+          <span>Page size</span>
+          <select
+            value={String(limit())}
+            onInput={(event) => setLimit(Number.parseInt(event.currentTarget.value, 10))}
+          >
+            <For each={PAGE_SIZES}>
+              {(size) => <option value={String(size)}>{size} rows</option>}
+            </For>
+          </select>
+        </label>
+
+        <div class="vogt-backlog-field vogt-backlog-field-wide">
+          <span>Type</span>
+          <div class="vogt-backlog-chiprow">
+            <For each={WORK_KINDS}>
+              {(kind) => (
                 <button
                   type="button"
-                  class={`vogt-backlog-chip${filter().states.includes(state) ? " on" : ""}`}
-                  aria-pressed={filter().states.includes(state)}
-                  onClick={() => toggleIn("states", state)}
+                  class={`vogt-backlog-chip${filter().kinds.includes(kind) ? " on" : ""}`}
+                  aria-pressed={filter().kinds.includes(kind)}
+                  disabled={filter().view === "bugs"}
+                  title={
+                    filter().view === "bugs"
+                      ? "The bugs view is kind=bug by definition"
+                      : undefined
+                  }
+                  onClick={() => toggleIn("kinds", kind)}
                 >
-                  {state}
+                  {kind}
                 </button>
               )}
             </For>
-          </Show>
-          <span class="vogt-backlog-muted">
-            narrows the loaded page — the ranked views take no state parameter
-          </span>
+          </div>
         </div>
 
-        <div class="vogt-backlog-savedrow">
-          <button
-            type="button"
-            onClick={() => setFilter({ ...EMPTY_FILTER, view: filter().view })}
-            disabled={filterIsEmpty({ ...filter(), view: "backlog" })}
-          >
-            Clear filters
-          </button>
-          <input
-            type="text"
-            placeholder="Name this filter set"
-            value={saveName()}
-            onInput={(event) => setSaveName(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                saveCurrent();
-              }
-            }}
-          />
-          <button type="button" onClick={saveCurrent} disabled={!saveName().trim()}>
-            Save
-          </button>
-          <For each={savedFilters()}>
-            {(entry) => (
-              <span class="vogt-backlog-saved">
-                <button
-                  type="button"
-                  class="vogt-backlog-saved-recall"
-                  title={describeFilter(entry.filter)}
-                  onClick={() => setFilter(entry.filter)}
-                >
-                  {entry.name}
-                </button>
-                <button
-                  type="button"
-                  class="vogt-backlog-saved-drop"
-                  aria-label={`Forget the saved filter ${entry.name}`}
-                  onClick={() => removeSaved(entry.name)}
-                >
-                  ×
-                </button>
-              </span>
-            )}
-          </For>
-          <span class="vogt-backlog-muted">saved filters are kept in this browser</span>
+        <div class="vogt-backlog-field vogt-backlog-field-wide">
+          <span>State</span>
+          <div class="vogt-backlog-chiprow">
+            <Show
+              when={stateOptions().length}
+              fallback={<span class="vogt-backlog-muted">no states on this page</span>}
+            >
+              <For each={stateOptions()}>
+                {(state) => (
+                  <button
+                    type="button"
+                    class={`vogt-backlog-chip${filter().states.includes(state) ? " on" : ""}`}
+                    aria-pressed={filter().states.includes(state)}
+                    onClick={() => toggleIn("states", state)}
+                  >
+                    {state}
+                  </button>
+                )}
+              </For>
+            </Show>
+            <span class="vogt-backlog-muted">
+              narrows the loaded page — the ranked views take no state parameter
+            </span>
+          </div>
         </div>
+      </ProgressiveFilters>
 
-        <Show when={facetNote()}>
-          <p class="vogt-backlog-note">{facetNote()}</p>
-        </Show>
-      </section>
+      {/* FR-U14's second clause: a combination worth keeping is a named lens. */}
+      <SavedLenses
+        prefix="vogt-backlog"
+        lenses={savedFilters().map((entry) => ({
+          name: entry.name,
+          title: describeFilter(entry.filter),
+        }))}
+        onSave={saveCurrent}
+        onRecall={recallSaved}
+        onForget={removeSaved}
+        note="saved lenses are kept in this browser"
+      />
+
+      <Show when={facetNote()}>
+        <p class="vogt-backlog-note">{facetNote()}</p>
+      </Show>
 
       <Show when={createOpen()}>
         <form class="vogt-backlog-create" onSubmit={(event) => void submitCreate(event)}>
@@ -1587,15 +1713,12 @@ const Backlog: Component<Props> = (props) => {
                 }
               />
             </span>
-            <span class="vogt-backlog-cell-ref">Ref</span>
-            <span class="vogt-backlog-cell-title">Title</span>
-            <span class="vogt-backlog-cell-kind">Type</span>
-            <span class="vogt-backlog-cell-state">State</span>
-            <span class="vogt-backlog-cell-pri">Pri</span>
-            <span class="vogt-backlog-cell-trust">Trust</span>
-            <span class="vogt-backlog-cell-project">Project</span>
-            <span class="vogt-backlog-cell-updated">Updated</span>
-            <span class="vogt-backlog-cell-score">Score</span>
+            {/* The rows are no longer columns, so neither is this: it says
+                what a row carries rather than naming cells that moved. */}
+            <span>Rank</span>
+            <span class="vogt-backlog-headnote">
+                Vogt's order · every row keeps its ref, trust, age and score
+            </span>
           </div>
 
           <div
@@ -1625,8 +1748,16 @@ const Backlog: Component<Props> = (props) => {
                   }}
                 >
                   <For each={windowRows()}>
-                    {(entry) => {
+                    {(entry, index) => {
                       const sourceUrl = readString(entry, "source_url");
+                      // The ranked position, not the position in the window:
+                      // "3rd" has to mean 3rd in the server's order however
+                      // far down the list the reader has scrolled.
+                      const rank = () => window_().start + index() + 1;
+                      const expanded = () => expandedRows().has(entry.ref);
+                      const detailId = `backlog-row-${entry.ref}-detail`;
+                      const ownWhy = () =>
+                        shown().find((one) => one.ref === entry.ref) ?? null;
                       return (
                         <div
                           ref={(node) => {
@@ -1650,76 +1781,165 @@ const Backlog: Component<Props> = (props) => {
                             explained().includes(entry.ref) ? " explained" : ""
                           }`}
                         >
-                          <span class="vogt-backlog-cell-select">
-                            <input
-                              type="checkbox"
-                              aria-label={`Select ${entry.ref}`}
-                              checked={selectedSet().has(entry.ref)}
-                              disabled={entry.origin !== "declared"}
-                              title={
-                                entry.origin === "declared"
-                                  ? undefined
-                                  : "Observed subjects have no work item to transition"
-                              }
-                              onChange={() => toggleSelected(entry.ref)}
-                            />
-                          </span>
-                          <span class="vogt-backlog-cell-ref vogt-backlog-mono">
-                            <Show
-                              when={entry.origin === "declared"}
-                              fallback={
-                                <Show when={sourceUrl} fallback={<span>{entry.ref}</span>}>
-                                  {(url) => (
-                                    <a href={url()} target="_blank" rel="noreferrer">
-                                      {entry.ref}
-                                    </a>
-                                  )}
-                                </Show>
-                              }
-                            >
+                          <div class="vogt-backlog-row-facts">
+                            <span class="vogt-backlog-cell-select">
+                              <input
+                                type="checkbox"
+                                aria-label={`Select ${entry.ref}`}
+                                checked={selectedSet().has(entry.ref)}
+                                disabled={entry.origin !== "declared"}
+                                title={
+                                  entry.origin === "declared"
+                                    ? undefined
+                                    : "Observed subjects have no work item to transition"
+                                }
+                                onChange={() => toggleSelected(entry.ref)}
+                              />
+                            </span>
+                            <span class="vogt-backlog-rank" title="Rank in the server's order">
+                              {rank()}
+                            </span>
+                            <span class="vogt-backlog-cell-ref vogt-backlog-mono">
+                              <Show
+                                when={entry.origin === "declared"}
+                                fallback={
+                                  <Show when={sourceUrl} fallback={<span>{entry.ref}</span>}>
+                                    {(url) => (
+                                      <a href={url()} target="_blank" rel="noreferrer">
+                                        {entry.ref}
+                                      </a>
+                                    )}
+                                  </Show>
+                                }
+                              >
+                                <button
+                                  type="button"
+                                  class="vogt-backlog-link"
+                                  onClick={() => open(entry)}
+                                >
+                                  {entry.ref}
+                                </button>
+                              </Show>
+                            </span>
+                            <span class="vogt-backlog-cell-trust">
+                              <span
+                                class={`vogt-backlog-trust trust-${trustOf(entry)}`}
+                                title={`trust: ${trustOf(entry)}`}
+                              >
+                                {trustOf(entry)}
+                              </span>
+                            </span>
+                            <span class="vogt-backlog-age">{formatWhen(entry.updated_at)}</span>
+                            <span class="vogt-backlog-cell-score">
                               <button
                                 type="button"
-                                class="vogt-backlog-link"
-                                onClick={() => open(entry)}
+                                class="vogt-backlog-score"
+                                title="Why is this ranked here?"
+                                onClick={() => toggleWhy(entry.ref)}
                               >
-                                {entry.ref}
+                                {entry.score.toFixed(2)}
+                                <span class="vogt-backlog-why">why</span>
                               </button>
-                            </Show>
-                          </span>
-                          <span class="vogt-backlog-cell-title" title={entry.title}>
+                            </span>
+                            <button
+                              type="button"
+                              class="vogt-backlog-row-toggle"
+                              aria-expanded={expanded()}
+                              aria-controls={detailId}
+                              onClick={() => toggleRow(entry.ref)}
+                            >
+                              {expanded() ? "Less" : "More"}
+                            </button>
+                          </div>
+
+                          {/* FR-U25: the title wraps to what it says, and the
+                              row is as tall as that makes it. */}
+                          <div class="vogt-backlog-row-title">
                             {entry.title}
                             <Show when={entry.origin === "observed"}>
                               <span class="vogt-backlog-origin">observed</span>
                             </Show>
-                          </span>
-                          <span class="vogt-backlog-cell-kind">{entry.kind}</span>
-                          <span class="vogt-backlog-cell-state">{entry.state}</span>
-                          <span class="vogt-backlog-cell-pri">{entry.priority}</span>
-                          <span class="vogt-backlog-cell-trust">
-                            <span
-                              class={`vogt-backlog-trust trust-${trustOf(entry)}`}
-                              title={`trust: ${trustOf(entry)}`}
-                            >
-                              {trustOf(entry)}
-                            </span>
-                          </span>
-                          <span class="vogt-backlog-cell-project">
-                            {entry.project_slug ?? "—"}
-                          </span>
-                          <span class="vogt-backlog-cell-updated">
-                            {formatWhen(entry.updated_at)}
-                          </span>
-                          <span class="vogt-backlog-cell-score">
-                            <button
-                              type="button"
-                              class="vogt-backlog-score"
-                              title="Why is this ranked here?"
-                              onClick={() => toggleWhy(entry.ref)}
-                            >
-                              {entry.score.toFixed(2)}
-                              <span class="vogt-backlog-why">why</span>
-                            </button>
-                          </span>
+                          </div>
+
+                          <div class="vogt-backlog-row-tags">
+                            <span>{entry.kind}</span>
+                            <span>{entry.state}</span>
+                            <span>{entry.priority}</span>
+                            <span>{entry.project_slug ?? "no project"}</span>
+                            <For each={entry.labels ?? []}>
+                              {(label) => <span class="vogt-backlog-rowlabel">{label}</span>}
+                            </For>
+                          </div>
+
+                          <Show when={expanded()}>
+                            <div class="vogt-backlog-row-detail" id={detailId}>
+                              <Show when={entry.origin === "observed"}>
+                                <p class="vogt-backlog-provenance">
+                                  <span>
+                                    Observed{" "}
+                                    {readString(entry, "observation_kind") ?? "subject"}
+                                  </span>
+                                  <Show when={readString(entry, "observed_at")}>
+                                    {(at) => <span>seen {formatWhen(at())}</span>}
+                                  </Show>
+                                  <Show when={readString(entry, "adopted_as")}>
+                                    {(ref) => <span>adopted as {ref()}</span>}
+                                  </Show>
+                                  <Show when={sourceUrl}>
+                                    {(url) => (
+                                      <a href={url()} target="_blank" rel="noreferrer">
+                                        source
+                                      </a>
+                                    )}
+                                  </Show>
+                                </p>
+                              </Show>
+
+                              {/* The ranking evidence, attributed to the row it
+                                  explains rather than only to a table below. */}
+                              <Show
+                                when={ownWhy()}
+                                fallback={
+                                  <p class="vogt-backlog-muted">
+                                    {explained().includes(entry.ref)
+                                      ? "Asking Vogt why this is ranked here…"
+                                      : "Open why to see the inputs behind this score."}
+                                  </p>
+                                }
+                              >
+                                {(explanation) => (
+                                  <ul class="vogt-backlog-why-factors">
+                                    <For each={explanation().contributions}>
+                                      {(contribution) => (
+                                        <li>
+                                          <span class="vogt-backlog-why-input">
+                                            {contribution.input}
+                                          </span>
+                                          <span class="vogt-backlog-why-detail">
+                                            {contribution.detail}
+                                          </span>
+                                          <span class="vogt-backlog-delta">
+                                            {contribution.contribution >= 0 ? "+" : ""}
+                                            {contribution.contribution.toFixed(2)}
+                                          </span>
+                                        </li>
+                                      )}
+                                    </For>
+                                    <Show when={explanation().pending.length}>
+                                      <li class="vogt-backlog-muted">
+                                        not yet available:{" "}
+                                        {explanation()
+                                          .pending.map(([name]) => name)
+                                          .join(", ")}
+                                      </li>
+                                    </Show>
+                                  </ul>
+                                )}
+                              </Show>
+
+                              {rowActions(entry)}
+                            </div>
+                          </Show>
                         </div>
                       );
                     }}

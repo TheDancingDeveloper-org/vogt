@@ -607,10 +607,13 @@ export const restoreInbox = (entry_key: string, reason: string) =>
     "POST",
   );
 
-export const suppressInbox = (subject: string, reason: string) =>
+/** `suppress` and `work.adopt` are subject operations, not Inbox ones: the
+ *  Backlog's observed rows reach the same two writes with the same reason
+ *  rule. */
+export const suppressSubject = (subject: string, reason: string) =>
   call<Record<string, unknown>>("suppress", { subject, reason }, "POST");
 
-export const adoptInbox = (subject: string, reason: string) =>
+export const adoptSubject = (subject: string, reason: string) =>
   call<Record<string, unknown>>("work.adopt", { subject, reason }, "POST");
 
 export const resolveInboxDrift = (
