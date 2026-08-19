@@ -1008,7 +1008,7 @@ impl AgentTaskRegistry {
         std::fs::write(&context_file, context)?;
 
         let mut prompt = String::new();
-        prompt.push_str("# MyDevEnv2 Scheduled Agent Task\n\n");
+        prompt.push_str("# Vogt Scheduled Agent Task\n\n");
         prompt.push_str(&format!("Task: {}\n", task.name));
         prompt.push_str(&format!("Task ID: {}\n", task.id));
         prompt.push_str(&format!("Run ID: {run_id}\n"));
@@ -1370,7 +1370,7 @@ fn default_command() -> Vec<String> {
     vec![
         "/bin/sh".to_string(),
         "-lc".to_string(),
-        "printf 'MyDevEnv2 scheduled agent task\\n\\n'; cat \"$MYDEVENV2_AGENT_TASK_PROMPT_FILE\"; printf '\\nPrompt file: %s\\nContext file: %s\\n' \"$MYDEVENV2_AGENT_TASK_PROMPT_FILE\" \"$MYDEVENV2_AGENT_TASK_CONTEXT_FILE\"; exec \"${SHELL:-/bin/bash}\"".to_string(),
+        "printf 'Vogt scheduled agent task\\n\\n'; cat \"$MYDEVENV2_AGENT_TASK_PROMPT_FILE\"; printf '\\nPrompt file: %s\\nContext file: %s\\n' \"$MYDEVENV2_AGENT_TASK_PROMPT_FILE\" \"$MYDEVENV2_AGENT_TASK_CONTEXT_FILE\"; exec \"${SHELL:-/bin/bash}\"".to_string(),
     ]
 }
 

@@ -89,6 +89,10 @@ identity still say MyDevEnv2. That is deliberate and is not drift: the names
 divide by *process*, not by product, and renaming them is a stack-environment
 migration on a live deployment. `MERGE_MYDEVENV2.md` §11.1 records the sunset
 order — move the host, retire the standalone stack, *then* alias the names.
+The same compatibility rule keeps the Android application and notification
+channel IDs, browser storage/event keys, and `MYDEVENV2_NOTIFY:` task hook;
+none is presentation copy. Browser/route titles, install labels, login/errors,
+notification channel labels and notification content all use **Vogt**.
 
 `engine/` is its own Cargo workspace, so every `cargo` invocation runs from
 `engine/`. The Rust binary embeds the repository-root `web/dist/` via

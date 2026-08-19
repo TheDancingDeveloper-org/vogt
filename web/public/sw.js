@@ -1,4 +1,4 @@
-// MyDevEnv2 service worker — handles push events, notification clicks, and an
+// Vogt service worker — handles push events, notification clicks, and an
 // explicit offline fallback for navigation requests. The app remains online-only;
 // we do not cache an app shell for disconnected use.
 
@@ -7,7 +7,7 @@ const OFFLINE_HTML = `<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MyDevEnv2 Offline</title>
+    <title>Offline · Vogt</title>
     <style>
       :root {
         color-scheme: dark;
@@ -47,7 +47,7 @@ const OFFLINE_HTML = `<!doctype html>
   <body>
     <main>
       <h1>Connection required</h1>
-      <p>MyDevEnv2 needs a live server connection. Reconnect to the network and try again.</p>
+      <p>Vogt needs a live server connection. Reconnect to the network and try again.</p>
       <button type="button" onclick="location.reload()">Retry</button>
     </main>
   </body>
@@ -91,13 +91,13 @@ self.addEventListener("push", (event) => {
   try {
     payload = event.data.json();
   } catch {
-    payload = { title: "MyDevEnv2", body: event.data.text() };
+    payload = { title: "Vogt", body: event.data.text() };
   }
-  const title = payload.title || "MyDevEnv2";
+  const title = payload.title || "Vogt";
   const opts = {
     body: payload.body || "",
-    icon: "/favicon.svg",
-    badge: "/favicon.svg",
+    icon: "/icon-192.png",
+    badge: "/notification-badge.svg",
     data: payload.data || {},
     tag: payload.data?.session_id || "mydevenv2-default",
     renotify: true,

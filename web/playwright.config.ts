@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+// Parallel worktrees must not silently reuse another product's dev server.
+// CI keeps the conventional port; local agents can allocate an isolated one.
 const port = Number.parseInt(process.env.PLAYWRIGHT_PORT ?? "4173", 10);
 
 export default defineConfig({

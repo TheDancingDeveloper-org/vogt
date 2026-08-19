@@ -357,7 +357,7 @@ const Settings: Component<Props> = (props) => {
 
   const authFailureMessage = (error: unknown): string => {
     if (error instanceof ApiError && error.status === 401) {
-      return "Token rejected (401). Check that you copied the current MyDevEnv2 token exactly.";
+      return "Token rejected (401). Check that you copied the current Vogt token exactly.";
     }
     if (error instanceof ApiError && error.status === 403) {
       return "Token accepted, but it does not have permission to access this app (403).";
@@ -386,7 +386,7 @@ const Settings: Component<Props> = (props) => {
         return false;
       }
       setAuthCheck("valid");
-      setAuthCheckMsg(`Authenticated successfully with MyDevEnv2 ${status.version}.`);
+      setAuthCheckMsg(`Authenticated successfully with Vogt ${status.version}.`);
       return true;
     } catch (error) {
       setAuthCheck("invalid");
@@ -696,7 +696,7 @@ const Settings: Component<Props> = (props) => {
                 setAuthCheck("idle");
                 setAuthCheckMsg("Backend changed; validate before saving.");
               }}
-              placeholder="https://mydevenv2.sprooty.com"
+              placeholder="https://your-vogt.example"
               autocomplete="off"
               spellcheck={false}
             />

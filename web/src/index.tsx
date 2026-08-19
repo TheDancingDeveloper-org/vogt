@@ -70,7 +70,7 @@ render(
     <ErrorBoundary
       fallback={(error) => (
         <main class="app-error" role="alert">
-          <h1>MyDevEnv2 could not render this view</h1>
+          <h1>Vogt could not render this view</h1>
           <p>{error instanceof Error ? error.message : String(error)}</p>
           <button type="button" onClick={() => window.location.reload()}>
             Reload

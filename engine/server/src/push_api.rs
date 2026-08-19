@@ -125,7 +125,7 @@ pub async fn test_dispatch(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TestReq>,
 ) -> Json<serde_json::Value> {
-    let title = req.title.unwrap_or_else(|| "MyDevEnv2 test".into());
+    let title = req.title.unwrap_or_else(|| "Vogt test".into());
     let body = req
         .body
         .unwrap_or_else(|| "Push notifications are working.".into());
@@ -168,7 +168,7 @@ pub fn spawn_activity_watcher(state: Arc<AppState>) {
                     .map(|s| s.name())
                     .unwrap_or_else(|| id.to_string());
                 let title = format!("{name} {verb}");
-                let body = "Tap to open the session in MyDevEnv2.";
+                let body = "Tap to open the session in Vogt.";
                 let data = json!({
                     "kind": data_kind,
                     "session_id": id.to_string(),

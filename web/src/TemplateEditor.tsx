@@ -246,7 +246,7 @@ const TemplateEditor: Component<Props> = (props) => {
                     type="text"
                     value={cwd()}
                     onInput={(e) => setCwd(e.currentTarget.value)}
-                    placeholder="{repo}/server or Active/apps/MyDevEnv2"
+                    placeholder="{repo}/server or Active/apps/vogt"
                   />
                 </div>
 
@@ -266,7 +266,7 @@ const TemplateEditor: Component<Props> = (props) => {
                     type="text"
                     value={matchRepoNames()}
                     onInput={(e) => setMatchRepoNames(e.currentTarget.value)}
-                    placeholder="MyDevEnv2, rustTorrent"
+                    placeholder="vogt, rustTorrent"
                   />
                 </div>
 
@@ -276,7 +276,7 @@ const TemplateEditor: Component<Props> = (props) => {
                     rows={4}
                     value={matchPathPrefixes()}
                     onInput={(e) => setMatchPathPrefixes(e.currentTarget.value)}
-                    placeholder={"Active/apps/MyDevEnv2\nsites/my-site"}
+                    placeholder={"Active/apps/vogt\nsites/my-site"}
                   />
                 </div>
 

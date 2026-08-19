@@ -92,11 +92,13 @@ import {
 } from "./workspaceLayouts";
 import {
   describeRoute,
+  documentTitleForRoute,
   isCurrentPlace,
   isCurrentTool,
   settingsReturnRoute,
   type PrimaryPlace,
 } from "./routeModel";
+import { productDocumentTitle } from "./identity";
 import {
   hasUnsavedWork,
   protectDirtyEditorExit,
@@ -160,10 +162,10 @@ const LoginScreen: Component<LoginScreenProps> = (props) => {
     } catch (value) {
       setError(
         value instanceof ApiError && value.status === 401
-          ? "That token was rejected (401). Check the current MyDevEnv2 token and try again."
+          ? "That token was rejected (401). Check the current Vogt token and try again."
           : value instanceof ApiError
             ? `The server rejected the login (HTTP ${value.status}).`
-            : `Could not reach the MyDevEnv2 server: ${value instanceof Error ? value.message : String(value)}`,
+            : `Could not reach Vogt: ${value instanceof Error ? value.message : String(value)}`,
       );
     } finally {
       setBusy(false);
@@ -173,8 +175,8 @@ const LoginScreen: Component<LoginScreenProps> = (props) => {
   return (
     <main class="login-screen">
       <form class="login-card" onSubmit={submit}>
-        <div class="login-eyebrow">MyDevEnv2</div>
-        <h1>Sign in to your development environment</h1>
+        <div class="login-eyebrow">Vogt</div>
+        <h1>Sign in to Vogt</h1>
         <p class="login-copy">
           Enter a valid bearer token to continue. The workspace stays locked until
           the server confirms your credentials.
@@ -199,7 +201,7 @@ const LoginScreen: Component<LoginScreenProps> = (props) => {
             type="url"
             value={base()}
             onInput={(event) => setBaseDraft(event.currentTarget.value)}
-            placeholder="https://mydevenv2.sprooty.com (blank = this site)"
+            placeholder="https://your-vogt.example (blank = this site)"
             autocomplete="url"
             spellcheck={false}
           />
@@ -462,6 +464,15 @@ const App: Component = () => {
       ? outcome
       : null;
   };
+
+  createEffect(() => {
+    const state = authState();
+    document.title = state === "checking"
+      ? productDocumentTitle("Checking session")
+      : state === "unauthenticated"
+        ? productDocumentTitle("Sign in")
+        : documentTitleForRoute(routeOutcome(), location.pathname);
+  });
 
   onMount(() => {
     const unsubscribeAuthState = subscribeAuthState(() => {

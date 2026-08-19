@@ -83,7 +83,7 @@ public class MainActivity extends BridgeActivity {
                 return;
             }
             String text = value != null ? value : "";
-            clipboard.setPrimaryClip(ClipData.newPlainText("MyDevEnv2", text));
+            clipboard.setPrimaryClip(ClipData.newPlainText("Vogt", text));
         }
     }
 }
