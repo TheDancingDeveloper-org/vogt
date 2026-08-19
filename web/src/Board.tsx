@@ -159,6 +159,8 @@ interface Filters {
   initiative: string;
   assignee: string;
   lanes: LaneMode;
+  /** Phone presentation state. This selects a visible column, not a filter. */
+  column: string;
   /** Seconds between polls; 0 means the user paused it. */
   poll: number;
 }
@@ -171,6 +173,7 @@ interface BoardParams {
   initiative?: string;
   assignee?: string;
   lanes?: string;
+  column?: string;
   poll?: string;
   [key: string]: string | string[] | undefined;
 }
@@ -202,6 +205,7 @@ const URL_KEYS = [
   "initiative",
   "assignee",
   "lanes",
+  "column",
   "poll",
 ] as const;
 
@@ -214,6 +218,7 @@ export function filtersFromQuery(query: BoardParams): Filters {
     initiative: (query.initiative ?? "").trim(),
     assignee: (query.assignee ?? "").trim(),
     lanes: asLaneMode(query.lanes),
+    column: (query.column ?? "").trim(),
     poll: asPoll(query.poll),
   };
 }
@@ -230,6 +235,7 @@ function queryFor(
     initiative: active.initiative || null,
     assignee: active.assignee || null,
     lanes: active.lanes === "none" ? null : active.lanes,
+    column: active.column || null,
     poll:
       active.poll === DEFAULT_POLL_SECONDS
         ? null
@@ -728,6 +734,30 @@ const Board: Component<Props> = (props) => {
   const navigate = useNavigate();
 
   const [filters, setFilters] = createSignal<Filters>(filtersFromQuery(searchParams));
+  const [phone, setPhone] = createSignal(false);
+  const [expandedCards, setExpandedCards] = createSignal<Set<string>>(new Set());
+  const [expandableCards, setExpandableCards] = createSignal<Set<string>>(new Set());
+
+  const cardExpanded = (ref: string) => expandedCards().has(ref);
+  const toggleCardExpanded = (ref: string) => {
+    setExpandedCards((current) => {
+      const next = new Set(current);
+      if (next.has(ref)) next.delete(ref);
+      else next.add(ref);
+      return next;
+    });
+  };
+  const cardExpandable = (item: WorkItem) =>
+    Boolean(item.body?.trim()) || expandableCards().has(item.ref);
+  const noteTitleClipping = (ref: string, clipped: boolean) => {
+    setExpandableCards((current) => {
+      if (current.has(ref) === clipped) return current;
+      const next = new Set(current);
+      if (clipped) next.add(ref);
+      else next.delete(ref);
+      return next;
+    });
+  };
 
   /**
    * How far down each windowed column the reader has scrolled, held here
@@ -960,10 +990,15 @@ const Board: Component<Props> = (props) => {
   };
 
   const requestedStates = (active: Filters): string[] => {
+    const available = columnsFor(workflows() ?? [], Object.keys(columnTotals()))
+      .map((column) => column.state)
+      .filter((state) => !active.states.length || active.states.includes(state));
+    if (phone()) {
+      const selected = available.includes(active.column) ? active.column : available[0];
+      return selected ? [selected] : [];
+    }
     if (active.states.length) return active.states;
-    return columnsFor(workflows() ?? [], Object.keys(columnTotals())).map(
-      (column) => column.state,
-    );
+    return available;
   };
 
   const boardCells = (active: Filters) =>
@@ -1134,6 +1169,11 @@ const Board: Component<Props> = (props) => {
   };
 
   onMount(() => {
+    const query = window.matchMedia("(max-width: 768px)");
+    const updatePhone = () => setPhone(query.matches);
+    updatePhone();
+    query.addEventListener("change", updatePhone);
+    onCleanup(() => query.removeEventListener("change", updatePhone));
     void reload();
   });
 
@@ -1149,6 +1189,7 @@ const Board: Component<Props> = (props) => {
       active.initiative,
       active.assignee,
       active.lanes,
+      phone() ? active.column : "",
       workflows()?.map((workflow) => [workflow.kind, workflow.states]),
       projects().map((project) => project.slug),
       initiatives().map((initiative) => initiative.id),
@@ -1203,11 +1244,32 @@ const Board: Component<Props> = (props) => {
     ),
   );
 
-  const columns = createMemo<Column[]>(() => {
+  const selectableColumns = createMemo<Column[]>(() => {
     const wanted = filters().states;
     if (!wanted.length) return allColumns();
     const shown = allColumns().filter((column) => wanted.includes(column.state));
     return shown.length ? shown : allColumns();
+  });
+
+  const columns = createMemo<Column[]>(() => {
+    const available = selectableColumns();
+    if (!phone()) return available;
+    const selected = available.find((column) => column.state === filters().column);
+    return selected ? [selected] : available.slice(0, 1);
+  });
+
+  // The default state is the first one the server ordered, and a default is
+  // not worth an entry in the address: `column` appears only once the reader
+  // has chosen a state, and leaves again when a filter removes that state
+  // from the board.
+  createEffect(() => {
+    if (!phone()) return;
+    const selected = filters().column;
+    if (!selected) return;
+    const available = selectableColumns();
+    if (available.length && !available.some((column) => column.state === selected)) {
+      patch({ column: "" });
+    }
   });
 
   const finishedStates = createMemo(() => finishedStatesFor(activeWorkflows()));
@@ -1591,6 +1653,16 @@ const Board: Component<Props> = (props) => {
   };
 
   const onCardKeyDown = (event: KeyboardEvent, item: WorkItem, lane: Lane) => {
+    // A control inside the card owns its own keys: Enter on "Show more" has to
+    // expand the card in place, not open the item the card is standing on.
+    const from = event.target as HTMLElement | null;
+    if (
+      from &&
+      from !== event.currentTarget &&
+      from.closest("button, a, input, select, textarea")
+    ) {
+      return;
+    }
     const shown = columns();
     const index = shown.findIndex((one) => one.state === displayState(item));
     if (event.key === "Enter") {
@@ -1716,7 +1788,11 @@ const Board: Component<Props> = (props) => {
     // The poll interval is a refresh preference, not a filter, so it is left
     // out of what gets saved and left alone on recall: a named view should
     // not change how often the reader's board refreshes.
-    const query = encodeFilters({ ...filters(), poll: DEFAULT_POLL_SECONDS });
+    const query = encodeFilters({
+      ...filters(),
+      column: "",
+      poll: DEFAULT_POLL_SECONDS,
+    });
     setSavedFilters(
       writeSavedFilters([
         { name, query },
@@ -1729,6 +1805,7 @@ const Board: Component<Props> = (props) => {
   const recallSaved = (entry: SavedFilter) => {
     applyFilters({
       ...filtersFromQuery(queryFromSearch(entry.query)),
+      column: filters().column,
       poll: filters().poll,
     });
   };
@@ -2241,6 +2318,27 @@ const Board: Component<Props> = (props) => {
           </div>
         }
       >
+        <Show when={phone()}>
+          <div
+            class="board-phone-states"
+            role="group"
+            aria-label="Board workflow state"
+          >
+            <For each={selectableColumns()}>
+              {(column) => (
+                <button
+                  type="button"
+                  class="board-phone-state"
+                  aria-pressed={columns()[0]?.state === column.state}
+                  onClick={() => patch({ column: column.state })}
+                >
+                  <span>{humanState(column.state)}</span>
+                  <span class="board-phone-state-count">{columnCount(column.state)}</span>
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
         <div class="board-scroll">
           <div class="board-grid">
             <div class="board-headrow" style={{ "grid-template-columns": gridTemplate() }}>
@@ -2726,7 +2824,32 @@ const Board: Component<Props> = (props) => {
                                                 </span>
                                                 <span class="board-kind">{item.kind}</span>
                                               </div>
-                                              <div class="board-card-title">{item.title}</div>
+                                              <div
+                                                id={`${cardDomId(item.ref)}-content`}
+                                                class="board-card-content"
+                                              >
+                                                <div
+                                                  class={`board-card-title${cardExpanded(item.ref) ? " expanded" : ""}`}
+                                                  ref={(node) => {
+                                                    const inspect = () => {
+                                                      if (cardExpanded(item.ref)) return;
+                                                      noteTitleClipping(
+                                                        item.ref,
+                                                        node.scrollHeight > node.clientHeight + 1,
+                                                      );
+                                                    };
+                                                    const observer = new ResizeObserver(inspect);
+                                                    observer.observe(node);
+                                                    queueMicrotask(inspect);
+                                                    onCleanup(() => observer.disconnect());
+                                                  }}
+                                                >
+                                                  {item.title}
+                                                </div>
+                                                <Show when={cardExpanded(item.ref) && item.body?.trim()}>
+                                                  <p class="board-card-body">{item.body}</p>
+                                                </Show>
+                                              </div>
                                               <div class="board-card-meta">
                                                 <Show when={filters().lanes !== "project" && item.project_slug}>
                                                   <span>{item.project_slug}</span>
@@ -2751,6 +2874,20 @@ const Board: Component<Props> = (props) => {
                                                     )}
                                                   </For>
                                                 </div>
+                                              </Show>
+                                              <Show when={cardExpandable(item)}>
+                                                <button
+                                                  type="button"
+                                                  class="board-card-expand"
+                                                  aria-expanded={cardExpanded(item.ref)}
+                                                  aria-controls={`${cardDomId(item.ref)}-content`}
+                                                  onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    toggleCardExpanded(item.ref);
+                                                  }}
+                                                >
+                                                  {cardExpanded(item.ref) ? "Show less" : "Show more"}
+                                                </button>
                                               </Show>
                                             </div>
                                           );

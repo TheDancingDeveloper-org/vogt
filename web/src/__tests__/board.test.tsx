@@ -283,6 +283,162 @@ describe("FR-U22 — the same move, from the keyboard", () => {
   });
 });
 
+describe("Stage 9 — the phone board is one workflow state at a time", () => {
+  /** Answer the board's narrow-shell query the way a phone would. */
+  function onAPhone(): () => void {
+    const desktop = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes("max-width: 768px"),
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    return () => {
+      window.matchMedia = desktop;
+    };
+  }
+
+  /** The states the harness's default workflow declares. */
+  const columnNamesOfWorkflow = ["open", "in_progress", "done", "wont_do"];
+
+  const twoStates = {
+    "GET /work": {
+      body: {
+        items: [
+          workItem({ ref: "WI-1", state: "open" }),
+          workItem({ ref: "WI-2", state: "in_progress" }),
+        ],
+        total: 2,
+      },
+    },
+  };
+
+  it("draws one column, names every state, and asks the server for that cell", async () => {
+    const desktop = onAPhone();
+    try {
+      const vogt = fakeVogt(twoStates);
+      const { container } = board();
+      await waitFor(() => expect(columnNames(container).length).toBe(1));
+
+      // The pill row is the whole board's state list, not just the drawn one.
+      const pills = [...container.querySelectorAll(".board-phone-state")].map(
+        (node) => node.textContent,
+      );
+      expect(pills.length).toBe(columnNamesOfWorkflow.length);
+      expect(columnNames(container)).toEqual(["open"]);
+      await waitFor(() => expect(card(container, "WI-1")).toBeTruthy());
+      expect(() => card(container, "WI-2")).toThrow();
+
+      // One state on the screen is one cell on the wire: selecting a state is
+      // not a reason to read the rest of the estate.
+      const reads = vogt.matching("POST /board/list");
+      const last = reads[reads.length - 1]?.body as { cells?: { state: string }[] };
+      expect(last?.cells?.map((one) => one.state)).toEqual(["open"]);
+    } finally {
+      desktop();
+    }
+  });
+
+  it("puts a chosen state in the URL and leaves the default one out of it", async () => {
+    const desktop = onAPhone();
+    try {
+      fakeVogt(twoStates);
+      const view = board();
+      await waitFor(() => expect(columnNames(view.container).length).toBe(1));
+      expect(view.url()).toBe("/board");
+
+      const pill = [...view.container.querySelectorAll<HTMLButtonElement>(
+        ".board-phone-state",
+      )].find((node) => node.textContent?.includes("in progress"))!;
+      fireEvent.click(pill);
+
+      await waitFor(() => expect(columnNames(view.container)).toEqual(["in progress"]));
+      await waitFor(() =>
+        expect(queryOf(view.url()).get("column")).toBe("in_progress"),
+      );
+      await waitFor(() => expect(card(view.container, "WI-2")).toBeTruthy());
+      expect(() => card(view.container, "WI-1")).toThrow();
+    } finally {
+      desktop();
+    }
+  });
+
+  it("restores the state named in a pasted link", async () => {
+    const desktop = onAPhone();
+    try {
+      fakeVogt(twoStates);
+      const { container } = board("/board?column=in_progress");
+      await waitFor(() => expect(columnNames(container)).toEqual(["in progress"]));
+      await waitFor(() => expect(card(container, "WI-2")).toBeTruthy());
+    } finally {
+      desktop();
+    }
+  });
+});
+
+describe("FR-U25 — a card with more to say expands where it stands", () => {
+  const longBody = "The rest of what this item says, which the collapsed card has no room for.";
+
+  it("expands and collapses the card's own content, and never into a dialog", async () => {
+    fakeVogt({
+      "GET /work": {
+        body: { items: [workItem({ ref: "WI-1", body: longBody })], total: 1 },
+      },
+    });
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    const expand = () =>
+      card(container, "WI-1").querySelector<HTMLButtonElement>(".board-card-expand");
+    const body = () => card(container, "WI-1").querySelector(".board-card-body");
+
+    expect(expand()?.getAttribute("aria-expanded")).toBe("false");
+    expect(body()).toBeNull();
+
+    fireEvent.click(expand()!);
+    await waitFor(() => expect(body()?.textContent).toBe(longBody));
+    expect(expand()?.getAttribute("aria-expanded")).toBe("true");
+    // The expanded content is in the card, not in something drawn over it.
+    expect(container.querySelector("[role=dialog]")).toBeNull();
+    expect(card(container, "WI-1").contains(body())).toBe(true);
+
+    fireEvent.click(expand()!);
+    await waitFor(() => expect(body()).toBeNull());
+    expect(expand()?.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("offers no expand control on a card whose content is not clipped", async () => {
+    fakeVogt({
+      "GET /work": { body: { items: [workItem({ ref: "WI-1", body: "" })], total: 1 } },
+    });
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    expect(card(container, "WI-1").querySelector(".board-card-expand")).toBeNull();
+  });
+
+  it("keeps Enter on the expand control off the card's own Enter", async () => {
+    fakeVogt({
+      "GET /work": {
+        body: { items: [workItem({ ref: "WI-1", body: longBody })], total: 1 },
+      },
+    });
+    const view = board();
+    await waitFor(() => card(view.container, "WI-1"));
+
+    const expand = view.container.querySelector<HTMLButtonElement>(".board-card-expand")!;
+    fireEvent.keyDown(expand, { key: "Enter" });
+
+    // The card would have navigated to the item; the control it was pressed on
+    // owns that key.
+    expect(view.url()).toBe("/board");
+  });
+});
+
 describe("FR-U17 — trust on every card, and never blank", () => {
   it("renders the trust state the server gave", async () => {
     fakeVogt({

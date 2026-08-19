@@ -59,6 +59,7 @@ interface PlaceMetricFixtures {
   projectsTotal?: number | null;
   boardTotal?: number | null;
   backlogTotal?: number | null;
+  boardItems?: Record<string, unknown>[];
 }
 
 async function installFixtures(
@@ -80,6 +81,7 @@ async function installFixtures(
     ...metricOverrides,
   };
   let inboxCalls = 0;
+  const boardRequests: Record<string, unknown>[] = [];
   const sessions = [...initialSessions];
   let createdSessions = 0;
   await page.addInitScript(() => {
@@ -175,6 +177,36 @@ async function installFixtures(
     if (url.pathname.endsWith("/workflows")) {
       return route.fulfill({ json: { workflows: [{ kind: "feature", initial_state: "open", states: ["open", "done"], transitions: { open: ["done"], done: [] } }] } });
     }
+    if (url.pathname.endsWith("/board/list")) {
+      if (metrics.boardTotal === null) return route.fulfill({ status: 503, body: "work unavailable" });
+      const body = request.postDataJSON() as {
+        cells?: { lane_key?: string; state?: string }[];
+      };
+      boardRequests.push(body as Record<string, unknown>);
+      const fixtureItems = metrics.boardItems ?? boardItems;
+      const cells = (body.cells ?? []).map((cell) => {
+        const items = fixtureItems.filter((item) => item.state === cell.state);
+        return {
+          lane_key: cell.lane_key ?? "",
+          state: cell.state ?? "",
+          items,
+          total: items.length,
+          next_cursor: null,
+        };
+      });
+      return route.fulfill({ json: {
+        cells,
+        column_totals: {
+          open: fixtureItems.filter((item) => item.state === "open").length,
+          done: fixtureItems.filter((item) => item.state === "done").length,
+        },
+        lane_totals: { "": fixtureItems.length },
+        total: metrics.boardTotal,
+        snapshot: "browser-board-snapshot",
+        snapshot_at: "2026-08-17T10:01:00Z",
+        revision: 1,
+      } });
+    }
     if (url.pathname.endsWith("/work")) {
       if (metrics.boardTotal === null) return route.fulfill({ status: 503, body: "work unavailable" });
       return route.fulfill({ json: { items: boardItems, total: metrics.boardTotal, freshness: { status: "fresh" } } });
@@ -199,7 +231,7 @@ async function installFixtures(
     if (url.pathname.endsWith("/actors")) return route.fulfill({ json: { actors: [] } });
     return route.fulfill({ json: {} });
   });
-  return { inboxCalls: () => inboxCalls, sessions };
+  return { inboxCalls: () => inboxCalls, boardRequests, sessions };
 }
 
 test("History palette results restore the selected session, query and match", async ({ page }) => {
@@ -308,7 +340,9 @@ test("Board dragover/drop uses the real browser gesture and keeps its filter on 
   await expect(target.locator("textarea")).toBeVisible();
   await page.reload();
   await expect(page).toHaveURL(/#\/board\?project=vogt/);
-  await expect(page.getByLabel("Board filters")).toBeVisible();
+  await expect(
+    page.getByRole("group", { name: "Board filters", exact: true }),
+  ).toBeVisible();
 });
 
 test("Board progressive filters survive reload, history, and saved-lens recall", async ({ page }) => {
@@ -350,6 +384,105 @@ test("Board progressive filters survive reload, history, and saved-lens recall",
   await expect(filters.getByText("Type: feature")).toBeVisible();
   await page.goForward();
   await expect(filters.getByText("Label: infra")).toBeVisible();
+});
+
+test("Phone Board renders one URL-selected workflow state without widening the server filter", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "Phone state composition is a narrow-shell contract");
+  const openItem = {
+    ...boardItems[0],
+    ref: "WI-OPEN",
+    title: "Open phone card",
+    state: "open",
+  };
+  const doneItem = {
+    ...boardItems[0],
+    ref: "WI-DONE",
+    title: "Done phone card",
+    state: "done",
+  };
+  const fixture = await installFixtures(page, {}, [], undefined, {
+    boardTotal: 2,
+    boardItems: [openItem, doneItem],
+  });
+
+  await page.goto("/#/board?project=vogt&column=done");
+  const states = page.getByRole("group", { name: "Board workflow state" });
+  await expect(states).toBeVisible();
+  await expect(states.getByRole("button", { name: /open 1/i })).toBeVisible();
+  await expect(states.getByRole("button", { name: /done 1/i })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByText("Done phone card")).toBeVisible();
+  await expect(page.getByText("Open phone card")).toHaveCount(0);
+  expect(fixture.boardRequests.at(-1)).not.toHaveProperty("states");
+  expect(fixture.boardRequests.at(-1)?.cells).toEqual([
+    { lane_key: "", state: "done" },
+  ]);
+
+  await states.getByRole("button", { name: /open 1/i }).click();
+  await expect(page).toHaveURL(/column=open/);
+  await expect(page.getByText("Open phone card")).toBeVisible();
+  await expect(page.getByText("Done phone card")).toHaveCount(0);
+  expect(fixture.boardRequests.at(-1)?.cells).toEqual([
+    { lane_key: "", state: "open" },
+  ]);
+  expect(fixture.boardRequests.at(-1)?.project).toEqual("vogt");
+
+  // Selecting a state rewrites the board's own address rather than stacking
+  // history entries, the same way its filter chips do. What has to survive is
+  // the address: reload it, and arrive at it by back and forward.
+  await page.reload();
+  await expect(page.getByText("Open phone card")).toBeVisible();
+  await expect(states.getByRole("button", { name: /open 1/i })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  await page.goto("/#/board?project=vogt&column=done");
+  await expect(page.getByText("Done phone card")).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/column=open/);
+  await expect(page.getByText("Open phone card")).toBeVisible();
+  await expect(page.getByText("Done phone card")).toHaveCount(0);
+  await page.goForward();
+  await expect(page).toHaveURL(/column=done/);
+  await expect(page.getByText("Done phone card")).toBeVisible();
+});
+
+test("Board cards expand measured title and body content in place", async ({ page }) => {
+  const longTitle = "A long Board title that must remain readable after expansion ".repeat(8);
+  const longBody = "The expanded body stays in the measured card and never moves to a modal.";
+  await installFixtures(page, {}, [], undefined, {
+    boardItems: [{ ...boardItems[0], title: longTitle, body: longBody }],
+  });
+  await page.goto("/#/board");
+
+  const card = page.locator(".board-card").filter({ hasText: "A long Board title" });
+  const title = card.locator(".board-card-title");
+  const before = await card.evaluate((element) => element.getBoundingClientRect().height);
+  await expect(card.getByRole("button", { name: "Show more" })).toBeVisible();
+  await card.getByRole("button", { name: "Show more" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(card.getByText(longBody)).toBeVisible();
+  await expect(title).toHaveClass(/expanded/);
+  const expanded = await card.evaluate((element) => element.getBoundingClientRect().height);
+  expect(expanded).toBeGreaterThan(before);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+
+  // Collapse the same way the reader reached the control: by pointer where the
+  // board has room for one, and by keyboard everywhere. Phone containment of
+  // the surrounding controls is tracked separately as first-viewport work.
+  const collapse = card.getByRole("button", { name: "Show less" });
+  if (test.info().project.name === "desktop") {
+    await collapse.click();
+  } else {
+    await collapse.focus();
+    await page.keyboard.press("Enter");
+  }
+  await expect(card.getByText(longBody)).toHaveCount(0);
+  await expect(title).not.toHaveClass(/expanded/);
+  await expect(card.getByRole("button", { name: "Show more" })).toBeFocused();
 });
 
 test("Vogt identity and route-aware titles survive navigation and reload", async ({ page }) => {
@@ -1451,3 +1584,4 @@ test("dirty Agent Task drafts guard navigation and browser exit", async ({ page 
     return event.defaultPrevented;
   })).toBe(false);
 });
+

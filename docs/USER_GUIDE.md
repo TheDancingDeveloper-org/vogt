@@ -122,12 +122,16 @@ state the server refused.
 
 - **Swimlanes** by project or initiative; per-column WIP counts; lanes and
   columns collapse, and the layout is remembered per device.
+- **On a phone**, a labelled state row shows one workflow state at a time;
+  the selected state is in the URL and every state keeps its exact count.
 - **Filters** by project, state, type, label, initiative and actor are added
   through `+ Filter` and shown as individually removable chips. The URL remains
   the shareable/restorable source of truth, and a combination can be named and
   recalled as a saved lens (per device; shared server-side lenses are
   deliberately not built — `REQUIREMENTS.md` §3).
 - **Quick-create** raises an item without leaving the board.
+- Long cards expand and collapse in place so their full title and body remain
+  readable without leaving the bounded, measured Board.
 - The board is operable from the keyboard: focus an item, move it between
   columns, open its detail, quick-create.
 
