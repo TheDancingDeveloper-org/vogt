@@ -60,6 +60,7 @@ import {
   type AuditRecord,
   type FreshnessSummary,
 } from "./vogtApi";
+import SurfaceHeader from "./SurfaceHeader";
 import { ViewAgeBadge, createLoadStamp, createViewAge, onVogtLive } from "./viewAge";
 
 interface Props {
@@ -975,50 +976,66 @@ const AuditBrowser: Component<Props> = (props) => {
 
   return (
     <div class="vogt-surface vab">
-      <header class="vab-header">
-        <div class="vab-views" role="group" aria-label="Global views">
-          <For each={["audit", "inbox"] as ViewName[]}>
-            {(name) => (
-              <button
-                type="button"
-                aria-pressed={filter().view === name}
-                class={`vab-viewtab${filter().view === name ? " active" : ""}`}
-                onClick={() => update("view", name)}
-              >
-                {name === "audit" ? "Audit trail" : "Notifications"}
-              </button>
-            )}
-          </For>
-        </div>
-        <div class="vab-header-actions">
+      {/* The shared working header (FR-U23, Stage 3): this route had no title
+          at all, which on a phone left a reader inside a filter form with no
+          statement of where they were. */}
+      <SurfaceHeader
+        class="vab-header"
+        label="Audit header"
+        title={<h1>{filter().view === "audit" ? "Audit" : "Notifications"}</h1>}
+        honesty={(
           <ViewAgeBadge
             age={viewAge()}
             class="vab-age"
             title="How long ago this view last got an answer from Vogt. It re-reads when Vogt announces a change; a badge that goes stale means the stream is not arriving."
           />
-          <button
-            type="button"
-            onClick={refresh}
-            disabled={filter().view === "audit" ? records.loading : inbox.loading}
-          >
-            {(filter().view === "audit" ? records.loading : inbox.loading)
-              ? "Loading…"
-              : "Refresh"}
-          </button>
-        </div>
-      </header>
+        )}
+        controls={(
+          <>
+            <div class="vab-views" role="group" aria-label="Global views">
+              <For each={["audit", "inbox"] as ViewName[]}>
+                {(name) => (
+                  <button
+                    type="button"
+                    aria-pressed={filter().view === name}
+                    class={`vab-viewtab${filter().view === name ? " active" : ""}`}
+                    onClick={() => update("view", name)}
+                  >
+                    {name === "audit" ? "Audit trail" : "Notifications"}
+                  </button>
+                )}
+              </For>
+            </div>
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={filter().view === "audit" ? records.loading : inbox.loading}
+            >
+              {(filter().view === "audit" ? records.loading : inbox.loading)
+                ? "Loading…"
+                : "Refresh"}
+            </button>
+          </>
+        )}
+        detail={(
+          <Show when={filter().view === "audit"}>
+            <details class="surface-header-disclosure">
+              <summary>What this view is asking Vogt</summary>
+              <p class="vab-provenance">
+                <strong>Every filter here is pushed to Vogt.</strong>{" "}
+                <span class="vab-mono">audit.list</span> takes the actor, the
+                operation, the entity, the project and a time range, and pages with
+                a limit and an offset — so what is below is one query's answer over
+                the whole log, and the count beside it is how many records match,
+                not how many are on screen.
+              </p>
+            </details>
+          </Show>
+        )}
+      />
 
       {/* -- the audit browser (FR-U19) -------------------------------------- */}
       <Show when={filter().view === "audit"}>
-        <p class="vab-provenance">
-          <strong>Every filter here is pushed to Vogt.</strong>{" "}
-          <span class="vab-mono">audit.list</span> takes the actor, the operation,
-          the entity, the project and a time range, and pages with a limit and an
-          offset — so what is below is one query's answer over the whole log, and
-          the count beside it is how many records match, not how many are on
-          screen.
-        </p>
-
         <section class="vab-filters" aria-label="Audit filters">
           <div class="vab-filter-grid">
             <label class="vab-field">

@@ -1305,6 +1305,20 @@ const Backlog: Component<Props> = (props) => {
         onRemove={removeFilter}
         onClear={() => setFilter({ ...EMPTY_FILTER, view: filter().view })}
         clearDisabled={filterIsEmpty({ ...filter(), view: "backlog" })}
+        lenses={(
+          /* FR-U14's second clause: a combination worth keeping is a lens. */
+          <SavedLenses
+            prefix="vogt-backlog"
+            lenses={savedFilters().map((entry) => ({
+              name: entry.name,
+              title: describeFilter(entry.filter),
+            }))}
+            onSave={saveCurrent}
+            onRecall={recallSaved}
+            onForget={removeSaved}
+            note="saved lenses are kept in this browser"
+          />
+        )}
       >
         <label class="vogt-backlog-field">
           <span>Project</span>
@@ -1426,19 +1440,6 @@ const Backlog: Component<Props> = (props) => {
           </div>
         </div>
       </ProgressiveFilters>
-
-      {/* FR-U14's second clause: a combination worth keeping is a named lens. */}
-      <SavedLenses
-        prefix="vogt-backlog"
-        lenses={savedFilters().map((entry) => ({
-          name: entry.name,
-          title: describeFilter(entry.filter),
-        }))}
-        onSave={saveCurrent}
-        onRecall={recallSaved}
-        onForget={removeSaved}
-        note="saved lenses are kept in this browser"
-      />
 
       <Show when={facetNote()}>
         <p class="vogt-backlog-note">{facetNote()}</p>

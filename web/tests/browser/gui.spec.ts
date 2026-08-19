@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const inboxEntry = {
   entry_key: "drift:proposal-1:material-v1",
@@ -60,6 +60,8 @@ interface PlaceMetricFixtures {
   boardTotal?: number | null;
   backlogTotal?: number | null;
   boardItems?: Record<string, unknown>[];
+  /** What a session's scrollback says, for the waiting-session card. */
+  scrollback?: string;
   backlogItems?: Record<string, unknown>[];
 }
 
@@ -83,6 +85,7 @@ async function installFixtures(
   };
   let inboxCalls = 0;
   const boardRequests: Record<string, unknown>[] = [];
+  const sessionInputs: { id: string; text: string; submit: boolean }[] = [];
   const sessions = [...initialSessions];
   let createdSessions = 0;
   await page.addInitScript(() => {
@@ -136,6 +139,12 @@ async function installFixtures(
   await page.route("**/api/sessions/*/kill", async (route) =>
     route.fulfill({ json: { ok: true } }),
   );
+  await page.route("**/api/sessions/*/input", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-2) ?? "";
+    const body = route.request().postDataJSON() as { text: string; submit: boolean };
+    sessionInputs.push({ id, ...body });
+    return route.fulfill({ json: { ok: true } });
+  });
   await page.route("**/api/sessions/*", async (route) => {
     if (
       route.request().method() === "POST"
@@ -148,6 +157,15 @@ async function installFixtures(
       const index = sessions.findIndex((session) => session.id === id);
       if (index >= 0) sessions.splice(index, 1);
       return route.fulfill({ json: { ok: true } });
+    }
+    if (route.request().method() === "GET") {
+      const id = new URL(route.request().url()).pathname.split("/").at(-1);
+      const session = sessions.find((one) => one.id === id);
+      if (!session) return route.fulfill({ status: 404, json: { error: "not found" } });
+      return route.fulfill({ json: {
+        ...session,
+        scrollback_base64: btoa(metrics.scrollback ?? "Apply this migration? (y/n) "),
+      } });
     }
     return route.fulfill({ status: 404, json: { error: "not found" } });
   });
@@ -227,6 +245,26 @@ async function installFixtures(
       total: metrics.projectsTotal,
       } });
     }
+    if (url.pathname.endsWith("/vogt/events")) {
+      return route.fulfill({ json: { events: [], last_id: 0 } });
+    }
+    if (url.pathname.endsWith("/vogt/audit")) {
+      return route.fulfill({ json: { records: [], total: 0 } });
+    }
+    if (url.pathname.endsWith("/work/get")) {
+      return route.fulfill({ json: {
+        item: {
+          id: "01JWORKITEM", ref: "WI-7", kind: "feature", title: "Measured board card",
+          body: "", state: "open", priority: "normal", project_slug: "vogt",
+          initiative_id: null, origin: "declared", trust_state: "verified",
+          assignee_identity_ref: null, labels: [], relations: [],
+          created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-17T10:00:00Z",
+        },
+        comments: [],
+        sessions: [],
+        audit: [],
+      } });
+    }
     if (url.pathname.endsWith("/why")) {
       return route.fulfill({ json: {
         ref: "WI-7",
@@ -241,9 +279,15 @@ async function installFixtures(
     if (url.pathname.endsWith("/labels")) return route.fulfill({ json: { labels: [] } });
     if (url.pathname.endsWith("/initiatives")) return route.fulfill({ json: { initiatives: [] } });
     if (url.pathname.endsWith("/actors")) return route.fulfill({ json: { actors: [] } });
+    if (url.pathname.endsWith("/vogt/observations")) {
+      return route.fulfill({ json: { observations: [], total: 0 } });
+    }
+    if (url.pathname.endsWith("/vogt/sessions")) {
+      return route.fulfill({ json: { sessions: [], engine: null } });
+    }
     return route.fulfill({ json: {} });
   });
-  return { inboxCalls: () => inboxCalls, boardRequests, sessions };
+  return { inboxCalls: () => inboxCalls, boardRequests, sessions, sessionInputs };
 }
 
 test("History palette results restore the selected session, query and match", async ({ page }) => {
@@ -357,6 +401,17 @@ test("Board dragover/drop uses the real browser gesture and keeps its filter on 
   ).toBeVisible();
 });
 
+/**
+ * A narrow shell keeps the saved lenses inside the `+ Filter` disclosure, so
+ * the first screen belongs to the work. Anything reaching for a lens control
+ * has to open it there first; on a desk it is already beside the chips.
+ */
+async function openFilterPanelOnPhone(group: Locator): Promise<void> {
+  if (test.info().project.name !== "phone") return;
+  const add = group.getByRole("button", { name: "+ Filter", exact: true });
+  if ((await add.getAttribute("aria-expanded")) === "false") await add.click();
+}
+
 test("Board progressive filters survive reload, history, and saved-lens recall", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/board?project=vogt&lanes=project");
@@ -384,6 +439,7 @@ test("Board progressive filters survive reload, history, and saved-lens recall",
   await expect(filters.getByText("Type: feature")).toBeVisible();
   await expect(filters.getByText("Swimlanes: project")).toBeVisible();
 
+  await openFilterPanelOnPhone(filters);
   await page.locator(".board-saved-recall").click();
   await expect(page).toHaveURL(/project=vogt/);
   await expect(page).toHaveURL(/kind=feature/);
@@ -626,6 +682,16 @@ test("primary surface headers keep their shared order and geometry across zoom",
       await page.goto(`/#/${routeName}`);
       const header = page.locator("[data-surface-header]:visible");
       await expect(header).toBeVisible();
+
+      // A narrow shell folds the controls and the detail behind one
+      // disclosure so the surface's own work owns the first screen. The
+      // contract below is what has to hold once they are shown, so they are
+      // shown; that the fold exists at all is asserted where it belongs, with
+      // the rest of the phone's first-viewport composition.
+      const more = header.locator(".surface-header-more");
+      if (await more.count()) {
+        if ((await more.getAttribute("aria-expanded")) === "false") await more.click();
+      }
 
       const slots = await header.locator(":scope > [data-surface-header-slot]")
         .evaluateAll((elements) => elements.map((element) =>
@@ -1621,6 +1687,7 @@ test("Backlog filters are chips, a + Filter disclosure and a named lens", async 
   await expect(panel).toBeHidden();
   await expect(filters.getByRole("button", { name: "+ Filter", exact: true })).toBeFocused();
 
+  await openFilterPanelOnPhone(filters);
   await page.getByLabel("Lens name").fill("Vogt features");
   await page.getByRole("button", { name: "Save lens" }).click();
   await expect(page.locator(".vogt-backlog-saved-recall")).toHaveText("Vogt features");
@@ -1632,6 +1699,7 @@ test("Backlog filters are chips, a + Filter disclosure and a named lens", async 
   await filters.getByRole("button", { name: "Clear all" }).click();
   await expect(page).not.toHaveURL(/kind=feature/);
 
+  await openFilterPanelOnPhone(filters);
   await page.locator(".vogt-backlog-saved-recall").click();
   await expect(page).toHaveURL(/project=vogt/);
   await expect(page).toHaveURL(/kind=feature/);
@@ -1801,4 +1869,208 @@ test("Phone controls keep the 44px target and 16px form-text floors", { timeout:
       expect(await undersizedControls(page), `at ${width}px on /${route}`).toEqual([]);
     }
   }
+});
+
+
+/**
+ * F1 of the live restructure report: a phone that spends its first screen on
+ * controls is not a steering surface. Each primary route has to arrive with
+ * its own work already on it — and the controls that moved out of the way
+ * have to still be reachable, which is the half that makes it a composition
+ * fix rather than a deletion.
+ */
+test("Phone primary surfaces lead with their work, not their controls", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "First-viewport composition is the phone's");
+  await installFixtures(page);
+
+  const firstUseful = {
+    sessions: ".session-place-row, .sessions-empty",
+    inbox: ".inbox-entry, .inbox-empty",
+    board: ".board-card, .board-empty",
+    backlog: ".vogt-backlog-row, .vogt-backlog-empty",
+  } as const;
+
+  for (const [route, selector] of Object.entries(firstUseful)) {
+    await page.goto(`/#/${route}`);
+    const first = page.locator(selector).first();
+    await expect(first, `/${route} draws something to steer with`).toBeVisible();
+
+    const geometry = await first.evaluate((node) => ({
+      top: node.getBoundingClientRect().top,
+      viewport: window.innerHeight,
+      sideways: document.documentElement.scrollWidth > window.innerWidth,
+    }));
+    expect(geometry.sideways, `/${route} does not scroll sideways`).toBe(false);
+    // Inside the first screen, and with room to be read rather than peeking
+    // over the fold by a pixel.
+    expect(geometry.top, `/${route} first content at ${geometry.top}`)
+      .toBeLessThan(geometry.viewport - 80);
+  }
+
+  // What moved out of the first screen is one control away, not gone.
+  await page.goto("/#/board");
+  const header = page.locator("[data-surface-header]:visible");
+  await expect(header.locator('[data-surface-header-slot="controls"]')).toBeHidden();
+  await header.getByRole("button", { name: "View controls" }).click();
+  await expect(header.locator('[data-surface-header-slot="controls"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Refresh now" })).toBeVisible();
+
+  const filters = page.getByRole("group", { name: "Board filters", exact: true });
+  await expect(page.getByLabel("Lens name")).toBeHidden();
+  await filters.getByRole("button", { name: "+ Filter", exact: true }).click();
+  await expect(page.getByLabel("Lens name")).toBeVisible();
+});
+
+
+/**
+ * Stage 3's route matrix, walked on a phone (FR-U23).
+ *
+ * Reachability was never the question — the palette could open all of these.
+ * What this asserts is that each one arrives *contained*: inside the phone
+ * shell, saying what it is, without a sideways scroll, and with its own
+ * address surviving a reload and the back button.
+ */
+const SECONDARY_ROUTES = [
+  { path: "projects", title: "Projects" },
+  { path: "audit", title: "Audit" },
+  { path: "w/WI-7", title: "Measured board card" },
+  { path: "g", title: "Sessions", tool: "Git" },
+  { path: "g/src", title: "Sessions", tool: "Git" },
+  { path: "history", title: "Sessions", tool: "History" },
+  { path: "tasks", title: "Sessions", tool: "Tasks" },
+  { path: "gui", title: "GUI stream is unavailable" },
+  // No PTY answers in a fixture, so what has to hold here is that the route
+  // says which session state it is in — live or not found — inside the shell.
+  { path: "t/browser-session", title: "Session" },
+  { path: "e/src/main.ts", title: "Sessions" },
+] as const;
+
+test("Phone secondary routes are contained, titled and addressable", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "Containment is the narrow shell's");
+  await installFixtures(page);
+
+  for (const route of SECONDARY_ROUTES) {
+    await page.goto(`/#/${route.path}`);
+    await page.waitForLoadState("networkidle");
+
+    // Inside the phone shell, not instead of it.
+    await expect(page.locator(".mobile-go-to"), `/${route.path} keeps Go to`).toBeVisible();
+    await expect(
+      page.getByRole("navigation", { name: "Primary navigation" }),
+      `/${route.path} keeps the bottom bar`,
+    ).toBeVisible();
+
+    // Saying what it is.
+    const titled = page.getByRole("heading", { name: route.title, exact: false }).first();
+    await expect(titled, `/${route.path} says it is ${route.title}`).toBeVisible();
+    if ("tool" in route && route.tool) {
+      await expect(
+        page.getByRole("navigation", { name: "Session tools" })
+          .getByRole("link", { name: route.tool }),
+        `/${route.path} marks its tool`,
+      ).toHaveAttribute("aria-current", "page");
+    }
+
+    const sideways = await page.evaluate(
+      () => document.documentElement.scrollWidth > window.innerWidth,
+    );
+    expect(sideways, `/${route.path} does not scroll sideways`).toBe(false);
+  }
+
+  // Settings is a modal route: what it opens over is covered rather than left
+  // peeking out above the form.
+  await page.goto("/#/settings");
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await expect(settings).toBeVisible();
+  const covered = await page.evaluate(() => {
+    const backdrop = document.querySelector(".modal-backdrop");
+    if (!backdrop) return false;
+    const box = backdrop.getBoundingClientRect();
+    return box.top <= 0 && box.height >= window.innerHeight - 1;
+  });
+  expect(covered, "the Settings backdrop covers the shell it opened over").toBe(true);
+  await expect(settings.getByLabel("Bearer token")).toBeVisible();
+
+  // A deep link with a query survives a reload and the back button.
+  await page.goto("/#/audit?actor=user%3Asam");
+  await expect(page.getByRole("heading", { name: "Audit" })).toBeVisible();
+  await page.reload();
+  await expect(page).toHaveURL(/actor=user%3Asam/);
+  await page.goto("/#/projects");
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/audit\?actor=user%3Asam/);
+  await page.goForward();
+  await expect(page).toHaveURL(/#\/projects/);
+});
+
+
+/**
+ * Stage 9's waiting session, on the surface a phone actually steers from.
+ *
+ * The two things asserted here are the two the requirement is about: the card
+ * shows the session's real prompt before offering anything, and each control
+ * sends exactly the bytes a person at that terminal would have typed. Neither
+ * is an approval, and the card says so.
+ */
+test("Phone waiting sessions show the prompt and send terminal input", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "Waiting cards are the narrow shell's");
+  const waiting = {
+    ...liveSession,
+    id: "waiting-session",
+    name: "needs-attention",
+    activity: "waiting-for-input",
+  };
+  const exited = {
+    ...liveSession,
+    id: "exited-session",
+    name: "already-finished",
+    activity: "waiting-for-input",
+    exit_code: 0,
+  };
+  const fixture = await installFixtures(page, {}, [liveSession, waiting, exited], undefined, {
+    scrollback: "running migration 0011\nApply this migration? (y/n) ",
+  });
+
+  await page.goto("/#/sessions");
+
+  const card = page.locator(".session-waiting").filter({ hasText: "needs-attention" });
+  await expect(card).toBeVisible();
+  // Above the roster: the prompt is what the phone came for.
+  const order = await page.evaluate(() => {
+    const first = document.querySelector(".session-waiting");
+    const roster = document.querySelector(".sessions-place-list, .sessions-empty");
+    if (!first || !roster) return null;
+    return first.getBoundingClientRect().top < roster.getBoundingClientRect().top;
+  });
+  expect(order).toBe(true);
+
+  // It shows before it asks: the session's own output, and the target it belongs to.
+  await expect(card.getByTestId("waiting-tail")).toContainText("Apply this migration? (y/n)");
+  await expect(card).toContainText("/workspace/vogt");
+  await expect(card).toContainText("not Vogt approvals");
+
+  const acts = card.getByRole("group", { name: "Terminal input for needs-attention" });
+  await acts.getByRole("button", { name: "Send y + Enter" }).click();
+  await expect.poll(() => fixture.sessionInputs.length).toBe(1);
+  expect(fixture.sessionInputs[0]).toEqual({
+    id: "waiting-session",
+    text: "y",
+    submit: true,
+  });
+
+  await acts.getByRole("button", { name: "Send Ctrl-C" }).click();
+  await expect.poll(() => fixture.sessionInputs.length).toBe(2);
+  expect(fixture.sessionInputs[1]).toEqual({
+    id: "waiting-session",
+    text: "\u0003",
+    submit: false,
+  });
+
+  // An exited session refuses safely, and says why rather than offering a
+  // control that could only fail at whoever pressed it.
+  const dead = page.locator(".session-waiting").filter({ hasText: "already-finished" });
+  await expect(dead).toContainText("has exited");
+  await expect(dead.getByRole("button", { name: "Send y + Enter" })).toHaveCount(0);
+  await expect(dead.getByRole("button", { name: "Send Ctrl-C" })).toHaveCount(0);
 });

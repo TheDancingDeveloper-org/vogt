@@ -1859,6 +1859,10 @@ const Board: Component<Props> = (props) => {
       <SurfaceHeader
         class="board-header"
         label="Board header"
+        /* The board's controls are its refresh cadence and a Refresh now:
+           chrome over the cards, and on a phone the cards come first. */
+        collapseControls
+
         title={<h1>Board</h1>}
         honesty={(
           <div class="board-summary" aria-live="polite">
@@ -1959,6 +1963,25 @@ const Board: Component<Props> = (props) => {
           <button type="button" onClick={hideFinishedColumns}>
             Hide finished columns
           </button>
+        )}
+        lenses={(
+          /* FR-U14's second clause: a combined filter is a named lens. */
+          <SavedLenses
+            prefix="board"
+            lenses={savedFilters().map((entry) => ({
+              name: entry.name,
+              title: describeSaved(entry),
+            }))}
+            onSave={saveCurrent}
+            onRecall={recallSaved}
+            onForget={forgetSaved}
+            note={(
+              <>
+                saved lenses are kept in this browser · the URL above carries the
+                same set to somebody else
+              </>
+            )}
+          />
         )}
       >
         <label class="board-field">
@@ -2109,23 +2132,6 @@ const Board: Component<Props> = (props) => {
 
       </ProgressiveFilters>
 
-      {/* FR-U14's second clause: a combined filter is a named lens. */}
-      <SavedLenses
-        prefix="board"
-        lenses={savedFilters().map((entry) => ({
-          name: entry.name,
-          title: describeSaved(entry),
-        }))}
-        onSave={saveCurrent}
-        onRecall={recallSaved}
-        onForget={forgetSaved}
-        note={(
-          <>
-            saved lenses are kept in this browser · the URL above carries the
-            same set to somebody else
-          </>
-        )}
-      />
 
       <Show when={createOpen()}>
         <form class="board-create" onSubmit={(event) => void submitCreate(event)}>

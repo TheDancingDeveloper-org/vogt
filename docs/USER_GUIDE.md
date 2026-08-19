@@ -316,6 +316,12 @@ so UI changes ship without a new APK; only native plumbing needs one.
   default: a session entering `waiting-for-input` or `errored`, new drift, and
   the agent-task notify hook. `idle_stall` and `agent_task_started` exist and
   default off. Quiet hours digest instead of sending.
+- **A session waiting for input becomes a card**, above the roster, showing
+  the prompt it is actually waiting on. **Send y + Enter** and **Send Ctrl-C**
+  send those keystrokes to that session's terminal — they are terminal input,
+  not Vogt approvals, and the card says so. If the prompt cannot be read, or
+  the session has exited, the card says that instead and offers nothing to
+  press.
 - **Modifier row** above the soft keyboard: `Esc`, `Tab`, sticky `Ctrl`,
   arrows, `/ | ~`, `Enter`. Tap `Ctrl` then a letter to send `Ctrl+letter`.
 - Use the terminal's labelled **A− / A+** controls for terminal-only font size;
@@ -330,6 +336,12 @@ so UI changes ship without a new APK; only native plumbing needs one.
   page when the field takes focus and the layout moves out from under you
   mid-sentence; the floor is set once, for every field in the product.
 - The board renders as a list rather than columns below the narrow breakpoint.
+- **Each surface arrives with its work on the screen.** Sessions leads with the
+  session wanting attention, Inbox with the first attention row, Board with the
+  selected state's cards, Backlog with the first ranked row. What a surface
+  keeps for reference rather than for steering — a refresh cadence, the saved
+  lenses — is one control away: **View controls** in the header, and `+ Filter`
+  for the lens row.
 - Tapping a notification lands on the terminal that raised it.
 
 ## 4. Keyboard reference

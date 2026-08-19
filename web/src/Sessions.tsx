@@ -15,6 +15,8 @@ import type { SessionSummary } from "./api";
 import type { SessionTool } from "./routeModel";
 import { pendingAction, setPendingAction } from "./pendingAction";
 import SurfaceHeader from "./SurfaceHeader";
+import WaitingSessionCard from "./WaitingSession";
+import { createNarrow } from "./narrow";
 
 interface Props {
   currentTool?: SessionTool | null;
@@ -152,6 +154,18 @@ const Sessions: Component<Props> = (props) => {
   };
 
   const approvalId = () => new URLSearchParams(location.search).get("approval");
+
+  // Stage 9: on a narrow client a waiting session is an attention card rather
+  // than a row with a label on it. The rows keep every session, including
+  // these; the cards are what puts the prompt and its two answers where a
+  // thumb is, above the list rather than inside it.
+  const narrow = createNarrow();
+  // Including the ones that exited while waiting: somebody came to this
+  // screen to answer that prompt, and a card that says the session is gone is
+  // the answer to why they cannot (Stage 9's "refuse safely and explain").
+  const waiting = createMemo(() =>
+    sessions().filter((session) => session.activity === "waiting-for-input"),
+  );
   return (
     <section
       class={`sessions-place ${props.hasActiveWorkspace ? "has-workspace" : ""}`}
@@ -195,6 +209,20 @@ const Sessions: Component<Props> = (props) => {
           </button>
         ) : undefined}
       />
+      <Show when={narrow() && waiting().length > 0}>
+        <section class="sessions-waiting" aria-label="Sessions waiting for input">
+          <For each={waiting()}>
+            {(session) => (
+              <WaitingSessionCard
+                session={session}
+                onOpen={(chosen) => navigate(`/t/${chosen.id}`)}
+                onFailure={(message) => setPendingError(message)}
+              />
+            )}
+          </For>
+        </section>
+      </Show>
+
       <div class="sessions-place-body">
         <aside class="sessions-place-sidebar" aria-label="Live sessions">
           <Show when={sessionsError()}>
