@@ -62,6 +62,8 @@ interface PlaceMetricFixtures {
   boardItems?: Record<string, unknown>[];
   /** What a session's scrollback says, for the waiting-session card. */
   scrollback?: string;
+  /** Items per board cell page; 0 or absent serves the whole cell at once. */
+  boardPageSize?: number;
   backlogItems?: Record<string, unknown>[];
 }
 
@@ -199,18 +201,24 @@ async function installFixtures(
     if (url.pathname.endsWith("/board/list")) {
       if (metrics.boardTotal === null) return route.fulfill({ status: 503, body: "work unavailable" });
       const body = request.postDataJSON() as {
-        cells?: { lane_key?: string; state?: string }[];
+        cells?: { lane_key?: string; state?: string; cursor?: string }[];
       };
       boardRequests.push(body as Record<string, unknown>);
       const fixtureItems = metrics.boardItems ?? boardItems;
+      const page = metrics.boardPageSize ?? 0;
       const cells = (body.cells ?? []).map((cell) => {
-        const items = fixtureItems.filter((item) => item.state === cell.state);
+        const all = fixtureItems.filter((item) => item.state === cell.state);
+        // A bounded cell: the first page carries a cursor, and the request
+        // that returns with it gets the rest (NFR-S5, #63).
+        const items = page > 0
+          ? (cell.cursor ? all.slice(page) : all.slice(0, page))
+          : all;
         return {
           lane_key: cell.lane_key ?? "",
           state: cell.state ?? "",
           items,
-          total: items.length,
-          next_cursor: null,
+          total: all.length,
+          next_cursor: page > 0 && !cell.cursor && all.length > page ? "cursor-1" : null,
         };
       });
       return route.fulfill({ json: {
@@ -2101,4 +2109,100 @@ test("Non-editor routes fetch neither the editor nor the terminal", async ({ pag
   // for the editor.
   await page.goto("/#/e/src/main.ts");
   await expect.poll(() => asked.length, { timeout: 15_000 }).toBeGreaterThan(0);
+});
+
+/**
+ * #63's server-owned bounded pages, from the client's side: a cell that has
+ * more than one page reads the next one with the *cursor and snapshot the
+ * server gave it*, and appends. NFR-S5's point is that scrolling a column
+ * must not become a read of the estate.
+ */
+test("A bounded Board cell continues from its cursor rather than re-reading", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Cell scrolling is the desk's column");
+  const many = Array.from({ length: 8 }, (_, index) => ({
+    ...boardItems[0],
+    ref: `WI-${index + 1}`,
+    title: `Ranked card ${index + 1}`,
+  }));
+  const fixture = await installFixtures(page, {}, [], undefined, {
+    boardItems: many,
+    boardPageSize: 3,
+    boardTotal: many.length,
+  });
+  await page.goto("/#/board");
+
+  await expect(page.getByText("Ranked card 1")).toBeVisible();
+  await expect(page.getByText("Ranked card 4")).toHaveCount(0);
+  // The column says how long it really is, not how much of it arrived.
+  await expect(page.locator('.board-cell[data-state="open"]')).toHaveAttribute("data-wip", "8");
+
+  const cell = page.locator('.board-cell[data-state="open"] .board-cell-cards');
+  await cell.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+    node.dispatchEvent(new Event("scroll"));
+  });
+
+  await expect(page.getByText("Ranked card 4")).toBeVisible();
+  const last = fixture.boardRequests.at(-1) as {
+    cells?: { state?: string; cursor?: string }[];
+    snapshot?: string;
+  };
+  expect(last.cells).toEqual([{ lane_key: "", state: "open", cursor: "cursor-1" }]);
+  expect(last.snapshot).toBe("browser-board-snapshot");
+});
+
+/**
+ * #59's crowded rail: many live sessions must not push the file tree out of
+ * the rail. The running list gets its own scroller and Files keeps a usable
+ * minimum — asserted as geometry, because "usable" is a height.
+ */
+test("A crowded places rail keeps the file tree reachable", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+  const crowd = Array.from({ length: 24 }, (_, index) => ({
+    ...liveSession,
+    id: `crowd-${index}`,
+    name: `crowded-session-${index}`,
+  }));
+  await installFixtures(page, {}, crowd);
+  await page.goto("/#/sessions");
+
+  const rail = page.locator(".places-rail");
+  await expect(rail).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Files" })).toBeVisible();
+  await expect(page.getByRole("searchbox", { name: "Search files" })).toBeVisible();
+
+  const geometry = await rail.evaluate((node) => {
+    const tree = node.querySelector(".file-tree");
+    const sessions = node.querySelector(".places-rail-session-area");
+    const treeBox = tree?.getBoundingClientRect();
+    return {
+      railBottom: node.getBoundingClientRect().bottom,
+      viewport: window.innerHeight,
+      treeTop: treeBox?.top ?? -1,
+      treeHeight: treeBox?.height ?? -1,
+      sessionsScrolls: sessions
+        ? sessions.scrollHeight > sessions.clientHeight + 1
+        : false,
+      railScrolls: node.scrollHeight > node.clientHeight + 1,
+    };
+  });
+
+  // The rail is the one desktop scroller (#59's decision: no nested traps),
+  // it does not grow past the window, and Files keeps its usable minimum
+  // rather than being squeezed to a sliver under the crowd.
+  expect(geometry.railBottom).toBeLessThanOrEqual(geometry.viewport + 1);
+  expect(geometry.railScrolls).toBe(true);
+  expect(geometry.treeHeight).toBeGreaterThanOrEqual(260);
+
+  // Reachable, not merely present: scrolling the rail brings Files onto the
+  // screen, with its search still usable there.
+  await rail.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  const reached = await page.getByRole("heading", { name: "Files" }).evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    return box.top >= 0 && box.bottom <= window.innerHeight;
+  });
+  expect(reached).toBe(true);
+  await expect(page.getByRole("searchbox", { name: "Search files" })).toBeVisible();
 });
