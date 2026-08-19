@@ -58,11 +58,23 @@ env:
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
 
 concurrency:
-  # Only the newest commit on a branch is worth an image; older ones in
-  # flight are already superseded. Keyed by ref, so a dev build and a main
-  # build never cancel each other.
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+  # Keyed by *commit*, not by ref, since 2026-08-19.
+  #
+  # "Only the newest commit on a branch is worth an image" is true of a repo
+  # that merges slowly. This one merged to main 23 times in 24 hours — a
+  # median gap of 16 minutes — while this workflow took a median of 19 minutes
+  # and a p90 of 41. Every build was therefore superseded before it finished:
+  # 12 of the last 13 main builds were cancelled, 36% of the repository's
+  # entire CI compute was spent on runs that were thrown away, and main
+  # frequently had no `sha-` image at all. Nothing was left for
+  # `indexarr/ops` to pin, so shipping a fix meant waiting for a quiet window.
+  #
+  # Keying by SHA means no two commits share a group and none can supersede
+  # another — the same reasoning `ci.yml` already records, and for the same
+  # reason. It costs runner time on a burst, which is what the capacity freed
+  # by lifting the runners' four-core cap is for.
+  group: build-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   # Docker Hub is not on the critical path any more (#33): both Dockerfiles
@@ -87,7 +99,7 @@ jobs:
   image:
     name: build and publish a commit image
     needs: base-images
-    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    runs-on: [self-hosted, publish]
     permissions:
       contents: read
       packages: write
@@ -160,6 +172,21 @@ jobs:
           load: true
           tags: ${{ env.IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache against the estate's own registry (2026-08-19). This
+          # workflow previously specified no cache at all, which made
+          # `docker/build-push-action` the single largest consumer of CI time
+          # in the estate — 4,716s aggregate, of which this repository's stack
+          # image was 1,406s in one step, recompiling Rust from scratch every
+          # run.
+          #
+          # `192.168.1.75:5500` is the `local-registry` container on this same
+          # host, so the cache never leaves the building. That matters more
+          # here than it would on a hosted runner: `type=gha` resolves against
+          # GitHub's cache service over the WAN, and this repository is
+          # already at 6.2 GB of a 10 GB per-repo ceiling with a key that
+          # churns every run, so it pays the upload and still misses the
+          # restore. dind-daemon.json trusts this registry over HTTP.
+          cache-from: type=registry,ref=192.168.1.75:5500/vogt-buildcache:core
 
       - name: the image runs
         env:
@@ -189,6 +216,22 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
           sbom: true
+          # Layer cache against the estate's own registry (2026-08-19). This
+          # workflow previously specified no cache at all, which made
+          # `docker/build-push-action` the single largest consumer of CI time
+          # in the estate — 4,716s aggregate, of which this repository's stack
+          # image was 1,406s in one step, recompiling Rust from scratch every
+          # run.
+          #
+          # `192.168.1.75:5500` is the `local-registry` container on this same
+          # host, so the cache never leaves the building. That matters more
+          # here than it would on a hosted runner: `type=gha` resolves against
+          # GitHub's cache service over the WAN, and this repository is
+          # already at 6.2 GB of a 10 GB per-repo ceiling with a key that
+          # churns every run, so it pays the upload and still misses the
+          # restore. dind-daemon.json trusts this registry over HTTP.
+          cache-from: type=registry,ref=192.168.1.75:5500/vogt-buildcache:core
+          cache-to: type=registry,ref=192.168.1.75:5500/vogt-buildcache:core,mode=max
 
       - uses: sigstore/cosign-installer@v3
 
@@ -228,7 +271,7 @@ jobs:
   stack-image:
     name: build and publish the merged image
     needs: base-images
-    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    runs-on: [self-hosted, publish]
     permissions:
       contents: read
       packages: write
@@ -307,6 +350,11 @@ jobs:
           load: true
           tags: ${{ env.STACK_IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache against the estate's own local-registry — see the note
+          # on the core image above. This is the build that most needed it:
+          # a median of 1,406s in a single step with no cache of any kind.
+          # Its own tag, so the two images cannot evict each other.
+          cache-from: type=registry,ref=192.168.1.75:5500/vogt-buildcache:stack
           build-args: |
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
@@ -352,6 +400,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache against the estate's own local-registry — see the note
+          # on the core image above. This is the build that most needed it:
+          # a median of 1,406s in a single step with no cache of any kind.
+          # Its own tag, so the two images cannot evict each other.
+          cache-from: type=registry,ref=192.168.1.75:5500/vogt-buildcache:stack
+          cache-to: type=registry,ref=192.168.1.75:5500/vogt-buildcache:stack,mode=max
           # Identical to the candidate build's, so the pushed image is the
           # layers the smoke test just ran, not a rebuild that happens to
           # look similar. The `dev` branch is the dev image (`:dev`,

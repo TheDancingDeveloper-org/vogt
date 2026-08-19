@@ -44,7 +44,7 @@ jobs:
 
   distribution:
     name: build distribution
-    runs-on: [self-hosted, node-b, linux, x64]
+    runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v7
 
@@ -77,7 +77,7 @@ jobs:
     name: build, sign and publish the image
     needs: [distribution, base-images]
     # `docker`/`publish` is advertised only by the Docker-in-Docker workers.
-    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    runs-on: [self-hosted, publish]
     permissions:
       contents: read
       packages: write
@@ -146,6 +146,12 @@ jobs:
           load: true
           tags: ${{ env.IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
+          # Reads the layer cache `build.yml` writes, and never writes to it.
+          # A release should be able to reuse work a commit build already did,
+          # but it must not be able to change what later commit builds start
+          # from: the cache is then only ever populated by the ordinary path,
+          # and a release remains reproducible from its inputs alone.
+          cache-from: type=registry,ref=192.168.1.75:5500/vogt-buildcache:core
 
       - name: the image runs
         env:
@@ -173,6 +179,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
           sbom: true
+          # Reads the layer cache `build.yml` writes, and never writes to it.
+          # A release should be able to reuse work a commit build already did,
+          # but it must not be able to change what later commit builds start
+          # from: the cache is then only ever populated by the ordinary path,
+          # and a release remains reproducible from its inputs alone.
+          cache-from: type=registry,ref=192.168.1.75:5500/vogt-buildcache:core
 
       - uses: sigstore/cosign-installer@v3
 
@@ -204,7 +216,7 @@ jobs:
   stack-image:
     name: build, sign and publish the merged image
     needs: [distribution, base-images]
-    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    runs-on: [self-hosted, publish]
     permissions:
       contents: read
       packages: write
@@ -281,6 +293,12 @@ jobs:
           load: true
           tags: ${{ env.STACK_IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
+          # Reads the layer cache `build.yml` writes, and never writes to it.
+          # A release should be able to reuse work a commit build already did,
+          # but it must not be able to change what later commit builds start
+          # from: the cache is then only ever populated by the ordinary path,
+          # and a release remains reproducible from its inputs alone.
+          cache-from: type=registry,ref=192.168.1.75:5500/vogt-buildcache:stack
 
       - name: both halves run
         env:
@@ -301,6 +319,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
           sbom: true
+          # Read-only, as above: a release reuses the commit builds' cache and
+          # never writes to it.
+          cache-from: type=registry,ref=192.168.1.75:5500/vogt-buildcache:stack
 
       - uses: sigstore/cosign-installer@v3
 
@@ -347,7 +368,7 @@ jobs:
   android:
     name: build and sign the Android shell
     needs: distribution
-    runs-on: [self-hosted, node-b, linux, x64]
+    runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v7
 
