@@ -15,6 +15,7 @@
 // surface's own layout rules and tests already reach for.
 
 import { For, Show, createSignal, type JSX } from "solid-js";
+import { createNarrow } from "./narrow";
 
 /** One active filter, as the reader sees it: a sentence and a way to drop it. */
 export interface FilterChip {
@@ -34,6 +35,14 @@ interface FiltersProps {
   clearDisabled?: boolean;
   /** Controls rendered beside Done, for surface-specific shortcuts. */
   actions?: JSX.Element;
+  /**
+   * The surface's saved lenses.
+   *
+   * Placed here rather than by the surface because where they belong depends
+   * on the width: beside the chips on a desk, and inside this disclosure on a
+   * phone, where a row spent on naming a lens is a row not spent on the work.
+   */
+  lenses?: JSX.Element;
   /** The surface's own filter fields. */
   children: JSX.Element;
 }
@@ -46,6 +55,7 @@ interface FiltersProps {
  * back there rather than at the top of the document.
  */
 export function ProgressiveFilters(props: FiltersProps): JSX.Element {
+  const narrow = createNarrow();
   const [open, setOpen] = createSignal(false);
   let addButton: HTMLButtonElement | undefined;
 
@@ -117,6 +127,7 @@ export function ProgressiveFilters(props: FiltersProps): JSX.Element {
       >
         <div class={`vogt-filter-panel-grid ${props.prefix}-filter-panel-grid`}>
           {props.children}
+          <Show when={narrow()}>{props.lenses}</Show>
           <div class={`vogt-filter-actions ${props.prefix}-toolbar-actions`}>
             {props.actions}
             <button type="button" onClick={close}>
@@ -125,6 +136,7 @@ export function ProgressiveFilters(props: FiltersProps): JSX.Element {
           </div>
         </div>
       </div>
+      <Show when={!narrow()}>{props.lenses}</Show>
     </div>
   );
 }

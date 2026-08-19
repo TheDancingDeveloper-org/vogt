@@ -330,6 +330,12 @@ so UI changes ship without a new APK; only native plumbing needs one.
   page when the field takes focus and the layout moves out from under you
   mid-sentence; the floor is set once, for every field in the product.
 - The board renders as a list rather than columns below the narrow breakpoint.
+- **Each surface arrives with its work on the screen.** Sessions leads with the
+  session wanting attention, Inbox with the first attention row, Board with the
+  selected state's cards, Backlog with the first ranked row. What a surface
+  keeps for reference rather than for steering — a refresh cadence, the saved
+  lenses — is one control away: **View controls** in the header, and `+ Filter`
+  for the lens row.
 - Tapping a notification lands on the terminal that raised it.
 
 ## 4. Keyboard reference

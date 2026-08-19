@@ -58,6 +58,14 @@
   box-sizing: border-box;
 }
 
+/* `hidden` means hidden. Several components below set `display` on a class
+   that also carries the attribute, and an author rule beats the user agent's
+   `[hidden] { display: none }` — which turns "this is not shown" into "this
+   is shown", silently, in exactly the places that meant it least. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -574,12 +582,37 @@ textarea {
 }
 
 @media (max-width: 768px) {
-  .surface-header-title,
+  /* Three lines, not five: the title and the primary action share the first,
+     the honesty line has the second, and the disclosure that holds the rest
+     has the third. A slot per row was what made a phone header 270px tall. */
+  .surface-header {
+    gap: 8px 10px;
+  }
+
+  .surface-header-title {
+    flex: 1 1 auto;
+    min-width: 40%;
+  }
+
   .surface-header-honesty,
-  .surface-header-controls,
-  .surface-header-action {
+  .surface-header-controls {
     flex: 1 1 auto;
     width: 100%;
+  }
+
+  /* Visual order only: the DOM keeps the reading order the header exists to
+     guarantee. The primary action belongs beside the title where a thumb is,
+     not below a disclosure that may be open and several lines tall. */
+  .surface-header-title { order: 0; }
+  .surface-header-action { order: 1; }
+  .surface-header-honesty { order: 2; }
+  .surface-header-more { order: 3; }
+  .surface-header-controls { order: 4; }
+  .surface-header-detail { order: 5; }
+
+  .surface-header-action {
+    flex: 0 0 auto;
+    margin-left: auto;
   }
 
   .surface-header-spacer {
@@ -6816,7 +6849,9 @@ textarea {
     padding: 10px;
   }
 
-  .vogt-backlog-header,
+  /* The backlog header is a `SurfaceHeader` now, and the shared narrow rules
+     above already lay it out in three lines; stacking every slot again is
+     what made it 200px tall. */
   .vogt-backlog-create-actions,
   .vogt-backlog-bulk-row {
     flex-direction: column;
@@ -8196,6 +8231,27 @@ textarea {
     min-height: 44px;
     min-width: 44px;
     align-items: center;
+  }
+
+  /* The header's disclosure (see `SurfaceHeader.tsx`): its controls and its
+     detail fold away so the surface's own work is what the first screen is
+     spent on. The button sits on the title's line. */
+  .surface-header-more {
+    flex: 0 0 auto;
+    font-size: 12px;
+  }
+
+  .surface-header-controls,
+  .surface-header-detail {
+    flex-basis: 100%;
+  }
+
+  /* A named lens is recalled by its name; the label and the note explaining
+     where lenses live are desk-width courtesies. */
+  .vogt-lens-label,
+  .vogt-lenses > .board-muted,
+  .vogt-lenses > .vogt-backlog-muted {
+    display: none;
   }
 
   /* Rows of small controls need room between the targets, not just inside

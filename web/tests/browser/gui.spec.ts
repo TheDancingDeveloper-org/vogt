@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const inboxEntry = {
   entry_key: "drift:proposal-1:material-v1",
@@ -357,6 +357,17 @@ test("Board dragover/drop uses the real browser gesture and keeps its filter on 
   ).toBeVisible();
 });
 
+/**
+ * A narrow shell keeps the saved lenses inside the `+ Filter` disclosure, so
+ * the first screen belongs to the work. Anything reaching for a lens control
+ * has to open it there first; on a desk it is already beside the chips.
+ */
+async function openFilterPanelOnPhone(group: Locator): Promise<void> {
+  if (test.info().project.name !== "phone") return;
+  const add = group.getByRole("button", { name: "+ Filter", exact: true });
+  if ((await add.getAttribute("aria-expanded")) === "false") await add.click();
+}
+
 test("Board progressive filters survive reload, history, and saved-lens recall", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/board?project=vogt&lanes=project");
@@ -384,6 +395,7 @@ test("Board progressive filters survive reload, history, and saved-lens recall",
   await expect(filters.getByText("Type: feature")).toBeVisible();
   await expect(filters.getByText("Swimlanes: project")).toBeVisible();
 
+  await openFilterPanelOnPhone(filters);
   await page.locator(".board-saved-recall").click();
   await expect(page).toHaveURL(/project=vogt/);
   await expect(page).toHaveURL(/kind=feature/);
@@ -626,6 +638,16 @@ test("primary surface headers keep their shared order and geometry across zoom",
       await page.goto(`/#/${routeName}`);
       const header = page.locator("[data-surface-header]:visible");
       await expect(header).toBeVisible();
+
+      // A narrow shell folds the controls and the detail behind one
+      // disclosure so the surface's own work owns the first screen. The
+      // contract below is what has to hold once they are shown, so they are
+      // shown; that the fold exists at all is asserted where it belongs, with
+      // the rest of the phone's first-viewport composition.
+      const more = header.locator(".surface-header-more");
+      if (await more.count()) {
+        if ((await more.getAttribute("aria-expanded")) === "false") await more.click();
+      }
 
       const slots = await header.locator(":scope > [data-surface-header-slot]")
         .evaluateAll((elements) => elements.map((element) =>
@@ -1621,6 +1643,7 @@ test("Backlog filters are chips, a + Filter disclosure and a named lens", async 
   await expect(panel).toBeHidden();
   await expect(filters.getByRole("button", { name: "+ Filter", exact: true })).toBeFocused();
 
+  await openFilterPanelOnPhone(filters);
   await page.getByLabel("Lens name").fill("Vogt features");
   await page.getByRole("button", { name: "Save lens" }).click();
   await expect(page.locator(".vogt-backlog-saved-recall")).toHaveText("Vogt features");
@@ -1632,6 +1655,7 @@ test("Backlog filters are chips, a + Filter disclosure and a named lens", async 
   await filters.getByRole("button", { name: "Clear all" }).click();
   await expect(page).not.toHaveURL(/kind=feature/);
 
+  await openFilterPanelOnPhone(filters);
   await page.locator(".vogt-backlog-saved-recall").click();
   await expect(page).toHaveURL(/project=vogt/);
   await expect(page).toHaveURL(/kind=feature/);
@@ -1801,4 +1825,54 @@ test("Phone controls keep the 44px target and 16px form-text floors", { timeout:
       expect(await undersizedControls(page), `at ${width}px on /${route}`).toEqual([]);
     }
   }
+});
+
+
+/**
+ * F1 of the live restructure report: a phone that spends its first screen on
+ * controls is not a steering surface. Each primary route has to arrive with
+ * its own work already on it — and the controls that moved out of the way
+ * have to still be reachable, which is the half that makes it a composition
+ * fix rather than a deletion.
+ */
+test("Phone primary surfaces lead with their work, not their controls", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "First-viewport composition is the phone's");
+  await installFixtures(page);
+
+  const firstUseful = {
+    sessions: ".session-place-row, .sessions-empty",
+    inbox: ".inbox-entry, .inbox-empty",
+    board: ".board-card, .board-empty",
+    backlog: ".vogt-backlog-row, .vogt-backlog-empty",
+  } as const;
+
+  for (const [route, selector] of Object.entries(firstUseful)) {
+    await page.goto(`/#/${route}`);
+    const first = page.locator(selector).first();
+    await expect(first, `/${route} draws something to steer with`).toBeVisible();
+
+    const geometry = await first.evaluate((node) => ({
+      top: node.getBoundingClientRect().top,
+      viewport: window.innerHeight,
+      sideways: document.documentElement.scrollWidth > window.innerWidth,
+    }));
+    expect(geometry.sideways, `/${route} does not scroll sideways`).toBe(false);
+    // Inside the first screen, and with room to be read rather than peeking
+    // over the fold by a pixel.
+    expect(geometry.top, `/${route} first content at ${geometry.top}`)
+      .toBeLessThan(geometry.viewport - 80);
+  }
+
+  // What moved out of the first screen is one control away, not gone.
+  await page.goto("/#/board");
+  const header = page.locator("[data-surface-header]:visible");
+  await expect(header.locator('[data-surface-header-slot="controls"]')).toBeHidden();
+  await header.getByRole("button", { name: "View controls" }).click();
+  await expect(header.locator('[data-surface-header-slot="controls"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Refresh now" })).toBeVisible();
+
+  const filters = page.getByRole("group", { name: "Board filters", exact: true });
+  await expect(page.getByLabel("Lens name")).toBeHidden();
+  await filters.getByRole("button", { name: "+ Filter", exact: true }).click();
+  await expect(page.getByLabel("Lens name")).toBeVisible();
 });
