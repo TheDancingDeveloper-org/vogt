@@ -612,7 +612,8 @@ textarea {
 }
 
 .inbox-filter,
-.inbox-entry-actions label {
+.inbox-entry-composer label,
+.inbox-batch-composer label {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -621,7 +622,7 @@ textarea {
 }
 
 .inbox-filter select,
-.inbox-entry-actions input,
+.inbox-entry-composer input,
 .inbox-batch input {
   min-height: 32px;
   padding: 6px 8px;
@@ -641,6 +642,31 @@ textarea {
   border: 1px solid var(--bd);
   border-radius: 8px;
   background: var(--bg-elev);
+}
+
+.inbox-support {
+  flex: 0 0 auto;
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+
+.inbox-support > summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.inbox-support[open] > summary {
+  border-bottom: 1px solid var(--bd);
+}
+
+.inbox-support .inbox-coverage,
+.inbox-support .inbox-batch {
+  border: 0;
+  border-radius: 0 0 8px 8px;
 }
 
 .inbox-batch span {
@@ -771,6 +797,40 @@ textarea {
   gap: 8px;
 }
 
+.inbox-entry-composer,
+.inbox-batch-composer {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.inbox-entry-composer > strong {
+  flex: 1 0 100%;
+  text-transform: capitalize;
+}
+
+.inbox-entry-composer label,
+.inbox-batch-composer label {
+  flex: 1 1 240px;
+}
+
+.inbox-entry-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inbox-refusal {
+  flex: 1 0 100%;
+  margin: 0;
+  color: var(--activity-errored);
+}
+
 .inbox-entry-heading h2 {
   flex: 1 1 240px;
   margin: 0;
@@ -866,7 +926,8 @@ textarea {
   }
 
   .inbox-entry-actions button,
-  .inbox-entry-actions label {
+  .inbox-entry-composer label,
+  .inbox-batch-composer label {
     flex: 1 1 100%;
   }
 }

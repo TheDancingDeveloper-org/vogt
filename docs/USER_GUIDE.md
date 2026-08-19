@@ -58,6 +58,14 @@ non-closable places. Sessions contains the terminal/editor panes and machine
 tools; their existing deep links still select the named pane or tool, and a
 pasted link restores the view it names (FR-U11). Open panes persist per device.
 
+Inbox puts the server-ordered attention stream directly after its title,
+freshness statement and compact source filter. Coverage/provenance and batch
+operations remain immediately below the stream as labelled disclosures; an
+empty answer opens its coverage automatically so “covered and empty” cannot be
+mistaken for “not collected.” Entry and batch reason fields appear only after
+you choose the corresponding write, and a refusal stays beside that composer
+so the reason can be corrected without losing focus or context.
+
 On desktop, the whole Places rail scrolls as one column when running sessions
 make it taller than the window. Files therefore remains reachable rather than
 being squeezed behind a separately scrolling session list; when visible it
