@@ -22,6 +22,7 @@ import {
   toggleHistoryPin,
 } from "./historyPins";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
+import { sessionsStore } from "./store";
 import {
   historyMatchKey,
   historyResultUrl,
@@ -148,6 +149,19 @@ const History: Component<Props> = (props) => {
   const [sessionsError, setSessionsError] = createSignal<string | null>(null);
   const [sessionsStale, setSessionsStale] = createSignal(false);
   const [sessionsRetry, setSessionsRetry] = createSignal<SessionRetry>("refresh");
+
+  /** What to say beside "No archived sessions" when the reader has live ones
+   *  open — this page shows scrollback from sessions that have *ended*
+   *  (`USER_GUIDE.md` §2, "Archived scrollback from sessions that have
+   *  ended"), and a reader with three open shells and an empty page here has
+   *  no way to tell that apart from a broken read without this line. */
+  const liveSessionNote = createMemo(() => {
+    const live = sessionsStore.order.length;
+    if (live === 0) return "";
+    return live === 1
+      ? "1 session is currently running — it appears here once it exits."
+      : `${live} sessions are currently running — they appear here once they exit.`;
+  });
   const [archiveTotal, setArchiveTotal] = createSignal<number | null>(null);
   const [archiveComplete, setArchiveComplete] = createSignal(false);
   const [hasMoreSessions, setHasMoreSessions] = createSignal(false);
@@ -756,7 +770,9 @@ const History: Component<Props> = (props) => {
                   fallback={
                     <div class="history-empty">
                       {sessions().length === 0
-                        ? "No archived sessions."
+                        ? liveSessionNote()
+                          ? `No archived sessions. ${liveSessionNote()}`
+                          : "No archived sessions."
                         : "No loaded sessions match these filters."}
                     </div>
                   }

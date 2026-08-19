@@ -27,6 +27,8 @@ import FeedbackCenter, {
   type FeedbackOptions,
 } from "./FeedbackCenter";
 import { getLayoutMode, setLayoutMode } from "./layout";
+import { createResizablePane } from "./resizablePane";
+import { createNarrow } from "./narrow";
 import {
   buildDefaultSessionName,
   mergeTemplates,
@@ -342,6 +344,21 @@ const App: Component = () => {
   let settingsRouted = false;
   let settingsHasHistoryReturn = false;
   const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
+
+  const placesRail = createResizablePane({
+    key: "places-rail",
+    defaultWidth: 248,
+    min: 180,
+    max: 420,
+  });
+  // The rail's resize/collapse is a desktop feature layered on the *desktop*
+  // grid. Below the shell's own narrow breakpoint the rail is not a grid
+  // column at all — it is `display: none`, replaced by the bottom nav — and
+  // an inline `grid-template-columns` here would out-specificity that
+  // stylesheet rule and reserve the desktop rail's width anyway, which is
+  // exactly what happened the first time this shipped: Inbox measured at
+  // 768px lost two thirds of its width to a column nothing was drawing into.
+  const shellNarrow = createNarrow();
   const [fileWorkflow, setFileWorkflow] = createSignal<FileWorkflow | null>(null);
   const [templateSelectorOpen, setTemplateSelectorOpen] = createSignal(false);
   const [templateSelectorContext, setTemplateSelectorContext] =
@@ -1032,9 +1049,32 @@ const App: Component = () => {
           />
         </Show>
       }>
-      <div class="app">
-        <aside class="places-rail" aria-label="Places">
-          <div class="places-brand">Vogt</div>
+      <div
+        class="app"
+        classList={{ "app--rail-collapsed": !shellNarrow() && placesRail.collapsed() }}
+        style={
+          shellNarrow() || placesRail.collapsed()
+            ? undefined
+            : { "grid-template-columns": `${placesRail.width()}px 1fr` }
+        }
+      >
+        <aside
+          class="places-rail"
+          aria-label="Places"
+          hidden={placesRail.collapsed()}
+        >
+          <div class="places-brand">
+            <span>Vogt</span>
+            <button
+              type="button"
+              class="rail-collapse"
+              aria-label="Hide the Places rail"
+              title="Hide the Places rail"
+              onClick={() => placesRail.setCollapsed(true)}
+            >
+              «
+            </button>
+          </div>
           <button type="button" class="rail-go-to" onClick={() => setCommandPaletteOpen(true)}>Go to…</button>
           <nav class="places-nav">
             <div class="places-group">
@@ -1165,10 +1205,61 @@ const App: Component = () => {
             </span>
           </div>
         </aside>
+        {/* A sibling of the aside, not a child of it: the aside scrolls
+            (`overflow-y: auto`), and per CSS an axis left at its initial
+            `visible` while the other is scrolling computes to `auto` too —
+            so a handle poking 4px past the aside's own right edge was being
+            clipped by its parent's own scroll box, and every pointer event
+            aimed at that sliver hit the aside underneath instead of the
+            handle. Positioned here, against `.app`'s own `position:relative`,
+            it is never inside anything that clips it. */}
+        <Show when={!shellNarrow() && !placesRail.collapsed()}>
+          <div
+            class="rail-resize-handle"
+            classList={{ dragging: placesRail.dragging() }}
+            style={{ left: `${placesRail.width() - 4}px` }}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize the Places rail"
+            aria-valuenow={placesRail.width()}
+            aria-valuemin={180}
+            aria-valuemax={420}
+            tabIndex={0}
+            onPointerDown={(event) => placesRail.beginResize(event)}
+            onKeyDown={(event) => {
+              // The pointer drag has a keyboard equivalent, the same way a
+              // Board card's Shift+Arrow move exists beside its drag: a
+              // control reachable only by mouse is not reachable.
+              if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                placesRail.setWidth(placesRail.width() - 16);
+              } else if (event.key === "ArrowRight") {
+                event.preventDefault();
+                placesRail.setWidth(placesRail.width() + 16);
+              }
+            }}
+          />
+        </Show>
         <main class="main">
           <button type="button" class="mobile-go-to" onClick={() => setCommandPaletteOpen(true)}>
             Go to…
           </button>
+          {/* The rail's own reopen affordance, in `main`'s own document flow
+              rather than fixed to the viewport — fixed positioning put this
+              on top of the connection-lost banner, which spans the same
+              corner. A closed drawer has no width of its own to hold a
+              button in, so this is the surface it gave the space back to. */}
+          <Show when={!shellNarrow() && placesRail.collapsed()}>
+            <button
+              type="button"
+              class="rail-reopen"
+              aria-label="Show the Places rail"
+              title="Show the Places rail"
+              onClick={() => placesRail.setCollapsed(false)}
+            >
+              » Places
+            </button>
+          </Show>
           <Show when={!isConnected() && getToken()}>
             <div class="connection-banner">
               <div class="connection-banner-copy">

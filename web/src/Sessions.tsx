@@ -17,6 +17,7 @@ import { pendingAction, setPendingAction } from "./pendingAction";
 import SurfaceHeader from "./SurfaceHeader";
 import WaitingSessionCard from "./WaitingSession";
 import { createNarrow } from "./narrow";
+import { createResizablePane } from "./resizablePane";
 
 interface Props {
   currentTool?: SessionTool | null;
@@ -160,6 +161,17 @@ const Sessions: Component<Props> = (props) => {
   // these; the cards are what puts the prompt and its two answers where a
   // thumb is, above the list rather than inside it.
   const narrow = createNarrow();
+  const liveList = createResizablePane({
+    key: "sessions-live-list",
+    // Item 2 (r18): the default was a fixed 220-280px column that stayed
+    // that wide even when it held nothing but "No live sessions are
+    // available." — more real estate than the content, every time, on
+    // every visit. 220px is enough for a session name and its status; a
+    // reader who wants more drags for it, and the width is remembered.
+    defaultWidth: 220,
+    min: 160,
+    max: 480,
+  });
   // Including the ones that exited while waiting: somebody came to this
   // screen to answer that prompt, and a card that says the session is gone is
   // the answer to why they cannot (Stage 9's "refuse safely and explain").
@@ -223,8 +235,45 @@ const Sessions: Component<Props> = (props) => {
         </section>
       </Show>
 
-      <div class="sessions-place-body">
-        <aside class="sessions-place-sidebar" aria-label="Live sessions">
+      <div
+        class="sessions-place-body"
+        classList={{ "sessions-place-body--sidebar-collapsed": !narrow() && liveList.collapsed() }}
+        style={
+          narrow() || liveList.collapsed()
+            ? undefined
+            : { "grid-template-columns": `${liveList.width()}px minmax(0, 1fr)` }
+        }
+      >
+        <Show when={!narrow() && liveList.collapsed()}>
+          <button
+            type="button"
+            class="sessions-sidebar-reopen"
+            aria-label="Show live sessions"
+            title="Show live sessions"
+            onClick={() => liveList.setCollapsed(false)}
+          >
+            ›
+          </button>
+        </Show>
+        <aside
+          class="sessions-place-sidebar"
+          aria-label="Live sessions"
+          hidden={!narrow() && liveList.collapsed()}
+        >
+          <Show when={!narrow()}>
+            <div class="sessions-sidebar-head">
+              <span>Live sessions</span>
+              <button
+                type="button"
+                class="sessions-sidebar-collapse"
+                aria-label="Hide live sessions"
+                title="Hide live sessions"
+                onClick={() => liveList.setCollapsed(true)}
+              >
+                ‹
+              </button>
+            </div>
+          </Show>
           <Show when={sessionsError()}>
             {(message) => <p class="sessions-outage" role="alert">Sessions could not be read: {message()}</p>}
           </Show>
@@ -252,6 +301,39 @@ const Sessions: Component<Props> = (props) => {
             </div>
           </Show>
         </aside>
+        {/* A sibling of the aside, not a child of it, for the reason the
+            Places rail's own handle is: the aside scrolls, and a handle
+            poking past its own edge is clipped by that scroll box, handing
+            every pointer event meant for it to the aside underneath instead
+            (caught by a browser test that dragged the handle and found the
+            width never moved — `document.elementFromPoint` at the handle's
+            own center resolved to the aside, not the handle). Positioned
+            here, against `.sessions-place-body`'s own `position: relative`,
+            nothing clips it. */}
+        <Show when={!narrow() && !liveList.collapsed()}>
+          <div
+            class="sessions-resize-handle"
+            classList={{ dragging: liveList.dragging() }}
+            style={{ left: `${liveList.width() - 4}px` }}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize live sessions"
+            aria-valuenow={liveList.width()}
+            aria-valuemin={160}
+            aria-valuemax={480}
+            tabIndex={0}
+            onPointerDown={(event) => liveList.beginResize(event)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                liveList.setWidth(liveList.width() - 16);
+              } else if (event.key === "ArrowRight") {
+                event.preventDefault();
+                liveList.setWidth(liveList.width() + 16);
+              }
+            }}
+          />
+        </Show>
         <div class="sessions-active-workspace">
           <Show when={pendingAction()} keyed>
             {(current) => {
