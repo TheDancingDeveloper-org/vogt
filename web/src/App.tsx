@@ -52,7 +52,6 @@ import {
   sessionsStore,
   startEventStream,
   stopEventStream,
-  onVogtChanged,
 } from "./store";
 import {
   closeTab,
@@ -98,6 +97,7 @@ import {
   createPlaceMetrics,
   type PlaceMetric,
 } from "./placeMetrics";
+import { onVogtLive } from "./viewAge";
 
 // -- what the first screen does not have to carry (NFR-S5, #104) -----------
 //
@@ -566,7 +566,14 @@ const App: Component = () => {
   onCleanup(() => {
     stopEventStream();
   });
-  onCleanup(onVogtChanged(() => void placeMetrics.refresh()));
+  // The badges follow the core's changes like every other surface — through
+  // `onVogtLive`, so a backgrounded tab stops reading and reconciles once when
+  // it comes back. Before #138 this subscribed to the raw event and refreshed
+  // four counts per event per tab, hidden or not; two clients doing that were
+  // 88% of the core's request volume. `nudge` coalesces the burst; this line
+  // decides whether there is anyone to coalesce it for.
+  onVogtLive(() => placeMetrics.nudge());
+  onCleanup(() => placeMetrics.dispose());
 
   // Remember where the active tab is, so re-selecting it comes back here and
   // not to the surface's default view.
