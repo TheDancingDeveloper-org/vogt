@@ -2263,3 +2263,67 @@ test("A place whose chunk never arrives costs that place, not the shell", async 
   await page.goto("/#/board");
   await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
 });
+
+
+/**
+ * The working header is one row with one vertical anchor.
+ *
+ * Reported from the dev instance as "this area is badly rendering on every
+ * page", and it was: every slot hugged the top of a header whose slots are
+ * all different heights, the controls bottom-aligned inside their own slot,
+ * and a labelled select stacked its label above itself. Three baselines in
+ * one bar — the primary action floating above the button beside it.
+ *
+ * Asserted as geometry rather than as a screenshot: the controls and the
+ * action are on the same line as each other, and no control in the header is
+ * taller than the row it is supposed to sit in.
+ */
+test("The working header puts its controls and its action on one line", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The narrow shell stacks by design");
+  await installFixtures(page);
+
+  for (const route of ["board", "backlog", "inbox", "sessions"]) {
+    await page.goto(`/#/${route}`);
+    const header = page.locator("[data-surface-header]:visible").first();
+    await expect(header).toBeVisible();
+
+    const rows = await header.evaluate((node) => {
+      const box = (selector: string) => {
+        const found = node.querySelector<HTMLElement>(selector);
+        if (!found) return null;
+        const rect = found.getBoundingClientRect();
+        return { top: rect.top, bottom: rect.bottom, mid: rect.top + rect.height / 2 };
+      };
+      return {
+        controls: box('[data-surface-header-slot="controls"]'),
+        action: box('[data-surface-header-slot="action"]'),
+        title: box('[data-surface-header-slot="title"]'),
+        // The tallest thing inside the controls: a label stacked over its
+        // select is what used to double this.
+        tallest: Math.max(
+          0,
+          ...[...node.querySelectorAll<HTMLElement>(
+            '[data-surface-header-slot="controls"] > *',
+          )].map((child) => child.getBoundingClientRect().height),
+        ),
+      };
+    });
+
+    if (rows.controls && rows.action) {
+      // Centres within a few pixels of each other: the two clusters are one
+      // row, not two anchored at different edges.
+      expect(
+        Math.abs(rows.controls.mid - rows.action.mid),
+        `/${route} controls and action share a line`,
+      ).toBeLessThan(8);
+    }
+    if (rows.controls && rows.title) {
+      expect(
+        Math.abs(rows.controls.mid - rows.title.mid),
+        `/${route} controls sit with the title`,
+      ).toBeLessThan(20);
+    }
+    expect(rows.tallest, `/${route} no stacked label doubles a control`)
+      .toBeLessThan(46);
+  }
+});
