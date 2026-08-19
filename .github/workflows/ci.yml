@@ -66,9 +66,14 @@ jobs:
     name: classify changes
     # NFR-C4: every job names a self-hosted runner. `runs-on: ubuntu-latest`
     # is prohibited estate-wide, and dynamic `runs-on` expressions with it.
-    # These four labels match the three node-b workers; `proxmox-gha-public-*`
-    # does not carry `node-b`.
-    runs-on: [self-hosted, node-b, linux, x64]
+    #
+    # `self-hosted` alone, since 2026-08-19. The old selector also named
+    # `node-b`, `linux` and `x64`: the last two are advertised by every runner
+    # and bought nothing, and `node-b` was a *location* being used as a fleet
+    # selector, which left the Proxmox and WSL2 runners idle while all three
+    # Node B workers were busy. Labels now name capabilities only — `docker`,
+    # `publish`, `tailnet` — so a job asking for none of them runs anywhere.
+    runs-on: [self-hosted]
     outputs:
       python: ${{ steps.classify.outputs.python }}
       engine: ${{ steps.classify.outputs.engine }}
@@ -167,7 +172,7 @@ jobs:
     name: lint, type-check, test (py${{ matrix.python-version }})
     needs: changes
     if: needs.changes.outputs.python == 'true'
-    runs-on: [self-hosted, node-b, linux, x64]
+    runs-on: [self-hosted]
     env:
       UV_PYTHON: ${{ matrix.python-version }}
     strategy:
@@ -222,7 +227,7 @@ jobs:
     name: the core alone, with no engine present
     needs: changes
     if: needs.changes.outputs.any == 'true'
-    runs-on: [self-hosted, node-b, linux, x64]
+    runs-on: [self-hosted]
     env:
       UV_PYTHON: "3.13"
     steps:
@@ -251,7 +256,7 @@ jobs:
     name: fmt, clippy, test (engine) and the PWA it embeds
     needs: changes
     if: needs.changes.outputs.engine == 'true'
-    runs-on: [self-hosted, node-b, linux, x64]
+    runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v7
 
@@ -384,7 +389,7 @@ jobs:
     name: the Android shell assembles
     needs: changes
     if: needs.changes.outputs.mobile == 'true'
-    runs-on: [self-hosted, node-b, linux, x64]
+    runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v7
 
@@ -464,7 +469,7 @@ jobs:
     name: ci
     needs: [changes, build, core, engine, android]
     if: always()
-    runs-on: [self-hosted, node-b, linux, x64]
+    runs-on: [self-hosted]
     steps:
       - name: gate
         env:
