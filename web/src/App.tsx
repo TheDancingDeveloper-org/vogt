@@ -4,36 +4,22 @@ import {
   Show,
   createEffect,
   createSignal,
+  lazy,
   onCleanup,
   onMount,
   untrack,
 } from "solid-js";
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
 import type { TerminalActions } from "./Terminal";
-import TerminalWorkspace from "./TerminalWorkspace";
-import Editor from "./Editor";
-import EditorWorkspace from "./EditorWorkspace";
-import AgentTasks, { type AgentTaskDraftGuard } from "./AgentTasks";
-import Assistant from "./Assistant";
-import AuditBrowser from "./AuditBrowser";
-import Backlog from "./Backlog";
+import type { AgentTaskDraftGuard } from "./AgentTasks";
 import Board from "./Board";
-import Inbox from "./Inbox";
 import Sessions from "./Sessions";
 import RouteOutcomeView from "./RouteOutcome";
-import GitTab from "./Git";
-import GuiTab from "./Gui";
-import Projects from "./Projects";
-import WorkItemDetail from "./WorkItemDetail";
-import History from "./History";
-import KeyboardShortcuts from "./KeyboardShortcuts";
 import { matchAppShortcut } from "./keyboardShortcuts";
 import ModKeyRow from "./ModKeyRow";
-import Settings from "./Settings";
 import FileTree from "./FileTree";
-import FileWorkflowDialog, { type FileWorkflow } from "./FileWorkflowDialog";
+import type { FileWorkflow } from "./FileWorkflowDialog";
 import CommandPalette, { invalidateCommandPaletteProviders } from "./CommandPalette";
-import TemplateSelector from "./TemplateSelector";
 import Dialog from "./Dialog";
 import FeedbackCenter, {
   createFeedbackQueue,
@@ -109,6 +95,41 @@ import {
   createPlaceMetrics,
   type PlaceMetric,
 } from "./placeMetrics";
+
+// -- what the first screen does not have to carry (NFR-S5, #104) -----------
+//
+// Every place below is reached by a route, and no route needs all of them.
+// Kept eager: the shell itself, the Board and the Sessions place, which are
+// the two landing routes — a lazy landing place is a second round trip
+// before anything is drawn. Everything else, including the terminal (xterm)
+// and the editor (Monaco and its language workers), arrives when the route
+// that needs it does. This is what took the initial bundle from 848kB to
+// 218kB; `scripts/check_bundle.py` is what keeps it there.
+//
+// Deliberately *without* a `Suspense` boundary around them. Suspense catches
+// every resource beneath it, not only the one that is lazy: with a boundary
+// here, a Backlog filter change re-suspends the surface's own ranked read,
+// the boundary swaps in its fallback, and the control the reader just
+// clicked is destroyed under their finger. A place with nothing drawn for
+// the few milliseconds its chunk takes is the cheaper of the two.
+const TerminalWorkspace = lazy(() => import("./TerminalWorkspace"));
+const Editor = lazy(() => import("./Editor"));
+const EditorWorkspace = lazy(() => import("./EditorWorkspace"));
+const AgentTasks = lazy(() => import("./AgentTasks"));
+const Assistant = lazy(() => import("./Assistant"));
+const AuditBrowser = lazy(() => import("./AuditBrowser"));
+const Backlog = lazy(() => import("./Backlog"));
+const Inbox = lazy(() => import("./Inbox"));
+const GitTab = lazy(() => import("./Git"));
+const GuiTab = lazy(() => import("./Gui"));
+const Projects = lazy(() => import("./Projects"));
+const WorkItemDetail = lazy(() => import("./WorkItemDetail"));
+const History = lazy(() => import("./History"));
+const KeyboardShortcuts = lazy(() => import("./KeyboardShortcuts"));
+const Settings = lazy(() => import("./Settings"));
+const TemplateSelector = lazy(() => import("./TemplateSelector"));
+const FileWorkflowDialog = lazy(() => import("./FileWorkflowDialog"));
+
 
 const PlaceCount: Component<{ metric: PlaceMetric; label: string }> = (props) => {
   const copy = () => {
@@ -1207,6 +1228,8 @@ const App: Component = () => {
               onCreateSession={() => void onCreate()}
             >
               <div class="tab-view">
+                {/* The terminal is xterm and the editor is Monaco; both are
+                    fetched when a pane that needs one is opened. */}
                 <Show when={isIDEMode && editorWorkspaceActive()}>
                   <div
                     class="retained-tab-pane"

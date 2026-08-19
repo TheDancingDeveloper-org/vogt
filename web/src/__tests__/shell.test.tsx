@@ -126,12 +126,14 @@ function shown(container: HTMLElement): HTMLElement | null {
 
 /** The surface on screen, waited for by the class it renders itself under. */
 async function surface(container: HTMLElement, selector: string): Promise<HTMLElement> {
+  // The panes are lazy in the shipped bundle (#104), so the first look at one
+  // waits for its chunk as well as for its render.
   return await waitFor(() => {
     const pane = shown(container);
     const found = pane?.querySelector<HTMLElement>(selector);
     expect(found, `no ${selector} is on screen`).toBeTruthy();
     return found!;
-  });
+  }, { timeout: 5_000 });
 }
 
 /** Stable places deliberately have no top-level tab strip. */

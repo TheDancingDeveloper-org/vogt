@@ -319,6 +319,19 @@ jobs:
         working-directory: web
         run: pnpm build
 
+      # What a cold visit costs, enforced rather than hoped for. The editor
+      # and the terminal are behind their own routes (#104); one careless
+      # static import puts them back on the first screen, and nothing else in
+      # this pipeline would say so.
+      #
+      # `--no-project`: the check reads the build manifest and the standard
+      # library and nothing else, so it does not need this repo's Python
+      # environment synced into a job that is otherwise Rust and Node.
+      - uses: astral-sh/setup-uv@v9.0.0
+
+      - name: the first screen stays inside its budget
+        run: uv run --no-project python scripts/check_bundle.py
+
       - name: web/dist exists even when the PWA was not built
         run: |
           set -euo pipefail
