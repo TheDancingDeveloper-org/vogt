@@ -322,6 +322,13 @@ so UI changes ship without a new APK; only native plumbing needs one.
   the size is remembered per device. Browser pinch/Ctrl+wheel zoom remains the
   normal whole-app zoom gesture.
 - **Copy/paste**: long-press to select, long-press empty space to paste.
+- **Every control is a thumb's size.** On a phone, or on any touch screen, no
+  button, tab, tick box or link in the navigation is smaller than 44 by 44
+  pixels, and rows of them keep space between the targets rather than only
+  inside them.
+- **Nothing you type into is under 16px.** Below that, mobile browsers zoom the
+  page when the field takes focus and the layout moves out from under you
+  mid-sentence; the floor is set once, for every field in the product.
 - The board renders as a list rather than columns below the narrow breakpoint.
 - Tapping a notification lands on the terminal that raised it.
 

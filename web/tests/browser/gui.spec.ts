@@ -1730,3 +1730,75 @@ test("Backlog ranked rows size to their content and expand in place", async ({ p
   await expect(declared.getByRole("button", { name: "Open", exact: true })).toHaveCount(0);
 });
 
+
+
+/**
+ * Stage 10's two phone rules, measured rather than asserted in prose: no
+ * interactive target below 44 by 44 pixels, and nothing typed into below 16px
+ * — the size at which mobile browsers zoom the visual viewport out from under
+ * whoever is typing.
+ *
+ * Every route the phone can reach is walked, because the rule is the shell's
+ * and not any one surface's, and a control added to Settings tomorrow is as
+ * able to break it as one added to Inbox.
+ */
+const PHONE_ROUTES = [
+  "sessions", "inbox", "board", "backlog",
+  "projects", "audit", "settings", "git", "history", "tasks", "w/WI-7",
+] as const;
+
+async function undersizedControls(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const found: string[] = [];
+    const nodes = document.querySelectorAll<HTMLElement>(
+      "button, summary, input, select, textarea, [role=button]",
+    );
+    for (const node of nodes) {
+      const box = node.getBoundingClientRect();
+      if (box.width === 0 || box.height === 0) continue;
+      // A tick box's target is the label a tap lands on, not the drawn box.
+      const tick =
+        node.tagName === "INPUT" &&
+        /^(checkbox|radio)$/.test((node as HTMLInputElement).type);
+      const target = tick ? (node.closest("label") ?? node).getBoundingClientRect() : box;
+      const font = Number.parseFloat(getComputedStyle(node).fontSize);
+      const name = `${node.tagName.toLowerCase()}.${node.className || "-"}`.slice(0, 50);
+      if (target.height < 44 || target.width < 44) {
+        found.push(`${name} is ${Math.round(target.width)}x${Math.round(target.height)}`);
+      }
+      if (/^(INPUT|TEXTAREA|SELECT)$/.test(node.tagName) && font < 16) {
+        found.push(`${name} types at ${font}px`);
+      }
+    }
+    return [...new Set(found)];
+  });
+}
+
+test("Phone controls keep the 44px target and 16px form-text floors", { timeout: 90_000 }, async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The floors are the narrow shell's");
+  await installFixtures(page);
+
+  for (const route of PHONE_ROUTES) {
+    await page.goto(`/#/${route}`);
+    await page.waitForLoadState("networkidle");
+    await page.waitForTimeout(200);
+    expect(await undersizedControls(page), `at 390px on /${route}`).toEqual([]);
+    const overflow = await page.evaluate(() => ({
+      doc: document.documentElement.scrollWidth,
+      win: window.innerWidth,
+    }));
+    expect(overflow.doc, `no sideways scroll on /${route}`).toBeLessThanOrEqual(overflow.win);
+  }
+
+  // The narrowest and widest phones the shell claims, because a 44px floor
+  // that only holds at one width is a coincidence.
+  for (const width of [320, 430]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const route of ["sessions", "inbox", "board", "backlog"]) {
+      await page.goto(`/#/${route}`);
+      await page.waitForLoadState("networkidle");
+      await page.waitForTimeout(200);
+      expect(await undersizedControls(page), `at ${width}px on /${route}`).toEqual([]);
+    }
+  }
+});

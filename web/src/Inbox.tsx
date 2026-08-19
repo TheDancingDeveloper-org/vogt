@@ -168,12 +168,16 @@ const Entry: Component<EntryProps> = (props) => {
       <div class="inbox-entry-mark" aria-label={props.seen ? "Seen" : "Unread"} />
       <div class="inbox-entry-body">
         <div class="inbox-entry-heading">
-          <input
-            type="checkbox"
-            aria-label={`Select ${props.entry.title}`}
-            checked={props.selected}
-            onChange={() => props.onSelect(props.entry)}
-          />
+          {/* The box is small; the thing a thumb has to hit is not. The label
+              is what makes the 44px target actually toggle the box. */}
+          <label class="vogt-tickbox">
+            <input
+              type="checkbox"
+              aria-label={`Select ${props.entry.title}`}
+              checked={props.selected}
+              onChange={() => props.onSelect(props.entry)}
+            />
+          </label>
           <span class="inbox-source">{props.entry.source}</span>
           <h2>{props.entry.title}</h2>
         </div>
