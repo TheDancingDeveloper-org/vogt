@@ -477,9 +477,18 @@ textarea {
  * cannot disagree with the visual one. Surface-specific evidence lives
  * inside the honesty slot and keeps its own vocabulary and state classes. */
 
+/* One row, one vertical anchor.
+ *
+ * Every slot used to hug the top of a header whose slots are all different
+ * heights — a 24px title beside a two-line honesty line beside a 56px
+ * label-over-select beside a 32px button — and the controls bottom-aligned
+ * inside their own slot on top of that. The result was three different
+ * baselines in one bar: the primary action floated above the Refresh button
+ * next to it, and the title sat level with a kicker rather than with the
+ * controls it belongs to. Centring is what makes it read as one header. */
 .surface-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   flex: 0 0 auto;
   flex-wrap: wrap;
   min-width: 0;
@@ -512,8 +521,14 @@ textarea {
   font-size: 20px;
 }
 
+/* The honesty line takes the slack before the spacer does. With equal grow
+   factors the free width was split evenly between a sentence and a blank, so
+   "stream disconnected; may be stale" wrapped to three lines with 200px of
+   empty header beside it. The spacer still grows — it is what pushes the
+   controls right on a surface that reports no honesty at all — just not at
+   the expense of the words. */
 .surface-header-honesty {
-  flex: 1 1 18rem;
+  flex: 3 1 18rem;
   color: var(--fg-muted);
   font-size: 12px;
 }
@@ -535,10 +550,20 @@ textarea {
 
 .surface-header-controls {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   flex: 0 1 auto;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* A labelled control in a header is one line, not two. The stacked form is
+   right in a filter panel, where the labels line up in a grid; here it makes
+   the control twice the height of the button beside it. */
+.surface-header-controls label {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .surface-header-controls > * {
@@ -552,6 +577,7 @@ textarea {
 
 .surface-header-action {
   display: flex;
+  align-items: center;
   flex: 0 0 auto;
 }
 
@@ -6238,16 +6264,18 @@ textarea {
 
 /* Freshness is rendered even when it is good news: an empty answer and a
  * stale answer have to stop looking alike (FR-U2, FR-U17). */
+/* A sentence about the evidence, and it has to look like one. Bordered on
+   four sides over an elevated background, in a dark theme, beside a title, it
+   read as a disabled text input with placeholder text in it — which is what
+   the eye calls a broken form, not a freshness note. The coloured rule stays:
+   it is the status, and it is the only part that was doing any work. */
 .vogt-backlog-freshness {
   flex: 1 1 18rem;
   margin: 0;
-  padding: 6px 10px;
-  border: 1px solid var(--bd);
-  border-left-width: 3px;
-  border-radius: 4px;
+  padding: 2px 0 2px 9px;
+  border-left: 3px solid var(--bd);
   font-size: 12px;
   color: var(--fg-muted);
-  background: var(--bg-elev);
 }
 
 .vogt-backlog-freshness.fresh {
