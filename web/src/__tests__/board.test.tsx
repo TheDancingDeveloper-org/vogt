@@ -560,7 +560,10 @@ describe("FR-U11 — the filter set is the URL", () => {
     expect(value("Assignee")).toBe("user:sam");
     expect(value("Swimlanes")).toBe("project");
     // The kind chip named in the URL is the active one.
-    const active = [...container.querySelectorAll(".board-chip.active")].map(
+    const typeField = [...container.querySelectorAll<HTMLElement>(".board-field")].find(
+      (node) => node.querySelector("span")?.textContent === "Type",
+    )!;
+    const active = [...typeField.querySelectorAll(".board-chip.active")].map(
       (node) => node.textContent,
     );
     expect(active).toEqual(["bug"]);
@@ -579,6 +582,70 @@ describe("FR-U11 — the filter set is the URL", () => {
     fireEvent.input(label.querySelector("select")!, { target: { value: "infra" } });
 
     await waitFor(() => expect(queryOf(view.url()).get("label")).toBe("infra"));
+  });
+
+  it("keeps the legacy grid closed and exposes every dimension through + Filter", async () => {
+    fakeVogt();
+    const view = board();
+    await waitFor(() => expect(columnNames(view.container).length).toBeGreaterThan(0));
+
+    const panel = view.container.querySelector<HTMLElement>("#board-filter-panel")!;
+    expect(panel.hidden).toBe(true);
+    expect(panel.getAttribute("aria-label")).toBe("Add Board filters");
+
+    const add = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.trim() === "+ Filter",
+    )!;
+    expect(add.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(add);
+
+    expect(panel.hidden).toBe(false);
+    expect(add.getAttribute("aria-expanded")).toBe("true");
+    for (const dimension of [
+      "Project",
+      "Initiative",
+      "Label",
+      "Assignee",
+      "Swimlanes",
+      "Type",
+      "State",
+    ]) {
+    expect(panel.textContent).toContain(dimension);
+    }
+
+    const label = [...panel.querySelectorAll<HTMLElement>(".board-field")].find(
+      (field) => field.querySelector("span")?.textContent === "Label",
+    )!;
+    fireEvent.input(label.querySelector("select")!, { target: { value: "infra" } });
+    await waitFor(() => expect(queryOf(view.url()).get("label")).toBe("infra"));
+    expect(view.container.textContent).toContain("Label: infra");
+
+    label.querySelector("select")!.focus();
+    fireEvent.keyDown(label.querySelector("select")!, { key: "Escape" });
+    await waitFor(() => expect(panel.hidden).toBe(true));
+    await waitFor(() => expect(document.activeElement).toBe(add));
+  });
+
+  it("removes active chips independently and clear-all includes swimlanes", async () => {
+    fakeVogt();
+    const view = board("/board?project=beta&label=infra&lanes=project");
+    await waitFor(() => expect(columnNames(view.container).length).toBeGreaterThan(0));
+
+    fireEvent.click(
+      view.container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Remove filter Label: infra"]',
+      )!,
+    );
+    await waitFor(() => expect(queryOf(view.url()).get("label")).toBeNull());
+    expect(queryOf(view.url()).get("project")).toBe("beta");
+    expect(queryOf(view.url()).get("lanes")).toBe("project");
+
+    const clear = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.trim() === "Clear all",
+    )!;
+    fireEvent.click(clear);
+    await waitFor(() => expect(queryOf(view.url()).toString()).toBe(""));
+    expect(view.container.textContent).toContain("No filters applied");
   });
 
   it("round-trips: the URL it wrote is a URL it can be handed back", async () => {
@@ -616,7 +683,7 @@ describe("FR-U14 — a combined filter is nameable and recalled", () => {
 
   function saveButton(container: HTMLElement): HTMLButtonElement {
     return [...container.querySelectorAll("button")].find(
-      (node) => node.textContent === "Save filter",
+      (node) => node.textContent === "Save lens",
     ) as HTMLButtonElement;
   }
 
@@ -647,8 +714,8 @@ describe("FR-U14 — a combined filter is nameable and recalled", () => {
     );
 
     // Somewhere else entirely.
-    const clear = [...view.container.querySelectorAll("button")].find((node) =>
-      node.textContent?.startsWith("Clear filters"),
+    const clear = [...view.container.querySelectorAll("button")].find(
+      (node) => node.textContent?.trim() === "Clear all",
     )!;
     fireEvent.click(clear);
     await waitFor(() => expect(queryOf(view.url()).get("label")).toBeNull());
@@ -673,8 +740,8 @@ describe("FR-U14 — a combined filter is nameable and recalled", () => {
     fireEvent.click(saveButton(view.container));
     await waitFor(() => expect(view.container.querySelector(".board-saved")).toBeTruthy());
 
-    const clear = [...view.container.querySelectorAll("button")].find((node) =>
-      node.textContent?.startsWith("Clear filters"),
+    const clear = [...view.container.querySelectorAll("button")].find(
+      (node) => node.textContent?.trim() === "Clear all",
     )!;
     fireEvent.click(clear);
     await waitFor(() => expect(queryOf(view.url()).getAll("kind")).toEqual([]));
@@ -704,7 +771,7 @@ describe("FR-U14 — a combined filter is nameable and recalled", () => {
         "just beta",
       ),
     );
-    expect(second.container.textContent).toContain("saved filters are kept in this browser");
+    expect(second.container.textContent).toContain("saved lenses are kept in this browser");
   });
 
   it("will not save an unnamed set, and forgets one on request", async () => {
