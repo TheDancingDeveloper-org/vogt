@@ -26,6 +26,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 DIST = WEB / "dist"
@@ -54,16 +55,25 @@ DEFERRED_MARKERS = (
 )
 
 
-def load_manifest() -> dict[str, dict]:
+#: One chunk as Vite's manifest describes it: its emitted `file`, the chunks
+#: it imports statically and dynamically, and the CSS that comes with it. The
+#: values are read defensively rather than modelled, because this script's job
+#: is to fail on a shape it does not recognise, not to define one.
+Chunk = dict[str, Any]
+Manifest = dict[str, Chunk]
+
+
+def load_manifest() -> Manifest:
     if not MANIFEST.exists():
         sys.exit(
             f"no build manifest at {MANIFEST}.\n"
             "Run `pnpm build` in web/ first; `build.manifest` must stay true."
         )
-    return json.loads(MANIFEST.read_text())
+    manifest: Manifest = json.loads(MANIFEST.read_text())
+    return manifest
 
 
-def initial_graph(manifest: dict[str, dict]) -> tuple[set[str], set[str]]:
+def initial_graph(manifest: Manifest) -> tuple[set[str], set[str]]:
     """The entry, what it statically imports, and the CSS that comes with it."""
     entries = [key for key, chunk in manifest.items() if chunk.get("isEntry")]
     if not entries:
