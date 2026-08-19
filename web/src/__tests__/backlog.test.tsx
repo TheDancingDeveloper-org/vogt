@@ -428,20 +428,134 @@ describe("FR-U11 / FR-U14 — the filter set is the URL, and can be named", () =
       '.vogt-backlog-savedrow input[type="text"]',
     )!;
     fireEvent.input(name, { target: { value: "beta only" } });
-    fireEvent.click(button(view.container, "Save"));
+    fireEvent.click(button(view.container, "Save lens"));
     await waitFor(() =>
       expect(view.container.querySelector(".vogt-backlog-saved-recall")?.textContent).toBe(
         "beta only",
       ),
     );
 
-    fireEvent.click(button(view.container, "Clear filters"));
+    fireEvent.click(button(view.container, "Clear all"));
     await waitFor(() => expect(queryOf(view.url()).get("project")).toBeNull());
 
     fireEvent.click(
       view.container.querySelector<HTMLButtonElement>(".vogt-backlog-saved-recall")!,
     );
     await waitFor(() => expect(queryOf(view.url()).get("project")).toBe("beta"));
+  });
+});
+
+describe("FR-U25 — a ranked row is content-sized and expands where it stands", () => {
+  const twoRows = {
+    "GET /backlog": {
+      body: {
+        items: [
+          rankedEntry({ ref: "WI-1", title: "A declared row", score: 4.25 }),
+          rankedEntry({
+            ref: "gh:alpha#12",
+            origin: "observed",
+            title: "An observed subject",
+            state: "observed",
+            observation_kind: "forge issue",
+            observed_at: "2026-08-01T00:00:00Z",
+            source_url: "https://example.invalid/12",
+            score: 1.5,
+          }),
+        ],
+        total_considered: 2,
+      },
+    },
+  };
+
+  it("keeps rank, ref, trust, age and score on the collapsed row", async () => {
+    fakeVogt(twoRows);
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    const first = rows(container)[0]!;
+    expect(first.querySelector(".vogt-backlog-rank")?.textContent).toBe("1");
+    expect(first.querySelector(".vogt-backlog-cell-ref")?.textContent).toBe("WI-1");
+    expect(first.querySelector(".vogt-backlog-trust")?.textContent).toBe("verified");
+    expect(first.querySelector(".vogt-backlog-age")?.textContent).toBeTruthy();
+    expect(first.querySelector(".vogt-backlog-score")?.textContent).toContain("4.25");
+    // Nothing in the row asks the browser to hide what does not fit.
+    expect(first.querySelector(".vogt-backlog-row-title")).toBeTruthy();
+    expect(rows(container)[1]?.querySelector(".vogt-backlog-rank")?.textContent).toBe("2");
+  });
+
+  it("expands in the row rather than in a dialog, and collapses again", async () => {
+    fakeVogt(twoRows);
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    const first = () => rows(container)[0]!;
+    expect(first().querySelector(".vogt-backlog-row-detail")).toBeNull();
+
+    fireEvent.click(button(first(), "More"));
+    await waitFor(() =>
+      expect(first().querySelector(".vogt-backlog-row-detail")).toBeTruthy(),
+    );
+    expect(container.querySelector("[role=dialog]")).toBeNull();
+    expect(button(first(), "Less")).toBeTruthy();
+
+    fireEvent.click(button(first(), "Less"));
+    await waitFor(() =>
+      expect(first().querySelector(".vogt-backlog-row-detail")).toBeNull(),
+    );
+  });
+
+  it("offers a declared row's acts and an observed subject's, never both", async () => {
+    fakeVogt(twoRows);
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    fireEvent.click(button(rows(container)[0]!, "More"));
+    await waitFor(() => expect(button(rows(container)[0]!, "Open")).toBeTruthy());
+    const declaredActs = [...rows(container)[0]!.querySelectorAll("button")].map(
+      (node) => node.textContent,
+    );
+    expect(declaredActs).toContain("Select");
+    expect(declaredActs).toContain("Start a session…");
+    expect(declaredActs).not.toContain("Adopt as work item…");
+
+    fireEvent.click(button(rows(container)[1]!, "More"));
+    await waitFor(() =>
+      expect(button(rows(container)[1]!, "Adopt as work item…")).toBeTruthy(),
+    );
+    const observedActs = [...rows(container)[1]!.querySelectorAll("button")].map(
+      (node) => node.textContent,
+    );
+    expect(observedActs).toContain("Suppress source…");
+    expect(observedActs).not.toContain("Start a session…");
+    expect(observedActs).not.toContain("Open");
+  });
+
+  it("refuses a row's write until a reason for that write is typed", async () => {
+    const vogt = fakeVogt({
+      ...twoRows,
+      "POST /work/adopt": { body: { ok: true } },
+    });
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    const observed = () => rows(container)[1]!;
+    fireEvent.click(button(observed(), "More"));
+    await waitFor(() => expect(button(observed(), "Adopt as work item…")).toBeTruthy());
+    fireEvent.click(button(observed(), "Adopt as work item…"));
+
+    const confirm = () => button(observed(), "Confirm");
+    await waitFor(() => expect(confirm().disabled).toBe(true));
+    expect(vogt.matching("POST /work/adopt")).toHaveLength(0);
+
+    const reason = observed().querySelector("textarea")!;
+    fireEvent.input(reason, { target: { value: "this is real work" } });
+    await waitFor(() => expect(confirm().disabled).toBe(false));
+    fireEvent.click(confirm());
+
+    await waitFor(() => expect(vogt.matching("POST /work/adopt")).toHaveLength(1));
+    const sent = vogt.matching("POST /work/adopt")[0]?.body as Record<string, unknown>;
+    expect(sent.subject).toBe("gh:alpha#12");
+    expect(sent.reason).toBe("this is real work");
   });
 });
 

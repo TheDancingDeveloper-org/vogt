@@ -97,6 +97,7 @@ import { openWorkItemTab } from "./tabs";
 import { ViewAgeBadge, createViewAge, onVogtLive } from "./viewAge";
 import { MeasuredWindow } from "./measuredWindow";
 import SurfaceHeader from "./SurfaceHeader";
+import { ProgressiveFilters, SavedLenses } from "./ProgressiveFilters";
 import {
   VogtUnavailable,
   createWork,
@@ -1773,18 +1774,8 @@ const Board: Component<Props> = (props) => {
   // -- saved filters (FR-U14) ----------------------------------------------
 
   const [savedFilters, setSavedFilters] = createSignal<SavedFilter[]>(readSavedFilters());
-  const [saveName, setSaveName] = createSignal("");
-  const [filterPanelOpen, setFilterPanelOpen] = createSignal(false);
-  let addFilterButton: HTMLButtonElement | undefined;
 
-  const closeFilterPanel = () => {
-    setFilterPanelOpen(false);
-    queueMicrotask(() => addFilterButton?.focus());
-  };
-
-  const saveCurrent = () => {
-    const name = saveName().trim();
-    if (!name) return;
+  const saveCurrent = (name: string) => {
     // The poll interval is a refresh preference, not a filter, so it is left
     // out of what gets saved and left alone on recall: a named view should
     // not change how often the reader's board refreshes.
@@ -1799,10 +1790,11 @@ const Board: Component<Props> = (props) => {
         ...savedFilters().filter((entry) => entry.name !== name),
       ]),
     );
-    setSaveName("");
   };
 
-  const recallSaved = (entry: SavedFilter) => {
+  const recallSaved = (name: string) => {
+    const entry = savedFilters().find((one) => one.name === name);
+    if (!entry) return;
     applyFilters({
       ...filtersFromQuery(queryFromSearch(entry.query)),
       column: filters().column,
@@ -1956,48 +1948,19 @@ const Board: Component<Props> = (props) => {
         {(message) => <div class="board-banner board-banner--ok">{message()}</div>}
       </Show>
 
-      <div class="board-toolbar" role="group" aria-label="Board filters">
-        <div class="board-filter-summary">
-          <span class="board-filter-summary-label">Filters</span>
-          <Show when={activeFilterChips().length > 0} fallback={<span class="board-muted">No filters applied</span>}>
-            <div class="board-filter-chips">
-              <For each={activeFilterChips()}>
-                {(chip) => (
-                  <span class="board-filter-chip">
-                    <span>{chip.label}</span>
-                    <button type="button" aria-label={`Remove filter ${chip.label}`} onClick={() => removeFilter(chip.key)}>×</button>
-                  </span>
-                )}
-              </For>
-            </div>
-          </Show>
-          <button
-            type="button"
-            class="board-add-filter"
-            ref={addFilterButton}
-            aria-controls="board-filter-panel"
-            aria-expanded={filterPanelOpen()}
-            onClick={() => setFilterPanelOpen((open) => !open)}
-          >
-            + Filter
+      <ProgressiveFilters
+        surface="Board"
+        prefix="board"
+        chips={activeFilterChips()}
+        onRemove={removeFilter}
+        onClear={clearFilters}
+        clearDisabled={filterCount() === 0}
+        actions={(
+          <button type="button" onClick={hideFinishedColumns}>
+            Hide finished columns
           </button>
-          <button type="button" onClick={clearFilters} disabled={filterCount() === 0}>
-            Clear all
-          </button>
-        </div>
-        <div
-          id="board-filter-panel"
-          class="board-filter-panel"
-          role="group"
-          aria-label="Add Board filters"
-          hidden={!filterPanelOpen()}
-          onKeyDown={(event) => {
-            if (event.key !== "Escape") return;
-            event.stopPropagation();
-            closeFilterPanel();
-          }}
-        >
-          <div class="board-filter-panel-grid">
+        )}
+      >
         <label class="board-field">
           <span>Project</span>
           {/* Selection is declared on the options rather than on the select.
@@ -2144,64 +2107,25 @@ const Board: Component<Props> = (props) => {
           </div>
         </div>
 
-        <div class="board-toolbar-actions">
-          <button type="button" onClick={hideFinishedColumns}>
-            Hide finished columns
-          </button>
-          <button type="button" onClick={closeFilterPanel}>
-            Done
-          </button>
-        </div>
-          </div>
-        </div>
-      </div>
+      </ProgressiveFilters>
 
       {/* FR-U14's second clause: a combined filter is a named lens. */}
-      <div class="board-savedrow">
-        <span class="board-savedlabel">Saved lenses</span>
-        <input
-          type="text"
-          class="board-savedname"
-          placeholder="Name this lens"
-          aria-label="Lens name"
-          value={saveName()}
-          onInput={(event) => setSaveName(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter") return;
-            event.preventDefault();
-            saveCurrent();
-          }}
-        />
-        <button type="button" onClick={saveCurrent} disabled={!saveName().trim()}>
-          Save lens
-        </button>
-        <For each={savedFilters()}>
-          {(entry) => (
-            <span class="board-saved">
-              <button
-                type="button"
-                class="board-saved-recall"
-                title={describeSaved(entry)}
-                onClick={() => recallSaved(entry)}
-              >
-                {entry.name}
-              </button>
-              <button
-                type="button"
-                class="board-saved-drop"
-                aria-label={`Forget the saved lens ${entry.name}`}
-                onClick={() => forgetSaved(entry.name)}
-              >
-                ×
-              </button>
-            </span>
-          )}
-        </For>
-        <span class="board-muted">
-          saved lenses are kept in this browser · the URL above carries the
-          same set to somebody else
-        </span>
-      </div>
+      <SavedLenses
+        prefix="board"
+        lenses={savedFilters().map((entry) => ({
+          name: entry.name,
+          title: describeSaved(entry),
+        }))}
+        onSave={saveCurrent}
+        onRecall={recallSaved}
+        onForget={forgetSaved}
+        note={(
+          <>
+            saved lenses are kept in this browser · the URL above carries the
+            same set to somebody else
+          </>
+        )}
+      />
 
       <Show when={createOpen()}>
         <form class="board-create" onSubmit={(event) => void submitCreate(event)}>

@@ -60,6 +60,7 @@ interface PlaceMetricFixtures {
   boardTotal?: number | null;
   backlogTotal?: number | null;
   boardItems?: Record<string, unknown>[];
+  backlogItems?: Record<string, unknown>[];
 }
 
 async function installFixtures(
@@ -214,7 +215,7 @@ async function installFixtures(
     if (url.pathname.endsWith("/backlog")) {
       if (metrics.backlogTotal === null) return route.fulfill({ status: 503, body: "backlog unavailable" });
       return route.fulfill({ json: {
-        items: boardItems,
+        items: metrics.backlogItems ?? boardItems,
         total_considered: metrics.backlogTotal,
         freshness: { status: "fresh", collectors: {} },
       } });
@@ -224,6 +225,17 @@ async function installFixtures(
       return route.fulfill({ json: {
       projects: [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }],
       total: metrics.projectsTotal,
+      } });
+    }
+    if (url.pathname.endsWith("/why")) {
+      return route.fulfill({ json: {
+        ref: "WI-7",
+        title: "Ranked",
+        total: 1,
+        contributions: [
+          { input: "age", detail: "raised 9 days ago and still open", value: 9, weight: 0.1, contribution: 0.9 },
+        ],
+        inputs_not_yet_available: {},
       } });
     }
     if (url.pathname.endsWith("/labels")) return route.fulfill({ json: { labels: [] } });
@@ -1583,5 +1595,138 @@ test("dirty Agent Task drafts guard navigation and browser exit", async ({ page 
     window.dispatchEvent(event);
     return event.defaultPrevented;
   })).toBe(false);
+});
+
+
+test("Backlog filters are chips, a + Filter disclosure and a named lens", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/backlog?project=vogt");
+
+  const filters = page.getByRole("group", { name: "Backlog filters", exact: true });
+  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(page.getByRole("group", { name: "Add Backlog filters" })).toBeHidden();
+  // The legacy always-open select grid is gone: the selects live behind the
+  // disclosure, not above the ranked work.
+  await expect(page.locator(".vogt-backlog-filter-grid")).toHaveCount(0);
+
+  await filters.getByRole("button", { name: "+ Filter", exact: true }).click();
+  const panel = page.getByRole("group", { name: "Add Backlog filters" });
+  await expect(panel).toBeVisible();
+  await panel.getByRole("button", { name: "feature", exact: true }).click();
+  await expect(page).toHaveURL(/kind=feature/);
+  await expect(filters.getByText("Type: feature")).toBeVisible();
+
+  // Escape closes the disclosure and gives focus back to what opened it.
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeHidden();
+  await expect(filters.getByRole("button", { name: "+ Filter", exact: true })).toBeFocused();
+
+  await page.getByLabel("Lens name").fill("Vogt features");
+  await page.getByRole("button", { name: "Save lens" }).click();
+  await expect(page.locator(".vogt-backlog-saved-recall")).toHaveText("Vogt features");
+
+  await filters.getByRole("button", { name: "Remove filter Project: vogt" }).click();
+  await expect(page).not.toHaveURL(/project=vogt/);
+  await expect(page).toHaveURL(/kind=feature/);
+
+  await filters.getByRole("button", { name: "Clear all" }).click();
+  await expect(page).not.toHaveURL(/kind=feature/);
+
+  await page.locator(".vogt-backlog-saved-recall").click();
+  await expect(page).toHaveURL(/project=vogt/);
+  await expect(page).toHaveURL(/kind=feature/);
+
+  await page.reload();
+  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(filters.getByText("Type: feature")).toBeVisible();
+});
+
+test("Backlog ranked rows size to their content and expand in place", async ({ page }) => {
+  const longTitle =
+    "A ranked title long enough to need a second line and then some more of one ".repeat(3);
+  await installFixtures(page, {}, [], undefined, {
+    backlogItems: [
+      {
+        ref: "WI-7", title: longTitle, kind: "feature", state: "open", priority: "normal",
+        project_slug: "vogt", trust_state: "verified", labels: ["infra"], score: 1.25,
+        updated_at: "2026-08-17T10:00:00Z", origin: "declared",
+      },
+      {
+        ref: "gh:vogt#12", title: "An observed subject nobody has adopted", kind: "bug",
+        state: "observed", priority: "normal", project_slug: "vogt", trust_state: "unverified",
+        labels: [], score: 0.5, updated_at: "2026-08-16T10:00:00Z", origin: "observed",
+        observation_kind: "forge issue", observed_at: "2026-08-16T10:00:00Z",
+        source_url: "https://example.invalid/12",
+      },
+    ],
+  });
+  await page.goto("/#/backlog");
+
+  const declared = page.locator(".vogt-backlog-row").filter({ hasText: "A ranked title" });
+  const observed = page.locator(".vogt-backlog-row").filter({ hasText: "An observed subject" });
+  await expect(declared).toBeVisible();
+
+  // The collapsed row keeps the facts a reader ranks by.
+  await expect(declared.locator(".vogt-backlog-rank")).toHaveText("1");
+  await expect(declared.getByRole("button", { name: "WI-7" })).toBeVisible();
+  await expect(declared.locator(".vogt-backlog-trust")).toHaveText("verified");
+  await expect(declared.locator(".vogt-backlog-age")).not.toBeEmpty();
+  await expect(declared.locator(".vogt-backlog-score")).toContainText("1.25");
+
+  // The title wraps rather than ending in an ellipsis: nothing it says is
+  // taller than the box drawn for it.
+  const title = declared.locator(".vogt-backlog-row-title");
+  const clipping = await title.evaluate((node) => {
+    const line = Number.parseFloat(getComputedStyle(node).lineHeight) || 16;
+    return {
+      scroll: node.scrollHeight,
+      client: node.clientHeight,
+      lines: Math.round(node.getBoundingClientRect().height / line),
+    };
+  });
+  expect(clipping.scroll).toBeLessThanOrEqual(clipping.client + 1);
+  expect(clipping.lines).toBeGreaterThanOrEqual(2);
+
+  // Every control below is reached from the keyboard: it is the operable path
+  // the row has to keep, and it does not depend on where a phone's shell has
+  // pushed the list (first-viewport containment is its own issue).
+  const press = async (control: ReturnType<typeof page.getByRole>) => {
+    await control.focus();
+    await page.keyboard.press("Enter");
+  };
+
+  const before = await declared.evaluate((node) => node.getBoundingClientRect().height);
+  await press(declared.getByRole("button", { name: "More" }));
+  // Declared rows offer what a work item can do, and nothing a subject can.
+  await expect(declared.getByRole("button", { name: "Open", exact: true })).toBeVisible();
+  await expect(declared.getByRole("button", { name: "Select", exact: true })).toBeVisible();
+  await expect(declared.getByRole("button", { name: "Start a session…" })).toBeVisible();
+  await expect(declared.getByRole("button", { name: "Adopt as work item…" })).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const expanded = await declared.evaluate((node) => node.getBoundingClientRect().height);
+  expect(expanded).toBeGreaterThan(before);
+
+  // The ranking evidence belongs to the row it explains.
+  await press(declared.getByRole("button", { name: /1\.25/ }));
+  await expect(declared.getByText("raised 9 days ago and still open")).toBeVisible();
+
+  // A write from a row still asks for a reason of its own.
+  await press(declared.getByRole("button", { name: "Start a session…" }));
+  const confirm = declared.getByRole("button", { name: "Confirm" });
+  await expect(confirm).toBeDisabled();
+  await declared.locator("textarea").fill("picking this up now");
+  await expect(confirm).toBeEnabled();
+  await press(declared.getByRole("button", { name: "Cancel" }));
+
+  // Observed rows offer the two writes a subject has, and no transition.
+  await press(observed.getByRole("button", { name: "More" }));
+  await expect(observed.getByText("Observed forge issue")).toBeVisible();
+  await expect(observed.getByRole("button", { name: "Adopt as work item…" })).toBeVisible();
+  await expect(observed.getByRole("button", { name: "Suppress source…" })).toBeVisible();
+  await expect(observed.getByRole("button", { name: "Start a session…" })).toHaveCount(0);
+  await expect(observed.getByRole("checkbox")).toBeDisabled();
+
+  await press(declared.getByRole("button", { name: "Less" }));
+  await expect(declared.getByRole("button", { name: "Open", exact: true })).toHaveCount(0);
 });
 

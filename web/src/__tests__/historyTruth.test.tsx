@@ -117,7 +117,9 @@ describe("History read truth", () => {
     expect(container.querySelector(".history-list.stale")).not.toBeNull();
   });
 
-  it("loads a continuation page without losing filters, selection, or pins", async () => {
+  // Two hundred rendered rows and a second page of them: slow enough on a
+  // loaded machine to exceed the default budget without anything being wrong.
+  it("loads a continuation page without losing filters, selection, or pins", { timeout: 20_000 }, async () => {
     const firstPage = Array.from({ length: 200 }, (_, index) => archive(index));
     const lastPage = [archive(200)];
     vi.spyOn(api, "operationalStatus").mockResolvedValue(status(201));

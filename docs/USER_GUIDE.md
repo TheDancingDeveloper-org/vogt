@@ -142,7 +142,27 @@ fifty audit rows end up saying "triage". A drop does pre-fill the last reason
 the server accepted, which is a form with a required field rather than a
 bypass; quick-create deliberately does not inherit it.
 
-### 2.2 A work item
+### 2.2 The backlog and bugs
+
+One tab, two ranked views over the same filter set. The order is Vogt's, not
+the client's: `backlog` and `bugs` rank declared work and observed subjects
+together, and every row can say why it is where it is.
+
+- **Filters** by project, label, initiative, actor, type and state are added
+  through `+ Filter` and shown as individually removable chips, exactly as on
+  the board. The URL carries the set, and a combination can be named and
+  recalled as a saved lens (per device).
+- **A row is as tall as what it says.** Rank, ref, trust, age and score stay on
+  the row's first line; the title wraps rather than ending in an ellipsis.
+- **More** opens the rest of the row in place: an observed subject's
+  provenance, the ranking factors behind its score, and the acts that row
+  actually has. Declared rows offer Open, Select and starting a session;
+  observed subjects offer Adopt and Suppress. Nothing moves to a dialog.
+- **Bulk transition and bulk labelling** each collect their own typed reason,
+  are applied one audited write at a time, and report each refusal against the
+  item that was refused.
+
+### 2.3 A work item
 
 The detail page holds the description, the item's own state history (every
 entry into a state, oldest first, with what it came from, when, who moved it
@@ -160,7 +180,7 @@ this item's brief — description, `why`, relations — written to a prompt file
 agent is pointed at. The session is linked back: the item shows its live
 activity badge, and the terminal links back to the item.
 
-### 2.3 Projects and the drift inbox
+### 2.4 Projects and the drift inbox
 
 A project page shows its brief, CI status, contract compliance with the
 criteria that failed, the dependency graph, the import form, and the drift
@@ -183,7 +203,7 @@ from one no sweep has walked. Where the same source lives in two registered
 projects — a vendored crate that is also its own repository — both ends say so;
 Vogt does not compare the copies or claim either has drifted.
 
-### 2.4 The assistant
+### 2.5 The assistant
 
 Absent unless the deployment set an API key — the routes answer `404` and every
 client hides the surface, so an unprovisioned deployment looks unprovisioned
@@ -207,7 +227,7 @@ An approved write is audited to **your** actor, using the core token paired with
 the token that pressed approve. There is no shared "assistant" actor to fall
 back to; an unpaired approver is refused by name.
 
-### 2.5 Terminals
+### 2.6 Terminals
 
 Sessions are owned by the server, so closing a browser does not end them and
 several devices can watch one session at once. On attach you get a scrollback
@@ -264,7 +284,7 @@ cwd = "~/projects/myapp"
 env = [["DJANGO_SETTINGS_MODULE", "myapp.settings.dev"], ["DEBUG", "1"]]
 ```
 
-### 2.6 Scheduled agent tasks
+### 2.7 Scheduled agent tasks
 
 A task is a command, a prompt, a schedule (`manual`, `interval`, or UTC
 `daily`) and a persistent context file. Running one spawns a real PTY session,
