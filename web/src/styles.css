@@ -1,6 +1,13 @@
 /* Vogt — minimal styling, terminal-first */
 
 :root {
+  /* The product is dark, and the browser's own controls have to know it: a
+     native tick box or select rendered for a light page is a white block on
+     this background, and at phone target sizes it is a large one. This also
+     gives form text and option lists their contrast (FR-M3, Stage 10). */
+  color-scheme: dark;
+  accent-color: #58a6ff;
+
   --bg: #0d1117;
   --bg-elev: #161b22;
   --bg-tab: #1c232c;
@@ -890,7 +897,7 @@ textarea {
 }
 
 .inbox-entry-actions button {
-  min-height: 32px;
+  min-height: 44px;
 }
 
 .inbox-actions-trigger {
@@ -1171,7 +1178,8 @@ textarea {
     background: rgba(88, 166, 255, 0.16);
   }
   .main {
-    padding-bottom: calc(58px + var(--safe-bottom));
+    /* 44px of target, plus the bar's own padding. */
+    padding-bottom: calc(70px + var(--safe-bottom));
   }
   .mobile-go-to {
     display: block;
@@ -8101,4 +8109,104 @@ textarea {
 .wid-answer-form input {
   flex: 1;
   min-width: 8rem;
+}
+
+/* The label a bare tick box lives in, so a tap has something to land on. */
+.vogt-tickbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* -- Phone control tokens (RESTRUCTURE Stage 10, FR-M3) --------------------
+ *
+ * Two rules, applied once at the end so nothing above has to remember them:
+ * on a phone or any coarse pointer, no interactive target is smaller than
+ * 44 by 44 pixels, and no control a reader types into is under 16px.
+ *
+ * The second rule is not only about eyesight. Mobile Safari and Chrome zoom
+ * the visual viewport when a control below 16px takes focus, which moves the
+ * page out from under the reader mid-sentence — a layout bug wearing a font
+ * size. Setting the floor here is what stops every future control from
+ * having to remember it.
+ *
+ * Density is kept where it is worth keeping: these are minimums on the box,
+ * not a uniform size, so a dense row stays dense and simply stops being
+ * un-hittable. `gap` floors go with them, because two 44px targets touching
+ * each other are one 88px target for a thumb.
+ */
+@media (max-width: 768px), (pointer: coarse) {
+  button,
+  summary,
+  [role="button"],
+  .mobile-go-to,
+  /* Anchors are only targets where they are navigation; an inline link in a
+     sentence is text, and 44px of it would be a paragraph with holes. */
+  .phone-bottom-nav a,
+  .sessions-tools a,
+  .recent-places a {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .phone-bottom-nav a,
+  .sessions-tools a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Deliberately the bare element selector, and deliberately not
+     `!important`: this is the floor a control falls to when it says nothing,
+     and any component that asks for more — the Inbox sheet's 52px targets,
+     say — has to be able to win. Where one asked for *less*, it was changed
+     at its own rule rather than shouted over from here. */
+  button,
+  summary {
+    padding-block: 10px;
+    padding-inline: 12px;
+  }
+
+  /* `!important` deliberately: this is a floor, and a floor that any
+     surface's own `font-size` could sink is not one. Every rule it beats was
+     written for a mouse and a desk. */
+  input,
+  select,
+  textarea {
+    /* 16px exactly: the browser's own zoom threshold, not a taste. */
+    font-size: 16px !important;
+    min-height: 44px;
+  }
+
+  /* A tick box stays a tick box: the browser draws it, and padding on a
+     replaced element does not become hit area. What gets the 44px is the
+     label around it, which is what a tap actually lands on — hence
+     `.vogt-tickbox` on the surfaces whose boxes stood bare in a `<span>`. */
+  input[type="checkbox"],
+  input[type="radio"] {
+    width: 24px;
+    height: 24px;
+    min-height: 24px;
+    margin: 0;
+  }
+
+  .vogt-tickbox,
+  label:has(> input[type="checkbox"]),
+  label:has(> input[type="radio"]) {
+    min-height: 44px;
+    min-width: 44px;
+    align-items: center;
+  }
+
+  /* Rows of small controls need room between the targets, not just inside
+     them, or the 44px boxes overlap and the wrong one answers. */
+  .vogt-filter-summary,
+  .vogt-filter-chips,
+  .vogt-lenses,
+  .vogt-backlog-row-facts,
+  .vogt-backlog-row-actions,
+  .vogt-backlog-chiprow,
+  .board-chips {
+    gap: 10px;
+  }
 }

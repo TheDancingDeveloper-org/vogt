@@ -1702,7 +1702,7 @@ const Backlog: Component<Props> = (props) => {
       <Show when={!outage()}>
         <div class="vogt-backlog-listwrap">
           <div class="vogt-backlog-headrow">
-            <span class="vogt-backlog-cell-select">
+            <label class="vogt-backlog-cell-select vogt-tickbox">
               <input
                 type="checkbox"
                 aria-label="Select every declared row"
@@ -1712,7 +1712,7 @@ const Backlog: Component<Props> = (props) => {
                   setSelected(event.currentTarget.checked ? selectableRefs() : [])
                 }
               />
-            </span>
+            </label>
             {/* The rows are no longer columns, so neither is this: it says
                 what a row carries rather than naming cells that moved. */}
             <span>Rank</span>
@@ -1782,7 +1782,7 @@ const Backlog: Component<Props> = (props) => {
                           }`}
                         >
                           <div class="vogt-backlog-row-facts">
-                            <span class="vogt-backlog-cell-select">
+                            <label class="vogt-backlog-cell-select vogt-tickbox">
                               <input
                                 type="checkbox"
                                 aria-label={`Select ${entry.ref}`}
@@ -1795,7 +1795,7 @@ const Backlog: Component<Props> = (props) => {
                                 }
                                 onChange={() => toggleSelected(entry.ref)}
                               />
-                            </span>
+                            </label>
                             <span class="vogt-backlog-rank" title="Rank in the server's order">
                               {rank()}
                             </span>
