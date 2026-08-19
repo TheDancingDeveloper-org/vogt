@@ -347,13 +347,47 @@ test("Inbox evidence, source filter and batch reason survive a desktop browser",
   await page.goto("/#/inbox?source=drift");
   await expect(page.getByRole("heading", { name: inboxEntry.title })).toBeVisible();
   await expect(page.getByRole("region", { name: "Drift evidence" })).toContainText("observed_state");
-  await expect(page.getByRole("button", { name: "Reject proposed change" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reject proposed change…" })).toBeVisible();
+  await expect(page.getByPlaceholder("Why this triage decision?")).toHaveCount(0);
   await expect(page.locator(".inbox-filter select")).toHaveValue("drift");
   await page.getByLabel(`Select ${inboxEntry.title}`).check();
+  await page.getByRole("button", { name: "Archive selected…" }).click();
   await page.getByLabel("Batch reason").fill("reviewed in browser");
-  await page.getByRole("button", { name: "Archive selected" }).click();
+  await page.locator(".inbox-batch-composer").getByRole("button", { name: "Confirm archive" }).click();
   await expect.poll(() => fixture.inboxCalls()).toBeGreaterThan(1);
   await expect(page).toHaveURL(/#\/inbox\?source=drift/);
+});
+
+test("Inbox puts its first answer before progressive support at every shell width", async ({ page }) => {
+  await installFixtures(page);
+  const widths = test.info().project.name === "phone" ? [390] : [768, 1280];
+  for (const width of widths) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/#/inbox");
+    const entry = page.locator(".inbox-entry").first();
+    const coverage = page.locator(".inbox-support").first();
+    await expect(entry).toBeVisible();
+    await expect(coverage).not.toHaveAttribute("open", "");
+    const geometry = await page.locator(".inbox-surface").evaluate((surface) => {
+      const entry = surface.querySelector<HTMLElement>(".inbox-entry")!;
+      const coverage = surface.querySelector<HTMLElement>(".inbox-support")!;
+      const batch = surface.querySelectorAll<HTMLElement>(".inbox-support")[1]!;
+      return {
+        entryTop: entry.getBoundingClientRect().top,
+        entryBottom: entry.getBoundingClientRect().bottom,
+        viewportHeight: document.documentElement.clientHeight,
+        ordered: Boolean(
+          entry.compareDocumentPosition(coverage) & Node.DOCUMENT_POSITION_FOLLOWING
+          && coverage.compareDocumentPosition(batch) & Node.DOCUMENT_POSITION_FOLLOWING
+        ),
+        overflow: surface.scrollWidth - surface.clientWidth,
+      };
+    });
+    expect(geometry.ordered).toBe(true);
+    expect(geometry.entryTop).toBeGreaterThanOrEqual(0);
+    expect(geometry.entryBottom).toBeLessThanOrEqual(geometry.viewportHeight);
+    expect(geometry.overflow).toBeLessThanOrEqual(1);
+  }
 });
 
 test("primary surface headers keep their shared order and geometry across zoom", async ({ page }) => {

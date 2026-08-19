@@ -85,31 +85,52 @@ interface EntryProps {
     action: "archive" | "snooze" | "restore",
     reason: string,
     until?: string,
-  ) => void;
+  ) => Promise<string | null>;
   onAction: (
     entry: InboxEntry,
     action: "adopt" | "suppress" | "accept" | "reject",
     reason: string,
-  ) => void;
+  ) => Promise<string | null>;
 }
 
+type EntryAction = "archive" | "snooze" | "restore" | "adopt" | "suppress" | "accept" | "reject";
+
 const Entry: Component<EntryProps> = (props) => {
+  const [composing, setComposing] = createSignal<EntryAction | null>(null);
   const [reason, setReason] = createSignal("");
+  const [refusal, setRefusal] = createSignal<string | null>(null);
   const [until, setUntil] = createSignal((() => {
     const next = new Date(Date.now() + 24 * 60 * 60 * 1000);
     next.setMinutes(next.getMinutes() - next.getTimezoneOffset());
     return next.toISOString().slice(0, 16);
   })());
-  const submit = (action: "archive" | "snooze" | "restore") => {
-    props.onTriage(
+  const begin = (action: EntryAction) => {
+    setComposing(action);
+    setRefusal(null);
+    queueMicrotask(() => {
+      document.getElementById(`inbox-reason-${encodeURIComponent(props.entry.entry_key)}`)?.focus();
+    });
+  };
+  const cancel = () => {
+    setComposing(null);
+    setReason("");
+    setRefusal(null);
+  };
+  const submit = async (action: "archive" | "snooze" | "restore") => {
+    const error = await props.onTriage(
       props.entry,
       action,
       reason(),
       action === "snooze" ? new Date(until()).toISOString() : undefined,
     );
+    if (error) setRefusal(error);
+    else cancel();
   };
-  const submitAction = (action: "adopt" | "suppress" | "accept" | "reject") =>
-    props.onAction(props.entry, action, reason());
+  const submitAction = async (action: "adopt" | "suppress" | "accept" | "reject") => {
+    const error = await props.onAction(props.entry, action, reason());
+    if (error) setRefusal(error);
+    else cancel();
+  };
   return (
     <article
       class={`inbox-entry ${props.seen ? "inbox-entry-seen" : "inbox-entry-unseen"}`}
@@ -153,35 +174,63 @@ const Entry: Component<EntryProps> = (props) => {
           <button type="button" class="inbox-open" onClick={() => props.onOpen(props.entry)}>
             Open entry
           </button>
-          <label>
-            <span>Reason</span>
-            <input
-              id={`inbox-reason-${encodeURIComponent(props.entry.entry_key)}`}
-              value={reason()}
-              onInput={(event) => setReason(event.currentTarget.value)}
-              placeholder="Why this triage decision?"
-            />
-          </label>
           <Show when={props.entry.triage_state === "active"}>
-            <button type="button" disabled={props.busy} onClick={() => submit("archive")}>Archive</button>
-            <label>
-              <span>Snooze until</span>
-              <input type="datetime-local" value={until()} onInput={(event) => setUntil(event.currentTarget.value)} />
-            </label>
-            <button type="button" disabled={props.busy} onClick={() => submit("snooze")}>Snooze</button>
+            <button type="button" disabled={props.busy} onClick={() => begin("archive")}>Archive…</button>
+            <button type="button" disabled={props.busy} onClick={() => begin("snooze")}>Snooze…</button>
             <Show when={props.entry.action?.kind === "observation"}>
-              <button type="button" disabled={props.busy} onClick={() => submitAction("adopt")}>Adopt as work item</button>
-              <button type="button" disabled={props.busy} onClick={() => submitAction("suppress")}>Suppress source</button>
+              <button type="button" disabled={props.busy} onClick={() => begin("adopt")}>Adopt as work item…</button>
+              <button type="button" disabled={props.busy} onClick={() => begin("suppress")}>Suppress source…</button>
             </Show>
             <Show when={props.entry.action?.kind === "drift" && props.entry.evidence_snapshot && props.entry.proposed_change}>
-              <button type="button" disabled={props.busy} onClick={() => submitAction("accept")}>Accept proposed change</button>
-              <button type="button" disabled={props.busy} onClick={() => submitAction("reject")}>Reject proposed change</button>
+              <button type="button" disabled={props.busy} onClick={() => begin("accept")}>Accept proposed change…</button>
+              <button type="button" disabled={props.busy} onClick={() => begin("reject")}>Reject proposed change…</button>
             </Show>
           </Show>
           <Show when={props.entry.triage_state !== "active"}>
-            <button type="button" disabled={props.busy} onClick={() => submit("restore")}>Restore</button>
+            <button type="button" disabled={props.busy} onClick={() => begin("restore")}>Restore…</button>
           </Show>
         </div>
+        <Show when={composing()}>
+          {(chosen) => (
+            <form
+              class="inbox-entry-composer"
+              aria-label={`${chosen()} ${props.entry.title}`}
+              onSubmit={(event) => {
+                event.preventDefault();
+                const action = chosen();
+                if (action === "archive" || action === "snooze" || action === "restore") {
+                  void submit(action);
+                } else {
+                  void submitAction(action);
+                }
+              }}
+            >
+              <strong>{chosen().replaceAll("_", " ")}</strong>
+              <label>
+                <span>Reason</span>
+                <input
+                  id={`inbox-reason-${encodeURIComponent(props.entry.entry_key)}`}
+                  value={reason()}
+                  onInput={(event) => setReason(event.currentTarget.value)}
+                  placeholder="Why this triage decision?"
+                />
+              </label>
+              <Show when={chosen() === "snooze"}>
+                <label>
+                  <span>Snooze until</span>
+                  <input type="datetime-local" value={until()} onInput={(event) => setUntil(event.currentTarget.value)} />
+                </label>
+              </Show>
+              <div class="inbox-entry-composer-actions">
+                <button type="submit" disabled={props.busy || !reason().trim()}>
+                  {props.busy ? "Submitting…" : `Confirm ${chosen()}`}
+                </button>
+                <button type="button" disabled={props.busy} onClick={cancel}>Cancel</button>
+              </div>
+              <Show when={refusal()}>{(message) => <p class="inbox-refusal" role="alert">{message()}</p>}</Show>
+            </form>
+          )}
+        </Show>
       </div>
     </article>
   );
@@ -199,6 +248,7 @@ const Inbox: Component<Props> = (props) => {
   const [triaging, setTriaging] = createSignal<string | null>(null);
   const [selected, setSelected] = createSignal<Set<string>>(new Set<string>());
   const [batchReason, setBatchReason] = createSignal("");
+  const [batchAction, setBatchAction] = createSignal<"selected" | "read" | null>(null);
   const [batchBusy, setBatchBusy] = createSignal(false);
   const [focusedIndex, setFocusedIndex] = createSignal(0);
 
@@ -269,9 +319,8 @@ const Inbox: Component<Props> = (props) => {
     });
   };
 
-  const archiveSelected = async () => {
+  const archiveKeys = async (keys: string[]) => {
     const reason = batchReason().trim();
-    const keys = [...selected()];
     if (!keys.length) return;
     if (!reason) {
       props.onError?.("A reason is required for the batch Inbox decision.");
@@ -288,7 +337,10 @@ const Inbox: Component<Props> = (props) => {
         }
       }
       setSelected(new Set(failed));
-      setBatchReason("");
+      if (!failed.length) {
+        setBatchReason("");
+        setBatchAction(null);
+      }
       if (failed.length) props.onError?.(`${failed.length} Inbox archive(s) were refused; the selection was retained.`);
       await load();
     } finally {
@@ -296,12 +348,13 @@ const Inbox: Component<Props> = (props) => {
     }
   };
 
+  const archiveSelected = () => archiveKeys([...selected()]);
+
   const archiveRead = async () => {
     const readKeys = entries()
       .filter((entry) => seen().has(entry.entry_key) && entry.triage_state === "active")
       .map((entry) => entry.entry_key);
-    setSelected(new Set(readKeys));
-    if (readKeys.length) await archiveSelected();
+    if (readKeys.length) await archiveKeys(readKeys);
   };
 
   const focusEntry = (index: number) => {
@@ -313,10 +366,25 @@ const Inbox: Component<Props> = (props) => {
     }
   };
 
-  const focusReason = (index: number) => {
+  const focusReason = (index: number, action: "archive" | "snooze" | "resolve") => {
     const entry = entries()[Math.max(0, Math.min(index, entries().length - 1))];
     if (!entry) return;
-    document.getElementById(`inbox-reason-${encodeURIComponent(entry.entry_key)}`)?.focus();
+    const labels = action === "archive"
+      ? ["Archive…"]
+      : action === "snooze"
+        ? ["Snooze…"]
+        : entry.action?.kind === "drift"
+          ? ["Reject proposed change…", "Accept proposed change…"]
+          : entry.triage_state === "active"
+            ? ["Suppress source…", "Adopt as work item…"]
+            : ["Restore…"];
+    const root = document.querySelector<HTMLElement>(
+      `[data-entry-key="${CSS.escape(entry.entry_key)}"]`,
+    );
+    const button = [...(root?.querySelectorAll<HTMLButtonElement>(
+      ".inbox-entry-actions button",
+    ) ?? [])].find((candidate) => labels.includes(candidate.textContent?.trim() ?? ""));
+    button?.click();
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
@@ -330,7 +398,7 @@ const Inbox: Component<Props> = (props) => {
       focusEntry(focusedIndex() - 1);
     } else if (key === "e" || key === "s" || key === "r") {
       event.preventDefault();
-      focusReason(focusedIndex());
+      focusReason(focusedIndex(), key === "s" ? "snooze" : key === "r" ? "resolve" : "archive");
     }
   };
   onMount(() => {
@@ -349,10 +417,9 @@ const Inbox: Component<Props> = (props) => {
     action: "archive" | "snooze" | "restore",
     reason: string,
     until?: string,
-  ) => {
+  ): Promise<string | null> => {
     if (!reason.trim()) {
-      props.onError?.("A reason is required for every Inbox triage decision.");
-      return;
+      return "A reason is required for every Inbox triage decision.";
     }
     setTriaging(entry.entry_key);
     try {
@@ -360,8 +427,9 @@ const Inbox: Component<Props> = (props) => {
       else if (action === "restore") await restoreInbox(entry.entry_key, reason);
       else if (until) await snoozeInbox(entry.entry_key, until, reason);
       await load();
+      return null;
     } catch (error) {
-      props.onError?.(error instanceof Error ? error.message : String(error));
+      return error instanceof Error ? error.message : String(error);
     } finally {
       setTriaging(null);
     }
@@ -371,10 +439,9 @@ const Inbox: Component<Props> = (props) => {
     entry: InboxEntry,
     kind: "adopt" | "suppress" | "accept" | "reject",
     reason: string,
-  ) => {
+  ): Promise<string | null> => {
     if (!reason.trim()) {
-      props.onError?.("A reason is required for every Inbox decision.");
-      return;
+      return "A reason is required for every Inbox decision.";
     }
     setTriaging(entry.entry_key);
     try {
@@ -386,8 +453,9 @@ const Inbox: Component<Props> = (props) => {
         await resolveInboxDrift(entry.action.drift_id, kind === "accept" ? "accepted" : "rejected", reason);
       }
       await load();
+      return null;
     } catch (error) {
-      props.onError?.(error instanceof Error ? error.message : String(error));
+      return error instanceof Error ? error.message : String(error);
     } finally {
       setTriaging(null);
     }
@@ -431,22 +499,6 @@ const Inbox: Component<Props> = (props) => {
           </details>
         )}
       />
-      <div class="inbox-batch" aria-label="Batch Inbox actions">
-        <span>{selected().size} selected</span>
-        <input
-          aria-label="Batch reason"
-          value={batchReason()}
-          onInput={(event) => setBatchReason(event.currentTarget.value)}
-          placeholder="Reason for selected archive…"
-        />
-        <button type="button" disabled={batchBusy() || selected().size === 0} onClick={() => void archiveSelected()}>
-          {batchBusy() ? "Archiving…" : "Archive selected"}
-        </button>
-        <button type="button" disabled={batchBusy() || !entries().some((entry) => seen().has(entry.entry_key) && entry.triage_state === "active")} onClick={() => void archiveRead()}>
-          Archive read
-        </button>
-      </div>
-      <Show when={result()}>{(answer) => <Coverage result={answer()} />}</Show>
       <Show when={failure()}>
         {(error) => (
           <div class="inbox-outage" role="alert">
@@ -458,9 +510,9 @@ const Inbox: Component<Props> = (props) => {
         )}
       </Show>
       <Show when={!failure() && result() && result()!.entries.length === 0}>
-        <p class="inbox-empty">No normalized entries were returned. Check the coverage cards above: a covered-empty source is different from a source that was not collected.</p>
+        <p class="inbox-empty">No normalized entries were returned. Open coverage and provenance below: a covered-empty source is different from a source that was not collected.</p>
       </Show>
-      <div class="inbox-list" aria-live="polite">
+      <div class="inbox-list" aria-label="Attention stream" aria-live="polite">
         <For each={entries()}>
           {(entry, index) => <Entry entry={entry} seen={seen().has(entry.entry_key)} selected={selected().has(entry.entry_key)} busy={triaging() === entry.entry_key} onSelect={toggleSelected} onOpen={(value) => { setFocusedIndex(index()); openEntry(value); }} onTriage={triage} onAction={action} />}
         </For>
@@ -470,6 +522,58 @@ const Inbox: Component<Props> = (props) => {
           {loading() ? "Loading…" : "Load more"}
         </button>
       </Show>
+      <Show when={result()}>
+        {(answer) => (
+          <details class="inbox-support" open={answer().entries.length === 0}>
+            <summary>Coverage and provenance</summary>
+            <Coverage result={answer()} />
+          </details>
+        )}
+      </Show>
+      <details class="inbox-support" open={selected().size > 0 || batchAction() !== null}>
+        <summary>Batch operations · {selected().size} selected</summary>
+        <div class="inbox-batch" aria-label="Batch Inbox actions">
+          <span>{selected().size} selected</span>
+          <button
+            type="button"
+            disabled={batchBusy() || selected().size === 0}
+            onClick={() => setBatchAction("selected")}
+          >
+            Archive selected…
+          </button>
+          <button
+            type="button"
+            disabled={batchBusy() || !entries().some((entry) => seen().has(entry.entry_key) && entry.triage_state === "active")}
+            onClick={() => setBatchAction("read")}
+          >
+            Archive read…
+          </button>
+          <Show when={batchAction()}>
+            <form
+              class="inbox-batch-composer"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (batchAction() === "selected") void archiveSelected();
+                else void archiveRead();
+              }}
+            >
+              <label>
+                <span>Reason</span>
+                <input
+                  aria-label="Batch reason"
+                  value={batchReason()}
+                  onInput={(event) => setBatchReason(event.currentTarget.value)}
+                  placeholder="Why archive these entries?"
+                />
+              </label>
+              <button type="submit" disabled={batchBusy() || !batchReason().trim()}>
+                {batchBusy() ? "Archiving…" : "Confirm archive"}
+              </button>
+              <button type="button" disabled={batchBusy()} onClick={() => setBatchAction(null)}>Cancel</button>
+            </form>
+          </Show>
+        </div>
+      </details>
     </section>
   );
 };
