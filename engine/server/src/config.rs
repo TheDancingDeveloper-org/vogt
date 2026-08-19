@@ -502,11 +502,28 @@ pub fn load(
             .session_templates
             .unwrap_or_else(SessionTemplate::default_templates),
         assistant_api_key,
-        assistant_base_url: from_file
+        assistant_base_url: match from_file
             .assistant_base_url
             .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_BASE_URL").ok())
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "https://api.theclawbay.com/v1".to_string()),
+        {
+            Some(url) => url,
+            // The endpoint an API key is sent to is an exposure decision, so
+            // it is never guessed: a key with no stated destination is a
+            // configuration error, not a silent default provider.
+            None if assistant_key_present => {
+                return Err(ApiError::Config(
+                    "assistant_api_key is set but assistant_base_url is not; \
+                     name the OpenAI-compatible endpoint the key belongs to \
+                     (assistant_base_url / MYDEVENV2_ASSISTANT_BASE_URL)"
+                        .into(),
+                ));
+            }
+            // Without a key the assistant is disabled and this value is
+            // never dialled; a non-routable placeholder keeps the field
+            // total without inventing a provider.
+            None => "https://assistant.invalid/v1".to_string(),
+        },
         assistant_model: from_file
             .assistant_model
             .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_MODEL").ok())

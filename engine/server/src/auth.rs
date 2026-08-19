@@ -498,7 +498,7 @@ mod tests {
             agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
             session_templates: vec![],
             assistant_api_key: None,
-            assistant_base_url: "https://api.theclawbay.com/v1".into(),
+            assistant_base_url: "https://assistant.invalid/v1".into(),
             assistant_model: "gpt-5.4-mini".into(),
             assistant_max_tool_calls: 8,
             assistant_allow_claude_proxy: false,

@@ -68,6 +68,8 @@ services:
       INFISICAL_CLIENT_SECRET: ${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET:?HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET is required for prod-mydevenv2 agent auth}
       MYDEVENV2_AGENT_AUTH_REQUIRED: "1"
       MYDEVENV2_AUTO_AGENT_AUTH: "1"
+      # Private compatibility only; Vogt and the engine do not require it.
+      MYDEVENV2_CADASTRE_MCP_ENABLED: "1"
       # Tailscale auto-join. Issue a one-shot reusable key from the admin UI.
       TAILSCALE_AUTH_KEY: ${HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY}
       TAILSCALE_HOSTNAME: mydevenv2

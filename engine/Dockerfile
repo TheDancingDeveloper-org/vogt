@@ -110,6 +110,12 @@ ARG INSTALL_AI_CLIENTS=false
 # Flutter is also dev-only: app CI pins this exact stable release, while the
 # production MyDevEnv2 runtime has no reason to carry the large mobile SDK.
 ARG INSTALL_FLUTTER=false
+# These are private-stack compatibility features, not parts of the generic
+# Vogt delivery. The repository-root image never sees these arguments. Keeping
+# them off by default also means a direct engine build does not silently add a
+# separate product or provider-specific client to the image.
+ARG INSTALL_CADASTRE_MCP=false
+ARG INSTALL_THECLAWBAY=false
 
 # ─── Stage 1: web bundle ────────────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS web-build
@@ -400,6 +406,7 @@ RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
     && rm -rf /home/sprooty/.opencode
 
 ARG INSTALL_AI_CLIENTS
+ARG INSTALL_THECLAWBAY
 # --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
 # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
 # mount — same reasoning as the system pnpm install above. sudo because
@@ -408,21 +415,16 @@ ARG INSTALL_AI_CLIENTS
 # codex-full-access wrapper as `codex`. This overrides persisted per-user
 # workspace-write/network restrictions for every repo under ~/Working.
 #
-# `theclawbay` is here for the reason the other two already are, learned the
-# hard way: it was never installed by any image, in MyDevEnv2 or here. It was
-# an npm global somebody put in the persisted $HOME, so `vogt-dev` — bound to
-# a different home volume than `mydevenv2-dev` — simply did not have it, and
-# nothing was red. A tool the pod is expected to carry belongs in the image
-# under /usr/local, where the runtime bind mount cannot take it away. That it
-# also installs *into* $HOME is unchanged and still handled by the PATH
-# ordering above; this only fixes where `theclawbay` itself lives.
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
 RUN if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        sudo npm install -g --prefix=/usr/local @openai/codex @anthropic-ai/claude-code theclawbay \
+        sudo npm install -g --prefix=/usr/local @openai/codex @anthropic-ai/claude-code \
         && sudo install -d /usr/local/libexec \
         && codex_target="$(readlink -f /usr/local/bin/codex)" \
         && sudo ln -s "$codex_target" /usr/local/libexec/codex-real \
         && sudo ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex ; \
+    fi \
+    && if [ "$INSTALL_THECLAWBAY" = "true" ]; then \
+        sudo npm install -g --prefix=/usr/local theclawbay ; \
     fi
 
 # sccache (apt package lacks Redis support; pull from GitHub). Resolve latest
@@ -535,15 +537,13 @@ RUN if [ "$INSTALL_FLUTTER" = "true" ]; then \
 # Fail the build if they don't install — silent fallback would leave the pod
 # with broken Python tooling that surfaces as cryptic command-not-found errors.
 #
-# cadastre[mcp-client] lands the cadastre-mcp-remote console script the
-# mydevenv2-cadastre-mcp wrapper execs. Now installable at build time because
-# cadastre publishes to PyPI as of v0.1.0 — previously this had to happen at
-# runtime (deploy/mcp-bootstrap.sh's install_bridge) from the mounted
-# workspace checkout, since the package wasn't available to the build
-# context at all. That runtime install is left in place as a no-op fallback
-# (it checks `command -v cadastre-mcp-remote` first) for a workspace with a
-# newer cadastre than this image shipped.
-RUN pip3 install --break-system-packages --no-cache-dir uv ruff pytest "cadastre[mcp-client]"
+# Cadastre is a separate product. The private estate can opt into its bridge,
+# but neither a normal engine build nor the public core image installs it.
+ARG INSTALL_CADASTRE_MCP
+RUN pip3 install --break-system-packages --no-cache-dir uv ruff pytest \
+    && if [ "$INSTALL_CADASTRE_MCP" = "true" ]; then \
+        pip3 install --break-system-packages --no-cache-dir "cadastre[mcp-client]"; \
+    fi
 
 # The server binary (built in stage 2 with the web bundle embedded; cache
 # mounts in stage 2 mean we have to copy out of /usr/local/bin, not /app).

@@ -1083,6 +1083,66 @@ product ships four runtime dependencies. A tracing *backend* is a different
 decision from a log line, and NFR-OB3's identifier is what would make it
 adoptable later without re-instrumenting anything.
 
+### Revision r20 — a public reader, and the boundary that makes one possible
+
+*2026-08-19. The open-source delivery boundary is drawn: the Python core is
+the public product, everything estate-shaped becomes explicit opt-in, and the
+CI runner rule learns the difference between running untrusted code and
+publishing trusted artefacts. Written as the repository is prepared for the
+public milestone NFR-O1 has always named.*
+
+The repository grew inside a private estate, and it shows: the root image
+built from a private GHCR mirror, the engine image installed a Cadastre MCP
+bridge and a provider-specific assistant client unconditionally, agent
+bootstrap died without an Infisical-held Cadastre credential, and every
+workflow job named a tailnet-connected runner that a fork's pull request must
+never reach. None of that was wrong for a private estate; all of it is wrong
+for a public reader, who must be able to build, run, and understand the
+product without knowing the estate exists.
+
+Four decisions, all applied in this revision:
+
+1. **The public delivery is the Python core.** The repository-root
+   `Dockerfile` builds from the upstream Docker Official Image, digest-pinned
+   but on a registry every operator can reach; an allow-list `.dockerignore`
+   keeps the engine, web, and mobile trees out of the public build context
+   entirely. A self-contained `deploy/vogt.compose.yml` and
+   `deploy/.env.example` carry the quickstart, and the only `${X:?}`-gated
+   value is `VOGT_PUBLIC_URL` — an exposure value under NFR-D2, so it is
+   asked for, never guessed. The engine, PWA, and mobile shell remain in the
+   tree as separately documented private deployment material until they earn
+   their own public product decision (new NFR-O4).
+2. **Cadastre and MCP tooling become opt-in everywhere.** The engine image
+   installs `cadastre[mcp-client]` and the `theclawbay` client only behind
+   `INSTALL_CADASTRE_MCP` / `INSTALL_THECLAWBAY` build arguments, both
+   default-off; agent auth and MCP bootstrap register and probe Cadastre only
+   when `MYDEVENV2_CADASTRE_MCP_ENABLED=1`, and report the disabled state as
+   a skip rather than a failure. The private stacks opt in explicitly in
+   their compose files, so the current estate is unchanged — but nothing
+   public installs, registers, or requires any of it (new NFR-O5, O6).
+3. **NFR-C4 is revised, as its own stub predicted.** The r4 rule — every job
+   on a self-hosted runner — was written for a private repository where every
+   workflow run was the owner's own code. A public repository runs fork pull
+   requests, and those must not execute on tailnet-connected workers. The
+   rule becomes a trust split: validation runs on isolated GitHub-hosted
+   runners, publication keeps the labelled self-hosted pool. The audit moves
+   into this repository, because the r4 comment in `runner-policy.yml`
+   recorded the blocker exactly: a public repository cannot call the
+   organisation's private reusable workflow.
+4. **NFR-D2 reaches the engine's assistant.** `assistant_base_url` silently
+   defaulted to a provider endpoint, which meant an operator who set only an
+   API key sent that key somewhere they never named. A configured key with no
+   stated destination is now a configuration error; with no key the assistant
+   is off and no destination exists to guess. The private stacks already
+   state theirs explicitly, so nothing deployed changes behaviour.
+
+What this revision deliberately does not decide, matching the open questions
+in the transition brief: the compatibility window for `MYDEVENV2_*`
+environment names and persisted engine identifiers, whether the engine stays
+in this repository long-term, and the final public image tagging policy.
+Renaming a value that is persisted or on the wire is a migration, not a
+search-and-replace, and each will be its own recorded decision.
+
 ## 1. Functional requirements
 
 ### FR-P — Projects & per-repo view
@@ -1417,7 +1477,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | NFR-C1 | Docs-only changes (`docs/**`, `design/**`, `**/*.md`) shall not trigger the full pipeline — docs lint/link/config-drift checks only. | M |
 | NFR-C2 | Mixed code+docs changes shall run the full pipeline; the docs path is never a bypass (trivially-succeeding gate job pattern for required checks). | M |
 | NFR-C3 | *(revised r5)* **Releases** — a semver-tagged image, `latest`, the wheel, the SBOM attestation — shall be tag-triggered only; a push to main shall never cut a release. A push to main **may** publish a **commit-identified** image (`sha-<commit>`, signed, carrying no semver and never moving `latest`), because deploying a fix must not require inventing a version number for it. Deploying remains a separate act (NFR-D10). | M |
-| NFR-C4 | *(r4)* Every workflow job shall select a self-hosted runner explicitly (`runs-on: [self-hosted, node-b, linux, x64, …]`); GitHub-hosted runners and dynamic `runs-on` expressions shall not appear. The repository shall be added to the `public-node-b` runner group before its first workflow exists. Jobs needing a Docker daemon shall additionally request the `docker, publish` labels. | M |
+| NFR-C4 | *(r4, revised r20)* Runner selection shall follow trust, not uniformity. Jobs that execute untrusted or fork-submitted code — validation, lint, type-check, test, docs — shall run on isolated GitHub-hosted runners (`ubuntu-latest`) and shall never enter the tailnet-connected self-hosted pool. Jobs that build, sign, or publish trusted artefacts shall retain the labelled self-hosted publisher pool (`[self-hosted, node-b, linux, x64, …]`, plus `docker, publish` where a Docker daemon is needed). Dynamic `runs-on` expressions remain prohibited. The runner audit shall live in this repository (`runner-policy.yml`): a public repository cannot call the organisation's private reusable workflow, which is the revisit the r4 stub recorded in advance. | M |
 | NFR-C5 | *(r4)* Image signing shall be keyless (workflow OIDC identity via Fulcio/Rekor), so that no signing key exists to store or rotate and the signature binds to this repository and workflow. | M |
 | NFR-C6 | *(r9)* The merged CI shall run both halves on every push — Rust fmt/clippy/test, web typecheck, APK build, and the existing Python suite — and the build-vs-release discipline of NFR-C3 (a push builds `sha-` images, only a tag releases) shall govern the merged image. (MERGE §5.1) | M |
 
@@ -1428,6 +1488,9 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | NFR-O1 | The platform shall be **MIT licensed** (decided 2026-08-12; `LICENSE` in place, matching cadastre) and developed on GitHub — initially in a private repository under `TheDancingDeveloper-org`, going public at a milestone of the owner's choosing. | M |
 | NFR-O2 | Images published with SBOM, signature, and attestations. | S |
 | NFR-O3 | The project repository shall itself satisfy the default project contract (AGENTS.md, README, LICENSE, docs/, design/, src/). | M |
+| NFR-O4 | *(r20)* The public delivery is the Python core: the repository-root `Dockerfile` shall build from an upstream registry with no access to private mirrors, registries, paths, or services, and an allow-list `.dockerignore` shall keep the engine, web, and mobile trees out of the public build context. The engine and its PWA/mobile delivery are separate, separately documented deployment material until they carry their own public product decision. | M |
+| NFR-O5 | *(r20)* Cadastre and MCP client tooling are optional integrations. No public image, Compose example, startup path, or getting-started instruction shall install, register, or require `cadastre[mcp-client]` / `cadastre-mcp-remote`, a Cadastre endpoint or token, or a secret broker to obtain one; their absence shall be a non-fatal, honestly reported state, and private stacks opt in explicitly (build arguments, `MYDEVENV2_CADASTRE_MCP_ENABLED=1`). | M |
+| NFR-O6 | *(r20)* Public deployment examples shall be self-contained: a persistent named volume, explicit exposure values (`VOGT_PUBLIC_URL` as the only required variable), and no dependence on estate infrastructure — Tailscale, Komodo, Infisical, private DNS, private certificates, or personal absolute paths. `https://vogt-dev.sprooty.com/` is named only as the known development/example deployment, never as a default an installation assumes. | M |
 
 ### NFR-OB — Observability & diagnostics *(r19)*
 

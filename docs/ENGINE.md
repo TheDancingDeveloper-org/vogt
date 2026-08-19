@@ -1048,7 +1048,7 @@ the terminal half works exactly as before (FR-T6, FR-E9).
 | Key (TOML) | Env | Default |
 |---|---|---|
 | `assistant_api_key` | `MYDEVENV2_ASSISTANT_API_KEY` | unset (feature off) |
-| `assistant_base_url` | `MYDEVENV2_ASSISTANT_BASE_URL` | `https://api.theclawbay.com/v1` |
+| `assistant_base_url` | `MYDEVENV2_ASSISTANT_BASE_URL` | none — required once `assistant_api_key` is set |
 | `assistant_model` | `MYDEVENV2_ASSISTANT_MODEL` | `gpt-5.4-mini` |
 | `assistant_max_tool_calls` | `MYDEVENV2_ASSISTANT_MAX_TOOL_CALLS` | `8` |
 | `assistant_reasoning_effort` | `MYDEVENV2_ASSISTANT_REASONING_EFFORT` | unset |

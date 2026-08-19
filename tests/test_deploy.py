@@ -239,16 +239,29 @@ def test_the_image_has_no_default_listen_address() -> None:
     assert 'CMD ["--help"]' in text
 
 
-def test_every_workflow_job_names_a_self_hosted_runner() -> None:
-    """NFR-C4, checked here so a new workflow cannot quietly opt out."""
+def test_every_workflow_job_names_a_fixed_approved_runner() -> None:
+    """NFR-C4 r20: fork validation is isolated; publishing stays private."""
+    publisher_workflows = {"build.yml", "release.yml", "mirror-base-images.yml"}
     for path in sorted(WORKFLOWS.glob("*.yml")):
         for number, line in enumerate(path.read_text("utf-8").splitlines(), start=1):
             if not re.match(r"^\s*runs-on\s*:", line):
                 continue
-            assert "self-hosted" in line, f"{path.name}:{number}: {line.strip()}"
+            assert "ubuntu-latest" in line or "self-hosted" in line, (
+                f"{path.name}:{number}: unapproved runner: {line.strip()}"
+            )
             assert "${{" not in line, (
                 f"{path.name}:{number}: dynamic runner selection is rejected"
             )
+            if "self-hosted" in line:
+                assert path.name in publisher_workflows, (
+                    f"{path.name}:{number}: untrusted validation must not run "
+                    "on the tailnet-connected publisher pool"
+                )
+            if path.name in {"ci.yml", "docs.yml", "runner-policy.yml"}:
+                assert "ubuntu-latest" in line, (
+                    f"{path.name}:{number}: fork validation must use an "
+                    "isolated hosted runner"
+                )
 
 
 def test_the_release_workflow_is_tag_only_and_signs_a_digest() -> None:

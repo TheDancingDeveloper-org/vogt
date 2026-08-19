@@ -9,6 +9,7 @@ readonly CICD_PROJECT_ID="6d6caff5-7aaf-42f8-a135-2455d7629af8"
 readonly INFRASTRUCTURE_PROJECT_ID="5b7e75de-e874-484d-9595-873acd6bfd07"
 readonly APPS_PROJECT_ID="76b1ebe1-3656-4cef-952c-30d5d489c6e7"
 readonly INFISICAL_ENV="prod"
+readonly CADASTRE_MCP_ENABLED="${MYDEVENV2_CADASTRE_MCP_ENABLED:-0}"
 readonly CADASTRE_SECRET_NAME="${MYDEVENV2_CADASTRE_SECRET_NAME:-HOMELAB_CADASTRE_HTTP_TOKEN}"
 readonly VOGT_SECRET_NAME="${MYDEVENV2_VOGT_SECRET_NAME:-HOMELAB_VOGT_AGENT_TOKEN}"
 readonly DEFAULT_CADASTRE_MCP_URL="https://winrarhost.tailc7d3c.ts.net:18092/mcp"
@@ -170,12 +171,17 @@ load_agent_environment() {
     HOMELAB_KOMODO_API_SECRET="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_SECRET || true)"
     [[ -n "${HOMELAB_KOMODO_API_SECRET}" ]] || die "Infisical secret HOMELAB_KOMODO_API_SECRET is missing or empty"
     export HOMELAB_KOMODO_API_SECRET
-    # Cadastre is an agent-side dependency, not a container/server setting.
-    # Keep the bearer in the child environment only; never persist or print it.
-    CADASTRE_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$CADASTRE_SECRET_NAME" || true)"
-    [[ -n "$CADASTRE_HTTP_TOKEN" ]] || die \
-        "Infisical secret $CADASTRE_SECRET_NAME is missing or empty"
-    export CADASTRE_HTTP_TOKEN
+    # Cadastre is an explicit private-stack integration, not a prerequisite
+    # for an authenticated shell or for Vogt. Only fetch its credential when
+    # that stack has opted in.
+    if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
+        CADASTRE_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$CADASTRE_SECRET_NAME" || true)"
+        [[ -n "$CADASTRE_HTTP_TOKEN" ]] || die \
+            "Infisical secret $CADASTRE_SECRET_NAME is missing or empty"
+        export CADASTRE_HTTP_TOKEN
+    else
+        unset CADASTRE_HTTP_TOKEN CADASTRE_HTTP_TOKEN_FILE
+    fi
     # Vogt is the estate's backlog/project tracker, reached the same way for
     # the same reasons. Absent secret is not fatal, unlike cadastre's: an
     # instance may legitimately not be deployed yet, and agent auth must keep
@@ -201,14 +207,17 @@ load_agent_environment() {
 
     umask 077
     AUTH_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mydevenv2-agent-auth.XXXXXXXX")"
-    printf '%s' "$CADASTRE_HTTP_TOKEN" >"$AUTH_TMP_DIR/cadastre-http-token"
-    export CADASTRE_HTTP_TOKEN_FILE="$AUTH_TMP_DIR/cadastre-http-token"
+    if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
+        printf '%s' "$CADASTRE_HTTP_TOKEN" >"$AUTH_TMP_DIR/cadastre-http-token"
+        export CADASTRE_HTTP_TOKEN_FILE="$AUTH_TMP_DIR/cadastre-http-token"
+    fi
     if [[ -n "$VOGT_HTTP_TOKEN" ]]; then
         printf '%s' "$VOGT_HTTP_TOKEN" >"$AUTH_TMP_DIR/vogt-http-token"
         export VOGT_TOKEN_FILE="$AUTH_TMP_DIR/vogt-http-token"
     fi
 
-    if [[ "${MYDEVENV2_AUTO_CADASTRE_MCP:-1}" == "1" ]]; then
+    if [[ "$CADASTRE_MCP_ENABLED" == "1" \
+        && "${MYDEVENV2_AUTO_CADASTRE_MCP:-1}" == "1" ]]; then
         /usr/local/bin/mydevenv2-mcp-bootstrap
     fi
 
@@ -260,14 +269,18 @@ check_access() {
         -H 'Content-Type: application/json' \
         --data '{"type":"ListServers","params":{}}' >"$response_file"
     printf 'ok: Komodo API\n'
-    mcp_url="${CADASTRE_MCP_URL:-$DEFAULT_CADASTRE_MCP_URL}"
-    mcp_curl_args=()
-    if [[ -n "${MYDEVENV2_CADASTRE_MCP_RESOLVE:-$DEFAULT_CADASTRE_MCP_RESOLVE}" ]]; then
-        mcp_curl_args+=(--resolve "${MYDEVENV2_CADASTRE_MCP_RESOLVE}")
+    if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
+        mcp_url="${CADASTRE_MCP_URL:-$DEFAULT_CADASTRE_MCP_URL}"
+        mcp_curl_args=()
+        if [[ -n "${MYDEVENV2_CADASTRE_MCP_RESOLVE:-$DEFAULT_CADASTRE_MCP_RESOLVE}" ]]; then
+            mcp_curl_args+=(--resolve "${MYDEVENV2_CADASTRE_MCP_RESOLVE}")
+        fi
+        probe_mcp "Cadastre MCP" "$mcp_url" "$CADASTRE_HTTP_TOKEN" \
+            "$CADASTRE_SECRET_NAME" "$response_file" "$error_file" "" \
+            "${mcp_curl_args[@]}"
+    else
+        printf 'skip: Cadastre MCP (optional integration disabled)\n'
     fi
-    probe_mcp "Cadastre MCP" "$mcp_url" "$CADASTRE_HTTP_TOKEN" \
-        "$CADASTRE_SECRET_NAME" "$response_file" "$error_file" "" \
-        "${mcp_curl_args[@]}"
 
     # Vogt, probed the same way Cadastre is — because until this existed, the
     # check reported seven services green while Vogt was completely unusable

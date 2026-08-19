@@ -2,8 +2,8 @@
 
 `docs/CONFIG.md` and `config.example.toml` are *generated* from the schema
 below by `scripts/gen_config_docs.py`, and CI fails when the committed files
-drift from it. Cadastre's `:18081` incident began as a default documented in
-one place and implemented in another; here there is only one place.
+drift from it. A setting documented in one place and implemented in another
+will eventually disagree; here there is only one place.
 
 Precedence, highest first: explicit arguments, `VOGT_*` environment
 variables, the TOML file named by `VOGT_CONFIG_FILE`, then the schema
@@ -18,8 +18,8 @@ is a number — is what determines whether it may carry a default:
   client will trust. **Never defaulted**, anywhere: code, images, docs, or
   examples.
 - `allocation` — a path or a slot on a host the operator owns. **Always
-  defaulted**, because `${X:?}`-gating allocation values is what cost
-  cadastre every deploy after `cadastre#42`.
+  defaulted**, so a deployment does not fail merely because the example did
+  not know its host's filesystem layout.
 - `behaviour` — tuning that decides neither of the above; unconstrained.
 
 `tests/test_config.py` asserts the first two rules against the live schema,
@@ -126,7 +126,7 @@ class VogtConfig(BaseSettings):
         default=None,
         description=(
             "The URL clients reach this instance at, e.g. "
-            "`https://host.tailnet.ts.net:18094`. An exposure value, so it "
+            "`https://vogt.example.com`. An exposure value, so it "
             "has no default and is never guessed: the process binds "
             "`0.0.0.0:8000` inside a container and is published somewhere "
             "else entirely, so the server cannot know its own address — only "
@@ -139,10 +139,9 @@ class VogtConfig(BaseSettings):
     fronted: bool = Field(
         default=False,
         description=(
-            "Whether this instance runs behind a front door that publishes it "
-            "at a different address and different mount points — the merged "
-            "stack, where the Rust engine serves `/api/vogt` and `/mcp` and "
-            "this core is loopback-only. When true, `connect` and "
+            "Whether this instance runs behind an optional front door that "
+            "publishes it at a different address and mount points. When true, "
+            "`connect` and "
             "`/connection-info` render against the identity the door states "
             "per request (`X-Vogt-Public-Url`, `X-Vogt-Api-Path`, "
             "`X-Vogt-Mcp-Path`), because the door is the only thing that "
