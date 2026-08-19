@@ -343,6 +343,7 @@ test("Vogt identity and route-aware titles survive navigation and reload", async
 });
 
 test("Inbox evidence, source filter and batch reason survive a desktop browser", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Phone Inbox uses the bottom action sheet");
   const fixture = await installFixtures(page);
   await page.goto("/#/inbox?source=drift");
   await expect(page.getByRole("heading", { name: inboxEntry.title })).toBeVisible();
@@ -356,6 +357,37 @@ test("Inbox evidence, source filter and batch reason survive a desktop browser",
   await page.locator(".inbox-batch-composer").getByRole("button", { name: "Confirm archive" }).click();
   await expect.poll(() => fixture.inboxCalls()).toBeGreaterThan(1);
   await expect(page).toHaveURL(/#\/inbox\?source=drift/);
+});
+
+test("Phone Inbox uses source pills and a focus-safe bottom action sheet", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "Bottom-sheet mechanics are validated in the phone project");
+  await installFixtures(page);
+  await page.goto("/#/inbox");
+
+  const pills = page.getByRole("group", { name: "Source filter" });
+  await expect(pills).toBeVisible();
+  await expect(page.locator(".inbox-filter select")).toHaveCount(0);
+  await pills.getByRole("button", { name: "drift" }).click();
+  await expect(page).toHaveURL(/#\/inbox\?source=drift$/);
+  await expect(page.getByRole("region", { name: "Drift evidence" })).toContainText("observed_state");
+
+  const trigger = page.getByRole("button", { name: "Inbox actions" });
+  await trigger.click();
+  const sheet = page.getByRole("dialog", { name: `Actions for ${inboxEntry.title}` });
+  await expect(sheet).toBeVisible();
+  const targetHeights = await sheet.locator("button").evaluateAll((buttons) =>
+    buttons.map((button) => Math.round(button.getBoundingClientRect().height)),
+  );
+  expect(targetHeights.every((height) => height >= 52)).toBe(true);
+  await expect(sheet.getByRole("button", { name: "Reject proposed change…" })).toBeVisible();
+  await expect(sheet.getByPlaceholder("Why this triage decision?")).toHaveCount(0);
+
+  await sheet.getByRole("button", { name: "Reject proposed change…" }).click();
+  await sheet.getByPlaceholder("Why this triage decision?").fill("the observed evidence was reviewed");
+  await page.keyboard.press("Escape");
+  await expect(sheet).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  expect(page.url()).toContain("#/inbox?source=drift");
 });
 
 test("Inbox puts its first answer before progressive support at every shell width", async ({ page }) => {

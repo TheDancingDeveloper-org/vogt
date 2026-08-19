@@ -14,6 +14,7 @@ import {
   type InboxSourceCoverage,
 } from "./vogtApi";
 import { onVogtChanged } from "./store";
+import Dialog from "./Dialog";
 import SurfaceHeader from "./SurfaceHeader";
 
 interface Props {
@@ -78,6 +79,7 @@ interface EntryProps {
   seen: boolean;
   selected: boolean;
   busy: boolean;
+  phone: boolean;
   onSelect: (entry: InboxEntry) => void;
   onOpen: (entry: InboxEntry) => void;
   onTriage: (
@@ -99,6 +101,7 @@ const Entry: Component<EntryProps> = (props) => {
   const [composing, setComposing] = createSignal<EntryAction | null>(null);
   const [reason, setReason] = createSignal("");
   const [refusal, setRefusal] = createSignal<string | null>(null);
+  const [sheetOpen, setSheetOpen] = createSignal(false);
   const [until, setUntil] = createSignal((() => {
     const next = new Date(Date.now() + 24 * 60 * 60 * 1000);
     next.setMinutes(next.getMinutes() - next.getTimezoneOffset());
@@ -116,6 +119,29 @@ const Entry: Component<EntryProps> = (props) => {
     setReason("");
     setRefusal(null);
   };
+  const closeSheet = () => {
+    setSheetOpen(false);
+    cancel();
+    if (window.history.state?.vogtInboxActionSheet) window.history.back();
+  };
+  const openSheet = () => {
+    window.history.pushState(
+      { ...(window.history.state ?? {}), vogtInboxActionSheet: true },
+      "",
+      window.location.href,
+    );
+    setSheetOpen(true);
+  };
+  onMount(() => {
+    const onPopState = () => {
+      if (sheetOpen()) {
+        setSheetOpen(false);
+        cancel();
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    onCleanup(() => window.removeEventListener("popstate", onPopState));
+  });
   const submit = async (action: "archive" | "snooze" | "restore") => {
     const error = await props.onTriage(
       props.entry,
@@ -124,11 +150,13 @@ const Entry: Component<EntryProps> = (props) => {
       action === "snooze" ? new Date(until()).toISOString() : undefined,
     );
     if (error) setRefusal(error);
+    else if (props.phone) closeSheet();
     else cancel();
   };
   const submitAction = async (action: "adopt" | "suppress" | "accept" | "reject") => {
     const error = await props.onAction(props.entry, action, reason());
     if (error) setRefusal(error);
+    else if (props.phone) closeSheet();
     else cancel();
   };
   return (
@@ -174,23 +202,30 @@ const Entry: Component<EntryProps> = (props) => {
           <button type="button" class="inbox-open" onClick={() => props.onOpen(props.entry)}>
             Open entry
           </button>
-          <Show when={props.entry.triage_state === "active"}>
-            <button type="button" disabled={props.busy} onClick={() => begin("archive")}>Archive…</button>
-            <button type="button" disabled={props.busy} onClick={() => begin("snooze")}>Snooze…</button>
-            <Show when={props.entry.action?.kind === "observation"}>
-              <button type="button" disabled={props.busy} onClick={() => begin("adopt")}>Adopt as work item…</button>
-              <button type="button" disabled={props.busy} onClick={() => begin("suppress")}>Suppress source…</button>
+          <Show when={!props.phone}>
+            <Show when={props.entry.triage_state === "active"}>
+              <button type="button" disabled={props.busy} onClick={() => begin("archive")}>Archive…</button>
+              <button type="button" disabled={props.busy} onClick={() => begin("snooze")}>Snooze…</button>
+              <Show when={props.entry.action?.kind === "observation"}>
+                <button type="button" disabled={props.busy} onClick={() => begin("adopt")}>Adopt as work item…</button>
+                <button type="button" disabled={props.busy} onClick={() => begin("suppress")}>Suppress source…</button>
+              </Show>
+              <Show when={props.entry.action?.kind === "drift" && props.entry.evidence_snapshot && props.entry.proposed_change}>
+                <button type="button" disabled={props.busy} onClick={() => begin("accept")}>Accept proposed change…</button>
+                <button type="button" disabled={props.busy} onClick={() => begin("reject")}>Reject proposed change…</button>
+              </Show>
             </Show>
-            <Show when={props.entry.action?.kind === "drift" && props.entry.evidence_snapshot && props.entry.proposed_change}>
-              <button type="button" disabled={props.busy} onClick={() => begin("accept")}>Accept proposed change…</button>
-              <button type="button" disabled={props.busy} onClick={() => begin("reject")}>Reject proposed change…</button>
+            <Show when={props.entry.triage_state !== "active"}>
+              <button type="button" disabled={props.busy} onClick={() => begin("restore")}>Restore…</button>
             </Show>
           </Show>
-          <Show when={props.entry.triage_state !== "active"}>
-            <button type="button" disabled={props.busy} onClick={() => begin("restore")}>Restore…</button>
+          <Show when={props.phone}>
+            <button type="button" class="inbox-actions-trigger" disabled={props.busy} onClick={openSheet}>
+              Inbox actions
+            </button>
           </Show>
         </div>
-        <Show when={composing()}>
+        <Show when={props.phone ? null : composing()}>
           {(chosen) => (
             <form
               class="inbox-entry-composer"
@@ -232,6 +267,71 @@ const Entry: Component<EntryProps> = (props) => {
           )}
         </Show>
       </div>
+      <Show when={props.phone && sheetOpen()}>
+        <Dialog
+          label={`Actions for ${props.entry.title}`}
+          dialogClass="inbox-action-sheet"
+          backdropClass="inbox-action-sheet-backdrop"
+          onClose={closeSheet}
+        >
+          <button type="button" class="inbox-sheet-close" onClick={closeSheet}>Close</button>
+          <div class="inbox-sheet-actions">
+            <Show when={props.entry.triage_state === "active"}>
+              <button type="button" disabled={props.busy} onClick={() => begin("archive")}>Archive…</button>
+              <button type="button" disabled={props.busy} onClick={() => begin("snooze")}>Snooze…</button>
+              <Show when={props.entry.action?.kind === "observation"}>
+                <button type="button" disabled={props.busy} onClick={() => begin("adopt")}>Adopt as work item…</button>
+                <button type="button" disabled={props.busy} onClick={() => begin("suppress")}>Suppress source…</button>
+              </Show>
+              <Show when={props.entry.action?.kind === "drift" && props.entry.evidence_snapshot && props.entry.proposed_change}>
+                <button type="button" disabled={props.busy} onClick={() => begin("accept")}>Accept proposed change…</button>
+                <button type="button" disabled={props.busy} onClick={() => begin("reject")}>Reject proposed change…</button>
+              </Show>
+            </Show>
+            <Show when={props.entry.triage_state !== "active"}>
+              <button type="button" disabled={props.busy} onClick={() => begin("restore")}>Restore…</button>
+            </Show>
+          </div>
+          <Show when={composing()}>
+            {(chosen) => (
+              <form
+                class="inbox-entry-composer"
+                aria-label={`${chosen()} ${props.entry.title}`}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const action = chosen();
+                  if (action === "archive" || action === "snooze" || action === "restore") void submit(action);
+                  else void submitAction(action);
+                }}
+              >
+                <strong>{chosen().replaceAll("_", " ")}</strong>
+                <label>
+                  <span>Reason</span>
+                  <input
+                    id={`inbox-reason-${encodeURIComponent(props.entry.entry_key)}`}
+                    value={reason()}
+                    onInput={(event) => setReason(event.currentTarget.value)}
+                    placeholder="Why this triage decision?"
+                  />
+                </label>
+                <Show when={chosen() === "snooze"}>
+                  <label>
+                    <span>Snooze until</span>
+                    <input type="datetime-local" value={until()} onInput={(event) => setUntil(event.currentTarget.value)} />
+                  </label>
+                </Show>
+                <div class="inbox-entry-composer-actions">
+                  <button type="submit" disabled={props.busy || !reason().trim()}>
+                    {props.busy ? "Submitting…" : `Confirm ${chosen()}`}
+                  </button>
+                  <button type="button" disabled={props.busy} onClick={cancel}>Cancel</button>
+                </div>
+                <Show when={refusal()}>{(message) => <p class="inbox-refusal" role="alert">{message()}</p>}</Show>
+              </form>
+            )}
+          </Show>
+        </Dialog>
+      </Show>
     </article>
   );
 };
@@ -251,6 +351,7 @@ const Inbox: Component<Props> = (props) => {
   const [batchAction, setBatchAction] = createSignal<"selected" | "read" | null>(null);
   const [batchBusy, setBatchBusy] = createSignal(false);
   const [focusedIndex, setFocusedIndex] = createSignal(0);
+  const [phone, setPhone] = createSignal(false);
 
   const seenKey = "mydevenv2.inbox.seen.v1";
   const readSeen = () => {
@@ -402,8 +503,15 @@ const Inbox: Component<Props> = (props) => {
     }
   };
   onMount(() => {
+    const query = window.matchMedia("(max-width: 768px)");
+    const updatePhone = () => setPhone(query.matches);
+    updatePhone();
+    query.addEventListener("change", updatePhone);
     window.addEventListener("keydown", onKeyDown);
-    onCleanup(() => window.removeEventListener("keydown", onKeyDown));
+    onCleanup(() => {
+      query.removeEventListener("change", updatePhone);
+      window.removeEventListener("keydown", onKeyDown);
+    });
   });
 
   const openEntry = (entry: InboxEntry) => {
@@ -484,13 +592,30 @@ const Inbox: Component<Props> = (props) => {
           </p>
         )}
         controls={(
-          <label class="inbox-filter">
-            <span>Source</span>
-            <select value={source()} onChange={(event) => applySource(event.currentTarget.value)}>
-              <option value="">All sources</option>
-              <For each={SOURCES}>{(value) => <option value={value}>{value}</option>}</For>
-            </select>
-          </label>
+          <Show when={phone()} fallback={(
+            <label class="inbox-filter">
+              <span>Source</span>
+              <select value={source()} onChange={(event) => applySource(event.currentTarget.value)}>
+                <option value="">All sources</option>
+                <For each={SOURCES}>{(value) => <option value={value}>{value}</option>}</For>
+              </select>
+            </label>
+          )}>
+            <div class="inbox-filter-pills" role="group" aria-label="Source filter">
+              <For each={["", ...SOURCES]}>
+                {(value) => (
+                  <button
+                    type="button"
+                    class={source() === value ? "active" : ""}
+                    aria-pressed={source() === value}
+                    onClick={() => applySource(value)}
+                  >
+                    {value || "All sources"}
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
         )}
         detail={(
           <details class="surface-header-disclosure">
@@ -514,7 +639,7 @@ const Inbox: Component<Props> = (props) => {
       </Show>
       <div class="inbox-list" aria-label="Attention stream" aria-live="polite">
         <For each={entries()}>
-          {(entry, index) => <Entry entry={entry} seen={seen().has(entry.entry_key)} selected={selected().has(entry.entry_key)} busy={triaging() === entry.entry_key} onSelect={toggleSelected} onOpen={(value) => { setFocusedIndex(index()); openEntry(value); }} onTriage={triage} onAction={action} />}
+          {(entry, index) => <Entry entry={entry} seen={seen().has(entry.entry_key)} selected={selected().has(entry.entry_key)} busy={triaging() === entry.entry_key} phone={phone()} onSelect={toggleSelected} onOpen={(value) => { setFocusedIndex(index()); openEntry(value); }} onTriage={triage} onAction={action} />}
         </For>
       </div>
       <Show when={result()?.next_cursor}>

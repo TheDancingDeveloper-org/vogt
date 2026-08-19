@@ -80,6 +80,12 @@ mistaken for “not collected.” Entry and batch reason fields appear only afte
 you choose the corresponding write, and a refusal stays beside that composer
 so the reason can be corrected without losing focus or context.
 
+On a phone, the source filter becomes labelled pills and each entry keeps its
+evidence in the stream while moving applicable writes into an **Inbox actions**
+bottom sheet. The sheet is keyboard-operable, restores focus to its trigger on
+cancel, and keeps archive, snooze, restore, adoption, suppression and drift
+resolution reasons tied to the same server operations as the desktop view.
+
 On desktop, the whole Places rail scrolls as one column when running sessions
 make it taller than the window. Files therefore remains reachable rather than
 being squeezed behind a separately scrolling session list; when visible it
