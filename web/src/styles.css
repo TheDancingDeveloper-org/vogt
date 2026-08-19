@@ -6527,6 +6527,13 @@ textarea {
   gap: 8px;
 }
 
+.vogt-projects-title {
+  margin: 0;
+  flex: 1 1 100%;
+  color: var(--fg);
+  font-size: 20px;
+}
+
 .vogt-backlog-headnote {
   text-transform: none;
   letter-spacing: 0;

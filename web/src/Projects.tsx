@@ -1254,6 +1254,10 @@ const Projects: Component<Props> = (props) => {
   return (
     <div class="vogt-surface vogt-projects">
       <header class="vogt-projects-header">
+        {/* The route says where it is as a heading and not only as a crumb:
+            a crumb is a control, and a phone arriving on a secondary route
+            needs the title (FR-U23, Stage 3). */}
+        <h1 class="vogt-projects-title">{place().project || "Projects"}</h1>
         <nav class="vogt-projects-crumbs" aria-label="Where you are">
           <button
             type="button"

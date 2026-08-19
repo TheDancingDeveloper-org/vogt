@@ -227,6 +227,26 @@ async function installFixtures(
       total: metrics.projectsTotal,
       } });
     }
+    if (url.pathname.endsWith("/vogt/events")) {
+      return route.fulfill({ json: { events: [], last_id: 0 } });
+    }
+    if (url.pathname.endsWith("/vogt/audit")) {
+      return route.fulfill({ json: { records: [], total: 0 } });
+    }
+    if (url.pathname.endsWith("/work/get")) {
+      return route.fulfill({ json: {
+        item: {
+          id: "01JWORKITEM", ref: "WI-7", kind: "feature", title: "Measured board card",
+          body: "", state: "open", priority: "normal", project_slug: "vogt",
+          initiative_id: null, origin: "declared", trust_state: "verified",
+          assignee_identity_ref: null, labels: [], relations: [],
+          created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-17T10:00:00Z",
+        },
+        comments: [],
+        sessions: [],
+        audit: [],
+      } });
+    }
     if (url.pathname.endsWith("/why")) {
       return route.fulfill({ json: {
         ref: "WI-7",
@@ -241,6 +261,12 @@ async function installFixtures(
     if (url.pathname.endsWith("/labels")) return route.fulfill({ json: { labels: [] } });
     if (url.pathname.endsWith("/initiatives")) return route.fulfill({ json: { initiatives: [] } });
     if (url.pathname.endsWith("/actors")) return route.fulfill({ json: { actors: [] } });
+    if (url.pathname.endsWith("/vogt/observations")) {
+      return route.fulfill({ json: { observations: [], total: 0 } });
+    }
+    if (url.pathname.endsWith("/vogt/sessions")) {
+      return route.fulfill({ json: { sessions: [], engine: null } });
+    }
     return route.fulfill({ json: {} });
   });
   return { inboxCalls: () => inboxCalls, boardRequests, sessions };
@@ -1876,3 +1902,87 @@ test("Phone primary surfaces lead with their work, not their controls", async ({
   await filters.getByRole("button", { name: "+ Filter", exact: true }).click();
   await expect(page.getByLabel("Lens name")).toBeVisible();
 });
+
+
+/**
+ * Stage 3's route matrix, walked on a phone (FR-U23).
+ *
+ * Reachability was never the question — the palette could open all of these.
+ * What this asserts is that each one arrives *contained*: inside the phone
+ * shell, saying what it is, without a sideways scroll, and with its own
+ * address surviving a reload and the back button.
+ */
+const SECONDARY_ROUTES = [
+  { path: "projects", title: "Projects" },
+  { path: "audit", title: "Audit" },
+  { path: "w/WI-7", title: "Measured board card" },
+  { path: "g", title: "Sessions", tool: "Git" },
+  { path: "g/src", title: "Sessions", tool: "Git" },
+  { path: "history", title: "Sessions", tool: "History" },
+  { path: "tasks", title: "Sessions", tool: "Tasks" },
+  { path: "gui", title: "GUI stream is unavailable" },
+  // No PTY answers in a fixture, so what has to hold here is that the route
+  // says which session state it is in — live or not found — inside the shell.
+  { path: "t/browser-session", title: "Session" },
+  { path: "e/src/main.ts", title: "Sessions" },
+] as const;
+
+test("Phone secondary routes are contained, titled and addressable", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "Containment is the narrow shell's");
+  await installFixtures(page);
+
+  for (const route of SECONDARY_ROUTES) {
+    await page.goto(`/#/${route.path}`);
+    await page.waitForLoadState("networkidle");
+
+    // Inside the phone shell, not instead of it.
+    await expect(page.locator(".mobile-go-to"), `/${route.path} keeps Go to`).toBeVisible();
+    await expect(
+      page.getByRole("navigation", { name: "Primary navigation" }),
+      `/${route.path} keeps the bottom bar`,
+    ).toBeVisible();
+
+    // Saying what it is.
+    const titled = page.getByRole("heading", { name: route.title, exact: false }).first();
+    await expect(titled, `/${route.path} says it is ${route.title}`).toBeVisible();
+    if ("tool" in route && route.tool) {
+      await expect(
+        page.getByRole("navigation", { name: "Session tools" })
+          .getByRole("link", { name: route.tool }),
+        `/${route.path} marks its tool`,
+      ).toHaveAttribute("aria-current", "page");
+    }
+
+    const sideways = await page.evaluate(
+      () => document.documentElement.scrollWidth > window.innerWidth,
+    );
+    expect(sideways, `/${route.path} does not scroll sideways`).toBe(false);
+  }
+
+  // Settings is a modal route: what it opens over is covered rather than left
+  // peeking out above the form.
+  await page.goto("/#/settings");
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await expect(settings).toBeVisible();
+  const covered = await page.evaluate(() => {
+    const backdrop = document.querySelector(".modal-backdrop");
+    if (!backdrop) return false;
+    const box = backdrop.getBoundingClientRect();
+    return box.top <= 0 && box.height >= window.innerHeight - 1;
+  });
+  expect(covered, "the Settings backdrop covers the shell it opened over").toBe(true);
+  await expect(settings.getByLabel("Bearer token")).toBeVisible();
+
+  // A deep link with a query survives a reload and the back button.
+  await page.goto("/#/audit?actor=user%3Asam");
+  await expect(page.getByRole("heading", { name: "Audit" })).toBeVisible();
+  await page.reload();
+  await expect(page).toHaveURL(/actor=user%3Asam/);
+  await page.goto("/#/projects");
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/audit\?actor=user%3Asam/);
+  await page.goForward();
+  await expect(page).toHaveURL(/#\/projects/);
+});
+
