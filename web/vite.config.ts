@@ -22,6 +22,10 @@ export default defineConfig({
     target: "es2022",
     outDir: "dist",
     emptyOutDir: true,
+    // `scripts/check_bundle.py` reads this to work out what the first screen
+    // actually costs: which chunk is the entry, and which chunks it pulls in
+    // statically rather than when a route asks for them (#104).
+    manifest: true,
     sourcemap: process.env.VITE_SOURCEMAP === "1",
   },
 });

@@ -2074,3 +2074,31 @@ test("Phone waiting sessions show the prompt and send terminal input", async ({ 
   await expect(dead.getByRole("button", { name: "Send y + Enter" })).toHaveCount(0);
   await expect(dead.getByRole("button", { name: "Send Ctrl-C" })).toHaveCount(0);
 });
+
+
+/**
+ * #104's middle criterion, asserted where it is falsifiable: a reader on
+ * Board, Backlog, Inbox or the Sessions roster must not download the editor
+ * or the terminal. The budget script measures the built graph; this measures
+ * what the browser actually asks for.
+ */
+test("Non-editor routes fetch neither the editor nor the terminal", async ({ page }) => {
+  const deferred = /monaco|xterm|TerminalWorkspace|EditorWorkspace|\.worker/i;
+  const asked: string[] = [];
+  page.on("request", (request) => {
+    const url = request.url();
+    if (deferred.test(url)) asked.push(new URL(url).pathname);
+  });
+
+  await installFixtures(page);
+  for (const route of ["board", "backlog", "inbox", "sessions", "projects", "audit"]) {
+    await page.goto(`/#/${route}`);
+    await page.waitForLoadState("networkidle");
+  }
+  expect(asked, "no editor or terminal code on a route that has neither").toEqual([]);
+
+  // And it does arrive when a route needs it: the editor route is what pays
+  // for the editor.
+  await page.goto("/#/e/src/main.ts");
+  await expect.poll(() => asked.length, { timeout: 15_000 }).toBeGreaterThan(0);
+});
