@@ -98,7 +98,7 @@ def test_checking_an_unadopted_project_records_nothing(
     # And the brief agrees, because a view that disagreed with the answer
     # would be a second opinion nobody asked for.
     assert brief_project(instance, ProjectBriefParams(slug=slug)).compliance_status == (
-        "not_checked"
+        "not_applicable"
     )
     assert compliance(instance, ComplianceParams(project=slug)).status == (
         "not_applicable"

@@ -7183,6 +7183,7 @@ textarea {
 
 .vogt-projects-status--not_collected,
 .vogt-projects-status--not_checked,
+.vogt-projects-status--not_applicable,
 .vogt-projects-status--no_checks {
   color: var(--fg-muted);
 }

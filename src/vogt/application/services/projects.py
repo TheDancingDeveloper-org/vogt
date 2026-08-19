@@ -28,7 +28,12 @@ from vogt.application.services.views import _gather, freshness_of
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.collectors.dep_refs import KIND_DEP_SCAN
 from vogt.core.checks import roll_up
-from vogt.core.contract import DEFAULT_CONTRACT, Scaffold, default_scaffold
+from vogt.core.contract import (
+    DEFAULT_CONTRACT,
+    NOT_APPLICABLE,
+    Scaffold,
+    default_scaffold,
+)
 from vogt.core.entities import Actor, Project
 from vogt.core.ids import slugify
 from vogt.core.workflow import check_lifecycle_transition
@@ -339,8 +344,19 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
             if observed_version is None or project.current_version is None
             else observed_version.lstrip("v") == project.current_version.lstrip("v")
         ),
-        compliance_status=project.compliance_status,
-        compliance_checked_at=project.compliance_checked_at,
+        # FR-G16: no view may imply a fault in a project that never adopted
+        # the contract. The brief is a view, and `not_checked` on a project
+        # nobody may check reads as an omission rather than as a choice.
+        compliance_status=(
+            project.compliance_status
+            if project.contract_adopted_at is not None
+            else NOT_APPLICABLE
+        ),
+        compliance_checked_at=(
+            project.compliance_checked_at
+            if project.contract_adopted_at is not None
+            else None
+        ),
         ci_status=_ci_summary(ctx, project),
         dependencies=_dependency_summary(ctx, project),
         freshness=freshness_of(ctx),
