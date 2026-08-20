@@ -1,0 +1,158 @@
+# The estate deployment, as an overlay on the public base.
+#
+#   docker compose -f deploy/vogt.compose.yml -f deploy/estate.overlay.yml up -d
+#
+# This is the reference customisation `docs/CUSTOMISATION.md` points at, and
+# the thing that makes its claim checkable: the private deployment is the
+# published public image plus configuration, not a second build of the same
+# source. Every difference from the generic install is stated here and
+# nowhere else.
+#
+# **Not yet deployed.** The topology is proven — see below — but the estate
+# still runs the merged single-container image from
+# `deploy/vogt-stack.compose.yml`. Moving it is a deliberate act with a parity
+# walk attached; this file is the reviewed source for when that happens.
+#
+# ## What was proven, and how
+#
+# Engine and core were run as separate containers on one network, the core
+# from the published `ghcr.io/thedancingdeveloper-org/vogt:dev` image:
+#
+#   * the engine detected a non-loopback `VOGT_CORE_URL` and declined to start
+#     a core of its own — "proxying to a core this container does not run",
+#     the branch `entrypoint.sh` already carried;
+#   * `/readyz` reported `vogt_core ready (schema 3 of 11)` across the network;
+#   * an authenticated call through `/api/vogt` failed with exactly the right
+#     error — `front-door token "primary" has no paired vogt-core token` —
+#     which is the `vogt_core_token` secret below;
+#   * with no `VOGT_ENGINE_STATE_DIR` on the core, `backup_agreement`
+#     degraded to "not set here", which is the coupling the mounts below fix.
+#
+# ## The two things a naive split gets wrong
+#
+# 1. **The core reads the estate, not the engine.** Collection runs in the
+#    core, so the workspace has to reach *both* containers.
+# 2. **The core reads engine state off the filesystem** for backup and restore
+#    (`lifecycle.py`), and in the merged image that worked by accident of
+#    co-location. Split them and `backup` does not fail — it writes
+#    `engine_state: "not configured"` and silently becomes core-only, which is
+#    the failure NFR-I6 exists to prevent. The narrow bind below keeps the
+#    path meaning what it means today without handing the core the whole pod
+#    home.
+
+services:
+  # ── the core: the public image, unmodified ──────────────────────────────
+  vogt:
+    # No port. In the estate the engine is the only published surface
+    # (NFR-D11); the core is reachable on the compose network alone. `!reset`
+    # rather than an override because Compose concatenates `ports` across
+    # files — an override would publish both.
+    ports: !reset []
+
+    environment:
+      # It is fronted, so `connect` and `/connection-info` render against the
+      # identity the engine states per request rather than this address.
+      VOGT_FRONTED: "true"
+      VOGT_IMPORT_ROOT: "${VOGT_IMPORT_ROOT:-/home/sprooty/Working/Active}"
+      # Read by `backup`/`restore`. Must be the same path the engine writes.
+      VOGT_ENGINE_STATE_DIR: /home/sprooty/.local/share/mydevenv2
+      VOGT_GITHUB_TOKEN_FILE: /run/secrets/github_token
+
+    volumes:
+      # The estate, so collectors can read the repositories they observe.
+      - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working:ro"
+      # Engine state, narrowly. Read-write because `restore` writes it.
+      - "${VOGT_HOME_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/home}/.local/share/mydevenv2:/home/sprooty/.local/share/mydevenv2"
+
+    secrets:
+      - github_token
+
+  # ── the engine: the private image, front door, no core inside it ────────
+  engine:
+    image: "${VOGT_STACK_IMAGE:?pin the vogt-stack digest}"
+    container_name: "${VOGT_CONTAINER_NAME:-vogt-engine}"
+    hostname: "${VOGT_CONTAINER_NAME:-vogt-engine}"
+    restart: unless-stopped
+    init: true
+    depends_on:
+      - vogt
+
+    # The only published surface. Tailnet address only, never 0.0.0.0.
+    ports:
+      - "${VOGT_BIND_IP:?the address the front door is published on}:${VOGT_ENGINE_PORT:-18097}:8910"
+
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+    volumes:
+      - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working"
+      - "${VOGT_HOME_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/home}:/home/sprooty"
+      - "${VOGT_TAILSCALE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/tailscale}:/var/lib/tailscale"
+
+    environment:
+      # The core lives in the sibling container, not on loopback. This is what
+      # tells the engine not to start one.
+      VOGT_CORE_URL: "http://vogt:8000"
+      VOGT_CORE_TOKEN_FILE: /run/secrets/vogt_core_token
+
+      MYDEVENV2_TOKEN: "${MYDEVENV2_TOKEN:?the front door's primary bearer token}"
+      MYDEVENV2_EXTRA_TOKENS_JSON: "${MYDEVENV2_EXTRA_TOKENS_JSON:-}"
+      MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE: "${MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE:-600}"
+      MYDEVENV2_BIND: 0.0.0.0:8910
+      MYDEVENV2_SCROLLBACK_BYTES: "${MYDEVENV2_SCROLLBACK_BYTES:-4194304}"
+      MYDEVENV2_PUBLIC_URL: "${VOGT_PUBLIC_URL:?the URL clients reach the front door at}"
+      RUST_LOG: "${RUST_LOG:-info}"
+
+      # Agent auth and its optional integrations.
+      INFISICAL_API_URL: "${INFISICAL_API_URL:-http://100.92.54.45:8400}"
+      INFISICAL_CLIENT_ID: "${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID:?required for agent auth}"
+      INFISICAL_CLIENT_SECRET: "${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET:?required for agent auth}"
+      MYDEVENV2_AGENT_AUTH_REQUIRED: "1"
+      MYDEVENV2_AUTO_AGENT_AUTH: "1"
+      MYDEVENV2_VOGT_SECRET_NAME: "${MYDEVENV2_VOGT_SECRET_NAME:-HOMELAB_VOGT_AGENT_TOKEN}"
+      # Cadastre is a separate product and an explicit opt-in (NFR-O5).
+      CADASTRE_MCP_ENABLED: "1"
+
+      # Tailnet.
+      TAILSCALE_AUTH_KEY: "${HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY:-}"
+      TAILSCALE_HOSTNAME: "${TAILSCALE_HOSTNAME:-vogt}"
+      MYDEVENV2_TAILSCALE_ACCEPT_DNS: "${MYDEVENV2_TAILSCALE_ACCEPT_DNS:-1}"
+      TAILSCALE_EXIT_NODE: "${MYDEVENV2_TAILSCALE_EXIT_NODE:-}"
+
+      # Optional surfaces, each of which degrades rather than fails.
+      MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON: "${MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON:-}"
+      MYDEVENV2_ASSISTANT_API_KEY: "${MYDEVENV2_ASSISTANT_API_KEY:-}"
+      MYDEVENV2_ASSISTANT_MODEL: "${MYDEVENV2_ASSISTANT_MODEL:-gpt-5.4-mini}"
+      # Stated, never defaulted to a provider: a key with no destination is a
+      # configuration error (NFR-D2, r20).
+      MYDEVENV2_ASSISTANT_BASE_URL: "${MYDEVENV2_ASSISTANT_BASE_URL:?name the endpoint the assistant key belongs to}"
+      START_SWAY: "${START_SWAY:-0}"
+      GUI_STREAM_URL: "${GUI_STREAM_URL:-}"
+      SCCACHE_REDIS: "${SCCACHE_REDIS:-redis://100.92.54.45:6380}"
+
+    secrets:
+      - vogt_core_token
+
+    # `/readyz` is the aggregate, and it deliberately does not fail on an
+    # absent core — restarting the engine would not revive one and would kill
+    # every live PTY (FR-E9). Do not "fix" this to gate on the core.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8910/readyz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+secrets:
+  github_token:
+    file: ./github-token
+  vogt_core_token:
+    file: ./vogt-core-token

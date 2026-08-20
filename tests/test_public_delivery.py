@@ -12,6 +12,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_COMPOSE = REPO_ROOT / "deploy" / "vogt.compose.yml"
 BUILD_OVERLAY = REPO_ROOT / "deploy" / "vogt.build.yml"
+ESTATE_OVERLAY = REPO_ROOT / "deploy" / "estate.overlay.yml"
 PUBLIC_ENV = REPO_ROOT / "deploy" / ".env.example"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 
@@ -163,3 +164,38 @@ def test_public_dockerignore_excludes_private_toolchains() -> None:
     assert all(line.startswith("!") for line in reincluded)
     for path in ("engine", "web", "mobile", "docs", "tests", "deploy"):
         assert not any(entry.lstrip("!").rstrip("/*") == path for entry in reincluded)
+
+
+def test_the_estate_overlay_states_differences_only() -> None:
+    """The reference customisation is the base plus config, not a second base.
+
+    `docs/CUSTOMISATION.md` claims the estate deployment is built from the
+    documented extension points. That is only checkable if the overlay really
+    is an overlay, so it must not restate the base's image or health check for
+    the core service.
+    """
+    overlay = _without_comments(ESTATE_OVERLAY.read_text(encoding="utf-8"))
+    assert "engine:" in overlay
+    assert 'VOGT_CORE_URL: "http://vogt:8000"' in overlay
+
+    core = overlay.split("  engine:")[0]
+    assert "image:" not in core, "the overlay must not rebuild or repin the core"
+    assert "healthcheck:" not in core
+    # Compose concatenates `ports`, so an override would publish both.
+    assert "ports: !reset []" in core
+
+
+def test_the_estate_overlay_wires_the_two_filesystem_couplings() -> None:
+    """A naive split loses collection and half of every backup.
+
+    The core is what reads repositories, and it reads engine state off the
+    filesystem for backup/restore — in the merged image both worked by
+    co-location. Split them without these mounts and `backup` does not fail,
+    it writes `engine_state: "not configured"` (NFR-I6).
+    """
+    core = _without_comments(ESTATE_OVERLAY.read_text(encoding="utf-8")).split(
+        "  engine:"
+    )[0]
+    assert "VOGT_ENGINE_STATE_DIR:" in core
+    assert ".local/share/mydevenv2:/home/sprooty/.local/share/mydevenv2" in core
+    assert ":/home/sprooty/Working:ro" in core

@@ -202,6 +202,18 @@ detached core, host mounts, uid selection, optional integrations — and is
 documented in [`DEPLOYMENT.md`](DEPLOYMENT.md) as the reference customisation
 rather than as the way Vogt is meant to be run.
 
+You can read it as a diff. [`deploy/estate.overlay.yml`](../deploy/estate.overlay.yml)
+is that deployment expressed against this same base:
+
+```console
+docker compose -f deploy/vogt.compose.yml -f deploy/estate.overlay.yml up -d
+```
+
+It adds one service and some configuration. It does not rebuild, repin, or
+restate the core — that is the published image, unmodified, which is what
+makes "the private path is the public path plus configuration" a claim you
+can check rather than one you have to believe.
+
 If your deployment needs something none of these layers reach, that is worth
 an issue. The generic base is only generic if the customisations people
 actually need are supported ones.
