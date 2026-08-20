@@ -187,6 +187,25 @@ export function createViewAge(input: () => Omit<AgeInput, "now">): Accessor<View
   return () => describeAge({ ...input(), now: now() });
 }
 
+/** Which `.surface-header-honesty--*` tone a view's age maps to (rail-spec.md
+ *  A1). `paused` and `stale` share a colour — both mean "provisional, not
+ *  wrong" — and `waiting` shares outage's, since a view that never loaded has
+ *  nothing to call current either. */
+export function honestyToneClass(tone: AgeTone): string {
+  switch (tone) {
+    case "live":
+      return "surface-header-honesty--fresh";
+    case "paused":
+      return "surface-header-honesty--partial";
+    case "stale":
+      return "surface-header-honesty--stale";
+    case "outage":
+      return "surface-header-honesty--outage";
+    case "waiting":
+      return "surface-header-honesty--never";
+  }
+}
+
 /** The badge itself, so five surfaces cannot drift into five renderings. */
 export const ViewAgeBadge: Component<{
   age: ViewAge;
