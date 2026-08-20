@@ -38,7 +38,7 @@ Read the ops copy when you want to know what is running.
 | Run directory | `personal/vogt-dev` |
 | File paths | `vogt-stack.compose.yml`, `vogt-stack.docker-socket.yml` |
 | Environment | the filled `vogt-stack.env.example` |
-| Webhook | **off** |
+| Webhook | `vogt` **off**; `vogt-dev` **on** — see below |
 
 **The socket overlay is a trust decision, not a default.** Listing
 `vogt-stack.docker-socket.yml` mounts the host's Docker socket into the pod,
@@ -48,11 +48,29 @@ reason: sessions run agent CLIs and repo workflows that expect `docker` to
 work. Omit the overlay and Docker commands inside sessions fail closed, which
 is the lower-privilege mode and costs nothing else.
 
-**Webhook off is deliberate.** Publishing an image is not deploying it
-(NFR-D10): production moves when a human changes the pinned digest and runs
-`DeployStack`. A webhook that redeployed on every push would make `dev` a
-continuous-deployment branch, which is a different requirement from the one
-this stack exists to satisfy.
+**Webhook off is deliberate — for the stack this document was written about.**
+Publishing an image is not deploying it (NFR-D10): production moves when a
+human changes the pinned digest and runs `DeployStack`. A webhook that
+redeployed on every push would make that a continuous-deployment branch,
+which is a different requirement from the one the stack exists to satisfy.
+
+**`vogt-dev` does not follow that rule, and the difference is easy to trip
+over.** Read from the Komodo API on 2026-08-20:
+
+| Komodo stack | Run directory | Webhook |
+|---|---|---|
+| `vogt-dev` | `personal/vogt-dev` | **on** |
+| `vogt` | `personal/vogt-prod-candidate` | off |
+| `vogt-legacy-core` | `personal/vogt` | on (stack is down) |
+
+So a push to `indexarr/ops` `main` **redeploys `vogt-dev` by itself**, while
+the `vogt` stack waits for an explicit `DeployStack`. Two consequences worth
+holding: batch ops changes into one push if you want one redeploy, and do not
+push a half-finished `vogt-dev` compose expecting to deploy it later.
+
+Note also that the Komodo stack *names* do not match their run directories —
+the stack called `vogt` deploys the prod-candidate directory. Check
+`GetStack` before assuming which one you are moving.
 
 ## 3. The `pre_deploy` hook
 

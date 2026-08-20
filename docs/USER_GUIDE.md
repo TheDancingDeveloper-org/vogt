@@ -10,6 +10,8 @@ service worker, offline page and notification artwork.
 Some deliberately invisible compatibility identifiers retain the historical
 name: browser storage and event keys, Rust crate/config names, the Android
 package and notification-channel IDs, and the `MYDEVENV2_NOTIFY:` task hook.
+Which of those are renameable and which are migrations is inventoried on
+[#144](https://github.com/TheDancingDeveloper-org/vogt/issues/144).
 Changing those as presentation copy would instead discard local preferences,
 break protocols or FCM, create a second Android app, or invalidate existing
 task definitions. Their user-facing labels and messages still say Vogt.
@@ -30,6 +32,13 @@ still outstanding and `ROADMAP.md` says so.
 ---
 
 ## 1. Getting in
+
+> The addresses in this section are **the maintainer's own deployment**, used
+> here so the walkthrough has something concrete to point at. Substitute your
+> own instance throughout. If you do not have one yet,
+> [`GETTING_STARTED.md`](GETTING_STARTED.md) builds one, and
+> [`DEPLOYMENT.md`](DEPLOYMENT.md) is the reference customisation these
+> addresses belong to.
 
 1. Open **https://vogt.sprooty.com** — the merged product: Vogt's work
    surfaces and the session engine's terminals on one address.

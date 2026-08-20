@@ -126,8 +126,9 @@ workflow and [`docs/CONFIG.md`](docs/CONFIG.md) for every setting.
 - [Configuration reference](docs/CONFIG.md) — generated schema reference.
 - [Customisation](docs/CUSTOMISATION.md) — the supported extension points,
   and how to run a heavily customised deployment without forking.
-- [Deployment guide](docs/DEPLOYMENT.md) — topology, storage, security,
-  backups, and upgrade principles.
+- [Reference customisation](docs/DEPLOYMENT.md) — the maintainer's own estate
+  deployment, annotated with the extension point each choice uses. Evidence,
+  not a prerequisite.
 - [Design outline](docs/DESIGN.md) — architecture and domain decisions.
 - [Requirements](docs/REQUIREMENTS.md) — complete requirements, revision
   rationale, delivery verification, and the gap register.
