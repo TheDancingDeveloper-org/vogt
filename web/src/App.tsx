@@ -134,7 +134,23 @@ const TemplateSelector = lazy(() => import("./TemplateSelector"));
 const FileWorkflowDialog = lazy(() => import("./FileWorkflowDialog"));
 
 
-const PlaceCount: Component<{ metric: PlaceMetric; label: string }> = (props) => {
+/**
+ * A glanceable count beside a nav place. `tone` carries the attention grammar
+ * from design 5b / 4a rule 4 — "three count weights only": a muted number is
+ * informational, a solid accent badge is unread (Inbox), an outlined amber
+ * badge is drift (Projects), and a red badge is a session waiting. A tone only
+ * paints once the metric is `ready` and its attention signal is non-zero, so a
+ * loading or stale count never flashes colour. For `accent` the metric's own
+ * value is the signal; for `drift` the caller passes a separate `attention`
+ * count (the shell's drift-existence metric), because the number shown is the
+ * project total, not the drift count.
+ */
+const PlaceCount: Component<{
+  metric: PlaceMetric;
+  label: string;
+  tone?: "accent" | "drift";
+  attention?: number;
+}> = (props) => {
   const copy = () => {
     if (props.metric.state === "loading") return { glyph: "…", label: `${props.label} loading` };
     if (props.metric.state === "unavailable") return { glyph: "—", label: `${props.label} unavailable` };
@@ -144,10 +160,16 @@ const PlaceCount: Component<{ metric: PlaceMetric; label: string }> = (props) =>
       ? { glyph, label: `${value} ${props.label}, refreshing` }
       : { glyph, label: `${value} ${props.label}` };
   };
+  const attention = () => props.attention ?? props.metric.value ?? 0;
+  const toned = () => props.metric.state === "ready" && attention() > 0;
   return (
     <span
       class="place-count"
-      classList={{ "place-count--attention": (props.metric.value ?? 0) > 0 && props.label.includes("waiting") }}
+      classList={{
+        "place-count--attention": (props.metric.value ?? 0) > 0 && props.label.includes("waiting"),
+        "place-count--accent": props.tone === "accent" && toned(),
+        "place-count--drift": props.tone === "drift" && toned(),
+      }}
       data-state={props.metric.state}
       aria-label={copy().label}
       title={copy().label}
@@ -1101,12 +1123,12 @@ const App: Component = () => {
               <span class="places-group-label">Work</span>
               <a class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined} href="#/board"><span>Board</span><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></a>
               <a class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined} href="#/backlog"><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
-              <a class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined} href="#/inbox"><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" /></a>
+              <a class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined} href="#/inbox"><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" tone="accent" /></a>
             </div>
             <Show when={publicCfg()?.vogt?.configured}>
               <div class="places-group">
                 <span class="places-group-label">Estate</span>
-                <a class={currentPlace("projects") ? "active" : ""} aria-current={currentPlace("projects") ? "page" : undefined} href="#/projects"><span>Projects</span><PlaceCount metric={placeMetrics.metrics.projects} label="Projects" /></a>
+                <a class={currentPlace("projects") ? "active" : ""} aria-current={currentPlace("projects") ? "page" : undefined} href="#/projects"><span>Projects</span><PlaceCount metric={placeMetrics.metrics.projects} label="Projects" tone="drift" attention={placeMetrics.metrics.drift.value ?? 0} /></a>
                 <a class={currentPlace("audit") ? "active" : ""} aria-current={currentPlace("audit") ? "page" : undefined} href="#/audit">Audit</a>
               </div>
             </Show>
@@ -1477,7 +1499,7 @@ const App: Component = () => {
 
       <nav class="phone-bottom-nav" aria-label="Primary navigation">
         <a href="#/sessions" class={currentPlace("sessions") ? "active" : ""} aria-current={currentPlace("sessions") ? "page" : undefined}><span>Sessions</span><PlaceCount metric={sessionMetric()} label="sessions" /></a>
-        <a href="#/inbox" class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined}><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" /></a>
+        <a href="#/inbox" class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined}><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" tone="accent" /></a>
         <a href="#/board" class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined}><span>Board</span><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></a>
         <a href="#/backlog" class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined}><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
       </nav>

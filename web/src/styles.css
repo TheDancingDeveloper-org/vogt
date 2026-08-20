@@ -438,6 +438,18 @@ textarea {
 .place-count--attention {
   color: var(--activity-waiting);
 }
+/* Unread inbox: a solid accent badge (design 5b / 4a rule 4 — "solid accent =
+   unread"). Dark text on the accent fill, matching .login-submit. */
+.place-count--accent {
+  color: #08111c;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+/* Drift on the estate: an outlined --activity-running badge on Projects. The
+   number stays the project total; the colour is the attention signal. */
+.place-count--drift {
+  color: var(--activity-running);
+}
 .places-section-label--counted {
   display: flex;
   align-items: center;
@@ -5306,6 +5318,26 @@ textarea {
 
 .board-freshness--waiting {
   color: var(--fg-muted);
+}
+
+/* A1 (5a): inside the honesty slot the freshness reads as a bold inline lead,
+   not a pill — the slot's left border already carries the tone, so repeating it
+   as a coloured chip is the duplication A1 removes. Scoped to the two surfaces
+   5a depicts: Board (.board-freshness--lead) and Audit (.vab-age). */
+.surface-header-honesty .board-freshness--lead,
+.surface-header-honesty .vab-age {
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  color: var(--fg);
+  font-weight: 600;
+  white-space: normal;
+}
+/* The board's counts follow the lead as ·-separated qualifiers. */
+.board-summary > span:not(.vogt-age)::before {
+  content: "·";
+  margin-right: 6px;
+  color: var(--bd-strong);
 }
 
 .board-banner {

@@ -1,5 +1,5 @@
 import { createStore } from "solid-js/store";
-import { backlog, listInbox, listProjects, listWork } from "./vogtApi";
+import { backlog, listDrift, listInbox, listProjects, listWork } from "./vogtApi";
 
 export type PlaceMetricState = "loading" | "ready" | "stale" | "unavailable";
 
@@ -13,6 +13,13 @@ export interface PlaceMetrics {
   projects: PlaceMetric;
   board: PlaceMetric;
   backlog: PlaceMetric;
+  /**
+   * Whether the estate currently carries any drift proposal. The rail colours
+   * Projects amber when this is non-zero (design 5b / 4a rule 4: "outlined
+   * --activity-running = drift"). It is an existence signal, not a per-project
+   * count, so the read stays bounded (`limit: 1`) like its four siblings.
+   */
+  drift: PlaceMetric;
 }
 
 const initial = (): PlaceMetric => ({ value: null, state: "loading" });
@@ -61,6 +68,7 @@ export function createPlaceMetrics(): PlaceMetricsController {
     projects: initial(),
     board: initial(),
     backlog: initial(),
+    drift: initial(),
   });
   let generation = 0;
 
@@ -81,7 +89,7 @@ export function createPlaceMetrics(): PlaceMetricsController {
 
   const read = async () => {
     const currentGeneration = ++generation;
-    for (const name of ["inbox", "projects", "board", "backlog"] as const) {
+    for (const name of ["inbox", "projects", "board", "backlog", "drift"] as const) {
       setMetrics(name, "state", metrics[name].value === null ? "loading" : "stale");
     }
     await Promise.all([
@@ -106,6 +114,12 @@ export function createPlaceMetrics(): PlaceMetricsController {
       load(
         "backlog",
         async () => requiredCount((await backlog({ limit: 1 })).total_considered, "Backlog"),
+        currentGeneration,
+      ),
+      load(
+        "drift",
+        // Existence, not census: one proposal is enough to colour Projects.
+        async () => ((await listDrift({ limit: 1 })).proposals.length > 0 ? 1 : 0),
         currentGeneration,
       ),
     ]);

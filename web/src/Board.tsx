@@ -1867,13 +1867,16 @@ const Board: Component<Props> = (props) => {
         honestyClass={`surface-header-honesty--${freshness().tone === "live" ? "fresh" : freshness().tone === "outage" || freshness().tone === "waiting" ? "outage" : "stale"}`}
         honesty={(
           <div class="board-summary" aria-live="polite">
-            <span>{items().length} loaded</span>
-            <span>of {total()} matching</span>
-            <span>{columns().length} columns</span>
+            {/* A1 (5a): the honesty leads with a bold freshness clause; the
+                counts follow as quiet qualifiers. Tone is carried by the
+                honesty slot's left border, so the lead is plain --fg, not a
+                pill. */}
             <ViewAgeBadge
               age={freshness()}
-              class={`board-freshness board-freshness--${freshness().tone}`}
+              class="board-freshness board-freshness--lead"
             />
+            <span>{items().length} of {total()} loaded</span>
+            <span>{columns().length} columns</span>
           </div>
         )}
         controls={(
