@@ -198,4 +198,40 @@ def test_the_estate_overlay_wires_the_two_filesystem_couplings() -> None:
     )[0]
     assert "VOGT_ENGINE_STATE_DIR:" in core
     assert ".local/share/mydevenv2:/home/sprooty/.local/share/mydevenv2" in core
-    assert ":/home/sprooty/Working:ro" in core
+    assert ':/home/sprooty/Working"' in core, (
+        "import clones into this tree; it cannot be :ro"
+    )
+
+
+def test_the_estate_overlay_keeps_the_existing_core_volume() -> None:
+    """The base's volume name is not the one the estate's data is in.
+
+    `deploy/vogt.compose.yml` declares `vogt-data`; the estate's core has
+    lived in `vogt-core-data` since the stack was created. Without the
+    mapping the core comes up against an empty volume — not a failure, a
+    *new instance*: new instance_id, no projects, no audit history, and the
+    real database still in the volume nobody is reading any more.
+    """
+    overlay = ESTATE_OVERLAY.read_text(encoding="utf-8")
+    assert 'name: "${VOGT_CORE_VOLUME:-vogt-core-data}"' in overlay
+
+
+def test_the_estate_overlay_does_not_gate_on_an_assistant_endpoint() -> None:
+    """The engine enforces r20's rule; compose must not enforce it twice.
+
+    A key with no stated destination is a startup error in the engine. Gating
+    `MYDEVENV2_ASSISTANT_BASE_URL` with `${X:?}` here as well would refuse to
+    deploy a stack that simply has no assistant key — the common case.
+    """
+    overlay = ESTATE_OVERLAY.read_text(encoding="utf-8")
+    assert (
+        'MYDEVENV2_ASSISTANT_BASE_URL: "${MYDEVENV2_ASSISTANT_BASE_URL:-}"' in overlay
+    )
+    required = set(re.findall(r"\$\{([A-Z_]+):\?", _without_comments(overlay)))
+    # Only genuine exposure values and the image may be required.
+    assert required <= {
+        "VOGT_BIND_IP",
+        "VOGT_PUBLIC_URL",
+        "VOGT_STACK_IMAGE",
+        "MYDEVENV2_TOKEN",
+    }, f"unexpected required variables: {sorted(required)}"

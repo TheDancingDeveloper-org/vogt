@@ -59,13 +59,23 @@ services:
       VOGT_GITHUB_TOKEN_FILE: /run/secrets/github_token
 
     volumes:
-      # The estate, so collectors can read the repositories they observe.
-      - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working:ro"
+      # The estate. Read-*write*, not read-only: collection only reads, but
+      # `VOGT_IMPORT_ROOT` points inside this tree and `project import` clones
+      # into it (FR-P6). Mounted `:ro` the core comes up perfectly healthy and
+      # import fails at the first clone.
+      - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working"
       # Engine state, narrowly. Read-write because `restore` writes it.
       - "${VOGT_HOME_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/home}/.local/share/mydevenv2:/home/sprooty/.local/share/mydevenv2"
 
     secrets:
       - github_token
+
+    # Fixed, because the engine reaches it through an /etc/hosts pin and a
+    # pin cannot follow a dynamic address. Inside this stack's own network,
+    # so it collides with nothing.
+    networks:
+      default:
+        ipv4_address: "${VOGT_CORE_IP:-10.59.0.10}"
 
   # ── the engine: the private image, front door, no core inside it ────────
   engine:
@@ -79,7 +89,7 @@ services:
 
     # The only published surface. Tailnet address only, never 0.0.0.0.
     ports:
-      - "${VOGT_BIND_IP:?the address the front door is published on}:${VOGT_ENGINE_PORT:-18097}:8910"
+      - "${VOGT_BIND_IP:?the address the front door is published on}:${VOGT_PORT:-18097}:8910"
 
     cap_add:
       - NET_ADMIN
@@ -90,6 +100,19 @@ services:
       - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working"
       - "${VOGT_HOME_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/home}:/home/sprooty"
       - "${VOGT_TAILSCALE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/tailscale}:/var/lib/tailscale"
+
+    # Not optional plumbing — the same landmine the retired ContextKeeper
+    # entry existed for. This container runs Tailscale, which overwrites
+    # /etc/resolv.conf and breaks Docker's embedded service-name resolution,
+    # so `vogt` does not resolve here however correct the compose file looks.
+    # `extra_hosts` writes to /etc/hosts, which is consulted *before* DNS, so
+    # the pin survives. Verified: with resolv.conf deliberately broken, a
+    # pinned name resolves and an unpinned one times out.
+    #
+    # This is why the core takes a fixed address below rather than whatever
+    # the pool hands it.
+    extra_hosts:
+      - "vogt:${VOGT_CORE_IP:-10.59.0.10}"
 
     environment:
       # The core lives in the sibling container, not on loopback. This is what
@@ -125,15 +148,25 @@ services:
       MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON: "${MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON:-}"
       MYDEVENV2_ASSISTANT_API_KEY: "${MYDEVENV2_ASSISTANT_API_KEY:-}"
       MYDEVENV2_ASSISTANT_MODEL: "${MYDEVENV2_ASSISTANT_MODEL:-gpt-5.4-mini}"
-      # Stated, never defaulted to a provider: a key with no destination is a
-      # configuration error (NFR-D2, r20).
-      MYDEVENV2_ASSISTANT_BASE_URL: "${MYDEVENV2_ASSISTANT_BASE_URL:?name the endpoint the assistant key belongs to}"
+      # Empty when unset, *not* `${X:?}`. The engine already enforces r20's
+      # rule — a key with no stated destination is a startup error — so
+      # gating it here as well would fail the deploy of a stack that simply
+      # has no assistant key, which is the common case.
+      MYDEVENV2_ASSISTANT_BASE_URL: "${MYDEVENV2_ASSISTANT_BASE_URL:-}"
       START_SWAY: "${START_SWAY:-0}"
       GUI_STREAM_URL: "${GUI_STREAM_URL:-}"
       SCCACHE_REDIS: "${SCCACHE_REDIS:-redis://100.92.54.45:6380}"
 
     secrets:
       - vogt_core_token
+
+    # If this deployment also mounts the host Docker socket, it attaches
+    # *here*. The estate's `docker-compose.docker-socket.yml` names the
+    # service `vogt`, which in this topology is the **core** — applying it
+    # unchanged would hand the host daemon to the core, which has no use for
+    # it, and leave the engine (whose sessions run `docker`) without. That
+    # file needs its service renamed to `engine` before it is used alongside
+    # this overlay.
 
     # `/readyz` is the aggregate, and it deliberately does not fail on an
     # absent core — restarting the engine would not revive one and would kill
@@ -150,6 +183,24 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  # Declared so the core's address is stable across recreates. This is the
+  # subnet Docker had already assigned this stack, so nothing moves.
+  default:
+    ipam:
+      config:
+        - subnet: "${VOGT_STACK_SUBNET:-10.59.0.0/16}"
+
+volumes:
+  # The base declares `vogt-data`; this estate's core already lives in
+  # `vogt-core-data` and has since the stack was created. Map the name rather
+  # than migrate the data — without this the core comes up against an empty
+  # volume, which is not a failure but a *new instance*: new instance_id, no
+  # projects, no audit history, and the real database still sitting in the
+  # volume nobody is now reading.
+  vogt-data:
+    name: "${VOGT_CORE_VOLUME:-vogt-core-data}"
 
 secrets:
   github_token:
