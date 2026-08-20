@@ -1366,3 +1366,21 @@ def test_the_engine_pins_every_npm_global_it_installs() -> None:
                 assert "@${" in token or re.search(r"@\d", token), (
                     f"unpinned npm global: {token}"
                 )
+
+
+def test_latest_moves_only_on_a_semver_tag() -> None:
+    """NFR-C3: a commit build never moves `latest`; a release does.
+
+    `build.yml` already said `latest=false` outright. `release.yml` said
+    nothing and inherited `latest=auto` from metadata-action's defaults —
+    the right behaviour, but living in another project's source, where a
+    change to that default would silently move this repository's `latest`.
+    Both halves are now stated here.
+    """
+    release = (WORKFLOWS / "release.yml").read_text("utf-8")
+    build = (WORKFLOWS / "build.yml").read_text("utf-8")
+    assert release.count("latest=auto") >= 2, "both released images must state it"
+    assert "latest=false" in build
+    assert "latest=true" not in release, (
+        "`latest=true` would tag a non-semver ref as latest"
+    )
