@@ -245,3 +245,42 @@ def test_pull_requests_sync_and_self_heal(
     ]
     sweep(instance, SweepParams(reason=WHY))
     assert 100 not in _backlog_numbers(instance)
+
+
+# -- #170: PRs in the backlog by default, excludable by view filter -------
+
+
+def test_prs_are_in_the_backlog_by_default_and_excludable(
+    instance: AppContext, forge: FakeForge
+) -> None:
+    forge.issues = [
+        {
+            "number": 1,
+            "title": "an issue",
+            "state": "open",
+            "updated_at": "2026-08-01T00:00:00Z",
+        }
+    ]
+    forge.pulls = [
+        {
+            "number": 100,
+            "title": "a pr",
+            "state": "open",
+            "updated_at": "2026-08-01T00:00:00Z",
+        }
+    ]
+    sweep(instance, SweepParams(reason=WHY))
+
+    assert {1, 100} <= set(_backlog_numbers(instance)), (
+        "issues and PRs both, by default (#170)"
+    )
+
+    filtered = backlog(instance, BacklogParams(limit=100, include_prs=False))
+    kinds = {i.observation_kind for i in filtered.items if i.origin == "observed"}
+    assert "forge.pull_request" not in kinds, "the view filter excludes PRs"
+    numbers = {
+        int(i.title.split()[0].lstrip("#"))
+        for i in filtered.items
+        if i.title.startswith("#")
+    }
+    assert 1 in numbers and 100 not in numbers

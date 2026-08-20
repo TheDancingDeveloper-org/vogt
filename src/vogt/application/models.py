@@ -823,6 +823,17 @@ class BacklogParams(Params):
     initiative: str | None = None
     label: str | None = None
     trust_states: list[TrustState] | None = None
+    include_prs: bool = Field(
+        default=True,
+        description=(
+            "Whether open pull requests rank in the backlog (#170). On by "
+            "default: a synced PR is worklike, and now that closure is "
+            "observed (#173) a merged one self-heals out rather than "
+            "lingering. Set false to see issues and markers only — a view "
+            "choice, not a data one; the PRs stay queryable through "
+            "`observations list`."
+        ),
+    )
     limit: int = Field(default=20, ge=1, le=200)
     offset: int = Field(
         default=0,

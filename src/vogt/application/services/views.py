@@ -151,7 +151,11 @@ def freshness_of(ctx: AppContext) -> Freshness:
 
 
 def trust_for(
-    ctx: AppContext, *, observed_at: datetime | None, disputed: bool = False
+    ctx: AppContext,
+    *,
+    observed_at: datetime | None,
+    confirmed_at: datetime | None = None,
+    disputed: bool = False,
 ) -> str:
     """Compute a trust state; never hand-set (FR-R4, SCHEMA §4).
 
@@ -159,14 +163,30 @@ def trust_for(
     subject. `stale` means the last confirmation aged out. `unverified` means
     nothing has ever confirmed it — which is the honest answer for declared
     work nobody has linked to anything.
+
+    Confirmation is "last seen", not "last changed" (#173, #174): a forge
+    subject re-read every sweep is still there, even if its payload has not
+    moved since it was filed, so `subject_seen.last_confirmed_at` (passed as
+    `confirmed_at`) takes precedence over the immutable first-seen
+    `observed_at`. Before this, a stable open issue aged to `stale` at the
+    verify horizon purely because nothing about it had changed.
     """
     if disputed:
         return "disputed"
-    if observed_at is None:
+    reference = _freshest(observed_at, confirmed_at)
+    if reference is None:
         return "unverified"
-    age = (ctx.clock() - observed_at).total_seconds()
+    age = (ctx.clock() - reference).total_seconds()
     horizon = ctx.config.verify_horizon_hours * 3600
     return "verified" if age <= horizon else "stale"
+
+
+def _freshest(
+    observed_at: datetime | None, confirmed_at: datetime | None
+) -> datetime | None:
+    """The more recent of first-seen and last-confirmed, ignoring absent ones."""
+    candidates = [m for m in (observed_at, confirmed_at) if m is not None]
+    return max(candidates) if candidates else None
 
 
 # -- assembling the ranked set --------------------------------------------
@@ -229,9 +249,16 @@ def _observed_candidates(
     adopted: dict[str, str],
 ) -> list[_Candidate]:
     candidates: list[_Candidate] = []
+    confirmed = ctx.observed.last_confirmed(
+        [observation.subject_key for observation in observations]
+    )
     for observation in observations:
         priority = priority_of(observation)
-        trust = trust_for(ctx, observed_at=observation.observed_at)
+        trust = trust_for(
+            ctx,
+            observed_at=observation.observed_at,
+            confirmed_at=confirmed.get(observation.subject_key),
+        )
         project = (
             projects.get(observation.project_id) if observation.project_id else None
         )
@@ -317,6 +344,7 @@ def _gather(
     label: str | None,
     trust_states: Sequence[str] | None = None,
     include_observed: bool = True,
+    include_prs: bool = True,
 ) -> _Gathered:
     """Build the ranked set across both stores."""
     with ctx.declared.read() as view:
@@ -354,10 +382,18 @@ def _gather(
             # and truncates the open ones behind them. `exclude_closed` drops
             # them in the query; `count_closed` retains `closed_upstream`. A
             # closed subject stays observable through `observations list`.
+            # PRs stay in the backlog by default (#170); excluding them is a
+            # view choice, so it filters the observed set here rather than
+            # changing what is worklike or what is collected.
+            observed_kinds = tuple(
+                kind
+                for kind in WORKLIKE_KINDS
+                if include_prs or kind != "forge.pull_request"
+            )
             worklike = [
                 observation
                 for observation in ctx.observed.latest(
-                    kinds=tuple(WORKLIKE_KINDS),
+                    kinds=observed_kinds,
                     project_id=scoped_project,
                     exclude_closed=True,
                     limit=RANKING_CANDIDATE_LIMIT,
@@ -415,6 +451,7 @@ def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
         initiative=params.initiative,
         label=params.label,
         trust_states=params.trust_states,
+        include_prs=params.include_prs,
     )
     return BacklogResult(
         items=gathered.ranked[params.offset : params.offset + params.limit],
@@ -486,7 +523,11 @@ def why(ctx: AppContext, params: WhyParams) -> WhyResult:
                 priority=priority_of(observation),
                 updated_at=observation.observed_at,
                 trust_state=trust_for(  # type: ignore[arg-type]
-                    ctx, observed_at=observation.observed_at
+                    ctx,
+                    observed_at=observation.observed_at,
+                    confirmed_at=ctx.observed.last_confirmed(
+                        [observation.subject_key]
+                    ).get(observation.subject_key),
                 ),
                 state=OBSERVED_STATE,
             )
