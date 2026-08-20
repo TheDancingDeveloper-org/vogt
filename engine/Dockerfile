@@ -416,15 +416,34 @@ ARG INSTALL_THECLAWBAY
 # workspace-write/network restrictions for every repo under ~/Working.
 #
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
-RUN if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        sudo npm install -g --prefix=/usr/local @openai/codex @anthropic-ai/claude-code \
-        && sudo install -d /usr/local/libexec \
+# One `npm install -g` for whichever packages are wanted, not one per
+# package. A second global install into the same prefix reconciles the whole
+# tree, and `@anthropic-ai/claude-code` resolves a platform-specific binary
+# through an optional dependency — reconciling around it left
+# `/usr/local/bin/claude` in place but no longer executable:
+#
+#   exec /usr/local/bin/claude: exec format error
+#   the dev image is missing claude
+#
+# A green build and a broken tool, caught only because the smoke test runs
+# `--version` on every tool the dev pod is expected to carry. Building the
+# package list first keeps both toggles independent without paying for a
+# second reconciliation.
+RUN pkgs=""; \
+    if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
+        pkgs="$pkgs @openai/codex @anthropic-ai/claude-code"; \
+    fi; \
+    if [ "$INSTALL_THECLAWBAY" = "true" ]; then \
+        pkgs="$pkgs theclawbay"; \
+    fi; \
+    if [ -n "$pkgs" ]; then \
+        sudo npm install -g --prefix=/usr/local $pkgs; \
+    fi \
+    && if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
+        sudo install -d /usr/local/libexec \
         && codex_target="$(readlink -f /usr/local/bin/codex)" \
         && sudo ln -s "$codex_target" /usr/local/libexec/codex-real \
         && sudo ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex ; \
-    fi \
-    && if [ "$INSTALL_THECLAWBAY" = "true" ]; then \
-        sudo npm install -g --prefix=/usr/local theclawbay ; \
     fi
 
 # sccache (apt package lacks Redis support; pull from GitHub). Resolve latest
