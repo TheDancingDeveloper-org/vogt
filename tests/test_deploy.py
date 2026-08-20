@@ -1340,6 +1340,13 @@ def test_two_instances_of_the_merged_stack_can_coexist(stack: str) -> None:
     )
 
 
+ENGINE_DOCKERFILE = WORKFLOWS.parent.parent / "engine" / "Dockerfile"
+
+
+@pytest.mark.skipif(
+    not ENGINE_DOCKERFILE.exists(),
+    reason="engine/ is deleted in the core-alone job, which is the point of it",
+)
 def test_the_engine_pins_every_npm_global_it_installs() -> None:
     """A `latest` global install is somebody else's publish deciding this image.
 
@@ -1348,7 +1355,7 @@ def test_the_engine_pins_every_npm_global_it_installs() -> None:
     change on our side. Unpinned also means two builds of the same commit are
     different images, which defeats a commit-identified `dev-<sha>` (NFR-C3).
     """
-    text = (WORKFLOWS.parent.parent / "engine" / "Dockerfile").read_text("utf-8")
+    text = ENGINE_DOCKERFILE.read_text("utf-8")
     installs = [
         line for line in text.splitlines() if "pkgs=" in line and "$pkgs" in line
     ]
