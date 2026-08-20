@@ -287,7 +287,6 @@ const Sessions: Component<Props> = (props) => {
                       <strong>{session.name}</strong>
                       <span class="session-place-context">
                         <small>{session.cwd || "default workspace"}</small>
-                        <small>{session.continuity ? `${session.continuity.provider} · ${session.continuity.state}` : "continuity unavailable"}</small>
                       </span>
                     </span>
                     <span class="session-place-status">

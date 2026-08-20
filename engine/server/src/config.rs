@@ -98,8 +98,7 @@ impl SessionTemplate {
             // the provider starts with no brokered credentials.
             SessionTemplate {
                 name: "Claude Code (protected)".to_string(),
-                description: "Claude Code through agent-auth, captured by ContextKeeper"
-                    .to_string(),
+                description: "Claude Code through agent-auth".to_string(),
                 command: Some(vec![
                     "mydevenv2-agent-auth".to_string(),
                     "run".to_string(),
@@ -115,7 +114,7 @@ impl SessionTemplate {
             },
             SessionTemplate {
                 name: "Codex (protected)".to_string(),
-                description: "Codex CLI through agent-auth, captured by ContextKeeper".to_string(),
+                description: "Codex CLI through agent-auth".to_string(),
                 command: Some(vec![
                     "mydevenv2-agent-auth".to_string(),
                     "run".to_string(),
@@ -241,16 +240,10 @@ pub struct Config {
     /// Which profile a request that names none runs against. `None` means the
     /// implicit `default` when it exists, else the first configured profile.
     pub assistant_default_profile: Option<String>,
-    /// Base URL of the ContextKeeper sidecar. None disables every continuity
-    /// surface: terminals still work and simply read as unprotected.
-    pub contextkeeper_url: Option<String>,
-    /// ContextKeeper's control token. Server-side only — the browser talks to
-    /// same-origin MyDevEnv2 routes and never holds this.
-    pub contextkeeper_token: Option<String>,
     /// Where vogt-core imports repositories, when this container runs one.
-    /// Read from `VOGT_IMPORT_ROOT` — the core's own variable name,
-    /// unprefixed for the reason the ContextKeeper pair is: one name for one
-    /// thing. Read once here rather than per request, so a readiness check
+    /// Read from `VOGT_IMPORT_ROOT` — the core's own variable name, left
+    /// unprefixed on purpose: one name for one thing. Read once here rather
+    /// than per request, so a readiness check
     /// reports the configuration the process started with.
     pub vogt_import_root: Option<std::path::PathBuf>,
     /// The directory vogt-core has been told is *this* server's `state_dir`,
@@ -317,8 +310,6 @@ struct FileConfig {
     assistant_reasoning_effort: Option<String>,
     assistant_profiles: Option<Vec<AssistantProfile>>,
     assistant_default_profile: Option<String>,
-    contextkeeper_url: Option<String>,
-    contextkeeper_token: Option<String>,
     public_url: Option<String>,
     vogt_core_url: Option<String>,
     vogt_core_token: Option<String>,
@@ -546,17 +537,6 @@ pub fn load(
             .unwrap_or(false),
         assistant_profiles,
         assistant_default_profile,
-        // Unprefixed on purpose: these are ContextKeeper's own variable names,
-        // and the same two values configure its CLI and hooks inside the
-        // container. One name for one credential.
-        contextkeeper_url: from_file
-            .contextkeeper_url
-            .or_else(|| std::env::var("CONTEXTKEEPER_URL").ok())
-            .filter(|s| !s.trim().is_empty()),
-        contextkeeper_token: from_file
-            .contextkeeper_token
-            .or_else(|| std::env::var("CONTEXTKEEPER_API_TOKEN").ok())
-            .filter(|s| !s.trim().is_empty()),
         // `ENGINE_PUBLIC_URL` is this process's own address, and is not
         // `VOGT_PUBLIC_URL`: that one is the *core's* view of where it is
         // published, which in the merged shape is an internal detail no
@@ -568,9 +548,9 @@ pub fn load(
             .or_else(|| engine_env("ENGINE_PUBLIC_URL").ok())
             .map(|value| value.trim().trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty()),
-        // Unprefixed like the ContextKeeper pair above, and for the same
-        // reason: these are vogt's own variable names, and the same values
-        // configure its CLI inside the container. One name for one thing.
+        // Unprefixed on purpose: these are vogt's own variable names, and the
+        // same values configure its CLI inside the container. One name for one
+        // thing.
         vogt_core_url: from_file
             .vogt_core_url
             .or_else(|| std::env::var("VOGT_CORE_URL").ok())

@@ -48,8 +48,7 @@ The engine owns the *doing*:
   read slice of Vogt, with every effector behind an on-screen approval
   (FR-T1–T4, FR-T6).
 - **Workspace-scoped file and git APIs**, a GUI process launcher, web push
-  (VAPID and FCM), archived session history, and a ContextKeeper continuity
-  proxy.
+  (VAPID and FCM), and archived session history.
 - **The front door.** The single published port: the PWA, the engine's native
   APIs, the WebSocket attach path, `/api/vogt` and `/mcp` proxied to the core,
   and aggregate health (NFR-D11).
@@ -348,12 +347,9 @@ section that documents it.
   malformed or out-of-bounds input, `401` no or wrong token, `403` capability
   denied, `404` not found (also: feature not provisioned, see below), `409`
   conflict, `429` rate limited, `500` something the engine owns is broken,
-  `502` an optional upstream did not answer. When an upstream answered and its
-  own reply is the useful one, its status is passed through and the body is
-  `{"error": ..., "detail": <upstream body>}`.
+  `502` an optional upstream did not answer.
 - A feature that is not provisioned answers `404` rather than `501` or `503`:
-  the assistant with no API key, every continuity route but its health probe
-  with no ContextKeeper. The feature is invisible rather than
+  the assistant with no API key. The feature is invisible rather than
   advertised-but-broken. The Vogt front
   door is the exception and answers `503` with a named reason, because an
   absent core is an outage of something that exists rather than a feature that
@@ -533,14 +529,6 @@ notification, and re-arms only once the session leaves the state. It is
 switched **off** for a new subscription — a heuristic about silence is not one
 of the four kinds FR-M2 says is worth a phone interruption — so the watcher
 runs and dispatches to whoever asked for it and to nobody else.
-
-`SessionSummary.continuity` is ContextKeeper enrichment and is **absent**, not
-null, when there is nothing to say — no sidecar configured, sidecar
-unreachable, or no agent session bound to the PTY. It is read from a cache the
-ContextKeeper runtime refreshes in the background, so a slow sidecar costs a
-stale badge rather than a hung roster. `POST /api/sessions` never enriches: a
-brand-new terminal has nothing bound yet, and creating one must not wait on
-anything.
 
 ### Attach protocol
 
@@ -839,53 +827,6 @@ Notifications the engine sends carry `{kind, session_id, url}` in their data,
 where `url` is a PWA route (`/#/t/<session-id>`), so a tap lands on the
 terminal that raised it.
 
-### Continuity APIs
-
-A same-origin allow-list in front of the ContextKeeper sidecar. The browser
-never receives ContextKeeper's control token, so every call is forwarded
-server-side — and only these calls are, because ContextKeeper's own API also
-carries prune and maintenance routes no browser should reach. With no
-ContextKeeper configured, every route here except `health` answers `404`, which
-the PWA reads as "continuity is unavailable" rather than as an error.
-
-- `GET /api/contextkeeper/health` -> a snapshot of whether continuity is
-  configured and reachable, and how fresh capture is. `200` even when the
-  sidecar is unreachable — `{"configured": false, "reachable": false}` is the
-  answer that lets the PWA show terminals as unprotected instead of pretending
-  the feature does not exist.
-- `GET /api/contextkeeper/terminals/:id` -> `SessionContinuity` for one PTY,
-  keyed by MyDevEnv2's session id, or `{"state": "unprotected"}` when nothing
-  is bound to it.
-- `GET /api/contextkeeper/sessions/:session_id` -> the registry session.
-- `GET /api/contextkeeper/sessions/:session_id/continuation` -> the
-  continuation recipe. ContextKeeper picks the rung; MyDevEnv2 creates the PTY
-  from the recipe's command, cwd and env. `kind: "reattach"` means attach the
-  existing terminal and start nothing.
-- `GET /api/contextkeeper/sessions/:session_id/preview` -> the compiled
-  recovery bundle.
-- `POST /api/contextkeeper/sessions/:session_id/approve`
-  `{"bundle_id", "request_id"?}` -> the approval record.
-- `POST /api/contextkeeper/sessions/:session_id/launch`
-  `{"bundle_id", "request_id"?}` -> the launch result.
-- `GET /api/contextkeeper/work/:work_id` -> every attempt in one durable work
-  session, so earlier attempts stay reachable after a recovery has replaced the
-  terminal.
-
-The two POST routes here are the only writes in this file that require no
-capability — a valid token of any scope may approve a bundle and launch a
-recovery, which spawns a terminal. Stated rather than left to be discovered:
-a client cannot tell from a `403` it will never get.
-
-Preview is a separate step from approval on purpose: approval is a human
-deciding about *this* bundle, so the UI must have shown it first. `request_id`
-is supplied by the client so that a retried click replays the same operation
-instead of performing a second one; when omitted the engine mints one, which
-makes the retry protection the caller's to keep.
-
-Bodies here are ContextKeeper's shapes, passed through as JSON rather than
-re-declared in `engine/contract/`. That is deliberate — they belong to the
-sidecar's contract, and mirroring them would create a second place to be wrong.
-
 ### Session history APIs
 
 Archived scrollback for sessions that have ended. Every route requires history
@@ -1008,10 +949,9 @@ response will do. Current standard small shapes:
 - `OkResponse` -> `{"ok": true|false}`
 - `WriteFileResponse` -> `{"ok": true, "bytes": <n>}`
 
-Several routes here still return `serde_json::Value` — the push routes, the
-continuity proxy, `DELETE /api/history/:id`, `DELETE /api/agent-tasks/:id`.
-The continuity ones are that way on purpose, because the shapes are
-ContextKeeper's. The rest are the standard above not yet applied.
+Several routes here still return `serde_json::Value` — the push routes,
+`DELETE /api/history/:id`, `DELETE /api/agent-tasks/:id`. These are the
+standard above not yet applied.
 
 ### Not covered here
 
@@ -1027,8 +967,6 @@ ContextKeeper's. The rest are the standard above not yet applied.
   and does not describe this process.
 - **The assistant's tool loop and threat model** — §6 of this file.
 - **Agent task scheduling and execution** — §7 of this file.
-- **ContextKeeper's own API.** Only the allow-listed subset above is proxied;
-  the sidecar's contract is the sidecar's.
 
 ---
 

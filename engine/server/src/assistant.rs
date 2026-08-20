@@ -1451,8 +1451,6 @@ mod tests {
             assistant_reasoning_effort: None,
             assistant_profiles: vec![],
             assistant_default_profile: None,
-            contextkeeper_url: None,
-            contextkeeper_token: None,
             public_url: None,
             vogt_core_url: None,
             vogt_import_root: None,

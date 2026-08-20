@@ -176,14 +176,6 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
 
-    extra_hosts:
-      # Not optional plumbing — a landmine if dropped (§10). This container
-      # runs Tailscale, which overwrites /etc/resolv.conf and breaks Docker's
-      # service-name resolution, so the ContextKeeper sidecar is reached
-      # through a pinned entry rather than through container DNS. An
-      # allocation naming this host, therefore defaulted.
-      - "contextkeeper:${CONTEXTKEEPER_IP:-100.92.54.45}"
-
     volumes:
       # The estate. ALL development happens here, and it is the same tree both
       # halves agree on: the engine's `workspace_root` defaults to
@@ -351,12 +343,6 @@ services:
       TAILSCALE_EXIT_NODE: "${MYDEVENV2_TAILSCALE_EXIT_NODE:-}"
 
       # ── optional surfaces, each of which degrades rather than fails ──────
-      # ContextKeeper continuity. Unset means /api/contextkeeper/* answers 404
-      # and every terminal reads as unprotected — which is also what an outage
-      # looks like, deliberately. The token is server-side only; the browser
-      # calls same-origin routes and the engine proxies.
-      CONTEXTKEEPER_URL: "${CONTEXTKEEPER_URL:-}"
-      CONTEXTKEEPER_API_TOKEN: "${CONTEXTKEEPER_API_TOKEN:-}"
       # FCM service-account JSON (single-line). Empty disables the FCM
       # transport; web-push still works for any browser subscription.
       MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON: "${MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON:-}"

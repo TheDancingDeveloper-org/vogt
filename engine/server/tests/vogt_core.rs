@@ -181,8 +181,6 @@ fn base_config() -> Config {
         assistant_reasoning_effort: None,
         assistant_profiles: vec![],
         assistant_default_profile: None,
-        contextkeeper_url: None,
-        contextkeeper_token: None,
         public_url: None,
         vogt_core_url: None,
         vogt_import_root: None,
@@ -783,43 +781,6 @@ async fn the_public_config_says_when_there_is_no_core() {
         "a client that must provoke a 503 to discover this cannot render an \
          honest absent state; it renders a tab that appears and then errors"
     );
-}
-
-// -- ContextKeeper's writes are session control (auth) ---------------------
-
-#[tokio::test]
-async fn approving_a_recovery_needs_the_sessions_capability() {
-    // Lives here rather than in `contextkeeper.rs` because what is asserted is
-    // the capability gate, not the sidecar: until this arm existed, any valid
-    // token could approve and launch a recovery — which starts a terminal —
-    // while every other write in this server was gated.
-    let base = boot(base_config()).await;
-    let refused = client()
-        .post(format!("{base}/api/contextkeeper/sessions/abc/approve"))
-        .headers(bearer(HISTORY_ONLY_TOKEN))
-        .json(&json!({}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
-
-    let launch = client()
-        .post(format!("{base}/api/contextkeeper/sessions/abc/launch"))
-        .headers(bearer(HISTORY_ONLY_TOKEN))
-        .json(&json!({}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(launch.status(), StatusCode::FORBIDDEN);
-
-    // A read stays open to a read-only token — the gate is about the act.
-    let read = client()
-        .get(format!("{base}/api/contextkeeper/health"))
-        .headers(bearer(HISTORY_ONLY_TOKEN))
-        .send()
-        .await
-        .unwrap();
-    assert_ne!(read.status(), StatusCode::FORBIDDEN);
 }
 
 // -- the core's changes arrive on this server's stream (FR-U10) ------------

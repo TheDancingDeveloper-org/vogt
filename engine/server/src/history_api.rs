@@ -61,8 +61,8 @@ fn default_retention_days() -> u32 {
 
 /// List archived sessions with pagination.
 ///
-/// A disabled history answers 404, not 500 — as the assistant and continuity
-/// routes already do when unprovisioned. `Internal` said the server was
+/// A disabled history answers 404, not 500 — as the assistant routes already
+/// do when unprovisioned. `Internal` said the server was
 /// broken when the truth was that a feature had not been turned on, and the
 /// difference matters to whoever is paged about it.
 pub async fn list_sessions(

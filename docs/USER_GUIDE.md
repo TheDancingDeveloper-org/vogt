@@ -422,7 +422,6 @@ truth.
 | **vogt-core** | Terminals, files, git, history, the assistant over sessions | Vogt surfaces report the outage by name; they do not render an empty backlog |
 | **the engine** | Every Vogt view, and the CLI/REST/MCP surfaces | Session controls disable with the reason stated |
 | **the assistant** | Everything else | The tab is absent, not broken |
-| **ContextKeeper** | Everything else | Terminals show as unprotected |
 
 A lost event stream is indicated and reconciles on reconnect. A stale view
 never presents itself as current — everything that aggregates says how old its

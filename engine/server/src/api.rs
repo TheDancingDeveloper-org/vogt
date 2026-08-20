@@ -15,27 +15,8 @@ use uuid::Uuid;
 
 use crate::{app::AppState, error::Result, pty::SessionSpec};
 
-/// Attach ContextKeeper's view of each terminal, when there is one.
-///
-/// This reads a cache the ContextKeeper runtime refreshes in the background, so
-/// a slow or dead sidecar costs a stale badge rather than a hung roster. With
-/// no ContextKeeper configured every summary is returned exactly as before.
-fn with_continuity(
-    state: &Arc<AppState>,
-    mut summaries: Vec<SessionSummary>,
-) -> Vec<SessionSummary> {
-    let Some(runtime) = state.contextkeeper.as_ref() else {
-        return summaries;
-    };
-    for summary in &mut summaries {
-        summary.continuity = runtime.continuity_for(&summary.id.to_string());
-    }
-    summaries
-}
-
 pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
-    let sessions = state.sessions.list();
-    Json(with_continuity(&state, sessions))
+    Json(state.sessions.list())
 }
 
 pub async fn create_session(
@@ -43,8 +24,6 @@ pub async fn create_session(
     Json(spec): Json<SessionSpec>,
 ) -> Result<Json<SessionSummary>> {
     let s = state.sessions.create(spec)?;
-    // A brand-new terminal has no agent session bound yet, and creating one
-    // must never wait on ContextKeeper, so this is deliberately unenriched.
     Ok(Json(s.summary()))
 }
 
@@ -54,11 +33,8 @@ pub async fn get_session(
 ) -> Result<Json<SessionDetail>> {
     let s = state.sessions.get(id)?;
     let (snap, pos) = s.snapshot();
-    let summary = with_continuity(&state, vec![s.summary()])
-        .pop()
-        .expect("one summary in, one summary out");
     Ok(Json(SessionDetail {
-        summary,
+        summary: s.summary(),
         scrollback_pos: pos,
         scrollback_base64: base64::engine::general_purpose::STANDARD.encode(&snap),
     }))

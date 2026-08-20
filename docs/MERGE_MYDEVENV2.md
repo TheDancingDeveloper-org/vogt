@@ -78,11 +78,11 @@ That is a requirements change, not drift, and should be written into
 
 | Aspect | State |
 |---|---|
-| Language / size | Rust/Axum server ~9.8k lines; Solid/Vite/TS PWA (Terminal, Editor+Monaco, FileTree, Git, History, Assistant, AgentTasks, Continuity, Gui-launch, CommandPalette, Settings); Capacitor 8 Android shell |
+| Language / size | Rust/Axum server ~9.8k lines; Solid/Vite/TS PWA (Terminal, Editor+Monaco, FileTree, Git, History, Assistant, AgentTasks, Gui-launch, CommandPalette, Settings); Capacitor 8 Android shell |
 | Sessions | Per-session PTY, ring-buffer scrollback, WS attach with snapshot replay, activity state machine (idle/running/waiting-for-input/errored), SSE event stream, session templates (command/cwd/env matched by repo name / path prefix) |
 | Agent tasks | Durable scheduled-agent registry (`manual` / `interval` / UTC `daily`), runs launch real PTY sessions through `SessionRegistry`, prompt + persistent context files, `MYDEVENV2_NOTIFY:` push hook. Command is user-supplied (codex/claude/anything) |
 | Assistant | Server-side OpenAI-compatible tool-use loop; tools: `list_sessions`, `read_session_tail`, `send_input` (confirmation-gated PendingAction, 120 s expiry, one at a time); PWA Assistant tab; STT on-device (APK push-to-talk), TTS via `speechSynthesis`. Off unless API key set. Threat model documented (`docs/ASSISTANT.md`) |
-| Other API | Files (read/write/op/download/tree/search), git (status/diff/log/branch/op), GUI process launch/stream, push (VAPID + FCM), history (persisted session logs + search index), ContextKeeper continuity proxy |
+| Other API | Files (read/write/op/download/tree/search), git (status/diff/log/branch/op), GUI process launch/stream, push (VAPID + FCM), history (persisted session logs + search index) |
 | Auth | Single primary token + extra scoped tokens with 8 capabilities (`sessions`, `filesystem-write`, `git-write`, `gui-control`, `agent-tasks-write`, `push-write`, `history-write`, `assistant`), per-token mutation rate limit |
 | Deployment | Docker on Node B via Komodo from `indexarr/ops` (`prod-mydevenv2` at 8910; `dev-mydevenv2` at 8911 per `uplift.md`), Woodpecker CI, Tailscale in-container, Caddy fronting, `main`→prod / `dev`→dev image streams |
 | Mobile | Capacitor shell loads the deployed PWA; APK built in CI, published to Forgejo `apk-latest`; STT plugin + `RECORD_AUDIO`; push via FCM |
@@ -373,7 +373,7 @@ the registry stores the path either way.
 ## 7. GUI uplift — Jira/Trello-grade on the Solid PWA
 
 The Solid PWA becomes the single front-end. Existing tabs (Terminal,
-Editor, Files, Git, History, Assistant, Tasks, Continuity) remain; vogt
+Editor, Files, Git, History, Assistant, Tasks) remain; vogt
 surfaces are added as new top-level routes sharing the shell, command
 palette, settings, and push plumbing.
 
