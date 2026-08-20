@@ -97,7 +97,8 @@ import {
   createPlaceMetrics,
   type PlaceMetric,
 } from "./placeMetrics";
-import { onVogtLive } from "./viewAge";
+import { createNow, formatAgo, onVogtLive } from "./viewAge";
+import { railSections, setRailSection } from "./railSections";
 
 // -- what the first screen does not have to carry (NFR-S5, #104) -----------
 //
@@ -270,6 +271,26 @@ function activityLabel(s: ActivityState, exit: number | null): string {
   }
 }
 
+/** How long a session has held its current activity, from the one timestamp
+ *  the engine actually reports. Absent on an older engine — omitted rather
+ *  than guessed (rail-spec.md's own withdrawn "node-b · actor:tim" line is
+ *  the reminder of what inventing a value here would repeat). */
+function sessionActivityAge(s: SessionSummary, now: number): string | null {
+  if (!s.activity_changed_at) return null;
+  const changed = Date.parse(s.activity_changed_at);
+  if (Number.isNaN(changed)) return null;
+  return formatAgo(now - changed);
+}
+
+/** The rail's session-row state word, beside the dot (rail-spec.md B2):
+ *  "waiting for input · 40s", "running · 6m". Colour is never the only
+ *  signal, so this line exists whether or not the age is known. */
+function sessionStateWord(s: SessionSummary, now: number): string {
+  const label = activityLabel(s.activity, s.exit_code);
+  const age = sessionActivityAge(s, now);
+  return age ? `${label} · ${age}` : label;
+}
+
 /**
  * Where each tab was last seen, including its query string.
  *
@@ -347,6 +368,40 @@ const App: Component = () => {
     value: waitingSessions(),
     state: sessionMetric().state,
   });
+  const railNow = createNow();
+  const [openMenuId, setOpenMenuId] = createSignal<string | null>(null);
+  const waitingSessionList = () =>
+    sessionsStore.ready
+      ? sessionsStore.order
+          .map((id) => sessionsStore.sessions[id])
+          .filter((s): s is SessionSummary => Boolean(s) && s!.activity === "waiting-for-input")
+      : [];
+
+  /** rail-spec.md B1: at most one card, outage wins ties, "running" never
+   *  earns one. It is a pointer to WaitingSessionCard on Sessions, never a
+   *  second copy of it — so there is nothing here that sends a keystroke. */
+  const railAttention = (): { href: string; outage: boolean; title: string; detail: string } | null => {
+    const outage = sessionMetric().state === "unavailable" || sessionMetric().state === "stale";
+    if (outage) {
+      return {
+        href: "#/sessions",
+        outage: true,
+        title: "Engine unavailable",
+        detail: sessionsError() || "Vogt cannot reach the session engine right now.",
+      };
+    }
+    const waiting = waitingSessionList();
+    const first = waiting[0];
+    if (!first) return null;
+    const cwdTail = first.cwd ? first.cwd.split("/").filter(Boolean).pop() : null;
+    const age = sessionActivityAge(first, railNow());
+    return {
+      href: waiting.length === 1 ? `#/t/${first.id}` : "#/sessions",
+      outage: false,
+      title: `${waiting.length} session${waiting.length === 1 ? "" : "s"} waiting`,
+      detail: [first.name, cwdTail, age].filter(Boolean).join(" · "),
+    };
+  };
 
   const openSettings = () => {
     const here = `${location.pathname}${location.search}`;
@@ -1045,6 +1100,24 @@ const App: Component = () => {
             </button>
           </div>
           <button type="button" class="rail-go-to" onClick={() => setCommandPaletteOpen(true)}>Go to…</button>
+          {/* B1: a pointer, not a second WaitingSession. Outage wins ties over
+              a waiting session; "running" never earns a card. Click routes to
+              the one waiting session's own terminal, or to Sessions when
+              there is more than one or none to single out. */}
+          <Show when={railAttention()}>
+            {(attention) => (
+              <a
+                href={attention().href}
+                class={`rail-attention${attention().outage ? " rail-attention--outage" : ""}`}
+              >
+                <span class="rail-attention-dot" aria-hidden="true" />
+                <span class="rail-attention-body">
+                  <span class="rail-attention-title">{attention().title}</span>
+                  <span class="rail-attention-detail">{attention().detail}</span>
+                </span>
+              </a>
+            )}
+          </Show>
           <nav class="places-nav">
             <div class="places-group">
               <span class="places-group-label">Work</span>
@@ -1074,7 +1147,17 @@ const App: Component = () => {
             </div>
           </nav>
           <div class="places-rail-session-area">
-            <div class="places-section-label places-section-label--counted"><span>Running</span><PlaceCount metric={sessionMetric()} label="running sessions" /></div>
+            <button
+              type="button"
+              class="places-section-toggle places-section-label places-section-label--counted"
+              aria-expanded={railSections.running}
+              onClick={() => setRailSection("running", !railSections.running)}
+            >
+              <span class="places-section-caret" aria-hidden="true">{railSections.running ? "▾" : "▸"}</span>
+              <span>Running</span>
+              <PlaceCount metric={sessionMetric()} label="running sessions" />
+            </button>
+            <div hidden={!railSections.running}>
             <For
               each={sessionsStore.order
                 .map((id) => sessionsStore.sessions[id])
@@ -1086,6 +1169,7 @@ const App: Component = () => {
               fallback={<div class="empty">No sessions yet.</div>}
             >
               {(s) => (
+                <>
                 <div
                   role="link"
                   tabIndex={0}
@@ -1093,6 +1177,7 @@ const App: Component = () => {
                   aria-label={`${s.name}, ${activityLabel(s.activity, s.exit_code)}`}
                   class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""} ${s.activity === "waiting-for-input" ? "waiting" : ""}`}
                   onClick={() => {
+                    setOpenMenuId(null);
                     openTerminalTab(s.id, s.name);
                     navigate(`/t/${s.id}`);
                   }}
@@ -1100,60 +1185,112 @@ const App: Component = () => {
                     if (event.target !== event.currentTarget) return;
                     if (event.key !== "Enter" && event.key !== " ") return;
                     event.preventDefault();
+                    setOpenMenuId(null);
                     openTerminalTab(s.id, s.name);
                     navigate(`/t/${s.id}`);
                   }}
                   onContextMenu={(e) => {
+                    // rail-spec.md B2: right-click widens today's rename-only
+                    // shortcut into the same menu the `···` trigger opens.
                     e.preventDefault();
-                    void onRenameSession(s);
+                    setOpenMenuId(s.id);
                   }}
                   title={`${s.name}\ncwd: ${s.cwd}`}
                 >
                   <span class={`activity-dot ${activityClass(s)}`} title={activityLabel(s.activity, s.exit_code)} />
                   <div class="session-row-body">
                     <span class="name">{s.name}</span>
+                    <span class={`state${s.activity === "waiting-for-input" ? " state--waiting" : ""}`}>
+                      {sessionStateWord(s, railNow())}
+                    </span>
                     <Show when={s.cwd}><span class="cwd">{s.cwd}</span></Show>
                   </div>
                   <button
                     type="button"
-                    class="row-btn"
-                    aria-label={isBookmarked(s.id) ? `Remove bookmark from ${s.name}` : `Bookmark ${s.name}`}
-                    title={isBookmarked(s.id) ? "Remove bookmark" : "Bookmark"}
+                    class="row-menu"
+                    aria-haspopup="menu"
+                    aria-expanded={openMenuId() === s.id}
+                    aria-label={`More actions for ${s.name}`}
                     onClick={(e) => {
                       e.stopPropagation();
+                      setOpenMenuId((current) => (current === s.id ? null : s.id));
+                    }}
+                  >···</button>
+                </div>
+                <div
+                  class="row-menu-list"
+                  role="menu"
+                  aria-label={`Actions for ${s.name}`}
+                  hidden={openMenuId() !== s.id}
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setOpenMenuId(null);
+                      openTerminalTab(s.id, s.name);
+                      navigate(`/t/${s.id}`);
+                    }}
+                  >Attach</button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-label={isBookmarked(s.id) ? `Remove bookmark from ${s.name}` : `Bookmark ${s.name}`}
+                    onClick={() => {
+                      setOpenMenuId(null);
                       toggleBookmark(s.id);
                     }}
-                  >{isBookmarked(s.id) ? "★" : "☆"}</button>
+                  >{isBookmarked(s.id) ? "Remove bookmark" : "Bookmark"}</button>
                   <button
                     type="button"
-                    class="row-btn"
+                    role="menuitem"
                     aria-label={`Duplicate ${s.name}`}
-                    title="Duplicate (same cwd)"
-                    onClick={(e) => {
-                      e.stopPropagation();
+                    onClick={() => {
+                      setOpenMenuId(null);
                       void onDuplicateSession(s);
                     }}
-                  >⧉</button>
+                  >Duplicate (same cwd)</button>
                   <button
                     type="button"
-                    class="close"
+                    role="menuitem"
+                    onClick={() => {
+                      setOpenMenuId(null);
+                      void onRenameSession(s);
+                    }}
+                  >Rename</button>
+                  <div class="row-menu-list-sep" role="separator" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="danger"
                     aria-label={`Close ${s.name}`}
-                    title="Kill & remove"
-                    onClick={(e) => {
-                      e.stopPropagation();
+                    onClick={() => {
+                      setOpenMenuId(null);
                       void onCloseSession(s);
                     }}
-                  >×</button>
+                  >Kill &amp; remove</button>
                 </div>
+                </>
               )}
             </For>
+            </div>
           </div>
           <Show when={recentPlacesStore.places.length > 0}>
             <div class="places-recent" aria-label="Recent places">
-              <div class="places-section-label">Recent places</div>
+              <button
+                type="button"
+                class="places-section-toggle places-section-label"
+                aria-expanded={railSections.recent}
+                onClick={() => setRailSection("recent", !railSections.recent)}
+              >
+                <span class="places-section-caret" aria-hidden="true">{railSections.recent ? "▾" : "▸"}</span>
+                <span>Recent places</span>
+              </button>
+              <div hidden={!railSections.recent}>
               <For each={recentPlacesStore.places.filter((place) => place.path !== "/gui" || guiEnabled()).slice(0, 6)}>
                 {(place) => <a href={`#${place.path}`}>{place.label}</a>}
               </For>
+              </div>
             </div>
           </Show>
           <FileTree
