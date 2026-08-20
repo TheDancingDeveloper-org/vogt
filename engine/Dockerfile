@@ -416,27 +416,32 @@ ARG INSTALL_THECLAWBAY
 # workspace-write/network restrictions for every repo under ~/Working.
 #
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
-# `@anthropic-ai/claude-code` is pinned, and the pin is load-bearing.
-# 2.1.237 (published 2026-08-19T23:57Z) ships `bin/claude.exe` as a shell stub
-# that prints "claude native binary not installed" instead of the ELF launcher
-# every prior release carried, so `docker run --entrypoint claude` fails with
-# `exec format error`. Reproduced in a clean node:22-bookworm container:
-# 2.1.235 and 2.1.236 are ELF and work, 2.1.237 is text and does not. An
-# unpinned global install means somebody else's bad publish is this image's
-# broken build — the `update_automation_gap` this product reports on other
-# people's repositories (FR-D6). Renovate can move this line.
-#
 # One `npm install -g` for whichever packages are wanted, not one per
 # package: a second global install into the same prefix reconciles the whole
 # tree for no benefit. This was first written as a fix for the failure above
 # and did not fix it — the cause was upstream, not the install shape — but
 # one reconciliation is still better than two, so it stays.
+# Every one of these is pinned, and Renovate moves them (see the
+# customManager in .github/renovate.json5, which reads the annotations).
+# `latest` here means a stranger's publish decides what this image contains:
+# 2.1.237 shipped `bin/claude.exe` as a shell stub and turned a green build
+# red with no change on our side. It also means two builds of the same commit
+# are different images, which defeats a commit-identified `dev-<sha>`
+# (NFR-C3). This is the `update_automation_gap` the product reports on other
+# people's repositories (FR-D6).
+# renovate: datasource=npm depName=@openai/codex
+ARG CODEX_VERSION=0.148.0
+# renovate: datasource=npm depName=@anthropic-ai/claude-code
+ARG CLAUDE_CODE_VERSION=2.1.236
+# renovate: datasource=npm depName=theclawbay
+ARG THECLAWBAY_VERSION=0.6.13
 RUN pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        pkgs="$pkgs @openai/codex @anthropic-ai/claude-code@2.1.236"; \
+        pkgs="$pkgs @openai/codex@${CODEX_VERSION}"; \
+        pkgs="$pkgs @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
     fi; \
     if [ "$INSTALL_THECLAWBAY" = "true" ]; then \
-        pkgs="$pkgs theclawbay"; \
+        pkgs="$pkgs theclawbay@${THECLAWBAY_VERSION}"; \
     fi; \
     if [ -n "$pkgs" ]; then \
         sudo npm install -g --prefix=/usr/local $pkgs; \

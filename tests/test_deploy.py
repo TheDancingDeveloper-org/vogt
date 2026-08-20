@@ -1338,3 +1338,24 @@ def test_two_instances_of_the_merged_stack_can_coexist(stack: str) -> None:
         "the core's volume is named explicitly to escape the compose project "
         "prefix, so it must be overridable or two instances share a database"
     )
+
+
+def test_the_engine_pins_every_npm_global_it_installs() -> None:
+    """A `latest` global install is somebody else's publish deciding this image.
+
+    `@anthropic-ai/claude-code@2.1.237` shipped `bin/claude.exe` as a shell
+    stub rather than the ELF launcher, and turned a green build red with no
+    change on our side. Unpinned also means two builds of the same commit are
+    different images, which defeats a commit-identified `dev-<sha>` (NFR-C3).
+    """
+    text = (WORKFLOWS.parent.parent / "engine" / "Dockerfile").read_text("utf-8")
+    installs = [
+        line for line in text.splitlines() if "pkgs=" in line and "$pkgs" in line
+    ]
+    assert installs, "the npm global install shape changed; update this test"
+    for line in installs:
+        for token in line.split():
+            if token.startswith(("@openai/", "@anthropic-ai/", "theclawbay")):
+                assert "@${" in token or re.search(r"@\d", token), (
+                    f"unpinned npm global: {token}"
+                )
