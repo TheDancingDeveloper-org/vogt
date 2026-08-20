@@ -175,6 +175,7 @@ complete, supported product.
 | **MCP** | running `vogt-mcp`, or `/mcp` on a running server | Agents cannot connect; nothing else changes |
 | **Remote MCP** | `vogt-mcp-remote` with `VOGT_URL` and `VOGT_TOKEN_FILE` | As above |
 | **Session engine** | `engine_url`, `engine_token_file`, `engine_state_dir` | `session.*` operations report that no engine is configured; nothing else is affected |
+| **Engine integrations** (Cadastre, assistant, GUI stream, push, sccache, agent-auth) | the session engine's own configuration | Documented in [`ENGINE.md`](ENGINE.md) §9 — each is absent by default and says so; several carry estate-address defaults a public operator must change |
 
 Tokens are always given as a *file path*, never as a value in the
 environment: a token in the environment is a token in every `docker inspect`.

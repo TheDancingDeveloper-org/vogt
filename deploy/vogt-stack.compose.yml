@@ -355,6 +355,8 @@ services:
       START_SWAY: "${START_SWAY:-0}"
       GUI_STREAM_URL: "${GUI_STREAM_URL:-}"
       # The cargo cache lives on the home bind mount; sccache hits Redis here.
+      # Estate default: a shared Redis a public operator cannot reach. Change or
+      # unset it — an absent/unreachable sccache costs build speed, nothing else.
       SCCACHE_REDIS: "${SCCACHE_REDIS:-redis://100.92.54.45:6380}"
 
     healthcheck:

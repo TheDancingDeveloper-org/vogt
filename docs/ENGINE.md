@@ -1380,3 +1380,28 @@ that is *owed* carries a requirement ID; each one that was *withdrawn* is in
 - **Nothing here is a second backlog.** The engine's outstanding work lives in
   `REQUIREMENTS.md` §7 and `ROADMAP.md`, because an item without a requirement
   is nobody's plan.
+
+## 9. Optional integrations — what each does when absent
+
+The engine ships client code for a number of services this estate runs. Every
+one of them is **absent by default**, and its absence is a reported, honest
+state rather than a fault (NFR-O5) — an engine with all of them off is a
+complete product. A public reader inherits the clients; this table is so they
+are also told what each one costs when the service behind it is not there.
+
+Several carry an **estate-address default** — a value that points at *this*
+estate and that a public operator must change or unset. Those are marked.
+
+| Integration | Turned on by | What its absence means |
+|---|---|---|
+| **Cadastre** (MCP bridge) | `CADASTRE_MCP_ENABLED=1` + `CADASTRE_MCP_URL` (§4), token brokered by `agent-auth.sh` | Agents in a session cannot reach Cadastre; every other MCP server and all core function is unchanged. A separate product, never assumed present. **`CADASTRE_MCP_URL` defaults to an estate address.** |
+| **Assistant provider** | `MYDEVENV2_ASSISTANT_API_KEY` (+ `_BASE_URL`, `_MODEL`) (§6) | The assistant routes answer 404 and the PWA hides its tab (FR-T6). A key with no `_BASE_URL` is a *startup error*, not a silent default (r20). |
+| **theclawbay** | `INSTALL_THECLAWBAY=1` build arg | A provider-specific agent CLI is simply not installed; sessions run every other tool. Opt-in since r20. |
+| **FCM / web push** | `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` | The FCM (native) transport is disabled; browser web-push still works for any subscription. |
+| **GUI streaming** | `GUI_STREAM_URL` (+ `START_SWAY`) | `/readyz` reports `gui: disabled` and the GUI surface's affordances are withdrawn with a stated reason. Production runs with it off and unverified (FR-E10). |
+| **sccache over Redis** | `SCCACHE_REDIS` | Rust builds in a session fall back to no shared cache — slower, never broken. **Defaults to an estate Redis (`redis://100.92.54.45:6380`); a public operator must change or unset it.** |
+| **Agent service auth** (Infisical, Komodo, Woodpecker, Forgejo, GitHub) | `engine/deploy/agent-auth.sh` + `INFISICAL_*` | **Estate tooling** — see the script's own header. It brokers this estate's service credentials into a session on demand. Absent, sessions run without those credentials pre-loaded; nothing in the core product depends on it. |
+
+The core product's own optional integrations — GitHub collection, MCP, remote
+MCP, and the session engine itself — are in
+[`CUSTOMISATION.md`](CUSTOMISATION.md), which points here for the engine's.
