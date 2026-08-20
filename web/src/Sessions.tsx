@@ -192,7 +192,15 @@ const Sessions: Component<Props> = (props) => {
           <h1>Sessions</h1>
           </>
         )}
-        honestyClass={sessionsError() ? "surface-header-honesty--outage" : isConnected() ? "surface-header-honesty--fresh" : "surface-header-honesty--stale"}
+        honestyClass={
+          !sessionsStore.ready && !sessionsError()
+            ? "surface-header-honesty--never"
+            : sessionsError()
+              ? "surface-header-honesty--outage"
+              : isConnected()
+                ? "surface-header-honesty--fresh"
+                : "surface-header-honesty--stale"
+        }
         honesty={(
           <div class="sessions-header-honesty" aria-live="polite">
             <p>
@@ -201,8 +209,8 @@ const Sessions: Component<Props> = (props) => {
                 : sessionsError()
                   ? `Sessions unavailable — ${sessionsError()}`
                   : isConnected()
-                    ? `${sessions().length} live · sorted by attention`
-                    : `${sessions().length} from the last answer · stream disconnected; may be stale`}
+                    ? <><strong>{sessions().length} live</strong> · sorted by attention</>
+                    : <><strong>{sessions().length} from the last answer</strong> · stream disconnected; may be stale</>}
             </p>
             <span class={`connection-state ${isConnected() ? "connected" : "disconnected"}`}>
               {isConnected() ? "Connected" : "Disconnected"}

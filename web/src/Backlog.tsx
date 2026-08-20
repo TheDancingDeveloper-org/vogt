@@ -58,7 +58,7 @@ import {
   type RankedView,
 } from "./vogtApi";
 import { openWorkItemTab } from "./tabs";
-import { ViewAgeBadge, createLoadStamp, createViewAge } from "./viewAge";
+import { ViewAgeBadge, createLoadStamp, createViewAge, honestyToneClass } from "./viewAge";
 import { MeasuredWindow } from "./measuredWindow";
 import SurfaceHeader from "./SurfaceHeader";
 import { ProgressiveFilters, SavedLenses } from "./ProgressiveFilters";
@@ -1247,33 +1247,19 @@ const Backlog: Component<Props> = (props) => {
         class="vogt-backlog-header"
         label="Backlog header"
         title={<h1>Backlog</h1>}
-        honestyClass={`surface-header-honesty--${freshness().status === "fresh" ? "fresh" : freshness().status === "outage" ? "outage" : "stale"}`}
+        honestyClass={honestyToneClass(viewAge().tone)}
         honesty={(
           <div class="vogt-backlog-honesty" aria-live="polite">
-          <ViewAgeBadge
+          <strong><ViewAgeBadge
             age={viewAge()}
             class="vogt-backlog-age"
-            title="How long ago this page last got an answer from Vogt — not how old the evidence behind that answer is, which is the line below"
-          />
-            <p class={`vogt-backlog-freshness ${freshness().status}`}>
-              {freshness().text}
-              <Show when={freshness().collectors.length}>
-                <span class="vogt-backlog-collectors">
-                  <For each={freshness().collectors}>
-                    {([name, age]) => (
-                      <span class="vogt-backlog-collector">
-                        {name}: {age}
-                      </span>
-                    )}
-                  </For>
-                </span>
-              </Show>
-            </p>
+            title="How long ago this page last got an answer from Vogt — not how old the evidence behind that answer is, which the detail below breaks down"
+          /></strong>
           </div>
         )}
         controls={(
           <>
-            <div class="surface-header-tabs vogt-backlog-views" role="group" aria-label="Ranked views">
+            <div class="vogt-backlog-views surface-header-tabs" role="group" aria-label="Ranked views">
               <For each={["backlog", "bugs"] as ViewName[]}>
                 {(name) => (
                   <button
@@ -1296,6 +1282,25 @@ const Backlog: Component<Props> = (props) => {
           <button type="button" onClick={openQuickCreate}>
             Quick create
           </button>
+        )}
+        detail={(
+          <details class="surface-header-disclosure">
+            <summary>How fresh the evidence behind this ranking is</summary>
+            <p class={`vogt-backlog-freshness ${freshness().status}`}>
+              {freshness().text}
+              <Show when={freshness().collectors.length}>
+                <span class="vogt-backlog-collectors">
+                  <For each={freshness().collectors}>
+                    {([name, age]) => (
+                      <span class="vogt-backlog-collector">
+                        {name}: {age}
+                      </span>
+                    )}
+                  </For>
+                </span>
+              </Show>
+            </p>
+          </details>
         )}
       />
 

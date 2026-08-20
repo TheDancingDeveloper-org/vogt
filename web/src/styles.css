@@ -1259,61 +1259,6 @@ textarea {
   font-size: 11px;
   color: var(--fg-muted);
 }
-.session-row .row-btn,
-.session-row .close {
-  flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 3px;
-  font-size: 13px;
-  color: var(--fg-muted);
-  opacity: 0;
-  transition: opacity 120ms, background 120ms;
-  touch-action: manipulation;
-}
-.session-row .row-menu {
-  flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  color: var(--fg-muted);
-  background: transparent;
-  border: 1px solid var(--bd);
-  border-radius: 5px;
-  opacity: 1;
-  font-size: 12px;
-  line-height: 1;
-}
-.session-row .row-menu:hover { color: var(--fg); background: rgba(255,255,255,.08); }
-.session-row .state { color: var(--fg-muted); font-size: 10px; line-height: 1.6; }
-@media (pointer: coarse) { .session-row .row-menu { width: 44px; height: 44px; } }
-.session-row:hover .row-btn,
-.session-row:hover .close,
-.session-row.active .row-btn,
-.session-row.active .close,
-.session-row:focus-within .row-btn,
-.session-row:focus-within .close {
-  opacity: 0.8;
-}
-.session-row .row-btn:hover,
-.session-row .close:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--fg);
-  opacity: 1;
-}
-@media (pointer: coarse) {
-  .session-row .row-btn,
-  .session-row .close {
-    opacity: 0.7;
-    width: 28px;
-    height: 28px;
-    font-size: 16px;
-  }
-}
-
 @media (max-width: 768px) {
   .connection-banner {
     padding-right: max(12px, var(--safe-right));
@@ -8446,29 +8391,266 @@ textarea {
   font-size: 12px;
 }
 
-/* Surface/rail handoff delta: preserve the shipped header grammar while
-   making freshness, the single action, and segmented view tabs legible. */
-.surface-header-honesty--fresh { padding-left: 8px; border-left: 3px solid var(--activity-done); }
-.surface-header-honesty--partial,
-.surface-header-honesty--stale { padding-left: 8px; border-left: 3px solid var(--activity-running); }
-.surface-header-honesty--outage,
-.surface-header-honesty--never { padding-left: 8px; border-left: 3px solid var(--activity-waiting); }
-.surface-header-honesty strong { color: var(--fg); font-weight: 600; }
-.surface-header-action button { color: #08111c; background: var(--accent); border-color: var(--accent); font-weight: 600; }
-.surface-header-action button:disabled { color: var(--fg-muted); background: transparent; border-color: var(--bd); font-weight: 400; }
-.surface-header-tabs { display: flex; gap: 4px; padding: 2px; border: 1px solid var(--bd); border-radius: 8px; background: var(--bg); }
-.surface-header-controls .surface-header-tabs button { min-height: 26px; padding: 0 12px; border: 0; border-radius: 6px; font-size: 12px; }
-.surface-header-controls .surface-header-tabs button[aria-pressed="true"] { color: #08111c; background: var(--accent); font-weight: 600; }
-@media (pointer: coarse) { .surface-header-controls .surface-header-tabs button { min-height: 44px; } }
+/* ============================================================================
+   Delta: surface header (5a) + places rail (5b), additive over the shipped
+   `.surface-header*` (b424733/d6de00b/1bcd0ef) and `.places-rail` blocks.
+   design_handoff_surface_header_and_rail/rail-spec.md is the source of truth.
+   ========================================================================== */
 
-/* Places rail handoff delta. */
-.rail-attention { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--activity-waiting); border-left-width: 3px; border-radius: 8px; background: rgba(248,81,73,.08); color: var(--fg); text-decoration: none; }
-.rail-attention--outage { border-color: var(--activity-errored); background: rgba(255,123,114,.08); }
-.rail-attention-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--activity-waiting); }
-.rail-attention--outage .rail-attention-dot { background: var(--activity-errored); }
-.rail-attention-body { min-width: 0; display: flex; flex-direction: column; }
-.rail-attention-title { font-size: 13px; line-height: 1.4; }
-.rail-attention-detail { color: var(--fg-muted); font-size: 11px; line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.session-menu { display: flex; flex-direction: column; gap: 6px; min-width: 240px; }
-.session-menu button { min-height: 40px; text-align: left; }
-.session-menu hr { width: 100%; border: 0; border-top: 1px solid var(--bd); }
+/* == 5a — surface header ================================================== *
+ * CSS only. No change to the header's tested slot order (title, honesty,
+ * spacer, controls, action, detail). Three deltas: honesty carries tone, the
+ * action slot is the one accent control, view tabs are a segmented group.
+ * ========================================================================= */
+
+/* 1. Honesty carries its tone. One sentence, one colour, above the fold; the
+      second and third freshness statements belong in the `detail` slot. The
+      state class is set by the surface — the shared component stays content-
+      free about what honesty means, which is the point of the slot. */
+.surface-header-honesty {
+  padding-left: 8px;
+  border-left: 3px solid var(--bd-strong);
+}
+.surface-header-honesty--fresh   { border-left-color: var(--activity-done); }
+.surface-header-honesty--partial,
+.surface-header-honesty--stale   { border-left-color: var(--activity-running); }
+.surface-header-honesty--outage,
+.surface-header-honesty--never   { border-left-color: var(--activity-waiting); }
+
+/* The lead clause is the answer's age; the rest are qualifiers. */
+.surface-header-honesty strong {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* 2. Exactly one accent control per header, and it is always the `action`
+      slot. Nothing in `controls` may take this treatment. */
+.surface-header-action button {
+  color: #08111c;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.surface-header-action button:hover:not(:disabled) {
+  background: #79b8ff;
+}
+/* Disabled keeps the shape and loses the claim: a blocked write still says
+   where it is, it just does not look pressable. */
+.surface-header-action button:disabled {
+  color: var(--fg-muted);
+  background: transparent;
+  border-color: var(--bd);
+  font-weight: 400;
+}
+
+/* 3. View tabs are a group, not loose buttons. The 26px tab is the one control
+      allowed under the header's 32px floor, because the group's own box clears
+      it (2px inset + 26px + 2px = 30px, and the shell sits on the 32px line). */
+.surface-header-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 2px;
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.surface-header-controls .surface-header-tabs button {
+  min-height: 26px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.surface-header-controls .surface-header-tabs button[aria-pressed="true"] {
+  color: #08111c;
+  background: var(--accent);
+  font-weight: 600;
+}
+@media (pointer: coarse) {
+  /* The 44px floor applies to the group's members too — it is an
+     accessibility requirement, not a header-consistency preference. */
+  .surface-header-controls .surface-header-tabs button {
+    min-height: 44px;
+  }
+}
+
+/* == 5b — places rail ===================================================== *
+ * Additive to the shipped rail. The rail is the scroller (`.places-rail`
+ * overflow-y:auto); every block below stays flex:0 0 auto so that stays true.
+ * ========================================================================= */
+
+/* 1. The attention card. Rendered only for a waiting session or an engine
+      outage; at most one; outage wins. `running` never earns a card.
+      It is a POINTER: it routes to Sessions, where WaitingSessionCard shows
+      the prompt tail and offers the keystrokes. It must not send input. */
+.rail-attention {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--activity-waiting);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: rgba(248, 81, 73, 0.08);
+  color: var(--fg);
+  text-decoration: none;
+}
+.rail-attention--outage {
+  border-color: var(--activity-errored);
+  background: rgba(255, 123, 114, 0.08);
+}
+.rail-attention-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--activity-waiting);
+  box-shadow: 0 0 6px var(--activity-waiting);
+  animation: pulse 0.7s ease-in-out infinite;
+}
+.rail-attention--outage .rail-attention-dot {
+  background: var(--activity-errored);
+  box-shadow: 0 0 6px var(--activity-errored);
+  animation: none;
+}
+.rail-attention-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.rail-attention-title {
+  font-size: 13px;
+  line-height: 1.4;
+}
+/* 1.6 at 10-11px, not 1.35: a line box shorter than the glyph box clips
+   descenders once the row is height-constrained. */
+.rail-attention-detail {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 2. One always-visible overflow control per session row, replacing the three
+      hover-revealed .row-btn/.close targets. Delete the `opacity: 0` +
+      `:hover`/`:focus-within` reveal block AND its `pointer: coarse` override
+      (28px is under the 44px floor the rest of the app keeps). A control a
+      touch user cannot see is a control they do not have. */
+.session-row .row-menu {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid var(--bd);
+  border-radius: 5px;
+  opacity: 1;
+}
+.session-row .row-menu:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.08);
+}
+@media (pointer: coarse) {
+  .session-row .row-menu {
+    width: 32px;
+    height: 32px;
+  }
+}
+/* Inline, not a floating popover: the rail scrolls, and a `position:
+   absolute` menu would either clip against that overflow or need portal
+   rendering to escape it. `.tree-actions` already answers this the same way
+   for the file tree's own `···`. */
+.row-menu-list {
+  display: grid;
+  gap: 3px;
+  margin: 2px 10px 6px 32px;
+  padding: 5px;
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+  background: var(--bg);
+}
+.row-menu-list button {
+  min-height: 28px;
+  padding: 4px 6px;
+  text-align: left;
+  font-size: 11px;
+  color: var(--fg);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+}
+.row-menu-list button:hover,
+.row-menu-list button:focus-visible {
+  background: rgba(88, 166, 255, 0.12);
+}
+.row-menu-list button.danger {
+  color: var(--activity-errored);
+}
+.row-menu-list-sep {
+  margin: 3px 2px;
+  border-top: 1px solid var(--bd);
+}
+@media (pointer: coarse) {
+  .row-menu-list button {
+    min-height: 44px;
+  }
+}
+/* The state word beside the dot. Colour is never the only signal. */
+.session-row .state {
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+}
+.session-row .state--waiting {
+  color: var(--activity-waiting);
+}
+
+/* 3. Section labels become disclosures. `.places-section-label` keeps its
+      typography; this is the button form of it. Keep the existing
+      `.places-section-label--counted` markup (and its .place-count) INSIDE the
+      button so shell.test.tsx's aria-label lookups still resolve. State lives
+      in localStorage `mydevenv2.rail.sections.v1`; Files defaults collapsed. */
+.places-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0 8px 4px;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  background: transparent;
+  border: none;
+}
+.places-section-toggle:hover {
+  color: var(--fg);
+}
+.places-section-caret {
+  color: var(--bd-strong);
+}
+.places-section-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+}
+@media (pointer: coarse) {
+  .places-section-toggle {
+    min-height: 44px;
+  }
+}

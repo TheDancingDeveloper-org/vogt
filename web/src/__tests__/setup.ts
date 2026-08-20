@@ -11,6 +11,7 @@ import { cleanup } from "@solidjs/testing-library";
 import { clearEditorDrafts } from "../editorDrafts";
 import { clearToolDrafts } from "../toolDrafts";
 import { clearPendingAction } from "../pendingAction";
+import { resetRailSections } from "../railSections";
 
 class StubResizeObserver implements ResizeObserver {
   observe(): void {}
@@ -61,6 +62,7 @@ afterEach(() => {
   clearEditorDrafts();
   clearToolDrafts();
   clearPendingAction();
+  resetRailSections();
 });
 
 // Unmount what the last test mounted.

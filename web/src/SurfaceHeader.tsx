@@ -21,6 +21,12 @@ import { createNarrow } from "./narrow";
 export interface SurfaceHeaderProps {
   title: JSX.Element;
   honesty?: JSX.Element;
+  /**
+   * Extra class on the honesty slot's own wrapper — `surface-header-honesty--
+   * fresh|partial|stale|outage|never` (rail-spec.md A1). The slot stays
+   * content-free about what tone means; this is the one thing about it the
+   * shared component knows.
+   */
   honestyClass?: string;
   controls?: JSX.Element;
   action?: JSX.Element;
@@ -57,7 +63,10 @@ export const SurfaceHeader: Component<SurfaceHeaderProps> = (props) => {
         {props.title}
       </div>
       <Show when={props.honesty !== undefined}>
-        <div class={`surface-header-honesty${props.honestyClass ? ` ${props.honestyClass}` : ""}`} data-surface-header-slot="honesty">
+        <div
+          class={`surface-header-honesty${props.honestyClass ? ` ${props.honestyClass}` : ""}`}
+          data-surface-header-slot="honesty"
+        >
           {props.honesty}
         </div>
       </Show>
