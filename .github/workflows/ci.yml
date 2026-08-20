@@ -434,13 +434,16 @@ jobs:
       # this having run first.
       #
       # `VOGT_ANDROID_SERVER_URL` has no default (FR-M1; see the comment in
-      # `mobile/capacitor.config.ts`), so it has to be named here. Loopback is
-      # the right value *for this job* and a wrong one for anything else: this
-      # step proves the shell assembles, exactly as the debug signing below
-      # proves nothing about distribution. The APK it uploads is a build
-      # artifact and points at nothing — installing it would show the offline
-      # page. A real APK is built by a release job that names a real front
-      # door.
+      # `mobile/capacitor.config.ts`), so it has to be named here. It is an
+      # exposure value (NFR-D2), so it is *not* hardcoded: the job reads the
+      # repo/environment variable `VOGT_ANDROID_SERVER_URL` and only falls back
+      # to loopback when that is unset. Unset, the artifact stays a build-proof
+      # that points at nothing (installing it shows the offline page). Set the
+      # variable to a real front door — e.g. `https://vogt-dev.sprooty.com` —
+      # and the same job publishes an APK that is actually installable and
+      # loads that Vogt. It stays debug-signed (below), so it is a sideload
+      # channel, not a store/release artifact; a signed release APK is still a
+      # separate, secret-gated job.
       #
       # `MYDEVENV2_ANDROID_APP_ID` is the non-prod identity (FR-M4). The
       # engine's Woodpecker pipeline was the only thing in the tree that ever
@@ -460,7 +463,7 @@ jobs:
       - name: capacitor sync
         working-directory: mobile
         env:
-          VOGT_ANDROID_SERVER_URL: http://127.0.0.1:8910
+          VOGT_ANDROID_SERVER_URL: ${{ vars.VOGT_ANDROID_SERVER_URL || 'http://127.0.0.1:8910' }}
           MYDEVENV2_ANDROID_APP_ID: "com.sprooty.mydevenv2.dev"
         run: npx cap sync android
 
