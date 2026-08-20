@@ -27,6 +27,13 @@ jobs:
         run: |
           set -euo pipefail
           bad=0
+          # Built from parts on purpose. The literal two-brace sequence is an
+          # Actions expression *anywhere* in a workflow file, including inside
+          # a `run:` body, and an unterminated one makes the whole workflow
+          # fail to start — a run with no jobs, no logs and a red X, which is
+          # how the first version of this gate was dead on arrival without
+          # anybody's dry run noticing.
+          expr_open='${'"{"
           while IFS=: read -r file number line; do
             case "$line" in
               *ubuntu-latest*|*self-hosted*) ;;
@@ -36,7 +43,7 @@ jobs:
                 ;;
             esac
             case "$line" in
-              *'${{'*)
+              *"$expr_open"*)
                 echo "::error file=$file,line=$number::dynamic runner selection is not allowed"
                 bad=1
                 ;;
