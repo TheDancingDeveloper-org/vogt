@@ -132,6 +132,14 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
+          # Stated rather than inherited. `latest=auto` is metadata-action's
+          # default, and it is the behaviour NFR-C3 requires — `latest` moves
+          # on a semver tag and on nothing else — but relying on a default
+          # means the rule lives in another project's source. `build.yml` says
+          # `latest=false` explicitly for the same reason; this is the other
+          # half of the same statement.
+          flavor: |
+            latest=auto
 
       # Built and *run* before it is pushed. v0.1.0 shipped an image whose
       # entrypoint did not exist — the venv was built at one path and copied
@@ -270,6 +278,14 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
+          # Stated rather than inherited. `latest=auto` is metadata-action's
+          # default, and it is the behaviour NFR-C3 requires — `latest` moves
+          # on a semver tag and on nothing else — but relying on a default
+          # means the rule lives in another project's source. `build.yml` says
+          # `latest=false` explicitly for the same reason; this is the other
+          # half of the same statement.
+          flavor: |
+            latest=auto
 
       - uses: docker/build-push-action@v6
         id: candidate
