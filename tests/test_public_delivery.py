@@ -203,6 +203,24 @@ def test_the_estate_overlay_wires_the_two_filesystem_couplings() -> None:
     )
 
 
+def test_the_estate_overlay_points_the_core_at_the_engine() -> None:
+    """#157: the split core reaches the engine by service name, no /etc/hosts pin.
+
+    The one-way DNS landmine is the engine's: it runs Tailscale and rewrites
+    its own resolv.conf, which is why it pins `vogt`. The core runs the vanilla
+    public image with Docker's resolver intact, so `engine` resolves without a
+    pin. The token is brokered as a file (FR-S7), never a value.
+    """
+    core = _without_comments(ESTATE_OVERLAY.read_text(encoding="utf-8")).split(
+        "  engine:"
+    )[0]
+    assert 'VOGT_ENGINE_URL: "http://engine:8910"' in core
+    assert "VOGT_ENGINE_TOKEN_FILE:" in core
+    assert not re.search(r"^\s+VOGT_ENGINE_TOKEN:", core, re.MULTILINE), (
+        "the engine token is brokered as a file, never a value"
+    )
+
+
 def test_the_estate_overlay_keeps_the_existing_core_volume() -> None:
     """The base's volume name is not the one the estate's data is in.
 

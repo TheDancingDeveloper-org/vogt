@@ -215,8 +215,15 @@ services:
     environment:
       # ── the engine (front door) ──────────────────────────────────────────
       MYDEVENV2_TOKEN: "${MYDEVENV2_TOKEN:?the front door's primary bearer token}"
-      # Optional scoped tokens. JSON array:
+      # Scoped front-door tokens. JSON array:
       # [{"name":"readonly","token":"...","capabilities":[]}]
+      #
+      # This is also where the core's own engine token is declared: one entry
+      # with capabilities ["sessions"] and nothing else, whose value is
+      # brokered to the core as `vogt_engine_token` below. Without it the core
+      # presents a token the engine does not know and every work-item session
+      # is refused — which is #157, where the core simply had no VOGT_ENGINE_URL
+      # to call at all.
       MYDEVENV2_EXTRA_TOKENS_JSON: "${MYDEVENV2_EXTRA_TOKENS_JSON:-}"
       MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE: "${MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE:-600}"
       # `0.0.0.0` here is the *container's* namespace, not the host's. Host
@@ -294,6 +301,22 @@ services:
       # engine owns. It must match the engine's `state_dir`, which the
       # header above pins to this same path and the home bind mount carries.
       VOGT_ENGINE_STATE_DIR: /home/sprooty/.local/share/mydevenv2
+      # Where the core reaches the engine to open a work item's coding session
+      # (FR-E1) — the M9–M12 capability this merge exists for. Loopback,
+      # because both halves share this container's namespace and the engine
+      # binds 8910 above. Unset, the `session.*` operations report "no engine
+      # configured" and a work item cannot open a session: honest-absence
+      # (FR-E9) working exactly as designed, in the one deployment that was
+      # never meant to have that absence. That absence — no VOGT_ENGINE_URL
+      # in any stack — is #157.
+      VOGT_ENGINE_URL: "http://127.0.0.1:8910"
+      # The token the core calls the engine with, brokered as a file (FR-S7),
+      # never a value. It carries only the engine's `sessions` capability: the
+      # core starts and stops terminals and has no business writing this pod's
+      # files. Its value is the `["sessions"]` entry in
+      # MYDEVENV2_EXTRA_TOKENS_JSON above; the `pre_deploy` hook writes it here
+      # exactly as it does vogt_core_token.
+      VOGT_ENGINE_TOKEN_FILE: /run/secrets/vogt_engine_token
       # Set, unlike the product default: without it the forge adapter is off,
       # so notifications never collect and a private repository cannot be
       # imported — silently, because forge subjects then read as "not
@@ -396,6 +419,7 @@ services:
     secrets:
       - github_token
       - vogt_core_token
+      - vogt_engine_token
 
     logging:
       driver: json-file
@@ -417,6 +441,12 @@ secrets:
     file: ./github-token
   vogt_core_token:
     file: ./vogt-core-token
+  # The core's engine token: the mirror of vogt_core_token, one direction the
+  # other. Legitimately empty on a first deploy, like the core token — the
+  # session path is simply off until the scoped token exists — so the
+  # pre_deploy hook does not `test -s` it.
+  vogt_engine_token:
+    file: ./vogt-engine-token
 
 volumes:
   # Named explicitly so it is not prefixed with the compose project, and
