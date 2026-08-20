@@ -195,7 +195,7 @@ pub struct Config {
     /// Defaults to $HOME/.local/share/mydevenv2.
     pub state_dir: std::path::PathBuf,
     /// FCM service-account JSON (the full contents, not a path). Sourced
-    /// from `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` env or config file. Empty
+    /// from `ENGINE_FCM_SERVICE_ACCOUNT_JSON` env or config file. Empty
     /// disables FCM push (web-push still works for browser subscriptions).
     pub fcm_service_account_json: Option<String>,
     /// VAPID `subject` (`mailto:` or `https:` URL). RFC 8292 requires this on
@@ -203,7 +203,7 @@ pub struct Config {
     pub vapid_subject: String,
     /// Comma-separated allow-list of origins for the CORS layer. Defaults to
     /// the production origin plus the local Vite dev origin. Override with
-    /// `MYDEVENV2_ALLOWED_ORIGINS` (comma-separated) or the config file.
+    /// `ENGINE_ALLOWED_ORIGINS` (comma-separated) or the config file.
     pub allowed_origins: Vec<String>,
     /// When enabled, default interactive sessions are started through the
     /// agent-auth helper so Forgejo/Woodpecker/GitHub/Komodo credentials are
@@ -214,7 +214,7 @@ pub struct Config {
     /// Session templates available for quick session creation.
     pub session_templates: Vec<SessionTemplate>,
     /// Bearer key for the assistant's LLM backend. Sourced from
-    /// `MYDEVENV2_ASSISTANT_API_KEY` env or config file. Empty disables the
+    /// `ENGINE_ASSISTANT_API_KEY` env or config file. Empty disables the
     /// assistant surface entirely (routes 404, PWA hides the tab).
     pub assistant_api_key: Option<String>,
     /// OpenAI-compatible base URL for the assistant backend.
@@ -348,7 +348,7 @@ pub fn load(
         .map_err(|e| ApiError::Config(format!("invalid bind {bind_str:?}: {e}")))?;
 
     let token = cli_token.or(from_file.token).ok_or_else(|| {
-        ApiError::Config("token required (MYDEVENV2_TOKEN env or config.token)".into())
+        ApiError::Config("token required (ENGINE_TOKEN env or config.token)".into())
     })?;
     if token.len() < 16 {
         return Err(ApiError::Config(
@@ -356,12 +356,12 @@ pub fn load(
         ));
     }
     let token_mutating_request_limit_per_minute =
-        parse_u32_env("MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE")?
+        parse_u32_env("ENGINE_MUTATING_REQUEST_LIMIT_PER_MINUTE")?
             .or(from_file.token_mutating_request_limit_per_minute)
             .unwrap_or(DEFAULT_MUTATING_REQUEST_LIMIT_PER_MINUTE);
 
     let mut extra_tokens = from_file.extra_tokens.unwrap_or_default();
-    if let Some(env_tokens) = parse_extra_tokens_env("MYDEVENV2_EXTRA_TOKENS_JSON")? {
+    if let Some(env_tokens) = parse_extra_tokens_env("ENGINE_EXTRA_TOKENS_JSON")? {
         extra_tokens.extend(env_tokens);
     }
     validate_extra_tokens(&token, &extra_tokens)?;
@@ -372,17 +372,17 @@ pub fn load(
     // already names it must not silently end up with two `openrouter`s, one of
     // which is never reachable.
     let mut assistant_profiles = from_file.assistant_profiles.unwrap_or_default();
-    if let Some(env_profiles) = parse_assistant_profiles_env("MYDEVENV2_ASSISTANT_PROFILES_JSON")? {
+    if let Some(env_profiles) = parse_assistant_profiles_env("ENGINE_ASSISTANT_PROFILES_JSON")? {
         assistant_profiles.extend(env_profiles);
     }
     let assistant_default_profile = from_file
         .assistant_default_profile
-        .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_DEFAULT_PROFILE").ok())
+        .or_else(|| engine_env("ENGINE_ASSISTANT_DEFAULT_PROFILE").ok())
         .filter(|s| !s.trim().is_empty());
     let assistant_api_key = from_file
         .assistant_api_key
         .clone()
-        .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_API_KEY").ok())
+        .or_else(|| engine_env("ENGINE_ASSISTANT_API_KEY").ok())
         .filter(|s| !s.trim().is_empty());
     let assistant_key_present = assistant_api_key.is_some();
     validate_assistant_profiles(
@@ -400,12 +400,12 @@ pub fn load(
         .canonicalize()
         .map_err(|e| ApiError::Config(format!("workspace_root {workspace_root:?}: {e}")))?;
 
-    let auto_agent_auth = match std::env::var("MYDEVENV2_AUTO_AGENT_AUTH") {
-        Ok(v) => Some(parse_bool_env("MYDEVENV2_AUTO_AGENT_AUTH", &v)?),
+    let auto_agent_auth = match engine_env("ENGINE_AUTO_AGENT_AUTH") {
+        Ok(v) => Some(parse_bool_env("ENGINE_AUTO_AGENT_AUTH", &v)?),
         Err(std::env::VarError::NotPresent) => None,
         Err(e) => {
             return Err(ApiError::Config(format!(
-                "reading MYDEVENV2_AUTO_AGENT_AUTH: {e}"
+                "reading ENGINE_AUTO_AGENT_AUTH: {e}"
             )));
         }
     }
@@ -424,7 +424,7 @@ pub fn load(
     .or(from_file.gui_stream_verified)
     .unwrap_or(false);
 
-    let agent_auth_helper = std::env::var("MYDEVENV2_AGENT_AUTH_HELPER")
+    let agent_auth_helper = engine_env("ENGINE_AGENT_AUTH_HELPER")
         .ok()
         .or(from_file.agent_auth_helper)
         .map(std::path::PathBuf::from)
@@ -456,7 +456,7 @@ pub fn load(
         token,
         token_mutating_request_limit_per_minute,
         extra_tokens,
-        scrollback_bytes: parse_usize_env("MYDEVENV2_SCROLLBACK_BYTES")?
+        scrollback_bytes: parse_usize_env("ENGINE_SCROLLBACK_BYTES")?
             .or(from_file.scrollback_bytes)
             .unwrap_or(DEFAULT_SCROLLBACK_BYTES),
         default_shell: from_file
@@ -469,7 +469,7 @@ pub fn load(
             .or_else(dirs_home)
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp")),
         activity_idle_after_ms: from_file.activity_idle_after_ms.unwrap_or(1_500),
-        idle_stall_after_ms: parse_u64_env("MYDEVENV2_IDLE_STALL_AFTER_MS")?
+        idle_stall_after_ms: parse_u64_env("ENGINE_IDLE_STALL_AFTER_MS")?
             .or(from_file.idle_stall_after_ms)
             .unwrap_or(10 * 60 * 1_000),
         workspace_root,
@@ -485,16 +485,16 @@ pub fn load(
             .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/mydevenv2")),
         fcm_service_account_json: from_file
             .fcm_service_account_json
-            .or_else(|| std::env::var("MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON").ok())
+            .or_else(|| engine_env("ENGINE_FCM_SERVICE_ACCOUNT_JSON").ok())
             .filter(|s| !s.trim().is_empty()),
         vapid_subject: from_file
             .vapid_subject
-            .or_else(|| std::env::var("MYDEVENV2_VAPID_SUBJECT").ok())
+            .or_else(|| engine_env("ENGINE_VAPID_SUBJECT").ok())
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "mailto:admin@example.invalid".to_string()),
         allowed_origins: parse_allowed_origins(
             from_file.allowed_origins,
-            std::env::var("MYDEVENV2_ALLOWED_ORIGINS").ok(),
+            engine_env("ENGINE_ALLOWED_ORIGINS").ok(),
         ),
         auto_agent_auth,
         agent_auth_helper,
@@ -504,7 +504,7 @@ pub fn load(
         assistant_api_key,
         assistant_base_url: match from_file
             .assistant_base_url
-            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_BASE_URL").ok())
+            .or_else(|| engine_env("ENGINE_ASSISTANT_BASE_URL").ok())
             .filter(|s| !s.trim().is_empty())
         {
             Some(url) => url,
@@ -515,7 +515,7 @@ pub fn load(
                 return Err(ApiError::Config(
                     "assistant_api_key is set but assistant_base_url is not; \
                      name the OpenAI-compatible endpoint the key belongs to \
-                     (assistant_base_url / MYDEVENV2_ASSISTANT_BASE_URL)"
+                     (assistant_base_url / ENGINE_ASSISTANT_BASE_URL)"
                         .into(),
                 ));
             }
@@ -526,20 +526,20 @@ pub fn load(
         },
         assistant_model: from_file
             .assistant_model
-            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_MODEL").ok())
+            .or_else(|| engine_env("ENGINE_ASSISTANT_MODEL").ok())
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
-        assistant_max_tool_calls: parse_u32_env("MYDEVENV2_ASSISTANT_MAX_TOOL_CALLS")?
+        assistant_max_tool_calls: parse_u32_env("ENGINE_ASSISTANT_MAX_TOOL_CALLS")?
             .or(from_file.assistant_max_tool_calls)
             .unwrap_or(8),
         assistant_reasoning_effort: from_file
             .assistant_reasoning_effort
-            .or_else(|| std::env::var("MYDEVENV2_ASSISTANT_REASONING_EFFORT").ok())
+            .or_else(|| engine_env("ENGINE_ASSISTANT_REASONING_EFFORT").ok())
             .filter(|s| !s.trim().is_empty()),
         assistant_allow_claude_proxy: from_file
             .assistant_allow_claude_proxy
             .or_else(|| {
-                std::env::var("MYDEVENV2_ASSISTANT_ALLOW_CLAUDE_PROXY")
+                engine_env("ENGINE_ASSISTANT_ALLOW_CLAUDE_PROXY")
                     .ok()
                     .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
             })
@@ -557,7 +557,7 @@ pub fn load(
             .contextkeeper_token
             .or_else(|| std::env::var("CONTEXTKEEPER_API_TOKEN").ok())
             .filter(|s| !s.trim().is_empty()),
-        // `MYDEVENV2_PUBLIC_URL` is this process's own address, and is not
+        // `ENGINE_PUBLIC_URL` is this process's own address, and is not
         // `VOGT_PUBLIC_URL`: that one is the *core's* view of where it is
         // published, which in the merged shape is an internal detail no
         // client sees. Two names because they are two facts — reusing one
@@ -565,7 +565,7 @@ pub fn load(
         // sync forever, and getting it wrong is silent (MERGE §5.3).
         public_url: from_file
             .public_url
-            .or_else(|| std::env::var("MYDEVENV2_PUBLIC_URL").ok())
+            .or_else(|| engine_env("ENGINE_PUBLIC_URL").ok())
             .map(|value| value.trim().trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty()),
         // Unprefixed like the ContextKeeper pair above, and for the same
@@ -615,7 +615,7 @@ fn read_token_path(path: Option<&str>) -> Result<Option<String>> {
 }
 
 fn read_token_file(name: &str) -> Result<Option<String>> {
-    let Ok(path) = std::env::var(name) else {
+    let Ok(path) = engine_env(name) else {
         return Ok(None);
     };
     if path.trim().is_empty() {
@@ -624,6 +624,48 @@ fn read_token_file(name: &str) -> Result<Option<String>> {
     let raw = std::fs::read_to_string(path.trim())
         .map_err(|e| ApiError::Config(format!("reading {name} ({path}): {e}")))?;
     Ok(Some(raw.trim().to_string()).filter(|s| !s.is_empty()))
+}
+
+/// Read an engine setting, accepting the historical `MYDEVENV2_` name.
+///
+/// The prefix is `ENGINE_` (#144). `MYDEVENV2_` is the name of a product that
+/// no longer exists, and several of these are extension points a customiser
+/// has to type — `PUBLIC_URL`, `ASSISTANT_BASE_URL`, `ALLOWED_ORIGINS`,
+/// `BIND` — so they are poor public surface.
+///
+/// The prefix is not `VOGT_`: that belongs to the core, whose settings this
+/// process shares an environment with in the merged image, and `VOGT_ENGINE_`
+/// is worse still because `VOGT_ENGINE_URL`, `_STATE_DIR` and `_TOKEN_FILE`
+/// are already the *core's* settings describing how it reaches this process.
+/// Mixing the two in one namespace would be a worse public surface than the
+/// historical name, not a better one.
+///
+/// Both names are accepted for one release. The old one warns rather than
+/// failing, because a deployment moves when its compose file moves and a
+/// stack that has not been touched yet must keep starting.
+fn engine_env(name: &str) -> std::result::Result<String, std::env::VarError> {
+    // `std::env::var`, not `engine_env` — this *is* the lookup.
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => {
+            let Some(suffix) = name.strip_prefix("ENGINE_") else {
+                return Err(std::env::VarError::NotPresent);
+            };
+            let legacy = format!("MYDEVENV2_{suffix}");
+            match std::env::var(&legacy) {
+                Ok(value) => {
+                    tracing::warn!(
+                        legacy = %legacy,
+                        current = %name,
+                        "environment variable renamed; the old name still works \
+                         this release and will stop"
+                    );
+                    Ok(value)
+                }
+                Err(_) => Err(std::env::VarError::NotPresent),
+            }
+        }
+        other => other,
+    }
 }
 
 fn parse_bool_env(name: &str, raw: &str) -> Result<bool> {
@@ -637,7 +679,7 @@ fn parse_bool_env(name: &str, raw: &str) -> Result<bool> {
 }
 
 fn parse_usize_env(name: &str) -> Result<Option<usize>> {
-    match std::env::var(name) {
+    match engine_env(name) {
         Ok(v) => {
             let trimmed = v.trim();
             if trimmed.is_empty() {
@@ -654,7 +696,7 @@ fn parse_usize_env(name: &str) -> Result<Option<usize>> {
 }
 
 fn parse_u32_env(name: &str) -> Result<Option<u32>> {
-    match std::env::var(name) {
+    match engine_env(name) {
         Ok(v) => {
             let trimmed = v.trim();
             if trimmed.is_empty() {
@@ -671,7 +713,7 @@ fn parse_u32_env(name: &str) -> Result<Option<u32>> {
 }
 
 fn parse_u64_env(name: &str) -> Result<Option<u64>> {
-    match std::env::var(name) {
+    match engine_env(name) {
         Ok(v) => {
             let trimmed = v.trim();
             if trimmed.is_empty() {
@@ -688,7 +730,7 @@ fn parse_u64_env(name: &str) -> Result<Option<u64>> {
 }
 
 fn parse_extra_tokens_env(name: &str) -> Result<Option<Vec<ScopedTokenConfig>>> {
-    match std::env::var(name) {
+    match engine_env(name) {
         Ok(raw) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -704,7 +746,7 @@ fn parse_extra_tokens_env(name: &str) -> Result<Option<Vec<ScopedTokenConfig>>> 
 }
 
 fn parse_assistant_profiles_env(name: &str) -> Result<Option<Vec<AssistantProfile>>> {
-    match std::env::var(name) {
+    match engine_env(name) {
         Ok(raw) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -859,7 +901,7 @@ fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<
             return list;
         }
     }
-    // Defaults: deployed PWA + Vite dev server. Adjust via MYDEVENV2_ALLOWED_ORIGINS
+    // Defaults: deployed PWA + Vite dev server. Adjust via ENGINE_ALLOWED_ORIGINS
     // for staging/preview environments.
     //
     // The merged product is served from `vogt.sprooty.com` (M14's naming
@@ -884,7 +926,7 @@ mod tests {
 
     #[test]
     fn parses_scrollback_bytes_env() {
-        const NAME: &str = "MYDEVENV2_TEST_SCROLLBACK_BYTES_VALID";
+        const NAME: &str = "ENGINE_TEST_SCROLLBACK_BYTES_VALID";
         std::env::set_var(NAME, "1048576");
         let parsed = parse_usize_env(NAME).unwrap();
         std::env::remove_var(NAME);
@@ -894,7 +936,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_scrollback_bytes_env() {
-        const NAME: &str = "MYDEVENV2_TEST_SCROLLBACK_BYTES_INVALID";
+        const NAME: &str = "ENGINE_TEST_SCROLLBACK_BYTES_INVALID";
         std::env::set_var(NAME, "not-a-number");
         let err = parse_usize_env(NAME).unwrap_err();
         std::env::remove_var(NAME);
@@ -995,7 +1037,7 @@ mod tests {
 
     #[test]
     fn parses_extra_tokens_env_json() {
-        const NAME: &str = "MYDEVENV2_TEST_EXTRA_TOKENS_JSON";
+        const NAME: &str = "ENGINE_TEST_EXTRA_TOKENS_JSON";
         std::env::set_var(
             NAME,
             r#"[{"name":"readonly","token":"1234567890abcdef","capabilities":["sessions"]}]"#,
@@ -1090,5 +1132,47 @@ mod tests {
     #[test]
     fn an_empty_profile_name_is_refused() {
         assert!(validate_assistant_profiles(false, &[profile("  ", "a")], None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+
+    /// Both names work, and the historical one is not silently preferred.
+    ///
+    /// The rename (#144) has to be survivable by a deployment that has not
+    /// been touched yet: a stack still setting `MYDEVENV2_*` must keep
+    /// starting, and one setting `ENGINE_*` must win if both are present.
+    #[test]
+    fn engine_env_accepts_both_names_and_prefers_the_current_one() {
+        let current = "ENGINE_PREFIX_TEST_ONE";
+        let legacy = "MYDEVENV2_PREFIX_TEST_ONE";
+
+        assert!(engine_env(current).is_err(), "unset means unset");
+
+        unsafe { std::env::set_var(legacy, "from-legacy") };
+        assert_eq!(engine_env(current).unwrap(), "from-legacy");
+
+        unsafe { std::env::set_var(current, "from-current") };
+        assert_eq!(
+            engine_env(current).unwrap(),
+            "from-current",
+            "the current name wins when both are set"
+        );
+
+        unsafe {
+            std::env::remove_var(current);
+            std::env::remove_var(legacy);
+        }
+    }
+
+    /// A name that is not `ENGINE_`-prefixed gets no fallback invented for it.
+    #[test]
+    fn engine_env_only_falls_back_for_engine_names() {
+        let other = "SOME_OTHER_PREFIX_TEST";
+        unsafe { std::env::set_var("MYDEVENV2_OTHER_PREFIX_TEST", "x") };
+        assert!(engine_env(other).is_err());
+        unsafe { std::env::remove_var("MYDEVENV2_OTHER_PREFIX_TEST") };
     }
 }

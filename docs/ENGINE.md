@@ -612,7 +612,7 @@ with `fetch` and a `ReadableStream`.
 
 ### Assistant APIs
 
-All routes 404 unless the server has `MYDEVENV2_ASSISTANT_API_KEY`
+All routes 404 unless the server has `ENGINE_ASSISTANT_API_KEY`
 provisioned. Mutating routes require the `assistant` token capability. See
 §6 for the threat model and behavior.
 
@@ -1061,16 +1061,26 @@ the terminal half works exactly as before (FR-T6, FR-E9).
 
 ### Configuration
 
+
+> **Environment prefix.** These are `ENGINE_*` as of #144. The historical
+> `MYDEVENV2_*` names are still accepted for one release and log a warning at
+> startup naming both, so a stack that has not been redeployed yet keeps
+> working. The prefix is not `VOGT_`: that belongs to the core, which shares
+> this process's environment in the merged image, and `VOGT_ENGINE_URL`,
+> `_STATE_DIR` and `_TOKEN_FILE` are already the *core's* settings for
+> reaching the engine — putting engine-owned settings in that namespace would
+> read worse than the historical name.
+
 | Key (TOML) | Env | Default |
 |---|---|---|
-| `assistant_api_key` | `MYDEVENV2_ASSISTANT_API_KEY` | unset (feature off) |
-| `assistant_base_url` | `MYDEVENV2_ASSISTANT_BASE_URL` | none — required once `assistant_api_key` is set |
-| `assistant_model` | `MYDEVENV2_ASSISTANT_MODEL` | `gpt-5.4-mini` |
-| `assistant_max_tool_calls` | `MYDEVENV2_ASSISTANT_MAX_TOOL_CALLS` | `8` |
-| `assistant_reasoning_effort` | `MYDEVENV2_ASSISTANT_REASONING_EFFORT` | unset |
-| `assistant_allow_claude_proxy` | `MYDEVENV2_ASSISTANT_ALLOW_CLAUDE_PROXY` | `false` |
-| `assistant_profiles` | `MYDEVENV2_ASSISTANT_PROFILES_JSON` | `[]` |
-| `assistant_default_profile` | `MYDEVENV2_ASSISTANT_DEFAULT_PROFILE` | the implicit `default` |
+| `assistant_api_key` | `ENGINE_ASSISTANT_API_KEY` | unset (feature off) |
+| `assistant_base_url` | `ENGINE_ASSISTANT_BASE_URL` | none — required once `assistant_api_key` is set |
+| `assistant_model` | `ENGINE_ASSISTANT_MODEL` | `gpt-5.4-mini` |
+| `assistant_max_tool_calls` | `ENGINE_ASSISTANT_MAX_TOOL_CALLS` | `8` |
+| `assistant_reasoning_effort` | `ENGINE_ASSISTANT_REASONING_EFFORT` | unset |
+| `assistant_allow_claude_proxy` | `ENGINE_ASSISTANT_ALLOW_CLAUDE_PROXY` | `false` |
+| `assistant_profiles` | `ENGINE_ASSISTANT_PROFILES_JSON` | `[]` |
+| `assistant_default_profile` | `ENGINE_ASSISTANT_DEFAULT_PROFILE` | the implicit `default` |
 
 #### Provider profiles (FR-T9, r16)
 
