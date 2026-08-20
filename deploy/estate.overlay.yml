@@ -70,6 +70,13 @@ services:
     secrets:
       - github_token
 
+    # Fixed, because the engine reaches it through an /etc/hosts pin and a
+    # pin cannot follow a dynamic address. Inside this stack's own network,
+    # so it collides with nothing.
+    networks:
+      default:
+        ipv4_address: "${VOGT_CORE_IP:-10.59.0.10}"
+
   # ── the engine: the private image, front door, no core inside it ────────
   engine:
     image: "${VOGT_STACK_IMAGE:?pin the vogt-stack digest}"
@@ -93,6 +100,19 @@ services:
       - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working"
       - "${VOGT_HOME_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/home}:/home/sprooty"
       - "${VOGT_TAILSCALE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/tailscale}:/var/lib/tailscale"
+
+    # Not optional plumbing — the same landmine the retired ContextKeeper
+    # entry existed for. This container runs Tailscale, which overwrites
+    # /etc/resolv.conf and breaks Docker's embedded service-name resolution,
+    # so `vogt` does not resolve here however correct the compose file looks.
+    # `extra_hosts` writes to /etc/hosts, which is consulted *before* DNS, so
+    # the pin survives. Verified: with resolv.conf deliberately broken, a
+    # pinned name resolves and an unpinned one times out.
+    #
+    # This is why the core takes a fixed address below rather than whatever
+    # the pool hands it.
+    extra_hosts:
+      - "vogt:${VOGT_CORE_IP:-10.59.0.10}"
 
     environment:
       # The core lives in the sibling container, not on loopback. This is what
@@ -163,6 +183,14 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  # Declared so the core's address is stable across recreates. This is the
+  # subnet Docker had already assigned this stack, so nothing moves.
+  default:
+    ipam:
+      config:
+        - subnet: "${VOGT_STACK_SUBNET:-10.59.0.0/16}"
 
 volumes:
   # The base declares `vogt-data`; this estate's core already lives in
