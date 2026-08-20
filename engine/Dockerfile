@@ -416,22 +416,24 @@ ARG INSTALL_THECLAWBAY
 # workspace-write/network restrictions for every repo under ~/Working.
 #
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
+# `@anthropic-ai/claude-code` is pinned, and the pin is load-bearing.
+# 2.1.237 (published 2026-08-19T23:57Z) ships `bin/claude.exe` as a shell stub
+# that prints "claude native binary not installed" instead of the ELF launcher
+# every prior release carried, so `docker run --entrypoint claude` fails with
+# `exec format error`. Reproduced in a clean node:22-bookworm container:
+# 2.1.235 and 2.1.236 are ELF and work, 2.1.237 is text and does not. An
+# unpinned global install means somebody else's bad publish is this image's
+# broken build — the `update_automation_gap` this product reports on other
+# people's repositories (FR-D6). Renovate can move this line.
+#
 # One `npm install -g` for whichever packages are wanted, not one per
-# package. A second global install into the same prefix reconciles the whole
-# tree, and `@anthropic-ai/claude-code` resolves a platform-specific binary
-# through an optional dependency — reconciling around it left
-# `/usr/local/bin/claude` in place but no longer executable:
-#
-#   exec /usr/local/bin/claude: exec format error
-#   the dev image is missing claude
-#
-# A green build and a broken tool, caught only because the smoke test runs
-# `--version` on every tool the dev pod is expected to carry. Building the
-# package list first keeps both toggles independent without paying for a
-# second reconciliation.
+# package: a second global install into the same prefix reconciles the whole
+# tree for no benefit. This was first written as a fix for the failure above
+# and did not fix it — the cause was upstream, not the install shape — but
+# one reconciliation is still better than two, so it stays.
 RUN pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        pkgs="$pkgs @openai/codex @anthropic-ai/claude-code"; \
+        pkgs="$pkgs @openai/codex @anthropic-ai/claude-code@2.1.236"; \
     fi; \
     if [ "$INSTALL_THECLAWBAY" = "true" ]; then \
         pkgs="$pkgs theclawbay"; \
