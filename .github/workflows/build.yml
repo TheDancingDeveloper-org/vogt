@@ -91,6 +91,8 @@ jobs:
       contents: read
       packages: write
       id-token: write
+    # The merged image derives its core from this one by digest (#143), so the
+    # digest has to leave this job rather than being re-derived from a tag.
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
@@ -228,7 +230,9 @@ jobs:
 
   stack-image:
     name: build and publish the merged image
-    needs: base-images
+    # `needs: image` is not ordering for its own sake: the merged image copies
+    # /opt/vogt out of the core image this run just published, by digest.
+    needs: [base-images, image]
     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
     permissions:
       contents: read
@@ -318,6 +322,7 @@ jobs:
           # pod opts in so its current configuration stays reproducible while
           # the generic distribution stays independent.
           build-args: |
+            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' }}
@@ -372,6 +377,7 @@ jobs:
           # `build-and-push-dev` used to make, which the migration to Actions
           # dropped without replacing (#23).
           build-args: |
+            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' }}

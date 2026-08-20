@@ -24,7 +24,7 @@
 # Four stages:
 #   1. web-build    — pnpm install + vite build of web/
 #   2. server-build — cargo build --release of engine/server, embedding the bundle
-#   3. core-build   — uv sync of the Python core into a self-contained venv
+#   3. core        — the published public core image, lifted whole (#143)
 #   4. runtime      — Ubuntu 26.04 with the full TOOLING.md toolchain, sway,
 #                     selkies-gstreamer, and both halves copied in
 #
@@ -84,7 +84,8 @@ ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.9.18
 # distribution: `requires-python = ">=3.11"` is satisfied by whatever Ubuntu
 # ships, but "whatever Ubuntu ships" is not a version this repository chose,
 # and it changes under us on a base-image bump.
-ARG CORE_PYTHON=3.13
+# The published public core image, digest-pinned. No default: see stage 3.
+ARG CORE_IMAGE
 ARG ANDROID_CMDLINE_TOOLS_VERSION=15859902
 ARG ANDROID_CMDLINE_TOOLS_SHA256=4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
 ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.1
@@ -149,46 +150,29 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM ${UV_IMAGE} AS uv
 
-# ─── Stage 3: the Python core's virtualenv ──────────────────────────────────
+# ─── Stage 3: the Python core, taken from the published image ───────────────
 #
-# Built on the runtime base rather than on `python:3.13-slim` (which is what
-# the root Dockerfile uses, because there its runtime stage is that same
-# image). A venv is not a self-contained thing: `bin/python` is a link to the
-# interpreter that created it, so a venv built on Debian and copied onto Ubuntu
-# is a directory full of scripts whose interpreter does not exist — and the
-# error names the script, not the missing interpreter.
+# Not built here. This is the *published public core image*, digest-pinned by
+# the caller, and `/opt/vogt` is lifted out of it whole.
 #
-# Two ways out; this takes the second. Copying the base image's `/usr/local`
-# python across works but silently entangles two distributions' libc and
-# OpenSSL. Instead uv downloads a standalone CPython into /opt/vogt/python and
-# builds the venv against it, so `COPY /opt/vogt` carries the interpreter, the
-# venv, and every console script's absolute shebang as one relocation-free
-# unit. The install directory is fixed rather than defaulted for exactly that
-# reason: the path in this stage has to be the path in the runtime stage.
-FROM ${RUNTIME_IMAGE} AS core-build
-ARG CORE_PYTHON
-COPY --from=uv /uv /usr/local/bin/uv
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_PYTHON=${CORE_PYTHON} \
-    UV_PYTHON_DOWNLOADS=automatic \
-    UV_PYTHON_INSTALL_DIR=/opt/vogt/python \
-    UV_PROJECT_ENVIRONMENT=/opt/vogt/.venv
-WORKDIR /src
-# Dependencies first, so a source-only change does not re-resolve them.
-COPY pyproject.toml uv.lock README.md LICENSE ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-install-project --no-dev
-COPY src/ ./src/
-# `--no-editable` because uv.lock records the project as an editable source.
-# An editable install is a `.pth` file pointing back at /src, which does not
-# exist in the runtime stage — the venv would import every dependency and then
-# fail on `No module named 'vogt'`.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable \
-    && /opt/vogt/.venv/bin/vogt --version
+# It used to be a second `uv sync` of the same source, which meant the merged
+# image contained a core that was built like the public one rather than being
+# it. "The private path is the public path plus configuration" was then a
+# claim about two builds agreeing, checkable by nobody. Now it is a digest.
+#
+# This only works because the public image bundles its own interpreter under
+# `/opt/vogt/python` (see the root Dockerfile). A venv is not self-contained
+# by default: `bin/python` links to whatever created it, so a venv built on
+# Debian and copied onto Ubuntu is a directory of scripts whose interpreter
+# does not exist — and the error names the script, not the missing
+# interpreter. Verified by copying `/opt/vogt` from the published image into
+# a bare `ubuntu` and running `vogt --version`.
+#
+# CORE_IMAGE has no default on purpose. A floating tag here would silently
+# decouple the two halves of a commit-identified build; `build.yml` passes the
+# digest its own core job just pushed.
+ARG CORE_IMAGE
+FROM ${CORE_IMAGE} AS core
 
 # ─── Stage 4: runtime + dev tooling ─────────────────────────────────────────
 FROM ${RUNTIME_IMAGE}
@@ -586,7 +570,7 @@ RUN chmod +x /usr/local/bin/mydevenv2-server
 # `pip install` goes somewhere surprising. Three names, no PATH surgery — and
 # `vogt` on PATH is also what makes the core reachable from a session inside
 # this container, which is the whole point of merging the trees.
-COPY --from=core-build /opt/vogt /opt/vogt
+COPY --from=core /opt/vogt /opt/vogt
 RUN ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt \
     && ln -s /opt/vogt/.venv/bin/vogt-mcp /usr/local/bin/vogt-mcp \
     && ln -s /opt/vogt/.venv/bin/vogt-mcp-remote /usr/local/bin/vogt-mcp-remote \

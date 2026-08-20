@@ -1384,3 +1384,46 @@ def test_latest_moves_only_on_a_semver_tag() -> None:
     assert "latest=true" not in release, (
         "`latest=true` would tag a non-semver ref as latest"
     )
+
+
+@pytest.mark.skipif(
+    not ENGINE_DOCKERFILE.exists(),
+    reason="engine/ is deleted in the core-alone job, which is the point of it",
+)
+def test_the_engine_takes_its_core_from_the_published_image() -> None:
+    """#143: the private image contains the public one, verifiably.
+
+    It used to run a second `uv sync` of the same source, so "the private path
+    is the public path plus configuration" was a claim about two builds
+    agreeing that nobody could check. Now it is a digest — and `CORE_IMAGE`
+    must have no default, because a floating tag would silently decouple the
+    two halves of a commit-identified build (NFR-C3).
+    """
+    text = ENGINE_DOCKERFILE.read_text("utf-8")
+    assert "FROM ${CORE_IMAGE} AS core" in text
+    assert "COPY --from=core /opt/vogt /opt/vogt" in text
+    assert "AS core-build" not in text, "the engine must not build a second core"
+    assert not re.search(r"^ARG CORE_IMAGE=", text, re.MULTILINE), (
+        "CORE_IMAGE must not default; the caller pins the digest"
+    )
+
+    for name in ("build.yml", "release.yml"):
+        wf = (WORKFLOWS / name).read_text("utf-8")
+        assert "CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}" in wf, (
+            f"{name} must pass the digest its own core job just pushed"
+        )
+
+
+def test_the_public_image_is_relocatable() -> None:
+    """The derive above only works if `/opt/vogt` carries its interpreter.
+
+    A venv links `bin/python` to whatever created it, so one built against the
+    base image's system Python is a directory of scripts whose interpreter does
+    not exist once copied into the engine's Ubuntu runtime — and the error
+    names the script, not the missing interpreter.
+    """
+    text = (WORKFLOWS.parent.parent / "Dockerfile").read_text("utf-8")
+    assert "UV_PYTHON_PREFERENCE=only-managed" in text
+    assert "UV_PYTHON_INSTALL_DIR=/opt/vogt/python" in text
+    assert "UV_PYTHON=3.13" in text, "pin the interpreter; unset means newest"
+    assert "COPY --from=build --chown=root:root /opt/vogt /opt/vogt" in text

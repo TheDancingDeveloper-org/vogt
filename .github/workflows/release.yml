@@ -76,6 +76,9 @@ jobs:
   image:
     name: build, sign and publish the image
     needs: distribution
+    # The merged image copies /opt/vogt out of this one by digest (#143).
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     # `docker`/`publish` is advertised only by the Docker-in-Docker workers.
     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
     permissions:
@@ -211,7 +214,7 @@ jobs:
 
   stack-image:
     name: build, sign and publish the merged image
-    needs: [distribution, base-images]
+    needs: [distribution, base-images, image]
     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
     permissions:
       contents: read
@@ -298,6 +301,7 @@ jobs:
           tags: ${{ env.STACK_IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
+            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             INSTALL_CADASTRE_MCP=true
 
       - name: both halves run
@@ -318,6 +322,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
+            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             INSTALL_CADASTRE_MCP=true
           provenance: true
           sbom: true

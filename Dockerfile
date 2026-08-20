@@ -43,9 +43,32 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.18@sha256:5713fa8217f92b80223bc83aac7db36ec
 # absolute shebang, so a venv built at /src/.venv and copied to /opt gives
 # `exec /opt/vogt/.venv/bin/vogt: no such file or directory` — an error that
 # names the script while actually meaning its interpreter is missing.
+# The venv is built against an interpreter *inside* `/opt/vogt`, not against
+# the base image's system Python. That makes the directory relocatable: it can
+# be copied whole into another image and still run, because it carries its own
+# interpreter rather than pointing at one that happens to exist at
+# /usr/local/bin.
+#
+# That property is what lets the merged engine image derive its core from this
+# published artefact instead of building a second one from the same source
+# (#143). A venv built against the base's system Python cannot be copied into
+# an Ubuntu runtime — the console scripts' shebang names an interpreter that
+# is not there — which is precisely why the engine used to build its own.
+#
+# `UV_PYTHON=3.13` is pinned deliberately: left unset, uv fetches the newest
+# managed interpreter it can find — 3.14 at the time of writing — and the
+# image would ship a Python no CI job has ever run the suite against. The
+# version tracks the base tag and the test matrix, not whatever is newest.
+#
+# The cost is roughly 50 MB of bundled CPython. The gain is that "the private
+# image contains the published public core" becomes a fact verifiable by
+# digest rather than a claim about two builds of the same commit.
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON=3.13 \
+    UV_PYTHON_DOWNLOADS=automatic \
+    UV_PYTHON_INSTALL_DIR=/opt/vogt/python \
+    UV_PYTHON_PREFERENCE=only-managed \
     UV_PROJECT_ENVIRONMENT=/opt/vogt/.venv
 
 WORKDIR /src
@@ -104,7 +127,9 @@ RUN groupadd --gid 1000 vogt \
     && chown root:0 /var/lib/vogt \
     && chmod 0770 /var/lib/vogt
 
-COPY --from=build --chown=root:root /opt/vogt/.venv /opt/vogt/.venv
+# The whole of /opt/vogt, not just the venv: the interpreter lives alongside
+# it now and the two only work together.
+COPY --from=build --chown=root:root /opt/vogt /opt/vogt
 
 ENV PATH="/opt/vogt/.venv/bin:$PATH" \
     VOGT_DATA_DIR=/var/lib/vogt \
