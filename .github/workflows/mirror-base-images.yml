@@ -106,9 +106,8 @@ env:
 jobs:
   check:
     name: every base image is a mirrored one
-    # This job also runs on fork pull requests, so it must not enter the
-    # tailnet-connected runner pool (NFR-C4, revised r20).
-    runs-on: ubuntu-latest
+    # NFR-C4: every job names a self-hosted runner.
+    runs-on: [self-hosted, node-b, linux, x64]
     steps:
       - uses: actions/checkout@v7
 

@@ -1120,15 +1120,32 @@ Four decisions, all applied in this revision:
    a skip rather than a failure. The private stacks opt in explicitly in
    their compose files, so the current estate is unchanged — but nothing
    public installs, registers, or requires any of it (new NFR-O5, O6).
-3. **NFR-C4 is revised, as its own stub predicted.** The r4 rule — every job
-   on a self-hosted runner — was written for a private repository where every
-   workflow run was the owner's own code. A public repository runs fork pull
-   requests, and those must not execute on tailnet-connected workers. The
-   rule becomes a trust split: validation runs on isolated GitHub-hosted
-   runners, publication keeps the labelled self-hosted pool. The audit moves
-   into this repository, because the r4 comment in `runner-policy.yml`
-   recorded the blocker exactly: a public repository cannot call the
-   organisation's private reusable workflow.
+3. **NFR-C4 is reaffirmed, and the revisit its stub predicted is answered.**
+   The r4 rule — every job on a self-hosted runner — was written for a private
+   repository where every workflow run was the owner's own code. A public
+   repository runs fork pull requests, and those must not execute on
+   tailnet-connected workers, so this revision first split the rule by trust:
+   validation on GitHub-hosted runners, publication on the pool. That was
+   reversed before it shipped, and the reasoning is kept here because the
+   question will be asked again.
+
+   The split conflated two things. Where a job runs is not what makes an image
+   generic — the Dockerfile is, and every job that builds or publishes one had
+   stayed on the pool throughout, so the split bought nothing for the
+   open-source delivery it was written to serve. Nor does it help anyone build
+   from source, which is a property of the build context. What it did buy was
+   protection against fork-submitted code on a tailnet-connected worker; but
+   that exposure is the runner's *network position*, not its credentials —
+   GitHub already withholds secrets from fork-triggered runs and makes
+   `GITHUB_TOKEN` read-only — and it is closed more completely by deciding
+   whether untrusted code runs **at all**. Requiring approval for fork pull
+   request workflows does that, costs nothing, and is now a prerequisite of
+   the NFR-O1 milestone rather than a hardening step someone might skip.
+
+   What does survive from the revision is the audit's new home: the r4 comment
+   in `runner-policy.yml` recorded the blocker exactly — a public repository
+   cannot call the organisation's private reusable workflow — so the gate is
+   inline here, where it keeps working across the milestone.
 4. **NFR-D2 reaches the engine's assistant.** `assistant_base_url` silently
    defaulted to a provider endpoint, which meant an operator who set only an
    API key sent that key somewhere they never named. A configured key with no
@@ -1477,7 +1494,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | NFR-C1 | Docs-only changes (`docs/**`, `design/**`, `**/*.md`) shall not trigger the full pipeline — docs lint/link/config-drift checks only. | M |
 | NFR-C2 | Mixed code+docs changes shall run the full pipeline; the docs path is never a bypass (trivially-succeeding gate job pattern for required checks). | M |
 | NFR-C3 | *(revised r5)* **Releases** — a semver-tagged image, `latest`, the wheel, the SBOM attestation — shall be tag-triggered only; a push to main shall never cut a release. A push to main **may** publish a **commit-identified** image (`sha-<commit>`, signed, carrying no semver and never moving `latest`), because deploying a fix must not require inventing a version number for it. Deploying remains a separate act (NFR-D10). | M |
-| NFR-C4 | *(r4, revised r20)* Runner selection shall follow trust, not uniformity. Jobs that execute untrusted or fork-submitted code — validation, lint, type-check, test, docs — shall run on isolated GitHub-hosted runners (`ubuntu-latest`) and shall never enter the tailnet-connected self-hosted pool. Jobs that **sign or publish** trusted artefacts — anything that pushes to a registry or carries estate credentials — shall retain the labelled self-hosted publisher pool (`[self-hosted, node-b, linux, x64, …]`, plus `docker, publish` where a Docker daemon is needed); a tag-triggered job that only *builds* an artefact for a later signing step may use either, because no untrusted code runs on a tag. A workflow reachable from `pull_request` shall not place any job on the self-hosted pool unless that job is guarded against fork events (`if: github.event_name != 'pull_request'`). Dynamic `runs-on` expressions remain prohibited. The runner audit shall live in this repository (`runner-policy.yml`): a public repository cannot call the organisation's private reusable workflow, which is the revisit the r4 stub recorded in advance. | M |
+| NFR-C4 | *(r4, reaffirmed r20)* Every workflow job shall select a self-hosted runner explicitly (`runs-on: [self-hosted, node-b, linux, x64, …]`); GitHub-hosted runners and dynamic `runs-on` expressions shall not appear. Jobs needing a Docker daemon shall additionally request the `docker, publish` labels. r20 considered splitting the rule by trust — fork-reachable validation on isolated GitHub-hosted runners, publication on the pool — and **rejected it**: where a job runs is not what makes an artefact generic, that is a property of the Dockerfile, and every job that builds or publishes an image never left the pool in the first place. The exposure a public repository does create — fork-submitted code executing on a tailnet-connected worker, the runner's network position rather than any secret, since GitHub withholds those from fork-triggered runs — shall be closed at the gate instead: approval shall be required for fork pull request workflows, and that setting is a **prerequisite of the milestone in NFR-O1**, not optional hardening. The runner audit shall live in this repository (`runner-policy.yml`) rather than calling the organisation's private reusable workflow, which a public repository cannot resolve — the revisit the r4 stub recorded in advance. | M |
 | NFR-C5 | *(r4)* Image signing shall be keyless (workflow OIDC identity via Fulcio/Rekor), so that no signing key exists to store or rotate and the signature binds to this repository and workflow. | M |
 | NFR-C6 | *(r9)* The merged CI shall run both halves on every push — Rust fmt/clippy/test, web typecheck, APK build, and the existing Python suite — and the build-vs-release discipline of NFR-C3 (a push builds `sha-` images, only a tag releases) shall govern the merged image. (MERGE §5.1) | M |
 

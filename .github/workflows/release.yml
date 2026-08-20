@@ -44,7 +44,7 @@ jobs:
 
   distribution:
     name: build distribution
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, node-b, linux, x64]
     steps:
       - uses: actions/checkout@v7
 

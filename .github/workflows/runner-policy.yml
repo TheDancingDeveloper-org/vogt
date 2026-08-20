@@ -1,9 +1,21 @@
-# Local runner-policy gate. It deliberately lives in this repository: a public
-# repository cannot call the organisation's private reusable workflow.
+# The runner-policy gate (NFR-C4, `~/Working/docs/CI-RUNNER-GATES.md`).
 #
-# This checks the public/private runner split without importing private
-# workflow code. Fork pull requests execute validation on isolated hosted
-# workers; trusted image publication retains the labelled publisher pool.
+# Inline rather than a call to the organisation's reusable workflow, and that
+# is the durable form: a *public* repository cannot call a reusable workflow
+# stored in a private one, which is the blocker the r4 stub recorded in
+# advance. Keeping the logic here means the audit survives the milestone in
+# NFR-O1 instead of stopping resolving on the day it matters.
+#
+# The rule itself is unchanged from r4: every job names a self-hosted runner,
+# and no job selects one dynamically. r20 considered splitting it — fork
+# validation on isolated GitHub-hosted workers, publication on the pool — and
+# rejected it. Where a job runs is not what makes an image generic, and the
+# exposure a public repository creates is fork-submitted code executing on a
+# tailnet-connected worker, which is closed at the gate by requiring approval
+# for fork pull request workflows rather than by relocating the pipeline.
+#
+# Reporting is not blocking: `runner-policy` must also be a required status
+# check on `main`, or this reports a red X that anyone can merge past.
 
 name: Runner policy
 
@@ -14,16 +26,11 @@ on:
 
 jobs:
   runner-policy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, node-b, linux, x64]
     steps:
       - uses: actions/checkout@v7
 
-      # Two rules, and the second is the one that matters. Exempting a
-      # *file* would let a fork-triggered job be added to a publisher
-      # workflow with the audit still green — so a workflow reachable from
-      # `pull_request` has to guard its self-hosted jobs against fork events,
-      # which is what `mirror-base-images.yml` already does.
-      - name: every job uses a fixed approved runner
+      - name: every job names a self-hosted runner
         run: |
           set -euo pipefail
           bad=0
@@ -36,9 +43,9 @@ jobs:
           expr_open='${'"{"
           while IFS=: read -r file number line; do
             case "$line" in
-              *ubuntu-latest*|*self-hosted*) ;;
+              *self-hosted*) ;;
               *)
-                echo "::error file=$file,line=$number::workflow job does not name an approved runner"
+                echo "::error file=$file,line=$number::job does not name a self-hosted runner"
                 bad=1
                 ;;
             esac
@@ -48,34 +55,7 @@ jobs:
                 bad=1
                 ;;
             esac
-            case "$file:$line" in
-              .github/workflows/build.yml:*self-hosted*|\
-              .github/workflows/release.yml:*self-hosted*|\
-              .github/workflows/mirror-base-images.yml:*self-hosted*) ;;
-              *:*)
-                if [[ "$line" == *self-hosted* ]]; then
-                  echo "::error file=$file,line=$number::validation workflow cannot use the private publisher pool"
-                  bad=1
-                fi
-                ;;
-            esac
+          # Both extensions: a gate a `.yaml` file can walk past is not a gate.
           done < <(grep -RnE '^[[:space:]]*runs-on:' .github/workflows \
                      --include='*.yml' --include='*.yaml')
-
-          # A publisher workflow that forks can trigger must guard the jobs
-          # that reach the tailnet pool.
-          for file in .github/workflows/*.yml .github/workflows/*.yaml; do
-            [ -e "$file" ] || continue
-            # A `runs-on:` line, not prose: several workflows discuss the
-            # self-hosted pool in comments without ever selecting it.
-            grep -qE '^[[:space:]]*runs-on:.*self-hosted' "$file" || continue
-            grep -qE '^[[:space:]]*pull_request:' "$file" || continue
-            if ! grep -qF "github.event_name != 'pull_request'" "$file"; then
-              echo "::error file=$file::workflow is reachable from a fork" \
-                   "pull request and uses the self-hosted pool without" \
-                   "guarding those jobs against fork events"
-              bad=1
-            fi
-          done
-
           [ "$bad" -eq 0 ]

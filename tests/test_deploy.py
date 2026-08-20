@@ -244,51 +244,24 @@ def _workflow_files() -> list[Path]:
     return sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")])
 
 
-def test_every_workflow_job_names_a_fixed_approved_runner() -> None:
-    """NFR-C4 r20: fork validation is isolated; publishing stays private."""
-    publisher_workflows = {"build.yml", "release.yml", "mirror-base-images.yml"}
+def test_every_workflow_job_names_a_self_hosted_runner() -> None:
+    """NFR-C4, checked here so a new workflow cannot quietly opt out.
+
+    r20 considered a trust split — fork validation on GitHub-hosted runners,
+    publication on the pool — and rejected it: where a job runs is not what
+    makes an image generic, and every job that builds or publishes one never
+    left the pool. The exposure a public repository creates is fork-submitted
+    code executing on a tailnet-connected worker, and that is closed by
+    requiring approval for fork pull request workflows, which is a
+    prerequisite of NFR-O1's milestone rather than a property of `runs-on`.
+    """
     for path in _workflow_files():
         for number, line in enumerate(path.read_text("utf-8").splitlines(), start=1):
             if not re.match(r"^\s*runs-on\s*:", line):
                 continue
-            assert "ubuntu-latest" in line or "self-hosted" in line, (
-                f"{path.name}:{number}: unapproved runner: {line.strip()}"
-            )
+            assert "self-hosted" in line, f"{path.name}:{number}: {line.strip()}"
             assert "${{" not in line, (
                 f"{path.name}:{number}: dynamic runner selection is rejected"
-            )
-            if "self-hosted" in line:
-                assert path.name in publisher_workflows, (
-                    f"{path.name}:{number}: untrusted validation must not run "
-                    "on the tailnet-connected publisher pool"
-                )
-            if path.name in {"ci.yml", "docs.yml", "runner-policy.yml"}:
-                assert "ubuntu-latest" in line, (
-                    f"{path.name}:{number}: fork validation must use an "
-                    "isolated hosted runner"
-                )
-
-
-def test_a_fork_reachable_workflow_guards_its_self_hosted_jobs() -> None:
-    """The file-level exemption above is not enough on its own.
-
-    `publisher_workflows` exempts whole files, so a fork-triggered job could
-    be added to one and still reach the tailnet pool with the audit green.
-    What actually protects the pool is the event guard, so assert that
-    instead of trusting the filename (NFR-C4 r20).
-    """
-    guard = "github.event_name != 'pull_request'"
-    for path in _workflow_files():
-        text = path.read_text("utf-8")
-        selects_pool = any(
-            re.match(r"^\s*runs-on\s*:", line) and "self-hosted" in line
-            for line in text.splitlines()
-        )
-        fork_reachable = re.search(r"^\s*pull_request\s*:", text, re.MULTILINE)
-        if selects_pool and fork_reachable:
-            assert guard in text, (
-                f"{path.name}: reachable from a fork pull request and uses "
-                "the self-hosted pool without guarding those jobs"
             )
 
 
