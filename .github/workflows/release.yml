@@ -75,7 +75,7 @@ jobs:
 
   image:
     name: build, sign and publish the image
-    needs: [distribution, base-images]
+    needs: distribution
     # `docker`/`publish` is advertised only by the Docker-in-Docker workers.
     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
     permissions:
@@ -281,6 +281,8 @@ jobs:
           load: true
           tags: ${{ env.STACK_IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            INSTALL_CADASTRE_MCP=true
 
       - name: both halves run
         env:
@@ -299,6 +301,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            INSTALL_CADASTRE_MCP=true
           provenance: true
           sbom: true
 

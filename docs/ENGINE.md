@@ -258,6 +258,22 @@ server automatically, carrying a per-session actor-scoped token, so an agent's
 writes are attributed to that session's actor rather than to a shared identity
 (FR-E5, FR-S10). `DEPLOYMENT.md` §7.2 is the credential's story.
 
+**Cadastre — optional, off by default.** Cadastre is a separate product, not
+part of Vogt (NFR-O5). `mydevenv2-mcp-bootstrap` registers it, and
+`mydevenv2-agent-auth` fetches its bearer and probes it, only when the
+deployment opts in:
+
+| Env | Default | Effect |
+|---|---|---|
+| `CADASTRE_MCP_ENABLED` | `0` | `1` registers and probes Cadastre. At `0` the bootstrap still registers Vogt, and `agent-auth check` reports `skip: Cadastre MCP (optional integration disabled)` rather than failing. |
+| `CADASTRE_MCP_URL` | the estate endpoint | Where the bridge points. |
+| `MYDEVENV2_CADASTRE_SECRET_NAME` | `HOMELAB_CADASTRE_HTTP_TOKEN` | Which Infisical secret holds the bearer. |
+
+The image installs `cadastre[mcp-client]` only under the
+`INSTALL_CADASTRE_MCP` build argument, which is also off by default — so
+enabling the flag on an image built without it registers a bridge that is not
+there. Both halves are opt-in, deliberately.
+
 ---
 
 ## 5. The wire contract
@@ -1048,7 +1064,7 @@ the terminal half works exactly as before (FR-T6, FR-E9).
 | Key (TOML) | Env | Default |
 |---|---|---|
 | `assistant_api_key` | `MYDEVENV2_ASSISTANT_API_KEY` | unset (feature off) |
-| `assistant_base_url` | `MYDEVENV2_ASSISTANT_BASE_URL` | `https://api.theclawbay.com/v1` |
+| `assistant_base_url` | `MYDEVENV2_ASSISTANT_BASE_URL` | none — required once `assistant_api_key` is set |
 | `assistant_model` | `MYDEVENV2_ASSISTANT_MODEL` | `gpt-5.4-mini` |
 | `assistant_max_tool_calls` | `MYDEVENV2_ASSISTANT_MAX_TOOL_CALLS` | `8` |
 | `assistant_reasoning_effort` | `MYDEVENV2_ASSISTANT_REASONING_EFFORT` | unset |

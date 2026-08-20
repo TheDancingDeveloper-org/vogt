@@ -1,0 +1,10 @@
+# The root Dockerfile ships the Python core only. Use an allow-list so private
+# and optional toolchains never enter a public build context.
+*
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/
+!src/**

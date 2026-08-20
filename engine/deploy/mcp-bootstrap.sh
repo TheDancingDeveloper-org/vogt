@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Idempotently register Cadastre for clients present in the image, and make
-# sure the stdio bridge they point at actually exists.
+# Idempotently register Vogt for clients present in the image. Cadastre is a
+# separate, optional private-stack integration and is registered only when
+# CADASTRE_MCP_ENABLED=1.
 # Registration stores only the endpoint and wrapper command; no bearer value.
 set -euo pipefail
 
 readonly CADASTRE_URL="${CADASTRE_MCP_URL:-https://winrarhost.tailc7d3c.ts.net:18092/mcp}"
 readonly CADASTRE_WRAPPER="/usr/local/bin/mydevenv2-cadastre-mcp"
 readonly CADASTRE_SRC="${MYDEVENV2_CADASTRE_SRC:-$HOME/Working/Active/cadastre}"
+readonly CADASTRE_MCP_ENABLED="${CADASTRE_MCP_ENABLED:-0}"
 
 # Where an agent in this session should reach Vogt, in the order of what
 # actually knows the answer:
@@ -165,10 +167,12 @@ install_opencode() {
         -- "$CADASTRE_WRAPPER" >/dev/null
 }
 
-install_bridge
-install_codex
-install_claude
-install_opencode
+if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
+    install_bridge
+    install_codex
+    install_claude
+    install_opencode
+fi
 
 # Vogt registrations are best-effort in the same way: a failure here must not
 # cost an agent its git/gh credentials.
@@ -191,4 +195,8 @@ install_vogt_opencode
 # Everything an operator wants to see is still shown: an interactive shell
 # prints stderr too. The only reader that notices the difference is the one
 # that must.
-printf 'mcp-bootstrap: Cadastre and Vogt MCP client registrations written; neither endpoint was probed — run `mydevenv2-agent-auth check` for that\n' >&2
+if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
+    printf 'mcp-bootstrap: Vogt and optional Cadastre MCP client registrations written; endpoints were not probed — run `mydevenv2-agent-auth check` for that\n' >&2
+else
+    printf 'mcp-bootstrap: Vogt MCP client registrations written; endpoint was not probed — run `mydevenv2-agent-auth check` for that\n' >&2
+fi

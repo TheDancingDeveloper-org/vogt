@@ -68,6 +68,13 @@ jobs:
     # is prohibited estate-wide, and dynamic `runs-on` expressions with it.
     # These four labels match the three node-b workers; `proxmox-gha-public-*`
     # does not carry `node-b`.
+    #
+    # r20 considered moving fork-reachable validation to hosted runners and
+    # rejected it: where a job runs is not what makes an image generic, and
+    # every job that builds or publishes one never left this pool. The
+    # exposure a public repository creates is closed by requiring approval
+    # for fork pull request workflows — a prerequisite of NFR-O1's milestone,
+    # not a property of `runs-on`.
     runs-on: [self-hosted, node-b, linux, x64]
     outputs:
       python: ${{ steps.classify.outputs.python }}

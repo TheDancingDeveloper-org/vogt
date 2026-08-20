@@ -15,23 +15,28 @@
 # other people's repositories (FR-D6) — hard to justify raising for others
 # while leaving it here.
 #
-# This is the multi-arch index digest for `python:3.13-slim`, so it still
-# resolves per-platform. Renovate keeps it current (`pinDigests: true`).
-#
-# Pulled from this organisation's GHCR mirror of Docker Hub's library images
-# rather than from Docker Hub itself (#33). The digest is unchanged and is
-# still upstream's: `.github/workflows/mirror-base-images.yml` copies the
-# manifest verbatim and fails if the digest moves, so the pin means exactly
-# what it meant before — it is only fetched from a registry that does not
-# rate-limit this repository's builds out of existence. The mirror name is
-# the upstream name with `docker.io/library/` replaced; nothing else about
-# it is a choice, and Renovate is taught the same substitution so it still
-# tracks upstream.
-FROM ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS build
+# The upstream Docker Official Image, pinned by digest. Keeping the public
+# image on an upstream registry is the point: a new operator must be able to
+# build Vogt without reaching a private organisation mirror. This is the
+# multi-arch index digest, so it still resolves per-platform, and Renovate
+# keeps it current (`pinDigests: true`). The build and runtime stages share
+# the digest deliberately, so the virtualenv is built against the interpreter
+# that runs it.
+FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS build
 
 # uv resolves and installs from the committed lockfile, so the image contains
 # exactly what CI tested (NFR-Q5).
-COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
+#
+# No `--mount=type=cache` on the two `uv sync` steps below, deliberately: a
+# cache mount is a BuildKit feature, and the legacy builder — which is what a
+# plain `docker compose up --build` still uses on some hosts — fails outright
+# on it. A public image that only builds on one builder is not a public image.
+# The cost is a slower cold rebuild, which CI absorbs and an operator pays
+# once.
+# Pin the upstream uv image as well as the Python base. Docker accepts a
+# tag-plus-digest reference here, so a rebuild cannot silently select a new
+# installer binary.
+COPY --from=ghcr.io/astral-sh/uv:0.9.18@sha256:5713fa8217f92b80223bc83aac7db36ec80a84437dbc0d04bbc659cae030d8c9 /uv /usr/local/bin/uv
 
 # The venv is built at the path it will be *used* at, not at `/src/.venv`
 # and copied. A venv is not relocatable: its console scripts carry an
@@ -47,19 +52,17 @@ WORKDIR /src
 
 # Dependencies first, so a source-only change does not re-resolve them.
 COPY pyproject.toml uv.lock README.md LICENSE ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-install-project --no-dev
+RUN uv sync --locked --no-install-project --no-dev
 
 COPY src/ ./src/
 # `--no-editable` because uv.lock records the project as an editable source.
 # An editable install is a `.pth` file pointing back at /src, which does not
 # exist in the runtime stage — the venv would import every dependency and
 # then fail on `No module named 'vogt'`.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable
+RUN uv sync --locked --no-dev --no-editable
 
 
-FROM ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS runtime
+FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS runtime
 
 LABEL org.opencontainers.image.title="vogt" \
       org.opencontainers.image.description="A product development environment for the AI era" \

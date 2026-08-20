@@ -1,17 +1,18 @@
-# The org runner-policy gate, called from `github-policy`.
+# The runner-policy gate (NFR-C4, `~/Working/docs/CI-RUNNER-GATES.md`).
 #
-# All logic lives in the reusable workflow so the rule changes in one place;
-# this file exists only to invoke it. Reusable workflows run with the CALLER's
-# context, so the audit applies to this repository's workflows — it fails if
-# any job here ever names a GitHub-hosted runner or a dynamic `runs-on`
-# (NFR-C4, `~/Working/docs/CI-RUNNER-GATES.md`).
+# Inline rather than a call to the organisation's reusable workflow, and that
+# is the durable form: a *public* repository cannot call a reusable workflow
+# stored in a private one, which is the blocker the r4 stub recorded in
+# advance. Keeping the logic here means the audit survives the milestone in
+# NFR-O1 instead of stopping resolving on the day it matters.
 #
-# The visibility blocker recorded in that document — a *public* repository
-# cannot call a reusable workflow stored in a private one — does not apply:
-# vogt is private (NFR-O1), `github-policy` is private, and it shares its
-# Actions at organization level. If vogt goes public at the milestone NFR-O1
-# describes, this stub stops resolving and must be revisited in the same
-# change.
+# The rule itself is unchanged from r4: every job names a self-hosted runner,
+# and no job selects one dynamically. r20 considered splitting it — fork
+# validation on isolated GitHub-hosted workers, publication on the pool — and
+# rejected it. Where a job runs is not what makes an image generic, and the
+# exposure a public repository creates is fork-submitted code executing on a
+# tailnet-connected worker, which is closed at the gate by requiring approval
+# for fork pull request workflows rather than by relocating the pipeline.
 #
 # Reporting is not blocking: `runner-policy` must also be a required status
 # check on `main`, or this reports a red X that anyone can merge past.
@@ -25,4 +26,36 @@ on:
 
 jobs:
   runner-policy:
-    uses: TheDancingDeveloper-org/github-policy/.github/workflows/runner-policy-reusable.yml@main
+    runs-on: [self-hosted, node-b, linux, x64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: every job names a self-hosted runner
+        run: |
+          set -euo pipefail
+          bad=0
+          # Built from parts on purpose. The literal two-brace sequence is an
+          # Actions expression *anywhere* in a workflow file, including inside
+          # a `run:` body, and an unterminated one makes the whole workflow
+          # fail to start — a run with no jobs, no logs and a red X, which is
+          # how the first version of this gate was dead on arrival without
+          # anybody's dry run noticing.
+          expr_open='${'"{"
+          while IFS=: read -r file number line; do
+            case "$line" in
+              *self-hosted*) ;;
+              *)
+                echo "::error file=$file,line=$number::job does not name a self-hosted runner"
+                bad=1
+                ;;
+            esac
+            case "$line" in
+              *"$expr_open"*)
+                echo "::error file=$file,line=$number::dynamic runner selection is not allowed"
+                bad=1
+                ;;
+            esac
+          # Both extensions: a gate a `.yaml` file can walk past is not a gate.
+          done < <(grep -RnE '^[[:space:]]*runs-on:' .github/workflows \
+                     --include='*.yml' --include='*.yaml')
+          [ "$bad" -eq 0 ]

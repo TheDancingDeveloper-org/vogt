@@ -86,7 +86,6 @@ jobs:
 
   image:
     name: build and publish a commit image
-    needs: base-images
     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
     permissions:
       contents: read
@@ -99,8 +98,10 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # No Docker Hub login, deliberately — and this is a trap worth naming,
-      # because the obvious "improvement" is to add one back.
+      # The public core Dockerfile uses the upstream Python Official Image
+      # directly. It does not require this repository's private base-image
+      # mirror or any estate credentials. The merged/private stack below is
+      # still built separately and retains its own mirror prerequisite.
       #
       # There used to be a login here, inert until `DOCKERHUB_USERNAME` was
       # set, offered as the remedy for builds failing at `FROM` with 429. The
@@ -307,9 +308,20 @@ jobs:
           load: true
           tags: ${{ env.STACK_IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
+          # `#` inside a `|` block scalar is literal content, not a YAML
+          # comment, and build-push-action parses the input without a comment
+          # option — so a note in there reaches buildx as a build arg. It goes
+          # here instead.
+          #
+          # INSTALL_CADASTRE_MCP / INSTALL_THECLAWBAY are private-stack
+          # compatibility. Neither is part of the root/public image; the dev
+          # pod opts in so its current configuration stays reproducible while
+          # the generic distribution stays independent.
           build-args: |
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
+            INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' }}
+            INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' }}
 
       - name: the merged image runs both halves
         env:
@@ -362,6 +374,8 @@ jobs:
           build-args: |
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
+            INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' }}
+            INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' }}
           provenance: true
           sbom: true
 

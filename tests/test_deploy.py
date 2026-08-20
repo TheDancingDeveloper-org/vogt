@@ -239,9 +239,23 @@ def test_the_image_has_no_default_listen_address() -> None:
     assert 'CMD ["--help"]' in text
 
 
+def _workflow_files() -> list[Path]:
+    """Both extensions. A gate a `.yaml` file can walk past is not a gate."""
+    return sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")])
+
+
 def test_every_workflow_job_names_a_self_hosted_runner() -> None:
-    """NFR-C4, checked here so a new workflow cannot quietly opt out."""
-    for path in sorted(WORKFLOWS.glob("*.yml")):
+    """NFR-C4, checked here so a new workflow cannot quietly opt out.
+
+    r20 considered a trust split — fork validation on GitHub-hosted runners,
+    publication on the pool — and rejected it: where a job runs is not what
+    makes an image generic, and every job that builds or publishes one never
+    left the pool. The exposure a public repository creates is fork-submitted
+    code executing on a tailnet-connected worker, and that is closed by
+    requiring approval for fork pull request workflows, which is a
+    prerequisite of NFR-O1's milestone rather than a property of `runs-on`.
+    """
+    for path in _workflow_files():
         for number, line in enumerate(path.read_text("utf-8").splitlines(), start=1):
             if not re.match(r"^\s*runs-on\s*:", line):
                 continue

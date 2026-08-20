@@ -2,7 +2,8 @@ name: mirror base images
 
 # Docker Hub is not on the critical path of a build (#33).
 #
-# Every `FROM` in both Dockerfiles used to name a Docker Hub library image.
+# Every FROM in the private engine Dockerfile used to name a Docker Hub
+# library image.
 # Anonymous pulls are rate-limited per IP and a self-hosted runner is one IP
 # for every build this repository makes, so a busy afternoon exhausted the
 # allowance and the next build failed at `FROM` with 429 — twice on
@@ -22,10 +23,11 @@ name: mirror base images
 # busy — which is when builds happen. See `build.yml` for why the login has
 # been removed rather than left inert.
 #
-# So the bases are mirrored into GHCR, where this project already publishes,
-# is already authenticated, and has no such limit. The Dockerfiles build
-# `FROM` the mirror, still pinned exactly as they were, and the only new
-# failure mode is one this organisation owns.
+# So the private engine bases are mirrored into GHCR, where this project
+# already publishes, is already authenticated, and has no such limit. The
+# engine Dockerfile builds from the mirror, still pinned exactly as it was.
+# The public root Dockerfile intentionally uses upstream Docker Official
+# Images directly and is not part of this workflow.
 #
 # ## The naming rule is the whole design
 #
@@ -46,9 +48,9 @@ name: mirror base images
 # A Renovate digest bump lands a reference that has never been mirrored. If
 # the build ran first it would fail at `FROM` — trading one unowned outage
 # for an owned one is not the point of this. So this workflow is a
-# *prerequisite* rather than a companion: `build.yml` and `release.yml` call
-# it with `uses:` and their image jobs `needs:` it, so no build can start
-# against a reference that is not in GHCR yet. The `push` trigger below
+# prerequisite rather than a companion: the private engine jobs call it with
+# uses/needs, so no private stack build can start against a reference that is
+# not in GHCR yet. The push trigger below
 # makes the mirror current the moment a bump merges, and the daily schedule
 # is the backstop for the paths neither covers (a tag cut from an old
 # checkout, a manual dispatch, a bump that merged while the runners were
@@ -70,12 +72,10 @@ on:
   push:
     branches: [main, dev]
     paths:
-      - "Dockerfile"
       - "engine/Dockerfile"
       - ".github/workflows/mirror-base-images.yml"
   pull_request:
     paths:
-      - "Dockerfile"
       - "engine/Dockerfile"
       - ".github/workflows/mirror-base-images.yml"
   schedule:
@@ -119,7 +119,7 @@ jobs:
         run: |
           set -euo pipefail
           bad=0
-          for file in Dockerfile engine/Dockerfile; do
+          for file in engine/Dockerfile; do
             while IFS= read -r ref; do
               # A stage name, not an image: no registry path and no tag.
               case "$ref" in
@@ -179,7 +179,7 @@ jobs:
           set -euo pipefail
 
           refs="$(
-            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" Dockerfile engine/Dockerfile \
+            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile \
               | sort -u
           )"
           if [ -z "$refs" ]; then
@@ -238,7 +238,7 @@ jobs:
           {
             echo "### Base images in GHCR"
             echo
-            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" Dockerfile engine/Dockerfile \
+            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile \
               | sort -u \
               | sed 's/^/- `/; s/$/`/'
             echo
