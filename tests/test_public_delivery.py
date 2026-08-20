@@ -199,3 +199,16 @@ def test_the_estate_overlay_wires_the_two_filesystem_couplings() -> None:
     assert "VOGT_ENGINE_STATE_DIR:" in core
     assert ".local/share/mydevenv2:/home/sprooty/.local/share/mydevenv2" in core
     assert ":/home/sprooty/Working:ro" in core
+
+
+def test_the_estate_overlay_keeps_the_existing_core_volume() -> None:
+    """The base's volume name is not the one the estate's data is in.
+
+    `deploy/vogt.compose.yml` declares `vogt-data`; the estate's core has
+    lived in `vogt-core-data` since the stack was created. Without the
+    mapping the core comes up against an empty volume — not a failure, a
+    *new instance*: new instance_id, no projects, no audit history, and the
+    real database still in the volume nobody is reading any more.
+    """
+    overlay = ESTATE_OVERLAY.read_text(encoding="utf-8")
+    assert 'name: "${VOGT_CORE_VOLUME:-vogt-core-data}"' in overlay

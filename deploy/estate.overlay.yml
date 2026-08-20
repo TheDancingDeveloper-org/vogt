@@ -151,6 +151,16 @@ services:
         max-size: "10m"
         max-file: "3"
 
+volumes:
+  # The base declares `vogt-data`; this estate's core already lives in
+  # `vogt-core-data` and has since the stack was created. Map the name rather
+  # than migrate the data — without this the core comes up against an empty
+  # volume, which is not a failure but a *new instance*: new instance_id, no
+  # projects, no audit history, and the real database still sitting in the
+  # volume nobody is now reading.
+  vogt-data:
+    name: "${VOGT_CORE_VOLUME:-vogt-core-data}"
+
 secrets:
   github_token:
     file: ./github-token
