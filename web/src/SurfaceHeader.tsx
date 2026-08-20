@@ -21,6 +21,7 @@ import { createNarrow } from "./narrow";
 export interface SurfaceHeaderProps {
   title: JSX.Element;
   honesty?: JSX.Element;
+  honestyClass?: string;
   controls?: JSX.Element;
   action?: JSX.Element;
   detail?: JSX.Element;
@@ -56,7 +57,7 @@ export const SurfaceHeader: Component<SurfaceHeaderProps> = (props) => {
         {props.title}
       </div>
       <Show when={props.honesty !== undefined}>
-        <div class="surface-header-honesty" data-surface-header-slot="honesty">
+        <div class={`surface-header-honesty${props.honestyClass ? ` ${props.honestyClass}` : ""}`} data-surface-header-slot="honesty">
           {props.honesty}
         </div>
       </Show>

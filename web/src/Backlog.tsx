@@ -1247,6 +1247,7 @@ const Backlog: Component<Props> = (props) => {
         class="vogt-backlog-header"
         label="Backlog header"
         title={<h1>Backlog</h1>}
+        honestyClass={`surface-header-honesty--${freshness().status === "fresh" ? "fresh" : freshness().status === "outage" ? "outage" : "stale"}`}
         honesty={(
           <div class="vogt-backlog-honesty" aria-live="polite">
           <ViewAgeBadge
@@ -1272,7 +1273,7 @@ const Backlog: Component<Props> = (props) => {
         )}
         controls={(
           <>
-            <div class="vogt-backlog-views" role="group" aria-label="Ranked views">
+            <div class="surface-header-tabs vogt-backlog-views" role="group" aria-label="Ranked views">
               <For each={["backlog", "bugs"] as ViewName[]}>
                 {(name) => (
                   <button

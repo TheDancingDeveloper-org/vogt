@@ -983,6 +983,7 @@ const AuditBrowser: Component<Props> = (props) => {
         class="vab-header"
         label="Audit header"
         title={<h1>{filter().view === "audit" ? "Audit" : "Notifications"}</h1>}
+        honestyClass={viewAge().tone === "outage" ? "surface-header-honesty--outage" : viewAge().tone === "stale" ? "surface-header-honesty--stale" : "surface-header-honesty--fresh"}
         honesty={(
           <ViewAgeBadge
             age={viewAge()}
@@ -992,7 +993,7 @@ const AuditBrowser: Component<Props> = (props) => {
         )}
         controls={(
           <>
-            <div class="vab-views" role="group" aria-label="Global views">
+            <div class="surface-header-tabs vab-views" role="group" aria-label="Global views">
               <For each={["audit", "inbox"] as ViewName[]}>
                 {(name) => (
                   <button

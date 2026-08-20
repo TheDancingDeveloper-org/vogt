@@ -144,6 +144,7 @@ function tabLabels(container: HTMLElement): string[] {
 }
 
 beforeEach(() => {
+  localStorage.removeItem("mydevenv2.rail.sections.v1");
   // `tabs.ts` holds its store in module state, so a tab opened by the last
   // test is still open in this one — and every assertion here is about which
   // tabs a URL produced.
@@ -300,6 +301,28 @@ describe("shared live steering", () => {
     );
   });
 
+  it("renders one navigation-only waiting attention pointer and a single session menu", async () => {
+    const { container } = mountShell("/sessions", {
+      sessions: [{ ...SESSION, activity: "waiting-for-input", activity_changed_at: new Date().toISOString() }],
+    });
+    await waitFor(() => {
+      expect(container.querySelectorAll(".rail-attention")).toHaveLength(1);
+      expect(container.querySelector(".rail-attention")?.getAttribute("href")).toBe("#/t/eng-1");
+      expect(container.querySelectorAll(".session-row .row-menu")).toHaveLength(1);
+      expect(container.querySelectorAll(".session-row .row-btn, .session-row .close")).toHaveLength(0);
+    });
+  });
+
+  it("persists a collapsed Files section and keeps the running count in its toggle", async () => {
+    localStorage.removeItem("mydevenv2.rail.sections.v1");
+    const { container } = mountShell("/sessions", { sessions: [SESSION] });
+    await waitFor(() => expect(container.querySelector(".places-section-toggle")).toBeTruthy());
+    const files = [...container.querySelectorAll<HTMLButtonElement>(".places-section-toggle")].find((button) => button.textContent?.includes("Files"));
+    expect(files?.getAttribute("aria-expanded")).toBe("false");
+    files?.click();
+    expect(JSON.parse(localStorage.getItem("mydevenv2.rail.sections.v1") ?? "{}").files).toBe(true);
+  });
+
   it("keeps the last session values stale when a refresh goes offline", async () => {
     const { container } = mountShell("/sessions", {
       engine: {
@@ -335,17 +358,18 @@ describe("shared live steering", () => {
     row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await waitFor(() => expect(tabsStore.active).toBe("term:eng-1"));
 
-    const bookmark = container.querySelector<HTMLButtonElement>('[aria-label="Bookmark alpha-build"]');
+    const menu = container.querySelector<HTMLButtonElement>('[aria-label="Actions for alpha-build"]');
+    expect(menu).toBeTruthy();
+    menu!.focus();
+    menu!.click();
+    const bookmark = await waitFor(() => [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((button) => button.textContent?.includes("Bookmark"))!);
     expect(bookmark).toBeTruthy();
-    bookmark!.focus();
     bookmark!.click();
-    expect(container.querySelector('[aria-label="Remove bookmark from alpha-build"]')).toBeTruthy();
-
-    const close = container.querySelector<HTMLButtonElement>('[aria-label="Close alpha-build"]');
-    close!.focus();
+    menu!.click();
+    const close = await waitFor(() => [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((button) => button.textContent?.includes("Kill & remove"))!);
     close!.click();
     const confirm = await waitFor(() => {
-      const found = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      const found = [...document.querySelectorAll<HTMLButtonElement>("button")]
         .find((button) => button.textContent?.trim() === "Confirm");
       expect(found).toBeTruthy();
       return found!;

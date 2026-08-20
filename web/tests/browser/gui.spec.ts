@@ -2168,6 +2168,10 @@ test("A crowded places rail keeps the file tree reachable", async ({ page }) => 
 
   const rail = page.locator(".places-rail");
   await expect(rail).toBeVisible();
+  const filesToggle = page.getByRole("button", { name: /Files/ });
+  await expect(filesToggle).toBeVisible();
+  await expect(filesToggle).toHaveAttribute("aria-expanded", "false");
+  await filesToggle.click();
   await expect(page.getByRole("heading", { name: "Files" })).toBeVisible();
   await expect(page.getByRole("searchbox", { name: "Search files" })).toBeVisible();
 
@@ -2466,4 +2470,3 @@ test("History explains an empty archive when live sessions are still running", a
   await expect(page.getByText("No archived sessions.", { exact: false })).toBeVisible();
   await expect(page.getByText(/session is currently running/)).toBeVisible();
 });
-

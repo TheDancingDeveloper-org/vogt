@@ -97,7 +97,7 @@ import {
   createPlaceMetrics,
   type PlaceMetric,
 } from "./placeMetrics";
-import { onVogtLive } from "./viewAge";
+import { formatAgo, onVogtLive } from "./viewAge";
 
 // -- what the first screen does not have to carry (NFR-S5, #104) -----------
 //
@@ -270,6 +270,33 @@ function activityLabel(s: ActivityState, exit: number | null): string {
   }
 }
 
+function sessionAge(s: SessionSummary): string {
+  const raw = s.activity_changed_at ?? s.created_at;
+  const at = Date.parse(raw);
+  return Number.isNaN(at) ? "age unavailable" : formatAgo(Date.now() - at);
+}
+
+interface RailSections {
+  running: boolean;
+  recent: boolean;
+  files: boolean;
+}
+
+const DEFAULT_RAIL_SECTIONS: RailSections = { running: true, recent: true, files: false };
+
+function loadRailSections(): RailSections {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("mydevenv2.rail.sections.v1") ?? "null") as Partial<RailSections> | null;
+    return {
+      running: parsed?.running ?? DEFAULT_RAIL_SECTIONS.running,
+      recent: parsed?.recent ?? DEFAULT_RAIL_SECTIONS.recent,
+      files: parsed?.files ?? DEFAULT_RAIL_SECTIONS.files,
+    };
+  } catch {
+    return { ...DEFAULT_RAIL_SECTIONS };
+  }
+}
+
 /**
  * Where each tab was last seen, including its query string.
  *
@@ -326,6 +353,13 @@ const App: Component = () => {
   const [templateSelectorContext, setTemplateSelectorContext] =
     createSignal<TemplateContext | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = createSignal(false);
+  const [railSections, setRailSections] = createSignal<RailSections>(loadRailSections());
+  const [sessionMenu, setSessionMenu] = createSignal<SessionSummary | null>(null);
+  const setRailSection = (section: keyof RailSections) => {
+    const next = { ...railSections(), [section]: !railSections()[section] };
+    setRailSections(next);
+    try { localStorage.setItem("mydevenv2.rail.sections.v1", JSON.stringify(next)); } catch { /* browser storage is optional */ }
+  };
   const placeMetrics = createPlaceMetrics();
   const waitingSessions = () =>
     sessionsStore.ready
@@ -957,6 +991,11 @@ const App: Component = () => {
     }
   };
 
+  const openSessionMenu = (s: SessionSummary, event?: Event) => {
+    event?.stopPropagation();
+    setSessionMenu(s);
+  };
+
   // App-level shortcuts are matched from the same registry the help dialog
   // renders. Browser-reserved alternatives and editable-surface contexts live
   // beside the binding instead of drifting between this handler and the UI.
@@ -1045,6 +1084,18 @@ const App: Component = () => {
             </button>
           </div>
           <button type="button" class="rail-go-to" onClick={() => setCommandPaletteOpen(true)}>Go to…</button>
+          <Show when={!isConnected() && getToken()}>
+            <a class="rail-attention rail-attention--outage" href="#/sessions" onClick={() => setSessionMenu(null)}>
+              <span class="rail-attention-dot" aria-hidden="true" />
+              <span class="rail-attention-body"><strong class="rail-attention-title">Engine unavailable</strong><span class="rail-attention-detail">{sessionsError() ?? "The session engine is not reachable."}</span></span>
+            </a>
+          </Show>
+          <Show when={isConnected() && waitingSessions() && waitingSessions()! > 0}>
+            <a class="rail-attention" href={waitingSessions() === 1 ? `#/t/${sessionsStore.order.find((id) => sessionsStore.sessions[id]?.activity === "waiting-for-input")}` : "#/sessions"}>
+              <span class="rail-attention-dot" aria-hidden="true" />
+              <span class="rail-attention-body"><strong class="rail-attention-title">{waitingSessions()} session{waitingSessions() === 1 ? "" : "s"} waiting</strong><span class="rail-attention-detail">{waitingSessions() === 1 ? (() => { const s = sessionsStore.order.map((id) => sessionsStore.sessions[id]).find((s): s is SessionSummary => Boolean(s && s.activity === "waiting-for-input")); return s ? `${s.name} · ${s.cwd.split("/").pop() || "/"} · ${sessionAge(s)}` : "Open Sessions"; })() : "Open Sessions to review attention"}</span></span>
+            </a>
+          </Show>
           <nav class="places-nav">
             <div class="places-group">
               <span class="places-group-label">Work</span>
@@ -1074,7 +1125,8 @@ const App: Component = () => {
             </div>
           </nav>
           <div class="places-rail-session-area">
-            <div class="places-section-label places-section-label--counted"><span>Running</span><PlaceCount metric={sessionMetric()} label="running sessions" /></div>
+            <button type="button" class="places-section-toggle places-section-label places-section-label--counted" aria-expanded={railSections().running} onClick={() => setRailSection("running")}><span aria-hidden="true">{railSections().running ? "▾" : "▸"}</span><span>Running</span><PlaceCount metric={sessionMetric()} label="running sessions" /></button>
+            <Show when={railSections().running}>
             <For
               each={sessionsStore.order
                 .map((id) => sessionsStore.sessions[id])
@@ -1103,66 +1155,35 @@ const App: Component = () => {
                     openTerminalTab(s.id, s.name);
                     navigate(`/t/${s.id}`);
                   }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    void onRenameSession(s);
-                  }}
+                  onContextMenu={(e) => { e.preventDefault(); openSessionMenu(s, e); }}
                   title={`${s.name}\ncwd: ${s.cwd}`}
                 >
                   <span class={`activity-dot ${activityClass(s)}`} title={activityLabel(s.activity, s.exit_code)} />
                   <div class="session-row-body">
                     <span class="name">{s.name}</span>
-                    <Show when={s.cwd}><span class="cwd">{s.cwd}</span></Show>
-                  </div>
+                  <Show when={s.cwd}><span class="cwd">{s.cwd}</span></Show>
+                  <span class={`state state--${activityClass(s)}`}>{activityLabel(s.activity, s.exit_code)} · {sessionAge(s)}</span>
+                </div>
                   <button
                     type="button"
-                    class="row-btn"
-                    aria-label={isBookmarked(s.id) ? `Remove bookmark from ${s.name}` : `Bookmark ${s.name}`}
-                    title={isBookmarked(s.id) ? "Remove bookmark" : "Bookmark"}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleBookmark(s.id);
-                    }}
-                  >{isBookmarked(s.id) ? "★" : "☆"}</button>
-                  <button
-                    type="button"
-                    class="row-btn"
-                    aria-label={`Duplicate ${s.name}`}
-                    title="Duplicate (same cwd)"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void onDuplicateSession(s);
-                    }}
-                  >⧉</button>
-                  <button
-                    type="button"
-                    class="close"
-                    aria-label={`Close ${s.name}`}
-                    title="Kill & remove"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void onCloseSession(s);
-                    }}
-                  >×</button>
+                    class="row-menu"
+                    aria-label={`Actions for ${s.name}`}
+                    title="Session actions"
+                    onClick={(e) => openSessionMenu(s, e)}
+                  >···</button>
                 </div>
               )}
             </For>
+            </Show>
           </div>
           <Show when={recentPlacesStore.places.length > 0}>
             <div class="places-recent" aria-label="Recent places">
-              <div class="places-section-label">Recent places</div>
-              <For each={recentPlacesStore.places.filter((place) => place.path !== "/gui" || guiEnabled()).slice(0, 6)}>
-                {(place) => <a href={`#${place.path}`}>{place.label}</a>}
-              </For>
+              <button type="button" class="places-section-toggle places-section-label" aria-expanded={railSections().recent} onClick={() => setRailSection("recent")}><span aria-hidden="true">{railSections().recent ? "▾" : "▸"}</span>Recent places</button>
+              <Show when={railSections().recent}><For each={recentPlacesStore.places.filter((place) => place.path !== "/gui" || guiEnabled()).slice(0, 6)}>{(place) => <a href={`#${place.path}`}>{place.label}</a>}</For></Show>
             </div>
           </Show>
-          <FileTree
-            onOpen={() => navigate("/sessions")}
-            promptPath={promptUser}
-            confirmAction={confirmUser}
-            onCreatePresetHere={(path) => { void onCreate(path); }}
-            onError={(message) => showToast(message, { kind: "error" })}
-          />
+          <button type="button" class="places-section-toggle places-section-label" aria-expanded={railSections().files} onClick={() => setRailSection("files")}><span aria-hidden="true">{railSections().files ? "▾" : "▸"}</span>Files</button>
+          <Show when={railSections().files}><FileTree onOpen={() => navigate("/sessions")} promptPath={promptUser} confirmAction={confirmUser} onCreatePresetHere={(path) => { void onCreate(path); }} onError={(message) => showToast(message, { kind: "error" })} /></Show>
           <div class="places-rail-footer">
             <button type="button" onClick={openSettings}>Settings</button>
             <span class={`rail-connection ${isConnected() ? "connected" : "offline"}`}>
@@ -1171,6 +1192,18 @@ const App: Component = () => {
             </span>
           </div>
         </aside>
+        <Show when={sessionMenu()}>
+          {(session) => <Dialog title={`Actions for ${session().name}`} onClose={() => setSessionMenu(null)}>
+            <div class="session-menu" role="menu">
+              <button type="button" role="menuitem" onClick={() => { const target = session(); setSessionMenu(null); openTerminalTab(target.id, target.name); navigate(`/t/${target.id}`); }}>Attach</button>
+              <button type="button" role="menuitem" onClick={() => { const target = session(); toggleBookmark(target.id); setSessionMenu(null); }}>{isBookmarked(session().id) ? "Remove bookmark" : "Bookmark"}</button>
+              <button type="button" role="menuitem" onClick={() => { const target = session(); setSessionMenu(null); void onDuplicateSession(target); }}>Duplicate</button>
+              <button type="button" role="menuitem" onClick={() => { const target = session(); setSessionMenu(null); void onRenameSession(target); }}>Rename</button>
+              <hr />
+              <button type="button" role="menuitem" class="danger" onClick={() => { const target = session(); void onCloseSession(target); setSessionMenu(null); }}>Kill & remove</button>
+            </div>
+          </Dialog>}
+        </Show>
         {/* A sibling of the aside, not a child of it: the aside scrolls
             (`overflow-y: auto`), and per CSS an axis left at its initial
             `visible` while the other is scrolling computes to `auto` too —

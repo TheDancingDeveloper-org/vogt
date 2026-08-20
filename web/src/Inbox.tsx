@@ -584,6 +584,7 @@ const Inbox: Component<Props> = (props) => {
           <h1>Inbox</h1>
           </>
         )}
+        honestyClass={failure() ? "surface-header-honesty--outage" : loading() && !result() ? "surface-header-honesty--partial" : "surface-header-honesty--fresh"}
         honesty={(
           <p class="inbox-header-honesty" aria-live="polite">
             {failure()

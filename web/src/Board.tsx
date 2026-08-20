@@ -1864,6 +1864,7 @@ const Board: Component<Props> = (props) => {
         collapseControls
 
         title={<h1>Board</h1>}
+        honestyClass={`surface-header-honesty--${freshness().tone === "live" ? "fresh" : freshness().tone === "outage" || freshness().tone === "waiting" ? "outage" : "stale"}`}
         honesty={(
           <div class="board-summary" aria-live="polite">
             <span>{items().length} loaded</span>

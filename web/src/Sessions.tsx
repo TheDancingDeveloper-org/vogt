@@ -192,6 +192,7 @@ const Sessions: Component<Props> = (props) => {
           <h1>Sessions</h1>
           </>
         )}
+        honestyClass={sessionsError() ? "surface-header-honesty--outage" : isConnected() ? "surface-header-honesty--fresh" : "surface-header-honesty--stale"}
         honesty={(
           <div class="sessions-header-honesty" aria-live="polite">
             <p>
