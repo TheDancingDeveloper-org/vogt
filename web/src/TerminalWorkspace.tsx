@@ -8,8 +8,7 @@ import {
   onCleanup,
 } from "solid-js";
 import Terminal, { type TerminalActions } from "./Terminal";
-import Continuity from "./Continuity";
-import type { ContinuationRecipe, SessionSummary } from "./api";
+import type { SessionSummary } from "./api";
 import {
   createSession,
   deleteSession,
@@ -46,8 +45,6 @@ interface Props {
   confirmClosePane?: (session: SessionSummary | null) => Promise<boolean>;
   onError?: (message: string) => void;
   onNotify?: (message: string, kind?: "info" | "error") => void;
-  /** Focus an existing terminal by id (continuity reattach and post-recovery). */
-  onFocusSession?: (sessionId: string) => void;
 }
 
 const STORAGE_KEY = "mydevenv2.terminalLayouts.v1";
@@ -167,7 +164,6 @@ const TerminalWorkspace: Component<Props> = (props) => {
   const [broadcast, setBroadcast] = createSignal(Boolean(initial.broadcast));
   const [busy, setBusy] = createSignal<SplitDirection | "close" | null>(null);
   const [error, setError] = createSignal<string | null>(null);
-  const [continuityShown, setContinuityShown] = createSignal(false);
   const [draft, setDraft] = createSignal("");
   let composerRef: HTMLTextAreaElement | undefined;
   const paneSenders = new Map<string, (data: string | ArrayBuffer) => void>();
@@ -403,28 +399,6 @@ const TerminalWorkspace: Component<Props> = (props) => {
     }
   };
 
-  const continuityState = () => activeSession()?.continuity ?? null;
-
-  /**
-   * Create a terminal from a continuation recipe.
-   *
-   * The recipe's command, cwd, and env are used verbatim: ContextKeeper mints
-   * the correlation identifiers that travel in `env`, and rewriting any of it
-   * here would break the binding between the new PTY and the work it
-   * continues.
-   */
-  const launchRecipe = async (recipe: ContinuationRecipe) => {
-    const spec = recipe.mydevenv2;
-    if (!spec) throw new Error(`the ${recipe.kind} rung starts nothing`);
-    const session = await createSession(
-      spec.name,
-      spec.command,
-      spec.cwd,
-      spec.env,
-    );
-    props.onFocusSession?.(session.id);
-  };
-
   return (
     <div class="terminal-workspace">
       <div class="terminal-workspace-toolbar">
@@ -462,17 +436,6 @@ const TerminalWorkspace: Component<Props> = (props) => {
           {broadcastEnabled() ? "Broadcast on" : "Broadcast off"}
         </button>
         <button
-          class={continuityShown() ? "active" : ""}
-          onClick={() => setContinuityShown((shown) => !shown)}
-          title={
-            continuityState()
-              ? "ContextKeeper: protection state and recovery for this session"
-              : "ContextKeeper: this terminal has no captured agent session bound to it"
-          }
-        >
-          {continuityState()?.state === "recovering" ? "Recovery ◆" : "Continuity"}
-        </button>
-        <button
           onClick={() => void splitActive("row")}
           disabled={busy() !== null}
           title="Split right"
@@ -498,17 +461,6 @@ const TerminalWorkspace: Component<Props> = (props) => {
           Close pane
         </button>
       </div>
-      <Show when={continuityShown() && activeSession()}>
-        {(session) => (
-          <Continuity
-            session={session()}
-            onClose={() => setContinuityShown(false)}
-            onLaunchRecipe={launchRecipe}
-            onFocusTerminal={(id) => props.onFocusSession?.(id)}
-            onNotify={props.onNotify}
-          />
-        )}
-      </Show>
       <Show when={panes().length > 1}>
         <div class="terminal-workspace-roster">
           <span class={`terminal-workspace-roster-badge ${broadcastEnabled() ? "active" : ""}`}>

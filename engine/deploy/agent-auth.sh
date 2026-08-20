@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Load service credentials on demand from Infisical for agent commands.
 # The base container intentionally does not install or authenticate Codex/Claude.
+#
+# ESTATE TOOLING — not part of the public Vogt product. This script brokers
+# *this estate's* service credentials (Infisical, Komodo, Woodpecker, Forgejo,
+# GitHub, Cadastre) into a session on demand. A public reader inherits it in the
+# engine image but has nothing for it to reach: the Infisical project IDs, the
+# default Cadastre MCP URL and the secret names below are all estate values.
+# Absent that estate a session simply runs without these credentials pre-loaded
+# — nothing in the core product depends on it. See ENGINE.md §9.
 
 set -euo pipefail
 
@@ -14,6 +22,7 @@ readonly INFISICAL_ENV="prod"
 readonly CADASTRE_MCP_ENABLED="${CADASTRE_MCP_ENABLED:-0}"
 readonly CADASTRE_SECRET_NAME="${MYDEVENV2_CADASTRE_SECRET_NAME:-HOMELAB_CADASTRE_HTTP_TOKEN}"
 readonly VOGT_SECRET_NAME="${MYDEVENV2_VOGT_SECRET_NAME:-HOMELAB_VOGT_AGENT_TOKEN}"
+# Estate address. A public operator sets CADASTRE_MCP_URL or leaves Cadastre off.
 readonly DEFAULT_CADASTRE_MCP_URL="https://winrarhost.tailc7d3c.ts.net:18092/mcp"
 readonly DEFAULT_CADASTRE_MCP_RESOLVE="${MYDEVENV2_CADASTRE_MCP_RESOLVE:-}"
 # The same default `vogt-mcp-auth.sh` uses, and for the reason it gives: in

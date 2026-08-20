@@ -260,44 +260,6 @@ function activityClass(s: SessionSummary): string {
   return s.activity;
 }
 
-/**
- * A one-glyph protection marker. Absent continuity means unprotected, which is
- * also what a ContextKeeper outage looks like — deliberately, because in both
- * cases there is no recovery to offer and the terminal is otherwise fine.
- */
-function continuityBadge(s: SessionSummary): { glyph: string; cls: string; title: string } {
-  const continuity = s.continuity;
-  if (!continuity) {
-    return {
-      glyph: "○",
-      cls: "unprotected",
-      title: "Unprotected: no captured agent session is bound to this terminal",
-    };
-  }
-  if (continuity.state === "recovering") {
-    return {
-      glyph: "◆",
-      cls: "recovering",
-      title: `Recovery available (${continuity.provider}, ${continuity.failure_count} failure(s))`,
-    };
-  }
-  if (continuity.state === "protected") {
-    const lag = continuity.capture_lag_seconds;
-    const fresh =
-      continuity.capture_status === "catching-up"
-        ? "capture catching up"
-        : lag == null
-          ? "capture freshness unknown"
-          : `captured ${Math.round(lag)}s ago`;
-    return {
-      glyph: "●",
-      cls: "protected",
-      title: `Protected (${continuity.provider}, ${fresh})`,
-    };
-  }
-  return { glyph: "○", cls: "unprotected", title: "Unprotected" };
-}
-
 function activityLabel(s: ActivityState, exit: number | null): string {
   if (exit !== null) return exit === 0 ? "exited (0)" : `errored (${exit})`;
   switch (s) {
@@ -1148,9 +1110,6 @@ const App: Component = () => {
                   title={`${s.name}\ncwd: ${s.cwd}`}
                 >
                   <span class={`activity-dot ${activityClass(s)}`} title={activityLabel(s.activity, s.exit_code)} />
-                  <span class={`continuity-dot ${continuityBadge(s).cls}`} title={continuityBadge(s).title}>
-                    {continuityBadge(s).glyph}
-                  </span>
                   <div class="session-row-body">
                     <span class="name">{s.name}</span>
                     <Show when={s.cwd}><span class="cwd">{s.cwd}</span></Show>
@@ -1414,14 +1373,6 @@ const App: Component = () => {
                         onNotify={(message, kind) =>
                           showToast(message, { kind })
                         }
-                        onFocusSession={(sessionId) => {
-                          // A recovery replaces the terminal, so navigation is
-                          // part of the action: the user should land in the
-                          // session that continues their work.
-                          const session = sessionsStore.sessions[sessionId];
-                          openTerminalTab(sessionId, session?.name ?? sessionId.slice(0, 8));
-                          navigate(`/t/${sessionId}`, { replace: false });
-                        }}
                       />
                     )}
                   </Show>

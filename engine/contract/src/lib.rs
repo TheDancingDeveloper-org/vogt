@@ -55,57 +55,11 @@ pub struct SessionSpec {
     pub scrollback_bytes: Option<usize>,
 }
 
-/// Whether ContextKeeper can recover this terminal's agent session.
-///
-/// `Unprotected` is the honest answer for both "no agent session is bound to
-/// this PTY" and "ContextKeeper did not answer": in either case there is no
-/// recovery to offer, and a terminal must keep working regardless.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProtectionState {
-    Protected,
-    Unprotected,
-    Recovering,
-}
-
-/// ContextKeeper's view of the agent session running in a terminal.
-///
-/// Every field is optional or defaulted because this is enrichment: the whole
-/// struct is absent when ContextKeeper is not configured, is unreachable, or
-/// has nothing bound to the PTY.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionContinuity {
-    pub state: ProtectionState,
-    /// ContextKeeper's registry id, which every continuity call is keyed by.
-    pub session_id: String,
-    pub provider: String,
-    #[serde(default)]
-    pub native_session_id: String,
-    /// The durable work session: earlier attempts stay reachable through it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_id: Option<String>,
-    #[serde(default)]
-    pub lifecycle: String,
-    #[serde(default)]
-    pub event_count: u64,
-    #[serde(default)]
-    pub failure_count: u64,
-    /// Seconds since capture last completed a pass. Freshness, not liveness.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capture_lag_seconds: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capture_status: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: Uuid,
     pub name: String,
     pub activity: ActivityState,
-    /// ContextKeeper enrichment. Absent means unprotected — never an error,
-    /// and never a reason to fail listing or creating a terminal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub continuity: Option<SessionContinuity>,
     #[serde(default)]
     pub exit_code: Option<i32>,
     #[serde(default)]
@@ -469,41 +423,6 @@ mod tests {
             ServerEvent::Activity { state, .. } => assert_eq!(state, ActivityState::Running),
             other => panic!("wrong variant: {other:?}"),
         }
-    }
-
-    #[test]
-    fn continuity_is_absent_rather_than_null_when_unprotected() {
-        // Older clients, and every response while ContextKeeper is unconfigured
-        // or unreachable, must see exactly the shape they saw before.
-        let summary = SessionSummary {
-            id: Uuid::nil(),
-            name: "term".into(),
-            activity: ActivityState::Idle,
-            continuity: None,
-            exit_code: None,
-            scrollback_bytes: 0,
-            cwd: "/workspace".into(),
-            command: None,
-            created_at: String::new(),
-            activity_changed_at: String::new(),
-        };
-        let json = serde_json::to_string(&summary).unwrap();
-        assert!(!json.contains("continuity"), "{json}");
-    }
-
-    #[test]
-    fn protection_state_is_kebab_case() {
-        assert_eq!(
-            serde_json::to_string(&ProtectionState::Recovering).unwrap(),
-            "\"recovering\""
-        );
-    }
-
-    #[test]
-    fn a_summary_without_continuity_still_deserializes() {
-        let raw = r#"{"id":"00000000-0000-0000-0000-000000000000","name":"t","activity":"idle"}"#;
-        let summary: SessionSummary = serde_json::from_str(raw).unwrap();
-        assert!(summary.continuity.is_none());
     }
 
     #[test]

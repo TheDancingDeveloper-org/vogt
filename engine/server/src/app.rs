@@ -16,8 +16,6 @@ use crate::{
     assistant::AssistantRuntime,
     assistant_api, auth,
     config::Config,
-    contextkeeper::ContextKeeperRuntime,
-    contextkeeper_api,
     events::EventBus,
     files, git,
     gui::GuiRegistry,
@@ -52,10 +50,6 @@ pub struct AppState {
     pub history: Option<Arc<SessionHistory>>,
     /// None when `assistant_api_key` is not configured; routes 404.
     pub assistant: Option<Arc<AssistantRuntime>>,
-    /// None when ContextKeeper is not configured. Every terminal then reads as
-    /// unprotected and the continuity routes answer 404 — MyDevEnv2 does not
-    /// depend on the sidecar for anything it owns.
-    pub contextkeeper: Option<Arc<ContextKeeperRuntime>>,
     /// None when no vogt-core is configured, which is the engine running as
     /// it always has. The Vogt routes then answer 503 with a named reason
     /// and every session keeps working (FR-E9).
@@ -97,12 +91,6 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             .expect("agent task registry init"),
     );
 
-    let contextkeeper = ContextKeeperRuntime::from_config(&cfg);
-    if let Some(runtime) = contextkeeper.as_ref() {
-        tracing::info!("contextkeeper continuity enabled");
-        runtime.spawn_refresher();
-    }
-
     let assistant = AssistantRuntime::from_config(&cfg, Arc::clone(&sessions), Arc::clone(&push));
     if assistant.is_some() {
         tracing::info!(model = %cfg.assistant_model, "assistant enabled");
@@ -139,7 +127,6 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         agent_tasks,
         history,
         assistant,
-        contextkeeper,
         vogt_core,
     });
 
@@ -233,35 +220,6 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/push/list", get(push_api::list))
         .route("/api/push/test", post(push_api::test_dispatch))
         .route("/api/push/flush-digests", post(push_api::flush_digests))
-        .route("/api/contextkeeper/health", get(contextkeeper_api::health))
-        .route(
-            "/api/contextkeeper/terminals/{id}",
-            get(contextkeeper_api::session_continuity),
-        )
-        .route(
-            "/api/contextkeeper/sessions/{session_id}",
-            get(contextkeeper_api::session),
-        )
-        .route(
-            "/api/contextkeeper/sessions/{session_id}/continuation",
-            get(contextkeeper_api::continuation),
-        )
-        .route(
-            "/api/contextkeeper/sessions/{session_id}/preview",
-            get(contextkeeper_api::preview),
-        )
-        .route(
-            "/api/contextkeeper/sessions/{session_id}/approve",
-            post(contextkeeper_api::approve),
-        )
-        .route(
-            "/api/contextkeeper/sessions/{session_id}/launch",
-            post(contextkeeper_api::launch),
-        )
-        .route(
-            "/api/contextkeeper/work/{work_id}",
-            get(contextkeeper_api::work_session),
-        )
         .route("/api/history/sessions", get(history_api::list_sessions))
         .route("/api/history/search", get(history_api::search_sessions))
         .route("/api/history/cleanup", post(history_api::cleanup_sessions))

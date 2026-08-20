@@ -100,9 +100,6 @@ impl Session {
             id: self.id,
             name: self.name.lock().clone(),
             activity: *self.activity.lock(),
-            // Enrichment belongs to the API layer, which is where the
-            // ContextKeeper cache lives; a PTY knows nothing about it.
-            continuity: None,
             exit_code: *self.exit_code.lock(),
             scrollback_bytes: sb.total_written(),
             cwd: self.cwd.clone(),
