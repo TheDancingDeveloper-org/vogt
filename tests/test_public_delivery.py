@@ -212,3 +212,24 @@ def test_the_estate_overlay_keeps_the_existing_core_volume() -> None:
     """
     overlay = ESTATE_OVERLAY.read_text(encoding="utf-8")
     assert 'name: "${VOGT_CORE_VOLUME:-vogt-core-data}"' in overlay
+
+
+def test_the_estate_overlay_does_not_gate_on_an_assistant_endpoint() -> None:
+    """The engine enforces r20's rule; compose must not enforce it twice.
+
+    A key with no stated destination is a startup error in the engine. Gating
+    `MYDEVENV2_ASSISTANT_BASE_URL` with `${X:?}` here as well would refuse to
+    deploy a stack that simply has no assistant key — the common case.
+    """
+    overlay = ESTATE_OVERLAY.read_text(encoding="utf-8")
+    assert (
+        'MYDEVENV2_ASSISTANT_BASE_URL: "${MYDEVENV2_ASSISTANT_BASE_URL:-}"' in overlay
+    )
+    required = set(re.findall(r"\$\{([A-Z_]+):\?", _without_comments(overlay)))
+    # Only genuine exposure values and the image may be required.
+    assert required <= {
+        "VOGT_BIND_IP",
+        "VOGT_PUBLIC_URL",
+        "VOGT_STACK_IMAGE",
+        "MYDEVENV2_TOKEN",
+    }, f"unexpected required variables: {sorted(required)}"

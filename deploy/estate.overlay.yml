@@ -79,7 +79,7 @@ services:
 
     # The only published surface. Tailnet address only, never 0.0.0.0.
     ports:
-      - "${VOGT_BIND_IP:?the address the front door is published on}:${VOGT_ENGINE_PORT:-18097}:8910"
+      - "${VOGT_BIND_IP:?the address the front door is published on}:${VOGT_PORT:-18097}:8910"
 
     cap_add:
       - NET_ADMIN
@@ -125,15 +125,25 @@ services:
       MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON: "${MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON:-}"
       MYDEVENV2_ASSISTANT_API_KEY: "${MYDEVENV2_ASSISTANT_API_KEY:-}"
       MYDEVENV2_ASSISTANT_MODEL: "${MYDEVENV2_ASSISTANT_MODEL:-gpt-5.4-mini}"
-      # Stated, never defaulted to a provider: a key with no destination is a
-      # configuration error (NFR-D2, r20).
-      MYDEVENV2_ASSISTANT_BASE_URL: "${MYDEVENV2_ASSISTANT_BASE_URL:?name the endpoint the assistant key belongs to}"
+      # Empty when unset, *not* `${X:?}`. The engine already enforces r20's
+      # rule — a key with no stated destination is a startup error — so
+      # gating it here as well would fail the deploy of a stack that simply
+      # has no assistant key, which is the common case.
+      MYDEVENV2_ASSISTANT_BASE_URL: "${MYDEVENV2_ASSISTANT_BASE_URL:-}"
       START_SWAY: "${START_SWAY:-0}"
       GUI_STREAM_URL: "${GUI_STREAM_URL:-}"
       SCCACHE_REDIS: "${SCCACHE_REDIS:-redis://100.92.54.45:6380}"
 
     secrets:
       - vogt_core_token
+
+    # If this deployment also mounts the host Docker socket, it attaches
+    # *here*. The estate's `docker-compose.docker-socket.yml` names the
+    # service `vogt`, which in this topology is the **core** — applying it
+    # unchanged would hand the host daemon to the core, which has no use for
+    # it, and leave the engine (whose sessions run `docker`) without. That
+    # file needs its service renamed to `engine` before it is used alongside
+    # this overlay.
 
     # `/readyz` is the aggregate, and it deliberately does not fail on an
     # absent core — restarting the engine would not revive one and would kill
