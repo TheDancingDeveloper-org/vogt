@@ -456,6 +456,23 @@ def test_the_merged_stack_takes_its_core_token_from_a_file(stack: str) -> None:
     )
 
 
+def test_the_merged_stack_points_the_core_at_the_engine(stack: str) -> None:
+    """#157: without VOGT_ENGINE_URL a work item cannot open its own session.
+
+    The merged container runs both halves, so the core reaches the engine over
+    loopback on the engine's port. Left unset it is the honest FR-E9 absence —
+    which was never meant to apply to the one deployment that runs both halves,
+    and is exactly how the work-item session path came to have never run.
+    """
+    assert f'VOGT_ENGINE_URL: "http://127.0.0.1:{ENGINE_PORT}"' in stack, (
+        "the core reaches the engine over loopback to open a work item's session"
+    )
+    assert "VOGT_ENGINE_TOKEN_FILE:" in stack
+    assert not re.search(r"^\s+VOGT_ENGINE_TOKEN:", stack, re.MULTILINE), (
+        "the engine token is brokered as a file, never a value (FR-S7)"
+    )
+
+
 @pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
 def test_the_merged_image_is_built_from_the_engine_dockerfile(workflow: str) -> None:
     """The context is the repository, not `engine/`.

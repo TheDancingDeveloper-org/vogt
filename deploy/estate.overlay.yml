@@ -56,6 +56,20 @@ services:
       VOGT_IMPORT_ROOT: "${VOGT_IMPORT_ROOT:-/home/sprooty/Working/Active}"
       # Read by `backup`/`restore`. Must be the same path the engine writes.
       VOGT_ENGINE_STATE_DIR: /home/sprooty/.local/share/mydevenv2
+      # The core reaches the engine here to open a work item's coding session
+      # (FR-E1). The engine is the sibling container, on the compose network by
+      # service name. Note the /etc/hosts landmine runs *one way only*: the
+      # engine breaks its own resolv.conf (it runs Tailscale, hence the `vogt`
+      # pin over there), but this core runs the vanilla public image with
+      # Docker's embedded resolver intact, so `engine` resolves here without a
+      # pin. Do not add one on a false symmetry with the engine's `extra_hosts`.
+      # Unset — as it was in every stack until #157 — `session.*` reports "no
+      # engine configured" and a work item cannot open a session (FR-E9).
+      VOGT_ENGINE_URL: "http://engine:8910"
+      # Brokered as a file (FR-S7), carrying only the engine's `sessions`
+      # capability. Its value is the `["sessions"]` entry the engine declares in
+      # MYDEVENV2_EXTRA_TOKENS_JSON below.
+      VOGT_ENGINE_TOKEN_FILE: /run/secrets/vogt_engine_token
       VOGT_GITHUB_TOKEN_FILE: /run/secrets/github_token
 
     volumes:
@@ -69,6 +83,7 @@ services:
 
     secrets:
       - github_token
+      - vogt_engine_token
 
     # Fixed, because the engine reaches it through an /etc/hosts pin and a
     # pin cannot follow a dynamic address. Inside this stack's own network,
@@ -121,6 +136,10 @@ services:
       VOGT_CORE_TOKEN_FILE: /run/secrets/vogt_core_token
 
       MYDEVENV2_TOKEN: "${MYDEVENV2_TOKEN:?the front door's primary bearer token}"
+      # Scoped front-door tokens, and where the core's session token is
+      # declared: one entry with capabilities ["sessions"], whose value the
+      # core presents via VOGT_ENGINE_TOKEN_FILE. Without it the core's
+      # work-item sessions are refused (#157).
       MYDEVENV2_EXTRA_TOKENS_JSON: "${MYDEVENV2_EXTRA_TOKENS_JSON:-}"
       MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE: "${MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE:-600}"
       MYDEVENV2_BIND: 0.0.0.0:8910
@@ -207,3 +226,7 @@ secrets:
     file: ./github-token
   vogt_core_token:
     file: ./vogt-core-token
+  # The core's engine token — the mirror of vogt_core_token, the other
+  # direction. Legitimately empty until the scoped token is minted.
+  vogt_engine_token:
+    file: ./vogt-engine-token

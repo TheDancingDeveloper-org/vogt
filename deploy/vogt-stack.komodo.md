@@ -74,27 +74,29 @@ the stack called `vogt` deploys the prod-candidate directory. Check
 
 ## 3. The `pre_deploy` hook
 
-Two credentials, both brokered as files (FR-S7). Komodo writes its environment
-field to `.env` beside the compose at deploy time; the hook turns two of those
-values into files the container mounts:
+Three credentials, all brokered as files (FR-S7). Komodo writes its environment
+field to `.env` beside the compose at deploy time; the hook turns those values
+into files the container mounts:
 
 ```bash
 umask 077
 sed -n 's/^VOGT_GITHUB_TOKEN=//p' .env > github-token
 sed -n 's/^VOGT_CORE_TOKEN=//p'   .env > vogt-core-token
+sed -n 's/^VOGT_ENGINE_TOKEN=//p' .env > vogt-engine-token
 test -s github-token
-chown 1000:1000 github-token vogt-core-token
-chmod 640       github-token vogt-core-token
+chown 1000:1000 github-token vogt-core-token vogt-engine-token
+chmod 640       github-token vogt-core-token vogt-engine-token
 ```
 
 `1000:1000`, not the core-only stack's `1000:0` — this image's `sprooty` has
 gid 1000, where the core-only image runs any uid with gid 0 precisely because
 it has not decided who it is.
 
-Note `test -s github-token` and **no** such test on the core token: the core
-token is legitimately empty on a first deploy, and failing the hook over it
-would make the stack unbootable in exactly the state you need it to boot in to
-mint one.
+Note `test -s github-token` and **no** such test on the core *or* engine
+token: the core token is legitimately empty on a first deploy, and failing the
+hook over it would make the stack unbootable in exactly the state you need it
+to boot in to mint one. The engine token is the same — the core-driven session
+path is simply off until it exists, which is the FR-E9 absence, not a fault.
 
 ## 4. First deploy, in order
 
@@ -118,6 +120,38 @@ core, which has to be running first.
 
 Between 1 and 4, `/api/vogt` reads work and writes refuse with a named reason.
 That is the designed degradation, not a broken stack.
+
+## 5. The engine session token (#157)
+
+Distinct from the core token above, and the other direction: this is the token
+the **core** presents to the **engine** so a work item can open its own coding
+session (FR-E1). Until it exists, `vogt session start` for a work item reports
+`engine_unavailable`/`no engine is configured` — which is the FR-E9 absence
+seen from the core, and was the state of *every* stack before this was wired.
+
+It is a scoped front-door token, not a core token, so it is *not* minted with
+`vogt token issue`. It is a value you choose, declared to the engine and
+brokered to the core as the same value:
+
+1. Generate an opaque value:
+   ```bash
+   openssl rand -hex 32
+   ```
+2. Declare it to the engine, with the `sessions` capability and nothing else,
+   in the stack's environment:
+   ```
+   MYDEVENV2_EXTRA_TOKENS_JSON=[{"name":"vogt-core-sessions","token":"<value>","capabilities":["sessions"]}]
+   VOGT_ENGINE_TOKEN=<value>
+   ```
+   The `pre_deploy` hook brokers `VOGT_ENGINE_TOKEN` into `vogt-engine-token`;
+   the engine learns the same value from `MYDEVENV2_EXTRA_TOKENS_JSON`.
+3. Redeploy. `vogt session start --project <p> --name x --reason "…"` now opens
+   a terminal instead of refusing.
+
+The `sessions` capability is deliberately the whole grant: Vogt starts and
+stops terminals and has no business writing that pod's files (CONFIG.md,
+`engine_token_file`). A token with more capability than that is a token the
+core did not need and a blast radius it should not carry.
 
 ## 5. What to watch after it is up
 
