@@ -1,15 +1,14 @@
 # Vogt GUI parity plan — surface header and places rail
 
-Status: review and implementation plan (no product code changed by this
-handoff review)
+Status: implemented on `dev` in commit `83ba28a`; retained as the parity
+checklist for follow-up review.
 
 Reviewed: 2026-08-20
 
 Design source: [`design/design_handoff_surface_header_and_rail/`](../design/design_handoff_surface_header_and_rail/)
 
 Archive provenance: Node B `/mnt/4tnvme/Temp/UI issues to solve(1).zip`,
-copied to [`design/UI issues to solve(1).zip`](../design/UI%20issues%20to%20solve%281%29.zip)
-at 2,301,046 bytes, SHA-256
+copied to `design/UI issues to solve(1).zip` at 2,301,046 bytes, SHA-256
 `b91147f48dbb397bbcfda570d2873ccd47731aa6fb93407091daf7028bddea87`.
 
 ## What was reviewed
@@ -190,4 +189,3 @@ rail geometry test remains green, and a desktop screenshot is comparable to
 5. `refactor(web): replace session hover actions with one overflow menu`
 6. `feat(web): persist collapsible rail sections`
 7. `test(web): capture desktop and phone parity screenshots`
-
