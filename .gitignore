@@ -51,3 +51,13 @@ web/test-results/
 # template; the copy an operator edits is theirs, not the repository's.
 deploy/.env
 .env
+
+# Broker-written credential files (FR-S7): the pre_deploy hook writes these
+# beside the compose at deploy time; they must never be committed. Belt-and-
+# braces alongside push protection now that the repo is public.
+github-token
+vogt-core-token
+vogt-engine-token
+deploy/github-token
+deploy/vogt-core-token
+deploy/vogt-engine-token
