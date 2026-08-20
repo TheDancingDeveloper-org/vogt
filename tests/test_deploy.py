@@ -239,10 +239,15 @@ def test_the_image_has_no_default_listen_address() -> None:
     assert 'CMD ["--help"]' in text
 
 
+def _workflow_files() -> list[Path]:
+    """Both extensions. A gate a `.yaml` file can walk past is not a gate."""
+    return sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")])
+
+
 def test_every_workflow_job_names_a_fixed_approved_runner() -> None:
     """NFR-C4 r20: fork validation is isolated; publishing stays private."""
     publisher_workflows = {"build.yml", "release.yml", "mirror-base-images.yml"}
-    for path in sorted(WORKFLOWS.glob("*.yml")):
+    for path in _workflow_files():
         for number, line in enumerate(path.read_text("utf-8").splitlines(), start=1):
             if not re.match(r"^\s*runs-on\s*:", line):
                 continue
@@ -262,6 +267,29 @@ def test_every_workflow_job_names_a_fixed_approved_runner() -> None:
                     f"{path.name}:{number}: fork validation must use an "
                     "isolated hosted runner"
                 )
+
+
+def test_a_fork_reachable_workflow_guards_its_self_hosted_jobs() -> None:
+    """The file-level exemption above is not enough on its own.
+
+    `publisher_workflows` exempts whole files, so a fork-triggered job could
+    be added to one and still reach the tailnet pool with the audit green.
+    What actually protects the pool is the event guard, so assert that
+    instead of trusting the filename (NFR-C4 r20).
+    """
+    guard = "github.event_name != 'pull_request'"
+    for path in _workflow_files():
+        text = path.read_text("utf-8")
+        selects_pool = any(
+            re.match(r"^\s*runs-on\s*:", line) and "self-hosted" in line
+            for line in text.splitlines()
+        )
+        fork_reachable = re.search(r"^\s*pull_request\s*:", text, re.MULTILINE)
+        if selects_pool and fork_reachable:
+            assert guard in text, (
+                f"{path.name}: reachable from a fork pull request and uses "
+                "the self-hosted pool without guarding those jobs"
+            )
 
 
 def test_the_release_workflow_is_tag_only_and_signs_a_digest() -> None:

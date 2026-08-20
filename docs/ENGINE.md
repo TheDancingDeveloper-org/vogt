@@ -258,6 +258,22 @@ server automatically, carrying a per-session actor-scoped token, so an agent's
 writes are attributed to that session's actor rather than to a shared identity
 (FR-E5, FR-S10). `DEPLOYMENT.md` §7.2 is the credential's story.
 
+**Cadastre — optional, off by default.** Cadastre is a separate product, not
+part of Vogt (NFR-O5). `mydevenv2-mcp-bootstrap` registers it, and
+`mydevenv2-agent-auth` fetches its bearer and probes it, only when the
+deployment opts in:
+
+| Env | Default | Effect |
+|---|---|---|
+| `CADASTRE_MCP_ENABLED` | `0` | `1` registers and probes Cadastre. At `0` the bootstrap still registers Vogt, and `agent-auth check` reports `skip: Cadastre MCP (optional integration disabled)` rather than failing. |
+| `CADASTRE_MCP_URL` | the estate endpoint | Where the bridge points. |
+| `MYDEVENV2_CADASTRE_SECRET_NAME` | `HOMELAB_CADASTRE_HTTP_TOKEN` | Which Infisical secret holds the bearer. |
+
+The image installs `cadastre[mcp-client]` only under the
+`INSTALL_CADASTRE_MCP` build argument, which is also off by default — so
+enabling the flag on an image built without it registers a bridge that is not
+there. Both halves are opt-in, deliberately.
+
 ---
 
 ## 5. The wire contract

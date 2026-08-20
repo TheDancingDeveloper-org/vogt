@@ -18,6 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Two rules, and the second is the one that matters. Exempting a
+      # *file* would let a fork-triggered job be added to a publisher
+      # workflow with the audit still green — so a workflow reachable from
+      # `pull_request` has to guard its self-hosted jobs against fork events,
+      # which is what `mirror-base-images.yml` already does.
       - name: every job uses a fixed approved runner
         run: |
           set -euo pipefail
@@ -47,5 +52,23 @@ jobs:
                 fi
                 ;;
             esac
-          done < <(grep -RnE '^[[:space:]]*runs-on:' .github/workflows --include='*.yml')
+          done < <(grep -RnE '^[[:space:]]*runs-on:' .github/workflows \
+                     --include='*.yml' --include='*.yaml')
+
+          # A publisher workflow that forks can trigger must guard the jobs
+          # that reach the tailnet pool.
+          for file in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -e "$file" ] || continue
+            # A `runs-on:` line, not prose: several workflows discuss the
+            # self-hosted pool in comments without ever selecting it.
+            grep -qE '^[[:space:]]*runs-on:.*self-hosted' "$file" || continue
+            grep -qE '^[[:space:]]*pull_request:' "$file" || continue
+            if ! grep -qF "github.event_name != 'pull_request'" "$file"; then
+              echo "::error file=$file::workflow is reachable from a fork" \
+                   "pull request and uses the self-hosted pool without" \
+                   "guarding those jobs against fork events"
+              bad=1
+            fi
+          done
+
           [ "$bad" -eq 0 ]

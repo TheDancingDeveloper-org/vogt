@@ -312,7 +312,7 @@ services:
       # Cadastre is not part of Vogt. This retained private stack opts into
       # its separately installed MCP bridge to preserve the current estate;
       # generic/public images and Compose examples leave it disabled.
-      MYDEVENV2_CADASTRE_MCP_ENABLED: "1"
+      CADASTRE_MCP_ENABLED: "1"
       # Which Infisical secret holds the Vogt token in-pod agents act with.
       #
       # A Vogt token is minted by one *instance* and stored hashed in that

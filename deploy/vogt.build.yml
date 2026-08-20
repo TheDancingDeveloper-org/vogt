@@ -1,0 +1,22 @@
+# Build overlay for the public base.
+#
+# The base compose file pulls a published image, because that is what a
+# deployment does. This overlay builds the same image from the checkout
+# instead, which is what a contributor — or anyone running Vogt before the
+# GHCR package is public — does:
+#
+#   docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d
+#
+# It is also the smallest worked example of the overlay model described in
+# `docs/CUSTOMISATION.md`: the base is not edited, and this file states only
+# its difference from the base.
+
+services:
+  vogt:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # Overrides the base's registry reference so the locally built image is
+    # the one that runs. Without this, Compose would tag the build and then
+    # still be able to resolve the published tag.
+    image: vogt:local

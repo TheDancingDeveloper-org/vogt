@@ -9,7 +9,9 @@ readonly CICD_PROJECT_ID="6d6caff5-7aaf-42f8-a135-2455d7629af8"
 readonly INFRASTRUCTURE_PROJECT_ID="5b7e75de-e874-484d-9595-873acd6bfd07"
 readonly APPS_PROJECT_ID="76b1ebe1-3656-4cef-952c-30d5d489c6e7"
 readonly INFISICAL_ENV="prod"
-readonly CADASTRE_MCP_ENABLED="${MYDEVENV2_CADASTRE_MCP_ENABLED:-0}"
+# Cadastre-scoped like the other Cadastre values in this file
+# (CADASTRE_MCP_URL, CADASTRE_HTTP_TOKEN), not prefixed with a product name.
+readonly CADASTRE_MCP_ENABLED="${CADASTRE_MCP_ENABLED:-0}"
 readonly CADASTRE_SECRET_NAME="${MYDEVENV2_CADASTRE_SECRET_NAME:-HOMELAB_CADASTRE_HTTP_TOKEN}"
 readonly VOGT_SECRET_NAME="${MYDEVENV2_VOGT_SECRET_NAME:-HOMELAB_VOGT_AGENT_TOKEN}"
 readonly DEFAULT_CADASTRE_MCP_URL="https://winrarhost.tailc7d3c.ts.net:18092/mcp"
@@ -216,8 +218,13 @@ load_agent_environment() {
         export VOGT_TOKEN_FILE="$AUTH_TMP_DIR/vogt-http-token"
     fi
 
-    if [[ "$CADASTRE_MCP_ENABLED" == "1" \
-        && "${MYDEVENV2_AUTO_CADASTRE_MCP:-1}" == "1" ]]; then
+    # Not gated on Cadastre. The bootstrap registers Vogt unconditionally and
+    # Cadastre only when it is enabled; gating the call itself would take
+    # Vogt's own registrations with it whenever Cadastre is off — which is
+    # every generic deployment, and the opposite of making an optional
+    # integration optional. (The variable's name is broader than Cadastre
+    # now; renaming it is tracked with the rest of the MYDEVENV2_* window.)
+    if [[ "${MYDEVENV2_AUTO_CADASTRE_MCP:-1}" == "1" ]]; then
         /usr/local/bin/mydevenv2-mcp-bootstrap
     fi
 

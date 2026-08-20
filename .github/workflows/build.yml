@@ -308,12 +308,18 @@ jobs:
           load: true
           tags: ${{ env.STACK_IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
+          # `#` inside a `|` block scalar is literal content, not a YAML
+          # comment, and build-push-action parses the input without a comment
+          # option — so a note in there reaches buildx as a build arg. It goes
+          # here instead.
+          #
+          # INSTALL_CADASTRE_MCP / INSTALL_THECLAWBAY are private-stack
+          # compatibility. Neither is part of the root/public image; the dev
+          # pod opts in so its current configuration stays reproducible while
+          # the generic distribution stays independent.
           build-args: |
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
-            # Private-stack compatibility. Neither is part of the root/public
-            # image; the dev pod opts in so its current configuration remains
-            # reproducible while the generic distribution stays independent.
             INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' }}
 

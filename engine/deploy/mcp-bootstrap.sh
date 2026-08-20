@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Idempotently register Vogt for clients present in the image. Cadastre is a
 # separate, optional private-stack integration and is registered only when
-# MYDEVENV2_CADASTRE_MCP_ENABLED=1.
+# CADASTRE_MCP_ENABLED=1.
 # Registration stores only the endpoint and wrapper command; no bearer value.
 set -euo pipefail
 
 readonly CADASTRE_URL="${CADASTRE_MCP_URL:-https://winrarhost.tailc7d3c.ts.net:18092/mcp}"
 readonly CADASTRE_WRAPPER="/usr/local/bin/mydevenv2-cadastre-mcp"
 readonly CADASTRE_SRC="${MYDEVENV2_CADASTRE_SRC:-$HOME/Working/Active/cadastre}"
-readonly CADASTRE_MCP_ENABLED="${MYDEVENV2_CADASTRE_MCP_ENABLED:-0}"
+readonly CADASTRE_MCP_ENABLED="${CADASTRE_MCP_ENABLED:-0}"
 
 # Where an agent in this session should reach Vogt, in the order of what
 # actually knows the answer:

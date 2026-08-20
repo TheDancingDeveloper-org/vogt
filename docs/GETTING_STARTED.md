@@ -39,13 +39,26 @@ container cannot infer the address clients will use. For a local installation,
 the example value `http://localhost:8080` is correct. Change `VOGT_PORT` if
 port 8080 is already in use.
 
-Build and start the core. The Compose entrypoint runs the idempotent `vogt
-init` bootstrap before serving, so a new named volume is ready without a
-manual container shell step:
+Start the core. `deploy/vogt.compose.yml` is the base and pulls a published
+image. To build it from this checkout instead, add the build overlay:
 
 ```console
-docker compose --env-file deploy/.env -f deploy/vogt.compose.yml up --build -d
+docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d
 ```
+
+Once the image is published and you are pinning it, the base runs on its own:
+
+```console
+docker compose -f deploy/vogt.compose.yml up -d
+```
+
+The Compose command runs the idempotent `vogt init` bootstrap before serving,
+so a new named volume is ready without a manual container shell step. It is
+required rather than convenient: `serve` on an empty data directory answers
+`/health/ready` with 503 and tells you to run `vogt init` first.
+
+The port publishes to `127.0.0.1` unless you set `VOGT_BIND_IP`. The example
+will not put an instance on a network interface because nobody said to.
 
 Check both health endpoints:
 
@@ -54,21 +67,22 @@ curl http://localhost:8080/health/live
 curl http://localhost:8080/health/ready
 ```
 
-Readiness performs the storage migration before serving traffic. A healthy
-response includes the declared and observed schema versions. Open
+Readiness reports whether both stores are migrated to this build's schema — it
+does not migrate them, which is why the Compose command runs `vogt init`
+first. A healthy response includes the declared and observed schema
+versions. Open
 `http://localhost:8080/ui` in a browser to use the GUI.
 
 Stop or inspect the instance with:
 
 ```console
-docker compose --env-file deploy/.env -f deploy/vogt.compose.yml ps
-docker compose --env-file deploy/.env -f deploy/vogt.compose.yml logs -f vogt
-docker compose --env-file deploy/.env -f deploy/vogt.compose.yml down
+docker compose -f deploy/vogt.compose.yml ps
+docker compose -f deploy/vogt.compose.yml logs -f vogt
+docker compose -f deploy/vogt.compose.yml down
 ```
 
-The named volumes `vogt-data` and `vogt-workspace` survive `down`. Do not add
-`--volumes` unless you intentionally want to remove the instance and its
-workspace.
+The named volume `vogt-data` survives `down`. Do not add `--volumes` unless
+you intentionally want to remove the instance and everything it holds.
 
 ## Local Python
 
@@ -144,7 +158,7 @@ uv run vogt project register \
   --root-path /path/to/my-project \
   --reason "start tracking this repository"
 uv run vogt sweep --reason "collect repository state"
-uv run vogt project get --project my-project
+uv run vogt project get --slug my-project
 uv run vogt backlog
 ```
 
@@ -209,17 +223,19 @@ test succeed.
 To remove the example completely, first make a backup, then run:
 
 ```console
-docker compose --env-file deploy/.env -f deploy/vogt.compose.yml down --volumes
+docker compose -f deploy/vogt.compose.yml down --volumes
 ```
 
-This removes the example's named data and workspace volumes and cannot be
-undone by Docker.
+This removes the example's named data volume and cannot be undone by Docker.
 
 ## Where to go next
 
 - [`docs/USER_GUIDE.md`](USER_GUIDE.md) explains the GUI, ranked views,
   projects, drift, audit, and all supported CLI/API surfaces.
 - [`docs/CONFIG.md`](CONFIG.md) is generated from the configuration schema.
+- [`docs/CUSTOMISATION.md`](CUSTOMISATION.md) names the supported extension
+  points — configuration, Compose overlays, image extension, your own front
+  door — for a deployment that needs more than the base.
 - [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) covers network exposure, tokens,
   storage, backups, and operational topology.
 - [`opensource.md`](../opensource.md) explains why the public path is

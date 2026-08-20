@@ -1,44 +1,78 @@
-# Generic, Python-core Compose example.
+# Generic Vogt — the public base.
 #
-# This file is the public self-hosting path. It deliberately does not know
-# about the private estate, the Rust session engine, Komodo, Tailscale,
-# Infisical, Cadastre, or an MCP client. Copy deploy/.env.example to .env,
-# adjust the values for the host, and run `docker compose -f
-# deploy/vogt.compose.yml up --build -d`.
+# This file is the supported self-hosting path *and* the base other
+# deployments layer onto. It knows nothing about any particular estate: no
+# session engine, no Komodo, Tailscale, Infisical, Cadastre or MCP client.
+#
+# Run it alone:
+#
+#   cp deploy/.env.example deploy/.env
+#   docker compose -f deploy/vogt.compose.yml up -d
+#
+# Build from a checkout instead of pulling a published image by adding the
+# build overlay:
+#
+#   docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d
+#
+# Add your own services, mounts and settings with an overlay of your own —
+# `docs/CUSTOMISATION.md` describes the supported extension points. Nothing
+# below needs editing to customise a deployment; that is the point of it
+# being a base.
 
 services:
   vogt:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    image: vogt:local
+    # Pinned by tag here so the example reads. A real deployment pins the
+    # digest — publishing an image and moving a deployment are separate acts
+    # (NFR-D10), and a digest is the only form of "which image is this" a
+    # rebuild cannot silently change.
+    image: ${VOGT_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt:v0.2.0}
     restart: unless-stopped
-    # Bootstrap is idempotent: it creates the first local actor on a new
-    # volume and migrates an existing instance before opening the listener.
-    # Subsequent restarts leave the instance and its audit history intact.
-    entrypoint: ["/bin/sh", "-c"]
-    command: >-
-      vogt init >/dev/null &&
-      exec vogt serve --host 0.0.0.0 --port 8000
 
-    # The host-side port is an allocation and has a safe local default. The
-    # public URL is an exposure decision and is supplied explicitly in .env.
+    # The image runs as any uid so long as the gid is 0: `/var/lib/vogt` is
+    # owned by group 0 and group-writable precisely so this is a deploy-time
+    # choice rather than a rebuild. Set VOGT_UID to the uid that owns the
+    # files this instance observes.
+    user: "${VOGT_UID:-1000}:0"
+
+    # `vogt init` is required, not decoration: `serve` on an empty data
+    # directory answers /health/ready with 503 and "run `vogt init` first".
+    # It is idempotent — it creates the instance on a new volume, migrates an
+    # existing one, and leaves the audit history alone on every restart after
+    # that.
+    #
+    # One list element, deliberately. Compose applies shell-style word
+    # splitting to a *string* command and truncates it at the `>` redirect,
+    # so the folded-scalar form of this silently becomes `["vogt", "init"]`
+    # and the server never starts. A single-element list is passed through
+    # verbatim to `sh -c`.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - vogt init && exec vogt serve --host 0.0.0.0 --port 8000
+
+    # `0.0.0.0` above is the *container's* namespace. Host exposure is
+    # decided here, and defaults to loopback: the example will not put an
+    # instance on a network interface because nobody said otherwise. Set
+    # VOGT_BIND_IP to publish it somewhere real.
     ports:
-      - "${VOGT_PORT:-8080}:8000"
+      - "${VOGT_BIND_IP:-127.0.0.1}:${VOGT_PORT:-8080}:8000"
 
     environment:
       VOGT_DATA_DIR: /var/lib/vogt
-      VOGT_IMPORT_ROOT: /workspace/repos
+      # An exposure value: the process cannot know the address clients reach
+      # it at, so it is asked for rather than guessed (NFR-D2, FR-A8).
       VOGT_PUBLIC_URL: "${VOGT_PUBLIC_URL:?Set VOGT_PUBLIC_URL in .env}"
       VOGT_LOG_LEVEL: "${VOGT_LOG_LEVEL:-info}"
 
+    # `import_root` is deliberately left at its default of
+    # `<data_dir>/repos`, which lives on this volume and is writable by the
+    # uid above. Pointing it at a mounted estate is a customisation, and one
+    # with an ownership requirement — see `docs/CUSTOMISATION.md`.
     volumes:
       - vogt-data:/var/lib/vogt
-      - vogt-workspace:/workspace
 
-    # The image is unprivileged by default. Keeping these settings in the
-    # example makes the hardening visible and prevents an operator from
-    # accidentally weakening it while adapting the file.
+    # The image is unprivileged by construction. Keeping these here makes the
+    # hardening visible, and survivable: the only writable paths are the
+    # volume and the tmpfs below.
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -47,6 +81,9 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
 
+    # Plain HTTP against the readiness endpoint. No MCP handshake, no bearer
+    # token: a health check that needs a credential is a health check that
+    # fails for the wrong reason.
     healthcheck:
       test:
         - CMD
@@ -69,4 +106,3 @@ services:
 
 volumes:
   vogt-data:
-  vogt-workspace:

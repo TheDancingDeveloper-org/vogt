@@ -46,3 +46,8 @@ mobile/dist/
 .idea/
 .vscode/
 web/test-results/
+
+# Operator-local Compose settings. `deploy/.env.example` is the committed
+# template; the copy an operator edits is theirs, not the repository's.
+deploy/.env
+.env

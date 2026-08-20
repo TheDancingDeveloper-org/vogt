@@ -15,19 +15,24 @@
 # other people's repositories (FR-D6) — hard to justify raising for others
 # while leaving it here.
 #
-# This is the multi-arch index digest for `python:3.13-slim`, so it still
-# resolves per-platform. Renovate keeps it current (`pinDigests: true`).
-#
-# This is the upstream Docker Official Image, pinned by digest. Keeping the
-# public image on an upstream registry is important: a new operator must be
-# able to build Vogt without access to a private organisation mirror. Renovate
-# can update this digest; the image digest is deliberately shared by the build
-# and runtime stages so the virtualenv is built against the interpreter that
-# runs it.
+# The upstream Docker Official Image, pinned by digest. Keeping the public
+# image on an upstream registry is the point: a new operator must be able to
+# build Vogt without reaching a private organisation mirror. This is the
+# multi-arch index digest, so it still resolves per-platform, and Renovate
+# keeps it current (`pinDigests: true`). The build and runtime stages share
+# the digest deliberately, so the virtualenv is built against the interpreter
+# that runs it.
 FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS build
 
 # uv resolves and installs from the committed lockfile, so the image contains
 # exactly what CI tested (NFR-Q5).
+#
+# No `--mount=type=cache` on the two `uv sync` steps below, deliberately: a
+# cache mount is a BuildKit feature, and the legacy builder — which is what a
+# plain `docker compose up --build` still uses on some hosts — fails outright
+# on it. A public image that only builds on one builder is not a public image.
+# The cost is a slower cold rebuild, which CI absorbs and an operator pays
+# once.
 # Pin the upstream uv image as well as the Python base. Docker accepts a
 # tag-plus-digest reference here, so a rebuild cannot silently select a new
 # installer binary.
