@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vogt.adapters.github.client import GitHubClient, unsupported_reason
+from vogt.adapters.forge import provider_for, token_file_for, unsupported_reason
+from vogt.adapters.github.client import GitHubClient
 from vogt.adapters.github.collectors import (
     KIND_ISSUE,
     KIND_PULL_REQUEST,
@@ -65,7 +66,7 @@ def writer_for(ctx: AppContext) -> ForgeWriter | None:
     `None` is the ordinary case, and it is not a failure: an instance with no
     GitHub token simply never speaks upstream.
     """
-    client = GitHubClient.from_token_file(ctx.config.github_token_file)
+    client = GitHubClient.from_token_file(token_file_for(ctx.config, "github.com"))
     return None if client is None else ForgeWriter(client)
 
 
@@ -126,7 +127,10 @@ def attempt(
         )
 
     repo_url = None if project is None else project.repo_url
-    number = _number_of(subject_key)
+    # Key parsing lives on the provider now (D5): the same object that builds
+    # `gh:owner/repo#n` on write-back is the one that reads the number back out.
+    provider = provider_for(repo_url, ctx.config)
+    number = None if provider is None else provider.number_of(subject_key)
     if action == "comment" and number is not None and body is not None:
         result = writer.comment(repo_url=repo_url, number=number, body=body)
     elif action == "label" and number is not None and labels:
@@ -157,14 +161,6 @@ def attempt(
             "subject_key": result.subject_key or subject_key,
         }
     )
-
-
-def _number_of(subject_key: str | None) -> int | None:
-    """`gh:owner/repo#123` -> 123."""
-    if not subject_key or "#" not in subject_key:
-        return None
-    _, _, tail = subject_key.partition("#")
-    return int(tail) if tail.isdigit() else None
 
 
 # -- operations ------------------------------------------------------------
@@ -261,7 +257,7 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
         _record_onboard(ctx, project, params.reason, refused)
         return refused
 
-    client = GitHubClient.from_token_file(ctx.config.github_token_file)
+    client = GitHubClient.from_token_file(token_file_for(ctx.config, "github.com"))
     if client is None:
         unconfigured = OnboardResult(
             project=project.slug,

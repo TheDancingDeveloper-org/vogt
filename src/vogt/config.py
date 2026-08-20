@@ -298,6 +298,22 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    forge_token_files: dict[str, Path] = Field(
+        default_factory=dict,
+        description=(
+            "Per-host forge token files (D8), mapping a forge host to a file "
+            "holding a token for it — a TOML table `[forge_token_files]` with, "
+            'e.g., `"github.com" = "/run/secrets/github_token"`. This is the '
+            "general form of `github_token_file`, which stays as the alias for "
+            "github.com; a host set here wins over the alias. A host absent "
+            "from this map has no provider registered, which is what keeps its "
+            "subjects 'not collected' rather than reported as absent — the same "
+            "honesty rule the single-token field has always followed. Files "
+            "rather than environment variables or arguments, so a token never "
+            "appears in a process listing (FR-S7)."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     engine_url: str | None = Field(
         default=None,
         description=(
@@ -478,6 +494,9 @@ def _label_for(annotation: Any) -> str:
     if origin in (tuple, list, set, frozenset):
         inner = args[0] if args else str
         return f"list of {_SCALAR_NAMES.get(inner, 'values')}s"
+    if origin is dict:
+        key, value = (args[0], args[1]) if len(args) == 2 else (str, str)
+        return f"map of {_label_for(key)} to {_label_for(value)}"
     if origin in (Union, UnionType):
         present = [arg for arg in args if arg is not type(None)]
         rendered = " or ".join(_label_for(arg) for arg in present)
@@ -500,6 +519,8 @@ def _default_label(name: str, field: FieldInfo) -> str:
     if field.default_factory is not None:
         if name == "data_dir":
             return "`$XDG_DATA_HOME/vogt`, else `~/.local/share/vogt`"
+        if name == "forge_token_files":
+            return "*(empty)*"
         return "computed"  # pragma: no cover - no other factory fields yet
     if name == "import_root":
         # Derived from another field, so it cannot be a factory — but it is
@@ -618,6 +639,10 @@ def _example_value(field: FieldDoc) -> str:
         return '"/var/lib/vogt"'
     if field.name == "import_root":
         return '"/var/lib/vogt/repos"'
+    if field.name == "forge_token_files":
+        # An inline table shows the shape an operator gets wrong — the host is
+        # the key, the token *file* the value — where an empty `{}` would not.
+        return '{ "github.com" = "/run/secrets/github_token" }'
     if field.name == "public_url":
         # Shown as an example rather than `null`, because an exposure value
         # with no default still has a *shape*, and the shape is the part an

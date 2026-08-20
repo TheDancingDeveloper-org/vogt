@@ -26,7 +26,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from vogt.adapters.github.client import GitHubClient, GitHubUnavailable, repo_of
+from vogt.adapters.forge import GitHubProvider
+from vogt.adapters.github.client import GitHubClient, GitHubUnavailable
 
 WriteBackPolicy = Literal["none", "comment_only", "full"]
 WriteBackAction = Literal["create", "comment", "label", "close", "reopen"]
@@ -60,6 +61,10 @@ class ForgeWriter:
 
     def __init__(self, client: GitHubClient) -> None:
         self._client = client
+        # The provider owns the host check and the subject-key scheme (D2, D5),
+        # so the key a write reports lands in exactly the form a collector
+        # reads it back in.
+        self._provider = GitHubProvider(client)
 
     # -- the four verbs ----------------------------------------------------
 
@@ -130,14 +135,13 @@ class ForgeWriter:
         number: int | None = None,
         method: str = "POST",
     ) -> WriteBackResult:
-        repo = repo_of(repo_url)
-        if repo is None:
+        ref = self._provider.parse(repo_url)
+        if ref is None:
             return WriteBackResult(
                 outcome="skipped",
                 detail="this project has no GitHub repository to write to",
             )
-        owner, name = repo
-        endpoint = path.format(owner=owner, repo=name, number=number)
+        endpoint = path.format(owner=ref.owner, repo=ref.repo, number=number)
         try:
             response = self._client.send(endpoint, payload, method=method)
         except GitHubUnavailable as exc:
@@ -157,7 +161,7 @@ class ForgeWriter:
             subject_key=(
                 None
                 if upstream_number is None
-                else f"gh:{owner}/{name}#{upstream_number}"
+                else self._provider.subject_key(ref, upstream_number)
             ),
             detail=json.dumps({"method": method, "endpoint": endpoint}),
         )

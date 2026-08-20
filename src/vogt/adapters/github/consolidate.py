@@ -18,11 +18,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from vogt.adapters.forge import GitHubProvider, RepoRef
 from vogt.adapters.github.client import (
     DEFAULT_PER_PAGE,
     GitHubClient,
     GitHubUnavailable,
-    repo_of,
 )
 from vogt.adapters.github.collectors import (
     KIND_ISSUE,
@@ -63,6 +63,7 @@ class GitHubConsolidator:
     ) -> None:
         self._client = client
         self._max_pages = max_pages
+        self._provider = GitHubProvider(client)
 
     @property
     def name(self) -> str:
@@ -74,15 +75,14 @@ class GitHubConsolidator:
 
     def collect(self, ctx: CollectorContext, project: Project) -> Iterable[Finding]:
         del ctx
-        repo = repo_of(project.repo_url)
-        if repo is None:
+        ref = self._provider.parse(project.repo_url)
+        if ref is None:
             return []
-        owner, name = repo
 
         findings: list[Finding] = []
-        findings += self._issues(project, owner, name)
-        findings += self._labels(project, owner, name)
-        findings += self._releases(project, owner, name)
+        findings += self._issues(project, ref)
+        findings += self._labels(project, ref)
+        findings += self._releases(project, ref)
         return findings
 
     # -- readers -----------------------------------------------------------
@@ -102,7 +102,7 @@ class GitHubConsolidator:
             if len(payload) < DEFAULT_PER_PAGE:
                 return
 
-    def _issues(self, project: Project, owner: str, name: str) -> list[Finding]:
+    def _issues(self, project: Project, ref: RepoRef) -> list[Finding]:
         """Every issue and pull request, open *and* closed.
 
         `state=all` is the whole difference between a sweep and a
@@ -111,7 +111,7 @@ class GitHubConsolidator:
         """
         found: list[Finding] = []
         for page in self._pages(
-            f"/repos/{owner}/{name}/issues", state="all", direction="asc"
+            f"/repos/{ref.owner}/{ref.repo}/issues", state="all", direction="asc"
         ):
             for item in page:
                 if not isinstance(item, dict):
@@ -121,7 +121,7 @@ class GitHubConsolidator:
                 found.append(
                     finding(
                         kind=KIND_PULL_REQUEST if is_pr else KIND_ISSUE,
-                        subject_key=f"gh:{owner}/{name}#{number}",
+                        subject_key=self._provider.subject_key(ref, number),
                         project=project,
                         source_url=item.get("html_url"),
                         # Closed history is context, not backlog: promoting it
@@ -140,37 +140,37 @@ class GitHubConsolidator:
                             "author": (item.get("user") or {}).get("login"),
                             "closed_at": item.get("closed_at"),
                             "updated_at": item.get("updated_at"),
-                            "repo": f"{owner}/{name}",
+                            "repo": ref.slug,
                             "consolidated": True,
                         },
                     )
                 )
         return found
 
-    def _labels(self, project: Project, owner: str, name: str) -> list[Finding]:
+    def _labels(self, project: Project, ref: RepoRef) -> list[Finding]:
         found: list[Finding] = []
-        for page in self._pages(f"/repos/{owner}/{name}/labels"):
+        for page in self._pages(f"/repos/{ref.owner}/{ref.repo}/labels"):
             for item in page:
                 if not isinstance(item, dict):
                     continue
                 found.append(
                     finding(
                         kind=KIND_LABEL,
-                        subject_key=f"ghlabel:{owner}/{name}/{item.get('name')}",
+                        subject_key=f"ghlabel:{ref.slug}/{item.get('name')}",
                         project=project,
                         payload={
                             "name": item.get("name"),
                             "color": item.get("color"),
                             "description": item.get("description"),
-                            "repo": f"{owner}/{name}",
+                            "repo": ref.slug,
                         },
                     )
                 )
         return found
 
-    def _releases(self, project: Project, owner: str, name: str) -> list[Finding]:
+    def _releases(self, project: Project, ref: RepoRef) -> list[Finding]:
         found: list[Finding] = []
-        for page in self._pages(f"/repos/{owner}/{name}/releases"):
+        for page in self._pages(f"/repos/{ref.owner}/{ref.repo}/releases"):
             for item in page:
                 if not isinstance(item, dict):
                     continue
@@ -178,14 +178,14 @@ class GitHubConsolidator:
                 found.append(
                     finding(
                         kind=KIND_RELEASE,
-                        subject_key=f"release:{owner}/{name}@{tag}",
+                        subject_key=f"release:{ref.slug}@{tag}",
                         project=project,
                         source_url=item.get("html_url"),
                         payload={
                             "tag": tag,
                             "name": item.get("name"),
                             "published_at": item.get("published_at"),
-                            "repo": f"{owner}/{name}",
+                            "repo": ref.slug,
                             "source": "github release",
                             "consolidated": True,
                         },

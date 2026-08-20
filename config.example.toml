@@ -72,6 +72,10 @@
 # default policy: behaviour
 # github_token_file = null
 
+# Per-host forge token files (D8), mapping a forge host to a file holding a token for it — a TOML table `[forge_token_files]` with, e.g., `"github.com" = "/run/secrets/github_token"`. This is the general form of `github_token_file`, which stays as the alias for github.com; a host set here wins over the alias. A host absent from this map has no provider registered, which is what keeps its subjects 'not collected' rather than reported as absent — the same honesty rule the single-token field has always followed. Files rather than environment variables or arguments, so a token never appears in a process listing (FR-S7).
+# default policy: behaviour
+# forge_token_files = { "github.com" = "/run/secrets/github_token" }
+
 # Where the session engine listens, e.g. `http://127.0.0.1:8910`. The engine is the other half of the merged product: it owns the PTYs a work item's session runs in (FR-E1). Unset means the `session.*` operations report that no engine is configured — absence of the engine costs sessions and nothing else, which is FR-E9 read from this side. An exposure value, so it is never guessed: co-located today, its address is still the operator's to state.
 # default policy: exposure
 # engine_url = null

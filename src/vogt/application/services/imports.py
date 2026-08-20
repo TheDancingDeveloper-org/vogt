@@ -17,8 +17,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from vogt.adapters.forge import GitHubProvider, RepoRef, token_file_for
 from vogt.adapters.git import CloneRequest
-from vogt.adapters.github.client import GitHubClient, repo_of
+from vogt.adapters.github.client import GitHubClient
 from vogt.application.context import AppContext
 from vogt.application.models import (
     ImportProjectParams,
@@ -39,6 +40,13 @@ _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 PROJECT_IMPORT = "project.import"
 PROJECT_IMPORTED_EVENT = "project.imported"
 
+#: Import is GitHub-shaped in v1 (it clones from GitHub and consolidates its
+#: history). It asks the provider for the concrete forge by name rather than
+#: resolving one per URL, and holds a token-less instance for the pure
+#: identity operations — parsing a reference and building its URLs needs no
+#: credential (D2). The registry stays the one place that knows the scheme.
+_GITHUB = GitHubProvider(GitHubClient())
+
 
 def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjectResult:
     """Clone, register, and consolidate — one operation, one reason.
@@ -49,7 +57,8 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
     scaffolds in the same order, for the same reason.
     """
     owner, repo = _resolve_repo(params.repo)
-    remote = f"https://github.com/{owner}/{repo}.git"
+    ref = RepoRef(host="github.com", owner=owner, repo=repo)
+    remote = _GITHUB.clone_url(ref)
     display_name = params.name or repo
     slug = slugify(display_name)
     if not slug:
@@ -64,7 +73,7 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
             msg = f"a project with slug {slug!r} is already registered"
             raise Conflict(msg)
 
-    client = GitHubClient.from_token_file(ctx.config.github_token_file)
+    client = GitHubClient.from_token_file(token_file_for(ctx.config, "github.com"))
     metadata = _describe(client, owner, repo)
 
     destination = (
@@ -85,7 +94,7 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
         RegisterProjectParams(
             name=display_name,
             root_path=str(outcome.destination),
-            repo_url=f"https://github.com/{owner}/{repo}",
+            repo_url=_GITHUB.web_url(ref),
             lifecycle_state=params.lifecycle_state,
             reason=params.reason,
         ),
@@ -133,9 +142,9 @@ def _resolve_repo(reference: str) -> tuple[str, str]:
     request to go looking for it, and nothing here looks.
     """
     candidate = reference.strip()
-    parsed = repo_of(candidate)
+    parsed = _GITHUB.parse(candidate)
     if parsed is not None:
-        return parsed
+        return parsed.owner, parsed.repo
     parts = [part for part in candidate.strip("/").split("/") if part]
     if len(parts) == 2 and all(_NAME.fullmatch(part) for part in parts):
         return parts[0], parts[1].removesuffix(".git")
