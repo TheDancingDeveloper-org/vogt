@@ -59,8 +59,11 @@ services:
       VOGT_GITHUB_TOKEN_FILE: /run/secrets/github_token
 
     volumes:
-      # The estate, so collectors can read the repositories they observe.
-      - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working:ro"
+      # The estate. Read-*write*, not read-only: collection only reads, but
+      # `VOGT_IMPORT_ROOT` points inside this tree and `project import` clones
+      # into it (FR-P6). Mounted `:ro` the core comes up perfectly healthy and
+      # import fails at the first clone.
+      - "${VOGT_WORKSPACE_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/workspace}:/home/sprooty/Working"
       # Engine state, narrowly. Read-write because `restore` writes it.
       - "${VOGT_HOME_DIR:-/mnt/2tnvme/docker/volumes/mydevenv2/home}/.local/share/mydevenv2:/home/sprooty/.local/share/mydevenv2"
 

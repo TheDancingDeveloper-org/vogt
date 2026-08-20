@@ -198,7 +198,7 @@ def test_the_estate_overlay_wires_the_two_filesystem_couplings() -> None:
     )[0]
     assert "VOGT_ENGINE_STATE_DIR:" in core
     assert ".local/share/mydevenv2:/home/sprooty/.local/share/mydevenv2" in core
-    assert ":/home/sprooty/Working:ro" in core
+    assert ":/home/sprooty/Working\"" in core, "import clones into this tree; it cannot be :ro"
 
 
 def test_the_estate_overlay_keeps_the_existing_core_volume() -> None:
