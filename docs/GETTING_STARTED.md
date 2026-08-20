@@ -236,7 +236,9 @@ This removes the example's named data volume and cannot be undone by Docker.
 - [`docs/CUSTOMISATION.md`](CUSTOMISATION.md) names the supported extension
   points — configuration, Compose overlays, image extension, your own front
   door — for a deployment that needs more than the base.
-- [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) covers network exposure, tokens,
-  storage, backups, and operational topology.
+- [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) is the reference customisation — the
+  maintainer's estate deployment, with each choice annotated by the extension
+  point it uses. Read it for worked examples of exposure, TLS, host mounts and
+  token brokering; it is not a second installation path.
 - [`opensource.md`](../opensource.md) explains why the public path is
   Python-core-first and how the current private deployment is preserved.

@@ -11,6 +11,26 @@ deployment history — see §4 for the specific lessons encoded here.
 described MyDevEnv2 as a product with its own deployment story; it has one
 deployment story, and this is it.
 
+> **This document is the reference customisation, not the generic path.**
+>
+> It describes the maintainer's own estate deployment on Node B — Tailscale,
+> Komodo, Infisical, host mounts, a Rust session engine as the front door. It
+> is retained deliberately, because it is the largest customisation of Vogt
+> that exists and therefore the best evidence that the extension points are
+> real. Every estate-specific choice below is annotated with the extension
+> point it exercises.
+>
+> If you are installing Vogt, you want
+> [`GETTING_STARTED.md`](GETTING_STARTED.md), which takes a new operator from
+> checkout to a running instance with none of this. If you are adapting Vogt
+> to a deployment of your own, you want
+> [`CUSTOMISATION.md`](CUSTOMISATION.md), which names the supported extension
+> points. Nothing here is a prerequisite for either.
+>
+> Hostnames, tailnet addresses, stack names and host paths appear throughout.
+> They are topology, not credentials: no secret value is recorded in this
+> document, and the two that matter are brokered as files (§2.2a, §7.2).
+
 This document covers three deployments, and confusing them is the most
 expensive mistake available here:
 
@@ -172,19 +192,23 @@ GitHub  <───outbound only─── collectors (optional adapter; no inboun
                                           webhooks required)
 ```
 
-| Fact | Value |
-|---|---|
-| Host | Node B, `winrarhost` — TS `100.92.54.45`, LAN `192.168.1.75` |
-| Komodo server (periphery) | `Local` |
-| Komodo stack | `vogt` (the ops directory is `personal/vogt`; the stack name is not prefixed) |
-| Desired state | `indexarr/ops` → `personal/vogt/docker-compose.yml` |
-| Image | `ghcr.io/thedancingdeveloper-org/vogt`, digest-pinned |
-| Exposure | tailnet only — bound to the Tailscale address, never `0.0.0.0` |
-| TLS name | `winrarhost.tailc7d3c.ts.net` (Tailscale-issued Let's Encrypt) |
-| App data | named volume `vogt-komodo-data` → `/var/lib/vogt` |
-| Operator material | `/mnt/2tnvme/docker/volumes/vogt/{tls,auth}`, mounted `:ro` |
-| Estate | `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` → `/home/sprooty/Working`, writable, as `VOGT_UID` (1000) |
-| Forge credential | `VOGT_GITHUB_TOKEN_FILE` → `/run/secrets/github_token` (see 2.2a) |
+| Fact | Value | Extension point |
+|---|---|---|
+| Host | Node B, `winrarhost` — TS `100.92.54.45`, LAN `192.168.1.75` | — |
+| Komodo server (periphery) | `Local` | — |
+| Komodo stack | `vogt` (the ops directory is `personal/vogt`; the stack name is not prefixed) | — |
+| Desired state | `indexarr/ops` → `personal/vogt/docker-compose.yml` | Compose overlay |
+| Image | `ghcr.io/thedancingdeveloper-org/vogt`, digest-pinned | the published base image, unmodified |
+| Exposure | tailnet only — bound to the Tailscale address, never `0.0.0.0` | `ports` + `VOGT_BIND_IP`; `public_url` states the address clients use |
+| TLS name | `winrarhost.tailc7d3c.ts.net` (Tailscale-issued Let's Encrypt) | `serve --tls-cert` / `--tls-key`, operator-owned and mounted `:ro` |
+| App data | named volume `vogt-komodo-data` → `/var/lib/vogt` | `data_dir` |
+| Operator material | `/mnt/2tnvme/docker/volumes/vogt/{tls,auth}`, mounted `:ro` | Compose overlay |
+| Estate | `/mnt/2tnvme/docker/volumes/mydevenv2/workspace` → `/home/sprooty/Working`, writable, as `VOGT_UID` (1000) | `import_root` + the uid/gid contract — see *Observing an estate on a host path* in `CUSTOMISATION.md` |
+| Forge credential | `VOGT_GITHUB_TOKEN_FILE` → `/run/secrets/github_token` (see 2.2a) | `github_token_file`, an optional integration |
+
+None of the right-hand column is special-cased for this estate. A different
+operator makes the same set of choices with different values, which is the
+claim this document exists to support.
 
 #### 2.2a Delivering the GitHub token to a read-only container
 
