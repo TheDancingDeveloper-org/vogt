@@ -64,9 +64,17 @@ def collector_registry(ctx: AppContext) -> CollectorRegistry:
     never run rather than reporting no outcomes.
     """
     registry = CollectorRegistry()
+    from vogt.adapters.forge import has_configured_forge
+    from vogt.adapters.forge.sync import forge_sync_collectors
     from vogt.adapters.github import github_collectors
 
     registry.add(MirroredSourceCollector(_RegisteredProjects(ctx)))
+    # The incremental issue/PR sync resolves its provider per project, so it
+    # registers whenever *any* forge is configured — the same conditional
+    # registration that keeps "not configured" honestly out of coverage (D8).
+    if has_configured_forge(ctx.config):
+        for sync_collector in forge_sync_collectors(ctx.observed):
+            registry.add(sync_collector)
     for collector in github_collectors(ctx.config):
         registry.add(collector)
     if ctx.engine is not None:

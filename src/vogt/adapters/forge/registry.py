@@ -138,6 +138,23 @@ def unsupported_reason(repo_url: str | None) -> str | None:
     )
 
 
+def has_configured_forge(config: VogtConfig) -> bool:
+    """Whether any registered forge has a usable token file (D8).
+
+    The conditional-registration gate for the per-project sync collectors: an
+    always-registered collector that fails on the network would pin the whole
+    estate's freshness to `partial`, so "no forge configured" must mean "not
+    registered", not "registered and failing"."""
+    # Through `spec.build` (not a direct file read) so it resolves a provider
+    # exactly as a sweep will — same token path, same client factory a test
+    # may have substituted.
+    for spec in _SPECS:
+        for host in spec.hosts:
+            if spec.build(token_file_for(config, host), None) is not None:
+                return True
+    return False
+
+
 def github_provider(
     config: VogtConfig, *, transport: Transport | None = None
 ) -> GitHubProvider | None:
@@ -154,6 +171,7 @@ def github_provider(
 
 __all__ = [
     "github_provider",
+    "has_configured_forge",
     "provider_for",
     "supported_hosts",
     "token_file_for",

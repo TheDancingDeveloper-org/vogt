@@ -21,6 +21,7 @@ from vogt.adapters.forge.models import (
 from vogt.adapters.forge.provider import ForgeProvider
 from vogt.adapters.forge.registry import (
     github_provider,
+    has_configured_forge,
     provider_for,
     supported_hosts,
     token_file_for,
@@ -38,6 +39,7 @@ __all__ = [
     "GitHubProvider",
     "RepoRef",
     "github_provider",
+    "has_configured_forge",
     "provider_for",
     "supported_hosts",
     "token_file_for",

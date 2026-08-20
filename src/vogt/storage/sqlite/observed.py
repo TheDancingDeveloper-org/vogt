@@ -38,6 +38,19 @@ MIGRATIONS_DIR = Path(__file__).parent / "migrations" / "observed"
 META_INSTANCE_ID = "instance_id"
 META_CREATED_AT = "created_at"
 
+#: A subject is "open" unless the source says otherwise. Kept as one string so
+#: the ranked-view filter and the `closed_upstream` count read the same rule:
+#: a null/absent state (a marker) or any state other than closed/merged is
+#: still outstanding. Mirrors `core.observed.lifecycle_of`.
+_OPEN_STATE_SQL = (
+    "lower(coalesce(json_extract(payload, '$.state'), '')) "
+    "NOT IN ('closed', 'merged')"
+)
+_CLOSED_STATE_SQL = (
+    "lower(coalesce(json_extract(payload, '$.state'), '')) "
+    "IN ('closed', 'merged')"
+)
+
 
 class SqliteObservedStore:
     """Append-only evidence store."""
@@ -349,9 +362,15 @@ class SqliteObservedStore:
         kinds: tuple[str, ...] = (),
         project_id: str | None = None,
         promoted_only: bool = False,
+        exclude_closed: bool = False,
         limit: int = 1000,
     ) -> list[Observation]:
-        """The newest observation per subject, filtered."""
+        """The newest observation per subject, filtered.
+
+        `exclude_closed` drops subjects the source says are `closed`/`merged`
+        in SQL rather than in Python, so the `limit` window can never fill
+        with closed rows and truncate the open ones behind them — the failure
+        that becomes possible once closures are permanent (#173)."""
         clauses: list[str] = []
         params: list[object] = []
         if kinds:
@@ -363,6 +382,8 @@ class SqliteObservedStore:
             params.append(project_id)
         if promoted_only:
             clauses.append("promoted = 1")
+        if exclude_closed:
+            clauses.append(_OPEN_STATE_SQL)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
         with self._read() as conn:
@@ -386,6 +407,79 @@ class SqliteObservedStore:
                 (subject_key,),
             ).fetchone()
         return None if row is None else _row_to_observation(row)
+
+    def count_closed(
+        self, *, kinds: tuple[str, ...], project_id: str | None = None
+    ) -> int:
+        """How many latest subjects of these kinds read `closed`/`merged`."""
+        clauses: list[str] = [_CLOSED_STATE_SQL]
+        params: list[object] = []
+        if kinds:
+            placeholders = ", ".join("?" for _ in kinds)
+            clauses.append(f"kind IN ({placeholders})")
+            params.extend(kinds)
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        where = " AND ".join(clauses)
+        with self._read() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM latest_observations WHERE {where}",
+                tuple(params),
+            ).fetchone()
+        return int(row["n"])
+
+    # -- incremental sync state (D1) ---------------------------------------
+
+    def get_watermark(self, *, collector: str, project_id: str) -> str | None:
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT watermark FROM sync_state WHERE collector = ? "
+                "AND project_id = ?",
+                (collector, project_id),
+            ).fetchone()
+        if row is None or row["watermark"] is None:
+            return None
+        return str(row["watermark"])
+
+    def set_watermark(
+        self, *, collector: str, project_id: str, watermark: str | None, at: datetime
+    ) -> None:
+        with self._write() as conn:
+            conn.execute(
+                "INSERT INTO sync_state (collector, project_id, watermark, "
+                "updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (collector, project_id) DO UPDATE SET "
+                "watermark = excluded.watermark, updated_at = excluded.updated_at",
+                (collector, project_id, watermark, to_iso(at)),
+            )
+
+    def touch_subjects(self, subject_keys: list[str], *, at: datetime) -> None:
+        if not subject_keys:
+            return
+        stamp = to_iso(at)
+        with self._write() as conn:
+            conn.executemany(
+                "INSERT INTO subject_seen (subject_key, last_confirmed_at) "
+                "VALUES (?, ?) ON CONFLICT (subject_key) DO UPDATE SET "
+                "last_confirmed_at = excluded.last_confirmed_at",
+                [(key, stamp) for key in subject_keys],
+            )
+
+    def last_confirmed(self, subject_keys: list[str]) -> dict[str, datetime]:
+        if not subject_keys:
+            return {}
+        placeholders = ", ".join("?" for _ in subject_keys)
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT subject_key, last_confirmed_at FROM subject_seen "
+                f"WHERE subject_key IN ({placeholders})",
+                tuple(subject_keys),
+            ).fetchall()
+        return {
+            str(row["subject_key"]): from_iso(str(row["last_confirmed_at"]))
+            for row in rows
+        }
 
     def dep_refs(
         self, *, from_project_id: str | None = None, to_project_id: str | None = None

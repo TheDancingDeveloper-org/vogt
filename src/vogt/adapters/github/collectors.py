@@ -84,93 +84,6 @@ class _GitHubCollector:
         raise NotImplementedError  # pragma: no cover - subclasses implement
 
 
-class GitHubIssueCollector(_GitHubCollector):
-    """Open issues, which are work the estate already has."""
-
-    endpoint = "/repos/{owner}/{repo}/issues"
-
-    @property
-    def name(self) -> str:
-        return "gh-issues"
-
-    @property
-    def query(self) -> dict[str, str | int]:
-        return {"state": "open"}
-
-    def to_findings(
-        self, project: Project, ref: RepoRef, payloads: list[Any]
-    ) -> Iterable[Finding]:
-        for item in payloads:
-            if not isinstance(item, dict) or "pull_request" in item:
-                # GitHub returns PRs from the issues endpoint. They are
-                # collected separately, with their own kind.
-                continue
-            number = item.get("number")
-            yield finding(
-                kind=KIND_ISSUE,
-                subject_key=self._provider.subject_key(ref, number),
-                project=project,
-                source_url=item.get("html_url"),
-                promoted=True,
-                payload={
-                    "number": number,
-                    "title": item.get("title", ""),
-                    "state": item.get("state", "open"),
-                    "labels": [
-                        label.get("name")
-                        for label in item.get("labels", [])
-                        if isinstance(label, dict)
-                    ],
-                    "author": (item.get("user") or {}).get("login"),
-                    "assignees": [
-                        (a or {}).get("login") for a in item.get("assignees", [])
-                    ],
-                    "comments": item.get("comments", 0),
-                    "updated_at": item.get("updated_at"),
-                    "repo": ref.slug,
-                },
-            )
-
-
-class GitHubPullRequestCollector(_GitHubCollector):
-    """Open pull requests."""
-
-    endpoint = "/repos/{owner}/{repo}/pulls"
-
-    @property
-    def name(self) -> str:
-        return "gh-prs"
-
-    @property
-    def query(self) -> dict[str, str | int]:
-        return {"state": "open"}
-
-    def to_findings(
-        self, project: Project, ref: RepoRef, payloads: list[Any]
-    ) -> Iterable[Finding]:
-        for item in payloads:
-            if not isinstance(item, dict):
-                continue
-            number = item.get("number")
-            yield finding(
-                kind=KIND_PULL_REQUEST,
-                subject_key=self._provider.subject_key(ref, number),
-                project=project,
-                source_url=item.get("html_url"),
-                payload={
-                    "number": number,
-                    "title": item.get("title", ""),
-                    "state": item.get("state", "open"),
-                    "draft": bool(item.get("draft", False)),
-                    "author": (item.get("user") or {}).get("login"),
-                    "head": (item.get("head") or {}).get("sha"),
-                    "base": (item.get("base") or {}).get("ref"),
-                    "updated_at": item.get("updated_at"),
-                    "repo": ref.slug,
-                },
-            )
-
-
 class GitHubActionsCollector(_GitHubCollector):
     """Workflow runs, as generic per-revision checks (FR-O6)."""
 
@@ -269,9 +182,10 @@ def github_collectors(
     from vogt.adapters.github.notifications import GitHubNotificationCollector
     from vogt.adapters.github.posture import GitHubPostureCollector
 
+    # Issues and PRs are the incremental `forge-issues`/`forge-prs` sync now
+    # (adapters/forge/sync.py); these four are the read-only surface still
+    # scraped per sweep, until Phase 4 moves them behind the provider too.
     return [
-        GitHubIssueCollector(client),
-        GitHubPullRequestCollector(client),
         GitHubActionsCollector(client),
         GitHubReleaseCollector(client),
         GitHubPostureCollector(client),
@@ -285,8 +199,6 @@ __all__ = [
     "KIND_PULL_REQUEST",
     "KIND_RELEASE",
     "GitHubActionsCollector",
-    "GitHubIssueCollector",
-    "GitHubPullRequestCollector",
     "GitHubReleaseCollector",
     "GitHubUnavailable",
     "github_collectors",

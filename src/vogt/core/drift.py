@@ -357,7 +357,7 @@ def vanished_upstream(
             subject_key=subject_key,
             content_digest="",
             observed_at=swept_at,
-            collector="gh-issues",
+            collector="forge-issues",
             payload={"absent_in_completed_sweep": True},
         ),
         evidence_observation_id=None,

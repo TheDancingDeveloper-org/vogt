@@ -111,10 +111,13 @@ class GitHubProvider:
     def issues_updated_since(
         self, ref: RepoRef, since: str | None
     ) -> Iterable[ForgeIssue]:
+        # Ascending by update time so a watermark walks history *forward*: the
+        # max `updated_at` in a page is where the next sweep resumes, and a
+        # first sync backfills oldest-first a page at a time (D3).
         params: dict[str, str | int] = {
             "state": "all",
             "sort": "updated",
-            "direction": "desc",
+            "direction": "asc",
             "per_page": DEFAULT_PER_PAGE,
         }
         if since:
@@ -132,22 +135,22 @@ class GitHubProvider:
     def pulls_updated_since(
         self, ref: RepoRef, since: str | None
     ) -> Iterable[ForgePull]:
-        params: dict[str, str | int] = {
-            "state": "all",
-            "sort": "updated",
-            "direction": "desc",
-            "per_page": DEFAULT_PER_PAGE,
-        }
-        # The pulls endpoint has no `since`; GitHub filters it by `sort=updated`
-        # and the caller stops once it passes the watermark (Phase 2). The
-        # capability stays `supports_since=True` because the issues endpoint —
-        # where most of the churn is — does honour it.
-        del since
+        # The pulls endpoint has no server-side `since`, so this asks for the
+        # most-recently-updated first and filters locally, then yields ascending
+        # so the caller advances its watermark the same way it does for issues.
+        # One page covers an estate's PR volume comfortably; a fuller backfill
+        # is bounded the same way issues are, and reported through `truncated`.
         payloads = self._client.get(
-            f"/repos/{ref.owner}/{ref.repo}/pulls", **params
+            f"/repos/{ref.owner}/{ref.repo}/pulls",
+            state="all",
+            sort="updated",
+            direction="desc",
+            per_page=DEFAULT_PER_PAGE,
         )
-        for item in _as_list(payloads):
-            yield _to_pull(ref, item)
+        pulls = [_to_pull(ref, item) for item in _as_list(payloads)]
+        if since:
+            pulls = [p for p in pulls if p.updated_at is None or p.updated_at >= since]
+        yield from reversed(pulls)
 
     def releases(self, ref: RepoRef) -> Iterable[ForgeRelease]:
         payloads = self._client.get(

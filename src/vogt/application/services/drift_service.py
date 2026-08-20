@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from vogt.adapters.forge.sync import current_collector
 from vogt.adapters.github.collectors import KIND_ISSUE
 from vogt.application.context import AppContext
 from vogt.application.models import (
@@ -220,7 +221,7 @@ def _forge_findings(ctx: AppContext) -> list[DriftFinding]:
                 # (FR-O4). Without a completed forge sweep this is "not
                 # collected", and raising it would be the exact mistake that
                 # made most of cadastre's "missing" drift an artefact.
-                swept = coverage.get("gh-issues")
+                swept = coverage.get(current_collector("gh-issues"))
                 if swept is None or swept.finished_at is None:
                     continue
                 findings.append(
@@ -426,7 +427,10 @@ def _reconcile_open_proposals(
         if proposal.superseded_at is not None:
             continue
         collector = str(proposal.evidence_snapshot.get("collector", ""))
-        swept = coverage.get(collector)
+        # A proposal raised before the Phase 2 rename names the old collector;
+        # coverage records only the new one, so resolve through the alias map
+        # or its retirement path is dead (D4, #173).
+        swept = coverage.get(current_collector(collector))
         if swept is None or swept.finished_at is None:
             continue
         if swept.finished_at <= proposal.opened_at:

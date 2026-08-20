@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from vogt.adapters.github import GitHubClient, GitHubUnavailable, github_collectors
+from vogt.adapters.github import GitHubClient, github_collectors
 from vogt.adapters.github.client import (
     NO_CONTENT,
     Transport,
@@ -21,8 +21,6 @@ from vogt.adapters.github.client import (
 )
 from vogt.adapters.github.collectors import (
     GitHubActionsCollector,
-    GitHubIssueCollector,
-    GitHubPullRequestCollector,
     GitHubReleaseCollector,
 )
 from vogt.adapters.github.posture import GitHubPostureCollector
@@ -168,9 +166,10 @@ def test_a_token_file_enables_the_forge_collectors(
     token = tmp_path / "token"
     token.write_text("ghp_example\n", encoding="utf-8")
     config = instance.config.model_copy(update={"github_token_file": token})
+    # Issues and PRs are the incremental `forge-issues`/`forge-prs` sync now,
+    # registered by `collector_registry` (they need the observed store); the
+    # read-only scrapers `github_collectors` still builds are these four.
     assert {c.name for c in github_collectors(config)} == {
-        "gh-issues",
-        "gh-prs",
         "gh-actions",
         "gh-releases",
         "gh-posture",
@@ -201,58 +200,11 @@ def test_forge_collectors_declare_that_they_need_the_network(
         assert collector.requires_network is True, collector.name
 
     registry = CollectorRegistry()
-    registry.add(GitHubIssueCollector(GitHubClient(token="x")))
-    assert "gh-issues" not in {c.name for c in registry.offline()}
+    registry.add(GitHubActionsCollector(GitHubClient(token="x")))
+    assert "gh-actions" not in {c.name for c in registry.offline()}
 
 
 # -- what the collectors produce ------------------------------------------
-
-
-def test_issues_become_observations(ctx: CollectorContext) -> None:
-    client = GitHubClient(
-        token="x",
-        transport=_fake_transport(
-            {
-                "/issues": [
-                    {
-                        "number": 42,
-                        "title": "Segments never retry",
-                        "state": "open",
-                        "labels": [{"name": "bug"}, {"name": "p1"}],
-                        "user": {"login": "someone"},
-                        "assignees": [],
-                        "comments": 3,
-                        "updated_at": "2026-08-01T00:00:00Z",
-                        "html_url": "https://github.com/o/r/issues/42",
-                    }
-                ]
-            }
-        ),
-    )
-    found = list(GitHubIssueCollector(client).collect(ctx, _project()))
-    assert len(found) == 1
-    assert found[0].subject_key == "gh:TheDancingDeveloper-org/rustnzb#42"
-    assert found[0].promoted is True
-    assert found[0].payload["labels"] == ["bug", "p1"]
-
-
-def test_pull_requests_are_not_double_counted_as_issues(
-    ctx: CollectorContext,
-) -> None:
-    """GitHub returns PRs from the issues endpoint; they have their own kind."""
-    client = GitHubClient(
-        token="x",
-        transport=_fake_transport(
-            {
-                "/issues": [
-                    {"number": 1, "title": "An issue", "labels": []},
-                    {"number": 2, "title": "A PR", "pull_request": {}, "labels": []},
-                ]
-            }
-        ),
-    )
-    found = list(GitHubIssueCollector(client).collect(ctx, _project()))
-    assert [f.payload["number"] for f in found] == [1]
 
 
 def test_actions_runs_become_generic_checks(ctx: CollectorContext) -> None:
@@ -297,20 +249,12 @@ def test_a_project_that_is_not_on_github_is_skipped(ctx: CollectorContext) -> No
     """Not an error: a project without a forge is a supported project."""
     local = _project().model_copy(update={"repo_url": None})
     client = GitHubClient(token="x", transport=_fake_transport({}))
-    assert list(GitHubIssueCollector(client).collect(ctx, local)) == []
+    assert list(GitHubActionsCollector(client).collect(ctx, local)) == []
 
 
 def test_a_404_is_absence_not_an_exception(ctx: CollectorContext) -> None:
     client = GitHubClient(token="x", transport=_fake_transport({}))
-    assert list(GitHubIssueCollector(client).collect(ctx, _project())) == []
-
-
-def test_rate_limiting_raises_so_the_sweep_records_it(ctx: CollectorContext) -> None:
-    client = GitHubClient(
-        token="x", transport=_fake_transport({"/issues": {}}, status=403)
-    )
-    with pytest.raises(GitHubUnavailable, match="rate limited"):
-        list(GitHubIssueCollector(client).collect(ctx, _project()))
+    assert list(GitHubReleaseCollector(client).collect(ctx, _project())) == []
 
 
 @pytest.mark.parametrize(
@@ -366,14 +310,27 @@ def test_forge_issues_reach_the_bug_view(
         }
     )
 
+    # The adapter is "configured" by making its client factory answer, the way
+    # a token file does in production; the provider the sync resolves per
+    # project then speaks to the fake transport.
+    def configured(path: Any, *, transport: Transport | None = None) -> GitHubClient:
+        del path, transport
+        return GitHubClient(token="ghp_fake", transport=transport_for_route)
+
+    transport_for_route = transport
+    monkeypatch.setattr(
+        GitHubClient, "from_token_file", staticmethod(configured)
+    )
+
+    from vogt.adapters.forge.sync import forge_sync_collectors
     from vogt.application.services import collect as collect_service
 
     def registry_with_github(ctx: AppContext) -> CollectorRegistry:
         registry = CollectorRegistry()
         client = GitHubClient(token="x", transport=transport)
+        for collector in forge_sync_collectors(ctx.observed):
+            registry.add(collector)
         for collector in (
-            GitHubIssueCollector(client),
-            GitHubPullRequestCollector(client),
             GitHubActionsCollector(client),
             GitHubReleaseCollector(client),
         ):

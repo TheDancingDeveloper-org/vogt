@@ -39,12 +39,11 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.core.entities import Observation, Project, Suppression, WorkItem
 from vogt.core.observed import (
-    LIFECYCLE_CLOSED,
     OBSERVED_STATE,
+    WORKLIKE_KINDS,
     Rankable,
     is_classified,
     is_worklike,
-    lifecycle_of,
     priority_of,
     title_of,
     work_kind_of,
@@ -346,32 +345,28 @@ def _gather(
         suppressed = 0
         closed_count = 0
         if include_observed and ctx.observed.has_evidence_tables():
+            scoped_project = None if project_row is None else project_row.id
+            # A view named for outstanding work contains only work that is
+            # outstanding, and the closed filter now runs in SQL (#173). Before
+            # Phase 2 almost no closure was ever observed, so a Python filter
+            # behind a 1000-row window was harmless; once every sweep records
+            # closures as permanent rows, that window fills with closed items
+            # and truncates the open ones behind them. `exclude_closed` drops
+            # them in the query; `count_closed` retains `closed_upstream`. A
+            # closed subject stays observable through `observations list`.
             worklike = [
                 observation
                 for observation in ctx.observed.latest(
-                    project_id=None if project_row is None else project_row.id,
+                    kinds=tuple(WORKLIKE_KINDS),
+                    project_id=scoped_project,
+                    exclude_closed=True,
                     limit=RANKING_CANDIDATE_LIMIT,
                 )
                 if is_worklike(observation)
             ]
-            # A view named for outstanding work contains only work that is
-            # outstanding. `bugs` returned twenty-seven observed items and every
-            # one was closed upstream, each stamped `trust_state: verified` —
-            # the state sat in the payload the whole time and nothing consulted
-            # it. Trust describes how well a subject is known, not whether it is
-            # still open, and was being read as the second. A closed subject
-            # stays observable through `observations list`; it is only out of
-            # the ranked views.
-            closed_count = sum(
-                1
-                for observation in worklike
-                if lifecycle_of(observation) == LIFECYCLE_CLOSED
+            closed_count = ctx.observed.count_closed(
+                kinds=tuple(WORKLIKE_KINDS), project_id=scoped_project
             )
-            worklike = [
-                observation
-                for observation in worklike
-                if lifecycle_of(observation) != LIFECYCLE_CLOSED
-            ]
             kept: list[Observation] = []
             for observation in worklike:
                 if suppressions.hides(observation.subject_key, observation.project_id):

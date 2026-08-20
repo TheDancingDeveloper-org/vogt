@@ -359,20 +359,23 @@ side names a terminal by that id alone.
 `release:owner/repo@tag`, `depref:repo/Cargo.toml→../nzb-core`,
 `depscan:project-slug` (r15), `mirror:project/path->project` (r15, FR-D8),
 `contract:project-slug`, `session:<session id>` (r5, FR-E6),
-`task-run:<run id>` (r5, FR-E7). Same `subject_key` + same `content_digest`
+`task-run:<run id>` (r5, FR-E7), `sync:<collector>/<owner>/<repo>` (the
+per-project forge-sync receipt, #173). Same `subject_key` + same `content_digest`
 in a new sweep ⇒ no new row (sweep stats count it as unchanged), keeping
 growth proportional to change, not to polling frequency.
 
-*r15, a consequence worth stating*: `observed_at` is therefore **when a
-payload was first seen, not when it was last confirmed**, and no subject can
-be dated to the sweep that last saw it. Two live effects, both recorded in
-`REQUIREMENTS.md` r15 as residuals: a GitHub issue closed after its last
-observation keeps an observation saying `open` (the `gh-issues` collector
-reads open issues, so a close is an absence, not a payload change), and
-`latest_dep_refs` keeps a reference whose manifest entry was deleted until
-something re-observes that subject. Both would be closed by a per-subject
-last-seen record, which is a schema change and a new coverage concept rather
-than a bug fix.
+*r15, a consequence worth stating*: `observed_at` is **when a payload was
+first seen, not when it was last confirmed**. `observations` rows stay
+immutable, so the per-subject "last confirmed" record that closes this is a
+separate table — `subject_seen` (§3.3, #173) — touched on every sync batch
+including the batches where nothing changed. The two effects r15 recorded as
+residuals are now closed by construction rather than deferred: a forge issue
+closed after its last observation is re-observed as `closed` because the sync
+reads `state=all` incrementally (`forge-issues`/`forge-prs` replaced the
+open-only `gh-issues`/`gh-prs`), so a close is a payload change, not an
+absence; and trust reads `subject_seen.last_confirmed_at` rather than
+`observed_at` (Phase 3). `latest_dep_refs` staleness is unchanged and remains
+an r15 residual.
 
 The two session keys are Vogt's own ids rather than the engine's, deliberately:
 a session's subject is the thing Vogt declared, so its evidence survives an
@@ -419,6 +422,25 @@ table behind it.
 *r2*: `latest_dependencies` (requested spec, locked version,
 direct/transitive) is replaced by `latest_dep_refs`. No lockfile is parsed
 and no version is resolved.
+
+### 3.3 Forge-sync bookkeeping (`0004_forge_sync`, #173)
+
+Neither of these is evidence a person asserted — they are the incremental
+sync's own bookkeeping — so they live here rather than in `declared`, where
+every write needs an actor and a reason (D1). Both are mutable, unlike
+`observations`.
+
+| Table | Purpose | Key columns |
+|---|---|---|
+| `sync_state` | the incremental watermark: how far a collector has synced a project | `collector, project_id, watermark, updated_at`, PK `(collector, project_id)` |
+| `subject_seen` | when each subject was last **confirmed to still exist** upstream, touched on every sync batch including unchanged ones | `subject_key` (PK), `last_confirmed_at` |
+
+`watermark` is the max upstream `updated_at` the collector has seen for the
+project; the next sweep asks the forge for everything changed since (less a
+small overlap), so a closure between sweeps is observed rather than missed.
+`subject_seen` is what lets trust be read from "last confirmed" rather than
+"last changed" while `observations` stays immutable and `observed_at` stays
+first-seen — closing the r15 residual named in §3.1.
 
 ## 4. Cross-store semantics
 

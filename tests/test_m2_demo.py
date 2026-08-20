@@ -29,8 +29,6 @@ from vogt.adapters.github import GitHubClient
 from vogt.adapters.github.client import Transport
 from vogt.adapters.github.collectors import (
     GitHubActionsCollector,
-    GitHubIssueCollector,
-    GitHubPullRequestCollector,
     GitHubReleaseCollector,
 )
 from vogt.application.context import AppContext
@@ -161,15 +159,23 @@ def estate(instance: AppContext, tmp_path: Path) -> AppContext:
 
 def _with_github(monkeypatch: pytest.MonkeyPatch) -> None:
     """Configure the optional adapter, without a network."""
+    from vogt.adapters.forge.sync import forge_sync_collectors
     from vogt.application.services import collect as collect_service
 
-    client = GitHubClient(token="x", transport=_github(FORGE_ISSUES))
+    route = _github(FORGE_ISSUES)
+    client = GitHubClient(token="x", transport=route)
+
+    def configured(path: Any, *, transport: Any = None) -> GitHubClient:
+        del path, transport
+        return GitHubClient(token="ghp_fake", transport=route)
+
+    monkeypatch.setattr(GitHubClient, "from_token_file", staticmethod(configured))
 
     def registry(ctx: AppContext) -> CollectorRegistry:
         built = CollectorRegistry()
+        for collector in forge_sync_collectors(ctx.observed):
+            built.add(collector)
         for collector in (
-            GitHubIssueCollector(client),
-            GitHubPullRequestCollector(client),
             GitHubActionsCollector(client),
             GitHubReleaseCollector(client),
         ):
@@ -284,7 +290,7 @@ def test_the_same_estate_works_with_no_forge_at_all(estate: AppContext) -> None:
         "forge subjects are not collected — which is a different answer from "
         "'there are none', and the freshness stamp says which collectors ran"
     )
-    assert "gh-issues" not in found.freshness.collectors
+    assert "forge-issues" not in found.freshness.collectors
 
 
 def test_a_second_sweep_finds_nothing_new(estate: AppContext) -> None:

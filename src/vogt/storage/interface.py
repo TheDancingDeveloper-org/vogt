@@ -663,10 +663,43 @@ class ObservedStore(Protocol):
         kinds: tuple[str, ...] = (),
         project_id: str | None = None,
         promoted_only: bool = False,
+        exclude_closed: bool = False,
         limit: int = 1000,
     ) -> list[Observation]: ...
 
     def latest_by_subject(self, subject_key: str) -> Observation | None: ...
+
+    def count_closed(
+        self, *, kinds: tuple[str, ...], project_id: str | None = None
+    ) -> int:
+        """How many latest subjects of these kinds read `closed`/`merged`.
+
+        The counterpart to `latest(exclude_closed=True)`: the ranked view
+        drops closed subjects in SQL so the row window cannot silently
+        truncate once closures are permanent, and still reports how many it
+        dropped (`closed_upstream`)."""
+        ...
+
+    # -- incremental sync state (D1) ---------------------------------------
+
+    def get_watermark(self, *, collector: str, project_id: str) -> str | None:
+        """The max upstream `updated_at` this collector has synced for a
+        project, or `None` before the first sync."""
+        ...
+
+    def set_watermark(
+        self, *, collector: str, project_id: str, watermark: str | None, at: datetime
+    ) -> None: ...
+
+    def touch_subjects(self, subject_keys: list[str], *, at: datetime) -> None:
+        """Record that these subjects were confirmed to still exist now,
+        whether or not their content changed (resolves the #50 residual)."""
+        ...
+
+    def last_confirmed(self, subject_keys: list[str]) -> dict[str, datetime]:
+        """Per subject, when it was last confirmed upstream. Empty for
+        subjects never touched by a sync."""
+        ...
 
     def dep_refs(
         self, *, from_project_id: str | None = None, to_project_id: str | None = None
