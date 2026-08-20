@@ -61,7 +61,7 @@ import {
   type FreshnessSummary,
 } from "./vogtApi";
 import SurfaceHeader from "./SurfaceHeader";
-import { ViewAgeBadge, createLoadStamp, createViewAge, onVogtLive } from "./viewAge";
+import { ViewAgeBadge, createLoadStamp, createViewAge, honestyToneClass, onVogtLive } from "./viewAge";
 
 interface Props {
   onError?: (message: string) => void;
@@ -983,16 +983,17 @@ const AuditBrowser: Component<Props> = (props) => {
         class="vab-header"
         label="Audit header"
         title={<h1>{filter().view === "audit" ? "Audit" : "Notifications"}</h1>}
+        honestyClass={honestyToneClass(viewAge().tone)}
         honesty={(
-          <ViewAgeBadge
+          <strong><ViewAgeBadge
             age={viewAge()}
             class="vab-age"
             title="How long ago this view last got an answer from Vogt. It re-reads when Vogt announces a change; a badge that goes stale means the stream is not arriving."
-          />
+          /></strong>
         )}
         controls={(
           <>
-            <div class="vab-views" role="group" aria-label="Global views">
+            <div class="vab-views surface-header-tabs" role="group" aria-label="Global views">
               <For each={["audit", "inbox"] as ViewName[]}>
                 {(name) => (
                   <button
