@@ -60,6 +60,30 @@
     "ghcr.io/thedancingdeveloper-org/vogt-base": "docker.io/library",
   },
 
+  // The engine image installs three npm CLIs, and they are pinned as ARGs
+  // rather than floating on `latest` — see the note above them in
+  // `engine/Dockerfile`. Nothing tracks a version inside a `RUN` by default,
+  // so this teaches Renovate to read the annotation that sits above each one:
+  //
+  //     # renovate: datasource=npm depName=@openai/codex
+  //     ARG CODEX_VERSION=0.148.0
+  //
+  // If this ever stops matching, the failure is silent in the same way the
+  // registryAlias failure is: the pins simply go stale and no PR is raised.
+  // Check here first if one of them has not moved in a suspiciously long
+  // time. (On a Renovate older than the `managerFilePatterns` rename, this
+  // key is spelled `fileMatch`.)
+  customManagers: [
+    {
+      customType: "regex",
+      description: "npm CLIs pinned as ARGs in the engine image",
+      managerFilePatterns: ["/^engine/Dockerfile$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)\\s+ARG [A-Z_]+_VERSION=(?<currentValue>\\S+)",
+      ],
+    },
+  ],
+
   packageRules: [
     {
       matchManagers: ["github-actions"],

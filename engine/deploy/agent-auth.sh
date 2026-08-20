@@ -243,7 +243,12 @@ check_access() {
     load_agent_environment
     response_file="$(mktemp)"
     error_file="$(mktemp)"
-    trap 'rm -f "$response_file" "$error_file"' EXIT
+    # Defaulted expansions, because this trap fires at *script* exit — by
+    # which point `check_access` has returned and its locals are gone. Under
+    # `set -u` the bare form aborted with "response_file: unbound variable"
+    # after every probe had reported ok, so a fully green check exited 1 and
+    # the temp files were never removed.
+    trap 'rm -f "${response_file:-}" "${error_file:-}"' EXIT
 
     printf 'ok: Infisical universal auth\n'
     curl -fsS -H "Authorization: token $FORGEJO_TOKEN" \
