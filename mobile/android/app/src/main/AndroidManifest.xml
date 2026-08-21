@@ -27,6 +27,18 @@
 
         </activity>
 
+        <!--
+            Held only while a voice conversation is active (FR-M6): keeps the
+            process alive across screen-off so the assistant socket, audio
+            capture and TTS survive. Not exported — only MainActivity's bridge
+            starts it. `microphone` because a conversation uses the mic through
+            the WebView; `dataSync` because the socket must keep running.
+        -->
+        <service
+            android:name=".VoiceConversationService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|dataSync" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -45,4 +57,14 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Assistant voice input (speech-recognition plugin) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!--
+        Foreground service held for the duration of an active voice conversation
+        (FR-M6). The typed permissions match the service's declared
+        foregroundServiceType and are required on API 34+.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Keep the CPU alive so the assistant socket survives screen-off. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 </manifest>
