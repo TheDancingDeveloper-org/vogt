@@ -42,7 +42,13 @@ from vogt.application.services import (
     list_projects,
 )
 from vogt.config import VogtConfig
-from vogt.errors import Conflict, InvalidRequest, NotFound
+from vogt.errors import (
+    Conflict,
+    ImportBranchDiverged,
+    ImportWorkingTreeDirty,
+    InvalidRequest,
+    NotFound,
+)
 
 from tests.conftest import TEST_PRINCIPAL, SequentialIds, StepClock
 
@@ -358,19 +364,129 @@ def test_clone_puts_a_working_tree_where_it_was_told(
     assert outcome.reused is False
 
 
-def test_a_second_import_of_the_same_remote_reuses_the_checkout(
+def test_a_second_import_of_a_clean_checkout_at_parity_reuses_it(
     origin: Path, tmp_path: Path
 ) -> None:
-    """FR-P7: re-importing registers what is there rather than re-cloning."""
+    """FR-P7 + #180 decision 6: re-importing a clean checkout at parity reuses it.
+
+    Right after a clone the working tree is clean and local HEAD equals origin
+    HEAD, so the parity gate passes and the re-import registers what is there
+    rather than cloning again — the reuse case survives the gate unchanged, as
+    long as nothing has diverged.
+    """
     destination = tmp_path / "cloned"
     first = clone_repository(CloneRequest(remote=str(origin), destination=destination))
-    (destination / "local-work.txt").write_text("mine\n", encoding="utf-8")
 
     second = clone_repository(CloneRequest(remote=str(origin), destination=destination))
 
     assert second.reused is True
     assert second.revision == first.revision
-    assert (destination / "local-work.txt").exists(), "the import ate local work"
+
+
+def test_reimporting_over_a_dirty_working_tree_is_refused(
+    origin: Path, tmp_path: Path
+) -> None:
+    """#180 decision 6: a dirty existing checkout is refused, not reconciled.
+
+    An untracked local file is uncommitted work; writing an import over it is
+    the loss the gate exists to prevent. The receipt names the exact condition
+    and the working tree is left untouched — Vogt runs no stash on the user's
+    behalf.
+    """
+    destination = tmp_path / "cloned"
+    clone_repository(CloneRequest(remote=str(origin), destination=destination))
+    (destination / "local-work.txt").write_text("mine\n", encoding="utf-8")
+
+    with pytest.raises(ImportWorkingTreeDirty, match="uncommitted changes"):
+        clone_repository(CloneRequest(remote=str(origin), destination=destination))
+    assert (destination / "local-work.txt").exists(), (
+        "a refused import touched the tree"
+    )
+
+
+def test_reimporting_over_a_diverged_default_branch_is_refused(
+    origin: Path, tmp_path: Path
+) -> None:
+    """#180 decision 6: a local default branch ahead of origin is refused.
+
+    A local commit that origin does not have makes local HEAD and origin HEAD
+    two different commits. The tree is clean, so it is the divergence condition
+    that fails, and the receipt says which HEAD is which — Vogt performs no
+    merge, rebase or pull to close the gap.
+    """
+    destination = tmp_path / "cloned"
+    clone_repository(CloneRequest(remote=str(origin), destination=destination))
+    (destination / "local.txt").write_text("committed locally\n", encoding="utf-8")
+    _git(destination, "add", "local.txt")
+    _git(
+        destination,
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-m",
+        "ahead",
+    )
+
+    with pytest.raises(ImportBranchDiverged, match="diverged from origin HEAD"):
+        clone_repository(CloneRequest(remote=str(origin), destination=destination))
+
+
+def test_a_clean_reimport_never_fetches_merges_or_rebases(
+    origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#180: the gate reads, and the import performs no merge logic ever.
+
+    Every git invocation of a successful clean reuse is recorded; none of the
+    reconciling verbs may appear. `ls-remote` is a read of origin's refs and is
+    allowed — it fetches no objects and moves no ref.
+    """
+    destination = tmp_path / "cloned"
+    clone_repository(CloneRequest(remote=str(origin), destination=destination))
+
+    recorded: list[list[str]] = []
+    real_run = subprocess.run
+
+    def recording(args: Any, **kwargs: Any) -> Any:
+        recorded.append(list(args))
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recording)
+    outcome = clone_repository(
+        CloneRequest(remote=str(origin), destination=destination)
+    )
+
+    assert outcome.reused is True
+    verbs = {arg for argv in recorded for arg in argv}
+    for forbidden in ("fetch", "merge", "rebase", "pull", "stash"):
+        assert forbidden not in verbs, f"a reuse ran git {forbidden}"
+
+
+def test_importing_into_a_new_folder_skips_the_parity_gate(
+    origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#180 decision 6: a fresh clone is never gated — there is nothing to gate.
+
+    Nothing exists at the destination, so no HEAD and no working tree can
+    diverge; the gate must not run. Asserted by proving no `ls-remote` (the
+    gate's only network read) was issued during a first clone.
+    """
+    recorded: list[list[str]] = []
+    real_run = subprocess.run
+
+    def recording(args: Any, **kwargs: Any) -> Any:
+        recorded.append(list(args))
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recording)
+    outcome = clone_repository(
+        CloneRequest(remote=str(origin), destination=tmp_path / "brand-new")
+    )
+
+    assert outcome.reused is False
+    verbs = {arg for argv in recorded for arg in argv}
+    assert "ls-remote" not in verbs, "a new-folder clone ran the parity gate"
 
 
 def test_a_destination_holding_a_different_repository_is_refused(

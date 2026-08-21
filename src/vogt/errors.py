@@ -71,6 +71,42 @@ class ForgeAccountsNotConfigured(InvalidRequest):
     code = "forge_accounts_not_configured"
 
 
+class ImportParityRefused(Conflict):
+    """Importing onto a pre-existing checkout is refused: it is not at clean
+    parity with origin, and Vogt performs no merge on the user's behalf (#180).
+
+    Import over an existing folder never fetches-and-merges, rebases or stashes.
+    When the local default branch has diverged from origin, or the working tree
+    is dirty, the honest answer is to hand the reconciliation back to the person
+    — push or pull yourself, then retry — rather than guess at a merge. The two
+    subclasses name which of the two conditions failed, so the receipt is
+    actionable rather than a bare "refused".
+    """
+
+    code = "import_parity_refused"
+
+
+class ImportWorkingTreeDirty(ImportParityRefused):
+    """The destination's working tree has uncommitted changes (#180).
+
+    Vogt will not write into a dirty tree to satisfy an import, because the one
+    thing worse than refusing is silently reconciling somebody's uncommitted
+    work. Commit, stash or discard it yourself, then retry."""
+
+    code = "import_working_tree_dirty"
+
+
+class ImportBranchDiverged(ImportParityRefused):
+    """The local default branch has diverged from origin (#180).
+
+    Local HEAD and origin HEAD on the default branch name two different commits.
+    Vogt performs no merge, rebase or stash, so it refuses rather than pick a
+    reconciliation the person did not ask for. Push or pull the branch yourself,
+    then retry."""
+
+    code = "import_branch_diverged"
+
+
 class InboxEntryNotFound(NotFound):
     """The requested Inbox occurrence is not in the current projection."""
 
