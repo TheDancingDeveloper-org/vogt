@@ -149,9 +149,7 @@ def test_the_closure_is_recorded_as_an_observation(
         }
     ]
     sweep(instance, SweepParams(reason=WHY))
-    latest = instance.observed.latest_by_subject(
-        "gh:TheDancingDeveloper-org/rustnzb#7"
-    )
+    latest = instance.observed.latest_by_subject("gh:TheDancingDeveloper-org/rustnzb#7")
     assert latest is not None
     assert lifecycle_of(latest) == LIFECYCLE_CLOSED
 

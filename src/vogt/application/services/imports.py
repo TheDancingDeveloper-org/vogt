@@ -163,9 +163,7 @@ def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _describe(
-    provider: GitHubProvider | None, ref: RepoRef
-) -> dict[str, object]:
+def _describe(provider: GitHubProvider | None, ref: RepoRef) -> dict[str, object]:
     """Confirm the repository exists and is visible to this token.
 
     Unconfigured is not an error — a public repository clones perfectly well
@@ -176,10 +174,7 @@ def _describe(
         return {}
     payload = provider.describe(ref)
     if payload is None:
-        msg = (
-            f"the forge has no repository {ref.slug} visible to this "
-            "instance's token"
-        )
+        msg = f"the forge has no repository {ref.slug} visible to this instance's token"
         raise NotFound(msg)
     return payload
 

@@ -131,9 +131,7 @@ class ForgeProvider(Protocol):
 
     # -- write surface (append-only by construction, FR-B4) ----------------
 
-    def comment(
-        self, ref: RepoRef, number: int, body: str
-    ) -> WriteBackResult:
+    def comment(self, ref: RepoRef, number: int, body: str) -> WriteBackResult:
         """Post a comment on a linked issue or pull request."""
 
     def create_issue(
@@ -151,9 +149,7 @@ class ForgeProvider(Protocol):
     ) -> WriteBackResult:
         """Add labels. Adds only — never replaces the existing set."""
 
-    def set_state(
-        self, ref: RepoRef, number: int, state: str
-    ) -> WriteBackResult:
+    def set_state(self, ref: RepoRef, number: int, state: str) -> WriteBackResult:
         """Close or reopen. Both directions are recoverable by the other."""
 
 

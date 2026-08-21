@@ -173,9 +173,7 @@ def test_issues_updated_since_normalises_and_drops_pull_requests() -> None:
 def test_pulls_and_releases_and_checks_normalise() -> None:
     provider = _provider(
         {
-            "/pulls": [
-                {"number": 3, "title": "wip", "state": "open", "draft": True}
-            ],
+            "/pulls": [{"number": 3, "title": "wip", "state": "open", "draft": True}],
             "/releases": [{"tag_name": "v1.2.0", "name": "1.2.0"}],
             "/actions/runs": {
                 "workflow_runs": [
@@ -320,8 +318,6 @@ def test_a_map_entry_present_wins_over_the_alias(tmp_path: Path) -> None:
     alias.write_text("ghp_alias\n", encoding="utf-8")
     mapped = tmp_path / "mapped"
     mapped.write_text("ghp_mapped\n", encoding="utf-8")
-    config = _config(
-        github_token_file=alias, forge_token_files={"github.com": mapped}
-    )
+    config = _config(github_token_file=alias, forge_token_files={"github.com": mapped})
     assert token_file_for(config, "github.com") == mapped
     assert provider_for(GITHUB, config) is not None

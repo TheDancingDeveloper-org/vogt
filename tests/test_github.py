@@ -318,9 +318,7 @@ def test_forge_issues_reach_the_bug_view(
         return GitHubClient(token="ghp_fake", transport=transport_for_route)
 
     transport_for_route = transport
-    monkeypatch.setattr(
-        GitHubClient, "from_token_file", staticmethod(configured)
-    )
+    monkeypatch.setattr(GitHubClient, "from_token_file", staticmethod(configured))
 
     from vogt.adapters.forge.sync import forge_sync_collectors
     from vogt.application.services import collect as collect_service

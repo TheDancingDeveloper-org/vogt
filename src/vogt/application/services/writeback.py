@@ -58,9 +58,7 @@ _ONBOARD_READS = frozenset({"forge-labels", "forge-releases"})
 
 
 def _count_latest(ctx: AppContext, project_id: str, kind: str) -> int:
-    return len(
-        ctx.observed.latest(kinds=(kind,), project_id=project_id, limit=100_000)
-    )
+    return len(ctx.observed.latest(kinds=(kind,), project_id=project_id, limit=100_000))
 
 
 @dataclass(frozen=True)

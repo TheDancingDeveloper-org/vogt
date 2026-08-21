@@ -26,9 +26,7 @@ def test_a_reconfirmed_subject_stays_verified(instance: AppContext) -> None:
     assert trust_for(instance, observed_at=stale_observed) == "stale"
     # But it was confirmed to still exist five minutes ago.
     assert (
-        trust_for(
-            instance, observed_at=stale_observed, confirmed_at=fresh_confirmed
-        )
+        trust_for(instance, observed_at=stale_observed, confirmed_at=fresh_confirmed)
         == "verified"
     )
 

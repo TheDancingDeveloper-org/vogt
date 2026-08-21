@@ -43,12 +43,10 @@ META_CREATED_AT = "created_at"
 #: a null/absent state (a marker) or any state other than closed/merged is
 #: still outstanding. Mirrors `core.observed.lifecycle_of`.
 _OPEN_STATE_SQL = (
-    "lower(coalesce(json_extract(payload, '$.state'), '')) "
-    "NOT IN ('closed', 'merged')"
+    "lower(coalesce(json_extract(payload, '$.state'), '')) NOT IN ('closed', 'merged')"
 )
 _CLOSED_STATE_SQL = (
-    "lower(coalesce(json_extract(payload, '$.state'), '')) "
-    "IN ('closed', 'merged')"
+    "lower(coalesce(json_extract(payload, '$.state'), '')) IN ('closed', 'merged')"
 )
 
 

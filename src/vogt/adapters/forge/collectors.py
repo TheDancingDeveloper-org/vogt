@@ -87,9 +87,7 @@ class _ForgeReadCollector:
     ) -> Finding:
         return finding(
             kind=KIND_SYNC,
-            subject_key=(
-                f"sync:{self.name}/{ref.slug if ref else project.id}"
-            ),
+            subject_key=(f"sync:{self.name}/{ref.slug if ref else project.id}"),
             project=project,
             payload={
                 "collector": self.name,

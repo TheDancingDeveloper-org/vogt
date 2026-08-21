@@ -144,9 +144,7 @@ class GitHubProvider:
         }
         if since:
             params["since"] = since
-        payloads = self._client.get(
-            f"/repos/{ref.owner}/{ref.repo}/issues", **params
-        )
+        payloads = self._client.get(f"/repos/{ref.owner}/{ref.repo}/issues", **params)
         for item in _as_list(payloads):
             if "pull_request" in item:
                 # The issues endpoint returns PRs too; they have their own
