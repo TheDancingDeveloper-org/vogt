@@ -184,6 +184,11 @@ pub struct AuthorizedIdentity {
 /// trail of who did what. The single bearer token doesn't give us a user
 /// identity, so the log line records method + path + request id; that's
 /// enough to correlate suspicious activity from the same client.
+// Both arms are an axum `Response` by design — the rejection *is* a response
+// this middleware returns directly, not an error boxed and rethrown. clippy
+// 1.98's `result_large_err` flags the large `Err`; boxing only one arm would
+// make the signature asymmetric for no runtime win, so the lint is allowed here.
+#[allow(clippy::result_large_err)]
 pub async fn require_bearer(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
