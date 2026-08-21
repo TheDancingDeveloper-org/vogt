@@ -27,6 +27,14 @@ env:
   # Published, versioned and signed; not recommended to anybody who wants
   # Vogt rather than this estate's pod.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+  # The BuildKit layer cache, on the estate's own local-registry on Node B
+  # (#184) — the same backend and repository `build.yml` uses, and the one #129
+  # established on `main`. Not GHCR: the runners are on Node B, so this cache
+  # never leaves the host while GHCR is a WAN round-trip. `dind-daemon.json` on
+  # the workers trusts it over HTTP. Releases share a `release` cache stream
+  # (rather than a per-tag key that would be cold every time) so one release
+  # warms the next; it cannot evict main's or dev's streams.
+  CACHE_IMAGE: 192.168.1.75:5500/vogt-buildcache
 
 jobs:
   # Docker Hub is not on the critical path (#33): both Dockerfiles build
@@ -157,6 +165,10 @@ jobs:
           load: true
           tags: ${{ env.IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache on the estate's local-registry (#184); the push below
+          # shares the ref so it re-tags rather than recompiles.
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release,mode=max
 
       - name: the image runs
         env:
@@ -184,6 +196,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
           sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release,mode=max
 
       - uses: sigstore/cosign-installer@v3
 
@@ -212,9 +226,23 @@ jobs:
             echo "and \`DeployStack\` runs for \`personal-vogt\` (NFR-D10)."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # The dev-pod toolchain base, built (or reused) before the merged image that
+  # is built `FROM` it (#184). A release is always the `lean` variant — no
+  # Flutter, no AI clients. `needs: base-images` because the pod base builds
+  # `FROM` a mirrored Ubuntu the mirror job must have copied first.
+  pod-base:
+    name: the pod base is in GHCR
+    needs: base-images
+    uses: ./.github/workflows/pod-base.yml
+    with:
+      variant: lean
+    permissions:
+      contents: read
+      packages: write
+
   stack-image:
     name: build, sign and publish the merged image
-    needs: [distribution, base-images, image]
+    needs: [distribution, base-images, pod-base, image]
     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
     permissions:
       contents: read
@@ -225,21 +253,10 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: build the PWA
-        # `rust-embed` reads `web/dist/` at compile time, so the bundle is a
-        # build input rather than a separate artefact: an image built without
-        # this step compiles and serves a placeholder where the product's
-        # front end should be.
-        run: |
-          set -euo pipefail
-          corepack enable
-          cd web
-          pnpm install --frozen-lockfile
-          pnpm build
+      # No runner-side `pnpm build` (#184): it never reached the image
+      # (`engine/Dockerfile.dockerignore` excludes `web/dist`, and stage 1 of
+      # `engine/Dockerfile` builds the bundle the image embeds). The PWA is
+      # still built before the engine that embeds it — stage 1 before stage 2.
 
       # No Docker Hub login, deliberately — and this is a trap worth naming,
       # because the obvious "improvement" is to add one back.
@@ -301,8 +318,11 @@ jobs:
           tags: ${{ env.STACK_IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
+            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             INSTALL_CADASTRE_MCP=true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release,mode=max
 
       - name: both halves run
         env:
@@ -322,10 +342,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
+            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             INSTALL_CADASTRE_MCP=true
           provenance: true
           sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release,mode=max
 
       - uses: sigstore/cosign-installer@v3
 

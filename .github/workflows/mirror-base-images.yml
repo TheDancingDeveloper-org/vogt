@@ -73,10 +73,12 @@ on:
     branches: [main, dev]
     paths:
       - "engine/Dockerfile"
+      - "engine/Dockerfile.pod"
       - ".github/workflows/mirror-base-images.yml"
   pull_request:
     paths:
       - "engine/Dockerfile"
+      - "engine/Dockerfile.pod"
       - ".github/workflows/mirror-base-images.yml"
   schedule:
     # Renovate's window is "before 5am on monday" (`.github/renovate.json5`).
@@ -119,7 +121,7 @@ jobs:
         run: |
           set -euo pipefail
           bad=0
-          for file in engine/Dockerfile; do
+          for file in engine/Dockerfile engine/Dockerfile.pod; do
             while IFS= read -r ref; do
               # A stage name, not an image: no registry path and no tag.
               case "$ref" in
@@ -179,7 +181,7 @@ jobs:
           set -euo pipefail
 
           refs="$(
-            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile \
+            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile engine/Dockerfile.pod \
               | sort -u
           )"
           if [ -z "$refs" ]; then
@@ -238,7 +240,7 @@ jobs:
           {
             echo "### Base images in GHCR"
             echo
-            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile \
+            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile engine/Dockerfile.pod \
               | sort -u \
               | sed 's/^/- `/; s/$/`/'
             echo
