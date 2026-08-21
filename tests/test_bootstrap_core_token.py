@@ -34,12 +34,19 @@ def _context(cfg: VogtConfig) -> AppContext:
     )
 
 
-def _config(data_dir: Path, token_file: Path | None, **kw: object) -> VogtConfig:
+def _config(
+    data_dir: Path,
+    token_file: Path | None,
+    *,
+    scopes: str = "read,work.write,project.write",
+    actor: str = "agent:vogt-engine",
+) -> VogtConfig:
     return VogtConfig(
         data_dir=data_dir,
         sqlite_synchronous="off",
         bootstrap_core_token_file=token_file,
-        **kw,
+        bootstrap_core_token_scopes=scopes,
+        bootstrap_core_token_actor=actor,
     )
 
 
@@ -134,8 +141,8 @@ def test_the_adopted_token_carries_the_configured_scopes(tmp_path: Path) -> None
         _config(
             tmp_path / "instance",
             token_file,
-            bootstrap_core_token_scopes="read",
-            bootstrap_core_token_actor="agent:front-door",
+            scopes="read",
+            actor="agent:front-door",
         )
     )
     init_instance(ctx, InitParams())
@@ -159,7 +166,7 @@ def test_an_unknown_scope_fails_startup_rather_than_being_ignored(
         _config(
             tmp_path / "instance",
             token_file,
-            bootstrap_core_token_scopes="read,not-a-scope",
+            scopes="read,not-a-scope",
         )
     )
     with pytest.raises(InvalidRequest, match="not-a-scope"):
