@@ -96,6 +96,17 @@ class WorkFilter:
     label: str | None = None
     trust_states: tuple[str, ...] = ()
     exclude_terminal: bool = False
+    #: The #183 withdrawal, expressed as a filter: leave out native rows whose
+    #: project is unlinked. Items with no project are untouched — there is no
+    #: project to be linked. Off by default so `work.list`'s raw global query
+    #: stays complete; the curated surfaces (Board, Backlog) switch it on and
+    #: report what it removed.
+    exclude_unlinked_native: bool = False
+    #: Retired rows (`superseded_by` set, #183) are excluded from every work
+    #: view by default — the upstream item is the item. Export is the one
+    #: reader that wants everything, because a portability dump that quietly
+    #: drops the rows anchoring comments and ledger history is not a dump.
+    include_superseded: bool = False
     limit: int = 100
     offset: int = 0
 
@@ -158,6 +169,11 @@ class WorkItemUpdate:
     clear_initiative: bool = False
     add_labels: tuple[str, ...] = field(default=())
     remove_labels: tuple[str, ...] = field(default=())
+    #: The #183 retire marker: the subject key a migrated native item became.
+    #: Set once by the migration on link/publish, never cleared — withdrawing
+    #: an item from the upstream-truth model is a migration question, not a
+    #: toggle, exactly as `forge.link` has no unlink.
+    superseded_by: str | None = None
 
 
 class ReadView(Protocol):

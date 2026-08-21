@@ -1253,6 +1253,7 @@ class SqliteWriteTxn(SqliteReadView):
             ("assignee_actor_id", update.assignee_actor_id),
             ("initiative_id", update.initiative_id),
             ("project_id", update.project_id),
+            ("superseded_by", update.superseded_by),
         ):
             if value is not None:
                 assignments.append(f"{column} = ?")
@@ -1796,6 +1797,7 @@ def _row_to_work_item(
             "assignee_identity_ref": row["assignee_identity_ref"],
             "labels": labels,
             "relations": relations,
+            "superseded_by": row["superseded_by"],
             "created_at": from_iso(str(row["created_at"])),
             "updated_at": from_iso(str(row["updated_at"])),
         }
@@ -1858,6 +1860,23 @@ def _work_where(work_filter: WorkFilter) -> tuple[str, list[object]]:
     """Build the shared WHERE clause every work view filters through."""
     clauses: list[str] = []
     params: list[object] = []
+
+    if not work_filter.include_superseded:
+        # A native row that migrated upstream (#183) is retired — the
+        # subject-keyed upstream item is the item now, and listing the husk
+        # beside it would be the double-count the migration exists to end.
+        # The row stays reachable by ref/id for anyone following an old
+        # trail, and export asks for it explicitly.
+        clauses.append("w.superseded_by IS NULL")
+
+    if work_filter.exclude_unlinked_native:
+        # The #183 surface withdrawal: a native row on an unlinked project is
+        # not part of the curated work surfaces any more. Project-less items
+        # pass — there is no project to be linked.
+        clauses.append(
+            "(w.project_id IS NULL OR EXISTS (SELECT 1 FROM projects lp "
+            "WHERE lp.id = w.project_id AND lp.link_state = 'linked'))"
+        )
 
     if work_filter.project_id is not None:
         clauses.append("w.project_id = ?")

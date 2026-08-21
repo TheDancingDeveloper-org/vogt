@@ -40,7 +40,10 @@ MANIFEST_VERSION = 2
 
 #: An export covers everything, finished work included: it is a record,
 #: not a to-do list.
-_ALL_WORK = WorkFilter(limit=10_000, exclude_terminal=False)
+# Export carries retired (#183-superseded) rows too: a portability dump that
+# quietly dropped the rows anchoring comments and ledger history would not be
+# a dump of the instance.
+_ALL_WORK = WorkFilter(limit=10_000, exclude_terminal=False, include_superseded=True)
 
 BACKUP_EVENT = "instance.backed_up"
 RESTORE_EVENT = "instance.restored"

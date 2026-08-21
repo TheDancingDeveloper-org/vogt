@@ -160,6 +160,12 @@ class WorkItem(Entity):
     assignee_identity_ref: str | None = None
     labels: list[str] = []
     relations: list[Relation] = []
+    #: Set when the native item migrated upstream on link/publish (#183): the
+    #: subject key that is now the item. A superseded row is retired, not
+    #: deleted — it anchors its comments, relations, ledger rows and audit
+    #: trail, resolves by ref for anyone following an old trail, and is
+    #: excluded from every work view so each issue is counted exactly once.
+    superseded_by: str | None = None
     created_at: datetime
     updated_at: datetime
 
