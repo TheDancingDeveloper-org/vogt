@@ -108,6 +108,16 @@ Ordered so each step is demonstrable on its own and the hardware step is last.
 
 ### 3.6 Phone: background + speak-the-push (FR-M6) — *needs the dev APK, FR-M4*
 
+> **FR-M4's blocker is cleared on the configuration side (2026-08-21).** The
+> Firebase project `mydevenv2` really does carry an Android app for
+> `com.sprooty.mydevenv2.dev` (app id `1:1022775516765:android:5ef85b3f…`),
+> matching the checked-in `google-services.json` — verified against the console,
+> not inferred from the file. Nothing needs creating in Firebase. What is left
+> is the on-device pass: install the dev APK beside prod, confirm both register
+> for push and route correctly. The Checkpoint D code (#192) is built and
+> compiles; it has never run on hardware.
+
+
 - Capacitor foreground-service plugin held only while a conversation is
   active; released on end. Persistent notification names the app and offers
   "End conversation".
