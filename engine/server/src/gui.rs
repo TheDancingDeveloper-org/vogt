@@ -176,6 +176,14 @@ pub struct PublicConfig {
     /// Whether the conversational assistant is provisioned (key present).
     /// Presence only — never the key itself.
     pub assistant_enabled: bool,
+    /// Whether the server-side STT route is configured (FR-T12). A client with
+    /// no on-device recognizer uses it as its speech path; presence lets it
+    /// choose that path by capability rather than by probing for a 404. Never
+    /// the key or the base URL — a base URL is an exposure value (NFR-D2).
+    pub assistant_stt_enabled: bool,
+    /// Whether the server-side TTS route is configured (FR-T12). A client with
+    /// no on-device synthesis speaks replies through it. Presence only.
+    pub assistant_tts_enabled: bool,
     /// Whether this front door has a vogt-core behind it, and where its
     /// surfaces are mounted. Presence only, never a token: a client that has
     /// to provoke a 503 to find out whether Vogt exists cannot render an
@@ -215,6 +223,14 @@ pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicCon
         session_templates: state.config.session_templates.clone(),
         vogt: crate::vogt_core::public_status(&state),
         assistant_enabled: state.assistant.is_some(),
+        assistant_stt_enabled: state
+            .assistant_speech
+            .as_ref()
+            .is_some_and(|s| s.stt_enabled()),
+        assistant_tts_enabled: state
+            .assistant_speech
+            .as_ref()
+            .is_some_and(|s| s.tts_enabled()),
         assistant_model: state.assistant.as_ref().map(|a| a.model().to_string()),
         assistant_profiles: state
             .assistant

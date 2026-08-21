@@ -510,6 +510,14 @@ mod tests {
             assistant_profiles: vec![],
             assistant_default_profile: None,
             assistant_log_retention_days: 30,
+            assistant_stt_base_urls: vec![],
+            assistant_stt_api_key: None,
+            assistant_stt_model: "whisper-1".into(),
+            assistant_tts_base_urls: vec![],
+            assistant_tts_api_key: None,
+            assistant_tts_model: "tts-1".into(),
+            assistant_tts_voice: "alloy".into(),
+            assistant_speech_attempt_timeout_ms: 30_000,
             public_url: None,
             vogt_core_url: None,
             vogt_import_root: None,
@@ -599,6 +607,17 @@ mod tests {
         );
         assert_eq!(
             required_capability(&Method::POST, "/api/assistant/reset"),
+            Some(TokenCapability::Assistant)
+        );
+        // FR-T12: the server-side speech routes are POST under `/api/assistant`,
+        // so the same rule gates them — a speech route must never be an
+        // ungated back door into the assistant.
+        assert_eq!(
+            required_capability(&Method::POST, "/api/assistant/stt"),
+            Some(TokenCapability::Assistant)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/api/assistant/tts"),
             Some(TokenCapability::Assistant)
         );
         assert_eq!(
