@@ -370,12 +370,6 @@ const App: Component = () => {
     createSignal<TemplateContext | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = createSignal(false);
   const placeMetrics = createPlaceMetrics();
-  const waitingSessions = () =>
-    sessionsStore.ready
-      ? sessionsStore.order.filter(
-          (id) => sessionsStore.sessions[id]?.activity === "waiting-for-input",
-        ).length
-      : null;
   const sessionMetric = (): PlaceMetric => ({
     value: sessionsStore.ready ? sessionsStore.order.length : null,
     state: sessionsStore.ready
@@ -385,10 +379,6 @@ const App: Component = () => {
       : sessionsError()
         ? "unavailable"
         : "loading",
-  });
-  const waitingMetric = (): PlaceMetric => ({
-    value: waitingSessions(),
-    state: sessionMetric().state,
   });
   const railNow = createNow();
   const [openMenuId, setOpenMenuId] = createSignal<string | null>(null);
@@ -1160,7 +1150,7 @@ const App: Component = () => {
                 class={currentPlace("sessions") ? "active" : ""}
                 aria-current={currentPlace("sessions") && !["git", "history", "tasks", "gui", "assistant"].includes(currentTool() ?? "") ? "page" : undefined}
                 href="#/sessions"
-              ><span>Sessions</span><PlaceCount metric={waitingMetric()} label="sessions waiting for input" /></a>
+              ><span>Sessions</span><PlaceCount metric={sessionMetric()} label="sessions" /></a>
               <a class={isCurrentTool(routeOutcome(), "git") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "git") ? "page" : undefined} href="#/g">Git</a>
               <a class={isCurrentTool(routeOutcome(), "history") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "history") ? "page" : undefined} href="#/history">History</a>
               <a class={isCurrentTool(routeOutcome(), "tasks") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "tasks") ? "page" : undefined} href="#/tasks">Tasks</a>

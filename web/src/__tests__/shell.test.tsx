@@ -281,7 +281,9 @@ describe("shared live steering", () => {
     });
 
     await waitFor(() => {
-      expect(container.querySelector('[aria-label="1 sessions waiting for input"]')).toBeTruthy();
+      // #168: the rail Sessions badge counts all sessions (2), matching the
+      // mobile nav and the Running section — not just those waiting for input.
+      expect(container.querySelector('aside nav [aria-label="2 sessions"]')).toBeTruthy();
       expect(container.querySelector('[aria-label="0 active Inbox entries"]')).toBeTruthy();
       expect(container.querySelector('[aria-label="Projects unavailable"]')).toBeTruthy();
       expect(container.querySelector('.phone-bottom-nav [aria-label="12 Board work items"]')).toBeTruthy();
@@ -469,15 +471,13 @@ describe("route-owned navigation state", () => {
 });
 
 describe("FR-U23 — Sessions owns its machine workspace", () => {
-  it("keeps the attention roster and internal pane bar around a deep-linked tool", async () => {
+  it("keeps the machine workspace and internal pane bar around a deep-linked tool", async () => {
     const { container } = mountShell("/history", { sessions: [SESSION] });
 
     await surface(container, ".history-view");
+    // The Live Sessions sub-panel was removed (#167); Sessions still owns the
+    // machine workspace, so its place and tool bar persist around a deep link.
     expect(container.querySelector(".sessions-place")).toBeTruthy();
-    await waitFor(() =>
-      expect(container.querySelector('[aria-label="Live sessions"]')?.textContent)
-        .toContain("alpha-build"),
-    );
     expect(container.querySelector('[aria-label="Session tools"] a[aria-current="page"]')?.textContent)
       .toBe("History");
   });

@@ -1353,79 +1353,15 @@ textarea {
 }
 .sessions-place > .surface-header h1 { font-size: 20px; }
 .sessions-place > .surface-header p { margin: 2px 0 0; }
+/* The Live Sessions sub-panel was removed (#167); the body is now a single
+   column holding the active workspace. */
 .sessions-place-body {
-  display: grid;
-  /* Overridden inline from `resizablePane.ts` on a desk; this is the phone
-     fallback and the value before the pane's own persisted width loads. */
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
   min-width: 0;
   position: relative;
-}
-.sessions-place-body--sidebar-collapsed {
-  grid-template-columns: 1fr;
-}
-.sessions-place-sidebar {
-  position: relative;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 8px;
-  border-right: 1px solid var(--bd);
-  background: var(--bg);
-}
-.sessions-sidebar-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 2px 4px 8px;
-  color: var(--fg-muted);
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-.sessions-sidebar-collapse,
-.sessions-sidebar-reopen {
-  flex: 0 0 auto;
-  min-width: 26px;
-  min-height: 26px;
-  padding: 0;
-  color: var(--fg-muted);
-  line-height: 1;
-}
-.sessions-sidebar-collapse:hover,
-.sessions-sidebar-reopen:hover {
-  color: var(--fg);
-}
-.sessions-sidebar-reopen {
-  justify-self: start;
-  align-self: start;
-  margin: 8px;
-}
-/* Positioned against `.sessions-place-body`, not the sidebar it resizes —
-   the sidebar scrolls, and a handle inside a scrolling box is clipped by
-   that box's own overflow the instant it pokes past the box's edge. */
-.sessions-resize-handle {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 8px;
-  cursor: col-resize;
-  touch-action: none;
-  z-index: 5;
-}
-.sessions-resize-handle:hover,
-.sessions-resize-handle:focus-visible,
-.sessions-resize-handle.dragging {
-  background: var(--accent);
-  opacity: 0.35;
-}
-.sessions-resize-handle:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-  opacity: 1;
 }
 .sessions-active-workspace {
   display: flex;
@@ -1456,51 +1392,6 @@ textarea {
   color: var(--fg-muted);
   background: var(--bg-elev);
   font-size: 11px;
-}
-.sessions-place-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.session-place-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  padding: 9px;
-  border: 1px solid var(--bd);
-  border-radius: 7px;
-  background: var(--bg-elev);
-}
-.session-place-row--waiting {
-  border-color: var(--activity-waiting);
-  border-left-width: 4px;
-}
-.session-place-main,
-.session-place-context,
-.session-place-status {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 3px;
-}
-.session-place-main strong,
-.session-place-main small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.session-place-context,
-.session-place-status small { color: var(--fg-muted); }
-.session-place-status {
-  grid-column: 2;
-  align-items: flex-start;
-  font-size: 11px;
-}
-.session-place-open {
-  grid-column: 2;
-  justify-self: start;
-  min-height: 32px;
 }
 .sessions-tools {
   display: flex;
@@ -1541,25 +1432,8 @@ textarea {
 .route-outcome p:not(.place-kicker) { color: var(--fg-muted); }
 @media (max-width: 768px) {
   .sessions-place > .surface-header { padding: 8px 10px; }
-  .sessions-place-body { display: flex; flex-direction: column; }
-  .sessions-place-sidebar {
-    flex: 0 1 46%;
-    border-right: 0;
-    border-bottom: 1px solid var(--bd);
-  }
-  .sessions-place.has-workspace .sessions-place-sidebar { display: none; }
   .sessions-active-workspace { flex: 1; }
   .sessions-audit-note { display: none; }
-  .session-place-row {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    padding: 12px 10px;
-  }
-  .session-place-status { align-items: flex-start; }
-  .session-place-open {
-    grid-column: 2 / -1;
-    min-height: 44px;
-  }
-  .session-place-row--waiting .session-place-open::after { content: " · prompt needs attention"; }
 }
 
 .connection-banner {
