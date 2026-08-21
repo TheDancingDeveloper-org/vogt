@@ -105,6 +105,49 @@ class ForgeRelease:
 
 
 @dataclass(frozen=True)
+class ForgeLabel:
+    """One repository label."""
+
+    name: str
+    repo: str
+    color: str | None = None
+    description: str | None = None
+
+
+@dataclass(frozen=True)
+class ForgePosture:
+    """Update-automation posture, three independent facts (FR-D6).
+
+    `None` is "could not tell", distinct from `False` ("told, and off"): a
+    provider whose forge cannot answer one of these reports the gap honestly
+    rather than as an absence."""
+
+    version_updates_config: str | None
+    vulnerability_alerts: bool | None
+    automated_security_fixes: bool | None
+    repo: str = ""
+
+    @property
+    def version_updates(self) -> bool:
+        return self.version_updates_config is not None
+
+
+@dataclass(frozen=True)
+class ForgeNotification:
+    """One notification thread for a registered repository (FR-O8)."""
+
+    thread: str
+    repo: str
+    reason: str | None = None
+    unread: bool = False
+    title: str = ""
+    subject_type: str | None = None
+    updated_at: str | None = None
+    last_read_at: str | None = None
+    source_url: str | None = None
+
+
+@dataclass(frozen=True)
 class ForgeCheck:
     """One check on one revision (FR-O6). Actions is a producer, not the model."""
 
@@ -125,6 +168,9 @@ __all__ = [
     "ForgeCapabilities",
     "ForgeCheck",
     "ForgeIssue",
+    "ForgeLabel",
+    "ForgeNotification",
+    "ForgePosture",
     "ForgePull",
     "ForgeRelease",
     "RepoRef",

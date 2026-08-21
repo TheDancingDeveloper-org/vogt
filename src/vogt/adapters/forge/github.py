@@ -23,6 +23,9 @@ from vogt.adapters.forge.models import (
     ForgeCapabilities,
     ForgeCheck,
     ForgeIssue,
+    ForgeLabel,
+    ForgeNotification,
+    ForgePosture,
     ForgePull,
     ForgeRelease,
     RepoRef,
@@ -31,11 +34,13 @@ from vogt.adapters.github.client import (
     DEFAULT_PER_PAGE,
     NO_CONTENT,
     GitHubClient,
+    GitHubUnavailable,
     repo_of,
 )
 
 if TYPE_CHECKING:
-    from vogt.adapters.github.writeback import ForgeWriter, WriteBackResult
+    from vogt.adapters.forge.writeback import WriteBackResult
+    from vogt.adapters.github.writeback import ForgeWriter
 
 #: The one host this provider answers for. A value, not a literal buried in
 #: `parse`, so the registry can advertise it and a caller can be told which
@@ -105,6 +110,23 @@ class GitHubProvider:
 
     def web_url(self, ref: RepoRef) -> str:
         return f"https://{HOST}/{ref.owner}/{ref.repo}"
+
+    # -- import support (GitHub-shaped in v1) ------------------------------
+
+    def describe(self, ref: RepoRef) -> dict[str, Any] | None:
+        """The repository's metadata, or `None` when it is not visible.
+
+        `None` is a 404 — gone, private, or wrong name — which the import
+        service turns into its own NotFound; an unconfigured provider is a
+        separate case the caller handles before it gets here."""
+        payload = self._client.get(f"/repos/{ref.owner}/{ref.repo}")
+        if payload is None or payload is NO_CONTENT:
+            return None
+        return payload if isinstance(payload, dict) else {}
+
+    def clone_token(self) -> str | None:
+        """The token a clone should authenticate with, if any."""
+        return self._client.token
 
     # -- read surface ------------------------------------------------------
 
@@ -188,6 +210,87 @@ class GitHubProvider:
                 source_url=item.get("html_url"),
             )
 
+    def labels(self, ref: RepoRef) -> Iterable[ForgeLabel]:
+        payloads = self._client.get(
+            f"/repos/{ref.owner}/{ref.repo}/labels", per_page=DEFAULT_PER_PAGE
+        )
+        for item in _as_list(payloads):
+            name = item.get("name")
+            if not name:
+                continue
+            yield ForgeLabel(
+                name=str(name),
+                repo=ref.slug,
+                color=item.get("color"),
+                description=item.get("description"),
+            )
+
+    def posture(self, ref: RepoRef) -> ForgePosture:
+        config = self._version_update_config(ref)
+        return ForgePosture(
+            version_updates_config=config,
+            vulnerability_alerts=self._toggle(ref, "vulnerability-alerts"),
+            automated_security_fixes=self._toggle(ref, "automated-security-fixes"),
+            repo=ref.slug,
+        )
+
+    def notifications(self, ref: RepoRef) -> Iterable[ForgeNotification]:
+        # Per-repository, never the account-wide inbox: the scope rule holds by
+        # construction (FR-G15). `all=true` keeps read threads, which are still
+        # notifications — `unread` is a field, not a collection-time decision.
+        payloads = self._client.get(
+            f"/repos/{ref.owner}/{ref.repo}/notifications",
+            per_page=DEFAULT_PER_PAGE,
+            all="true",
+        )
+        for item in _as_list(payloads):
+            subject = item.get("subject") or {}
+            yield ForgeNotification(
+                thread=str(item.get("id", "")),
+                repo=ref.slug,
+                reason=item.get("reason"),
+                unread=bool(item.get("unread", False)),
+                title=subject.get("title", ""),
+                subject_type=subject.get("type"),
+                updated_at=item.get("updated_at"),
+                last_read_at=item.get("last_read_at"),
+                source_url=_notification_web_url(subject.get("url")),
+            )
+
+    #: Where the ecosystems keep their update-automation config. Presence is
+    #: the signal; the contents are not parsed.
+    _VERSION_UPDATE_CONFIGS = (
+        "renovate.json",
+        "renovate.json5",
+        ".github/renovate.json",
+        ".github/renovate.json5",
+        ".renovaterc",
+        ".renovaterc.json",
+        ".github/dependabot.yml",
+        ".github/dependabot.yaml",
+    )
+
+    def _version_update_config(self, ref: RepoRef) -> str | None:
+        for path in self._VERSION_UPDATE_CONFIGS:
+            try:
+                found = self._client.get(
+                    f"/repos/{ref.owner}/{ref.repo}/contents/{path}"
+                )
+            except GitHubUnavailable:
+                return None
+            if found is not None:
+                return path
+        return None
+
+    def _toggle(self, ref: RepoRef, endpoint: str) -> bool | None:
+        """One repository toggle: 204 (on) → True, 404 (off) → False, error →
+        None ("could not tell", never flattened to off)."""
+        try:
+            found = self._client.get(f"/repos/{ref.owner}/{ref.repo}/{endpoint}")
+        except GitHubUnavailable:
+            return None
+        return found is not None
+
     # -- write surface (delegates to the one mutator, FR-B4) ---------------
 
     def comment(self, ref: RepoRef, number: int, body: str) -> WriteBackResult:
@@ -263,6 +366,17 @@ def _to_issue(ref: RepoRef, item: dict[str, Any]) -> ForgeIssue:
         closed_at=item.get("closed_at"),
         source_url=item.get("html_url"),
     )
+
+
+def _notification_web_url(api_url: object) -> str | None:
+    """Turn the REST resource URL a notification subject carries into one a
+    person can open."""
+    if not isinstance(api_url, str) or not api_url:
+        return None
+    tail = api_url.partition("api.github.com/repos/")[2]
+    if not tail:
+        return api_url
+    return "https://github.com/" + tail.replace("/pulls/", "/pull/")
 
 
 def _to_pull(ref: RepoRef, item: dict[str, Any]) -> ForgePull:

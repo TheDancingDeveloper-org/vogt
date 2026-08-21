@@ -155,6 +155,14 @@ def has_configured_forge(config: VogtConfig) -> bool:
     return False
 
 
+def github_identity() -> GitHubProvider:
+    """A token-less GitHub provider for pure identity work — parsing a
+    reference, building clone/web URLs — which needs no credential. Import is
+    GitHub-shaped in v1 and reaches for this rather than constructing a client
+    of its own, so no service outside this package names `GitHubClient`."""
+    return _GITHUB_MATCHER
+
+
 def github_provider(
     config: VogtConfig, *, transport: Transport | None = None
 ) -> GitHubProvider | None:
@@ -170,6 +178,7 @@ def github_provider(
 
 
 __all__ = [
+    "github_identity",
     "github_provider",
     "has_configured_forge",
     "provider_for",

@@ -23,37 +23,26 @@ our own echo from somebody else's remark.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import Any, Literal
 
 from vogt.adapters.forge import GitHubProvider
+from vogt.adapters.forge.writeback import (
+    PERMITTED,
+    WriteBackAction,
+    WriteBackPolicy,
+    WriteBackResult,
+    permits,
+)
 from vogt.adapters.github.client import GitHubClient, GitHubUnavailable
 
-WriteBackPolicy = Literal["none", "comment_only", "full"]
-WriteBackAction = Literal["create", "comment", "label", "close", "reopen"]
-
-#: Which actions each policy level permits. `none` is deliberately an empty
-#: set rather than a missing key: "this project has no policy" and "this
-#: project's policy allows nothing" should not be different code paths.
-PERMITTED: dict[str, frozenset[str]] = {
-    "none": frozenset(),
-    "comment_only": frozenset({"comment"}),
-    "full": frozenset({"create", "comment", "label", "close", "reopen"}),
-}
-
-
-def permits(policy: str, action: str) -> bool:
-    return action in PERMITTED.get(policy, frozenset())
-
-
-@dataclass(frozen=True)
-class WriteBackResult:
-    """What happened upstream, for the ledger."""
-
-    outcome: Literal["succeeded", "failed", "skipped"]
-    detail: str | None = None
-    source_url: str | None = None
-    subject_key: str | None = None
+__all__ = [
+    "PERMITTED",
+    "ForgeWriter",
+    "WriteBackAction",
+    "WriteBackPolicy",
+    "WriteBackResult",
+    "permits",
+]
 
 
 class ForgeWriter:

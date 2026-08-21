@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from vogt.adapters.github.notifications import KIND_NOTIFICATION
+from vogt.adapters.forge import KIND_NOTIFICATION
 from vogt.application.context import AppContext
 from vogt.application.models import (
     NotificationsParams,

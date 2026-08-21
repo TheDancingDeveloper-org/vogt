@@ -47,13 +47,16 @@ from vogt.adapters.forge.models import (
     ForgeCapabilities,
     ForgeCheck,
     ForgeIssue,
+    ForgeLabel,
+    ForgeNotification,
+    ForgePosture,
     ForgePull,
     ForgeRelease,
     RepoRef,
 )
 
 if TYPE_CHECKING:
-    from vogt.adapters.github.writeback import WriteBackResult
+    from vogt.adapters.forge.writeback import WriteBackResult
 
 
 @runtime_checkable
@@ -113,6 +116,18 @@ class ForgeProvider(Protocol):
 
     def checks(self, ref: RepoRef) -> Iterable[ForgeCheck]:
         """Recent CI checks, as generic per-revision facts (FR-O6)."""
+
+    def labels(self, ref: RepoRef) -> Iterable[ForgeLabel]:
+        """Repository labels."""
+
+    def posture(self, ref: RepoRef) -> ForgePosture:
+        """Update-automation posture (FR-D6). Only meaningful when
+        `capabilities.supports_posture`; a provider without it should not be
+        asked, and the collector gates on the capability."""
+
+    def notifications(self, ref: RepoRef) -> Iterable[ForgeNotification]:
+        """Per-repository notifications (FR-O8). Gated on
+        `capabilities.supports_notifications`."""
 
     # -- write surface (append-only by construction, FR-B4) ----------------
 

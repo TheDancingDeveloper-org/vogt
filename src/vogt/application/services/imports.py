@@ -17,9 +17,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from vogt.adapters.forge import GitHubProvider, RepoRef, token_file_for
+from vogt.adapters.forge import (
+    GitHubProvider,
+    RepoRef,
+    github_identity,
+    github_provider,
+)
 from vogt.adapters.git import CloneRequest
-from vogt.adapters.github.client import GitHubClient
 from vogt.application.context import AppContext
 from vogt.application.models import (
     ImportProjectParams,
@@ -41,11 +45,10 @@ PROJECT_IMPORT = "project.import"
 PROJECT_IMPORTED_EVENT = "project.imported"
 
 #: Import is GitHub-shaped in v1 (it clones from GitHub and consolidates its
-#: history). It asks the provider for the concrete forge by name rather than
-#: resolving one per URL, and holds a token-less instance for the pure
-#: identity operations — parsing a reference and building its URLs needs no
-#: credential (D2). The registry stays the one place that knows the scheme.
-_GITHUB = GitHubProvider(GitHubClient())
+#: history). The pure identity operations — parsing a reference and building
+#: its URLs — need no credential, so they go through the registry's token-less
+#: identity provider rather than a client of import's own (D2).
+_GITHUB = github_identity()
 
 
 def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjectResult:
@@ -73,8 +76,8 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
             msg = f"a project with slug {slug!r} is already registered"
             raise Conflict(msg)
 
-    client = GitHubClient.from_token_file(token_file_for(ctx.config, "github.com"))
-    metadata = _describe(client, owner, repo)
+    provider = github_provider(ctx.config)
+    metadata = _describe(provider, ref)
 
     destination = (
         Path(params.root_path).expanduser()
@@ -85,7 +88,7 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
         CloneRequest(
             remote=remote,
             destination=destination,
-            token=None if client is None else client.token,
+            token=None if provider is None else provider.clone_token(),
         )
     )
 
@@ -104,14 +107,14 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
 
     consolidated = None
     detail = None
-    if params.consolidate and client is not None:
+    if params.consolidate and provider is not None:
         consolidated = onboard(
             ctx,
             OnboardParams(project=registered.project.slug, reason=params.reason),
         )
     elif params.consolidate:
         detail = (
-            "cloned and registered, but the GitHub adapter is not configured, "
+            "cloned and registered, but the forge adapter is not configured, "
             "so nothing upstream was read — which is 'not collected', not "
             "'there is nothing'"
         )
@@ -160,22 +163,25 @@ def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _describe(client: GitHubClient | None, owner: str, repo: str) -> dict[str, object]:
+def _describe(
+    provider: GitHubProvider | None, ref: RepoRef
+) -> dict[str, object]:
     """Confirm the repository exists and is visible to this token.
 
     Unconfigured is not an error — a public repository clones perfectly well
     without a token, and refusing to import one because the optional adapter
     is absent would make the core depend on it (NFR-PO1).
     """
-    if client is None:
+    if provider is None:
         return {}
-    payload = client.get(f"/repos/{owner}/{repo}")
+    payload = provider.describe(ref)
     if payload is None:
         msg = (
-            f"GitHub has no repository {owner}/{repo} visible to this instance's token"
+            f"the forge has no repository {ref.slug} visible to this "
+            "instance's token"
         )
         raise NotFound(msg)
-    return payload if isinstance(payload, dict) else {}
+    return payload
 
 
 __all__ = ["PROJECT_IMPORT", "PROJECT_IMPORTED_EVENT", "import_project"]

@@ -19,15 +19,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vogt.adapters.forge import provider_for, token_file_for, unsupported_reason
-from vogt.adapters.github.client import GitHubClient
-from vogt.adapters.github.collectors import (
+from vogt.adapters.forge import (
     KIND_ISSUE,
+    KIND_LABEL,
     KIND_PULL_REQUEST,
     KIND_RELEASE,
+    ForgeProvider,
+    provider_for,
+    unsupported_reason,
 )
-from vogt.adapters.github.consolidate import KIND_LABEL, GitHubConsolidator
-from vogt.adapters.github.writeback import ForgeWriter, permits
+from vogt.adapters.forge.collectors import forge_read_collectors
+from vogt.adapters.forge.sync import forge_sync_collectors
+from vogt.adapters.forge.writeback import permits
 from vogt.application.context import AppContext
 from vogt.application.models import (
     OnboardParams,
@@ -39,6 +42,7 @@ from vogt.application.models import (
 )
 from vogt.application.services import _resolve
 from vogt.application.writes import audited_action
+from vogt.collectors import Sweeper
 from vogt.collectors.base import CollectorContext
 from vogt.core.entities import Actor, Project, WorkItem, WriteBackRecord
 
@@ -46,6 +50,17 @@ WRITEBACK_SET = "project.writeback"
 WRITEBACK_SET_EVENT = "project.writeback_set"
 #: One consolidation run, attributed to whoever asked for it (FR-S1).
 ONBOARDED_EVENT = "forge.onboarded"
+
+#: The read collectors onboarding runs alongside the issue/PR sync: labels and
+#: releases are current-state history. Checks/notifications/posture are live
+#: signals, not backfill, so a sweep — not onboarding — is where they belong.
+_ONBOARD_READS = frozenset({"forge-labels", "forge-releases"})
+
+
+def _count_latest(ctx: AppContext, project_id: str, kind: str) -> int:
+    return len(
+        ctx.observed.latest(kinds=(kind,), project_id=project_id, limit=100_000)
+    )
 
 
 @dataclass(frozen=True)
@@ -60,14 +75,19 @@ class Attempt:
     state: str | None = None
 
 
-def writer_for(ctx: AppContext) -> ForgeWriter | None:
-    """A writer, or `None` when the adapter is not configured.
+def writer_for(ctx: AppContext) -> ForgeProvider | None:
+    """A configured provider, or `None` when no forge is set up.
 
     `None` is the ordinary case, and it is not a failure: an instance with no
-    GitHub token simply never speaks upstream.
+    forge token simply never speaks upstream. Write-back goes through the
+    provider's append-only write surface now (#175), not a GitHub-specific
+    writer — the policy machinery (`permits`, the ledger) is unchanged. The
+    per-action provider is resolved from the project's own `repo_url`; this
+    only answers "is any forge configured to write at all".
     """
-    client = GitHubClient.from_token_file(token_file_for(ctx.config, "github.com"))
-    return None if client is None else ForgeWriter(client)
+    from vogt.adapters.forge import github_provider
+
+    return github_provider(ctx.config)
 
 
 def attempt(
@@ -120,32 +140,32 @@ def attempt(
             update={"detail": "this item is not linked to a forge object"}
         )
 
-    writer = writer_for(ctx)
-    if writer is None:
-        return record.model_copy(
-            update={"detail": "the GitHub adapter is not configured"}
-        )
-
     repo_url = None if project is None else project.repo_url
-    # Key parsing lives on the provider now (D5): the same object that builds
-    # `gh:owner/repo#n` on write-back is the one that reads the number back out.
+    # The whole write goes through the provider surface now (#175): it owns the
+    # key scheme (`number_of`), the append-only verbs, and — being resolved
+    # from the project's own `repo_url` — which forge to speak to.
     provider = provider_for(repo_url, ctx.config)
-    number = None if provider is None else provider.number_of(subject_key)
-    if action == "comment" and number is not None and body is not None:
-        result = writer.comment(repo_url=repo_url, number=number, body=body)
-    elif action == "label" and number is not None and labels:
-        result = writer.add_labels(
-            repo_url=repo_url, number=number, labels=list(labels)
+    if provider is None:
+        return record.model_copy(
+            update={"detail": "no forge is configured to write to for this project"}
         )
-    elif action in ("close", "reopen") and number is not None:
-        result = writer.set_state(
-            repo_url=repo_url,
-            number=number,
-            state="closed" if action == "close" else "open",
+    ref = None if repo_url is None else provider.parse(repo_url)
+    number = provider.number_of(subject_key)
+    if ref is None and action != "create":
+        return record.model_copy(
+            update={"detail": "this project has no forge repository to write to"}
         )
-    elif action == "create" and item is not None:
-        result = writer.create_issue(
-            repo_url=repo_url,
+    if action == "comment" and ref is not None and number is not None and body:
+        result = provider.comment(ref, number, body)
+    elif action == "label" and ref is not None and number is not None and labels:
+        result = provider.add_labels(ref, number, list(labels))
+    elif action in ("close", "reopen") and ref is not None and number is not None:
+        result = provider.set_state(
+            ref, number, "closed" if action == "close" else "open"
+        )
+    elif action == "create" and ref is not None and item is not None:
+        result = provider.create_issue(
+            ref,
             title=item.title,
             body=item.body or f"Filed from Vogt as {item.ref}.",
             labels=list(item.labels),
@@ -257,8 +277,8 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
         _record_onboard(ctx, project, params.reason, refused)
         return refused
 
-    client = GitHubClient.from_token_file(token_file_for(ctx.config, "github.com"))
-    if client is None:
+    provider = provider_for(project.repo_url, ctx.config)
+    if provider is None:
         unconfigured = OnboardResult(
             project=project.slug,
             repo=project.repo_url,
@@ -269,43 +289,39 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
             new=0,
             unchanged=0,
             detail=(
-                "the GitHub adapter is not configured, so nothing was read — "
+                "the forge adapter is not configured, so nothing was read — "
                 "which is 'not collected', not 'there is nothing'"
             ),
         )
         _record_onboard(ctx, project, params.reason, unconfigured)
         return unconfigured
 
-    consolidator = GitHubConsolidator(client, max_pages=params.max_pages)
-    collector_ctx = CollectorContext(config=ctx.config, clock=ctx.clock)
-    findings = list(consolidator.collect(collector_ctx, project))
-
+    # Onboarding is "reset the watermark and sync now" (#173): the same
+    # read path a sweep walks, from the start of history, plus the current-state
+    # read collectors for labels and releases. Zero mutations by construction —
+    # every collector here only ever reads (FR-B3).
     now = ctx.clock()
-    sweep = ctx.observed.begin_sweep(
-        collector=consolidator.name, scope=[project.id], at=now
+    sync = forge_sync_collectors(ctx.observed)
+    for collector in sync:
+        collector.reset_watermark(project.id, at=now)
+    reads = [c for c in forge_read_collectors() if c.name in _ONBOARD_READS]
+    sweeper = Sweeper(
+        ctx.observed, CollectorContext(config=ctx.config, clock=ctx.clock)
     )
-    stats = ctx.observed.append(sweep.id, findings, at=now)
-    ctx.observed.finish_sweep(
-        sweep.id,
-        outcome="ok",
-        stats={"projects": 1, "new": stats.new, "unchanged": stats.unchanged},
-        at=ctx.clock(),
-    )
+    reports = sweeper.run([*sync, *reads], [project])
     ctx.observed.rebuild_latest()
 
-    by_kind: dict[str, int] = {}
-    for entry in findings:
-        by_kind[entry.kind] = by_kind.get(entry.kind, 0) + 1
-
+    new = sum(r.new for r in reports)
+    unchanged = sum(r.unchanged for r in reports)
     result = OnboardResult(
         project=project.slug,
         repo=project.repo_url,
-        issues=by_kind.get(KIND_ISSUE, 0),
-        pull_requests=by_kind.get(KIND_PULL_REQUEST, 0),
-        labels=by_kind.get(KIND_LABEL, 0),
-        releases=by_kind.get(KIND_RELEASE, 0),
-        new=stats.new,
-        unchanged=stats.unchanged,
+        issues=_count_latest(ctx, project.id, KIND_ISSUE),
+        pull_requests=_count_latest(ctx, project.id, KIND_PULL_REQUEST),
+        labels=_count_latest(ctx, project.id, KIND_LABEL),
+        releases=_count_latest(ctx, project.id, KIND_RELEASE),
+        new=new,
+        unchanged=unchanged,
         mutations=0,
     )
     # The largest read of an import, and for a long time the only step of one

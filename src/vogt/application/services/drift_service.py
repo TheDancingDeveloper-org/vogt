@@ -10,8 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from vogt.adapters.forge.sync import current_collector
-from vogt.adapters.github.collectors import KIND_ISSUE
+from vogt.adapters.forge import KIND_ISSUE, current_collector
 from vogt.application.context import AppContext
 from vogt.application.models import (
     DriftDetectParams,

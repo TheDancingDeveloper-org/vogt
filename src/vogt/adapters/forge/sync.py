@@ -27,6 +27,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from vogt.adapters.forge.kinds import (
+    COLLECTOR_ISSUES,
+    COLLECTOR_PULLS,
+    KIND_ISSUE,
+    KIND_PULL_REQUEST,
+    KIND_SYNC,
+)
 from vogt.adapters.forge.models import ForgeIssue, ForgePull, RepoRef
 from vogt.adapters.forge.provider import ForgeProvider
 from vogt.adapters.forge.registry import provider_for, unsupported_reason
@@ -35,25 +42,6 @@ from vogt.collectors.base import CollectorContext, Finding, finding
 from vogt.core.clock import from_iso, to_iso
 from vogt.core.entities import Project
 from vogt.storage.interface import ObservedStore
-
-KIND_ISSUE = "forge.issue"
-KIND_PULL_REQUEST = "forge.pull_request"
-#: The per-project receipt (the `dep_scan` pattern): a row that exists so "0"
-#: is distinguishable from "not attempted", and `not_supported` from either
-#: (FR-O4/O10/O11).
-KIND_SYNC = "forge.sync"
-
-#: Old collector names → the sync collectors that replaced them (D4). A drift
-#: proposal raised before the rename carries the old name in
-#: `evidence_snapshot.collector`, and coverage now records only the new one;
-#: FR-R6 retirement resolves through this so a pre-rename proposal still finds
-#: the completed sweep that would retire it.
-COLLECTOR_ALIASES = {"gh-issues": "forge-issues", "gh-prs": "forge-prs"}
-
-
-def current_collector(name: str) -> str:
-    """The live collector name for a possibly-renamed one (identity if new)."""
-    return COLLECTOR_ALIASES.get(name, name)
 
 #: Re-ask for a small window before the watermark, so a subject updated in the
 #: same second as the boundary is not skipped. Digest dedup means the overlap
@@ -198,7 +186,7 @@ _PAGE = 100
 class ForgeIssuesCollector(_ForgeSyncCollector):
     """Issues, open and closed, synced incrementally (replaces `gh-issues`)."""
 
-    name = "forge-issues"
+    name = COLLECTOR_ISSUES
     kind = KIND_ISSUE
 
     def _fetch(
@@ -241,7 +229,7 @@ class ForgeIssuesCollector(_ForgeSyncCollector):
 class ForgePullsCollector(_ForgeSyncCollector):
     """Pull requests, open and closed, synced incrementally (replaces `gh-prs`)."""
 
-    name = "forge-prs"
+    name = COLLECTOR_PULLS
     kind = KIND_PULL_REQUEST
 
     def _fetch(

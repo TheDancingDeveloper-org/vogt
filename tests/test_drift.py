@@ -150,7 +150,7 @@ def _record_checks(
         for revision, name, conclusion, ran_at in runs
     ]
     now = ctx.clock()
-    row = ctx.observed.begin_sweep(collector="gh-actions", scope=[project.id], at=now)
+    row = ctx.observed.begin_sweep(collector="forge-checks", scope=[project.id], at=now)
     ctx.observed.append(row.id, findings, at=now)
     ctx.observed.finish_sweep(row.id, outcome="ok", stats={"projects": 1}, at=now)
     ctx.observed.rebuild_latest()
