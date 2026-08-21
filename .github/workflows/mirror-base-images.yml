@@ -97,16 +97,31 @@ concurrency:
   # Never cancelled: an interrupted copy leaves a reference unmirrored, and
   # the next build is the thing that discovers it.
   #
-  # Per ref, because one global group is shared by the standalone push runs
-  # *and* by every `workflow_call` from `build.yml` and `release.yml`. A
-  # pending run is evicted when a newer one joins its group whatever
-  # `cancel-in-progress` says, so another branch's push could cancel the
-  # `needs: base-images` prerequisite of a build already under way — turning
-  # this job's whole purpose, "no build starts against an unmirrored
-  # reference", into the thing that fails the build. Copies are idempotent
-  # (skipped when the digest is already in GHCR), so concurrent runs across
-  # refs are safe.
-  group: mirror-base-images-${{ github.ref }}
+  # Keyed by *commit*, which is the unit of work this job actually has: the
+  # Dockerfiles at a commit name the digests to copy, so two runs of the same
+  # commit want byte-identical work and the second is pure duplication.
+  #
+  # Not per ref, and not one global group either — both were tried and both
+  # were wrong in opposite directions:
+  #
+  #   * One global group shed duplicates by *cancelling* them, which protected
+  #     Docker Hub's anonymous allowance by accident. It also meant an
+  #     unrelated branch's push could cancel the `needs: base-images`
+  #     prerequisite of a build already under way — turning this job's whole
+  #     purpose, "no build starts against an unmirrored reference", into the
+  #     thing that failed the build.
+  #   * Per ref stopped that cancellation and removed the shedding with it.
+  #     Under a fast-forward release model dev, main and prod carry the same
+  #     commit, so a cutover ran this three times over instead of once and
+  #     exhausted the 100/hour per-IP anonymous limit the header above
+  #     describes. `dev` then failed at `FROM` with `429 Too Many Requests`
+  #     against `registry-1.docker.io` — the exact outage this workflow exists
+  #     to prevent, reintroduced by the thing meant to make it more reliable.
+  #
+  # Keying by commit sheds the duplication without cancelling distinct work:
+  # three refs at one commit collapse to one copy, and a different commit's
+  # mirror is never touched.
+  group: mirror-base-images-${{ github.sha }}
   cancel-in-progress: false
 
 env:
