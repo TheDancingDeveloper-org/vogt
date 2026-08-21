@@ -48,6 +48,14 @@ fn test_config() -> Config {
         assistant_profiles: vec![],
         assistant_default_profile: None,
         assistant_log_retention_days: 30,
+        assistant_stt_base_urls: vec![],
+        assistant_stt_api_key: None,
+        assistant_stt_model: "whisper-1".into(),
+        assistant_tts_base_urls: vec![],
+        assistant_tts_api_key: None,
+        assistant_tts_model: "tts-1".into(),
+        assistant_tts_voice: "alloy".into(),
+        assistant_speech_attempt_timeout_ms: 30_000,
         public_url: None,
         vogt_core_url: None,
         vogt_import_root: None,
@@ -3415,4 +3423,123 @@ async fn the_agent_task_notify_hook_wakes_a_phone() {
     // The task's session never asked a question, so the device watching for
     // that was not woken — the hook is routed as its own kind.
     nothing_delivered_to(&log, "/waiting_for_input");
+}
+
+// -- Server-side speech (FR-T12) --------------------------------------------
+
+/// Unconfigured, both speech routes 404 so the client falls back (FR-T6). The
+/// request is well-formed — a real multipart upload and a real JSON body — so
+/// the 404 is the handler's "this half is not provisioned", not an extractor
+/// rejecting a malformed request.
+#[tokio::test]
+async fn server_speech_routes_404_when_unconfigured() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let form = reqwest::multipart::Form::new()
+        .text("model", "whisper-1")
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(vec![0u8, 1, 2, 3])
+                .file_name("take.webm")
+                .mime_str("audio/webm")
+                .unwrap(),
+        );
+    let stt = client
+        .post(format!("{base}/api/assistant/stt"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stt.status(), StatusCode::NOT_FOUND);
+
+    let tts = client
+        .post(format!("{base}/api/assistant/tts"))
+        .json(&json!({ "text": "hello" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tts.status(), StatusCode::NOT_FOUND);
+}
+
+/// Both speech routes require the `assistant` capability, enforced by the
+/// `starts_with("/api/assistant") && != GET` rule in `auth::required_capability`
+/// — a token without it is refused before the handler runs, so a speech route
+/// is never an ungated door into the assistant. Asserted end-to-end here in
+/// addition to the unit test in `auth.rs`.
+#[tokio::test]
+async fn server_speech_routes_require_the_assistant_capability() {
+    use mydevenv2_server::auth::{ScopedTokenConfig, TokenCapability};
+
+    let mut cfg = test_config();
+    // A token that may do sessions but not assistant.
+    cfg.extra_tokens = vec![ScopedTokenConfig {
+        name: "no-assistant".into(),
+        token: "no-assistant-token-1234567890".into(),
+        capabilities: vec![TokenCapability::Sessions],
+        mutating_requests_per_minute: 600,
+        vogt_core_token_file: None,
+        vogt_core_token: None,
+    }];
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth_for("no-assistant-token-1234567890"))
+        .build()
+        .unwrap();
+
+    let stt = client
+        .post(format!("{base}/api/assistant/stt"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stt.status(), StatusCode::FORBIDDEN);
+
+    let tts = client
+        .post(format!("{base}/api/assistant/tts"))
+        .json(&json!({ "text": "hello" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tts.status(), StatusCode::FORBIDDEN);
+}
+
+/// `/api/config` advertises each configured speech half by presence only — never
+/// a key or a base URL — so a client can pick the server pipeline by capability
+/// rather than by probing for a 404.
+#[tokio::test]
+async fn config_advertises_configured_server_speech() {
+    let (base, _h) = boot().await;
+    let unconfigured: Value = reqwest::get(format!("{base}/api/config"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unconfigured["assistant_stt_enabled"], false);
+    assert_eq!(unconfigured["assistant_tts_enabled"], false);
+
+    let mut cfg = test_config();
+    cfg.assistant_stt_base_urls = vec!["https://audio.invalid/v1".into()];
+    cfg.assistant_stt_api_key = Some("sk-stt-123".into());
+    // TTS left unset: the two halves are independent.
+    let (base, _h) = boot_with_config(cfg).await;
+    let configured: Value = reqwest::get(format!("{base}/api/config"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(configured["assistant_stt_enabled"], true);
+    assert_eq!(configured["assistant_tts_enabled"], false);
+    // Presence only — the key and base URL never appear.
+    let rendered = configured.to_string();
+    assert!(!rendered.contains("sk-stt-123"), "the key must never leak");
+    assert!(
+        !rendered.contains("audio.invalid"),
+        "the base URL is an exposure value and must never leak"
+    );
 }

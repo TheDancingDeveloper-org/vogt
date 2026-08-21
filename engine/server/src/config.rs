@@ -8,6 +8,13 @@ use crate::error::{ApiError, Result};
 const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_MUTATING_REQUEST_LIMIT_PER_MINUTE: u32 = 600;
 
+/// Voicemode's STT base-URL list, exactly (1:1 with `VOICEMODE_STT_BASE_URLS`):
+/// a local Whisper.cpp first, OpenAI's transcription endpoint as the fallback.
+const DEFAULT_STT_BASE_URLS: &[&str] = &["http://127.0.0.1:2022/v1", "https://api.openai.com/v1"];
+/// Voicemode's TTS base-URL list, exactly (1:1 with `VOICEMODE_TTS_BASE_URLS`):
+/// a local Kokoro first, OpenAI's speech endpoint as the fallback.
+const DEFAULT_TTS_BASE_URLS: &[&str] = &["http://127.0.0.1:8880/v1", "https://api.openai.com/v1"];
+
 /// One named OpenAI-compatible backend the assistant may run a turn against
 /// (FR-T9).
 ///
@@ -244,6 +251,50 @@ pub struct Config {
     /// days. Enforced on a schedule so the horizon is a configured maximum
     /// rather than whatever the last caller passed. Defaults to 30.
     pub assistant_log_retention_days: u32,
+    /// Server-side speech (FR-T12), configured **independently of the chat
+    /// profile**: the whole point of the requirement is that a deployment
+    /// whose chat runs through OpenRouter (which does not front audio
+    /// uniformly) can still point STT and TTS at their own OpenAI-compatible
+    /// audio provider — a cloud endpoint or a local Whisper.cpp/Kokoro pair,
+    /// interchangeable by configuration.
+    ///
+    /// The base URLs are an **ordered list**, adopting voicemode's
+    /// `VOICEMODE_STT_BASE_URLS` / `VOICEMODE_TTS_BASE_URLS` semantics: the
+    /// engine tries entry 1, and on a connection failure or non-2xx moves to
+    /// the next — local first, cloud fallback. Only when the whole list is
+    /// unconfigured (empty) or every entry fails does the route return 404, so
+    /// the client falls back to on-device or typed input (FR-T6).
+    ///
+    /// The key is reused for whichever entry needs one — the cloud endpoint —
+    /// while a local Whisper.cpp / Kokoro entry needs none, so an entry may
+    /// succeed with no key. A key set against an *empty* list is a startup
+    /// error, the same destination rule the chat key follows (r20).
+    ///
+    /// Defaults mirror voicemode exactly (1:1 with `VOICEMODE_*`): STT
+    /// `http://127.0.0.1:2022/v1,https://api.openai.com/v1` with model
+    /// `whisper-1`; TTS `http://127.0.0.1:8880/v1,https://api.openai.com/v1`
+    /// with model `tts-1-hd` and voice `nova`.
+    pub assistant_stt_base_urls: Vec<String>,
+    pub assistant_stt_api_key: Option<String>,
+    /// Transcription model sent to `/audio/transcriptions`. Defaults to
+    /// `whisper-1` (voicemode's OpenAI transcription model; a local Whisper.cpp
+    /// server serving `large-v2` answers the same OpenAI-compatible route).
+    pub assistant_stt_model: String,
+    pub assistant_tts_base_urls: Vec<String>,
+    pub assistant_tts_api_key: Option<String>,
+    /// Speech model sent to `/audio/speech`. Defaults to `tts-1-hd` (voicemode).
+    pub assistant_tts_model: String,
+    /// Voice name sent to `/audio/speech`; `/audio/speech` requires one.
+    /// Defaults to `nova` (voicemode's cloud default).
+    pub assistant_tts_voice: String,
+    /// Bounded per-attempt timeout for a single speech upstream, in
+    /// milliseconds. Applied to each entry in the base-URL list independently,
+    /// so a hanging or dead first endpoint cannot stall the request — the
+    /// engine gives up on it within this window and moves to the next. Defaults
+    /// to 30_000 (30s), enough for a cold local Whisper/Kokoro model yet
+    /// bounded; a test can lower it. This is the *per-attempt* bound, not the
+    /// whole request, which may try several entries.
+    pub assistant_speech_attempt_timeout_ms: u64,
     /// Where vogt-core imports repositories, when this container runs one.
     /// Read from `VOGT_IMPORT_ROOT` — the core's own variable name, left
     /// unprefixed on purpose: one name for one thing. Read once here rather
@@ -315,6 +366,14 @@ struct FileConfig {
     assistant_profiles: Option<Vec<AssistantProfile>>,
     assistant_default_profile: Option<String>,
     assistant_log_retention_days: Option<u32>,
+    assistant_stt_base_urls: Option<Vec<String>>,
+    assistant_stt_api_key: Option<String>,
+    assistant_stt_model: Option<String>,
+    assistant_tts_base_urls: Option<Vec<String>>,
+    assistant_tts_api_key: Option<String>,
+    assistant_tts_model: Option<String>,
+    assistant_tts_voice: Option<String>,
+    assistant_speech_attempt_timeout_ms: Option<u64>,
     public_url: Option<String>,
     vogt_core_url: Option<String>,
     vogt_core_token: Option<String>,
@@ -385,6 +444,44 @@ pub fn load(
         assistant_key_present,
         &assistant_profiles,
         assistant_default_profile.as_deref(),
+    )?;
+
+    // Server-side speech (FR-T12). Read independently of the chat keys above:
+    // the base URLs and key here point at an OpenAI-compatible *audio* provider,
+    // which need not be — and under the POC's OpenRouter chat profile, is not —
+    // the same place chat runs. The base URLs are an ordered fallback list
+    // (voicemode's `VOICEMODE_*_BASE_URLS` semantics: local first, cloud next);
+    // a half is enabled when its list is non-empty. A key against an empty list
+    // is refused (r20), matching the chat key's destination rule.
+    let assistant_stt_base_urls = parse_url_list(
+        from_file.assistant_stt_base_urls,
+        engine_env("ENGINE_ASSISTANT_STT_BASE_URLS").ok(),
+        DEFAULT_STT_BASE_URLS,
+    );
+    let assistant_stt_api_key = from_file
+        .assistant_stt_api_key
+        .or_else(|| engine_env("ENGINE_ASSISTANT_STT_API_KEY").ok())
+        .filter(|s| !s.trim().is_empty());
+    validate_speech_half(
+        "STT",
+        "stt",
+        &assistant_stt_base_urls,
+        &assistant_stt_api_key,
+    )?;
+    let assistant_tts_base_urls = parse_url_list(
+        from_file.assistant_tts_base_urls,
+        engine_env("ENGINE_ASSISTANT_TTS_BASE_URLS").ok(),
+        DEFAULT_TTS_BASE_URLS,
+    );
+    let assistant_tts_api_key = from_file
+        .assistant_tts_api_key
+        .or_else(|| engine_env("ENGINE_ASSISTANT_TTS_API_KEY").ok())
+        .filter(|s| !s.trim().is_empty());
+    validate_speech_half(
+        "TTS",
+        "tts",
+        &assistant_tts_base_urls,
+        &assistant_tts_api_key,
     )?;
 
     let workspace_root_raw = from_file.workspace_root.map(std::path::PathBuf::from);
@@ -545,6 +642,28 @@ pub fn load(
         assistant_log_retention_days: parse_u32_env("ENGINE_ASSISTANT_LOG_RETENTION_DAYS")?
             .or(from_file.assistant_log_retention_days)
             .unwrap_or(30),
+        assistant_stt_base_urls,
+        assistant_stt_api_key,
+        assistant_stt_model: from_file
+            .assistant_stt_model
+            .or_else(|| engine_env("ENGINE_ASSISTANT_STT_MODEL").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "whisper-1".to_string()),
+        assistant_tts_base_urls,
+        assistant_tts_api_key,
+        assistant_tts_model: from_file
+            .assistant_tts_model
+            .or_else(|| engine_env("ENGINE_ASSISTANT_TTS_MODEL").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "tts-1-hd".to_string()),
+        assistant_tts_voice: from_file
+            .assistant_tts_voice
+            .or_else(|| engine_env("ENGINE_ASSISTANT_TTS_VOICE").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "nova".to_string()),
+        assistant_speech_attempt_timeout_ms: parse_u64_env("ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS")?
+            .or(from_file.assistant_speech_attempt_timeout_ms)
+            .unwrap_or(30_000),
         // `ENGINE_PUBLIC_URL` is this process's own address, and is not
         // `VOGT_PUBLIC_URL`: that one is the *core's* view of where it is
         // published, which in the merged shape is an internal detail no
@@ -808,6 +927,57 @@ fn validate_assistant_profiles(
         }
     }
     Ok(())
+}
+
+/// One half of the server-side speech pipeline (FR-T12) is enabled when its
+/// ordered base-URL list is non-empty. A key set against an *empty* list is
+/// refused at startup, the same destination rule the chat key follows (r20): a
+/// credential the process would carry with nowhere to send it is a
+/// misconfiguration, and a silent fall-back to some default audio provider is
+/// precisely the wrong repair.
+///
+/// The reverse — base URLs with no key — is a valid, common configuration: a
+/// local Whisper.cpp / Kokoro entry needs no key, and the key (when present) is
+/// reused for whichever entry does, the cloud fallback.
+fn validate_speech_half(
+    label: &str,
+    prefix: &str,
+    base_urls: &[String],
+    api_key: &Option<String>,
+) -> Result<()> {
+    if api_key.is_some() && base_urls.is_empty() {
+        return Err(ApiError::Config(format!(
+            "assistant_{prefix}_api_key is set but assistant_{prefix}_base_urls is empty; \
+             name the OpenAI-compatible {label} endpoint(s) the key belongs to \
+             (assistant_{prefix}_base_urls / ENGINE_ASSISTANT_{}_BASE_URLS)",
+            prefix.to_ascii_uppercase()
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve an ordered base-URL list: a config-file list wins; else a
+/// comma-separated env value (voicemode's form) — where an env var set to the
+/// empty string means "disabled", so an operator can turn a half off; else the
+/// built-in default. Entries are trimmed and empties dropped.
+fn parse_url_list(file: Option<Vec<String>>, env: Option<String>, default: &[&str]) -> Vec<String> {
+    if let Some(list) = file {
+        return list
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    if let Some(raw) = env {
+        // A set-but-empty value is a deliberate "off", so it is honoured as an
+        // empty list rather than falling through to the default.
+        return raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    default.iter().map(|s| s.to_string()).collect()
 }
 
 fn validate_extra_tokens(primary_token: &str, extra_tokens: &[ScopedTokenConfig]) -> Result<()> {
@@ -1120,6 +1290,57 @@ mod tests {
     #[test]
     fn an_empty_profile_name_is_refused() {
         assert!(validate_assistant_profiles(false, &[profile("  ", "a")], None).is_err());
+    }
+
+    // -- Server-side speech (FR-T12) ----------------------------------------
+
+    #[test]
+    fn a_speech_key_with_an_empty_url_list_is_refused_and_names_the_setting() {
+        // The runtime symptom otherwise is a key the process carries with
+        // nowhere to send it, or a silent fall-back to some default audio
+        // provider — the same failure the chat key's r20 rule refuses.
+        let err = validate_speech_half("STT", "stt", &[], &Some("sk-audio".to_string()))
+            .expect_err("a key with an empty base-URL list must not boot");
+        let message = format!("{err:?}");
+        assert!(message.contains("assistant_stt_base_urls"), "{message}");
+        assert!(
+            message.contains("ENGINE_ASSISTANT_STT_BASE_URLS"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_speech_half_may_have_urls_without_a_key() {
+        // A local Whisper.cpp / Kokoro entry needs no key; the key, when
+        // present, is reused for whichever entry does (the cloud fallback).
+        let urls = vec![
+            "http://127.0.0.1:2022/v1".to_string(),
+            "https://api.openai.com/v1".to_string(),
+        ];
+        assert!(validate_speech_half("STT", "stt", &urls, &None).is_ok());
+        assert!(validate_speech_half("STT", "stt", &urls, &Some("sk".into())).is_ok());
+        // Empty list, no key: disabled, which is a valid state (404 ⇒ client
+        // falls back).
+        assert!(validate_speech_half("STT", "stt", &[], &None).is_ok());
+    }
+
+    #[test]
+    fn the_url_list_defaults_to_voicemodes_and_env_can_disable_it() {
+        // Unset ⇒ voicemode's local-first, cloud-fallback default, exactly.
+        assert_eq!(
+            parse_url_list(None, None, DEFAULT_STT_BASE_URLS),
+            vec![
+                "http://127.0.0.1:2022/v1".to_string(),
+                "https://api.openai.com/v1".to_string(),
+            ]
+        );
+        // A comma-separated env value is split, in order; an env set to empty
+        // is a deliberate "off".
+        assert_eq!(
+            parse_url_list(None, Some(" a , b ,, c ".into()), DEFAULT_STT_BASE_URLS),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert!(parse_url_list(None, Some("".into()), DEFAULT_STT_BASE_URLS).is_empty());
     }
 }
 

@@ -16,6 +16,7 @@ use crate::{
     assistant::AssistantRuntime,
     assistant_api,
     assistant_log::AssistantLog,
+    assistant_speech::{self, AssistantSpeech},
     auth,
     config::Config,
     events::EventBus,
@@ -52,6 +53,13 @@ pub struct AppState {
     pub history: Option<Arc<SessionHistory>>,
     /// None when `assistant_api_key` is not configured; routes 404.
     pub assistant: Option<Arc<AssistantRuntime>>,
+    /// Server-side speech proxy (FR-T12), or `None` when neither the STT nor
+    /// the TTS half is configured — in which case both `/api/assistant/stt`
+    /// and `/api/assistant/tts` answer 404 and the client falls back (FR-T6).
+    /// Configured independently of the chat profile: its base URL, key and
+    /// model come from the `assistant_stt_*` / `assistant_tts_*` keys, never
+    /// from `assistant_profiles`.
+    pub assistant_speech: Option<Arc<AssistantSpeech>>,
     /// The durable assistant interaction log (FR-T14). Engine-local, so an
     /// absent core costs it nothing (FR-E9). `None` only when the store could
     /// not be opened, which degrades to a live-only conversation rather than
@@ -119,6 +127,17 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         tracing::info!(model = %cfg.assistant_model, "assistant enabled");
     }
 
+    // Server-side speech (FR-T12), configured independently of the chat
+    // profile. `None` when neither half is set, and each route 404s per half.
+    let assistant_speech = AssistantSpeech::from_config(&cfg);
+    if let Some(speech) = assistant_speech.as_ref() {
+        tracing::info!(
+            stt = speech.stt_enabled(),
+            tts = speech.tts_enabled(),
+            "server-side speech enabled"
+        );
+    }
+
     let vogt_core = VogtCore::from_config(&cfg);
     match cfg.vogt_core_url.as_deref() {
         Some(url) => tracing::info!(
@@ -150,6 +169,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         agent_tasks,
         history,
         assistant,
+        assistant_speech,
         assistant_log,
         vogt_core,
     });
@@ -210,6 +230,12 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/assistant/history", get(assistant_api::history))
         .route("/api/assistant/log", get(assistant_api::log))
         .route("/api/assistant/reset", post(assistant_api::reset))
+        // Server-side speech (FR-T12). Both POST under `/api/assistant`, so the
+        // `starts_with("/api/assistant") && != GET ⇒ Assistant` rule in
+        // `auth::required_capability` already gates them behind the `assistant`
+        // capability; they 404 per half when unconfigured.
+        .route("/api/assistant/stt", post(assistant_speech::stt))
+        .route("/api/assistant/tts", post(assistant_speech::tts))
         .route("/api/events", get(api::events_stream))
         .route("/api/status", get(api::operational_status))
         .route("/api/files", get(files::read_file).put(files::write_file))

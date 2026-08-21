@@ -16,6 +16,7 @@ import { Capacitor } from "@capacitor/core";
 
 import {
   api,
+  ApiError,
   type AssistantPendingAction,
   type AssistantReply,
   type AssistantSendInputAction,
@@ -67,6 +68,20 @@ function webSpeechCtor(): WebSpeechRecognitionCtor | null {
     SpeechRecognition?: WebSpeechRecognitionCtor;
   };
   return scope.webkitSpeechRecognition ?? scope.SpeechRecognition ?? null;
+}
+
+/**
+ * Whether this browser can capture microphone audio for the server pipeline
+ * (FR-T12): a `MediaRecorder` to encode it and `getUserMedia` to open the mic.
+ * Both absent — an older WebView, a browser with no recorder — leaves the
+ * server STT path unusable, which degrades to typed input (FR-T6).
+ */
+function mediaRecorderAvailable(): boolean {
+  return (
+    typeof MediaRecorder !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    !!navigator.mediaDevices?.getUserMedia
+  );
 }
 
 interface AssistantDraft {
@@ -168,6 +183,13 @@ export default function Assistant(props: AssistantProps) {
   const [ttsOn, setTtsOn] = createSignal(localStorage.getItem(TTS_PREF_KEY) === "1");
   const [listening, setListening] = createSignal(false);
   const [sttAvailable, setSttAvailable] = createSignal(false);
+  // Whether the server-side speech pipeline (FR-T12) is configured. Read from
+  // `/api/config`, so a client with no on-device recognizer/synthesis picks the
+  // server path by capability rather than by provoking a 404. Either can go
+  // false at runtime if the route later 404s — a config that changed under a
+  // long-lived tab — after which that half degrades silently (FR-T6).
+  const [serverSttEnabled, setServerSttEnabled] = createSignal(false);
+  const [serverTtsEnabled, setServerTtsEnabled] = createSignal(false);
   // The vocabulary the repair pass matches against (FR-T13). Fetched from
   // `project.list`, not hard-coded: a repair against a list in this file
   // would be a guess wearing a validation pass's clothes. Empty is a working
@@ -183,6 +205,57 @@ export default function Assistant(props: AssistantProps) {
 
   let scroller: HTMLDivElement | undefined;
   let inputEl: HTMLInputElement | undefined;
+  // The server-TTS clip currently playing, if any, so it can be stopped the
+  // moment the speaker sends again or leaves (FR-T12). On-device synthesis is
+  // stopped through `speechSynthesis.cancel()`; this is its `<audio>` twin.
+  let currentAudio: HTMLAudioElement | null = null;
+
+  /** Stop every speech channel — on-device synthesis and a server clip alike. */
+  const haltSpeech = () => {
+    stopSpeaking();
+    if (currentAudio) {
+      try {
+        currentAudio.pause();
+      } catch {
+        /* already stopped */
+      }
+      currentAudio = null;
+    }
+  };
+
+  /**
+   * Speak a reply, choosing by capability (FR-T12): the browser's own
+   * synthesis when it has any, else the server pipeline for a client that has
+   * none. A server route that 404s (unconfigured) degrades this half silently
+   * — a spoken reply that cannot be spoken is still shown in the transcript.
+   */
+  const speak = (text: string) => {
+    if ("speechSynthesis" in window) {
+      speakSentences(text);
+      return;
+    }
+    if (serverTtsEnabled()) void playServerTts(text);
+  };
+
+  const playServerTts = async (text: string) => {
+    if (!text.trim()) return;
+    try {
+      const blob = await api.assistantTts(text);
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.addEventListener("ended", () => URL.revokeObjectURL(url), { once: true });
+      currentAudio = audio;
+      await audio.play();
+    } catch (e) {
+      // Unconfigured (404): degrade this half silently, exactly as an absent
+      // recognizer does for STT (FR-T6). Any other failure is worth surfacing.
+      if (e instanceof ApiError && e.status === 404) {
+        setServerTtsEnabled(false);
+      } else {
+        props.onError(`assistant speech: ${String(e)}`);
+      }
+    }
+  };
 
   const scrollToEnd = () => {
     queueMicrotask(() => {
@@ -210,10 +283,14 @@ export default function Assistant(props: AssistantProps) {
       props.onError(`assistant history: ${String(e)}`);
     }
     try {
-      setProfiles((await api.publicConfig()).assistant_profiles ?? []);
+      const cfg = await api.publicConfig();
+      setProfiles(cfg.assistant_profiles ?? []);
+      setServerSttEnabled(cfg.assistant_stt_enabled ?? false);
+      setServerTtsEnabled(cfg.assistant_tts_enabled ?? false);
     } catch {
       // No profile list means no choice to offer, not a broken assistant:
-      // every request then runs on the deployment's default.
+      // every request then runs on the deployment's default. Server speech
+      // stays off, which is the safe absent state.
     }
     try {
       const listed = await listProjects();
@@ -224,8 +301,11 @@ export default function Assistant(props: AssistantProps) {
     }
     // STT backend, in preference order: the Capacitor native plugin inside the
     // APK, then the browser's Web Speech recognizer on the desktop (FR-T13,
-    // VOICE_POC §3.4). Neither present — Firefox, say — is a working state that
-    // degrades to typed input with no error; the server STT route is §3.5.
+    // VOICE_POC §3.4), then the server-side pipeline (FR-T12, §3.5) for a
+    // client with neither — a desktop without Web Speech that can still capture
+    // audio and let the engine transcribe it. Absent all three — no recognizer,
+    // no server route, no MediaRecorder — is a working state that degrades to
+    // typed input with no error (FR-T6).
     if (Capacitor.isPluginAvailable("SpeechRecognition")) {
       try {
         const { SpeechRecognition } = await import(
@@ -242,6 +322,9 @@ export default function Assistant(props: AssistantProps) {
     } else if (webSpeechCtor()) {
       sttBackend = "web";
       setSttAvailable(true);
+    } else if (serverSttEnabled() && mediaRecorderAvailable()) {
+      sttBackend = "server";
+      setSttAvailable(true);
     }
   });
 
@@ -250,7 +333,7 @@ export default function Assistant(props: AssistantProps) {
       text: draft(),
       profile: profile(),
     });
-    stopSpeaking();
+    haltSpeech();
     // Abandoned, not sent: leaving the surface mid-sentence must not put
     // half an utterance into the conversation on the way out.
     if (listening()) void abandonTake();
@@ -262,11 +345,11 @@ export default function Assistant(props: AssistantProps) {
         ...cur,
         { role: "assistant", text: reply.reply ?? "", tool_trace: reply.tool_trace },
       ]);
-      if (ttsOn()) speakSentences(reply.reply);
+      if (ttsOn()) speak(reply.reply);
     }
     setPendingAction(reply.pending_action ?? null);
     if (reply.pending_action && ttsOn()) {
-      speakSentences(announce(reply.pending_action));
+      speak(announce(reply.pending_action));
     }
   };
 
@@ -275,7 +358,7 @@ export default function Assistant(props: AssistantProps) {
     if (!trimmed || busy()) return;
     setDraft("");
     setBusy(true);
-    stopSpeaking();
+    haltSpeech();
     setTranscript((cur) => [...cur, { role: "user", text: trimmed }]);
     try {
       applyReply(await api.assistantMessage(trimmed, profile() || undefined));
@@ -314,7 +397,7 @@ export default function Assistant(props: AssistantProps) {
   };
 
   const reset = async () => {
-    stopSpeaking();
+    haltSpeech();
     try {
       await api.assistantReset();
       setTranscript([]);
@@ -328,7 +411,7 @@ export default function Assistant(props: AssistantProps) {
     const next = !ttsOn();
     setTtsOn(next);
     localStorage.setItem(TTS_PREF_KEY, next ? "1" : "0");
-    if (!next) stopSpeaking();
+    if (!next) haltSpeech();
     else {
       // Prime the synth inside a user gesture — Android WebView requires it.
       window.speechSynthesis?.speak(new SpeechSynthesisUtterance(""));
@@ -342,9 +425,17 @@ export default function Assistant(props: AssistantProps) {
   let takeOpen = false;
   // Which recognizer this session decided on (onMount), and the live Web
   // Speech instance when that is the one. Native has no handle to hold — the
-  // plugin is a module singleton.
-  let sttBackend: "native" | "web" | null = null;
+  // plugin is a module singleton. `server` is the FR-T12 pipeline: capture with
+  // `MediaRecorder`, transcribe on the engine.
+  let sttBackend: "native" | "web" | "server" | null = null;
   let webRecognition: WebSpeechRecognition | null = null;
+  // Server-STT capture state. The take is a single recording: press starts it,
+  // release stops it, and the recorder's `stop` posts the audio and sends what
+  // came back. `abandonServer` lets leaving the surface mid-take drop the audio
+  // instead of sending it.
+  let serverRecorder: MediaRecorder | null = null;
+  let serverChunks: Blob[] = [];
+  let abandonServer = false;
 
   const closeRecognizer = async () => {
     setListening(false);
@@ -353,6 +444,19 @@ export default function Assistant(props: AssistantProps) {
       webRecognition = null;
       try {
         recognition?.stop();
+      } catch {
+        /* already stopped */
+      }
+      return;
+    }
+    if (sttBackend === "server") {
+      // `stop()` flushes the last chunk and fires `onstop`, which is where the
+      // audio is posted (unless the take was abandoned). The tracks are stopped
+      // there too, so the browser's recording indicator clears.
+      const recorder = serverRecorder;
+      serverRecorder = null;
+      try {
+        if (recorder && recorder.state !== "inactive") recorder.stop();
       } catch {
         /* already stopped */
       }
@@ -374,6 +478,10 @@ export default function Assistant(props: AssistantProps) {
     if (!takeOpen) return;
     takeOpen = false;
     await closeRecognizer();
+    // The server pipeline sends from the recorder's `onstop` once the audio has
+    // been transcribed, not from the draft — there is nothing in the composer
+    // to send yet — so this path ends here for it.
+    if (sttBackend === "server") return;
     // Sent here rather than from the recognizer's own "stopped" event,
     // because releasing the button removes that listener and the release is
     // now the ordinary way a take ends. Under the toggle this lived in the
@@ -396,6 +504,8 @@ export default function Assistant(props: AssistantProps) {
   /** End the take and send nothing — for leaving the surface mid-sentence. */
   const abandonTake = async () => {
     takeOpen = false;
+    // Tell the server recorder's `onstop` to drop the audio rather than post it.
+    abandonServer = true;
     await closeRecognizer();
   };
 
@@ -416,7 +526,7 @@ export default function Assistant(props: AssistantProps) {
     const Ctor = webSpeechCtor();
     if (!Ctor) return;
     try {
-      stopSpeaking();
+      haltSpeech();
       const recognition = new Ctor();
       recognition.continuous = true;
       recognition.interimResults = true;
@@ -450,10 +560,71 @@ export default function Assistant(props: AssistantProps) {
     }
   };
 
+  // The desktop take on the server pipeline (FR-T12): capture audio with
+  // `MediaRecorder`, and on release post it to the engine's STT route. Held
+  // rather than toggled, exactly as the other two paths (FR-T5) — the release
+  // is what ends the recording and triggers the transcription-and-send.
+  const startListeningServer = async () => {
+    try {
+      haltSpeech();
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      serverChunks = [];
+      abandonServer = false;
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data && event.data.size > 0) serverChunks.push(event.data);
+      });
+      recorder.addEventListener("stop", () => {
+        // Release the microphone so the browser's recording indicator clears.
+        stream.getTracks().forEach((track) => track.stop());
+        const chunks = serverChunks;
+        serverChunks = [];
+        if (abandonServer) return;
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        void transcribeAndSend(blob);
+      });
+      serverRecorder = recorder;
+      takeOpen = true;
+      setListening(true);
+      recorder.start();
+    } catch (e) {
+      setListening(false);
+      props.onError(`microphone: ${String(e)}`);
+    }
+  };
+
+  // The server round-trip: audio up, text back, then the same repair pass and
+  // send the on-device paths use (FR-T13). A 404 means the route is
+  // unconfigured, and the take degrades to typed input with no error (FR-T6).
+  const transcribeAndSend = async (blob: Blob) => {
+    try {
+      const { text } = await api.assistantStt(blob);
+      const heard = text.trim();
+      if (!heard) return;
+      const { text: repairedText, repairs } = repairUtterance(heard, slugs());
+      setRepaired(repairs.length ? describeRepairs(repairs) : "");
+      setDraft(repairedText);
+      void send(repairedText);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) {
+        // Unconfigured: retire the server mic and fall back to typed input,
+        // silently — the same degradation an absent recognizer gives.
+        setSttAvailable(false);
+        sttBackend = null;
+      } else {
+        props.onError(`speech transcription: ${String(e)}`);
+      }
+    }
+  };
+
   const startListening = async () => {
     if (listening()) return;
     if (sttBackend === "web") {
       startListeningWeb();
+      return;
+    }
+    if (sttBackend === "server") {
+      await startListeningServer();
       return;
     }
     try {
@@ -465,7 +636,7 @@ export default function Assistant(props: AssistantProps) {
         props.onError("microphone permission denied");
         return;
       }
-      stopSpeaking();
+      haltSpeech();
       takeOpen = true;
       setListening(true);
       await SpeechRecognition.removeAllListeners();

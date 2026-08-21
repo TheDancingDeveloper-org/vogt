@@ -623,6 +623,16 @@ provisioned. Mutating routes require the `assistant` token capability. See
   `utterance` (the raw recognised text before FR-T13's repair pass) so a
   repaired turn logs both forms.
 - `POST /api/assistant/reset` -> `OkResponse`
+- `POST /api/assistant/stt` (multipart audio, field `file`) -> `{"text": string}`
+  — server-side transcription (FR-T12). Proxies to `/audio/transcriptions` on an
+  ordered, independently-configured base-URL list (voicemode semantics: local
+  first, cloud fallback). **404** when unconfigured or every entry fails, so the
+  client falls back (FR-T6). Scope-gated on `assistant` (a POST under
+  `/api/assistant`). Audio is proxied, never stored.
+- `POST /api/assistant/tts` `{"text": "..."}` -> an audio stream (`audio/*`) —
+  server-side synthesis. Proxies `{model, input, voice}` to `/audio/speech` on
+  the same kind of ordered list. **404** when unconfigured/all-failed. Audio is
+  streamed back and never stored.
 
 `PendingAction` is tagged by `kind`, because the assistant has two effectors
 and a client must not render one as the other:
@@ -1041,6 +1051,27 @@ the terminal half works exactly as before (FR-T6, FR-E9).
 | `assistant_profiles` | `ENGINE_ASSISTANT_PROFILES_JSON` | `[]` |
 | `assistant_default_profile` | `ENGINE_ASSISTANT_DEFAULT_PROFILE` | the implicit `default` |
 | `assistant_log_retention_days` | `ENGINE_ASSISTANT_LOG_RETENTION_DAYS` | `30` |
+| `assistant_stt_base_urls` | `ENGINE_ASSISTANT_STT_BASE_URLS` (comma-separated) | `http://127.0.0.1:2022/v1,https://api.openai.com/v1` |
+| `assistant_stt_model` | `ENGINE_ASSISTANT_STT_MODEL` | `whisper-1` |
+| `assistant_stt_api_key` | `ENGINE_ASSISTANT_STT_API_KEY` | unset (local entry needs none) |
+| `assistant_tts_base_urls` | `ENGINE_ASSISTANT_TTS_BASE_URLS` (comma-separated) | `http://127.0.0.1:8880/v1,https://api.openai.com/v1` |
+| `assistant_tts_model` | `ENGINE_ASSISTANT_TTS_MODEL` | `tts-1-hd` |
+| `assistant_tts_voice` | `ENGINE_ASSISTANT_TTS_VOICE` | `nova` |
+| `assistant_tts_api_key` | `ENGINE_ASSISTANT_TTS_API_KEY` | unset (local entry needs none) |
+| `assistant_speech_attempt_timeout_ms` | `ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS` | `30000` |
+
+#### Server-side speech (FR-T12, r16)
+
+STT/TTS are configured **independently of the chat profile** above — chat may
+run through OpenRouter while audio uses OpenAI or a local Whisper.cpp + Kokoro
+pair. Each half's base URLs are an **ordered fallback list** adopting
+voicemode's `VOICEMODE_STT_BASE_URLS` / `VOICEMODE_TTS_BASE_URLS` semantics:
+entry 1 first, later entries on a connection failure or non-2xx — local first,
+cloud fallback. A half is enabled when its list is non-empty; the key is reused
+for whichever entry needs one (the cloud endpoint) and a local entry needs none.
+Each attempt is bounded by `assistant_speech_attempt_timeout_ms`. When the list
+is empty or every entry fails the route answers **404**, so the client falls
+back (FR-T6). Audio is never stored.
 
 #### Provider profiles (FR-T9, r16)
 
