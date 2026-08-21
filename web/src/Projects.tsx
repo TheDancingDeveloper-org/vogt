@@ -48,11 +48,13 @@ import {
   deps,
   importProject,
   listDrift,
+  listForgeRepos,
   listProjects,
   projectBrief,
   resolveDrift,
   type ComplianceResult,
   type DepRef,
+  type ForgeRepoView,
   type DepsResult,
   type DriftListResult,
   type DriftProposal,
@@ -1145,6 +1147,101 @@ const Projects: Component<Props> = (props) => {
   const [imported, setImported] = createSignal<Record<string, unknown> | null>(null);
   const [importFailure, setImportFailure] = createSignal<string | null>(null);
 
+  // -- the repo picker (#180, design #178 decision 5) -----------------------
+  // Enumerates what the acting credential (a linked PAT, #179, else the file
+  // token) can see, so a person can pick which to import. This lists; it never
+  // crawls — the token is the scope. Select-all imports each as clone + full
+  // sync, skipping what is already registered.
+  const [pickerRepos, setPickerRepos] = createSignal<ForgeRepoView[]>([]);
+  const [pickerLogin, setPickerLogin] = createSignal<string | null>(null);
+  const [pickerDetail, setPickerDetail] = createSignal<string | null>(null);
+  const [pickerLoading, setPickerLoading] = createSignal(false);
+  const [pickerError, setPickerError] = createSignal<string | null>(null);
+  const [pickerOpen, setPickerOpen] = createSignal(false);
+  const [selectedRepos, setSelectedRepos] = createSignal<Set<string>>(new Set());
+  const [batchImporting, setBatchImporting] = createSignal(false);
+  const [batchDone, setBatchDone] = createSignal<string | null>(null);
+  const [batchError, setBatchError] = createSignal<string | null>(null);
+
+  const importableRepos = createMemo(() =>
+    pickerRepos().filter((entry) => !entry.already_registered),
+  );
+  const allSelected = createMemo(() => {
+    const importable = importableRepos();
+    return importable.length > 0 && importable.every((e) => selectedRepos().has(e.url));
+  });
+
+  const loadRepos = async () => {
+    if (pickerLoading()) return;
+    setPickerOpen(true);
+    setPickerLoading(true);
+    setPickerError(null);
+    setBatchDone(null);
+    try {
+      const result = await listForgeRepos();
+      setPickerRepos(result.repos);
+      setPickerLogin(result.login);
+      setPickerDetail(result.detail);
+      setSelectedRepos(new Set<string>());
+    } catch (error) {
+      setPickerError(errorMessage(error));
+    } finally {
+      setPickerLoading(false);
+    }
+  };
+
+  const toggleRepo = (url: string) => {
+    setSelectedRepos((current) => {
+      const next = new Set<string>(current);
+      if (next.has(url)) next.delete(url);
+      else next.add(url);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedRepos(
+      allSelected()
+        ? new Set<string>()
+        : new Set<string>(importableRepos().map((e) => e.url)),
+    );
+  };
+
+  const batchReady = createMemo(
+    () => selectedRepos().size > 0 && importReason().trim().length > 0,
+  );
+
+  const importSelected = async () => {
+    if (!batchReady() || batchImporting()) return;
+    setBatchImporting(true);
+    setBatchError(null);
+    setBatchDone(null);
+    const reason = importReason().trim();
+    const chosen = importableRepos().filter((e) => selectedRepos().has(e.url));
+    let done = 0;
+    try {
+      for (const entry of chosen) {
+        // Each import is clone + full sync (the consolidate default), the same
+        // path a single named import walks — the picker only chooses the names.
+        await importProject({ repo: entry.url, consolidate: true, reason });
+        done += 1;
+      }
+      setBatchDone(`Imported ${done} of ${chosen.length} selected repositories.`);
+      setSelectedRepos(new Set<string>());
+      void refetchProjects();
+      await loadRepos();
+    } catch (error) {
+      const message = errorMessage(error);
+      setBatchError(
+        `Imported ${done} of ${chosen.length}; the next was refused: ${message}`,
+      );
+      props.onError?.(`An import was refused: ${message}`);
+      void refetchProjects();
+    } finally {
+      setBatchImporting(false);
+    }
+  };
+
   const importReady = createMemo(
     () => repo().trim().length > 0 && importReason().trim().length > 0,
   );
@@ -1862,14 +1959,102 @@ const Projects: Component<Props> = (props) => {
       <Show when={place().view === "import"}>
         <section class="vogt-projects-import" aria-label="Import a repository">
           <h2>Import a repository</h2>
-          {/* No listing, no search, no suggestion, and there must never be
-              one: that is the registration-candidate listing r3 removed
-              (FR-G15). The repository is always named by the person asking. */}
+          {/* Name the repository, or pick from the ones your linked credential
+              can see (#180, design #178 decision 5). The picker is an
+              *enumeration* of what your token reaches, not the candidate crawl
+              r3 removed (FR-G15): the token is the scope, and you still confirm
+              what is imported. */}
           <p class="vogt-projects-note">
-            Name the repository. Vogt clones it into the import root, registers it, and reads
-            what is already on the forge — it changes nothing upstream (FR-B3). There is no
-            repository picker here by design: nothing is registered that somebody did not name.
+            Name the repository, or browse the ones your linked forge account can see. Vogt
+            clones each into the import root, registers it, and reads what is already on the
+            forge — it changes nothing upstream (FR-B3).
           </p>
+
+          {/* -- the repo picker ------------------------------------------- */}
+          <div class="vogt-projects-picker" aria-label="Repository picker">
+            <div class="vogt-projects-resolve-actions">
+              <button type="button" onClick={() => void loadRepos()} disabled={pickerLoading()}>
+                {pickerLoading()
+                  ? "Listing…"
+                  : pickerOpen()
+                    ? "Refresh my repositories"
+                    : "Browse my repositories"}
+              </button>
+              <Show when={pickerLogin()}>
+                {(login) => (
+                  <span class="vogt-projects-hint">Listing as {login()}.</span>
+                )}
+              </Show>
+            </div>
+            <Show when={pickerError()}>
+              {(message) => <p class="vogt-projects-failure">{message()}</p>}
+            </Show>
+            <Show when={pickerOpen() && !pickerLoading() && !pickerError()}>
+              <Show
+                when={pickerRepos().length > 0}
+                fallback={
+                  <p class="vogt-projects-note">
+                    {pickerDetail() ??
+                      "No repositories were listed — link a forge account first."}
+                  </p>
+                }
+              >
+                <label class="vogt-projects-check">
+                  <input
+                    type="checkbox"
+                    checked={allSelected()}
+                    disabled={importableRepos().length === 0}
+                    onChange={() => toggleSelectAll()}
+                  />
+                  <span>Select all importable ({importableRepos().length})</span>
+                </label>
+                <ul class="vogt-projects-picker-list">
+                  <For each={pickerRepos()}>
+                    {(entry) => (
+                      <li>
+                        <label class="vogt-projects-check">
+                          <input
+                            type="checkbox"
+                            checked={selectedRepos().has(entry.url)}
+                            disabled={entry.already_registered}
+                            onChange={() => toggleRepo(entry.url)}
+                          />
+                          <span>
+                            {entry.owner}/{entry.name}{" "}
+                            <span class="vogt-projects-hint">
+                              {entry.visibility}
+                              {entry.already_registered ? " · already imported" : ""}
+                            </span>
+                          </span>
+                        </label>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+                <div class="vogt-projects-resolve-actions">
+                  <button
+                    type="button"
+                    onClick={() => void importSelected()}
+                    disabled={!batchReady() || batchImporting()}
+                  >
+                    {batchImporting()
+                      ? "Importing…"
+                      : `Import selected (${selectedRepos().size})`}
+                  </button>
+                  <span class="vogt-projects-hint">
+                    Each is cloned and fully synced. A reason (below) is required — the audit
+                    row records that a person imported these, and why.
+                  </span>
+                </div>
+                <Show when={batchError()}>
+                  {(message) => <p class="vogt-projects-failure">{message()}</p>}
+                </Show>
+                <Show when={batchDone()}>
+                  {(message) => <p class="vogt-projects-imported">{message()}</p>}
+                </Show>
+              </Show>
+            </Show>
+          </div>
           <form class="vogt-projects-form" onSubmit={(event) => void submitImport(event)}>
             <label class="vogt-projects-field">
               <span>Repository</span>

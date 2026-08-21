@@ -31,6 +31,7 @@ export const ROUTES = {
   "project.get": "/projects/get",
   "project.brief": "/projects/brief",
   "project.import": "/projects/import",
+  "forge.repos": "/forge/repos",
   "work.list": "/work",
   "board.list": "/board/list",
   "work.get": "/work/get",
@@ -737,12 +738,36 @@ export const resolveDrift = (
 
 /** Clone a named repository, register it, and read what is already there.
  *
- *  `repo` is always named by the caller. There is no listing operation to
- *  populate a picker from, and adding one would be the registration-candidate
- *  listing r3 removed (FR-G15). */
+ *  `repo` may be typed by hand or chosen from {@link listForgeRepos}. The
+ *  picker is an *enumeration* of what the acting credential can see (#180,
+ *  design #178 decision 5), not the candidate crawl r3 removed: the token is
+ *  the scope, and a person still confirms what is imported. */
 export const importProject = (
   params: Record<string, unknown> & { repo: string; reason: string },
 ) => call<Record<string, unknown>>("project.import", params, "POST");
+
+/** One repository the acting credential can see, as the picker renders it. */
+export interface ForgeRepoView {
+  owner: string;
+  name: string;
+  default_branch: string | null;
+  visibility: string;
+  url: string;
+  already_registered: boolean;
+}
+
+export interface ForgeReposResult {
+  repos: ForgeRepoView[];
+  login: string | null;
+  detail: string | null;
+}
+
+/** Enumerate the repositories the linked credential (#179) can see, so a
+ *  person can pick which to import (#180). Lists by credential, never by
+ *  crawl — an empty list with a `detail` means "not collected", not "you have
+ *  no repositories". */
+export const listForgeRepos = (host = "github.com") =>
+  call<ForgeReposResult>("forge.repos", { host }, "GET");
 
 export const startSession = (
   params: Record<string, unknown> & { reason: string },
