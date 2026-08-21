@@ -408,20 +408,51 @@ def test_by_state_stays_declared_only_and_says_so(
     assert brief.open_work > 0, "which is not the same as nothing outstanding"
 
 
-def test_a_host_the_adapter_cannot_read_says_so(
-    instance: AppContext, tmp_path: Path, forge: Forge
-) -> None:
-    """WI-9. All zeros and `detail: null` against a repo with an open issue.
+class Forgejo:
+    """A fake Forgejo that records every request; one open issue upstream."""
 
-    `indexarr` lives on Forgejo and has one open issue; `forge onboard`
-    returned `issues: 0, pull_requests: 0, labels: 0, releases: 0, new: 0,
-    detail: null`. The GitHub control run in the same minute returned 102
-    objects, so the operation worked and the difference was entirely the
-    remote's host. Half the remaining import queue is Forgejo-hosted, and the
-    playbook reads an empty consolidation as a signal.
-    """
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, str]] = []
+
+    def __call__(
+        self, url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
+    ) -> tuple[int, bytes]:
+        del headers, body
+        self.requests.append((method, url))
+        if "/issues" in url and "/comments" not in url:
+            return 200, json.dumps(
+                [
+                    {
+                        "number": 1,
+                        "title": "The one open Forgejo issue",
+                        "state": "open",
+                        "labels": [],
+                        "updated_at": "2026-08-01T00:00:00Z",
+                    }
+                ]
+            ).encode("utf-8")
+        return 200, b"[]"
+
+    @property
+    def mutations(self) -> list[tuple[str, str]]:
+        return [(m, u) for m, u in self.requests if m != "GET"]
+
+
+@pytest.fixture
+def forgejo(instance: AppContext, tmp_path: Path) -> tuple[AppContext, Forgejo]:
+    """`elsewhere`, a Forgejo-hosted project, on an instance that reads its
+    host — one line under `[forge_token_files]`, the deployed shape (D8)."""
+    import dataclasses
+
+    fake = Forgejo()
+    token = tmp_path / "forgejo-token"
+    token.write_text("frg_fake\n", encoding="utf-8")
+    config = instance.config.model_copy(
+        update={"forge_token_files": {"repo.indexarr.net": token}}
+    )
+    ctx = dataclasses.replace(instance, config=config, forge_transport=fake)
     register_project(
-        instance,
+        ctx,
         RegisterProjectParams(
             name="Elsewhere",
             root_path=str(tmp_path),
@@ -429,40 +460,67 @@ def test_a_host_the_adapter_cannot_read_says_so(
             reason=WHY,
         ),
     )
-    result = onboard(instance, OnboardParams(project="elsewhere", reason=WHY))
-
-    assert result.supported is False, "the zeros below mean nothing"
-    assert result.detail is not None
-    assert "repo.indexarr.net" in result.detail, "name the host it could not read"
-    assert "github.com" in result.detail, "and what it can"
-    assert forge.mutations == [], "and it asked nobody anything"
+    return ctx, fake
 
 
-def test_an_honest_empty_and_an_unread_one_are_distinguishable(
-    instance: AppContext, tmp_path: Path, forge: Forge
+def test_the_forgejo_host_is_read_not_refused(
+    forge: Forge, forgejo: tuple[AppContext, Forgejo]
 ) -> None:
-    """Three zeros, three causes — the reason this was p1.
+    """WI-9, inverted by #176. The zeros are gone because the read is real.
 
-    A repository with no history, a host with no adapter, and a step never
-    run all produced the same output. The third is fixed by auditing the run;
-    these two are the pair that has to differ in the result itself, and the
-    counts alone cannot carry that difference — zero is zero either way.
+    `indexarr` lives on Forgejo and has one open issue; `forge onboard` used
+    to return `issues: 0, …, detail: null` — byte-identical to an empty
+    repository — and WI-9's fix made that an honest `supported: false`. With
+    the Forgejo provider registered, the same operation against the same host
+    now *reads* the repository: the issue is counted, there is nothing to
+    explain, and consolidation stayed read-only (FR-B3) on this forge too.
     """
+    del forge
+    ctx, fake = forgejo
+    result = onboard(ctx, OnboardParams(project="elsewhere", reason=WHY))
+
+    assert result.supported is True, "the host is readable now, and says so"
+    assert result.detail is None, "nothing to explain — the counts are real"
+    assert result.issues == 1, "the open issue WI-9's zeros hid"
+    assert fake.mutations == [], "and onboarding asked nobody anything (FR-B3)"
+
+
+def test_an_honest_empty_and_an_unread_one_are_still_distinguishable(
+    forge: Forge, forgejo: tuple[AppContext, Forgejo], tmp_path: Path
+) -> None:
+    """WI-9's pairing, inverted at one end and intact at the other.
+
+    Forgejo and GitHub now answer the same operation with the same supported
+    shape — that is #176's acceptance. The distinction WI-9 exists for has
+    not been weakened by it: a host *no* registered forge reads still refuses
+    with a detail naming what is readable, which now includes the Forgejo
+    host, so zero still never means "there is nothing" by accident.
+    """
+    del forge
+    ctx, _ = forgejo
+    readable_forgejo = onboard(ctx, OnboardParams(project="elsewhere", reason=WHY))
+    readable_github = onboard(ctx, OnboardParams(project="rustnzb", reason=WHY))
+
+    assert readable_forgejo.supported is True and readable_forgejo.detail is None
+    assert readable_github.supported is True and readable_github.detail is None
+
+    other = tmp_path / "gitlab-hosted"
+    other.mkdir()
     register_project(
-        instance,
+        ctx,
         RegisterProjectParams(
-            name="Elsewhere",
-            root_path=str(tmp_path),
-            repo_url="https://repo.indexarr.net/indexarr/Indexarr.git",
+            name="Unreadable",
+            root_path=str(other),
+            repo_url="https://gitlab.com/group/project",
             reason=WHY,
         ),
     )
-    unreadable = onboard(instance, OnboardParams(project="elsewhere", reason=WHY))
-    readable = onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
-
+    unreadable = onboard(ctx, OnboardParams(project="unreadable", reason=WHY))
     assert unreadable.issues == 0 and unreadable.supported is False
-    assert readable.supported is True, "the same operation, against a host it reads"
-    assert readable.detail is None, "and it has nothing to explain"
+    assert unreadable.detail is not None
+    assert "gitlab.com" in unreadable.detail, "name the host it could not read"
+    assert "repo.indexarr.net" in unreadable.detail, "and what it can — both forges"
+    assert "github.com" in unreadable.detail
 
 
 def test_a_project_with_no_repository_url_is_not_an_empty_repository(

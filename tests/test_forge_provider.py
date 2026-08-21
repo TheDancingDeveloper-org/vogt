@@ -60,7 +60,9 @@ def _provider(routes: dict[str, Any] | None = None) -> GitHubProvider:
         (GITHUB, True),
         (GITHUB_SSH, True),
         ("https://github.com/owner/repo.git", True),
-        (FORGEJO, False),  # WI-9's host: a real repository the adapter cannot read
+        # WI-9's host. Readable since #176 — but only when `[forge_token_files]`
+        # names it, and this table is the config-less answer (see test_forgejo).
+        (FORGEJO, False),
         ("https://gitlab.com/group/project", False),
         ("https://example.com", False),
         (None, False),
@@ -76,8 +78,13 @@ def test_host_selection_table(repo_url: str | None, supported: bool) -> None:
     assert (unsupported_reason(repo_url) is None) is supported
 
 
-def test_the_forgejo_host_names_itself_and_what_is_readable() -> None:
-    """WI-9 again, at the seam: the reason carries its own cause."""
+def test_an_unconfigured_forgejo_host_names_itself_and_what_is_readable() -> None:
+    """WI-9 again, at the seam: the reason carries its own cause.
+
+    Since #176 a Forgejo host is readable when `[forge_token_files]` names
+    it; *this* instance's config does not, so the honest answer is unchanged
+    — and it still names both halves.
+    """
     reason = unsupported_reason(FORGEJO)
     assert reason is not None
     assert "repo.indexarr.net" in reason
@@ -89,7 +96,8 @@ def test_a_missing_url_is_not_an_unreadable_host() -> None:
     assert reason is not None and "no repository URL" in reason
 
 
-def test_supported_hosts_advertises_github_only_in_v1() -> None:
+def test_supported_hosts_without_config_advertises_the_constant_host_only() -> None:
+    """A Forgejo host is configuration (#176); github.com is the build's."""
     assert supported_hosts() == ("github.com",)
 
 
