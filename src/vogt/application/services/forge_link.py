@@ -51,7 +51,9 @@ def link_project(ctx: AppContext, params: ForgeLinkParams) -> ForgeLinkResult:
         actor = view.actor_by_identity(ctx.principal.identity_ref)
         pending = native_migration.open_native_items(view, project)
 
-    unsupported = unsupported_reason(project.repo_url)
+    # The config travels with the question: a Forgejo host is supported
+    # exactly when `[forge_token_files]` names it (#176).
+    unsupported = unsupported_reason(project.repo_url, ctx.config)
     if unsupported is not None:
         msg = (
             f"cannot link {project.slug!r}: {unsupported}. Set a supported "

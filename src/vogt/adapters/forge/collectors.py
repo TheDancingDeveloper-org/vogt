@@ -57,7 +57,9 @@ class _ForgeReadCollector:
         ref = None if provider is None else provider.parse(project.repo_url)
         if provider is None or ref is None:
             yield self._receipt(
-                project, supported=False, detail=unsupported_reason(project.repo_url)
+                project,
+                supported=False,
+                detail=unsupported_reason(project.repo_url, ctx.config),
             )
             return
         if self.capability is not None and not getattr(

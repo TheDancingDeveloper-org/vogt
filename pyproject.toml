@@ -104,6 +104,7 @@ known-local-folder = ["tests"]
 # JSON and TOML boundaries: a parsed document is `Any` and pretending
 # otherwise would be a cast, not a type.
 "src/vogt/adapters/github/client.py" = ["ANN401"]
+"src/vogt/adapters/forge/forgejo.py" = ["ANN401"]
 "src/vogt/adapters/github/collectors.py" = ["ANN401"]
 "src/vogt/collectors/dep_refs.py" = ["ANN401"]
 

@@ -3,8 +3,16 @@
 This is what replaces the free `repo_of()` at every call site: instead of
 "parse a GitHub URL", the question becomes "which forge hosts this, and is it
 configured", and the answer is a `ForgeProvider` or an honest `None`. The
-registry is the one place that knows the set of forges Vogt can speak to, so
-adding Forgejo in Phase 5 is a new entry here and nothing else.
+registry is the one place that knows the set of forges Vogt can speak to —
+Forgejo joined in Phase 5 (#176) as exactly the new entry this module
+promised, with no change to any call site outside the seam.
+
+Two kinds of host live here. github.com is a constant: one host, known
+without configuration. A Forgejo host is *data*: any host named under
+`[forge_token_files]` that is not github.com is read as a Forgejo/Gitea
+installation, which is why the resolution helpers take the config — the set
+of supported hosts is no longer knowable without it, and a call that omits
+it gets the constant half of the answer only.
 
 A provider resolves to `None` for two different reasons, and the caller that
 cares about the difference asks `unsupported_reason` first:
@@ -24,6 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from vogt.adapters.forge.forgejo import ForgejoClient, ForgejoProvider, parse_repo_url
 from vogt.adapters.forge.github import HOST as GITHUB_HOST
 from vogt.adapters.forge.github import GitHubProvider
 from vogt.adapters.forge.models import RepoRef
@@ -34,43 +43,77 @@ from vogt.config import VogtConfig
 
 @dataclass(frozen=True)
 class _Spec:
-    """One registered forge kind: how to recognise it, how to build it."""
+    """One registered forge kind: which hosts it answers for under a given
+    configuration, how to recognise a URL, and how to build the provider."""
 
-    hosts: tuple[str, ...]
-    match: Callable[[str | None], RepoRef | None]
-    build: Callable[[Path | None, Transport | None], ForgeProvider | None]
+    hosts: Callable[[VogtConfig | None], tuple[str, ...]]
+    match: Callable[[str | None, VogtConfig | None], RepoRef | None]
+    build: Callable[[str, Path | None, Transport | None], ForgeProvider | None]
 
 
 def _build_github(
-    token_file: Path | None, transport: Transport | None
+    host: str, token_file: Path | None, transport: Transport | None
 ) -> ForgeProvider | None:
+    del host  # one host; the client knows its own API root
     client = GitHubClient.from_token_file(token_file, transport=transport)
     return None if client is None else GitHubProvider(client)
+
+
+def _build_forgejo(
+    host: str, token_file: Path | None, transport: Transport | None
+) -> ForgeProvider | None:
+    client = ForgejoClient.from_token_file(host, token_file, transport=transport)
+    return None if client is None else ForgejoProvider(client)
 
 
 #: A token-less instance used only for its pure `parse` — matching a URL to a
 #: host never touches the network or needs a credential.
 _GITHUB_MATCHER = GitHubProvider(GitHubClient())
 
-#: The forges this build can speak to. GitHub is the only v1 provider (D2);
-#: Forgejo joins here in Phase 5 (#176) with no change to any call site.
+
+def _forgejo_hosts(config: VogtConfig | None) -> tuple[str, ...]:
+    """Every Forgejo host this configuration names (D8).
+
+    The `[forge_token_files]` map is the declaration: a host in it is a
+    Forgejo installation unless it is github.com, whose entry is only ever a
+    token override for the constant host. No config, no Forgejo hosts —
+    which is the honest answer, not a default.
+    """
+    if config is None:
+        return ()
+    return tuple(host for host in config.forge_token_files if host != GITHUB_HOST)
+
+
+#: The forges this build can speak to (D2). Adding one is one entry here —
+#: the claim Phase 5 (#176) existed to test, and Forgejo is the proof.
 _SPECS: tuple[_Spec, ...] = (
     _Spec(
-        hosts=(GITHUB_HOST,),
-        match=_GITHUB_MATCHER.parse,
+        hosts=lambda config: (GITHUB_HOST,),
+        match=lambda repo_url, config: _GITHUB_MATCHER.parse(repo_url),
         build=_build_github,
+    ),
+    _Spec(
+        hosts=_forgejo_hosts,
+        match=lambda repo_url, config: parse_repo_url(repo_url, _forgejo_hosts(config)),
+        build=_build_forgejo,
     ),
 )
 
 
-def supported_hosts() -> tuple[str, ...]:
-    """Every host some registered provider can read."""
-    return tuple(host for spec in _SPECS for host in spec.hosts)
+def supported_hosts(config: VogtConfig | None = None) -> tuple[str, ...]:
+    """Every host some registered provider can read under `config`.
+
+    Without a config only the constant hosts answer — github.com — because
+    a Forgejo host exists as a fact about a configuration, not this build.
+    """
+    return tuple(host for spec in _SPECS for host in spec.hosts(config))
 
 
-def _spec_for(repo_url: str | None) -> tuple[_Spec, RepoRef] | None:
+def _spec_for(
+    repo_url: str | None, config: VogtConfig | None
+) -> tuple[_Spec, RepoRef] | None:
     for spec in _SPECS:
-        ref = spec.match(repo_url)
+        ref = spec.match(repo_url, config)
         if ref is not None:
             return spec, ref
     return None
@@ -104,15 +147,17 @@ def provider_for(
     to tell a person *why* reaches for `unsupported_reason`, which answers the
     first case without a token.
     """
-    matched = _spec_for(repo_url)
+    matched = _spec_for(repo_url, config)
     if matched is None:
         return None
     spec, ref = matched
     token_file = token_file_for(config, ref.host)
-    return spec.build(token_file, transport)
+    return spec.build(ref.host, token_file, transport)
 
 
-def unsupported_reason(repo_url: str | None) -> str | None:
+def unsupported_reason(
+    repo_url: str | None, config: VogtConfig | None = None
+) -> str | None:
     """Why no forge can read this repository, or `None` if one can.
 
     An empty success is the failure mode this exists to prevent. `forge
@@ -121,16 +166,21 @@ def unsupported_reason(repo_url: str | None) -> str | None:
     to the honest answer for a repository with no history at all. The reader
     of an empty consolidation treats it as a signal, so the signal has to
     carry its own cause.
+
+    Takes the config because "supported" is partly configuration now: a
+    Forgejo host is readable exactly when `[forge_token_files]` names it.
+    Without the config the constant hosts still answer, and a configured
+    Forgejo host would be misreported — pass the config wherever one exists.
     """
     if not repo_url:
         return (
             "this project declares no repository URL, so there is no forge to "
             "read — which is 'not collected', not 'there is nothing'"
         )
-    if _spec_for(repo_url) is not None:
+    if _spec_for(repo_url, config) is not None:
         return None
     host = repo_url.split("://")[-1].split("/")[0] or repo_url
-    readable = ", ".join(supported_hosts())
+    readable = ", ".join(supported_hosts(config))
     return (
         f"no configured forge reads {host}; this build reads {readable} only, "
         "so nothing was collected here and no conclusion should be drawn from "
@@ -149,8 +199,8 @@ def has_configured_forge(config: VogtConfig) -> bool:
     # exactly as a sweep will — same token path, same client factory a test
     # may have substituted.
     for spec in _SPECS:
-        for host in spec.hosts:
-            if spec.build(token_file_for(config, host), None) is not None:
+        for host in spec.hosts(config):
+            if spec.build(host, token_file_for(config, host), None) is not None:
                 return True
     return False
 
@@ -174,7 +224,7 @@ def github_provider(
     it still goes through the same token resolution as everything else (D8).
     """
     token_file = token_file_for(config, GITHUB_HOST)
-    return _build_github(token_file, transport)  # type: ignore[return-value]
+    return _build_github(GITHUB_HOST, token_file, transport)  # type: ignore[return-value]
 
 
 __all__ = [

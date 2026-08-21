@@ -1,9 +1,10 @@
 """The `ForgeProvider` seam — one interface, many forges (D2).
 
 Everything Vogt does *to* or *reads from* a forge goes through this contract.
-GitHub is the only implementation in v1; the interface is validated on paper
-against GitLab and Gitea/Forgejo (see the module note below) so a second
-forge is a new class, not a re-plumbing.
+GitHub was the only implementation in v1; Forgejo/Gitea (`forgejo.py`, #176)
+is the second, landed as the new class the interface promised rather than a
+re-plumbing. GitLab remains validated on paper only (see the module note
+below).
 
 ## The shape is a policy, not just a type
 
@@ -33,10 +34,12 @@ Two things about this protocol are load-bearing:
   `/pipelines`. A merge request is a `ForgePull`; the id is URL-encoded
   `owner/repo`. `since` supported; posture differs (no repo-level Dependabot
   toggle) so `supports_posture` would be `False`.
-- **Gitea / Forgejo** — GitHub-shaped by design: `/repos/{o}/{r}/issues`
-  takes `since`; `/pulls`, `/releases` line up. No Actions-equivalent on older
-  installs, so `checks` may be empty and `supports_webhooks` varies by
-  version. This is the acceptance test of the interface in Phase 5 (#176).
+- **Gitea / Forgejo** — implemented (`forgejo.py`, #176), and the paper
+  validation held: `/repos/{o}/{r}/issues` takes `since`; `/pulls`,
+  `/releases`, `/labels` line up; checks come from `/actions/tasks` and are
+  honestly empty on installs without Actions. No posture surface, so
+  `supports_posture` is `False` and the gap reports itself (FR-O11). Subject
+  keys are host-qualified: `forge:{host}/{o}/{r}#{n}` (#171).
 """
 
 from __future__ import annotations

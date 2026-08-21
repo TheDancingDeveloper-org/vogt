@@ -319,8 +319,10 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
 
     # Asked before the adapter is even built: "this host is not supported" and
     # "the adapter is not configured" are different answers, and both are
-    # different from "there is nothing there".
-    unsupported = unsupported_reason(project.repo_url)
+    # different from "there is nothing there". The config travels with the
+    # question because a Forgejo host is supported exactly when
+    # `[forge_token_files]` names it (#176).
+    unsupported = unsupported_reason(project.repo_url, ctx.config)
     if unsupported is not None:
         refused = OnboardResult(
             project=project.slug,

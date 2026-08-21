@@ -39,6 +39,7 @@ from vogt.adapters.forge.provider import ForgeProvider
 from vogt.adapters.forge.registry import provider_for, unsupported_reason
 from vogt.adapters.github.client import Transport
 from vogt.collectors.base import CollectorContext, Finding, finding
+from vogt.config import VogtConfig
 from vogt.core.clock import from_iso, to_iso
 from vogt.core.entities import Project
 from vogt.storage.interface import ObservedStore
@@ -81,7 +82,9 @@ class _ForgeSyncCollector:
             # Either no forge hosts this, or the one that does is not
             # configured. Both are "not collected", and the receipt says which
             # so a zero here is never read as "there is nothing" (FR-O4/O11).
-            yield self._receipt(project, ref=None, supported=False, count=0)
+            yield self._receipt(
+                project, ref=None, supported=False, count=0, config=ctx.config
+            )
             return
 
         watermark = self._store.get_watermark(
@@ -162,8 +165,11 @@ class _ForgeSyncCollector:
         count: int,
         truncated: bool = False,
         watermark: str | None = None,
+        config: VogtConfig | None = None,
     ) -> Finding:
-        reason = None if supported else unsupported_reason(project.repo_url)
+        # The config names the Forgejo hosts (#176), so the reason can tell
+        # "no forge reads this" from "reads it, but no token" honestly.
+        reason = None if supported else unsupported_reason(project.repo_url, config)
         return finding(
             kind=KIND_SYNC,
             subject_key=f"sync:{self.name}/{ref.slug if ref else project.id}",

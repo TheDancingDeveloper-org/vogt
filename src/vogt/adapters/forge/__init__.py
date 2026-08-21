@@ -2,13 +2,18 @@
 
 One interface, `ForgeProvider`, that every forge Vogt speaks to satisfies;
 one registry, `provider_for`, that maps a repository URL to the provider that
-hosts it. GitHub is the only implementation in v1 — the interface is designed
-against GitLab and Gitea/Forgejo on paper (see `provider.py`) so a second
-forge is a new class here rather than a change at every call site.
+hosts it. GitHub was the only implementation in v1; Forgejo/Gitea joined in
+Phase 5 (#176) as a new class and one registry entry — the change-at-no-call-
+site the seam was designed to make true.
 """
 
 from __future__ import annotations
 
+from vogt.adapters.forge.forgejo import (
+    ForgejoClient,
+    ForgejoProvider,
+    ForgejoUnavailable,
+)
 from vogt.adapters.forge.github import GITHUB_CAPABILITIES, GitHubProvider
 from vogt.adapters.forge.kinds import (
     KIND_CHECK,
@@ -64,6 +69,9 @@ __all__ = [
     "ForgePull",
     "ForgeRelease",
     "ForgeRepo",
+    "ForgejoClient",
+    "ForgejoProvider",
+    "ForgejoUnavailable",
     "GitHubProvider",
     "RepoRef",
     "current_collector",
