@@ -27,6 +27,12 @@ import { listProjects } from "./vogtApi";
 import { describeRepairs, repairUtterance } from "./voiceRepair";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { pendingAction, setPendingAction } from "./pendingAction";
+import {
+  onVoiceServiceEnded,
+  registerPushSpeaker,
+  startVoiceService,
+  stopVoiceService,
+} from "./voiceService";
 
 const TTS_PREF_KEY = "mydevenv2.assistant.tts";
 
@@ -209,6 +215,10 @@ export default function Assistant(props: AssistantProps) {
   // moment the speaker sends again or leaves (FR-T12). On-device synthesis is
   // stopped through `speechSynthesis.cancel()`; this is its `<audio>` twin.
   let currentAudio: HTMLAudioElement | null = null;
+  // Native (Android) voice-conversation plumbing (FR-M6). Both stay undefined
+  // on the desktop PWA, where their registrars are no-ops. Cleaned up on leave.
+  let voiceEndedCleanup: (() => void) | undefined;
+  let pushSpeakerCleanup: (() => void) | undefined;
 
   /** Stop every speech channel — on-device synthesis and a server clip alike. */
   const haltSpeech = () => {
@@ -274,7 +284,35 @@ export default function Assistant(props: AssistantProps) {
     setReasonDraft(action?.kind === "vogt_write" ? action.reason : "");
   });
 
+  // A voice conversation being *active* is, on this surface, spoken replies
+  // being on: that is the toggle that turns a typed chat into a hands-free one
+  // where audio capture and TTS have to survive the phone sleeping. So while it
+  // is on, hold the Android foreground service (FR-M6); release it the moment
+  // it goes off. Both calls are no-ops on the desktop PWA, so this effect is
+  // invisible there — desktop voice is unaffected.
+  createEffect(() => {
+    if (ttsOn()) startVoiceService();
+    else stopVoiceService();
+  });
+
+  // The notification's "End conversation" action stops the service natively and
+  // dispatches this back to us, so the conversation ends on both sides at once.
+  const endFromNotification = () => {
+    if (!ttsOn()) return;
+    setTtsOn(false);
+    localStorage.setItem(TTS_PREF_KEY, "0");
+    haltSpeech();
+  };
+
   onMount(async () => {
+    voiceEndedCleanup = onVoiceServiceEnded(endFromNotification);
+    // Speak-the-push (FR-M6 / FR-M2): an FCM message that arrives while a voice
+    // conversation is active is spoken as well as shown. Outside an active
+    // conversation the gate is false, so nothing is spoken and FR-M2's shown/
+    // handled behaviour is exactly as before. No-op off a native platform.
+    pushSpeakerCleanup = await registerPushSpeaker((text) => {
+      if (ttsOn()) speak(text);
+    });
     try {
       const history = await api.assistantHistory();
       setTranscript(history.transcript);
@@ -334,6 +372,11 @@ export default function Assistant(props: AssistantProps) {
       profile: profile(),
     });
     haltSpeech();
+    // Leaving the surface ends the conversation, so release the held service
+    // and drop the native listeners (all no-ops on the desktop PWA).
+    stopVoiceService();
+    voiceEndedCleanup?.();
+    pushSpeakerCleanup?.();
     // Abandoned, not sent: leaving the surface mid-sentence must not put
     // half an utterance into the conversation on the way out.
     if (listening()) void abandonTake();
