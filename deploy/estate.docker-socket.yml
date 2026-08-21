@@ -1,0 +1,18 @@
+# Host Docker socket for the pod, as a separate opt-in file.
+#
+# Listing this file mounts the host's Docker socket into the engine, so an
+# agent in a session controls the host daemon. That is a trust decision, not
+# a default; omit the file and `docker` inside sessions fails closed.
+#
+# **The service is `engine`, not `vogt`.** Before the split there was one
+# container and it was called `vogt`. In the two-service topology `vogt` is
+# the *core*, which has no use for a Docker daemon — attaching the socket
+# there would hand it the host while leaving the engine, whose sessions
+# actually run `docker`, without.
+
+services:
+  engine:
+    group_add:
+      - "${DOCKER_SOCKET_GID:-984}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

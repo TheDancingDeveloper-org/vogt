@@ -8,10 +8,19 @@
 # source. Every difference from the generic install is stated here and
 # nowhere else.
 #
-# **Not yet deployed.** The topology is proven — see below — but the estate
-# still runs the merged single-container image from
-# `deploy/vogt-stack.compose.yml`. Moving it is a deliberate act with a parity
-# walk attached; this file is the reviewed source for when that happens.
+# **Deployed.** `vogt-dev` has run this overlay as two containers since
+# 2026-08-20, and `vogt-prod` runs it from the day it is stood up; confirm
+# with Komodo `GetStack` rather than with this comment, which said "not yet
+# deployed" for a while after it was. `deploy/vogt-stack.compose.yml` is the
+# older merged single-container shape and is not what either stack runs.
+#
+# Two stacks now layer onto it, so a change here reaches production. Every
+# instance-scoped value is supplied by the Komodo stack environment, not by
+# this file — which is what lets one reviewed source serve both.
+#
+# The optional third file is `deploy/estate.docker-socket.yml`: listing it
+# mounts the host Docker socket into the engine, and omitting it makes
+# `docker` inside a session fail closed. Both stacks currently list it.
 #
 # ## What was proven, and how
 #
