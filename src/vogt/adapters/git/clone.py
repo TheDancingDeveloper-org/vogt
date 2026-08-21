@@ -84,6 +84,9 @@ class CloneRequest:
     remote: str
     destination: Path
     token: str | None = None
+    #: Where the `GIT_ASKPASS` helper may live. Must be executable at runtime;
+    #: see `_AskPass` for why the default temp dir is not always that.
+    helper_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -128,11 +131,11 @@ def clone_repository(request: CloneRequest) -> CloneOutcome:
         # is refused unless it is clean and at parity with origin. Vogt runs no
         # merge, rebase or stash to make it so; the reconciliation is the
         # person's, not ours.
-        _enforce_import_parity(destination, request.token)
+        _enforce_import_parity(destination, request.token, request.helper_dir)
         return existing
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with _AskPass(request.token) as env:
+    with _AskPass(request.token, request.helper_dir) as env:
         _run_git(
             ["clone", "--origin", "origin", request.remote, str(destination)],
             cwd=destination.parent,
@@ -172,6 +175,9 @@ class PushRequest:
     remote: str
     branch: str
     token: str | None = None
+    #: See `CloneRequest.helper_dir` — the push's helper has the same
+    #: executability requirement.
+    helper_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -251,7 +257,7 @@ def push_branch(request: PushRequest) -> PushOutcome:
     other failure keeps its git diagnostic (redacted of credentials).
     """
     refspec = f"{request.branch}:refs/heads/{request.branch}"
-    with _AskPass(request.token) as env:
+    with _AskPass(request.token, request.helper_dir) as env:
         try:
             _run_git(
                 ["push", request.remote, refspec],
@@ -312,7 +318,9 @@ def _reuse_existing(destination: Path, remote: str) -> CloneOutcome | None:
     )
 
 
-def _enforce_import_parity(destination: Path, token: str | None) -> None:
+def _enforce_import_parity(
+    destination: Path, token: str | None, helper_dir: Path | None = None
+) -> None:
     """Refuse a re-import onto a checkout that is not clean and at parity (#180).
 
     The gate reads only — `git status`, `git rev-parse`, `git ls-remote` — and
@@ -337,7 +345,7 @@ def _enforce_import_parity(destination: Path, token: str | None) -> None:
         )
         raise ImportWorkingTreeDirty(msg)
     local = _local_head(destination, branch)
-    origin = _origin_head(destination, branch, token)
+    origin = _origin_head(destination, branch, token, helper_dir)
     if local != origin:
         msg = (
             f"local HEAD {local or 'unknown'} on branch {branch!r} has diverged "
@@ -379,7 +387,9 @@ def _local_head(destination: Path, branch: str) -> str | None:
     return _read(destination, "rev-parse", branch)
 
 
-def _origin_head(destination: Path, branch: str, token: str | None) -> str | None:
+def _origin_head(
+    destination: Path, branch: str, token: str | None, helper_dir: Path | None = None
+) -> str | None:
     """The commit origin's default branch points at, read live (no fetch).
 
     `git ls-remote` asks origin for its current refs and writes nothing — no
@@ -388,7 +398,7 @@ def _origin_head(destination: Path, branch: str, token: str | None) -> str | Non
     `GIT_ASKPASS` helper the clone uses, so a private origin is reachable without
     the credential ever touching a command line (FR-S8).
     """
-    with _AskPass(token) as env:
+    with _AskPass(token, helper_dir) as env:
         try:
             out = _run_git(
                 ["ls-remote", "origin", f"refs/heads/{branch}"],
@@ -417,10 +427,22 @@ def _normalise(remote: str) -> str:
 
 
 class _AskPass:
-    """A `GIT_ASKPASS` helper that exists for the length of one clone."""
+    """A `GIT_ASKPASS` helper that exists for the length of one clone.
 
-    def __init__(self, token: str | None) -> None:
+    `helper_dir` exists because the helper must be *executable*, which is a
+    stronger requirement than "somewhere to write a file": the hardened
+    deployment mounts `/tmp` as a `noexec` tmpfs (read-only image, tmpfs
+    scratch), so a helper written to the default temp dir is created fine and
+    then cannot be run — every authenticated clone failed with
+    `cannot exec '/tmp/vogt-askpass-…'` while unauthenticated ones sailed
+    through. The service layer passes a directory on the writable data
+    volume; `None` keeps the default temp dir for environments without the
+    hardening.
+    """
+
+    def __init__(self, token: str | None, helper_dir: Path | None = None) -> None:
         self._token = token
+        self._helper_dir = helper_dir
         self._dir: str | None = None
 
     def __enter__(self) -> dict[str, str]:
@@ -432,7 +454,12 @@ class _AskPass:
             env.pop("GIT_ASKPASS", None)
             return env
 
-        self._dir = tempfile.mkdtemp(prefix="vogt-askpass-")
+        if self._helper_dir is not None:
+            self._helper_dir.mkdir(parents=True, exist_ok=True)
+        self._dir = tempfile.mkdtemp(
+            prefix="vogt-askpass-",
+            dir=None if self._helper_dir is None else str(self._helper_dir),
+        )
         script = Path(self._dir) / "askpass.sh"
         script.write_text(_ASKPASS_SCRIPT, encoding="utf-8")
         script.chmod(0o700)

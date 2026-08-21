@@ -113,6 +113,9 @@ def publish_project(ctx: AppContext, params: ForgePublishParams) -> ForgePublish
             remote=provider.clone_url(ref),
             branch=source.branch,
             token=provider.clone_token(),
+            # Same executability constraint as the import's clone: the
+            # hardened /tmp is noexec, so the helper lives on the data volume.
+            helper_dir=ctx.config.data_dir / "tmp",
         )
     )
 

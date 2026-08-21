@@ -633,6 +633,42 @@ def test_the_askpass_helper_does_not_outlive_the_clone(
         assert not Path(path).exists(), f"{path} survived the clone"
 
 
+def test_the_askpass_helper_lives_where_the_caller_says(
+    origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The helper must be *executable*, which the default temp dir is not
+    everywhere: the hardened deployment mounts /tmp as a noexec tmpfs, so
+    every authenticated clone failed with `cannot exec '/tmp/vogt-askpass-…'`
+    while public ones sailed through. `helper_dir` is the caller saying where
+    an executable file may live — the service passes the data volume."""
+    seen: list[str] = []
+    real_run = subprocess.run
+
+    def recording(args: Any, **kwargs: Any) -> Any:
+        env = kwargs.get("env") or {}
+        if "GIT_ASKPASS" in env:
+            seen.append(env["GIT_ASKPASS"])
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recording)
+    helper_dir = tmp_path / "data" / "tmp"  # does not exist yet — created lazily
+    clone_repository(
+        CloneRequest(
+            remote=str(origin),
+            destination=tmp_path / "cloned",
+            token="ghp_x",
+            helper_dir=helper_dir,
+        )
+    )
+
+    assert seen, "no askpass helper was used, so the token went somewhere else"
+    for path in seen:
+        assert Path(path).is_relative_to(helper_dir), (
+            f"{path} was written outside the caller's helper_dir"
+        )
+        assert not Path(path).exists(), f"{path} survived the clone"
+
+
 def test_a_failure_message_does_not_repeat_a_credential(tmp_path: Path) -> None:
     """An error message is a place secrets escape to logs.
 

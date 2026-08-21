@@ -89,6 +89,10 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
             remote=remote,
             destination=destination,
             token=None if provider is None else provider.clone_token(),
+            # On the data volume, not the default temp dir: the hardened
+            # deployment's /tmp is a noexec tmpfs, and the askpass helper
+            # must be executable (see `_AskPass`).
+            helper_dir=ctx.config.data_dir / "tmp",
         )
     )
 
