@@ -10,10 +10,31 @@ const DEFAULT_MUTATING_REQUEST_LIMIT_PER_MINUTE: u32 = 600;
 
 /// Voicemode's STT base-URL list, exactly (1:1 with `VOICEMODE_STT_BASE_URLS`):
 /// a local Whisper.cpp first, OpenAI's transcription endpoint as the fallback.
-const DEFAULT_STT_BASE_URLS: &[&str] = &["http://127.0.0.1:2022/v1", "https://api.openai.com/v1"];
+/// Documented, not defaulted — see `DEFAULT_STT_BASE_URLS` for why.
+#[cfg(test)]
+const VOICEMODE_STT_BASE_URLS: &[&str] = &["http://127.0.0.1:2022/v1", "https://api.openai.com/v1"];
 /// Voicemode's TTS base-URL list, exactly (1:1 with `VOICEMODE_TTS_BASE_URLS`):
 /// a local Kokoro first, OpenAI's speech endpoint as the fallback.
-const DEFAULT_TTS_BASE_URLS: &[&str] = &["http://127.0.0.1:8880/v1", "https://api.openai.com/v1"];
+#[cfg(test)]
+const VOICEMODE_TTS_BASE_URLS: &[&str] = &["http://127.0.0.1:8880/v1", "https://api.openai.com/v1"];
+
+/// **Server-side speech is off until a deployment says where it runs.**
+///
+/// These defaulted to voicemode's local-first list, and that made `/api/config`
+/// lie: a half is "enabled" when its list is non-empty, so a deployment with
+/// nothing listening on `127.0.0.1:2022` still advertised
+/// `assistant_stt_enabled: true`. The client then offered a microphone whose
+/// every request fell through the list to a 404 — working, by the fallback
+/// rule, but advertised as a capability the deployment does not have. That is
+/// the shape FR-O4 exists to forbid: absence must read as absence.
+///
+/// Empty is therefore the honest default, and it is r20's rule applied to the
+/// other end of the same wire — a key with no stated destination is an error,
+/// so a destination nobody stated is not a configuration. An operator running
+/// voicemode's backends pastes its list (above, and in
+/// `deploy/vogt-stack.env.example`) and gets exactly voicemode's behaviour.
+const DEFAULT_STT_BASE_URLS: &[&str] = &[];
+const DEFAULT_TTS_BASE_URLS: &[&str] = &[];
 
 /// One named OpenAI-compatible backend the assistant may run a turn against
 /// (FR-T9).
@@ -1325,10 +1346,13 @@ mod tests {
     }
 
     #[test]
-    fn the_url_list_defaults_to_voicemodes_and_env_can_disable_it() {
-        // Unset ⇒ voicemode's local-first, cloud-fallback default, exactly.
+    fn the_url_list_is_off_unless_configured_and_parses_voicemodes_when_given() {
+        // Unset ⇒ off. Advertising a backend nobody configured is the lie
+        // FR-O4 forbids, so absence stays absence (see DEFAULT_STT_BASE_URLS).
+        assert!(parse_url_list(None, None, DEFAULT_STT_BASE_URLS).is_empty());
+        // Voicemode's own list, when a deployment states it, parses 1:1.
         assert_eq!(
-            parse_url_list(None, None, DEFAULT_STT_BASE_URLS),
+            parse_url_list(None, None, VOICEMODE_STT_BASE_URLS),
             vec![
                 "http://127.0.0.1:2022/v1".to_string(),
                 "https://api.openai.com/v1".to_string(),
@@ -1341,6 +1365,15 @@ mod tests {
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
         );
         assert!(parse_url_list(None, Some("".into()), DEFAULT_STT_BASE_URLS).is_empty());
+        // Both halves are off by default, and both take voicemode's list.
+        assert!(parse_url_list(None, None, DEFAULT_TTS_BASE_URLS).is_empty());
+        assert_eq!(
+            parse_url_list(None, None, VOICEMODE_TTS_BASE_URLS),
+            vec![
+                "http://127.0.0.1:8880/v1".to_string(),
+                "https://api.openai.com/v1".to_string(),
+            ]
+        );
     }
 }
 

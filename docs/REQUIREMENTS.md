@@ -1453,6 +1453,42 @@ the first landing (and #129 on `main`, which has never built green) was
 missing. It also guards the two `test_deploy` reads of `engine/Dockerfile*`
 for the core-alone job, which deletes that tree.
 
+### Revision r26 — server speech is off until a deployment says where it runs
+
+*2026-08-21 (#190, #194). FR-T12's base-URL lists defaulted to voicemode's
+local-first stack. That default made `/api/config` advertise a capability the
+deployment did not have, which is the one thing FR-O4 forbids: absence
+presenting as presence.*
+
+A speech half is enabled when its base-URL list is non-empty. Defaulting the
+list to `http://127.0.0.1:2022/v1,https://api.openai.com/v1` therefore enabled
+STT on every deployment, including the ones — every one of them today — with no
+Whisper.cpp on that port and no key for the fallback. Live on `vogt-dev`,
+`/api/config` answered `assistant_stt_enabled: true` and
+`assistant_tts_enabled: true` while nothing was listening. Nothing *broke*: a
+request fell through the list and 404'd, and the client degraded to on-device or
+typed input exactly as FR-T6 says. But the client had already been told the
+capability existed, and had offered the user a microphone for it.
+
+**Both halves now default to empty**, and a deployment turns one on by naming
+where its speech runs. This is r20's key-destination rule applied to the other
+end of the same wire — a key with no stated destination is a configuration
+error, so a destination nobody stated is not a configuration. Voicemode's exact
+lists stay documented, in `config.rs` beside the default and in
+`deploy/vogt-stack.env.example` as the commented paste-in, so adopting its
+stack is uncommenting two lines rather than reconstructing them.
+
+The interchangeable-backend design of FR-T12 is unchanged: the ordered
+local-first, cloud-fallback list is still the mechanism, and the routes still
+404 into a silent client fallback when no entry answers.
+
+**FR-T7's chat half was validated the same day** and is unaffected: a typed U1
+against `vogt-dev` returned a real answer through OpenRouter, having read the
+estate's notifications — so the assistant's chat path, its tool loop, and the
+front-door token's reach over `/api/assistant/*` are all confirmed working
+against a live deployment (#194). The 401 that a CLI token saw on those routes
+is a property of that token's capability set, not a defect.
+
 ## 1. Functional requirements
 
 ### FR-P — Projects & per-repo view

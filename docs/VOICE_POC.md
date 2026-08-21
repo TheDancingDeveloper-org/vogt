@@ -158,6 +158,22 @@ from §6, not before.
 
 ## 6. Findings
 
+### The deployment itself — chat validated end to end *(2026-08-21)*
+
+Against the live `vogt-dev` (fresh store, `dev-af35786`): a typed U1 — *"are
+there any notifications?"* — posted to `/api/assistant/message` with a GUI
+front-door token returned **HTTP 200** and a real answer, reporting 21 active
+notifications and naming the failing CI checks it had just read from the
+estate. So the chat profile (OpenRouter, `openai/gpt-5.4-mini`), the tool loop,
+and the front-door token's reach over `/api/assistant/*` are confirmed working
+against a real deployment, not a fixture (#194).
+
+The 401 an earlier CLI smoke test saw on that route was the *engine* token's
+capability set, not a defect — a GUI session token authenticates it correctly.
+Key hygiene (the shared OpenRouter token with a small limit) stays a deliberate
+follow-up on #194.
+
+
 ### Checkpoint A — the five utterances, typed *(2026-08-17)*
 
 **Reached.** §3.1, §3.2 and §3.3 are built and the five utterances complete
@@ -225,7 +241,9 @@ Two things deliberately **not** done at this checkpoint, and why:
 ### Checkpoint B — desktop microphone
 
 *Not run. Needs a person and a laptop microphone; everything it needs is
-built.*
+built* — the Web Speech path shipped with #189 and is live on `vogt-dev` as of
+`dev-af35786`. What is owed is the five utterances spoken three times each,
+with the recognizer misses and the U3/U4 approval-tap counts written here.
 
 ### Checkpoint C — server-side STT/TTS *(2026-08-21)*
 
@@ -242,7 +260,10 @@ Python workstation MCP app with local-audio-hardware deps, unfit for the
 headless Rust container): STT and TTS each take an **ordered, comma-separated
 base-URL list**, tried in order — local first, cloud fallback — hitting the same
 OpenAI-compatible `/audio/transcriptions` / `/audio/speech` on each. The
-defaults mirror voicemode exactly (1:1 with its `VOICEMODE_*` vars): STT
+defaults **ship empty** — see r26: a defaulted list made `/api/config`
+advertise a backend nobody was running, so a deployment now names where its
+speech runs, and voicemode's exact lists stay documented as the paste-in (1:1
+with its `VOICEMODE_*` vars): STT
 `http://127.0.0.1:2022/v1,https://api.openai.com/v1` model `whisper-1`; TTS
 `http://127.0.0.1:8880/v1,https://api.openai.com/v1` model `tts-1-hd` voice
 `nova`. The key is reused for whichever entry needs one (the cloud endpoint);
