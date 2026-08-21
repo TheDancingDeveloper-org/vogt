@@ -212,12 +212,25 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
     """
     text = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
     on_dev = r"=\$\{\{ github\.ref == 'refs/heads/dev' \}\}"
-    for arg in ("INSTALL_AI_CLIENTS", "INSTALL_FLUTTER"):
-        wired = re.findall(arg + on_dev, text)
-        assert len(wired) == 2, (
-            f"{arg} must be passed to both the candidate and the pushed "
-            f"build of engine/Dockerfile; found {len(wired)}"
-        )
+    # INSTALL_AI_CLIENTS is still a per-commit build arg on the merged image and
+    # must reach both the candidate and the pushed build, or the image that is
+    # smoke-tested is not the image that is published.
+    wired = re.findall("INSTALL_AI_CLIENTS" + on_dev, text)
+    assert len(wired) == 2, (
+        "INSTALL_AI_CLIENTS must be passed to both the candidate and the "
+        f"pushed build of engine/Dockerfile; found {len(wired)}"
+    )
+    # Flutter is no longer a build arg of the merged image (#184): it is the
+    # difference between the two published pod-base variants, selected once for
+    # the whole build. `dev` gets `full` (Flutter), everything else `lean`, so
+    # the dev image still carries the mobile SDK — proven by the loop below.
+    assert (
+        "variant: ${{ github.ref == 'refs/heads/dev' && 'full' || 'lean' }}" in text
+    ), "the pod variant must be `full` on dev (Flutter) and `lean` elsewhere"
+    assert "INSTALL_FLUTTER" not in text, (
+        "Flutter moved to the pod variant (#184); INSTALL_FLUTTER is no longer "
+        "a build arg of the merged image"
+    )
     loop = re.search(r"for tool in ([^;]+); do", text)
     assert loop, (
         "the dev image's smoke test must loop over the tools the image carries "
@@ -490,18 +503,43 @@ def test_the_merged_image_is_built_from_the_engine_dockerfile(workflow: str) -> 
     )
 
 
+@pytest.mark.skipif(
+    not (REPO_ROOT / "engine" / "Dockerfile").is_file(),
+    reason="the core-alone job (NFR-Q6) deletes engine/; this reads its Dockerfile",
+)
 @pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
 def test_the_pwa_is_built_before_the_merged_image(workflow: str) -> None:
-    """`rust-embed` reads `web/dist/` at compile time.
+    """`rust-embed` reads `web/dist/` at compile time, and it is stage 1.
 
-    An image built without this step compiles, starts, serves a placeholder
-    where the product's front end should be, and passes every check that
-    asks whether it is running.
+    Two properties, after #184 moved the build inside the image:
+
+      * the bundle is built by stage 1 of `engine/Dockerfile` (`web-build`),
+        which finishes before stage 2 (`server-build`) embeds it; and
+      * the runner deliberately does **not** build it. A runner-side
+        `pnpm build` produced a `web/dist` that `engine/Dockerfile.dockerignore`
+        drops from the context, so it never reached the image — a load-bearing
+        looking step that read as protection and did nothing.
     """
-    job = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+    dockerfile = (REPO_ROOT / "engine" / "Dockerfile").read_text("utf-8")
+    assert "AS web-build" in dockerfile and "AS server-build" in dockerfile
+    assert dockerfile.index("AS web-build") < dockerfile.index("AS server-build"), (
+        "the web bundle (stage 1) must be built before the server (stage 2) "
+        "that embeds it at compile time"
+    )
+    assert "COPY --from=web-build /app/web/dist" in dockerfile, (
+        "stage 2 must embed the bundle stage 1 built, which is what makes the "
+        "ordering load-bearing"
+    )
+
+    # Comments stripped: the workflow's own note explains the removed step by
+    # name, and a raw search would find `pnpm build` in the sentence about not
+    # running it — the mistake `_without_comments` exists for.
+    job = _without_comments((WORKFLOWS / workflow).read_text(encoding="utf-8"))
     job = job[job.index("  stack-image:") :]
-    assert job.index("pnpm build") < job.index("file: engine/Dockerfile"), (
-        f"{workflow}: the bundle is a build input, not a later artefact"
+    assert "pnpm build" not in job, (
+        f"{workflow}: the PWA must not be rebuilt on the runner (#184); stage 1 "
+        "of engine/Dockerfile builds the bundle the image embeds, and "
+        "engine/Dockerfile.dockerignore drops any host-built web/dist"
     )
 
 
@@ -559,6 +597,117 @@ def test_a_tag_can_release_the_merged_image() -> None:
     assert "type=semver,pattern={{version}}" in job, "a release assigns a version"
     assert 'cosign sign --yes "${STACK_IMAGE}@${DIGEST}"' in job, (
         "sign the digest, never a tag: a tag can be moved after signing"
+    )
+
+
+# ── The build cache and the pod-toolchain split (#184) ─────────────────────
+#
+# `dev`'s merged image recompiled everything from scratch on every push:
+# ~34 minutes, of which 22 were a dev-pod toolchain no commit touched and the
+# rest a Rust build with no layer cache. Two changes address it — a BuildKit
+# layer cache on the estate's own local-registry on Node B (not GHCR: the
+# runners are on Node B, so the cache stays on the host while GHCR is a WAN
+# hop, #129), and the toolchain moved to `engine/Dockerfile.pod`, built once by
+# `pod-base.yml` and consumed by digest. These assert the shape so a later edit
+# cannot quietly send the cache to GHCR or fold the toolchain back inline.
+
+#: The estate's local-registry on Node B (#129). `dind-daemon.json` on the
+#: workers trusts it over HTTP; it is local to the runners, unlike GHCR.
+LOCAL_REGISTRY_CACHE = "192.168.1.75:5500/vogt-buildcache"
+
+
+@pytest.mark.parametrize("workflow", ["build.yml", "release.yml", "pod-base.yml"])
+def test_image_builds_cache_to_the_node_b_local_registry(workflow: str) -> None:
+    """#184: the layer cache lands on Node B's local-registry, never GHCR.
+
+    Every `cache-from`/`cache-to` names the estate's `CACHE_IMAGE` (the local
+    registry), and none names GHCR — a WAN round-trip from these runners that
+    #55 mistakenly targeted and #129 corrected.
+    """
+    raw = (WORKFLOWS / workflow).read_text("utf-8")
+    assert f"CACHE_IMAGE: {LOCAL_REGISTRY_CACHE}" in raw, (
+        f"{workflow} must declare the Node B local-registry as CACHE_IMAGE "
+        f"({LOCAL_REGISTRY_CACHE})"
+    )
+    cache_lines = [
+        line
+        for line in raw.splitlines()
+        if "cache-from:" in line or "cache-to:" in line
+    ]
+    assert cache_lines, f"{workflow} sets a BuildKit layer cache"
+    for line in cache_lines:
+        assert "${{ env.CACHE_IMAGE }}" in line, (
+            f"{workflow}: a cache ref must use the local-registry CACHE_IMAGE, "
+            f"not an inline or GHCR ref: {line.strip()}"
+        )
+        assert "ghcr.io" not in line, (
+            f"{workflow}: the layer cache must not land on GHCR (#184): {line.strip()}"
+        )
+
+
+def test_the_core_and_stack_cache_streams_do_not_collide() -> None:
+    """#184: keyed per image and per ref so no stream evicts another.
+
+    core and stack are different layer graphs; dev and main fork on
+    INSTALL_AI_CLIENTS. One shared cache tag would have the streams evicting
+    each other and none hitting, which is the failure a cache is meant to end.
+    """
+    raw = (WORKFLOWS / "build.yml").read_text("utf-8")
+    assert "${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }}" in raw, (
+        "the core image caches under a per-ref core tag"
+    )
+    assert "${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}" in raw, (
+        "the merged image caches under a per-ref stack tag, distinct from core"
+    )
+
+
+@pytest.mark.skipif(
+    not (REPO_ROOT / "engine" / "Dockerfile").is_file(),
+    reason="the core-alone job (NFR-Q6) deletes engine/; this reads Dockerfile.pod",
+)
+def test_the_dev_pod_toolchain_is_split_into_its_own_base() -> None:
+    """#184: the merged image builds FROM a prebuilt pod base, not inline.
+
+    22 of the merged image's 34 build minutes were a toolchain no commit
+    touched. It now lives in `engine/Dockerfile.pod`, published by
+    `pod-base.yml`, and the merged image's runtime stage is
+    `FROM ${POD_BASE_IMAGE}`.
+    """
+    assert (REPO_ROOT / "engine" / "Dockerfile.pod").is_file(), (
+        "the pod toolchain lives in engine/Dockerfile.pod"
+    )
+    assert (WORKFLOWS / "pod-base.yml").is_file(), (
+        "pod-base.yml builds and publishes the pod base"
+    )
+    engine = (REPO_ROOT / "engine" / "Dockerfile").read_text("utf-8")
+    assert "FROM ${POD_BASE_IMAGE}" in engine, (
+        "the merged image's runtime stage builds on the prebuilt pod base"
+    )
+    # Sentinels for the heavy toolchain that must have moved out of the
+    # per-commit image and into the base.
+    pod = (REPO_ROOT / "engine" / "Dockerfile.pod").read_text("utf-8")
+    for tool in ("rustup.rs", "sdkmanager", "sway swaybg"):
+        assert tool not in engine, (
+            f"{tool!r} is toolchain that belongs in engine/Dockerfile.pod, not "
+            "the per-commit merged image (#184)"
+        )
+        assert tool in pod, f"the pod base must install {tool!r}"
+
+
+@pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
+def test_both_image_workflows_supply_the_pod_base_by_digest(workflow: str) -> None:
+    """#184: pod-base is a prerequisite and its digest is what the build uses.
+
+    A tag would silently decouple the merged image from the toolchain it was
+    tested against; the workflow passes the digest `pod-base` resolved, the same
+    standard `CORE_IMAGE` is held to (#143).
+    """
+    raw = (WORKFLOWS / workflow).read_text("utf-8")
+    assert "uses: ./.github/workflows/pod-base.yml" in raw, (
+        f"{workflow} builds or reuses the pod base as a prerequisite"
+    )
+    assert "POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}" in raw, (
+        f"{workflow} passes the resolved pod-base digest to engine/Dockerfile"
     )
 
 

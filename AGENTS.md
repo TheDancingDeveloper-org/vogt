@@ -64,7 +64,14 @@ on any surface.
   authoritative second way to publish and deploy the same Dockerfile. The
   engine's image is built by `.github/workflows/build.yml`, and the pre-merge
   Forgejo repository keeps its own pipeline. Read `engine/AGENTS.md` before
-  changing anything in there.
+  changing anything in there. Since #184 the dev-pod toolchain lives in
+  `engine/Dockerfile.pod` (built once by `.github/workflows/pod-base.yml` as
+  the `vogt-pod-base` base image, consumed by digest), so **adding a tool to
+  the pod means editing `engine/Dockerfile.pod`**, not `engine/Dockerfile`,
+  which now installs only the per-commit halves on top of it. The image builds
+  cache their layers to the estate's `local-registry` on Node B, not GHCR —
+  the runners are on the host (`docs/DEPLOYMENT.md` §10, `REQUIREMENTS.md`
+  r25).
 - `web/` — the Solid/Vite PWA, and the product's GUI going forward. It is baked
   into the Rust binary at compile time (`engine/server/src/assets.rs` embeds
   `../../web/dist/`), so a `cargo build` without a fresh `pnpm build` ships a

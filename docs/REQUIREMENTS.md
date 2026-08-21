@@ -1363,6 +1363,96 @@ capability is recorded in §7.3.*
    global `work.list`, keep native rows reachable: the withdrawal is a
    surface change, not data loss.
 
+### Revision r25 — the merged image is cached, and its toolchain is built once
+
+*2026-08-21 (#184, replacing the unmerged #55). `dev`'s merged-stack image
+recompiled everything from scratch on every push — about 34 minutes, of which
+22 were a dev-pod toolchain no commit had touched and the rest a Rust build
+with no layer cache. This revision makes the build cacheable and stops it
+rebuilding what does not change, without loosening any NFR-C6 guarantee.*
+
+The measurement is the argument. On the `dev` build of 2026-08-18: 1344s
+installing the toolchain (apt, rustup, five `cargo install`s, sway, GStreamer,
+JDK, Gradle, the Android SDK, Flutter), 259s exporting a tarball into the local
+daemon, 215s compiling Rust, 178s the core venv. None of the toolchain time
+depended on a line of this repository's source, and not one layer was `CACHED`
+because no `build-push-action` call set `cache-from`/`cache-to` and every job
+provisioned a fresh, torn-down builder.
+
+Four decisions, all applied in this revision:
+
+1. **A BuildKit layer cache on the estate's own `local-registry`, not GHCR.**
+   `build.yml` and `release.yml` cache both image builds — core and merged
+   stack — to `192.168.1.75:5500/vogt-buildcache`, the `local-registry`
+   container on Node B that #129 established on `main`. The runners are on Node
+   B, so this cache stays on the host; GHCR (or `type=gha`) is a WAN round-trip
+   from the same runners, which is why #55's GHCR backend was the wrong one
+   here. Tags are keyed per image *and* per ref (`core-<ref>`, `stack-<ref>`;
+   `*-release` for tags) so the core and stack streams, and the dev and main
+   streams, never evict each other. `dind-daemon.json` on the workers trusts
+   the registry over HTTP.
+
+2. **The dev-pod toolchain is its own base image.** It moved out of
+   `engine/Dockerfile` into `engine/Dockerfile.pod`, built and published by a
+   new reusable workflow `pod-base.yml` as `vogt-pod-base:{lean,full}-<hash>-
+   <week>` and consumed by the merged build **by digest** as `POD_BASE_IMAGE`
+   — the same standard `CORE_IMAGE` is held to (#143). Content-hashed so an
+   edit republishes immediately; week-stamped so the "latest at build time"
+   installs cannot silently freeze; skipped entirely when its tag already
+   exists, the same prerequisite shape as `mirror-base-images.yml`. Flutter is
+   now the difference between the `lean` (main, releases) and `full` (dev)
+   variants rather than a build arg. An ordinary push now *pulls* the
+   toolchain rather than building it.
+
+3. **The agent CLIs stay per-commit and pinned, and are not day-bucketed.**
+   #55 kept `@openai/codex`, `@anthropic-ai/claude-code` and `theclawbay`
+   unpinned and bucketed the cache by day to keep a warm layer from freezing
+   them. `dev` has since chosen the stronger property — the three are pinned as
+   Renovate-maintained ARGs (`test_the_engine_pins_every_npm_global_it_installs`
+   enforces it), which makes a commit-identified `dev-<sha>` reproducible
+   (NFR-C3, FR-D6). A pin is already cache-safe: the layer is reused only while
+   the versions are genuinely unchanged, and a Renovate bump busts it. Day-
+   bucketing would have made the same `dev-<sha>` non-reproducible, so it is
+   deliberately **not** carried over; the pins stay and no epoch arg is added.
+
+4. **This supersedes #129's `main` build; it does not fork the strategy.**
+   Both land on the same backend and repository (`local-registry`,
+   `vogt-buildcache`), so there is one caching strategy, not two. The
+   difference is that `dev` adds the pod split and per-ref keying (main's #129
+   uses flat `:core`/`:stack` and no split). Main's `build.yml` is *not*
+   forward-ported in a separate change: when `dev` merges to `main`, main
+   inherits this `build.yml` wholesale, and its first post-merge build warms a
+   fresh `:core-main`/`:stack-main` tag once. Nothing in `indexarr/ops`
+   changes — image names, tag streams and the digest-pin mechanism are
+   unchanged, so NFR-D10 still governs every deploy.
+
+All of NFR-C6's guarantees hold: the merged image is still built from
+`engine/Dockerfile` with the repository as context, the PWA is still built
+before the engine that embeds it (now stage 1 before stage 2, and no longer
+rebuilt inertly on the runner), both entrypoints still run in the candidate
+before the push, the digest is still signed, and a tag can still release it.
+`tests/test_deploy.py` was adapted rather than relaxed, and gained guards for
+the cache backend and the pod split.
+
+What this revision deliberately does not decide, matching the open questions
+in the transition brief: the compatibility window for `MYDEVENV2_*`
+environment names and persisted engine identifiers, whether the engine stays
+in this repository long-term, and the final public image tagging policy.
+Renaming a value that is persisted or on the wire is a migration, not a
+search-and-replace, and each will be its own recorded decision.
+
+**Landed twice, and the second landing is this one.** The first (208c1a4) was
+reverted the same day: its cache import failed on the live runner with
+`http: server gave HTTP response to HTTPS client`, because the default
+`docker-container` builder speaks HTTPS to every registry and sits on a bridge
+network — `dind-daemon.json` trusting the registry configures the *daemon*,
+not the builder BuildKit actually runs. The re-landing gives every
+`setup-buildx-action` `driver-opts: network=host` and an inline buildkitd
+`[registry."192.168.1.75:5500"] http = true`, which is the builder-side half
+the first landing (and #129 on `main`, which has never built green) was
+missing. It also guards the two `test_deploy` reads of `engine/Dockerfile*`
+for the core-alone job, which deletes that tree.
+
 ## 1. Functional requirements
 
 ### FR-P — Projects & per-repo view
