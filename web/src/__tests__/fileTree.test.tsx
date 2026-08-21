@@ -75,6 +75,81 @@ describe("FileTree", () => {
     await waitFor(() => expect(api.tree).toHaveBeenCalledWith("source", 0));
   });
 
+  it("dismisses a folder's actions picker on collapse, outside-click and Escape (#186)", async () => {
+    vi.spyOn(api, "tree").mockImplementation(async (path) =>
+      path === "source"
+        ? [{ name: "nested.tsx", path: "source/nested.tsx", is_dir: false }]
+        : [{ name: "source", path: "source", is_dir: true }],
+    );
+    vi.spyOn(api, "gitStatus").mockResolvedValue({
+      repo: "",
+      is_repo: false,
+      branch: "",
+      ahead: 0,
+      behind: 0,
+      entries: [],
+    });
+
+    render(() => (
+      <Router>
+        <Route path="*" component={() => <FileTree />} />
+      </Router>
+    ));
+
+    await fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    expect(await screen.findByText("source")).toBeVisible();
+
+    // Collapsing the folder takes its open picker with it (the orphaned-menu bug).
+    await fireEvent.click(screen.getByLabelText("Expand source"));
+    await fireEvent.click(screen.getByLabelText("Actions for source"));
+    expect(screen.getByRole("button", { name: "Open terminal" })).toBeVisible();
+    await fireEvent.click(screen.getByLabelText("Collapse source"));
+    expect(screen.queryByRole("button", { name: "Open terminal" })).not.toBeInTheDocument();
+
+    // A click outside the row dismisses it, the way a menu does.
+    await fireEvent.click(screen.getByLabelText("Actions for source"));
+    expect(screen.getByRole("button", { name: "Rename / move" })).toBeVisible();
+    await fireEvent.click(document.body);
+    expect(screen.queryByRole("button", { name: "Rename / move" })).not.toBeInTheDocument();
+
+    // And Escape dismisses it.
+    await fireEvent.click(screen.getByLabelText("Actions for source"));
+    expect(screen.getByRole("button", { name: "Rename / move" })).toBeVisible();
+    await fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("button", { name: "Rename / move" })).not.toBeInTheDocument();
+  });
+
+  it("keeps only one node's actions picker open at a time (#186)", async () => {
+    vi.spyOn(api, "tree").mockResolvedValue([
+      { name: "one.txt", path: "one.txt", is_dir: false },
+      { name: "two.txt", path: "two.txt", is_dir: false },
+    ]);
+    vi.spyOn(api, "gitStatus").mockResolvedValue({
+      repo: "",
+      is_repo: false,
+      branch: "",
+      ahead: 0,
+      behind: 0,
+      entries: [],
+    });
+
+    render(() => (
+      <Router>
+        <Route path="*" component={() => <FileTree />} />
+      </Router>
+    ));
+
+    await fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    expect(await screen.findByText("one.txt")).toBeVisible();
+
+    await fireEvent.click(screen.getByLabelText("Actions for one.txt"));
+    expect(screen.getAllByRole("button", { name: "Rename / move" })).toHaveLength(1);
+
+    // Opening the second node's picker closes the first — one picker, not two.
+    await fireEvent.click(screen.getByLabelText("Actions for two.txt"));
+    expect(screen.getAllByRole("button", { name: "Rename / move" })).toHaveLength(1);
+  });
+
   it("uses the in-product decision for delete, defaults to cancel, and reports failures", async () => {
     vi.spyOn(api, "tree").mockResolvedValue([
       { name: "notes.txt", path: "docs/notes.txt", is_dir: false },

@@ -29,6 +29,46 @@ import { pendingAction, setPendingAction } from "./pendingAction";
 
 const TTS_PREF_KEY = "mydevenv2.assistant.tts";
 
+// The Web Speech recognizer, read defensively. TypeScript's DOM lib does not
+// declare the vendor-prefixed `webkitSpeechRecognition`, and Firefox ships
+// neither name — so both are looked up off `window` and the absent case is a
+// first-class "no microphone here", not an error (FR-T13, VOICE_POC §3.4).
+interface WebSpeechAlternative {
+  readonly transcript: string;
+}
+interface WebSpeechResult {
+  readonly length: number;
+  readonly [index: number]: WebSpeechAlternative;
+}
+interface WebSpeechResultList {
+  readonly length: number;
+  readonly [index: number]: WebSpeechResult;
+}
+interface WebSpeechRecognitionEvent {
+  readonly results: WebSpeechResultList;
+}
+interface WebSpeechRecognition {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: WebSpeechRecognitionEvent) => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  start(): void;
+  stop(): void;
+  abort(): void;
+}
+type WebSpeechRecognitionCtor = new () => WebSpeechRecognition;
+
+/** The recognizer constructor this browser offers, or null (e.g. Firefox). */
+function webSpeechCtor(): WebSpeechRecognitionCtor | null {
+  const scope = window as unknown as {
+    webkitSpeechRecognition?: WebSpeechRecognitionCtor;
+    SpeechRecognition?: WebSpeechRecognitionCtor;
+  };
+  return scope.webkitSpeechRecognition ?? scope.SpeechRecognition ?? null;
+}
+
 interface AssistantDraft {
   text: string;
   profile: string;
@@ -182,16 +222,26 @@ export default function Assistant(props: AssistantProps) {
       // A core that cannot be asked costs slug repair and nothing else: the
       // composer, the work-item repair and typed input all keep working.
     }
+    // STT backend, in preference order: the Capacitor native plugin inside the
+    // APK, then the browser's Web Speech recognizer on the desktop (FR-T13,
+    // VOICE_POC §3.4). Neither present — Firefox, say — is a working state that
+    // degrades to typed input with no error; the server STT route is §3.5.
     if (Capacitor.isPluginAvailable("SpeechRecognition")) {
       try {
         const { SpeechRecognition } = await import(
           "@capacitor-community/speech-recognition"
         );
         const { available } = await SpeechRecognition.available();
-        setSttAvailable(available);
+        if (available) {
+          sttBackend = "native";
+          setSttAvailable(true);
+        }
       } catch {
         setSttAvailable(false);
       }
+    } else if (webSpeechCtor()) {
+      sttBackend = "web";
+      setSttAvailable(true);
     }
   });
 
@@ -290,9 +340,24 @@ export default function Assistant(props: AssistantProps) {
   // can arrive, and either can arrive first, so ending a take is idempotent —
   // a double send is one thing said once and answered twice.
   let takeOpen = false;
+  // Which recognizer this session decided on (onMount), and the live Web
+  // Speech instance when that is the one. Native has no handle to hold — the
+  // plugin is a module singleton.
+  let sttBackend: "native" | "web" | null = null;
+  let webRecognition: WebSpeechRecognition | null = null;
 
   const closeRecognizer = async () => {
     setListening(false);
+    if (sttBackend === "web") {
+      const recognition = webRecognition;
+      webRecognition = null;
+      try {
+        recognition?.stop();
+      } catch {
+        /* already stopped */
+      }
+      return;
+    }
     try {
       const { SpeechRecognition } = await import(
         "@capacitor-community/speech-recognition"
@@ -341,8 +406,56 @@ export default function Assistant(props: AssistantProps) {
   // speaks. Holding makes the open microphone exactly as long as the
   // deliberate act. `docs/ENGINE.md` §6 has called this push-to-talk since
   // before it was.
+  // The desktop take, on the browser's own recognizer. The browser asks for
+  // the microphone itself (no plugin permission call), the take is held rather
+  // than toggled exactly as on the phone, and going quiet fires `onend`, which
+  // is the same "recognizer stopped first" end the native `listeningState`
+  // handler covers — routed through the one `stopListening` so what was said is
+  // sent once (FR-T5).
+  const startListeningWeb = () => {
+    const Ctor = webSpeechCtor();
+    if (!Ctor) return;
+    try {
+      stopSpeaking();
+      const recognition = new Ctor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = navigator.language || "en-US";
+      recognition.onresult = (event) => {
+        let heard = "";
+        for (let i = 0; i < event.results.length; i += 1) {
+          heard += event.results[i]?.[0]?.transcript ?? "";
+        }
+        const trimmed = heard.trim();
+        if (trimmed) setDraft(trimmed);
+      };
+      recognition.onend = () => {
+        if (takeOpen) void stopListening();
+      };
+      recognition.onerror = (event) => {
+        // A take that simply heard nothing, or was aborted by the release, is
+        // an ordinary end — not something to surface as a failure.
+        if (event.error !== "no-speech" && event.error !== "aborted") {
+          setListening(false);
+          props.onError(`speech recognition: ${event.error}`);
+        }
+      };
+      webRecognition = recognition;
+      takeOpen = true;
+      setListening(true);
+      recognition.start();
+    } catch (e) {
+      setListening(false);
+      props.onError(`speech recognition: ${String(e)}`);
+    }
+  };
+
   const startListening = async () => {
     if (listening()) return;
+    if (sttBackend === "web") {
+      startListeningWeb();
+      return;
+    }
     try {
       const { SpeechRecognition } = await import(
         "@capacitor-community/speech-recognition"

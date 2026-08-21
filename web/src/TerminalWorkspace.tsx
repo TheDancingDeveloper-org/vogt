@@ -162,6 +162,9 @@ const TerminalWorkspace: Component<Props> = (props) => {
   const [root, setRoot] = createSignal<TerminalLayoutNode>(initial.root);
   const [activePaneId, setActivePaneId] = createSignal(initial.activePaneId);
   const [broadcast, setBroadcast] = createSignal(Boolean(initial.broadcast));
+  // Maximise/solo: show only the active pane at full size, without closing the
+  // others (#185). Only meaningful with a split; a single pane already fills.
+  const [soloed, setSoloed] = createSignal(false);
   const [busy, setBusy] = createSignal<SplitDirection | "close" | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [draft, setDraft] = createSignal("");
@@ -185,6 +188,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
     return pane ? sessionsStore.sessions[pane.sessionId] : undefined;
   });
   const broadcastEnabled = createMemo(() => broadcast() && panes().length > 1);
+  const soloEnabled = createMemo(() => soloed() && panes().length > 1);
   const canCloseActivePane = createMemo(() => {
     const pane = activePane();
     return Boolean(
@@ -312,6 +316,12 @@ const TerminalWorkspace: Component<Props> = (props) => {
     }
   });
 
+  // Closing a split back to a single pane returns to the ordinary full-size
+  // layout: solo is a multi-pane state and has nothing left to maximise.
+  createEffect(() => {
+    if (panes().length <= 1 && soloed()) setSoloed(false);
+  });
+
   const reportError = (prefix: string, err: unknown) => {
     const detail = err instanceof Error ? err.message : String(err);
     const message = `${prefix}: ${detail}`;
@@ -435,6 +445,19 @@ const TerminalWorkspace: Component<Props> = (props) => {
         >
           {broadcastEnabled() ? "Broadcast on" : "Broadcast off"}
         </button>
+        <Show when={panes().length > 1}>
+          <button
+            class={soloEnabled() ? "active" : ""}
+            onClick={() => setSoloed((value) => !value)}
+            title={
+              soloEnabled()
+                ? "Show every pane in this workspace again"
+                : "Maximise the active pane; the others keep running, hidden"
+            }
+          >
+            {soloEnabled() ? "Restore split" : "Maximise"}
+          </button>
+        </Show>
         <button
           onClick={() => void splitActive("row")}
           disabled={busy() !== null}
@@ -480,7 +503,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
           </For>
         </div>
       </Show>
-      <div class="terminal-layout">
+      <div class={`terminal-layout ${soloEnabled() ? "soloed" : ""}`}>
         <LayoutNodeView
           node={root()}
           activePaneId={activePaneId()}

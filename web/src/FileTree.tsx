@@ -45,6 +45,13 @@ interface NodeProps {
   statusEntries: GitStatusEntry[];
 }
 
+// Only one node's actions picker is open at a time. The picker behaves like a
+// menu, and two menus open at once in a recursive tree is two menus to dismiss.
+// A module-level signal is the lightest coordination that survives the
+// recursion: each node keeps its own `actionsOpen`, and this names which node
+// currently owns an open picker so the others can close themselves.
+const [openPickerNode, setOpenPickerNode] = createSignal<string | null>(null);
+
 const FILE_STATUS: Record<GitStatusKind, { marker: string; label: string }> = {
   modified: { marker: "M", label: "Modified" },
   staged: { marker: "S", label: "Staged" },
@@ -87,6 +94,51 @@ const TreeNodeView: Component<NodeProps> = (props) => {
   );
   const [loading, setLoading] = createSignal(false);
   const status = () => statusForPath(props.statusEntries, props.node.path);
+  let rowRef: HTMLDivElement | undefined;
+  let actionsRef: HTMLDivElement | undefined;
+
+  const openActions = () => {
+    // Claim ownership before opening: were these swapped, the coordination
+    // effect could observe `actionsOpen` true while the owner is still another
+    // node and close this picker in the same tick it opened.
+    setOpenPickerNode(props.node.path);
+    setActionsOpen(true);
+  };
+
+  const closeActions = () => {
+    setActionsOpen(false);
+    if (openPickerNode() === props.node.path) setOpenPickerNode(null);
+  };
+
+  // Another node opened its picker: close ours. This is the single-open-at-a-time
+  // rule, expressed once for the whole tree.
+  createEffect(() => {
+    if (actionsOpen() && openPickerNode() !== props.node.path) setActionsOpen(false);
+  });
+
+  // While the picker is open it dismisses like a menu: a click anywhere outside
+  // its row, or Escape, closes it. The listeners exist only while it is open,
+  // and `onCleanup` here fires when the effect re-runs (the picker closed) or
+  // the node unmounts.
+  createEffect(() => {
+    if (!actionsOpen()) return;
+    const onDocClick = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && (rowRef?.contains(target) || actionsRef?.contains(target))) {
+        return;
+      }
+      closeActions();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeActions();
+    };
+    document.addEventListener("click", onDocClick);
+    document.addEventListener("keydown", onKeyDown);
+    onCleanup(() => {
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onKeyDown);
+    });
+  });
 
   const toggle = async () => {
     if (!props.node.is_dir) {
@@ -95,6 +147,9 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     }
     const next = !open();
     setOpen(next);
+    // Collapsing a folder must take its picker with it: an actions menu left
+    // open over a now-hidden folder is orphaned on screen (#186).
+    if (!next) closeActions();
     if (next && (kids() === null || kids()?.length === 0)) {
       setLoading(true);
       try {
@@ -108,7 +163,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
 
   return (
     <div>
-      <div class="tree-row" title={props.node.path}>
+      <div class="tree-row" title={props.node.path} ref={rowRef}>
         <button
           type="button"
           class="tree-main"
@@ -137,13 +192,13 @@ const TreeNodeView: Component<NodeProps> = (props) => {
           class="tree-actions-toggle"
           aria-label={`Actions for ${props.node.path}`}
           aria-expanded={actionsOpen()}
-          onClick={() => setActionsOpen((value) => !value)}
+          onClick={() => (actionsOpen() ? closeActions() : openActions())}
         >
           <span aria-hidden="true">⋯</span>
         </button>
       </div>
       <Show when={actionsOpen()}>
-        <div class="tree-actions" aria-label={`Actions for ${props.node.path}`}>
+        <div class="tree-actions" aria-label={`Actions for ${props.node.path}`} ref={actionsRef}>
           <Show when={props.node.is_dir}>
             <Show when={props.onCreatePresetHere}>
               <button type="button" onClick={() => props.onCreatePresetHere?.(props.node.path)}>Create preset</button>
