@@ -116,6 +116,37 @@ or a fresh named volume carries the *host's* ownership, not the image's. A
 directory the container user cannot write to will fail at `project import`
 rather than at startup, which is a slow way to find out.
 
+### Running a second instance on the same host
+
+Two instances on one host — a production one beside a staging one, say — is
+supported, and it is the case where every default that names a host-wide
+thing becomes a collision. Compose covers some of it for you and not the
+rest.
+
+What Compose handles: the named volume in the base file is
+*project-scoped*, so two deployments started under different project names
+(`docker compose -p vogt-prod …`) already get separate volumes and separate
+networks. Use a distinct project name for each instance and most of the
+problem does not arise.
+
+What you must still change per instance:
+
+- `VOGT_PORT` — the bind fails otherwise, which at least tells you.
+- `VOGT_PUBLIC_URL` — each instance has its own address, and this one is
+  never inferred.
+- Any host path an overlay of yours bind-mounts. Two instances writing one
+  workspace is not an error, it is just wrong.
+- Any explicit `name:` you have put on a volume or network in your own
+  overlay. Naming them is what opts you *out* of the project scoping above,
+  and a shared data volume means two writers on one SQLite database — the
+  one failure here that does not stop the deploy and shows up later looking
+  like corruption.
+
+If your overlay pins a subnet, do not pick it by incrementing from the
+instance next door; enumerate what is actually in use first.
+[`DEPLOYMENT.md` §4.7](DEPLOYMENT.md) lists the full set with the commands,
+and what each collision looks like when it happens.
+
 ### Putting your own front door in front of Vogt
 
 Vogt supports running behind something that publishes it at a different

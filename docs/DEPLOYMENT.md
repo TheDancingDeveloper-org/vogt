@@ -554,6 +554,87 @@ and CI fails on drift (NFR-Q4). The committed `personal/vogt/` compose in
 the ops repo is a *consumer* of that schema — a generated-then-reviewed
 artifact, not a hand-maintained parallel truth.
 
+### 4.7 A second instance on one host collides on every allocation default *(r21)*
+
+Written after standing a production instance up beside an existing one on
+the same host, where every item below was found the hard way.
+
+4.1's rule — allocation values carry concrete defaults — is right, and this
+is the bill that comes with it: **every one of those defaults is a
+host-wide singleton, and the second instance is where you find that out.**
+None of these are faults in the compose file. They are faults in a
+particular *deploy*, and they differ mainly in how honestly they announce
+themselves.
+
+| Value | Default | What the collision looks like |
+|---|---|---|
+| `VOGT_STACK_SUBNET` | `10.59.0.0/16` | network creation fails, and Compose blames the *network* rather than the variable that chose it |
+| `VOGT_CORE_IP` | `10.59.0.10` | must sit inside the subnet above — change one and you must change the other |
+| `VOGT_CONTAINER_NAME` | `vogt-engine` | Docker refuses a duplicate name rather than replacing it |
+| `VOGT_CORE_VOLUME` | `vogt-core-data` | **no error at all**: the second instance quietly opens the first one's database |
+| `VOGT_PORT`, `VOGT_BIND_IP` | none | the bind fails — the honest one |
+| `VOGT_WORKSPACE_DIR`, `VOGT_HOME_DIR`, `VOGT_TAILSCALE_DIR` | none | two instances writing one tree; sharing the Tailscale directory also means two nodes contending for one machine identity |
+| `TAILSCALE_HOSTNAME` | `vogt` | the tailnet suffixes the second node, so the name you configured is not the name it has |
+
+The volume row is the one to fear. Every other collision stops the deploy;
+that one completes it. Two instances sharing `vogt-core-data` are two
+writers on one SQLite database, and the symptom arrives later and looks
+like corruption rather than like configuration.
+
+**Choosing a subnet: look, do not increment.** The neighbouring instance
+held `10.59.0.0/16`, so the obvious choice was `10.60.0.0/16` — which an
+unrelated stack already held. Docker's default address pool is
+`10.0.0.0/8` handed out in `/16`s, and it allocates the *lowest free block
+first*, so gaps below the high-water mark are precisely the blocks most
+likely to be taken while you are still setting up. Enumerate what is
+actually in use, then pick above the highest:
+
+```bash
+docker network ls --format '{{.Name}}' | while read -r n; do
+  docker network inspect "$n" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+done | grep -E '^10\.' | sort -t. -k2 -n
+ip route show | grep -E '^10\.'   # routes the daemon does not know about
+```
+
+Check the routing table too: a subnet no Docker network claims can still be
+reachable through a VPN route or a peer's advertised subnet, and the
+collision then shows up as traffic silently going to the wrong place rather
+than as a failed deploy.
+
+**A fronted instance on a CGNAT address cannot be proxied.** If you point a
+DNS record at a Tailscale address (`100.64.0.0/10`), a CDN cannot route to
+it — Cloudflare answers `522` on every request. Pointing at a tailnet
+address and proxying are mutually exclusive: leave the record unproxied and
+you get the registrar and DNS authority, not the proxy. The corollary is
+worth knowing before somebody reports an outage: the name resolves for
+everyone, and connects only from the tailnet. A client on the LAN, with no
+Tailscale, sees a name that resolves and a connection that hangs. That is
+the design working.
+
+**The first boot answers `401` on `/api/vogt`, and that is correct.** The
+front door injects a *paired core token* on those routes, and the core is
+what mints it — so it cannot exist before the instance does. Until it is
+set, sessions, terminals and `/mcp` all work and `/api/vogt` refuses with a
+named reason. That is FR-E9 behaving, not an outage, and treating it as one
+leads people to widen a token scope to "fix" it.
+
+**A dead Tailscale auth key fails the whole instance, not just Tailscale.**
+The engine's tailscale check is fatal, so an expired or already-consumed
+key leaves `/readyz` at `503` with both halves running perfectly — an
+alarming shape for a trivial cause. Auth keys are also frequently
+single-use: reusing the key that stood up the first instance will not
+enrol the second.
+
+**Server-side speech is off until something serves it.** The speech routes
+proxy to OpenAI-compatible audio endpoints named by
+`MYDEVENV2_ASSISTANT_STT_BASE_URLS` / `_TTS_BASE_URLS`, whose defaults are
+a local speech server first and a cloud endpoint second. With neither a
+local server nor a valid key, those routes `404` and clients fall back to
+browser-native speech — the honest absence (FR-T6), not a fault. Turning
+them on is a matter of running a speech container or supplying a key; note
+that an OpenAI-*compatible chat* provider is not necessarily an audio
+provider, so a working chat key is not evidence that speech will work.
+
 ## 5. Storage, backup, upgrade
 
 - One named volume mounted at `/var/lib/vogt` (both SQLite files +
