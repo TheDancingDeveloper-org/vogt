@@ -34,6 +34,9 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `session_scratch_project` | `VOGT_SESSION_SCRATCH_PROJECT` | string, optional | *(no default — must be set)* | behaviour |
 | `engine_state_dir` | `VOGT_ENGINE_STATE_DIR` | path, optional | *(no default — must be set)* | behaviour |
 | `engine_token_file` | `VOGT_ENGINE_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
+| `bootstrap_core_token_file` | `VOGT_BOOTSTRAP_CORE_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
+| `bootstrap_core_token_actor` | `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | string | `agent:vogt-engine` | behaviour |
+| `bootstrap_core_token_scopes` | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | string | `read,work.write,project.write` | behaviour |
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
@@ -131,6 +134,18 @@ The session engine's state directory, when this process can read it — the merg
 ### `engine_token_file`
 
 Path to a file containing the engine token Vogt calls it with. The token needs only the engine's `sessions` capability: Vogt starts and stops terminals, and has no business writing that pod's files. A file rather than an environment variable, for the same reason as `github_token_file` — a token in the environment is a token in every `docker inspect` (FR-S7).
+
+### `bootstrap_core_token_file`
+
+Path to a file holding the core token the front door will present, adopted at `init` if no token with that secret exists yet. This is what lets a fronted deployment come up in one deploy: without it the token can only be minted by a running core, so the front door's `/api/vogt` answers 401 until somebody execs in, mints one, edits the configuration and deploys again (#199). Supplying it is the same act as choosing `engine_token_file`'s value — the mirror of this token, which has always been operator-chosen. Idempotent: a boot that finds the secret already present changes nothing. Unset, the mint-then-configure path is unchanged.
+
+### `bootstrap_core_token_actor`
+
+Identity the adopted core token is bound to, created if absent. Audit rows name it, so it should say which front door acted — not a person, and not something shared with another instance.
+
+### `bootstrap_core_token_scopes`
+
+Scopes for the adopted core token. Everything in the pod runs as one uid and can read the token file, so this scope *is* that pod's blast radius — narrow it to what the front door actually needs. `admin` is deliberately not the default.
 
 ### `sqlite_synchronous`
 

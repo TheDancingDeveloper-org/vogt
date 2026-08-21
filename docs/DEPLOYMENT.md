@@ -611,12 +611,15 @@ everyone, and connects only from the tailnet. A client on the LAN, with no
 Tailscale, sees a name that resolves and a connection that hangs. That is
 the design working.
 
-**The first boot answers `401` on `/api/vogt`, and that is correct.** The
-front door injects a *paired core token* on those routes, and the core is
-what mints it — so it cannot exist before the instance does. Until it is
-set, sessions, terminals and `/mcp` all work and `/api/vogt` refuses with a
-named reason. That is FR-E9 behaving, not an outage, and treating it as one
-leads people to widen a token scope to "fix" it.
+**The first boot answers `401` on `/api/vogt` unless you supply the core
+token, and either way it is correct.** The front door injects a *paired core
+token* on those routes. Supply it — `bootstrap_core_token_file`, the same
+value mounted into both containers — and the core adopts it at `init` and
+the route works on the first deploy. Leave it unset and the token can only be
+minted by a running core, so `/api/vogt` refuses with a named reason while
+sessions, terminals and `/mcp` all keep working. That is FR-E9 behaving, not
+an outage, and treating it as one leads people to widen a token scope to
+"fix" it. `CUSTOMISATION.md` has the two-container shape.
 
 **A dead Tailscale auth key fails the whole instance, not just Tailscale.**
 The engine's tailscale check is fatal, so an expired or already-consumed

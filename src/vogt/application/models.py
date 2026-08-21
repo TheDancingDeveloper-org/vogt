@@ -190,6 +190,11 @@ class InitResult(Result):
     declared_schema_version: int
     observed_schema_version: int
     migrations_applied: list[str]
+    #: What became of `bootstrap_core_token_file` (#199): `not_configured`,
+    #: `already_present` or `adopted`. Reported because a silent bootstrap is
+    #: one nobody can confirm happened — and "did the token take?" is the
+    #: question a first deploy actually asks.
+    bootstrap_core_token: str = "not_configured"
 
 
 class MigrateParams(Params):

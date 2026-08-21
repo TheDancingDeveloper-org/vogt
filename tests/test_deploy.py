@@ -562,12 +562,20 @@ def test_both_halves_run_before_the_merged_image_is_pushed(workflow: str) -> Non
 
 
 @pytest.mark.parametrize("name", ["image", "stack-image"])
-def test_the_two_streams_are_kept_apart(name: str) -> None:
-    """NFR-D12: `dev` images can never be mistaken for commit images.
+def test_the_three_streams_are_kept_apart(name: str) -> None:
+    """NFR-D12: no image of one stream can be mistaken for another's.
 
-    `dev` and `dev-<sha>` on one branch, `sha-<commit>` on the other, and no
-    tag either can move — so "which build is that?" stays answerable and a
-    dev image cannot be picked up by anything following the prod stream.
+    `dev` + `dev-<sha>`, `sha-<commit>`, `prod-<sha>` — and no tag any of
+    them can move, so "which build is that?" stays answerable and an image
+    cannot be picked up by something following a different stream.
+
+    Every rule is an **explicit equality** on the ref, and that is the part
+    worth pinning. `sha-` was once `!= 'refs/heads/dev'` — "anything that is
+    not dev" — which was correct while two branches built and silently wrong
+    the moment a third did: `prod` would have been handed a plain `sha-` tag
+    and put production images into main's stream. A negation here is a bug
+    that only appears when somebody adds a branch, so the test refuses one
+    outright rather than checking today's three answers.
 
     Both images, because the requirement says both and the merge added the
     second: a rule kept by the core-only image and dropped by the merged one
@@ -580,9 +588,27 @@ def test_the_two_streams_are_kept_apart(name: str) -> None:
     job = rest[: end.start()] if end else rest
     assert "type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}" in job
     assert "type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}" in job
-    assert "type=sha,enable=${{ github.ref != 'refs/heads/dev' }}" in job
+    assert "type=sha,enable=${{ github.ref == 'refs/heads/main' }}" in job
+    assert "type=sha,prefix=prod-,enable=${{ github.ref == 'refs/heads/prod' }}" in job
+    assert "github.ref !=" not in job, (
+        "tag rules name the ref they belong to; a negation silently captures "
+        "the next branch somebody adds"
+    )
     assert "type=semver" not in job, "a build must not assign a version"
     assert "value=latest" not in job, "a build must not move an alias"
+
+
+def test_every_building_branch_has_a_tag_rule() -> None:
+    """A branch that builds with no rule of its own publishes nothing, or
+    worse, borrows another stream's tag."""
+    raw = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
+    on = raw[raw.index("on:") : raw.index("permissions:")]
+    branches = re.findall(r"^      - ([a-z][a-z0-9-]*)$", on, re.MULTILINE)
+    assert set(branches) == {"main", "dev", "prod"}, branches
+    for branch in branches:
+        assert f"github.ref == 'refs/heads/{branch}'" in raw, (
+            f"{branch} builds but no tag rule names it"
+        )
 
 
 def test_a_tag_can_release_the_merged_image() -> None:

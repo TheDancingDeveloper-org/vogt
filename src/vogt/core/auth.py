@@ -130,9 +130,39 @@ def matches(secret: str, token_hash: str) -> bool:
     return hmac.compare_digest(hash_token(secret), token_hash)
 
 
+#: The shortest operator-supplied secret `adopt` will accept. Well under
+#: what `issue` produces, and far above anything guessable: the point is to
+#: refuse a placeholder like "changeme" that would otherwise become a
+#: working credential, not to second-guess a generated value.
+MIN_ADOPTED_SECRET_LEN = 24
+
+
 def issue(scopes: tuple[Scope, ...]) -> Credential:
     """Mint a new token. The secret is returned once and never stored."""
     secret = TOKEN_PREFIX + secrets.token_urlsafe(TOKEN_ENTROPY_BYTES)
+    return adopt(secret, scopes)
+
+
+def adopt(secret: str, scopes: tuple[Scope, ...]) -> Credential:
+    """Take an operator-supplied secret as a credential, minting nothing.
+
+    The counterpart to `issue`, and the reason it exists is symmetry: the
+    engine's session token is already a value the operator chooses and
+    declares to both halves, while the core token could only be minted —
+    which forced every first boot through "deploy, get a 401, exec in, mint,
+    edit config, deploy again" (#199).
+
+    Storage is identical either way. A token is a hash in this database and
+    nothing else, so where the secret came from changes the bootstrap and
+    changes nothing afterwards.
+    """
+    if len(secret) < MIN_ADOPTED_SECRET_LEN:
+        msg = (
+            f"a supplied token must be at least {MIN_ADOPTED_SECRET_LEN} "
+            f"characters, not {len(secret)} — generate one with "
+            "`openssl rand -hex 32`"
+        )
+        raise ValueError(msg)
     return Credential(secret=secret, token_hash=hash_token(secret), scopes=scopes)
 
 

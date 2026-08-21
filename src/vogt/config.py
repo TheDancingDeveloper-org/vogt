@@ -387,6 +387,42 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    bootstrap_core_token_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file holding the core token the front door will "
+            "present, adopted at `init` if no token with that secret exists "
+            "yet. This is what lets a fronted deployment come up in one "
+            "deploy: without it the token can only be minted by a running "
+            "core, so the front door's `/api/vogt` answers 401 until somebody "
+            "execs in, mints one, edits the configuration and deploys again "
+            "(#199). Supplying it is the same act as choosing "
+            "`engine_token_file`'s value — the mirror of this token, which "
+            "has always been operator-chosen. Idempotent: a boot that finds "
+            "the secret already present changes nothing. Unset, the mint-then-"
+            "configure path is unchanged."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    bootstrap_core_token_actor: str = Field(
+        default="agent:vogt-engine",
+        description=(
+            "Identity the adopted core token is bound to, created if absent. "
+            "Audit rows name it, so it should say which front door acted — "
+            "not a person, and not something shared with another instance."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    bootstrap_core_token_scopes: str = Field(
+        default="read,work.write,project.write",
+        description=(
+            "Scopes for the adopted core token. Everything in the pod runs as "
+            "one uid and can read the token file, so this scope *is* that "
+            "pod's blast radius — narrow it to what the front door actually "
+            "needs. `admin` is deliberately not the default."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     sqlite_synchronous: Literal["off", "normal", "full", "extra"] = Field(
         default="normal",
         description=(

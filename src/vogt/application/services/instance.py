@@ -21,6 +21,7 @@ from vogt.application.models import (
     StatusResult,
     StoreCounts,
 )
+from vogt.application.services.auth import adopt_bootstrap_core_token
 from vogt.errors import InvalidRequest
 
 
@@ -45,10 +46,15 @@ def init_instance(ctx: AppContext, params: InitParams) -> InitResult:
         with ctx.declared.read() as view:
             instance_id = view.instance_id()
 
+    # After the instance exists, never before: adoption is a declared write
+    # and there is nothing to write into until bootstrap has run.
+    bootstrap_core_token = adopt_bootstrap_core_token(ctx)
+
     return InitResult(
         instance_id=instance_id,
         data_dir=str(ctx.config.resolved_data_dir),
         created=created,
+        bootstrap_core_token=bootstrap_core_token,
         declared_schema_version=declared_report.version,
         observed_schema_version=observed_report.version,
         migrations_applied=[

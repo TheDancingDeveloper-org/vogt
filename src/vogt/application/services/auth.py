@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 
 from vogt.application.context import AppContext
 from vogt.application.models import (
@@ -29,6 +30,7 @@ from vogt.core.auth import (
     AuthDecisionCode,
     Grant,
     Scope,
+    adopt,
     hash_token,
     is_expired,
     issue,
@@ -43,6 +45,8 @@ TOKEN_ISSUE = "token.issue"
 TOKEN_REVOKE = "token.revoke"
 
 TOKEN_ISSUED_EVENT = "token.issued"
+TOKEN_ADOPT = "token.adopt"
+TOKEN_ADOPTED_EVENT = "token.adopted"
 TOKEN_REVOKED_EVENT = "token.revoked"
 
 
@@ -253,6 +257,114 @@ def issue_token(ctx: AppContext, params: IssueTokenParams) -> IssueTokenResult:
         )
 
     return audited_write(ctx, operation=TOKEN_ISSUE, reason=params.reason, body=body)
+
+
+def adopt_bootstrap_core_token(ctx: AppContext) -> str:
+    """Adopt the operator-supplied core token named by configuration (#199).
+
+    Returns what happened, for `init` to report: `"not_configured"`,
+    `"already_present"` or `"adopted"`.
+
+    Idempotent by construction. The check is on the *hash* of the supplied
+    secret, so a second boot with the same value finds its own token and
+    writes nothing — which matters because `init` runs on every container
+    start, not only the first.
+
+    Two different failures, deliberately handled differently:
+
+    *No token* — the file is absent, unreadable or empty — is `not_configured`
+    and the instance comes up regardless. That is the shape a `pre_deploy`
+    hook produces when the value is simply unset, and it leaves the deployment
+    exactly where it is today: `/api/vogt` refusing with a named reason
+    (FR-E9). The instance is the thing that must boot, and it does not need
+    this credential for its own operation.
+
+    *A malformed configuration* — an unknown scope, a secret too short to be
+    one — raises, and startup fails. It is the r20 rule applied here: a key
+    whose destination cannot be honoured is a startup error, because the
+    alternative is a deployment that believes it supplied a credential and
+    silently did not.
+    """
+    configured = ctx.config.bootstrap_core_token_file
+    if configured is None:
+        return "not_configured"
+    try:
+        secret = Path(configured).read_text(encoding="utf-8").strip()
+    except OSError:
+        return "not_configured"
+    if not secret:
+        return "not_configured"
+
+    try:
+        scopes = parse_scopes(ctx.config.bootstrap_core_token_scopes)
+        credential = adopt(secret, scopes)
+    except ValueError as exc:
+        raise InvalidRequest(str(exc)) from exc
+
+    with ctx.declared.read() as view:
+        if view.token_by_hash(credential.token_hash) is not None:
+            return "already_present"
+
+    identity_ref = ctx.config.bootstrap_core_token_actor
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[TokenResult]:
+        del actor
+        # Re-checked inside the transaction: two containers of one stack can
+        # call `init` at the same moment, and the read above is not a lock.
+        existing = txn.token_by_hash(credential.token_hash)
+        if existing is not None:
+            return WriteOutcome(
+                result=TokenResult(token=existing),
+                entity_kind="token",
+                entity_id=existing.id,
+                payload={"adopted": False, "reason": "already present"},
+                event_kind=TOKEN_ADOPTED_EVENT,
+                summary={"actor": existing.actor_identity_ref},
+            )
+        holder = txn.actor_by_identity(identity_ref)
+        if holder is None:
+            holder = Actor(
+                id=ctx.id_factory("act"),
+                kind="agent",
+                display_name=identity_ref,
+                identity_ref=identity_ref,
+                disabled=False,
+                created_at=ctx.clock(),
+            )
+            txn.insert_actor(holder)
+        token = Token(
+            id=ctx.id_factory("tok"),
+            actor_id=holder.id,
+            actor_identity_ref=holder.identity_ref,
+            name="bootstrap core token",
+            scopes=list(scopes),
+            created_at=ctx.clock(),
+            expires_at=None,
+        )
+        txn.insert_token(token, token_hash=credential.token_hash)
+        return WriteOutcome(
+            result=TokenResult(token=token),
+            entity_kind="token",
+            entity_id=token.id,
+            # No secret in the payload, for the reason `issue_token` gives:
+            # an audit row holding the credential is a leak with a timestamp.
+            payload={
+                "actor": holder.identity_ref,
+                "scopes": list(scopes),
+                "name": token.name,
+                "source": "operator-supplied",
+            },
+            event_kind=TOKEN_ADOPTED_EVENT,
+            summary={"actor": holder.identity_ref, "scopes": list(scopes)},
+        )
+
+    audited_write(
+        ctx,
+        operation=TOKEN_ADOPT,
+        reason="adopting the operator-supplied core token at init",
+        body=body,
+    )
+    return "adopted"
 
 
 def list_tokens(ctx: AppContext, params: ListTokensParams) -> TokenListResult:

@@ -168,6 +168,56 @@ The two-service shape this enables — your front door on the published port,
 the core reachable only on the Compose network — is a supported topology, not
 a workaround.
 
+### Giving the front door its core token in one deploy
+
+A fronted deployment needs a token the front door presents to the core, so
+audit rows name the actor who acted rather than "the proxy". The core is what
+validates it — which used to mean it could only be *minted* by a running
+core, and a first deploy went: start up, watch `/api/vogt` answer 401, exec
+into the core, mint a token, paste it into your configuration, deploy again.
+The second deploy is not free either: it restarts the pod and takes every
+open terminal session with it.
+
+Choose the value instead, exactly as you already choose the engine's session
+token:
+
+```bash
+openssl rand -hex 32 > core-token
+```
+
+Mount that file into **both** containers. The front door presents it; the
+core adopts it at `init`:
+
+```yaml
+services:
+  vogt:                       # the core
+    environment:
+      VOGT_BOOTSTRAP_CORE_TOKEN_FILE: /run/secrets/core_token
+      # Optional. Everything in the pod runs as one uid and can read the
+      # file, so this scope is the pod's blast radius — keep it narrow.
+      VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES: read,work.write,project.write
+      VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR: agent:my-front-door
+    secrets: [core_token]
+
+  engine:                     # your front door
+    environment:
+      VOGT_CORE_TOKEN_FILE: /run/secrets/core_token
+    secrets: [core_token]
+```
+
+Adoption is idempotent: `init` runs on every container start, and a boot that
+finds the secret already present writes nothing. Rotating means putting a new
+value in the file — the old token stays valid until you revoke it, so the two
+acts are separate on purpose.
+
+Two ways this refuses rather than degrades, both deliberate. A secret shorter
+than 24 characters is rejected, so a placeholder never becomes a working
+credential; and an unknown scope fails startup rather than being ignored,
+because the alternative is a deployment that believes it supplied a
+credential and silently did not. An *absent or empty* file is neither of
+those — it simply means "not configured", and you get the mint-then-configure
+path exactly as before.
+
 ### In a split deployment, the CLI and the database are in different containers
 
 Worth knowing before you run an administrative command against a two-service

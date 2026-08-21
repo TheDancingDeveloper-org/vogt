@@ -80,6 +80,24 @@ services:
       # MYDEVENV2_EXTRA_TOKENS_JSON below.
       VOGT_ENGINE_TOKEN_FILE: /run/secrets/vogt_engine_token
       VOGT_GITHUB_TOKEN_FILE: /run/secrets/github_token
+      # The other direction of the same pairing, and the reason a first deploy
+      # is now a *single* deploy (#199). The engine presents this token on
+      # /api/vogt; the core adopts it here at `init` if it does not already
+      # hold it. Before this, only a running core could mint it — so the first
+      # boot answered 401, somebody exec'd in, minted one, edited the stack
+      # environment and deployed again, tearing down every PTY in the pod to
+      # do it.
+      #
+      # The same file the engine reads, mounted into both: one value, declared
+      # once, exactly as VOGT_ENGINE_TOKEN already worked. Idempotent — a
+      # restart that finds the secret already present writes nothing. Leave
+      # VOGT_CORE_TOKEN empty and this is inert, which is the old behaviour.
+      VOGT_BOOTSTRAP_CORE_TOKEN_FILE: /run/secrets/vogt_core_token
+      # Who the adopted token acts as, and how much it may do. Everything in
+      # the pod runs as one uid and can read the file, so this scope *is* the
+      # pod's blast radius.
+      VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR: "${VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR:-agent:vogt-engine}"
+      VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES: "${VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES:-read,work.write,project.write}"
 
     volumes:
       # The estate. Read-*write*, not read-only: collection only reads, but
@@ -93,6 +111,10 @@ services:
     secrets:
       - github_token
       - vogt_engine_token
+      # Read-only here and adopted at init; the engine *presents* the same
+      # value. Both halves knowing one operator-chosen secret is the whole
+      # mechanism (#199).
+      - vogt_core_token
 
     # Fixed, because the engine reaches it through an /etc/hosts pin and a
     # pin cannot follow a dynamic address. Inside this stack's own network,
