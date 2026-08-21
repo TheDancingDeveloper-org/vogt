@@ -1860,6 +1860,60 @@ class ForgeAccountStatusResult(Result):
     accounts: list[ForgeAccountView]
 
 
+class ForgeReposParams(Params):
+    """Enumerate the repositories a credential can see, to pick one to import
+    (#180, design #178 decision 5).
+
+    The credential is the acting actor's linked PAT (#179) when they have one,
+    and the instance file token (FR-S7) otherwise — so a person sees *their*
+    repositories, including private ones their PAT reaches. This lists; it never
+    crawls, and picking one is the only way an import ever begins (FR-G15).
+    """
+
+    host: str = Field(
+        default="github.com",
+        description="The forge host to enumerate. Only github.com is supported in v1.",
+    )
+
+
+class ForgeRepoView(Result):
+    """One repository the credential can see, as the picker shows it."""
+
+    owner: str
+    name: str
+    default_branch: str | None = None
+    visibility: str = Field(
+        description="'public' or 'private', as the forge reports it."
+    )
+    url: str = Field(
+        description="The repository's web URL; what an import is driven with."
+    )
+    already_registered: bool = Field(
+        description=(
+            "Whether this instance already has a project whose repository URL "
+            "is this repo — computed against the declared project list, so a "
+            "select-all can skip what is already imported."
+        )
+    )
+
+
+class ForgeReposResult(Result):
+    repos: list[ForgeRepoView]
+    login: str | None = Field(
+        default=None,
+        description="Whose credential enumerated these — the linked actor login, "
+        "or null when the instance file token was used.",
+    )
+    detail: str | None = Field(
+        default=None,
+        description=(
+            "Why the list is empty when it is — no forge configured for the "
+            "host, for instance — so an empty picker reads as 'not collected' "
+            "rather than 'you have no repositories'."
+        ),
+    )
+
+
 class OnboardParams(Params):
     project: str = Field(description="Project slug to consolidate.")
     max_pages: int = Field(

@@ -308,6 +308,11 @@ SCRIPT: list[tuple[str, StepParams]] = [
     # validated against the stand-in forge and never echoed back.
     ("forge.account_link", {"token": "ghp_parity_token", "reason": WHY}),
     ("forge.account_status", {}),
+    # The import picker (#180): enumerate what the linked credential can see, so
+    # the same accessible-repo list arrives byte-identically on all three
+    # surfaces. Driven while the account is still linked, so the actor's PAT is
+    # the credential the stand-in forge answers `/user/repos` for.
+    ("forge.repos", {}),
     ("forge.account_unlink", {"reason": WHY}),
     ("forge.actions", {}),
     ("export", {"destination": "{root}/export.json", "reason": WHY}),
@@ -454,6 +459,27 @@ def _stand_in_github(
     """
     if method == "GET" and url.endswith("/user"):
         return 200, json.dumps({"login": "parity-user"}).encode()
+    if method == "GET" and "/user/repos" in url:
+        # The import picker (#180) enumerates the linked credential's repos; a
+        # fixed pair keeps the three transports comparing the same answer.
+        return 200, json.dumps(
+            [
+                {
+                    "name": "parity-import",
+                    "owner": {"login": "parity-org"},
+                    "default_branch": "main",
+                    "private": False,
+                    "html_url": "https://github.com/parity-org/parity-import",
+                },
+                {
+                    "name": "private-thing",
+                    "owner": {"login": "parity-user"},
+                    "default_branch": "trunk",
+                    "private": True,
+                    "html_url": "https://github.com/parity-user/private-thing",
+                },
+            ]
+        ).encode()
     return 404, b""
 
 

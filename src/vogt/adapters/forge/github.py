@@ -28,6 +28,7 @@ from vogt.adapters.forge.models import (
     ForgePosture,
     ForgePull,
     ForgeRelease,
+    ForgeRepo,
     RepoRef,
 )
 from vogt.adapters.github.client import (
@@ -78,6 +79,37 @@ class GitHubProvider:
     @property
     def capabilities(self) -> ForgeCapabilities:
         return GITHUB_CAPABILITIES
+
+    def list_repos(self) -> Iterable[ForgeRepo]:
+        """`GET /user/repos` — every repository this token is entitled to see.
+
+        `affiliation` names the three ways a token reaches a repository (owned,
+        an org member, an outside collaborator), so a private repository the
+        actor can push to is enumerable while the account-wide crawl the scope
+        rule forbids is not — the token *is* the scope. Sorted by most-recently
+        pushed so the picker's first page is the repositories a person is likely
+        to be importing. One page, like every other read here; a fuller listing
+        is bounded the same way the collectors are.
+        """
+        payloads = self._client.get(
+            "/user/repos",
+            per_page=DEFAULT_PER_PAGE,
+            sort="pushed",
+            direction="desc",
+            affiliation="owner,collaborator,organization_member",
+        )
+        for item in _as_list(payloads):
+            name = item.get("name")
+            owner = (item.get("owner") or {}).get("login")
+            if not name or not owner:
+                continue
+            yield ForgeRepo(
+                owner=str(owner),
+                name=str(name),
+                default_branch=item.get("default_branch"),
+                visibility=("private" if item.get("private", False) else "public"),
+                web_url=item.get("html_url") or f"https://{HOST}/{owner}/{name}",
+            )
 
     def parse(self, repo_url: str | None) -> RepoRef | None:
         parsed = repo_of(repo_url)

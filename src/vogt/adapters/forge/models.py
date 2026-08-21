@@ -39,6 +39,31 @@ class RepoRef:
 
 
 @dataclass(frozen=True)
+class ForgeRepo:
+    """One repository a credential can see, for the import picker (#180).
+
+    Provider-agnostic on purpose: a picker built on this never learns which
+    forge answered. `already_registered` is deliberately *not* here — a provider
+    reads a forge and knows nothing of what this Vogt instance has registered,
+    so that field is computed by the service against the declared project list,
+    not by the adapter. `web_url` is what the service matches a registered
+    project's `repo_url` against, and what an import is then driven with.
+    """
+
+    owner: str
+    name: str
+    default_branch: str | None
+    #: "public" or "private", as the forge reports its visibility.
+    visibility: str
+    web_url: str
+
+    @property
+    def slug(self) -> str:
+        """`owner/name`, the half of the identity a person recognises."""
+        return f"{self.owner}/{self.name}"
+
+
+@dataclass(frozen=True)
 class ForgeCapabilities:
     """What a provider can and cannot do, declared rather than discovered.
 
@@ -173,5 +198,6 @@ __all__ = [
     "ForgePosture",
     "ForgePull",
     "ForgeRelease",
+    "ForgeRepo",
     "RepoRef",
 ]

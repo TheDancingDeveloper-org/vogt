@@ -26,7 +26,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from vogt.errors import Conflict, VogtError
+from vogt.errors import (
+    Conflict,
+    ImportBranchDiverged,
+    ImportWorkingTreeDirty,
+    VogtError,
+)
 
 #: Long enough for a large repository on a slow link, bounded so an import
 #: cannot hold a request open indefinitely. A timeout fails the import; it
@@ -113,6 +118,14 @@ def clone_repository(request: CloneRequest) -> CloneOutcome:
 
     existing = _reuse_existing(destination, request.remote)
     if existing is not None:
+        # A pre-existing checkout of the same remote is the one import path that
+        # is gated (#180, design #178 decision 6). A new folder never reaches
+        # here — `_reuse_existing` returns `None` and the clone runs — so only
+        # the folder that already holds this remote's clone is inspected, and it
+        # is refused unless it is clean and at parity with origin. Vogt runs no
+        # merge, rebase or stash to make it so; the reconciliation is the
+        # person's, not ours.
+        _enforce_import_parity(destination, request.token)
         return existing
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -164,6 +177,94 @@ def _reuse_existing(destination: Path, remote: str) -> CloneOutcome | None:
         default_branch=_read(destination, "rev-parse", "--abbrev-ref", "HEAD"),
         reused=True,
     )
+
+
+def _enforce_import_parity(destination: Path, token: str | None) -> None:
+    """Refuse a re-import onto a checkout that is not clean and at parity (#180).
+
+    The gate reads only — `git status`, `git rev-parse`, `git ls-remote` — and
+    changes nothing: no fetch, no merge, no rebase, no stash. It refuses on the
+    first failing condition with a typed receipt naming exactly what is wrong,
+    because the point of the gate is to hand the reconciliation back to the
+    person rather than have Vogt guess at a merge it has no business making.
+
+    Both conditions must hold. The working tree is checked first because it is a
+    local, no-network read; only then does the divergence check reach origin.
+    Branches other than the default are ignored — the default branch is the one
+    a clone tracks and the one an import's consolidation reads.
+    """
+    branch = _default_branch(destination)
+    dirty = _working_tree_changes(destination)
+    if dirty:
+        msg = (
+            f"the working tree at {destination} has uncommitted changes "
+            f"({len(dirty)} path(s), e.g. {dirty[0]!r}); Vogt does not touch "
+            "your working tree, so commit, stash or discard them yourself and "
+            "retry the import"
+        )
+        raise ImportWorkingTreeDirty(msg)
+    local = _local_head(destination, branch)
+    origin = _origin_head(destination, branch, token)
+    if local != origin:
+        msg = (
+            f"local HEAD {local or 'unknown'} on branch {branch!r} has diverged "
+            f"from origin HEAD {origin or 'unknown'}; Vogt performs no merge, "
+            "rebase or stash, so push or pull the branch yourself and retry the "
+            "import"
+        )
+        raise ImportBranchDiverged(msg)
+
+
+def _default_branch(destination: Path) -> str:
+    """The branch the gate inspects: the remote's default, as the clone tracks it.
+
+    `refs/remotes/origin/HEAD` is what `git clone` sets to the default branch, so
+    reading it names the default without a network round-trip or a guess. If it
+    is absent (an older or hand-made checkout) the current branch is the honest
+    fallback — it is the one an import's consolidation reads either way.
+    """
+    tracked = _read(destination, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if tracked:
+        return tracked.removeprefix("origin/")
+    return _read(destination, "rev-parse", "--abbrev-ref", "HEAD") or "HEAD"
+
+
+def _working_tree_changes(destination: Path) -> list[str]:
+    """The porcelain lines for a dirty tree, empty when it is clean.
+
+    `--porcelain` is the stable, script-facing form: staged, unstaged and
+    untracked changes all appear, one per line, and a clean tree is the empty
+    string. Untracked files count — writing an import over somebody's unsaved
+    new file is exactly the loss the gate exists to prevent.
+    """
+    out = _read(destination, "status", "--porcelain")
+    return [line for line in (out or "").splitlines() if line.strip()]
+
+
+def _local_head(destination: Path, branch: str) -> str | None:
+    """The commit the local default branch points at, or `None` if it has none."""
+    return _read(destination, "rev-parse", branch)
+
+
+def _origin_head(destination: Path, branch: str, token: str | None) -> str | None:
+    """The commit origin's default branch points at, read live (no fetch).
+
+    `git ls-remote` asks origin for its current refs and writes nothing — no
+    objects are fetched, no tracking ref is moved — so it answers "where is
+    origin now" without performing any part of a merge. The token rides the same
+    `GIT_ASKPASS` helper the clone uses, so a private origin is reachable without
+    the credential ever touching a command line (FR-S8).
+    """
+    with _AskPass(token) as env:
+        try:
+            out = _run_git(
+                ["ls-remote", "origin", f"refs/heads/{branch}"],
+                cwd=destination,
+                env=env,
+            )
+        except GitCommandFailed:
+            return None
+    return out.split()[0] if out else None
 
 
 def _same_remote(left: str, right: str) -> bool:

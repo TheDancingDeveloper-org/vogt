@@ -30,6 +30,7 @@ from vogt.adapters.forge.models import (
     ForgePosture,
     ForgePull,
     ForgeRelease,
+    ForgeRepo,
     RepoRef,
 )
 from vogt.adapters.forge.provider import ForgeProvider
@@ -62,6 +63,7 @@ __all__ = [
     "ForgeProvider",
     "ForgePull",
     "ForgeRelease",
+    "ForgeRepo",
     "GitHubProvider",
     "RepoRef",
     "current_collector",
