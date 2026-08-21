@@ -6,6 +6,7 @@ pub mod app;
 pub mod assets;
 pub mod assistant;
 pub mod assistant_api;
+pub mod assistant_log;
 pub mod auth;
 pub mod config;
 pub mod error;

@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Extension, Json,
 };
 use serde::Deserialize;
@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::{
     app::AppState,
     assistant::{AssistantReply, AssistantRuntime, PendingActionView, TranscriptEntry},
+    assistant_log::{ListQuery, LoggedEntry},
     auth::AuthorizedIdentity,
     error::{ApiError, Result},
     vogt_tools::Caller,
@@ -47,6 +48,11 @@ fn runtime(state: &AppState) -> Result<Arc<AssistantRuntime>> {
 #[derive(Debug, Deserialize)]
 pub struct MessageReq {
     pub text: String,
+    /// The raw recognised utterance behind a voice turn, before FR-T13's
+    /// repair pass. Sent by a voice client so the durable log can carry the raw
+    /// form beside the repaired `text` (FR-T14). Absent for a typed turn.
+    #[serde(default)]
+    pub utterance: Option<String>,
     /// Which configured provider profile to run this turn against (FR-T9).
     /// Absent means the deployment's default.
     #[serde(default)]
@@ -61,7 +67,8 @@ pub async fn message(
     let rt = runtime(&state)?;
     let caller = Caller::from_identity(identity.map(|Extension(id)| id));
     Ok(Json(
-        rt.handle_message(caller, req.text, req.profile).await?,
+        rt.handle_message(caller, req.text, req.utterance, req.profile)
+            .await?,
     ))
 }
 
@@ -122,4 +129,41 @@ pub async fn reset(
     let rt = runtime(&state)?;
     rt.reset().await;
     Ok(Json(mydevenv2_contract::OkResponse::new(true)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LogQuery {
+    #[serde(default = "default_log_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+    /// Restrict to one actor's interactions.
+    #[serde(default)]
+    pub actor: Option<String>,
+}
+
+fn default_log_limit() -> usize {
+    100
+}
+
+/// The durable interaction log (FR-T14), newest first.
+///
+/// Scope-gated: unlike `history` — the ephemeral in-memory transcript of the
+/// current conversation — this is a durable, cross-conversation record, so the
+/// route requires the `assistant` token capability (FR-S3), enforced in
+/// `auth::required_capability`. Entries carry external content still delimited
+/// as untrusted data (FR-T4), exactly as it was fed to the model.
+pub async fn log(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<LogQuery>,
+) -> Result<Json<Vec<LoggedEntry>>> {
+    let rt = runtime(&state)?;
+    let entries = rt
+        .read_log(ListQuery {
+            limit: q.limit,
+            offset: q.offset,
+            actor: q.actor,
+        })
+        .await?;
+    Ok(Json(entries))
 }

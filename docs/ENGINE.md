@@ -610,7 +610,18 @@ provisioned. Mutating routes require the `assistant` token capability. See
 - `PATCH /api/assistant/actions/:id` `{"reason": string}` -> the updated
   pending action only; Vogt writes accept this preview step, terminal input
   refuses it, and no effector runs until the unchanged POST approval route.
-- `GET /api/assistant/history` -> `{"transcript": [...], "pending_action"?: ...}`
+- `GET /api/assistant/history` -> `{"transcript": [...], "pending_action"?: ...}` —
+  the **ephemeral** in-memory transcript of the current conversation, ungated.
+- `GET /api/assistant/log?limit=&offset=&actor=` -> `LoggedEntry[]` — the
+  **durable** interaction log (FR-T14), newest first. Unlike `history` this is a
+  cross-conversation record attributable to each actor and surviving restart, so
+  it is scope-gated on the `assistant` capability. Each entry is
+  `{seq, at, actor, kind, direction, payload}`, where `kind` is one of
+  `utterance` / `request` / `reply` / `tool_call` / `tool_result` /
+  `pending_action` / `backend_error`. External content in a payload keeps its
+  FR-T4 delimiters. `POST /api/assistant/message` accepts an optional
+  `utterance` (the raw recognised text before FR-T13's repair pass) so a
+  repaired turn logs both forms.
 - `POST /api/assistant/reset` -> `OkResponse`
 
 `PendingAction` is tagged by `kind`, because the assistant has two effectors
@@ -983,7 +994,17 @@ browser.
 
 - `engine/server/src/assistant.rs` — runtime: in-memory conversation, OpenAI-compatible
   tool-use loop against the configured backend, tool dispatch, pending-action
-  gate.
+  gate. The loop also writes the durable interaction log as it runs.
+- `engine/server/src/assistant_log.rs` — the durable, attributable interaction
+  log (FR-T14): an engine-local append-only SQLite file at
+  `state_dir/assistant-log.db`, recording both directions — utterance (raw +
+  repaired), request, reply, every tool call and result, and every pending
+  action's proposal and outcome (`approved`/`denied`/`expired`). Text and
+  structure only, never audio (FR-T12). Engine-local so an absent core costs it
+  nothing (FR-E9); a failed open degrades to a live-only conversation rather
+  than refusing the assistant. Retention (`assistant_log_retention_days`,
+  default 30) is enforced on a daily background sweep, so the horizon is a
+  configured maximum rather than whatever the last caller passed.
 - `engine/server/src/vogt_tools.rs` — the Vogt toolbox: `tools/list` fetched
   from vogt-core's MCP surface and converted to OpenAI function shape, the
   curated slice, credential resolution, `tools/call`, delimiting.
@@ -1019,6 +1040,7 @@ the terminal half works exactly as before (FR-T6, FR-E9).
 | `assistant_allow_claude_proxy` | `ENGINE_ASSISTANT_ALLOW_CLAUDE_PROXY` | `false` |
 | `assistant_profiles` | `ENGINE_ASSISTANT_PROFILES_JSON` | `[]` |
 | `assistant_default_profile` | `ENGINE_ASSISTANT_DEFAULT_PROFILE` | the implicit `default` |
+| `assistant_log_retention_days` | `ENGINE_ASSISTANT_LOG_RETENTION_DAYS` | `30` |
 
 #### Provider profiles (FR-T9, r16)
 
