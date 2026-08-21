@@ -31,13 +31,14 @@ from fastapi.testclient import TestClient
 from vogt.adapters.http.app import API_PREFIX, build_app
 from vogt.application.context import AppContext
 from vogt.application.models import (
-    CreateWorkParams,
     RegisterProjectParams,
     SweepParams,
 )
-from vogt.application.services import create_work, register_project, sweep
+from vogt.application.services import register_project, sweep
 from vogt.gui import GUI_PREFIX, STATIC_ROOT
 from vogt.registry import default_registry
+
+from tests.conftest import native_work_item
 
 WHY = "gui test"
 
@@ -75,12 +76,7 @@ def client(instance: AppContext, tmp_path: Path) -> Iterator[TestClient]:
             name="Vogt", root_path=str(tmp_path / "vogt"), reason=WHY
         ),
     )
-    create_work(
-        instance,
-        CreateWorkParams(
-            kind="bug", title="Sweep drops a page", project="vogt", reason=WHY
-        ),
-    )
+    native_work_item(instance, kind="bug", title="Sweep drops a page", project="vogt")
     sweep(instance, SweepParams(reason=WHY))
     with TestClient(build_app(context_factory=lambda: instance)) as test_client:
         yield test_client

@@ -31,15 +31,15 @@ from vogt.adapters.engine import EngineClient
 from vogt.adapters.mcp.surface import McpSurface
 from vogt.application.context import AppContext
 from vogt.application.models import (
-    CreateWorkParams,
+    ForgeLinkParams,
     GetWorkParams,
     RegisterProjectParams,
     StartSessionParams,
     StopSessionParams,
 )
 from vogt.application.services import (
-    create_work,
     get_work,
+    link_project,
     register_project,
     start_session,
     stop_session,
@@ -52,6 +52,8 @@ from vogt.application.services.auth import (
 )
 from vogt.core.auth import hash_token
 from vogt.registry import default_registry
+
+from tests.conftest import native_work_item
 
 WHY = "the M10 demo"
 
@@ -124,29 +126,46 @@ def _as_session(ctx: AppContext, secret: str) -> tuple[AppContext, Authenticated
 
 
 def test_the_m10_demo(
-    estate: AppContext, engine: StandInEngine, tmp_path: object
+    estate: AppContext,
+    engine: StandInEngine,
+    tmp_path: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     del tmp_path
     # 1. A project, and a bug worth opening a terminal on. (`project.import`
     #    is exercised by the M7 demo against a recording cloner; what M10
     #    adds starts at the work item, so this registers the tree directly.)
+    #    Registered with its repository and linked (#181): the write verbs
+    #    the session drives below refuse on an unlinked project since
+    #    decision 10, and the demo's estate is a forge-linked one.
+    from vogt.adapters.github.client import GitHubClient
+
+    def configured(path: Any, *, transport: Any = None) -> GitHubClient:
+        del path, transport
+        return GitHubClient(token="ghp_fake", transport=lambda *a, **k: (200, b"[]"))
+
+    monkeypatch.setattr(GitHubClient, "from_token_file", staticmethod(configured))
     register_project(
         estate,
         RegisterProjectParams(
-            name="Rustnzb", root_path="/srv/estate/rustnzb", reason=WHY
-        ),
-    )
-    created = create_work(
-        estate,
-        CreateWorkParams(
-            kind="bug",
-            title="Retries are not backing off",
-            body="Second attempt fires immediately after the first.",
-            project="rustnzb",
+            name="Rustnzb",
+            root_path="/srv/estate/rustnzb",
+            repo_url="https://github.com/TheDancingDeveloper-org/rustnzb",
             reason=WHY,
         ),
     )
-    ref = created.item.ref
+    link_project(estate, ForgeLinkParams(project="rustnzb", reason=WHY))
+    # The item itself is the adopted/native declared shape (#183 owns their
+    # migration); `work.create` on the linked project would write through
+    # and hand back a subject key, and sessions open on declared refs.
+    created = native_work_item(
+        estate,
+        kind="bug",
+        title="Retries are not backing off",
+        body="Second attempt fires immediately after the first.",
+        project="rustnzb",
+    )
+    ref = created.ref
 
     # 2. Start a session on it. The terminal opens in the tree the registry
     #    records — not in the engine's workspace root (FR-E3).

@@ -43,6 +43,8 @@ from vogt.application.services import (
 from vogt.core.auth import hash_token
 from vogt.errors import InvalidRequest, MissingReason, NotFound
 
+from tests.conftest import native_work_item
+
 WHY = "session test"
 ROOT = "/srv/estate/vogt"
 
@@ -135,14 +137,8 @@ def wired(instance: AppContext, engine: StandInEngine) -> AppContext:
     register_project(
         ctx, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
     )
-    create_work(
-        ctx,
-        CreateWorkParams(
-            kind="bug",
-            title="A bug to open a terminal on",
-            project="vogt",
-            reason=WHY,
-        ),
+    native_work_item(
+        ctx, kind="bug", title="A bug to open a terminal on", project="vogt"
     )
     return ctx
 
@@ -395,15 +391,12 @@ def test_the_work_items_brief_travels_with_the_session(
     engine's state directory, and the engine is the process that owns that
     filesystem even when both halves share a container.
     """
-    create_work(
+    native_work_item(
         wired,
-        CreateWorkParams(
-            kind="bug",
-            title="Sweep drops a page",
-            body="The second page of results never arrives.",
-            project="vogt",
-            reason=WHY,
-        ),
+        kind="bug",
+        title="Sweep drops a page",
+        body="The second page of results never arrives.",
+        project="vogt",
     )
     result = start_session(wired, StartSessionParams(work_item="WI-2", reason=WHY))
 
@@ -428,17 +421,9 @@ def test_the_brief_carries_the_items_relations(
     by the related item's ref and title rather than by its id, because an id
     tells a reader nothing they can act on.
     """
-    create_work(
-        wired,
-        CreateWorkParams(
-            kind="bug", title="Sweep drops a page", project="vogt", reason=WHY
-        ),
-    )
-    create_work(
-        wired,
-        CreateWorkParams(
-            kind="feature", title="Paginate the collector", project="vogt", reason=WHY
-        ),
+    native_work_item(wired, kind="bug", title="Sweep drops a page", project="vogt")
+    native_work_item(
+        wired, kind="feature", title="Paginate the collector", project="vogt"
     )
     relate_work(
         wired,

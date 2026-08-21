@@ -29,10 +29,10 @@ from vogt.application.models import (
     BacklogParams,
     BugsParams,
     CommentParams,
-    CreateWorkParams,
     DriftDetectParams,
     DriftListParams,
     DriftResolveParams,
+    ForgeLinkParams,
     GetWorkParams,
     ObservationsParams,
     OnboardParams,
@@ -50,9 +50,9 @@ from vogt.application.services import (
     brief_project,
     bugs,
     comment_work,
-    create_work,
     detect_drift,
     get_work,
+    link_project,
     list_drift,
     list_write_backs,
     observations,
@@ -69,6 +69,8 @@ from vogt.core.drift import (
     REFERENCED_ISSUE_MISMATCH,
     UPDATE_AUTOMATION_GAP,
 )
+
+from tests.conftest import native_work_item
 
 WHY = "forge module test"
 REPO = "https://github.com/TheDancingDeveloper-org/rustnzb"
@@ -185,6 +187,13 @@ def forge(
             reason=WHY,
         ),
     )
+    # Linked, the #181 way: this suite exercises the adopted-item write-back
+    # plane, and since decision 10 the write verbs refuse on an unlinked
+    # project. Linking here goes through the real operation, against the
+    # same patched client factory the writes use.
+    link_project(instance, ForgeLinkParams(project="rustnzb", reason=WHY))
+    fake.requests.clear()
+    fake.bodies.clear()
     return fake
 
 
@@ -683,17 +692,18 @@ def test_an_item_finished_while_the_issue_it_names_is_open_is_drift(
     did, and refused to proceed.
     """
     onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
-    created = create_work(
+    # A declared row that *references* an issue without being linked to it —
+    # the pre-#181 shape #49 was about, still producible via `work.adopt`
+    # elsewhere; `work.create` on the linked project would write through and
+    # be the subject itself, which is not this scenario.
+    created = native_work_item(
         instance,
-        CreateWorkParams(
-            kind="bug",
-            title="Retries forever",
-            body=f"GitHub: {REPO}/issues/12 (fix in PR {REPO}/pull/13)",
-            project="rustnzb",
-            reason=WHY,
-        ),
+        kind="bug",
+        title="Retries forever",
+        body=f"GitHub: {REPO}/issues/12 (fix in PR {REPO}/pull/13)",
+        project="rustnzb",
     )
-    _finish(instance, created.item.ref)
+    _finish(instance, created.ref)
 
     raised = detect_drift(instance, DriftDetectParams(auto_accept=True, reason=WHY))
     proposal = next(p for p in raised.raised if p.kind == REFERENCED_ISSUE_MISMATCH)
@@ -717,17 +727,14 @@ def test_a_pull_request_number_in_a_title_is_not_an_issue_reference(
     about a PR from a sentence describing history.
     """
     onboard(instance, OnboardParams(project="rustnzb", reason=WHY))
-    created = create_work(
+    created = native_work_item(
         instance,
-        CreateWorkParams(
-            kind="bug",
-            title="Regression from #12",
-            body="Fixed in #13. See also #9.",
-            project="rustnzb",
-            reason=WHY,
-        ),
+        kind="bug",
+        title="Regression from #12",
+        body="Fixed in #13. See also #9.",
+        project="rustnzb",
     )
-    _finish(instance, created.item.ref)
+    _finish(instance, created.ref)
 
     raised = detect_drift(instance, DriftDetectParams(auto_accept=False, reason=WHY))
     assert [p for p in raised.raised if p.kind == REFERENCED_ISSUE_MISMATCH] == []

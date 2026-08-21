@@ -33,7 +33,6 @@ from vogt.application.models import (
     ContractEvaluateParams,
     ContractInapplicableParams,
     CreateProjectParams,
-    CreateWorkParams,
     ListAuditParams,
     ProjectBriefParams,
     RegisterProjectParams,
@@ -49,12 +48,13 @@ from vogt.application.services import (
     contract_evaluate,
     contract_inapplicable,
     create_project,
-    create_work,
     list_audit,
     register_project,
     scaffold_project,
 )
 from vogt.errors import NotFound
+
+from tests.conftest import native_work_item
 
 WHY = "contract adoption test"
 
@@ -170,12 +170,14 @@ def test_a_project_that_declined_is_never_refused_anything(
     """FR-G13 still holds, and FR-G16 does not become a new gate."""
     slug = _handed(instance, tmp_path)
 
-    created = create_work(
-        instance,
-        CreateWorkParams(kind="bug", title="Tracked anyway", project=slug, reason=WHY),
+    # FR-G13 / FR-G16: contract state gates nothing. The write plane's own
+    # NotLinked refusal (#181, decision 10) is about link state, not the
+    # contract, so the declared row still lands the audited way here.
+    created = native_work_item(
+        instance, kind="bug", title="Tracked anyway", project=slug
     )
 
-    assert created.item.ref.startswith("WI-")
+    assert created.ref.startswith("WI-")
 
 
 # -- FR-G17: the scaffold reaches a project Vogt was handed ---------------

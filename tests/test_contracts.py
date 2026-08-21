@@ -13,7 +13,6 @@ from vogt.application.models import (
     ContractCheckParams,
     ContractEvaluateParams,
     CreateProjectParams,
-    CreateWorkParams,
     ProjectBriefParams,
     RegisterProjectParams,
     SweepParams,
@@ -26,7 +25,6 @@ from vogt.application.services import (
     contract_check,
     contract_evaluate,
     create_project,
-    create_work,
     register_project,
     sweep,
     transition_project,
@@ -34,6 +32,8 @@ from vogt.application.services import (
 from vogt.collectors.git_local import tracked_names
 from vogt.core.contract import DEFAULT_CONTRACT, evaluate
 from vogt.errors import NotFound
+
+from tests.conftest import native_work_item
 
 WHY = "contract test"
 
@@ -327,13 +327,13 @@ def test_a_non_compliant_project_refuses_nothing(
         "non_compliant"
     )
 
-    created = create_work(
-        instance,
-        CreateWorkParams(
-            kind="bug", title="Still allowed", project="messy", reason=WHY
-        ),
+    # FR-G13 still holds under #181: compliance gates nothing. The write
+    # plane's own NotLinked refusal is a *link-state* rule, not a compliance
+    # one, so the declared row lands the audited way regardless of the verdict.
+    created = native_work_item(
+        instance, kind="bug", title="Still allowed", project="messy"
     )
-    assert created.item.project_slug == "messy"
+    assert created.project_slug == "messy"
 
     moved = transition_project(
         instance,

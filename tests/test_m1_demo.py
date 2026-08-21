@@ -106,12 +106,13 @@ def test_m1_demo(instance: AppContext, agent: Agent) -> None:
         reason="the agent is tracking this repo",
     )
 
-    # create a bug
+    # create a bug — project-less, because since #181 `work.create` on an
+    # unlinked project is the typed link-or-publish refusal (decision 10),
+    # and what this demo drives is the M1 write plane, not the forge.
     bug = agent.tool(
         "work_create",
         kind="bug",
         title="Segment fetch retries forever",
-        project="rust-nzb",
         priority="p1",
         reason="observed while reading the retry loop",
     )["item"]
@@ -123,7 +124,6 @@ def test_m1_demo(instance: AppContext, agent: Agent) -> None:
         "work_create",
         kind="feature",
         title="Add a retry budget",
-        project="rust-nzb",
         priority="p2",
         reason="the bug cannot be fixed without this",
     )["item"]

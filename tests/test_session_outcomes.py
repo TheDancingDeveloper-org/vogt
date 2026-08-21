@@ -28,7 +28,6 @@ from vogt.adapters.engine import EngineClient, EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
     CoverageParams,
-    CreateWorkParams,
     ObservationsParams,
     RegisterProjectParams,
     StartSessionParams,
@@ -37,7 +36,6 @@ from vogt.application.models import (
 )
 from vogt.application.services import (
     coverage,
-    create_work,
     observations,
     register_project,
     start_session,
@@ -47,6 +45,8 @@ from vogt.application.services import (
 from vogt.application.services.collect import collector_registry
 from vogt.collectors.session_outcomes import KIND_SESSION_OUTCOME, KIND_TASK_RUN
 from vogt.core.entities import Observation
+
+from tests.conftest import native_work_item
 
 WHY = "session outcome test"
 
@@ -213,14 +213,8 @@ def wired(instance: AppContext, engine: StandInEngine, repo: Path) -> AppContext
     register_project(
         ctx, RegisterProjectParams(name="Estate", root_path=str(repo), reason=WHY)
     )
-    create_work(
-        ctx,
-        CreateWorkParams(
-            kind="bug",
-            title="Something to open a terminal on",
-            project="estate",
-            reason=WHY,
-        ),
+    native_work_item(
+        ctx, kind="bug", title="Something to open a terminal on", project="estate"
     )
     return ctx
 

@@ -47,6 +47,8 @@ from vogt.application.services import (
 from vogt.core.entities import AuditRecord
 from vogt.errors import NotFound
 
+from tests.conftest import native_comment, native_work_item
+
 WHY = "a test said so"
 
 
@@ -58,9 +60,15 @@ def _project(ctx: AppContext, name: str) -> str:
 
 
 def _item(ctx: AppContext, title: str, *, project: str | None = None) -> str:
+    # Since #181 `work.create` refuses on an unlinked project, and these
+    # tests are about the audit log, not the write-through plane — so a
+    # project-bound fixture item lands as the audited native row `work.adopt`
+    # still produces, and a project-less one keeps riding the real service.
+    if project is not None:
+        return native_work_item(ctx, kind="bug", title=title, project=project).ref
     return create_work(
         ctx,
-        CreateWorkParams(kind="bug", title=title, project=project, reason=WHY),
+        CreateWorkParams(kind="bug", title=title, reason=WHY),
     ).item.ref
 
 
@@ -316,7 +324,7 @@ def test_the_total_agrees_with_the_records_under_every_narrowing(
     """A total counted from a different set is a page indicator that lies."""
     slug = _project(instance, "Counted")
     ref = _item(instance, "Counted item", project=slug)
-    comment_work(instance, CommentParams(ref=ref, body="counted", reason=WHY))
+    native_comment(instance, ref=ref, body="counted")
     moment = _at(instance, "work.comment")
 
     narrowings: tuple[dict[str, Any], ...] = (
@@ -341,7 +349,7 @@ def test_a_projects_trail_holds_its_items_and_their_comments(
 ) -> None:
     slug = _project(instance, "Ours")
     ref = _item(instance, "Ours", project=slug)
-    comment_work(instance, CommentParams(ref=ref, body="ours", reason=WHY))
+    native_comment(instance, ref=ref, body="ours")
 
     trail = _trail(instance, project=slug, limit=500)
 
@@ -468,8 +476,7 @@ def test_a_time_bound_survives_a_timestamp_with_microseconds(
 def test_an_items_events_carry_the_states_it_moved_between(
     instance: AppContext,
 ) -> None:
-    _project(instance, "alpha")
-    ref = _item(instance, "Sweep drops a page", project="alpha")
+    ref = _item(instance, "Sweep drops a page")
     transition_work(
         instance, TransitionWorkParams(ref=ref, to_state="in_progress", reason=WHY)
     )
@@ -491,9 +498,8 @@ def test_an_items_events_carry_the_states_it_moved_between(
 
 
 def test_an_items_history_excludes_every_other_items(instance: AppContext) -> None:
-    _project(instance, "alpha")
-    mine = _item(instance, "Mine", project="alpha")
-    theirs = _item(instance, "Theirs", project="alpha")
+    mine = _item(instance, "Mine")
+    theirs = _item(instance, "Theirs")
     transition_work(
         instance, TransitionWorkParams(ref=theirs, to_state="in_progress", reason=WHY)
     )
@@ -512,9 +518,8 @@ def test_the_cursor_still_walks_a_narrowed_feed(instance: AppContext) -> None:
     would decide the history ended at the first quiet stretch — which, on a
     busy estate, is immediately.
     """
-    _project(instance, "alpha")
-    ref = _item(instance, "Mine", project="alpha")
-    noise = _item(instance, "Noise", project="alpha")
+    ref = _item(instance, "Mine")
+    noise = _item(instance, "Noise")
     for state in ("in_progress", "review"):
         transition_work(
             instance, TransitionWorkParams(ref=ref, to_state=state, reason=WHY)

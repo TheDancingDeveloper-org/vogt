@@ -23,11 +23,131 @@ from vogt.application.context import AppContext, build_context
 from vogt.application.models import InitParams
 from vogt.application.services import init_instance
 from vogt.config import VogtConfig
+from vogt.core.entities import WorkItem
 from vogt.core.principal import Principal
 
 TEST_PRINCIPAL = Principal(
     identity_ref="local:test-user", kind="human", display_name="test-user"
 )
+
+
+def native_work_item(
+    ctx: AppContext,
+    *,
+    title: str,
+    body: str = "",
+    kind: str = "feature",
+    project: str | None = None,
+    state: str | None = None,
+    priority: str = "p2",
+    effort: str | None = None,
+    assignee: str | None = None,
+    initiative: str | None = None,
+    labels: tuple[str, ...] = (),
+    reason: str = "native fixture (pre-#183 shape)",
+) -> WorkItem:
+    """A declared work item in a project, written the audited way.
+
+    Since #181 `work.create` refuses on an unlinked project (decision 10),
+    but a *native declared row in a project* remains a legitimate shape the
+    read plane must keep serving — `work.adopt` still produces one, and
+    #183 owns their migration. Fixtures that need "a work item in this
+    project" and are not testing the write-through plane use this instead
+    of riding `work.create`; it lands the same audit and event rows the
+    service does, so audit- and event-shaped assertions keep meaning what
+    they meant.
+    """
+    from vogt.application.services import _resolve
+    from vogt.application.writes import WriteOutcome, audited_write
+    from vogt.core.entities import Actor
+    from vogt.storage.interface import WriteTxn
+
+    body_text = body
+
+    def write(txn: WriteTxn, actor: Actor) -> WriteOutcome[WorkItem]:
+        del actor
+        workflow = txn.workflow_for(kind)
+        now = ctx.clock()
+        item = WorkItem(
+            id=ctx.id_factory("wrk"),
+            ref=txn.next_work_ref(),
+            kind=kind,  # type: ignore[arg-type]
+            title=title,
+            body=body_text,
+            state=state or workflow.initial_state,
+            priority=priority,  # type: ignore[arg-type]
+            effort=effort,  # type: ignore[arg-type]
+            project_id=(None if project is None else _resolve.project(txn, project).id),
+            initiative_id=(
+                None if initiative is None else _resolve.initiative(txn, initiative).id
+            ),
+            origin="created",
+            trust_state="unverified",
+            assignee_actor_id=(
+                None if assignee is None else _resolve.actor(txn, assignee).id
+            ),
+            labels=list(labels),
+            created_at=now,
+            updated_at=now,
+        )
+        txn.insert_work_item(item)
+        stored = txn.work_item_by_id(item.id)
+        assert stored is not None  # written in this transaction
+        return WriteOutcome(
+            result=stored,
+            entity_kind="work_item",
+            entity_id=item.id,
+            payload=stored.model_dump(mode="json"),
+            event_kind="work.created",
+            summary={"ref": item.ref, "kind": item.kind, "title": item.title},
+        )
+
+    return audited_write(ctx, operation="work.create", reason=reason, body=write)
+
+
+def native_comment(
+    ctx: AppContext,
+    *,
+    ref: str,
+    body: str,
+    reason: str = "native comment fixture (pre-#183 shape)",
+) -> object:
+    """A local comment on a native declared item, written the audited way.
+
+    `work.comment` refuses on an unlinked project since #181 (decision 10);
+    audit- and trail-shaped tests that need "a comment on this project's
+    item" use this, which lands the same comment row, audit row and event
+    the native service path does — minus the write-back attempt, which those
+    tests were never about.
+    """
+    from vogt.application.services import _resolve
+    from vogt.application.writes import WriteOutcome, audited_write
+    from vogt.core.entities import Actor, Comment
+    from vogt.storage.interface import WriteTxn
+
+    body_text = body
+
+    def write(txn: WriteTxn, actor: Actor) -> WriteOutcome[Comment]:
+        item = _resolve.work_item(txn, ref)
+        comment = Comment(
+            id=ctx.id_factory("cmt"),
+            work_item_id=item.id,
+            actor_id=actor.id,
+            actor_display_name=actor.display_name,
+            body=body_text,
+            created_at=ctx.clock(),
+        )
+        txn.insert_comment(comment)
+        return WriteOutcome(
+            result=comment,
+            entity_kind="comment",
+            entity_id=comment.id,
+            payload=comment.model_dump(mode="json"),
+            event_kind="work.commented",
+            summary={"ref": item.ref, "comment_id": comment.id},
+        )
+
+    return audited_write(ctx, operation="work.comment", reason=reason, body=write)
 
 
 class StepClock:

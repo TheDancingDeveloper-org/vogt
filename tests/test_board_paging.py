@@ -12,12 +12,12 @@ from vogt.application.models import (
     BoardListParams,
     CreateWorkParams,
     RegisterProjectParams,
-    TransitionWorkParams,
 )
 from vogt.application.services import create_work, list_board, register_project
-from vogt.application.services.work import transition_work
 from vogt.core.entities import WorkItem
 from vogt.errors import InvalidCursor
+
+from tests.conftest import native_work_item
 
 WHY = "board paging test"
 
@@ -34,22 +34,18 @@ def test_cells_page_independently_with_exact_totals(instance: AppContext) -> Non
         RegisterProjectParams(name="Alpha", root_path="/srv/alpha", reason=WHY),
     )
     for index in range(7):
-        create_work(
-            instance,
-            CreateWorkParams(
-                kind="feature",
-                title=f"open {index}",
-                project="alpha",
-                reason=WHY,
-            ),
+        native_work_item(
+            instance, kind="feature", title=f"open {index}", project="alpha"
         )
-    moving = create_work(
+    # Straight to `in_progress`: `work.transition` refuses on an unlinked
+    # project since #181, and what this test pages is the Board SQL, not the
+    # state machine.
+    moving = native_work_item(
         instance,
-        CreateWorkParams(kind="feature", title="moving", project="alpha", reason=WHY),
-    ).item
-    transition_work(
-        instance,
-        TransitionWorkParams(ref=moving.ref, to_state="in_progress", reason=WHY),
+        kind="feature",
+        title="moving",
+        project="alpha",
+        state="in_progress",
     )
 
     first = list_board(

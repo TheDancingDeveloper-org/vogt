@@ -225,9 +225,12 @@ def _attempt_comment(ctx: AppContext) -> WriteBackRecord:
     set_write_back(
         ctx, SetWriteBackParams(project="rustnzb", policy="comment_only", reason=WHY)
     )
+    # Project-less on purpose: `work.create` on an unlinked project refuses
+    # since #181, and what this test drives is `writeback.attempt`'s identity
+    # selection directly — the project travels as an argument below.
     work = create_work(
         ctx,
-        CreateWorkParams(kind="bug", title="upstream", project="rustnzb", reason=WHY),
+        CreateWorkParams(kind="bug", title="upstream", reason=WHY),
     )
     with ctx.declared.read() as view:
         project = view.project_by_slug("rustnzb")

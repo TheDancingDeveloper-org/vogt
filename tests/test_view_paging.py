@@ -35,18 +35,18 @@ from vogt.application.models import (
     BacklogResult,
     BugsParams,
     CreateProjectParams,
-    CreateWorkParams,
     InitParams,
 )
 from vogt.application.services import (
     backlog,
     bugs,
     create_project,
-    create_work,
     init_instance,
 )
 from vogt.config import VogtConfig
 from vogt.core.principal import Principal
+
+from tests.conftest import native_work_item
 
 WHY = "paging test"
 FIXED = datetime(2026, 8, 12, 5, 0, 0, tzinfo=UTC)
@@ -69,14 +69,11 @@ def estate(tmp_path: Path) -> AppContext:
         CreateProjectParams(name="Paged", root_path=str(tmp_path), reason=WHY),
     )
     for index in range(12):
-        create_work(
+        native_work_item(
             ctx,
-            CreateWorkParams(
-                title=f"item {index:02d}",
-                kind="bug" if index % 2 else "feature",
-                project="paged",
-                reason=WHY,
-            ),
+            title=f"item {index:02d}",
+            kind="bug" if index % 2 else "feature",
+            project="paged",
         )
     return ctx
 

@@ -77,7 +77,12 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ("initiative.list", {}),
     (
         "project.register",
-        {"name": "Parity Project", "root_path": "/srv/parity", "reason": WHY},
+        {
+            "name": "Parity Project",
+            "root_path": "/srv/parity",
+            "repo_url": "https://github.com/parity-org/parity-project",
+            "reason": WHY,
+        },
     ),
     ("project.get", {"slug": "parity-project"}),
     ("project.list", {}),
@@ -111,6 +116,25 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     ("notifications", {}),
+    # -- the forge foundation, armed before the work plane (#179/#180/#181) --
+    # Per-actor account linking: paste, confirm, enumerate. The token is
+    # validated against the stand-in forge and never echoed back; it is also
+    # the credential the linked project's write-through lands under.
+    ("forge.account_link", {"token": "ghp_parity_token", "reason": WHY}),
+    ("forge.account_status", {}),
+    # The import picker (#180): the same accessible-repo list must arrive
+    # byte-identically on all three surfaces.
+    ("forge.repos", {}),
+    (
+        "forge.writeback",
+        {"project": "parity-project", "policy": "full", "reason": WHY},
+    ),
+    # The #181 pivot: an explicit act makes the project upstream-truth.
+    ("forge.link", {"project": "parity-project", "reason": WHY}),
+    # -- the work plane, both shapes (#181) ---------------------------------
+    # Native declared items carry the relation/blocker flows; they belong to
+    # no project because `work.create` on an unlinked project is the typed
+    # decision-10 refusal, and relations stay declared-only in v1.
     (
         "work.create",
         {
@@ -119,7 +143,6 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "body": "raised by the parity harness",
             "priority": "p1",
             "effort": "s",
-            "project": "parity-project",
             "initiative": "parity-initiative",
             "assignee": "agent:parity",
             "labels": ["parity"],
@@ -131,11 +154,27 @@ SCRIPT: list[tuple[str, StepParams]] = [
         {
             "kind": "feature",
             "title": "Blocking feature",
-            "project": "parity-project",
             "reason": WHY,
         },
     ),
+    # Write-through create on the linked project: the stand-in forge mints
+    # issue #1, and the subject key comes back as the ref on every surface.
+    (
+        "work.create",
+        {
+            "kind": "feature",
+            "title": "Upstream tracked",
+            "body": "created through the forge",
+            "project": "parity-project",
+            "labels": ["parity"],
+            "reason": WHY,
+        },
+    ),
+    # Consolidate so the mirror knows the issue the create just minted; the
+    # upstream-truth reads below join that mirror to the overlay.
+    ("forge.onboard", {"project": "parity-project", "reason": WHY}),
     ("work.get", {"ref": "WI-1"}),
+    ("work.get", {"ref": "gh:parity-org/parity-project#1"}),
     ("work.list", {"project": "parity-project"}),
     (
         "board.list",
@@ -150,12 +189,36 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     ("work.update", {"ref": "WI-1", "priority": "p0", "reason": WHY}),
+    # Overlay-only on the linked item: priority is vogt-local (decision 2).
+    (
+        "work.update",
+        {"ref": "gh:parity-org/parity-project#1", "priority": "p0", "reason": WHY},
+    ),
     (
         "work.relate",
         {"ref": "WI-1", "kind": "depends_on", "target": "WI-2", "reason": WHY},
     ),
     ("work.transition", {"ref": "WI-2", "to_state": "in_progress", "reason": WHY}),
+    # A vogt-only state move on the linked item: overlay-only, no upstream
+    # write — the invariant the transport-recording test pins.
+    (
+        "work.transition",
+        {
+            "ref": "gh:parity-org/parity-project#1",
+            "to_state": "in_progress",
+            "reason": WHY,
+        },
+    ),
     ("work.comment", {"ref": "WI-1", "body": "seen by the harness", "reason": WHY}),
+    # A comment on the linked item posts upstream, fail-loud.
+    (
+        "work.comment",
+        {
+            "ref": "gh:parity-org/parity-project#1",
+            "body": "posted through the forge",
+            "reason": WHY,
+        },
+    ),
     ("backlog", {}),
     ("bugs", {}),
     ("why", {"ref": "WI-1"}),
@@ -298,21 +361,10 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     ("auth.decisions", {}),
-    # -- the forge module ---------------------------------------------------
-    (
-        "forge.writeback",
-        {"project": "parity-project", "policy": "comment_only", "reason": WHY},
-    ),
-    ("forge.onboard", {"project": "parity-project", "reason": WHY}),
-    # Per-actor account linking (#179): paste, confirm, remove. The token is
-    # validated against the stand-in forge and never echoed back.
-    ("forge.account_link", {"token": "ghp_parity_token", "reason": WHY}),
-    ("forge.account_status", {}),
-    # The import picker (#180): enumerate what the linked credential can see, so
-    # the same accessible-repo list arrives byte-identically on all three
-    # surfaces. Driven while the account is still linked, so the actor's PAT is
-    # the credential the stand-in forge answers `/user/repos` for.
-    ("forge.repos", {}),
+    # -- the forge module's tail --------------------------------------------
+    # The account stayed linked through every write-through step above; the
+    # unlink here proves removal on all three surfaces and returns writes to
+    # the file token.
     ("forge.account_unlink", {"reason": WHY}),
     ("forge.actions", {}),
     ("export", {"destination": "{root}/export.json", "reason": WHY}),
@@ -448,39 +500,98 @@ def _recording_cloner(root: Path) -> Cloner:
     return clone
 
 
-def _stand_in_github(
-    url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
-) -> tuple[int, bytes]:
-    """A forge that validates the parity PAT without a network (#179).
+class _StandInForge:
+    """A deterministic forge, one per instance (#179, #180, #181).
 
-    `forge.account_link` calls `/user` to learn who a token belongs to; the
-    three transports must get the identical answer, so this hands back a fixed
-    login rather than reaching GitHub.
+    It validates the parity PAT, enumerates the picker's repos, *mints
+    issues* for the write-through plane and then lists them back for the
+    sync collectors — so `work.create` on the linked project and the
+    `forge.onboard` that mirrors it produce byte-identical state on all
+    three transports without a network. Deterministic issue numbers per
+    instance are what make the subject-key refs comparable.
     """
-    if method == "GET" and url.endswith("/user"):
-        return 200, json.dumps({"login": "parity-user"}).encode()
-    if method == "GET" and "/user/repos" in url:
-        # The import picker (#180) enumerates the linked credential's repos; a
-        # fixed pair keeps the three transports comparing the same answer.
-        return 200, json.dumps(
-            [
-                {
-                    "name": "parity-import",
-                    "owner": {"login": "parity-org"},
-                    "default_branch": "main",
-                    "private": False,
-                    "html_url": "https://github.com/parity-org/parity-import",
-                },
-                {
-                    "name": "private-thing",
-                    "owner": {"login": "parity-user"},
-                    "default_branch": "trunk",
-                    "private": True,
-                    "html_url": "https://github.com/parity-user/private-thing",
-                },
-            ]
-        ).encode()
-    return 404, b""
+
+    def __init__(self) -> None:
+        self.issues: list[dict[str, Any]] = []
+
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        body: bytes = b"",
+        method: str = "GET",
+    ) -> tuple[int, bytes]:
+        del headers
+        payload = json.loads(body.decode()) if body else {}
+        if method == "GET" and url.endswith("/user"):
+            return 200, json.dumps({"login": "parity-user"}).encode()
+        if method == "GET" and "/user/repos" in url:
+            return 200, json.dumps(
+                [
+                    {
+                        "name": "parity-import",
+                        "owner": {"login": "parity-org"},
+                        "default_branch": "main",
+                        "private": False,
+                        "html_url": "https://github.com/parity-org/parity-import",
+                    },
+                    {
+                        "name": "private-thing",
+                        "owner": {"login": "parity-user"},
+                        "default_branch": "trunk",
+                        "private": True,
+                        "html_url": "https://github.com/parity-user/private-thing",
+                    },
+                ]
+            ).encode()
+        if method == "POST" and url.rstrip("/").endswith("/issues"):
+            number = len(self.issues) + 1
+            issue = {
+                "number": number,
+                "title": payload.get("title", ""),
+                "state": "open",
+                "labels": [{"name": str(name)} for name in payload.get("labels", [])],
+                "comments": 0,
+                "updated_at": f"2026-08-01T00:00:{number:02d}Z",
+                "html_url": (
+                    f"https://github.com/parity-org/parity-project/issues/{number}"
+                ),
+            }
+            self.issues.append(issue)
+            return 200, json.dumps(issue).encode()
+        if method == "POST" and "/comments" in url:
+            return 200, json.dumps(
+                {"html_url": "https://github.com/parity-org/parity-project/issues/1"}
+            ).encode()
+        if method == "POST" and "/labels" in url:
+            return 200, json.dumps({"number": 1}).encode()
+        if method == "PATCH" and "/issues/" in url:
+            number = int(url.rstrip("/").rsplit("/", 1)[1])
+            for issue in self.issues:
+                if issue["number"] == number:
+                    issue["state"] = payload.get("state", issue["state"])
+            return 200, json.dumps({"number": number}).encode()
+        if method == "GET" and "/issues" in url and "/comments" not in url:
+            return 200, json.dumps(self.issues).encode()
+        if "/actions/runs" in url:
+            return 200, json.dumps({"workflow_runs": []}).encode()
+        if "/contents/" in url:
+            return 404, b""
+        if "/vulnerability-alerts" in url or "/automated-security-fixes" in url:
+            return 404, b""
+        if method == "GET" and (
+            "/pulls" in url
+            or "/labels" in url
+            or "/releases" in url
+            or "/notifications" in url
+        ):
+            return 200, b"[]"
+        if method == "GET" and "/repos/" in url:
+            # `describe` — the bare repository read `project.import` makes.
+            tail = url.split("/repos/", 1)[1].split("?", 1)[0]
+            if tail.count("/") == 1:
+                return 200, json.dumps({"default_branch": "main"}).encode()
+        return 404, b""
 
 
 def _forge_key_file(root: Path) -> Path:
@@ -533,18 +644,25 @@ def _fresh(
 ) -> tuple[AppContext, Path]:
     root = tmp_path_factory.mktemp(label)
     _write_fixture_tree(root)
+    # A file token alongside the per-actor PAT: `forge.onboard`'s sync path
+    # deliberately uses the FR-S7 file token (sweeps have no acting person),
+    # so mirroring the write-through issue needs one. Every provider the
+    # instance builds is wired to this instance's own stand-in forge.
+    token_file = root / "github_token"
+    token_file.write_text("ghp_parity_file", encoding="utf-8")
     context = build_context(
         config=VogtConfig(
             data_dir=root / "instance",
             import_root=root / "imported",
             forge_account_key_file=_forge_key_file(root),
+            github_token_file=token_file,
         ),
         principal=TEST_PRINCIPAL,
         clock=StepClock(),
         id_factory=SequentialIds(),
         cloner=_recording_cloner(root),
         engine=_stand_in_engine(),
-        forge_transport=_stand_in_github,
+        forge_transport=_StandInForge(),
     )
     init_instance(context, InitParams())
     return context, root

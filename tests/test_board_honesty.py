@@ -18,17 +18,17 @@ from vogt.application.models import (
     BacklogParams,
     BoardCellParams,
     BoardListParams,
-    CreateWorkParams,
     RegisterProjectParams,
     SweepParams,
 )
 from vogt.application.services import (
     backlog,
-    create_work,
     list_board,
     register_project,
     sweep,
 )
+
+from tests.conftest import native_work_item
 
 WHY = "board honesty test"
 
@@ -56,12 +56,7 @@ def estate(instance: AppContext, tmp_path: Path) -> AppContext:
         instance,
         RegisterProjectParams(name="Fixture", root_path=str(project), reason=WHY),
     )
-    create_work(
-        instance,
-        CreateWorkParams(
-            kind="feature", title="declared one", project="fixture", reason=WHY
-        ),
-    )
+    native_work_item(instance, kind="feature", title="declared one", project="fixture")
     sweep(instance, SweepParams(offline_only=True, reason=WHY))
     return instance
 
@@ -111,9 +106,6 @@ def test_a_board_with_no_observations_is_candidate_equal(instance: AppContext) -
         instance,
         RegisterProjectParams(name="Bare", root_path="/srv/bare", reason=WHY),
     )
-    create_work(
-        instance,
-        CreateWorkParams(kind="feature", title="only one", project="bare", reason=WHY),
-    )
+    native_work_item(instance, kind="feature", title="only one", project="bare")
     result = list_board(instance, _board(instance))
     assert result.backlog_candidates == result.declared_total == 1
