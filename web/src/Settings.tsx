@@ -1,12 +1,12 @@
 import { Component, Show, For, createEffect, createSignal, onMount } from "solid-js";
 import {
   api,
-  clearStoredAuth,
   ApiError,
   getBase,
   getToken,
   setBase,
   setToken,
+  signOut,
   validateCredentials,
   type OperationalStatus,
   type PushPreferences,
@@ -428,9 +428,15 @@ const Settings: Component<Props> = (props) => {
   };
 
   const clearAuth = () => {
-    clearStoredAuth();
+    // Handing the credential back is the same session-level fact as having it
+    // refused, so it travels the same way (#195): `signOut` clears both token
+    // and base and publishes the rejection, and the shell returns to the
+    // login screen from its one subscriber. That is why this no longer
+    // reloads the page to get there — and why the other tabs follow.
+    // Closed first: `signOut` returns the shell to the login screen in the
+    // same tick, which unmounts this modal underneath the call.
     props.onClose();
-    location.reload();
+    signOut();
   };
 
   const updateStoragePref = (key: keyof StoragePrefs, value: number) => {
@@ -809,7 +815,7 @@ const Settings: Component<Props> = (props) => {
             </Show>
           </div>
           <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
-            <button type="button" onClick={clearAuth}>Clear saved auth</button>
+            <button type="button" onClick={clearAuth}>Sign out &amp; clear saved auth</button>
           </div>
 
           <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />

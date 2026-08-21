@@ -40,7 +40,8 @@ import {
 import { isBookmarked, toggleBookmark, bookmarks } from "./bookmarks";
 import { api as apiModule, ApiError, getBase, validateCredentials } from "./api";
 import type { PublicConfig, SessionTemplate } from "./api";
-import { subscribeAuthState } from "./api";
+import { clearStoredAuth, signOut, subscribeAuthRejected, subscribeAuthState } from "./api";
+import type { AuthRejection } from "./api";
 import {
   createSession,
   deleteSession,
@@ -542,12 +543,48 @@ const App: Component = () => {
         : documentTitleForRoute(routeOutcome(), location.pathname);
   });
 
+  /**
+   * The one place a refused credential becomes a signed-out shell (#195).
+   *
+   * Boot already handled a 401 correctly and nothing handled one that arrived
+   * afterwards, so a token rotated mid-session left every panel holding its
+   * own error and the shell still claiming to be authenticated — a lie the UI
+   * never re-examined, and no way back to the login screen short of a reload
+   * the reader had no reason to try. It lives here, once, because the fact is
+   * session-level: a call site doing its own version would be a second answer
+   * to the same question.
+   *
+   * What does *not* arrive here matters as much. A 403 and an unreachable
+   * engine never reach this function — `api.ts` publishes 401 alone — because
+   * a missing capability and an absent server are the caller's to render, and
+   * signing the reader out over either is FR-O4's collapse of "offline" into
+   * "unauthorized".
+   */
+  const endSession = (rejection: AuthRejection) => {
+    // Already at the gate: a second 401 from a panel that was still in flight
+    // must not overwrite the copy the reader is reading.
+    if (authState() === "unauthenticated") return;
+    // Otherwise the stream reconnects on the dead token until the backoff
+    // gives up, and each attempt reports the same rejection again.
+    stopEventStream();
+    clearStoredAuth();
+    setAuthError(
+      rejection.status === 401
+        ? "That token was rejected (401). Sign in with the current Vogt token to continue."
+        : "You are signed out. Enter a token to continue.",
+    );
+    setAuthState("unauthenticated");
+  };
+
   onMount(() => {
     const unsubscribeAuthState = subscribeAuthState(() => {
       stopEventStream();
       window.location.reload();
     });
     onCleanup(unsubscribeAuthState);
+    // Every refused credential, wherever it was met — this tab's own reads,
+    // its event stream, or another tab's, which arrives over the same channel.
+    onCleanup(subscribeAuthRejected(endSession));
     apiModule
       .publicConfig()
       .then((c) => setPublicCfg(c))
@@ -1314,6 +1351,13 @@ const App: Component = () => {
           />
           <div class="places-rail-footer">
             <button type="button" onClick={openSettings}>Settings</button>
+            {/* Reachable from the failure state, which is the case it is for:
+                a token that is wrong without being refused — pointed at the
+                wrong base, or at an instance that answers 403 to everything —
+                leaves the reader with panels full of errors and, before this,
+                nothing to press. Goes out through `api.ts` so the transition
+                is the same one a 401 takes. */}
+            <button type="button" onClick={() => signOut()}>Sign out</button>
             <span class={`rail-connection ${isConnected() ? "connected" : "offline"}`}>
               <span class="rail-connection-dot" aria-hidden="true" />
               {isConnected() ? "Connected" : "Offline"}

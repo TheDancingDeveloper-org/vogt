@@ -1453,6 +1453,82 @@ the first landing (and #129 on `main`, which has never built green) was
 missing. It also guards the two `test_deploy` reads of `engine/Dockerfile*`
 for the core-alone job, which deletes that tree.
 
+### Revision r26 — server speech is off until a deployment says where it runs
+
+*2026-08-21 (#190, #194). FR-T12's base-URL lists defaulted to voicemode's
+local-first stack. That default made `/api/config` advertise a capability the
+deployment did not have, which is the one thing FR-O4 forbids: absence
+presenting as presence.*
+
+A speech half is enabled when its base-URL list is non-empty. Defaulting the
+list to `http://127.0.0.1:2022/v1,https://api.openai.com/v1` therefore enabled
+STT on every deployment, including the ones — every one of them today — with no
+Whisper.cpp on that port and no key for the fallback. Live on `vogt-dev`,
+`/api/config` answered `assistant_stt_enabled: true` and
+`assistant_tts_enabled: true` while nothing was listening. Nothing *broke*: a
+request fell through the list and 404'd, and the client degraded to on-device or
+typed input exactly as FR-T6 says. But the client had already been told the
+capability existed, and had offered the user a microphone for it.
+
+**Both halves now default to empty**, and a deployment turns one on by naming
+where its speech runs. This is r20's key-destination rule applied to the other
+end of the same wire — a key with no stated destination is a configuration
+error, so a destination nobody stated is not a configuration. Voicemode's exact
+lists stay documented, in `config.rs` beside the default and in
+`deploy/vogt-stack.env.example` as the commented paste-in, so adopting its
+stack is uncommenting two lines rather than reconstructing them.
+
+The interchangeable-backend design of FR-T12 is unchanged: the ordered
+local-first, cloud-fallback list is still the mechanism, and the routes still
+404 into a silent client fallback when no entry answers.
+
+**FR-T7's chat half was validated the same day** and is unaffected: a typed U1
+against `vogt-dev` returned a real answer through OpenRouter, having read the
+estate's notifications — so the assistant's chat path, its tool loop, and the
+front-door token's reach over `/api/assistant/*` are all confirmed working
+against a live deployment (#194). The 401 that a CLI token saw on those routes
+is a property of that token's capability set, not a defect.
+
+### Revision r27 — a pinned tool may not update itself past its pin
+
+*2026-08-21 (#196). The image pins the agent CLIs, and one of them was
+re-installing a newer copy of itself on every boot. The pin held; what it did
+not cover was the tool's own updater.*
+
+`engine/Dockerfile` pins `@anthropic-ai/claude-code`, `@openai/codex` and
+`theclawbay`, and `test_the_engine_pins_every_npm_global_it_installs` enforces
+that at build. Claude Code, however, checks for a newer release at startup. It
+cannot overwrite the install it is running — that lives in `/usr/local`, owned
+by root, while the pod runs as `sprooty` — so it writes the update to whatever
+`NPM_CONFIG_PREFIX` names, which is the **persisted** `~/.npm-global`. PATH
+puts `/usr/local/bin` first, so the update never takes effect, so it happens
+again on the next boot.
+
+Observed live on `vogt-dev`: pinned `2.1.236` in the image, `2.1.238` written
+to the data volume seven minutes after boot, both on PATH, the pinned one
+winning. Nothing was broken and nothing was red — the cost was a wasted install
+per boot and a second, unpinned copy accumulating on a volume that outlives
+every redeploy.
+
+Two things make that worth closing rather than tolerating. The ordering that
+saves it **has already failed**: `engine/Dockerfile.pod` records a
+theclawbay-managed `~/.npm-global/bin/codex` shadowing the system wrapper on
+2026-07-31. And the pin exists *because* an unpinned release broke the build —
+`2.1.237` shipped `bin/claude.exe` as a shell stub (#147, #148). An updater
+free to walk past the pin is that same exposure with the gate removed.
+
+**The image now sets `DISABLE_UPDATES=1`.** Not `DISABLE_AUTOUPDATER`, which
+stops the background check but leaves `claude update` able to fork the image's
+version by hand: here the image *is* the statement of what runs (NFR-C3), so
+every update path is closed and a new version arrives the way every other
+pinned dependency does — by editing the ARG and rebuilding. A guard in
+`tests/test_deploy.py` keeps it that way.
+
+The general rule this states: **a tool the image pins must not be able to
+change its own version at runtime.** Where a tool offers no way to disable its
+updater, the honest options are to stop shipping it pinned or to make its
+install directory unwritable — not to rely on PATH order.
+
 ## 1. Functional requirements
 
 ### FR-P — Projects & per-repo view
@@ -1717,7 +1793,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 | FR-M1 | *(r9)* The mobile app shall be the Capacitor shell loading the merged PWA. Its MVP1 feature set shall be: terminal sessions, assistant with voice, push, backlog/board read, and session start/approve. | M | MERGE §3; ROADMAP M13 |
 | FR-M2 | *(r9, revised r15)* Push notifications shall be routed for events worth a phone interruption: a session entering `waiting-for-input` or `errored`, new drift, the agent-task notify hook, and an assistant pending-action approval — and for nothing else by default. The approval notification shall expose no terminal bytes, Vogt payload or reason and shall deep-link to `/sessions?approval=<id>`; the link is only a hint to the authoritative current action. | S | MERGE §10; RESTRUCTURE Stage 0, Stage 2 |
 | FR-M3 | *(r9)* Vogt surfaces shall be usable at phone widths; the board shall render as a list, not columns, below the narrow breakpoint. | S | MERGE §7 |
-| FR-M4 | *(r11)* A dev build of the mobile shell shall install alongside a prod build on one device **and register for push**. The id and the front door are already build inputs (`MYDEVENV2_ANDROID_APP_ID`, `VOGT_ANDROID_SERVER_URL`); what is missing is an FCM client entry for the dev id, since `google-services.json` is keyed to the application id. Until it exists, validating a mobile change means uninstalling the working app — which is why FR-M2's push routing and FR-T5's voice pass are both unverified on hardware. The signing key may be shared. | S | §7 |
+| FR-M4 | *(r11)* A dev build of the mobile shell shall install alongside a prod build on one device **and register for push**. The id and the front door are already build inputs (`MYDEVENV2_ANDROID_APP_ID`, `VOGT_ANDROID_SERVER_URL`); what is missing is an FCM client entry for the dev id, since `google-services.json` is keyed to the application id. Until it exists, validating a mobile change means uninstalling the working app — which is why FR-M2's push routing and FR-T5's voice pass are both unverified on hardware. The signing key may be shared. **Verified 2026-08-21: the FCM client entry exists and is genuine** — the Firebase project `mydevenv2` carries an Android app for package `com.sprooty.mydevenv2.dev` (app id `1:1022775516765:android:5ef85b3f8375753fbe77b4`), matching the checked-in `google-services.json`, and the dev shell already targets `https://vogt-dev.sprooty.com`. So the configuration half of this row is **met**; what remains is the on-device pass — install the dev APK alongside prod and confirm both register and route. | S | §7 |
 | FR-M5 | *(r15)* On narrow/coarse clients, the four primary places shall use a text-labelled bottom bar for Sessions, Inbox, Board and Backlog. Every secondary route shall remain reachable through a labelled “Go to…” control or a contextual link, including Projects, Audit, Settings, work items and all Sessions tools; push shall open the current pending action through its deep link. There shall be no approval-by-voice path. | S | RESTRUCTURE Stage 0, Stage 9 |
 | FR-M6 | *(r16)* The mobile shell shall keep receiving updates while backgrounded. The wake is push (FR-M2), not polling; while a voice conversation is active the shell shall hold an Android foreground service (with the required persistent notification) so audio capture, TTS playback and the assistant socket survive screen-off, and shall release it when the conversation ends. There shall be **no always-listening microphone** and no wake word. A push that arrives during an active conversation shall be spoken as well as shown; a push that arrives outside one behaves as FR-M2. Battery cost of a held service shall be measured in the POC before it ships. | S | r16; VOICE_POC §4 |
 
