@@ -28,6 +28,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
+| `forge_account_key_file` | `VOGT_FORGE_ACCOUNT_KEY_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `forge_token_files` | `VOGT_FORGE_TOKEN_FILES` | map of string to path | *(empty)* | behaviour |
 | `engine_url` | `VOGT_ENGINE_URL` | string, optional | *(no default — must be set)* | exposure |
 | `session_scratch_project` | `VOGT_SESSION_SCRATCH_PROJECT` | string, optional | *(no default — must be set)* | behaviour |
@@ -106,6 +107,10 @@ How long observation *history* is kept (NFR-I5). The newest observation per subj
 ### `github_token_file`
 
 Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing (FR-S7).
+
+### `forge_account_key_file`
+
+Path to a file holding a urlsafe-base64 Fernet key, used to encrypt per-actor forge Personal Access Tokens at rest (issue #179). A linked PAT must be *recoverable* to call the upstream API on the actor's behalf, which is the deliberate opposite of the vogt-issued tokens in `0005_tokens` — those store only a hash because they never need recovery. Its absence is what switches account linking off: with no key there is nowhere safe to keep a token, so the feature is disabled rather than insecure, and the file-token fallback (`github_token_file`) keeps working for sweeps and unlinked actors. A file rather than an environment variable, so the key never appears in a process listing (FR-S7).
 
 ### `forge_token_files`
 

@@ -298,6 +298,23 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    forge_account_key_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file holding a urlsafe-base64 Fernet key, used to "
+            "encrypt per-actor forge Personal Access Tokens at rest (issue "
+            "#179). A linked PAT must be *recoverable* to call the upstream "
+            "API on the actor's behalf, which is the deliberate opposite of "
+            "the vogt-issued tokens in `0005_tokens` — those store only a "
+            "hash because they never need recovery. Its absence is what "
+            "switches account linking off: with no key there is nowhere safe "
+            "to keep a token, so the feature is disabled rather than insecure, "
+            "and the file-token fallback (`github_token_file`) keeps working "
+            "for sweeps and unlinked actors. A file rather than an environment "
+            "variable, so the key never appears in a process listing (FR-S7)."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     forge_token_files: dict[str, Path] = Field(
         default_factory=dict,
         description=(
