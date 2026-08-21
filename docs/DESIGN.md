@@ -389,6 +389,43 @@ Explicit registration does most of this work. It is worth noticing that
 the discovery mechanism r3 deferred was also the thing that would have
 manufactured most of the noise the other two mechanisms exist to clean up.
 
+### 3.7 Upstream-truth work items on linked projects (r22, #181)
+
+The dual work model §3.2 describes is now the *unlinked* half of the story.
+A project carries a persisted `link_state`, set only by an explicit act —
+`project.import`'s clone+consolidate, or `forge.link`, which validates a
+provider-matched `repo_url` plus a usable credential and refuses with the
+missing precondition named. On a **linked** project:
+
+- **The work items are the mirrored forge issues.** The observed mirror
+  (issues synced all-state by the M5 collectors) is the truth for title,
+  body, labels and open/closed; the `work_overlay` table — keyed by the
+  subject, not by a `wrk_*` id — carries the vogt-local half: a workflow
+  state richer than open/closed, priority, effort, assignee, initiative,
+  and a `rank` column no operation writes yet. `services/upstream.py` is
+  the one place the join happens, so `work.get`, `work.list`, the Backlog
+  and the Board return the same item, each upstream issue exactly once.
+- **The subject key is the ref.** `gh:{owner}/{repo}#{n}` is the item's id
+  and ref on every surface; `WI-n` and subject keys cannot collide, and one
+  resolver accepts both.
+- **Writes go through, synchronously and fail-loud.** `work.create` opens
+  the issue (labels travel — shared vocabulary), `work.comment` posts,
+  label adds post, terminal transitions close/reopen — under the acting
+  actor's PAT (FR-B6) else the file token, subject to the FR-B1 policy,
+  which refuses loudly here rather than skipping. The provider call runs
+  *before* the declared transaction, so a failure raises a typed error and
+  commits nothing: no local row the forge never heard of, ever. Overlay
+  fields change with **zero** provider calls. Title/body edits and label
+  removals are refused (upstream truth; FR-B4's surface is append-only),
+  and relations between upstream items are not supported in v1.
+- **Unlinked projects refuse the write verbs** with `project_not_linked`,
+  naming link and publish (#182) as the ways forward; project-less items
+  are untouched. Native declared rows stay readable — the surface
+  withdrawal and the native-item migration are #183.
+
+FR-B7 is the requirement; the cutover starts from a fresh declared store by
+decision, so migration `0013_upstream_truth` is new-DDL only.
+
 ---
 
 ## 4. Architecture

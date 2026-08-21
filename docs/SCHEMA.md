@@ -127,7 +127,7 @@ through `idx_audit_at`, would both fix it without changing what is stored.
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `projects` | unit of the per-repo view; one explicitly registered repo or folder (FR-P5, FR-G15) | `id, slug, name, root_path, repo_url, lifecycle_state, current_version, contract_version, compliance_status(compliant\|non_compliant\|not_checked), compliance_checked_at, contract_adopted_at, exclusions(json), trust_state, created_at, updated_at` |
+| `projects` | unit of the per-repo view; one explicitly registered repo or folder (FR-P5, FR-G15) | `id, slug, name, root_path, repo_url, lifecycle_state, current_version, contract_version, compliance_status(compliant\|non_compliant\|not_checked), compliance_checked_at, contract_adopted_at, link_state(unlinked\|linked), exclusions(json), trust_state, created_at, updated_at` |
 | `contract_exemptions` | a criterion declared unmeetable by a project, with its reason and its author (FR-G19) | `id, project_id, rule, target, reason, declared_by, declared_at` |
 | `initiatives` | cross-project epics | `id, slug, title, body, state(open\|closed), weight, created_at, updated_at` |
 | ~~`project_dependencies`~~ | **Not built** — see below | — |
@@ -162,6 +162,7 @@ package identity is no longer needed to build the internal graph.
 | `work_item_labels` | tag assignments | `work_item_id, label_id` |
 | `work_links` | link to observed forge objects | `work_item_id, forge_kind(issue\|pr), repo, number, relation(completion\|reference), created_at` |
 | `comments` | collaboration | `id, work_item_id, actor_id, body, created_at` |
+| `work_overlay` | *(0013, FR-B7)* the vogt-local half of an upstream-truth item on a **linked** project, keyed by the forge subject, not a `wrk_*` id | `subject_key(pk), project_id, rank, workflow_state, priority, effort, assignee_actor_id, initiative_id, created_at, updated_at` |
 | `workflow_defs` | state machine per work-item kind | `kind, definition(json)` |
 | `writeback_actions` | *(M5)* one row per attempted forge write (FR-B2) | `id, at, actor_id, work_item_id, project_id, policy, action(create\|comment\|label\|close\|reopen), outcome(attempted\|succeeded\|failed\|skipped), detail` |
 
@@ -170,6 +171,16 @@ package identity is no longer needed to build the internal graph.
 separate operation (`ROADMAP.md` M5): a comment authored here posts upstream
 as part of commenting, so this table is the only place the upstream half of
 a declared write is visible before the next sweep re-observes it.
+
+*Added at 0013 (#181, FR-B7)*: `work_overlay` carries only what must never
+cross the forge boundary — decision 2's invariant — and joins the observed
+mirror (which stays the truth for title/labels/open-closed) into the item
+every surface returns for a linked project. There is no `wrk_*` row behind an
+upstream-truth item: the subject key is its id and its ref. On a failed
+write-through nothing lands here, because the provider call runs before the
+declared transaction opens (decision 9); `rank` is schema for the vogt-local
+ordering with no operation writing it yet. The 0013 migration is new-DDL
+only: the deployed cutover starts from a fresh declared store, by decision.
 
 *Added at M1*: `work_items.ref` is the short handle (`WI-7`) allocated from a
 counter in `meta`, inside the creating transaction so a rolled-back creation

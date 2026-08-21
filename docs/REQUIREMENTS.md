@@ -1,6 +1,6 @@
 # Vogt — Requirements (v0.3)
 
-Status: **baseline, revision r18** (2026-08-18), distilled from `DESIGN.md`,
+Status: **baseline, revision r22** (2026-08-21), distilled from `DESIGN.md`,
 `SCHEMA.md`, `DEPLOYMENT.md`, [`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md) and
 the originating product discussion.
 **v1 (M0–M6) is built**; §5 is the requirement-by-requirement verification
@@ -1206,6 +1206,74 @@ The file token (FR-S7) stays exactly what it was: the fallback for every sweep
 and for any actor who never linked one. Nothing that worked before needs a key
 or a link to keep working.
 
+### Revision r22 — the work model converges on the forge
+
+*2026-08-21. Decisions 1, 2, 9 and 10 of design #178, delivered as issue
+#181: on a linked project the work items **are** the upstream issues, a local
+overlay carries what must never cross the boundary, work writes go through to
+the forge synchronously and fail loud, and the write verbs on an unlinked
+project refuse with a typed error naming the two ways forward. FR-B7 is the
+requirement; #182 (publish) and #183 (native-item migration and the surface
+withdrawal) complete the pivot.*
+
+The estate ran a dual work model: declared `WI-n` rows in the declared store
+and observed forge subjects in the evidence store, bridged one subject at a
+time by `work.adopt`. The Backlog merged both; the Board read declared only;
+`work.create` never created anything upstream. That duality is what #178
+decided to end, and this revision records how the delivered system ends it.
+
+1. **Link state is a persisted decision, not an inference (decision 1).**
+   `projects.link_state` is `unlinked | linked`, and only an explicit act
+   moves it: `project.import`'s clone+consolidate of a forge repository,
+   the new `forge.link` operation (which validates the same two things
+   write-through will need — a `repo_url` a registered provider matches and
+   a usable credential, the actor's PAT or the file token — and refuses with
+   the missing precondition named), and, from #182, `forge.publish`. Nothing
+   re-derives "linked" per call from whichever tokens happen to resolve.
+2. **The identity decision is made once: the subject key is the ref.** An
+   upstream-truth item's `ref` *and* `id` are its forge subject key
+   (`gh:{owner}/{repo}#{n}`) on every surface — CLI, REST, MCP, and every
+   view. There is no parallel `WI-n` numbering for them, and the one
+   resolver that accepts both namespaces lives with the resolvers
+   (`services/upstream.resolve_work_ref`); they cannot collide because a
+   `WI-` ref never carries `:`.
+3. **The overlay is invisible upstream (decision 2).** `work_overlay`, keyed
+   by subject, carries only vogt-local semantics: rank (schema now, no
+   operation yet), a workflow state richer than open/closed, priority,
+   effort, assignee, initiative. The observed mirror the #173 sync
+   collectors maintain stays the truth for title, body, labels and
+   open/closed, and a read of a linked project's item is the join of the
+   two. Writing any overlay field produces **zero** provider calls, and the
+   suite pins that against a transport that records every request.
+4. **Work writes are write-through, synchronous and fail-loud (decision 9).**
+   On a linked project `work.create` opens the issue (labels included —
+   shared vocabulary), `work.comment` posts, label adds post, and terminal
+   transitions close/reopen — under the acting actor's PAT (FR-B6) or the
+   file token, subject to the project's FR-B1 policy, which now refuses
+   loudly instead of skipping silently: on a linked project the write goes
+   upstream or not at all. A provider failure raises a typed error
+   (`upstream_write_failed`) and nothing local commits — the provider call
+   runs *before* the declared transaction, so for `create` the caller
+   provably learns the issue was not created. No queue, no
+   eventually-consistent success. Title/body edits are refused (upstream
+   truth; FR-B4's verb set has no edit), as are label removals (append-only
+   surface) and moving an issue between projects.
+5. **Unlinked projects refuse the write verbs (decision 10).** `work.create`,
+   `work.comment`, label writes and state writes on an unlinked project
+   return `project_not_linked`, naming both ways forward: link (`forge
+   .link` / re-import) or publish (#182). Items belonging to no project are
+   untouched — there is no project to be linked — and native declared rows
+   remain readable everywhere; the surface withdrawal and the forge-less
+   guarantee's formal withdrawal are #183's.
+6. **The cutover starts fresh, by decision.** The deployed instance's
+   declared store is wiped at cutover and every repository re-imported
+   through the #180 picker, so migration `0013_upstream_truth` is new-table
+   / new-column DDL only: no data migration, no re-keying of existing rows,
+   no rehearsal path. The Board and Backlog converge on the same population
+   for a linked project — each upstream issue exactly once, native rows
+   deduplicated through the existing adoption links — which is what closes
+   the #187 gap for real once #183 lands.
+
 ## 1. Functional requirements
 
 ### FR-P — Projects & per-repo view
@@ -1372,6 +1440,7 @@ by path or repository URL, and stops there.*
 | FR-B4 | Write-back shall be additive/forward-only under every policy level: create, comment, label, close/reopen. Deletion, history rewriting, and force operations against GitHub shall not exist as capabilities. | M* | DESIGN §4 |
 | FR-B5 | *(decided 2026-08-12)* Comment write-back shall be **outbound only**: comments authored in Vogt post to the linked forge object under `comment_only` and `full`. Inbound forge comments shall remain observations, visible against the linked item, and shall never be copied into the `comments` table. Bidirectional conversation mirroring is deferred (§3). | M* | DESIGN §4 |
 | FR-B6 | *(r21)* An actor shall be able to link their own forge account by supplying a Personal Access Token, scoped to `(actor, host)`, so that write-back driven by that actor is attributed upstream to them rather than to the instance file token (FR-S7), which remains the fallback for sweeps and unlinked actors. The PAT shall be validated against the forge before it is stored, stored **encrypted at rest** (never hashed — recovery is required to call upstream, the deliberate opposite of the hash-only `tokens` of FR-S3) under a key named by `forge_account_key_file`, and never returned by any surface: status shall report host, login, scopes and linked-state only. An unset key file shall disable linking entirely (a feature with nowhere safe to keep a recoverable secret is off, not insecure). Linking and unlinking shall be audited writes gated as arming write-back is (FR-S11's `writeback`); a linked token's blast radius is whatever its own scopes allow, attributed to the actor, and unlinking shall delete the stored copy and advise revoking the token upstream, which is the only place it can be revoked. | S* | DESIGN §4; design #178 dec. 4; #179 |
+| FR-B7 | *(r22)* A project shall carry a persisted link state (`unlinked \| linked`) set only by an explicit act — `project.import`'s clone+consolidate, `forge.link` (which shall validate a provider-matched `repo_url` and a usable credential, refusing with the missing precondition named), and `forge.publish` once #182 delivers it. On a **linked** project the work items shall *be* the project's mirrored forge issues joined to a subject-keyed local overlay (`work_overlay`: rank, workflow state, priority, effort, assignee, initiative — never visible upstream, never causing a provider call), the subject key shall be the item's ref and id on every surface, and the work write verbs shall write through to the forge synchronously and fail loud: a provider failure or a policy refusal raises a typed error and commits nothing locally, so a caller can never hold a local success the forge refused — for `create` specifically, the caller shall learn the issue was not created. Title/body edits and label removals shall be refused as upstream truth under FR-B4's append-only verb set. On an **unlinked** project the write verbs shall refuse with `project_not_linked`, naming link and publish as the ways forward; items with no project are unaffected. The cutover to this model starts from a fresh declared store by decision — the migration is new-DDL only and transforms no existing row. | M* | design #178 dec. 1/2/9/10; #181 |
 
 ### FR-L — Lifecycle & administration
 
