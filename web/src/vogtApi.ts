@@ -19,7 +19,7 @@
 //      that a mutating operation appears only through a view that collects
 //      one). `call()` cannot invent one — there is no default.
 
-import { ApiError, getBase, getToken } from "./api";
+import { ApiError, getBase, getToken, reportAuthResponse } from "./api";
 
 /** Where the front door mounts vogt-core. */
 export const VOGT_PREFIX = "/api/vogt";
@@ -126,6 +126,13 @@ async function call<T>(
       // A non-JSON body from a proxy hop; the status still carries meaning.
     }
     if (isAbsent(res.status)) throw new VogtUnavailable(res.status, message);
+    // A 401 from behind the front door is the same fact as a 401 from the
+    // engine's own API — the one credential the browser holds is dead — so it
+    // ends the session once for the whole shell rather than becoming one
+    // stranded panel per Vogt surface (#195). Everything else, a 403 most of
+    // all, stays the caller's to render: the credential is fine, and it is
+    // the capability the reader needs told about.
+    reportAuthResponse(res.status, message);
     throw new ApiError(res.status, message);
   }
   return text ? (JSON.parse(text) as T) : (undefined as T);

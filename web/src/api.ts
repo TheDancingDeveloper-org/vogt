@@ -91,12 +91,32 @@ interface AuthStateMessage {
   revision: number;
 }
 
-function broadcastAuthState() {
-  const message: AuthStateMessage = {
-    type: "auth-state",
-    source: AUTH_SOURCE_ID,
-    revision: Date.now(),
-  };
+/**
+ * Why a session ended: a credential the server refused, or one the reader
+ * handed back. `status` is the rejecting HTTP status — 401, and only 401 —
+ * or 0 for a deliberate sign-out, and `detail` carries the server's own words
+ * when it gave any.
+ *
+ * Nothing else is published on this channel, and the omissions are the point
+ * (#195). A 403 says the credential is good and the capability is missing; a
+ * 502, a 503 or a dead socket says the engine is away. Both are the caller's
+ * to render where it happened, and collapsing either into "signed out" is the
+ * FR-O4 conflation of "offline" with "unauthorized" that this path exists to
+ * keep apart.
+ */
+export interface AuthRejection {
+  status: number;
+  detail: string;
+}
+
+interface AuthRejectedMessage extends AuthRejection {
+  type: "auth-rejected";
+  source: string;
+}
+
+type AuthMessage = AuthStateMessage | AuthRejectedMessage;
+
+function postAuthMessage(message: AuthMessage) {
   try {
     if (typeof BroadcastChannel !== "undefined") {
       const channel = new BroadcastChannel(AUTH_CHANNEL_NAME);
@@ -106,6 +126,48 @@ function broadcastAuthState() {
   } catch {
     /* BroadcastChannel unavailable */
   }
+}
+
+function broadcastAuthState() {
+  postAuthMessage({
+    type: "auth-state",
+    source: AUTH_SOURCE_ID,
+    revision: Date.now(),
+  });
+}
+
+const authRejectedListeners = new Set<(rejection: AuthRejection) => void>();
+
+function publishAuthRejection(rejection: AuthRejection) {
+  // The tab that *got* the 401 has to sign out too, and a broadcast is
+  // filtered by `source` precisely so a tab never hears its own — so this
+  // tab's listeners are called here, in-process, and the channel carries the
+  // same fact to the others.
+  for (const listener of [...authRejectedListeners]) listener(rejection);
+  postAuthMessage({ type: "auth-rejected", source: AUTH_SOURCE_ID, ...rejection });
+}
+
+/**
+ * Report the status of an authenticated response, so one rejected credential
+ * ends the session once instead of leaving N panels each holding their own
+ * dead error and a shell that still believes it is signed in (#195).
+ *
+ * Anything that is not a 401 returns without a word — see `AuthRejection` for
+ * why that silence is deliberate rather than an omission.
+ */
+export function reportAuthResponse(status: number, detail = ""): void {
+  if (status !== 401) return;
+  publishAuthRejection({ status, detail });
+}
+
+/**
+ * Hand the credential back deliberately: the sign-out control. Same
+ * session-level fact as a refusal, so it travels the same way and every
+ * surface that listens for one reacts to both.
+ */
+export function signOut(detail = ""): void {
+  clearStoredAuth();
+  publishAuthRejection({ status: 0, detail });
 }
 
 export function getToken(): string {
@@ -134,13 +196,21 @@ export function setBase(base: string) {
 }
 
 export function clearStoredAuth() {
+  let hadCredential = false;
   try {
+    hadCredential =
+      localStorage.getItem(TOKEN_KEY) !== null ||
+      localStorage.getItem(BASE_KEY) !== null;
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(BASE_KEY);
   } catch {
     /* localStorage unavailable */
   }
-  broadcastAuthState();
+  // Announcing a clear that cleared nothing makes every other tab reload for
+  // a change that did not happen — which is what two tabs handling the same
+  // 401 do, each clearing after the other, reloading the tab that is already
+  // showing the reader why they were signed out.
+  if (hadCredential) broadcastAuthState();
 }
 
 export function subscribeAuthState(onChange: () => void): () => void {
@@ -172,6 +242,41 @@ export function subscribeAuthState(onChange: () => void): () => void {
   };
 }
 
+/**
+ * Subscribe to credentials being refused or handed back.
+ *
+ * Separate from `subscribeAuthState` above because the two are different
+ * facts with different answers: that one says the stored credential changed
+ * (reload and use it), this one says there is no usable credential any more
+ * (return to the login screen and say so). Riding the same channel means one
+ * tab's 401 signs the others out for free.
+ */
+export function subscribeAuthRejected(
+  onRejected: (rejection: AuthRejection) => void,
+): () => void {
+  authRejectedListeners.add(onRejected);
+
+  let channel: BroadcastChannel | null = null;
+  try {
+    if (typeof BroadcastChannel !== "undefined") {
+      channel = new BroadcastChannel(AUTH_CHANNEL_NAME);
+      channel.addEventListener("message", (event: MessageEvent<AuthMessage>) => {
+        const data = event.data;
+        if (data?.type === "auth-rejected" && data.source !== AUTH_SOURCE_ID) {
+          onRejected({ status: data.status, detail: data.detail });
+        }
+      });
+    }
+  } catch {
+    channel = null;
+  }
+
+  return () => {
+    authRejectedListeners.delete(onRejected);
+    channel?.close();
+  };
+}
+
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const tok = getToken();
   return tok ? { Authorization: `Bearer ${tok}`, ...extra } : extra;
@@ -181,6 +286,17 @@ export class ApiError extends Error {
   constructor(public status: number, public body: string) {
     super(`HTTP ${status}: ${body}`);
   }
+}
+
+/**
+ * The error for a refused response, reporting a rejected credential on the
+ * way out. Every authenticated call in this module raises its failure through
+ * here, so the session-level fact is noticed once, centrally, rather than by
+ * whichever caller happened to be first (#195).
+ */
+function refused(status: number, body: string): ApiError {
+  reportAuthResponse(status, body);
+  return new ApiError(status, body);
 }
 
 async function req<T>(
@@ -198,7 +314,7 @@ async function req<T>(
     signal,
   });
   const text = await res.text();
-  if (!res.ok) throw new ApiError(res.status, text);
+  if (!res.ok) throw refused(res.status, text);
   return text ? (JSON.parse(text) as T) : (undefined as T);
 }
 
@@ -222,6 +338,10 @@ export async function validateCredentials(
     },
   });
   const text = await res.text();
+  // Deliberately not `refused()`: this asks about a *candidate* credential
+  // the reader has just typed, so a 401 here is that form's answer and not a
+  // statement about the session. Reporting it would sign the reader out of a
+  // working session for mistyping a token into Settings.
   if (!res.ok) throw new ApiError(res.status, text);
   return JSON.parse(text) as OperationalStatus;
 }
@@ -429,7 +549,7 @@ export const api = {
     const res = await fetch(url, {
       headers: tok ? { Authorization: `Bearer ${tok}` } : {},
     });
-    if (!res.ok) throw new ApiError(res.status, await res.text());
+    if (!res.ok) throw refused(res.status, await res.text());
     const blob = await res.blob();
     const objUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -511,7 +631,7 @@ export const api = {
     const res = await fetch(url, {
       headers: tok ? { Authorization: `Bearer ${tok}` } : {},
     });
-    if (!res.ok) throw new ApiError(res.status, await res.text());
+    if (!res.ok) throw refused(res.status, await res.text());
     const blob = await res.blob();
     const disposition = res.headers.get("content-disposition") ?? "";
     const match = disposition.match(/filename=\"([^\"]+)\"/i);
@@ -604,7 +724,7 @@ export const api = {
       body: form,
     });
     const text = await res.text();
-    if (!res.ok) throw new ApiError(res.status, text);
+    if (!res.ok) throw refused(res.status, text);
     return text ? (JSON.parse(text) as { text: string }) : { text: "" };
   },
   /**
@@ -618,7 +738,7 @@ export const api = {
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ text }),
     });
-    if (!res.ok) throw new ApiError(res.status, await res.text());
+    if (!res.ok) throw refused(res.status, await res.text());
     return res.blob();
   },
   sessionInput: (id: string, text: string, submit = false) =>
@@ -831,7 +951,15 @@ export function subscribeEvents(
         headers: authHeaders({ Accept: "text/event-stream" }),
         signal: controller.signal,
       });
-      if (!res.ok || !res.body) throw new Error(`SSE failed: ${res.status}`);
+      // The stream is an authenticated read like any other, and the one
+      // most likely to meet a rotated token first — it outlives every panel.
+      // Reported through the same path rather than a second one, so a stream
+      // that dies on 401 signs the reader out instead of reconnecting on a
+      // dead credential until the backoff gives up (#195).
+      if (!res.ok || !res.body) {
+        if (!res.ok) reportAuthResponse(res.status, "the event stream was refused");
+        throw new Error(`SSE failed: ${res.status}`);
+      }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
