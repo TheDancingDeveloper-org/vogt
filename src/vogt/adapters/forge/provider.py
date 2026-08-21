@@ -52,6 +52,7 @@ from vogt.adapters.forge.models import (
     ForgePosture,
     ForgePull,
     ForgeRelease,
+    ForgeRepo,
     RepoRef,
 )
 
@@ -75,6 +76,17 @@ class ForgeProvider(Protocol):
     @property
     def capabilities(self) -> ForgeCapabilities:
         """What this forge can do, for a caller to read before it asks."""
+
+    def list_repos(self) -> Iterable[ForgeRepo]:
+        """Repositories the credential can see, for the import picker (#180).
+
+        Enumeration, not discovery: it lists what *this credential* is entitled
+        to, so a person can pick one to import — it never crawls, and the scope
+        rule (FR-G15) is unbroken because the credential is the scope. A provider
+        with no usable credential yields nothing; the caller tells that apart
+        from "the account has no repositories" through the empty list plus its
+        own knowledge of whether a token was configured.
+        """
 
     def parse(self, repo_url: str | None) -> RepoRef | None:
         """Resolve a project's repository URL to this forge's identity.

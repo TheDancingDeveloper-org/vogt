@@ -64,6 +64,8 @@ from vogt.application.models import (
     ForgeAccountStatusParams,
     ForgeAccountStatusResult,
     ForgeAccountUnlinkParams,
+    ForgeReposParams,
+    ForgeReposResult,
     GetProjectParams,
     GetWorkParams,
     ImportParams,
@@ -960,6 +962,21 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.unlink_forge_account,
             route=HttpRoute("POST", "/forge/accounts/unlink"),
             cli=CliBinding(("forge", "account", "unlink")),
+        ),
+        Operation(
+            name="forge.repos",
+            summary="List the repositories your linked credential can see, so "
+            "you can pick which to import (clone + full sync).",
+            # A plain read: it enumerates what the acting credential is entitled
+            # to see and computes `already_registered` against declared state.
+            # It changes nothing, so no `writeback` scope and no reason.
+            scope="read",
+            mutating=False,
+            params_model=ForgeReposParams,
+            result_model=ForgeReposResult,
+            handler=services.list_forge_repos,
+            route=HttpRoute("GET", "/forge/repos"),
+            cli=CliBinding(("forge", "repos")),
         ),
         Operation(
             name="forge.actions",
