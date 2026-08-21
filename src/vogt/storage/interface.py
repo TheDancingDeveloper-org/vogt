@@ -23,6 +23,7 @@ from vogt.core.entities import (
     DepRef,
     DriftProposal,
     Event,
+    ForgeAccount,
     InboxTriage,
     Initiative,
     Label,
@@ -284,6 +285,28 @@ class ReadView(Protocol):
         self, *, decision: str | None = None, limit: int = 100
     ) -> list[AuthDecision]: ...
 
+    # -- forge accounts (per-actor PATs, #179) -----------------------------
+
+    def forge_account(self, *, actor_id: str, host: str) -> ForgeAccount | None:
+        """One actor's linked identity for a host, without the token.
+
+        The cleartext columns only, so a status read needs no key. The
+        encrypted PAT is deliberately absent — it is reachable only through
+        `forge_account_secret`, which the write path calls."""
+        ...
+
+    def forge_accounts_for_actor(self, actor_id: str) -> list[ForgeAccount]:
+        """Every host this actor has linked, newest first. No tokens."""
+        ...
+
+    def forge_account_secret(self, *, actor_id: str, host: str) -> str | None:
+        """The encrypted PAT for one (actor, host), or `None` when unlinked.
+
+        The single accessor that returns the ciphertext, so every read of the
+        secret is greppable. The value is Fernet ciphertext; the caller holds
+        the key and decrypts. Plaintext is never stored, so never returned."""
+        ...
+
     # -- drift -------------------------------------------------------------
 
     def list_drift(
@@ -452,6 +475,28 @@ class WriteTxn(ReadView, Protocol):
     def insert_token(self, token: Token, *, token_hash: str) -> None: ...
 
     def revoke_token(self, token_id: str, *, reason: str, at: datetime) -> bool: ...
+
+    def upsert_forge_account(
+        self,
+        *,
+        actor_id: str,
+        host: str,
+        login: str,
+        scopes: str,
+        encrypted_token: str,
+        at: datetime,
+    ) -> None:
+        """Link or re-link an actor's forge account for a host.
+
+        Re-linking overwrites the encrypted token and refreshes `login`,
+        `scopes` and `updated_at`, keeping the original `created_at`. The
+        stored token is always ciphertext — this interface has no plaintext
+        path (#179)."""
+        ...
+
+    def delete_forge_account(self, *, actor_id: str, host: str) -> bool:
+        """Unlink an actor's account for a host. True when a row was removed."""
+        ...
 
     def insert_writeback(self, record: WriteBackRecord) -> None: ...
 

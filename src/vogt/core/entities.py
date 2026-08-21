@@ -303,6 +303,24 @@ class WriteBackRecord(Entity):
     source_url: str | None = None
 
 
+class ForgeAccount(Entity):
+    """An actor's own forge identity, linked so writes are attributed to them.
+
+    Deliberately carries no token field. The encrypted PAT lives only in the
+    `forge_accounts.encrypted_token` column and is read through a dedicated
+    secret accessor, so this entity — which crosses every transport boundary —
+    can never carry a credential back out. `login` and `scopes` are the
+    cleartext columns a status read needs without touching the key (#179).
+    """
+
+    actor_id: str
+    host: str
+    login: str
+    scopes: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class DriftProposal(Entity):
     """A machine-raised question, resolved by a human or an agent (FR-R1)."""
 
