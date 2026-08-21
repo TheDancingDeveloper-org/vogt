@@ -38,6 +38,7 @@ from vogt.core.entities import (
     WorkItem,
     WorkKind,
     WorkLink,
+    WorkOverlay,
     WriteBackRecord,
 )
 from vogt.core.ids import IdFactory, new_id
@@ -924,6 +925,24 @@ class SqliteReadView:
             return None
         return self._hydrate([row])[0]
 
+    # -- the upstream-truth overlay (#181) ---------------------------------
+
+    def work_overlay(self, subject_key: str) -> WorkOverlay | None:
+        row = self._conn.execute(
+            "SELECT * FROM work_overlay WHERE subject_key = ?", (subject_key,)
+        ).fetchone()
+        return None if row is None else _row_to_overlay(row)
+
+    def work_overlays(self, subject_keys: list[str]) -> dict[str, WorkOverlay]:
+        if not subject_keys:
+            return {}
+        placeholders = ", ".join("?" for _ in subject_keys)
+        rows = self._conn.execute(
+            f"SELECT * FROM work_overlay WHERE subject_key IN ({placeholders})",
+            tuple(subject_keys),
+        ).fetchall()
+        return {str(row["subject_key"]): _row_to_overlay(row) for row in rows}
+
     # -- sessions ----------------------------------------------------------
 
     def session_by_id(self, session_id: str) -> CodingSession | None:
@@ -1117,8 +1136,9 @@ class SqliteWriteTxn(SqliteReadView):
             "INSERT INTO projects (id, slug, name, root_path, repo_url, "
             "lifecycle_state, current_version, contract_version, "
             "compliance_status, compliance_checked_at, contract_adopted_at, "
-            "write_back, exclusions, trust_state, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "write_back, link_state, exclusions, trust_state, created_at, "
+            "updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project.id,
                 project.slug,
@@ -1136,6 +1156,7 @@ class SqliteWriteTxn(SqliteReadView):
                 if project.contract_adopted_at is None
                 else to_iso(project.contract_adopted_at),
                 project.write_back,
+                project.link_state,
                 json.dumps(project.exclusions),
                 project.trust_state,
                 to_iso(project.created_at),
@@ -1154,6 +1175,7 @@ class SqliteWriteTxn(SqliteReadView):
             ("current_version", update.current_version),
             ("compliance_status", update.compliance_status),
             ("write_back", update.write_back),
+            ("link_state", update.link_state),
         ):
             if value is not None:
                 assignments.append(f"{column} = ?")
@@ -1582,6 +1604,36 @@ class SqliteWriteTxn(SqliteReadView):
         )
         return cursor.rowcount > 0
 
+    def upsert_work_overlay(self, overlay: WorkOverlay) -> None:
+        # `created_at` keeps the existing row's value on conflict, so the
+        # overlay records when local semantics first attached to the subject,
+        # not when they last moved — `updated_at` carries that.
+        self._conn.execute(
+            "INSERT INTO work_overlay (subject_key, project_id, rank, "
+            "workflow_state, priority, effort, assignee_actor_id, "
+            "initiative_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(subject_key) DO UPDATE SET "
+            "project_id = excluded.project_id, rank = excluded.rank, "
+            "workflow_state = excluded.workflow_state, "
+            "priority = excluded.priority, effort = excluded.effort, "
+            "assignee_actor_id = excluded.assignee_actor_id, "
+            "initiative_id = excluded.initiative_id, "
+            "updated_at = excluded.updated_at",
+            (
+                overlay.subject_key,
+                overlay.project_id,
+                overlay.rank,
+                overlay.workflow_state,
+                overlay.priority,
+                overlay.effort,
+                overlay.assignee_actor_id,
+                overlay.initiative_id,
+                to_iso(overlay.created_at),
+                to_iso(overlay.updated_at),
+            ),
+        )
+
     def insert_work_link(self, link: WorkLink) -> None:
         self._conn.execute(
             "INSERT INTO work_links (work_item_id, subject_key, origin_kind, "
@@ -1692,6 +1744,7 @@ def _row_to_project(row: sqlite3.Row) -> Project:
             "contract_version": row["contract_version"],
             "compliance_status": row["compliance_status"],
             "write_back": row["write_back"],
+            "link_state": row["link_state"],
             "compliance_checked_at": (
                 None if checked_at is None else from_iso(str(checked_at))
             ),
@@ -1743,6 +1796,23 @@ def _row_to_work_item(
             "assignee_identity_ref": row["assignee_identity_ref"],
             "labels": labels,
             "relations": relations,
+            "created_at": from_iso(str(row["created_at"])),
+            "updated_at": from_iso(str(row["updated_at"])),
+        }
+    )
+
+
+def _row_to_overlay(row: sqlite3.Row) -> WorkOverlay:
+    return WorkOverlay.model_validate(
+        {
+            "subject_key": str(row["subject_key"]),
+            "project_id": str(row["project_id"]),
+            "rank": row["rank"],
+            "workflow_state": row["workflow_state"],
+            "priority": row["priority"],
+            "effort": row["effort"],
+            "assignee_actor_id": row["assignee_actor_id"],
+            "initiative_id": row["initiative_id"],
             "created_at": from_iso(str(row["created_at"])),
             "updated_at": from_iso(str(row["updated_at"])),
         }

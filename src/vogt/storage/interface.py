@@ -36,6 +36,7 @@ from vogt.core.entities import (
     Token,
     WorkItem,
     WorkLink,
+    WorkOverlay,
     WriteBackRecord,
 )
 from vogt.core.principal import Principal
@@ -127,6 +128,7 @@ class ProjectUpdate:
     compliance_status: str | None = None
     compliance_checked_at: datetime | None = None
     write_back: str | None = None
+    link_state: str | None = None
     exclusions: tuple[str, ...] | None = None
     contract_adopted_at: datetime | None = None
     #: Adoption is reversible, and `None` already means "leave alone", so
@@ -258,6 +260,21 @@ class ReadView(Protocol):
     def work_links_for_subjects_by_item(self, work_item_id: str) -> dict[str, str]: ...
 
     def work_item_by_subject(self, subject_key: str) -> WorkItem | None: ...
+
+    # -- the upstream-truth overlay (#181) ---------------------------------
+
+    def work_overlay(self, subject_key: str) -> WorkOverlay | None:
+        """The vogt-local overlay for one upstream subject, if any."""
+        ...
+
+    def work_overlays(self, subject_keys: list[str]) -> dict[str, WorkOverlay]:
+        """The overlays for a batch of subjects, keyed by subject key.
+
+        Batched because every upstream-truth read joins the observed mirror
+        to the overlay, and a ranked view does that for hundreds of subjects
+        at once.
+        """
+        ...
 
     # -- tokens ------------------------------------------------------------
 
@@ -471,6 +488,17 @@ class WriteTxn(ReadView, Protocol):
     ) -> bool: ...
 
     def insert_work_link(self, link: WorkLink) -> None: ...
+
+    def upsert_work_overlay(self, overlay: WorkOverlay) -> None:
+        """Insert or replace the overlay row for one upstream subject.
+
+        The subject key is the primary key, so writing the merged row whole
+        keeps overlay updates in-place (#181 §6's ranking-cost watch-item:
+        no re-gather of the observed set on a write). `created_at` is kept
+        from the existing row on conflict; everything else follows the new
+        row.
+        """
+        ...
 
     def insert_token(self, token: Token, *, token_hash: str) -> None: ...
 

@@ -24,6 +24,13 @@ ComplianceStatus = Literal[
 ]
 TrustState = Literal["verified", "stale", "unverified", "disputed"]
 
+#: Whether a project's work model is the forge's (#181, decision 1). Set by
+#: an explicit act — `project.import`'s clone+consolidate, `forge.link`, and
+#: (from #182) `forge.publish` — never inferred per call from what tokens
+#: happen to resolve. On a `linked` project the work items *are* the upstream
+#: issues joined to the local overlay, and the write verbs write through.
+LinkState = Literal["unlinked", "linked"]
+
 WorkKind = Literal["feature", "bug", "chore", "question"]
 Priority = Literal["p0", "p1", "p2", "p3", "p4"]
 Effort = Literal["xs", "s", "m", "l", "xl"]
@@ -75,6 +82,11 @@ class Project(Entity):
     #: project adopts, not something it is measured against by default.
     contract_adopted_at: datetime | None = None
     write_back: Literal["none", "comment_only", "full"] = "none"
+    #: `linked` means this project's work items are its upstream issues
+    #: (#181). Persisted, and set only by an explicit act — import's
+    #: clone+consolidate or `forge.link` — so "is this linked" has one
+    #: answer everywhere rather than one per credential lookup.
+    link_state: LinkState = "unlinked"
     exclusions: list[str] = []
     trust_state: TrustState = "unverified"
     created_at: datetime
@@ -197,6 +209,29 @@ class ContractExemption(Entity):
     reason: str
     declared_by: str
     declared_at: datetime
+
+
+class WorkOverlay(Entity):
+    """The vogt-local half of an upstream-truth work item (#181, decision 2).
+
+    Keyed by the upstream subject key, not a `wrk_*` id, because on a linked
+    project there is no declared row: the observed mirror is the truth for
+    title/body/labels/open-closed, and this carries only what must never
+    cross the boundary — rank, a workflow state richer than open/closed, and
+    priority/effort/assignee/initiative. Writing any of it produces zero
+    provider calls, and that invariant is pinned by test.
+    """
+
+    subject_key: str
+    project_id: str
+    rank: float | None = None
+    workflow_state: str | None = None
+    priority: Priority | None = None
+    effort: Effort | None = None
+    assignee_actor_id: str | None = None
+    initiative_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class WorkLink(Entity):
