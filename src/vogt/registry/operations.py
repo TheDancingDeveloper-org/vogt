@@ -65,6 +65,9 @@ from vogt.application.models import (
     ForgeAccountStatusResult,
     ForgeAccountUnlinkParams,
     ForgeLinkParams,
+    ForgeLinkResult,
+    ForgePublishParams,
+    ForgePublishResult,
     ForgeReposParams,
     ForgeReposResult,
     GetProjectParams,
@@ -925,14 +928,34 @@ def build_operations() -> list[Operation[Any, Any]]:
         Operation(
             name="forge.link",
             summary="Make a registered project upstream-truth: its work "
-            "items become its forge issues, and work writes go through.",
+            "items become its forge issues, work writes go through, and any "
+            "open native items migrate upstream (#183).",
             scope="writeback",
             mutating=True,
             params_model=ForgeLinkParams,
-            result_model=ProjectResult,
+            result_model=ForgeLinkResult,
             handler=services.link_project,
             route=HttpRoute("POST", "/forge/link"),
             cli=CliBinding(("forge", "link")),
+        ),
+        # The first verb that creates upstream state and pushes commits
+        # (#182, FR-B8) — beyond FR-B4's deliberately non-destructive set.
+        # It refuses an existing remote, never force-pushes, and requires a
+        # clean, explicit local checkout; the scope is `writeback` for the
+        # same FR-S11 arming rationale as `forge.link`, because a published
+        # project is a linked one the moment the push lands.
+        Operation(
+            name="forge.publish",
+            summary="Create a repository under your forge credential, push "
+            "the local default branch, and make the project upstream-truth. "
+            "Refuses existing remotes; never force-pushes.",
+            scope="writeback",
+            mutating=True,
+            params_model=ForgePublishParams,
+            result_model=ForgePublishResult,
+            handler=services.publish_project,
+            route=HttpRoute("POST", "/forge/publish"),
+            cli=CliBinding(("forge", "publish")),
         ),
         # -- per-actor forge accounts (#179) -------------------------------
         #

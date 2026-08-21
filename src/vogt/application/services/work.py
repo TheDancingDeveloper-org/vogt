@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+from typing import Literal
 
 from vogt.adapters.forge import ForgeProvider
 from vogt.adapters.forge.models import RepoRef
@@ -88,7 +89,7 @@ def _refuse_unlinked(project: Project, verb: str) -> NotLinked:
     return NotLinked(
         f"{verb} needs a forge-linked project, and {project.slug!r} is not "
         "linked: link it (`forge link`, or re-import through `project "
-        "import`) or publish it (`forge publish`, coming in #182) first"
+        "import`) or publish it (`forge publish`) first"
     )
 
 
@@ -414,11 +415,19 @@ def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:
     declared rows. Each upstream issue appears exactly once — a subject an
     old-model `work_link` adopted is excluded in `upstream_items`, because
     its declared row is the item.
+
+    An **unlinked** project scope answers with the #183 marker: empty items
+    and `link_state: "unlinked"`, the machine-readable half of the
+    link-or-publish CTA. Not an error, because asking is legitimate; not the
+    native rows either, because the forge-less work surface is withdrawn —
+    they remain reachable by ref, and a link or publish migrates them.
     """
     with ctx.declared.read() as view:
         project_row = (
             None if params.project is None else _resolve.project(view, params.project)
         )
+        if project_row is not None and not upstream.is_linked(project_row):
+            return WorkListResult(items=[], total=0, link_state="unlinked")
         work_filter = WorkFilter(
             project_id=None if project_row is None else project_row.id,
             kinds=tuple(params.kinds or ()),
@@ -448,10 +457,14 @@ def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:
                 )
                 if upstream.matches(item, work_filter)
             )
+        scope_state: Literal["linked"] | None = (
+            None if project_row is None else "linked"
+        )
         if not upstream_rows:
             return WorkListResult(
                 items=view.list_work_items(work_filter),
                 total=view.count_work_items(work_filter),
+                link_state=scope_state,
             )
         # Merged paging: the declared page window cannot be pushed into SQL
         # once upstream rows join the list, so both halves are gathered and
@@ -471,6 +484,7 @@ def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:
     return WorkListResult(
         items=merged[params.offset : params.offset + params.limit],
         total=total,
+        link_state=scope_state,
     )
 
 

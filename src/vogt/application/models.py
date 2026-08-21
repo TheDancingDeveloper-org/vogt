@@ -625,6 +625,16 @@ class ListWorkParams(Params):
 class WorkListResult(Result):
     items: list[WorkItem]
     total: int
+    link_state: Literal["linked", "unlinked"] | None = Field(
+        default=None,
+        description=(
+            "Set when the list is scoped to one project (#183): `unlinked` "
+            "is the machine-readable marker that this project has no work "
+            "surface yet — the items are empty because linking or publishing "
+            "is the way forward, not because there is nothing to do. Global "
+            "lists carry null."
+        ),
+    )
 
 
 BoardLaneMode = Literal["none", "project", "initiative"]
@@ -704,6 +714,24 @@ class BoardListResult(Result):
             "declared work in this scope, the same population the rail counts. "
             "`backlog_candidates - declared_total` is the observed subjects the "
             "Board is currently silent about."
+        ),
+    )
+    link_state: Literal["linked", "unlinked"] | None = Field(
+        default=None,
+        description=(
+            "Set for a project scope (#183): `unlinked` marks a project with "
+            "no Board — the cells are empty because linking or publishing is "
+            "the way forward. The global Board carries null."
+        ),
+    )
+    excluded_unlinked: int = Field(
+        default=0,
+        description=(
+            "Declared rows this filter would have drawn whose project is "
+            "unlinked, excluded by #183's withdrawal and reported so the "
+            "Board's totals stay honest about what they leave out; on an "
+            "unlinked project scope it is the count of open native items a "
+            "link or publish would migrate."
         ),
     )
     snapshot: str
@@ -884,6 +912,24 @@ class BacklogResult(Result):
             "closed. Reported rather than silently dropped, so a short list is "
             "distinguishable from a filtered one — they remain queryable "
             "through `observations list`."
+        ),
+    )
+    link_state: Literal["linked", "unlinked"] | None = Field(
+        default=None,
+        description=(
+            "Set for a project scope (#183): `unlinked` marks a project with "
+            "no work surface — link or publish it to track work upstream. "
+            "The global view carries null."
+        ),
+    )
+    excluded_unlinked: int = Field(
+        default=0,
+        description=(
+            "Native declared items left out because their project is "
+            "unlinked (#183's withdrawal of the forge-less work layer). "
+            "Reported rather than silently dropped, so the arithmetic over "
+            "`declared` stays honest; on an unlinked project scope it is the "
+            "count of open native items a link or publish would migrate."
         ),
     )
     scope: str
@@ -1770,6 +1816,66 @@ class ForgeLinkParams(Params):
 
     project: str = Field(description="Project slug.")
     reason: Reason
+
+
+class MigratedItem(Result):
+    """One native work item re-keyed upstream on link/publish (#183)."""
+
+    ref: str = Field(description="The retired native ref, e.g. WI-7.")
+    subject_key: str = Field(description="The upstream subject it became.")
+    title: str
+    source_url: str | None = None
+
+
+class ForgeLinkResult(ProjectResult):
+    """`forge.link`'s receipt: the linked project, and what migrated (#183).
+
+    `migrated` lists every open native item published upstream and re-keyed
+    during this link, oldest first. A mid-migration provider failure raises
+    instead — naming which items migrated and which are still native — so a
+    result in hand means every listed item, and only those, moved.
+    """
+
+    migrated: list[MigratedItem] = []
+
+
+class ForgePublishParams(Params):
+    """Create the remote and make the project upstream-truth (#182).
+
+    The first verb that creates upstream state and pushes commits, which is
+    why every precondition is typed and checked up front: not already
+    linked, no `repo_url` to clobber, a clean checkout on a named branch,
+    and a usable credential. The push is plain — never forced.
+    """
+
+    project: str = Field(description="Project slug.")
+    name: str | None = Field(
+        default=None,
+        description="Repository name to create; defaults to the project slug.",
+    )
+    private: bool = Field(
+        default=True,
+        description=(
+            "Whether the new repository is private. Private by default: "
+            "publishing makes a repository, not an announcement."
+        ),
+    )
+    description: str | None = Field(
+        default=None, description="Repository description, if any."
+    )
+    reason: Reason
+
+
+class ForgePublishResult(Result):
+    """What `forge.publish` did, in the order it did it (#182)."""
+
+    project: Project
+    repo: str = Field(description="The created repository's web URL.")
+    branch: str = Field(description="The local branch pushed as the default.")
+    revision: str | None = Field(
+        default=None, description="The commit the push left as the remote head."
+    )
+    migrated: list[MigratedItem] = []
 
 
 class SetWriteBackParams(Params):

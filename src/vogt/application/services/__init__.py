@@ -35,6 +35,7 @@ from vogt.application.services.forge_accounts import (
     unlink_forge_account,
 )
 from vogt.application.services.forge_link import link_project
+from vogt.application.services.forge_publish import publish_project
 from vogt.application.services.forge_repos import list_forge_repos
 from vogt.application.services.history import list_audit, list_events
 from vogt.application.services.imports import import_project
@@ -161,6 +162,7 @@ __all__ = [
     "observations",
     "onboard",
     "prune",
+    "publish_project",
     "register_project",
     "relate_work",
     "resolve_drift",

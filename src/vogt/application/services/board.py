@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -36,7 +37,16 @@ def list_board(ctx: AppContext, params: BoardListParams) -> BoardListResult:
         project_row = (
             None if params.project is None else _resolve.project(view, params.project)
         )
+        if project_row is not None and not upstream.is_linked(project_row):
+            # The #183 CTA answer: an unlinked project has no Board. Empty
+            # cells with the machine-readable marker, not its native rows —
+            # they are withdrawn from the work surfaces, and the count says
+            # what a link or publish would migrate.
+            return _unlinked_board(ctx, view, params, project_row)
         work_filter = _work_filter(view, params, project_row)
+        excluded_unlinked = view.count_work_items(
+            replace(work_filter, exclude_unlinked_native=False)
+        ) - view.count_work_items(work_filter)
         fingerprint = _fingerprint(params)
         revision = view.current_revision()
 
@@ -146,6 +156,54 @@ def list_board(ctx: AppContext, params: BoardListParams) -> BoardListResult:
         total=sum(counts.values()),
         backlog_candidates=backlog_candidates,
         declared_total=declared_total,
+        link_state=None if project_row is None else "linked",
+        excluded_unlinked=excluded_unlinked,
+        snapshot=snapshot,
+        snapshot_at=snapshot_at,
+        revision=revision,
+    )
+
+
+def _unlinked_board(
+    ctx: AppContext,
+    view: ReadView,
+    params: BoardListParams,
+    project_row: Project,
+) -> BoardListResult:
+    """Empty cells plus the link-or-publish marker (#183).
+
+    A real snapshot token is minted (fingerprint + revision, no high water)
+    so the result's contract holds; there is nothing to continue, so no cell
+    carries a cursor. `excluded_unlinked` is the project's open native items
+    — what a link or publish would migrate — so the CTA can be specific.
+    """
+    pending = view.count_work_items(
+        WorkFilter(project_id=project_row.id, exclude_terminal=True)
+    )
+    fingerprint = _fingerprint(params)
+    revision = view.current_revision()
+    snapshot_at = ctx.clock()
+    snapshot = _encode_token(
+        {
+            "kind": "snapshot",
+            "fingerprint": fingerprint,
+            "revision": revision,
+            "snapshot_at": snapshot_at.isoformat(),
+            "high_water": None,
+        }
+    )
+    return BoardListResult(
+        cells=[
+            BoardCellResult(lane_key=cell.lane_key, state=cell.state, items=[], total=0)
+            for cell in params.cells
+        ],
+        column_totals={},
+        lane_totals={},
+        total=0,
+        backlog_candidates=0,
+        declared_total=0,
+        link_state="unlinked",
+        excluded_unlinked=pending,
         snapshot=snapshot,
         snapshot_at=snapshot_at,
         revision=revision,
@@ -174,6 +232,11 @@ def _work_filter(
         # Board draws terminal workflow columns when requested; visibility is
         # controlled by the explicit state filter, not by work.list's default.
         exclude_terminal=False,
+        # The #183 withdrawal: unlinked projects' native rows are not Board
+        # cards. The scoped unlinked case never reaches this filter (the CTA
+        # short-circuit answers first), so this bites on the global Board,
+        # and `excluded_unlinked` reports what it removed.
+        exclude_unlinked_native=True,
     )
 
 

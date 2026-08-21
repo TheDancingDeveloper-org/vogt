@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import fnmatch
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import NamedTuple
 
@@ -349,6 +349,10 @@ class _Gathered(NamedTuple):
     observed: int
     suppressed: int
     closed: int
+    #: Native declared items left out because their project is unlinked —
+    #: #183's withdrawal of the forge-less work layer, counted rather than
+    #: silently dropped so the surfaces stay honest about it.
+    excluded_unlinked: int
 
 
 def _gather(
@@ -380,9 +384,16 @@ def _gather(
             label=label,
             trust_states=tuple(trust_states or ()),
             exclude_terminal=True,
+            # The #183 withdrawal: an unlinked project's native rows are not
+            # ranked-view candidates any more — link or publish migrates them
+            # upstream, and the CTA is what the scoped surfaces show instead.
+            exclude_unlinked_native=True,
             limit=RANKING_CANDIDATE_LIMIT,
         )
         declared_items = view.list_work_items(work_filter)
+        excluded_unlinked = view.count_work_items(
+            replace(work_filter, exclude_unlinked_native=False)
+        ) - view.count_work_items(work_filter)
         candidates = _declared_candidates(view, declared_items)
         projects = {p.id: p for p in view.list_projects(limit=10_000, offset=0)}
         suppressions = SuppressionFilter.build(view.list_suppressions(limit=1000))
@@ -431,11 +442,26 @@ def _gather(
                 [observation.subject_key for observation in kept]
             )
             # An adopted subject is already in the declared half; listing it
-            # twice would double-count the work it represents.
+            # twice would double-count the work it represents. Since #183 the
+            # declared half of an *unlinked* project is withdrawn from the
+            # views, so an adoption into one must not hide the observation
+            # too — that would make adopting a subject erase the work from
+            # every surface, which is the silent drop this issue forbids.
+            # The observation stays a candidate, `adopted_as` still names
+            # the (withdrawn) row it became.
+            unlinked_ids = {
+                pid for pid, p in projects.items() if p.link_state != "linked"
+            }
+            hidden: set[str] = set()
+            for subject in adopted:
+                row = view.work_item_by_subject(subject)
+                if row is not None and row.project_id in unlinked_ids:
+                    continue
+                hidden.add(subject)
             observed = [
                 observation
                 for observation in kept
-                if observation.subject_key not in adopted
+                if observation.subject_key not in hidden
             ]
             # The upstream-truth join (#181): on a linked project a forge
             # issue is not a bare observed candidate but the work item
@@ -483,7 +509,12 @@ def _gather(
     if priorities:
         ranked = [entry for entry in ranked if entry.priority in set(priorities)]
     return _Gathered(
-        ranked, len(declared_items), len(observed), suppressed, closed_count
+        ranked,
+        len(declared_items),
+        len(observed),
+        suppressed,
+        closed_count,
+        excluded_unlinked,
     )
 
 
@@ -519,6 +550,37 @@ def candidate_population(
     return len(gathered.ranked), gathered.declared
 
 
+def _unlinked_scope(ctx: AppContext, project: str) -> BacklogResult | None:
+    """The #183 CTA answer for an unlinked project scope, or `None`.
+
+    An unlinked project has no backlog: not an error — asking is legitimate
+    — and not its native rows either, because the forge-less work surface is
+    withdrawn. The marker (`link_state: "unlinked"`) is the machine-readable
+    half of the link-or-publish CTA, and `excluded_unlinked` counts the open
+    native items a link or publish would migrate, so the surface can say
+    what the act would carry across rather than implying there is nothing.
+    """
+    with ctx.declared.read() as view:
+        project_row = _resolve.project(view, project)
+        if project_row.link_state == "linked":
+            return None
+        pending = view.count_work_items(
+            WorkFilter(project_id=project_row.id, exclude_terminal=True)
+        )
+    return BacklogResult(
+        items=[],
+        total_considered=0,
+        declared=0,
+        observed=0,
+        suppressed=0,
+        closed_upstream=0,
+        link_state="unlinked",
+        excluded_unlinked=pending,
+        scope=project,
+        freshness=freshness_of(ctx),
+    )
+
+
 def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
     """The ranked backlog, globally or for one project (FR-V1, FR-V2, FR-W4).
 
@@ -527,7 +589,15 @@ def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
     next rows of one ordering rather than a fresh ranking of what was left —
     which is the only version that pages honestly, and is why the offset is
     applied here rather than pushed into the query.
+
+    An unlinked project scope answers with the #183 CTA marker instead of a
+    ranked list; the global view excludes unlinked projects' native items and
+    counts the exclusion in `excluded_unlinked`.
     """
+    if params.project is not None:
+        unlinked = _unlinked_scope(ctx, params.project)
+        if unlinked is not None:
+            return unlinked
     gathered = _gather(
         ctx,
         project=params.project,
@@ -546,6 +616,8 @@ def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
         observed=gathered.observed,
         suppressed=gathered.suppressed,
         closed_upstream=gathered.closed,
+        link_state=None if params.project is None else "linked",
+        excluded_unlinked=gathered.excluded_unlinked,
         scope=params.project or "global",
         freshness=freshness_of(ctx),
     )
@@ -554,8 +626,13 @@ def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
 def bugs(ctx: AppContext, params: BugsParams) -> BacklogResult:
     """Open bugs across every project, declared and observed alike.
 
-    Paged like `backlog`, and for the same reason (FR-V5).
+    Paged like `backlog`, and for the same reason (FR-V5) — including the
+    #183 marker for an unlinked project scope and the exclusion count.
     """
+    if params.project is not None:
+        unlinked = _unlinked_scope(ctx, params.project)
+        if unlinked is not None:
+            return unlinked
     gathered = _gather(
         ctx,
         project=params.project,
@@ -572,6 +649,8 @@ def bugs(ctx: AppContext, params: BugsParams) -> BacklogResult:
         observed=gathered.observed,
         suppressed=gathered.suppressed,
         closed_upstream=gathered.closed,
+        link_state=None if params.project is None else "linked",
+        excluded_unlinked=gathered.excluded_unlinked,
         scope=params.project or "global",
         freshness=freshness_of(ctx),
     )
