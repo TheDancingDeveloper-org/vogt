@@ -1365,6 +1365,10 @@ textarea {
 }
 .sessions-active-workspace {
   display: flex;
+  /* Fill `.sessions-place-body`, so a lone terminal is full-size rather than
+     sized to its content (#185). This used to live only in the phone media
+     query, which is why the desktop workspace under-sized a single session. */
+  flex: 1;
   min-height: 0;
   min-width: 0;
   flex-direction: column;
@@ -1720,6 +1724,25 @@ textarea {
 .terminal-pane.active {
   border-color: var(--accent);
   box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.35);
+}
+/* Maximise the active pane (#185): the split tree stays mounted — every other
+   pane is hidden rather than closed, so its session keeps running — and the
+   active pane is lifted to fill the whole layout. `display: none` keeps the
+   hidden panes out of the flex flow so no gutter remains. */
+.terminal-layout.soloed {
+  position: relative;
+}
+.terminal-layout.soloed .terminal-split {
+  position: static;
+}
+.terminal-layout.soloed .terminal-pane {
+  display: none;
+}
+.terminal-layout.soloed .terminal-pane.active {
+  display: flex;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
 }
 .terminal-pane .terminal-host {
   padding: 4px 0 0 6px;
