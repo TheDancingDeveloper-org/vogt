@@ -12,6 +12,11 @@ What it can do, by policy level:
 - `comment_only` — post comments authored in Vogt to the linked object.
 - `full` — the above, plus create, label, and close/reopen.
 
+`create_repo` (#182) sits outside the per-project policy table because the
+project it serves has no upstream yet to have a policy about; the gate is the
+`writeback` scope on the one operation that calls it, `forge.publish`, and a
+name that already exists upstream is refused there, never clobbered.
+
 Comments flow **outbound only** (FR-B5). A comment authored here posts
 upstream; a comment authored on GitHub stays an observation shown against
 the linked item and is never copied into `comments`. That keeps `comments`
@@ -55,7 +60,7 @@ class ForgeWriter:
         # reads it back in.
         self._provider = GitHubProvider(client)
 
-    # -- the four verbs ----------------------------------------------------
+    # -- the write verbs ---------------------------------------------------
 
     def comment(
         self, *, repo_url: str | None, number: int, body: str
@@ -112,6 +117,28 @@ class ForgeWriter:
             payload={"state": state},
             method="PATCH",
         )
+
+    def create_repo(
+        self, *, name: str, private: bool, description: str | None = None
+    ) -> dict[str, Any]:
+        """Create a repository under the authenticated account (#182).
+
+        `POST /user/repos` and nothing else: no auto-init (the local history
+        is about to be pushed and a generated first commit would make the
+        very first push non-fast-forward), no template, no transfer. Errors
+        propagate as `GitHubUnavailable` with the status in the message; the
+        provider maps the 422 name-conflict onto the typed refusal, because
+        the provider is the layer that knows the product's error taxonomy.
+        """
+        payload: dict[str, Any] = {
+            "name": name,
+            "private": private,
+            "auto_init": False,
+        }
+        if description:
+            payload["description"] = description
+        response = self._client.send("/user/repos", payload)
+        return response if isinstance(response, dict) else {}
 
     # -- transport ---------------------------------------------------------
 

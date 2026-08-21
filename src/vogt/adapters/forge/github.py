@@ -38,6 +38,7 @@ from vogt.adapters.github.client import (
     GitHubUnavailable,
     repo_of,
 )
+from vogt.errors import RemoteRepoExists
 
 if TYPE_CHECKING:
     from vogt.adapters.forge.writeback import WriteBackResult
@@ -355,6 +356,49 @@ class GitHubProvider:
             repo_url=self.web_url(ref),
             number=number,
             state=state,  # type: ignore[arg-type]
+        )
+
+    def create_repo(
+        self, name: str, *, private: bool, description: str | None = None
+    ) -> ForgeRepo:
+        """`POST /user/repos` — a new repository under this credential (#182).
+
+        Under the acting actor's PAT the repository lands in *their* account,
+        which is the whole point of #179's identity work. GitHub answers a
+        name that already exists with 422, and that is a **typed refusal**
+        here (`RemoteRepoExists`), never an adoption of the existing
+        repository: the status travels in the client's error message, which
+        is the one stable thing `send` reports about a refused write.
+        """
+        try:
+            response = self._writer().create_repo(
+                name=name, private=private, description=description
+            )
+        except GitHubUnavailable as exc:
+            if "422" in str(exc):
+                msg = (
+                    f"github.com already has a repository named {name!r} "
+                    "reachable by this account; `forge.publish` never adopts "
+                    "or overwrites an existing remote — pick another name, or "
+                    "attach to the existing repository with `forge link` "
+                    "after setting the project's repo_url"
+                )
+                raise RemoteRepoExists(msg) from exc
+            raise
+        owner = (response.get("owner") or {}).get("login")
+        if not owner:
+            msg = (
+                "GitHub accepted the repository create but returned no owner, "
+                "so there is no address to push to"
+            )
+            raise GitHubUnavailable(msg)
+        created = str(response.get("name") or name)
+        return ForgeRepo(
+            owner=str(owner),
+            name=created,
+            default_branch=response.get("default_branch"),
+            visibility=("private" if response.get("private", private) else "public"),
+            web_url=response.get("html_url") or f"https://{HOST}/{owner}/{created}",
         )
 
     def _writer(self) -> ForgeWriter:

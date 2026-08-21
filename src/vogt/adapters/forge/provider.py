@@ -10,10 +10,11 @@ forge is a new class, not a re-plumbing.
 Two things about this protocol are load-bearing:
 
 1. **There is no destructive verb.** The write surface is `comment`,
-   `create_issue`, `add_labels`, `set_state` — append, append, append, and a
-   reversible toggle. FR-B4 ("no deletion, no force, ever") is guaranteed here
-   by construction: a provider *cannot* offer a delete because the interface
-   it satisfies has no name for one.
+   `create_issue`, `add_labels`, `set_state`, `create_repo` — append, append,
+   append, a reversible toggle, and a create that refuses an existing name
+   (#182). FR-B4 ("no deletion, no force, ever") is guaranteed here by
+   construction: a provider *cannot* offer a delete because the interface it
+   satisfies has no name for one.
 
 2. **Capabilities are declared, never discovered.** A caller reads
    `capabilities` and adjusts — it never probes a forge to find out whether
@@ -163,6 +164,19 @@ class ForgeProvider(Protocol):
 
     def set_state(self, ref: RepoRef, number: int, state: str) -> WriteBackResult:
         """Close or reopen. Both directions are recoverable by the other."""
+
+    def create_repo(
+        self, name: str, *, private: bool, description: str | None = None
+    ) -> ForgeRepo:
+        """Create a new, empty repository under the credential's account (#182).
+
+        Creates only — it never adopts, reuses or replaces an existing
+        repository. A name that already exists upstream is a **typed refusal**
+        (`RemoteRepoExists`), never a clobber: that repository is somebody's
+        state, and attaching to it is `forge.link`'s explicit act. Still
+        additive under FR-B4's reading — the verb set gains a create and no
+        destructive capability.
+        """
 
 
 __all__ = ["ForgeProvider"]
