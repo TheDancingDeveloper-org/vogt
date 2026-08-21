@@ -800,6 +800,12 @@ const Board: Component<Props> = (props) => {
   const [metadataReady, setMetadataReady] = createSignal(false);
   const [items, setItems] = createSignal<WorkItem[]>([]);
   const [total, setTotal] = createSignal(0);
+  // The honesty pair (#187): how many things the Backlog would consider for
+  // this scope, and how many of those are the declared work the Board draws.
+  // Kept as the server sent them — the Board never counts observed subjects
+  // client-side, it only reports the gap the server measured.
+  const [backlogCandidates, setBacklogCandidates] = createSignal<number | null>(null);
+  const [declaredTotal, setDeclaredTotal] = createSignal<number | null>(null);
   const [cellPages, setCellPages] = createSignal<Map<string, CellPageState>>(new Map());
   const [columnTotals, setColumnTotals] = createSignal<Record<string, number>>({});
   const [laneTotals, setLaneTotals] = createSignal<Record<string, number>>({});
@@ -1069,6 +1075,12 @@ const Board: Component<Props> = (props) => {
       setCellPages(next);
       syncItemsFromCells(next);
       setTotal(answer.total);
+      setBacklogCandidates(
+        typeof answer.backlog_candidates === "number" ? answer.backlog_candidates : null,
+      );
+      setDeclaredTotal(
+        typeof answer.declared_total === "number" ? answer.declared_total : null,
+      );
       setColumnTotals(answer.column_totals ?? {});
       setLaneTotals(answer.lane_totals ?? {});
       setBoardSnapshot(answer.snapshot);
@@ -1313,6 +1325,22 @@ const Board: Component<Props> = (props) => {
         active.states.length,
     );
   };
+
+  /**
+   * The honesty gap (#187): the Board draws declared cards, but the estate's
+   * outstanding work also includes open forge subjects nobody has adopted as
+   * a work item yet. Both numbers are the server's — this only decides whether
+   * the difference is worth saying, which it is exactly when there are more
+   * candidates than declared cards. `declared_total` is the same declared
+   * population the rail counts, so the banner's Board number agrees with it.
+   */
+  const candidateGap = createMemo<{ board: number; candidates: number } | null>(() => {
+    const candidates = backlogCandidates();
+    const declared = declaredTotal();
+    if (candidates === null || declared === null) return null;
+    if (candidates <= declared) return null;
+    return { board: declared, candidates };
+  });
 
   const lanes = createMemo<Lane[]>(() => {
     const grouped = new Map<string, Lane>();
@@ -1951,6 +1979,23 @@ const Board: Component<Props> = (props) => {
 
       <Show when={ack()}>
         {(message) => <div class="board-banner board-banner--ok">{message()}</div>}
+      </Show>
+
+      <Show when={candidateGap()}>
+        {(gap) => (
+          <div class="board-banner board-banner--candidates" role="note">
+            <strong>
+              {gap().board} {gap().board === 1 ? "work item" : "work items"} on the
+              Board · {gap().candidates} backlog candidates
+            </strong>
+            <span class="board-banner-detail">
+              The Board shows tracked work items. The other{" "}
+              {gap().candidates - gap().board} are open forge issues that have been
+              observed but not yet adopted as work items, so they rank in the{" "}
+              <a href="#/backlog">Backlog</a> without appearing here.
+            </span>
+          </div>
+        )}
       </Show>
 
       <ProgressiveFilters
