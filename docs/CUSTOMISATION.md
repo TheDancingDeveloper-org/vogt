@@ -168,6 +168,46 @@ The two-service shape this enables — your front door on the published port,
 the core reachable only on the Compose network — is a supported topology, not
 a workaround.
 
+### In a split deployment, the CLI and the database are in different containers
+
+Worth knowing before you run an administrative command against a two-service
+deployment, because the wrong container fails in a way that reads like a
+broken instance rather than like a typo.
+
+The core owns the data directory. The front door does not — it proxies to
+the core over the network and never opens the database. If your front-door
+image also happens to carry a `vogt` binary, that binary in that container
+is talking to *nothing*:
+
+```console
+$ docker exec <core-container> vogt status
+instance_id: ins_...
+data_dir: /var/lib/vogt
+counts:
+  projects: 50
+
+$ docker exec <front-door-container> vogt status
+error: not_initialized: no Vogt instance in /var/lib/vogt — run `vogt init` first
+```
+
+Both containers can show a `/var/lib/vogt`, which is what makes this
+confusing: the core's is the real named volume, and the front door's is
+whatever its image declares — frequently an empty anonymous volume that
+Docker creates fresh on each deploy.
+
+So **administrative commands go to the core**: `project import`,
+`project register`, `token issue`, `status`. Anything you would run to
+change what the instance knows belongs where the instance's state is. The
+tempting `vogt init` that the error message suggests is exactly the wrong
+response — it would initialise a second, empty instance in the container
+that should not have one.
+
+One wrinkle if you go looking: the core's CLI may be inside a virtualenv
+(`/opt/vogt/.venv/bin`) that is on `PATH` for a plain `docker exec` but not
+for a *login* shell. `docker exec core vogt status` finds it;
+`docker exec core sh -lc 'vogt status'` may not, and reports
+`vogt: not found` — a missing binary that is not missing.
+
 ## Layer 3 — extending the image
 
 The published image is built to be a base:
