@@ -16,6 +16,7 @@ from vogt.application.models import (
     BoardListResult,
 )
 from vogt.application.services import _resolve
+from vogt.application.services.views import candidate_population
 from vogt.core.clock import from_iso
 from vogt.core.digest import digest_of
 from vogt.core.entities import WorkItem
@@ -105,11 +106,26 @@ def list_board(ctx: AppContext, params: BoardListParams) -> BoardListResult:
     for (lane, state), count in counts.items():
         column_totals[state] = column_totals.get(state, 0) + count
         lane_totals[lane] = lane_totals.get(lane, 0) + count
+    # The honest denominator (#187): how many things the Backlog would consider
+    # for this same scope, and how many of those are declared work. Computed
+    # after the declared read closes rather than nested inside it, because
+    # `candidate_population` opens its own read to score the observed half.
+    backlog_candidates, declared_total = candidate_population(
+        ctx,
+        project=params.project,
+        kinds=params.kinds,
+        priorities=params.priorities,
+        assignee=params.assignee,
+        initiative=params.initiative,
+        label=params.label,
+    )
     return BoardListResult(
         cells=cells,
         column_totals=column_totals,
         lane_totals=lane_totals,
         total=sum(counts.values()),
+        backlog_candidates=backlog_candidates,
+        declared_total=declared_total,
         snapshot=snapshot,
         snapshot_at=snapshot_at,
         revision=revision,

@@ -433,6 +433,38 @@ def _gather(
     )
 
 
+def candidate_population(
+    ctx: AppContext,
+    *,
+    project: str | None,
+    kinds: Sequence[str] | None,
+    priorities: Sequence[str] | None,
+    assignee: str | None,
+    initiative: str | None,
+    label: str | None,
+) -> tuple[int, int]:
+    """Backlog-candidate counts for a Board scope (#187).
+
+    Returns ``(observed_inclusive_considered, declared_only)`` — the same two
+    numbers the Backlog reports as ``total_considered`` and ``declared`` — so
+    the Board can be honest that its declared count is not the size of the
+    outstanding work. It reuses `_gather` and therefore pays the Backlog's own
+    scoring cost; there is no cheaper count that would honour suppression,
+    adoption and closure the same way, and a count that did not would be a
+    second, quietly different idea of what a candidate is.
+    """
+    gathered = _gather(
+        ctx,
+        project=project,
+        kinds=kinds,
+        priorities=priorities,
+        assignee=assignee,
+        initiative=initiative,
+        label=label,
+    )
+    return len(gathered.ranked), gathered.declared
+
+
 def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
     """The ranked backlog, globally or for one project (FR-V1, FR-V2, FR-W4).
 
