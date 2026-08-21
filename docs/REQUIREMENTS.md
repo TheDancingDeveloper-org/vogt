@@ -1,6 +1,6 @@
 # Vogt — Requirements (v0.3)
 
-Status: **baseline, revision r22** (2026-08-21), distilled from `DESIGN.md`,
+Status: **baseline, revision r24** (2026-08-21), distilled from `DESIGN.md`,
 `SCHEMA.md`, `DEPLOYMENT.md`, [`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md) and
 the originating product discussion.
 **v1 (M0–M6) is built**; §5 is the requirement-by-requirement verification
@@ -1274,6 +1274,95 @@ decided to end, and this revision records how the delivered system ends it.
    deduplicated through the existing adoption links — which is what closes
    the #187 gap for real once #183 lands.
 
+### Revision r23 — the publish verb
+
+*2026-08-21. Decision 8 of design #178, delivered as issue #182: `forge
+.publish` creates a repository under the acting credential, pushes the local
+default branch, and hands the project to the r22 upstream-truth model.
+FR-B8 is the requirement.*
+
+Every forge write before this revision was FR-B4's deliberately
+non-destructive set — comment, create-issue, label, close/reopen: append,
+append, append, a reversible toggle. `forge.publish` is the first verb that
+**creates upstream state and pushes commits**, so it gets its own ID with a
+bounded rationale rather than riding FR-B4's:
+
+1. **It refuses an existing remote, always.** The repository is created
+   fresh (`POST /user/repos`, no auto-init); a name that already exists is
+   the forge's own conflict answer mapped to a typed refusal
+   (`remote_repo_exists`), never an adoption of somebody's repository —
+   attaching to an existing remote is `forge.link`'s explicit act, and a
+   project that already carries a `repo_url` or is already linked is
+   refused before anything leaves the machine.
+2. **It never force-pushes.** The push is a plain `git push` built in one
+   place with no force flag, no `+refspec`, no lease — FR-B4's "no force,
+   ever" mirrored into the one path where a force would be trivially
+   reachable — and a non-fast-forward rejection is a typed refusal
+   (`publish_non_fast_forward`) handed back to the person.
+3. **It requires clean, explicit local state.** A read-only gate (the #180
+   parity gate's posture at the opposite boundary) requires a git
+   repository at the project root, a clean working tree, and a named branch
+   on a commit, refusing with the exact failing condition named.
+4. **Security posture** sits beside FR-B6's: the repository lands under the
+   acting actor's linked PAT (file token as fallback), and the push
+   authenticates per-invocation through the same `GIT_ASKPASS` mechanism as
+   the clone (FR-S8) — the token is never embedded in a URL, argv, or the
+   checkout's configuration.
+
+The scope is `writeback` (FR-S11's arming rationale — a published project
+is a linked one the moment the push lands), the operation is
+registry-defined with CLI/REST/MCP parity driven by the harness, and after
+the push the project is `linked` and its open native items migrate (r24).
+
+### Revision r24 — the forge-less work layer is withdrawn
+
+*2026-08-21. Decision 7 (and the tail of decision 10) of design #178,
+delivered as issue #183: linking or publishing migrates a project's open
+native work items upstream, and the "forge-less layer stays real" guarantee
+is formally withdrawn. FR-B9 is the migration requirement; the withdrawn
+capability is recorded in §7.3.*
+
+1. **Migration on link/publish (FR-B9).** When `forge.link` or
+   `forge.publish` succeeds on a project holding open native work items,
+   each is published as an upstream issue (title, body with provenance,
+   labels) and **re-keyed**: the vogt-only fields fold into the
+   subject-keyed `work_overlay`, and the native row is **retired by
+   marker** (`work_items.superseded_by` names the new subject), not
+   deleted — the row anchors its comments, relations, ledger and audit
+   history, and its `WI-n` ref still resolves for anyone following an old
+   trail while every view excludes it, so each issue is counted exactly
+   once. No `work_links` row is written for the new subject (one would hide
+   the upstream item behind its own husk). **Closed and archived native
+   items stay historical, by decision** — only open items migrate.
+   Partial failure is honest, not atomic: per-item write-through, so a
+   provider failure mid-run raises a typed error naming which items
+   migrated and which are still native, and re-linking resumes exactly
+   there. A policy that would refuse the creates refuses the whole
+   link/publish up front, so no project ends up linked with items no
+   re-run could move. Rows whose adoption link already names a forge
+   object are the pre-#181 bridge and are skipped — their upstream
+   identity already exists.
+2. **The guarantee withdrawn.** NFR-PO1 promised a product fully functional
+   with no forge — *including* project work tracking. That clause is
+   withdrawn: on a project, work is tracked upstream or not at all, and the
+   ways forward are named (`forge.link`, `project.import`, `forge.publish`).
+   What NFR-PO1 keeps is everything else — projects, observation,
+   contracts, drift, audit, ranking of observed candidates, and work items
+   that belong to no project. The designed-but-withdrawn capability is
+   recorded in §7.3, cross-referencing #178.
+3. **The surface change.** Unlinked projects show no backlog/work/Board
+   surfaces. A project-scoped `backlog`/`work.list`/`board.list` answers
+   with empty items plus a machine-readable `link_state: "unlinked"` marker
+   (the link-or-publish CTA's server half; the PWA renders the CTA with the
+   count of items a link would migrate). The **global** Backlog and Board
+   exclude unlinked projects' native items with the exclusion **counted**
+   (`excluded_unlinked`) — never silently dropped, per the FR-O10 honesty
+   rule. An adoption into an unlinked project leaves the observed subject a
+   ranked candidate (labelled with what it was adopted as) rather than
+   erasing the work from every surface. `work.get` by ref, and the raw
+   global `work.list`, keep native rows reachable: the withdrawal is a
+   surface change, not data loss.
+
 ## 1. Functional requirements
 
 ### FR-P — Projects & per-repo view
@@ -1441,6 +1530,8 @@ by path or repository URL, and stops there.*
 | FR-B5 | *(decided 2026-08-12)* Comment write-back shall be **outbound only**: comments authored in Vogt post to the linked forge object under `comment_only` and `full`. Inbound forge comments shall remain observations, visible against the linked item, and shall never be copied into the `comments` table. Bidirectional conversation mirroring is deferred (§3). | M* | DESIGN §4 |
 | FR-B6 | *(r21)* An actor shall be able to link their own forge account by supplying a Personal Access Token, scoped to `(actor, host)`, so that write-back driven by that actor is attributed upstream to them rather than to the instance file token (FR-S7), which remains the fallback for sweeps and unlinked actors. The PAT shall be validated against the forge before it is stored, stored **encrypted at rest** (never hashed — recovery is required to call upstream, the deliberate opposite of the hash-only `tokens` of FR-S3) under a key named by `forge_account_key_file`, and never returned by any surface: status shall report host, login, scopes and linked-state only. An unset key file shall disable linking entirely (a feature with nowhere safe to keep a recoverable secret is off, not insecure). Linking and unlinking shall be audited writes gated as arming write-back is (FR-S11's `writeback`); a linked token's blast radius is whatever its own scopes allow, attributed to the actor, and unlinking shall delete the stored copy and advise revoking the token upstream, which is the only place it can be revoked. | S* | DESIGN §4; design #178 dec. 4; #179 |
 | FR-B7 | *(r22)* A project shall carry a persisted link state (`unlinked \| linked`) set only by an explicit act — `project.import`'s clone+consolidate, `forge.link` (which shall validate a provider-matched `repo_url` and a usable credential, refusing with the missing precondition named), and `forge.publish` once #182 delivers it. On a **linked** project the work items shall *be* the project's mirrored forge issues joined to a subject-keyed local overlay (`work_overlay`: rank, workflow state, priority, effort, assignee, initiative — never visible upstream, never causing a provider call), the subject key shall be the item's ref and id on every surface, and the work write verbs shall write through to the forge synchronously and fail loud: a provider failure or a policy refusal raises a typed error and commits nothing locally, so a caller can never hold a local success the forge refused — for `create` specifically, the caller shall learn the issue was not created. Title/body edits and label removals shall be refused as upstream truth under FR-B4's append-only verb set. On an **unlinked** project the write verbs shall refuse with `project_not_linked`, naming link and publish as the ways forward; items with no project are unaffected. The cutover to this model starts from a fresh declared store by decision — the migration is new-DDL only and transforms no existing row. | M* | design #178 dec. 1/2/9/10; #181 |
+| FR-B8 | *(r23)* `forge.publish` shall create a repository under the acting credential (the actor's linked PAT per FR-B6, else the FR-S7 file token), push the project's local default branch, set its `repo_url`, and mark it `linked` (FR-B7), migrating its open native items per FR-B9. As the first verb that creates upstream state and pushes commits — beyond FR-B4's deliberately non-destructive set — it shall: refuse a remote that already exists (the forge's name conflict maps to a typed `remote_repo_exists`; a project already linked or already carrying a `repo_url` is refused before any network call — attaching to an existing remote is `forge.link`'s act, never publish's clobber); **never force-push** (a plain push built in one place with no force flag or `+refspec`; a non-fast-forward rejection is the typed `publish_non_fast_forward` refusal, and the remote's history stands); and require clean, explicit local state through a read-only gate (a git repository at the project root, a clean working tree, a named branch on a commit — each failure typed and named). The push shall authenticate per-invocation via the FR-S8 `GIT_ASKPASS` mechanism: the token shall never appear in the remote URL, argv, or the checkout's configuration. Scope `writeback` (FR-S11); registry-defined with CLI/REST/MCP parity. | S* | design #178 dec. 8; #182 |
+| FR-B9 | *(r24)* When `forge.link` or `forge.publish` succeeds on a project holding **open** native work items, each shall be published as an upstream issue (labels included; body carrying its provenance) and re-keyed: vogt-only fields fold into the subject-keyed overlay, and the native row is retired by marker (`superseded_by`), never deleted — its history and ref remain reachable while every view excludes it, so each issue is counted exactly once. Closed/archived items stay historical. **No open native item shall be silently dropped**: migration is per-item write-through, a mid-run provider failure raises a typed error naming which items migrated and which are still native, re-linking resumes, and a write-back policy that would refuse the creates refuses the whole link/publish up front. Items whose adoption link already names a forge object are the pre-#181 bridge and are skipped rather than duplicated upstream. | M* | design #178 dec. 7; #183 |
 
 ### FR-L — Lifecycle & administration
 
@@ -1548,7 +1639,7 @@ priorities read against v2 (M9–M13), per the r9 revision note.
 
 | ID | Requirement | Pri |
 |---|---|---|
-| NFR-PO1 | The product shall be fully functional with no GitHub and no forge — no network at all: projects, work, backlog, ranking, contracts, compliance status, dependency references, drift, audit. Forge and advisory integrations are optional plugins that only ever *add*. | M |
+| NFR-PO1 | *(revised r24)* The product's **observation and estate layer** shall be fully functional with no GitHub and no forge — no network at all: projects, contracts, compliance status, dependency references, drift, audit, ranking of observed candidates, and work items that belong to no project. **Withdrawn from this guarantee (r24, #183, cross-ref design #178 dec. 7/10):** work tracking *on a project* — on a project, work is tracked upstream or not at all, and the unlinked answer is the typed refusal plus the link-or-publish surface, not a local work model that would silently diverge from the linked ones (§7.3 records the withdrawn capability). Forge and advisory integrations otherwise remain optional plugins that only ever *add*. | M |
 | NFR-PO2 | The full test suite shall run forge-less; forge-dependent tests are a separately marked layer. | M |
 | NFR-PO3 | Self-hosting shall require zero external services: SQLite storage, single process, single volume. | M |
 | NFR-PO4 | *(revised r4, r7)* The supported install path is an OCI image published to `ghcr.io/thedancingdeveloper-org/vogt` with SBOM and keyless cosign signature, consumed by a Docker Compose stack; image references in deployed compose files shall be **digest-pinned**, not alias-tracking. The wheel shall be published to **PyPI** when the repository goes public (NFR-O1), and until then to no index at all: a private index built to carry it would be a distribution channel with one user and a migration to undo. Reaching an instance does not require it (FR-A8). | M |
@@ -2796,6 +2887,20 @@ nobody wrote down gets rediscovered as an oversight.
   missed rather than refused.
 - **Backend convergence on Rust.** §3 again: the two-process shape is the
   requirement (NFR-D11), and nothing forecloses a future port.
+- **The forge-less work layer** *(withdrawn r24, #183, per design #178
+  decisions 7 and 10)*. Built and shipped through r21: native `WI-n` work
+  items on a project with no forge — created, ranked, boarded, transitioned
+  entirely locally — with NFR-PO1 guaranteeing the whole work surface ran
+  with no network. The #178 pivot ended it deliberately: two work models on
+  one estate is the divergence this product exists to notice, so on a
+  project, work is tracked upstream or not at all. What replaced it: the
+  typed `project_not_linked` refusal on the write verbs (FR-B7), the
+  link-or-publish CTA on the surfaces with the exclusion counted (r24 §3),
+  and migration of open native items on link/publish (FR-B9). What
+  survives: project-less work items, every observation-layer capability
+  (NFR-PO1 as revised), native rows reachable by ref, and the forge-less
+  *test* layer (NFR-PO2) — a build property, untouched. Reviving a
+  forge-less project work model is a new requirement, not a resumed one.
 
 ### 7.4 Residuals — true, smaller than the requirement, and worth naming
 

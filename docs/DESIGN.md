@@ -419,12 +419,49 @@ missing precondition named. On a **linked** project:
   removals are refused (upstream truth; FR-B4's surface is append-only),
   and relations between upstream items are not supported in v1.
 - **Unlinked projects refuse the write verbs** with `project_not_linked`,
-  naming link and publish (#182) as the ways forward; project-less items
-  are untouched. Native declared rows stay readable — the surface
-  withdrawal and the native-item migration are #183.
+  naming link and publish as the ways forward; project-less items are
+  untouched. Unlinked projects show **no** work surfaces (r24, #183): a
+  project-scoped backlog/work list/Board answers with empty items plus a
+  machine-readable `link_state: "unlinked"` marker — the PWA renders the
+  link-or-publish CTA over it — and the global views exclude unlinked
+  projects' native rows with the exclusion counted (`excluded_unlinked`),
+  never silently dropped. Native rows stay reachable by ref and through
+  the raw global `work.list`.
 
 FR-B7 is the requirement; the cutover starts from a fresh declared store by
 decision, so migration `0013_upstream_truth` is new-DDL only.
+
+### 3.8 Publish, and the migration that makes linking total (r23/r24)
+
+**`forge.publish` (FR-B8, #182)** is how a local-only project enters the
+linked model without a pre-existing remote: create the repository under the
+acting credential (`POST /user/repos`, no auto-init), push the local default
+branch, set `repo_url`, mark the project linked. It is the first verb that
+creates upstream state and pushes commits, and its shape is deliberately
+bounded: a read-only gate first (a git repository at the project root, a
+clean working tree, a named branch on a commit — each failure a typed
+refusal); an existing remote name is the forge's own conflict mapped to
+`remote_repo_exists`, never a clobber (a project already linked or already
+carrying a `repo_url` is refused before any network call — attaching to an
+existing remote is `forge.link`'s act); the push is plain — the argv is
+built in one place with no force flag and no `+refspec`, and a
+non-fast-forward rejection is `publish_non_fast_forward`, the remote's
+history standing. The token authenticates the push per-invocation through
+the same `GIT_ASKPASS` road the clone uses (FR-S8): never in the URL, argv,
+or the checkout's configuration.
+
+**Migration on link/publish (FR-B9, #183).** The moment either explicit act
+succeeds, the project's **open** native items migrate: each becomes an
+upstream issue (labels along, body carrying its provenance) and is re-keyed
+— vogt-only fields into the overlay under the new subject, the native row
+retired by marker (`superseded_by`), never deleted, so its comments,
+relations, ledger and audit history stay anchored and its ref still
+resolves while every view counts the issue exactly once. Closed items stay
+historical. Migration is per-item write-through: a mid-run provider failure
+raises a typed error naming what moved and what is still native, and
+re-linking resumes; a policy that would refuse the creates refuses the
+whole act up front. Adopted rows already linked to a forge object are the
+pre-#181 bridge and are skipped, not duplicated.
 
 ---
 

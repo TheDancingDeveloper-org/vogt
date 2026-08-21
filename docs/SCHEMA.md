@@ -156,7 +156,7 @@ package identity is no longer needed to build the internal graph.
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `work_items` | the unit of work | `id, ref, kind(feature\|bug\|chore\|question), title, body, state, priority(p0..p4), effort, project_id, initiative_id, origin(created\|adopted\|observed), trust_state, assignee_actor_id, created_at, updated_at` |
+| `work_items` | the unit of work | `id, ref, kind(feature\|bug\|chore\|question), title, body, state, priority(p0..p4), effort, project_id, initiative_id, origin(created\|adopted\|observed), trust_state, assignee_actor_id, superseded_by, created_at, updated_at` |
 | `work_relations` | typed DAG edges, cross-project | `work_item_id, related_id, kind(depends_on\|relates_to\|duplicate_of\|parent_of)` |
 | `labels` | instance-wide tag definitions (GitHub-label aligned) | `id, name, color` |
 | `work_item_labels` | tag assignments | `work_item_id, label_id` |
@@ -181,6 +181,16 @@ write-through nothing lands here, because the provider call runs before the
 declared transaction opens (decision 9); `rank` is schema for the vogt-local
 ordering with no operation writing it yet. The 0013 migration is new-DDL
 only: the deployed cutover starts from a fresh declared store, by decision.
+
+*Added at 0014 (#183, FR-B9)*: `work_items.superseded_by` — the retire
+marker for native items migrated upstream on `forge.link`/`forge.publish`.
+Set once to the new subject key, never cleared; a superseded row is excluded
+from every work view (each issue counted exactly once — the upstream item is
+the item) while the row itself keeps anchoring its comments, relations,
+ledger rows and audit history, and its `WI-n` ref still resolves by direct
+read. Retire-by-marker was chosen over deletion for exactly that history,
+and no `work_links` row is written for the new subject because the #181
+dedup reads one as "this declared row IS the item".
 
 *Added at M1*: `work_items.ref` is the short handle (`WI-7`) allocated from a
 counter in `meta`, inside the creating transaction so a rolled-back creation
