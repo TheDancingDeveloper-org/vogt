@@ -56,24 +56,6 @@ env:
   # Vogt alone (NFR-PO4), and this is the estate's own stack. One repository
   # with two kinds of tag in it is how somebody eventually pins the wrong one.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
-  # Where BuildKit's layer cache lives (#184, superseding #55's GHCR backend).
-  #
-  # The estate's own `local-registry` container on Node B, not GHCR and not a
-  # cache mount or a persistent named builder. The runners are a fleet on Node
-  # B and a job lands on whichever worker is free, so anything held in a
-  # builder's local state is cold on most runs by construction; a registry is
-  # the only cache all the workers can see. This one is local — the cache never
-  # leaves the host — while GHCR's `type=registry` (or `type=gha`) is a WAN
-  # round-trip from the same runners. #129 established this backend on `main`;
-  # `192.168.1.75:5500` is that container and `dind-daemon.json` on the workers
-  # trusts it over HTTP.
-  #
-  # Its own repository rather than tags alongside the images, for the reason
-  # `vogt` and `vogt-stack` are two repositories: one repository holding two
-  # kinds of tag is how somebody eventually pins the wrong one. Cache tags are
-  # keyed per image *and* per ref (`core-<ref>`, `stack-<ref>`) so the core and
-  # stack streams, and the dev and main streams, never evict each other.
-  CACHE_IMAGE: 192.168.1.75:5500/vogt-buildcache
 
 concurrency:
   # Only the newest commit on a branch is worth an image; older ones in
@@ -181,11 +163,6 @@ jobs:
           load: true
           tags: ${{ env.IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
-          # Layer cache on the estate's local-registry (#184). `cache-to` here
-          # and `cache-from` on the push below share one ref, so the push
-          # rebuilds nothing the smoke-tested candidate already produced.
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }}
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }},mode=max
 
       - name: the image runs
         env:
@@ -215,11 +192,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
           sbom: true
-          # Same cache ref as the candidate build above: every layer is a hit,
-          # so the pushed image is the bytes the smoke test just ran rather
-          # than a fresh recompile.
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }}
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }},mode=max
 
       - uses: sigstore/cosign-installer@v3
 
@@ -256,31 +228,11 @@ jobs:
             echo "semver tag was created, and \`latest\` did not move."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The dev-pod toolchain, built (or found already published) before anything
-  # that consumes it (#184). Same prerequisite shape as `base-images` and for
-  # the same reason: the common case is a lookup that costs seconds, and having
-  # it as a companion job instead would mean the image build racing the thing it
-  # is built on. `needs: base-images` because the pod base builds `FROM` a
-  # mirrored Ubuntu, which the mirror job must have copied first.
-  pod-base:
-    name: the pod base is in GHCR
-    needs: base-images
-    uses: ./.github/workflows/pod-base.yml
-    with:
-      # Flutter and the dev/prod split used to be build args on the merged
-      # image; they are the difference between the two published pod variants
-      # now, so the split is made once, here.
-      variant: ${{ github.ref == 'refs/heads/dev' && 'full' || 'lean' }}
-    permissions:
-      contents: read
-      packages: write
-
   stack-image:
     name: build and publish the merged image
     # `needs: image` is not ordering for its own sake: the merged image copies
     # /opt/vogt out of the core image this run just published, by digest.
-    # `needs: pod-base` supplies the toolchain base it now builds `FROM` (#184).
-    needs: [base-images, pod-base, image]
+    needs: [base-images, image]
     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
     permissions:
       contents: read
@@ -291,17 +243,21 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # There is deliberately no runner-side `pnpm build` here any more (#184).
-      #
-      # There was one, and it never reached the image. `rust-embed` does read
-      # `web/dist/` at compile time — that part was right — but the bundle it
-      # reads is the one stage 1 of `engine/Dockerfile` builds inside the build
-      # itself, and `engine/Dockerfile.dockerignore` lists `web/dist`, so the
-      # runner's copy was excluded from the context it would have had to arrive
-      # through. It was a step that looked load-bearing, cost a Node toolchain
-      # and a pnpm install, and produced a directory nothing read. The PWA is
-      # still built before the engine that embeds it — stage 1 before stage 2 —
-      # which `tests/test_deploy.py` now asserts against `engine/Dockerfile`.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: build the PWA
+        # `rust-embed` reads `web/dist/` at compile time, so the bundle is a
+        # build input to the Rust half rather than a separate artefact. An
+        # image built without this step compiles — and serves a placeholder
+        # where the product's front end should be.
+        run: |
+          set -euo pipefail
+          corepack enable
+          cd web
+          pnpm install --frozen-lockfile
+          pnpm build
 
       # No Docker Hub login, deliberately — and this is a trap worth naming,
       # because the obvious "improvement" is to add one back.
@@ -365,22 +321,12 @@ jobs:
           # compatibility. Neither is part of the root/public image; the dev
           # pod opts in so its current configuration stays reproducible while
           # the generic distribution stays independent.
-          #
-          # POD_BASE_IMAGE is the digest `pod-base` just resolved. Flutter is no
-          # longer a build arg here (#184): it is the `lean`/`full` pod variant
-          # selected above, so `dev` builds on `:full-*` (with the mobile SDK)
-          # and everything else on `:lean-*`.
           build-args: |
-            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
+            INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' }}
-          # Layer cache on the estate's local-registry (#184), its own tag so
-          # the stack and core streams cannot evict each other, and per-ref so
-          # dev (INSTALL_AI_CLIENTS=true, the `full` pod base) and main do not.
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }},mode=max
 
       - name: the merged image runs both halves
         env:
@@ -429,20 +375,15 @@ jobs:
           # `dev-<sha>`) and is the only one that carries the AI clients and
           # the mobile SDK — the same split `.woodpecker/server.yml`'s
           # `build-and-push-dev` used to make, which the migration to Actions
-          # dropped without replacing (#23). The mobile SDK half of it is now
-          # the `full` pod variant chosen in `needs.pod-base`.
+          # dropped without replacing (#23).
           build-args: |
-            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
+            INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' }}
             INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' }}
           provenance: true
           sbom: true
-          # Same cache ref as the candidate: every layer is a hit, so the push
-          # is a re-tag of the smoke-tested bytes rather than a recompile.
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }},mode=max
 
       - uses: sigstore/cosign-installer@v3
 

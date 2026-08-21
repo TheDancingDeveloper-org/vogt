@@ -1,9 +1,0 @@
-# The pod base has no COPY from the build context — it installs a toolchain and
-# nothing else. Excluding everything makes the context transfer a no-op rather
-# than a several-second upload of a repository the build will not read.
-#
-# BuildKit reads `<dockerfile>.dockerignore` in preference to any
-# `.dockerignore` at the context root, so this affects only this build. The
-# merged image keeps `engine/Dockerfile.dockerignore`; the core-only image at
-# the repository root keeps the root `.dockerignore`.
-**

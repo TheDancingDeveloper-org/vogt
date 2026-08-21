@@ -1018,19 +1018,6 @@ This section is the source of truth for the toolchain the merged image ships,
 and replaces `docs/engine/TOOLING.md`. It describes the image, not the stack:
 stack shape, environment and rollout are §2.2, §9 and §11.
 
-Since #184 the toolchain this section lists is installed by
-**`engine/Dockerfile.pod`**, not `engine/Dockerfile`. That file is built once
-by `.github/workflows/pod-base.yml` as the `vogt-pod-base:{lean,full}` base
-image and passed into the merged build by digest as `POD_BASE_IMAGE`, so a push
-pulls the toolchain rather than rebuilding it. `engine/Dockerfile` now installs
-only the per-commit halves on top of that base — the agent CLIs, the cadastre
-bridge, the server binary and the core. **Adding a tool to the pod means
-editing `engine/Dockerfile.pod`**; adding one of the per-commit, per-stream
-opt-ins means editing `engine/Dockerfile`. Flutter is the difference between
-the `lean` (main, releases) and `full` (dev) pod variants. Nothing about the
-published image name, its tag streams or the digest-pin deploy mechanism
-changed.
-
 The pod is a **neutral development baseline** for builds under
 `~/Working/Active/apps/`. It is not tuned for one language, because the estate
 it serves is not.
