@@ -21,13 +21,20 @@ name: build
 # Images are signed here as they are in a release. A build that reaches
 # production unsigned would be a worse hole than the one this closes.
 #
-# Two branches build, and they build into two streams that cannot collide
+# Three branches build, and they build into three streams that cannot collide
 # (NFR-D12, adopted from the engine's pre-merge dev/prod split):
 #
-#   main → `sha-<commit>`      the commit images a prod deploy pins
+#   prod → `prod-<sha>`        the images `vogt-prod` pins
+#   main → `sha-<commit>`      integration; nothing deploys from it
 #   dev  → `dev` + `dev-<sha>` the images a dev stack runs, for the merge
 #                              stages — mobile, voice, push — that are only
 #                              verifiable against something live
+#
+# Every rule below is an explicit equality on the ref, never a negation.
+# `sha-` was once "anything that is not dev", which was true while only two
+# branches built and silently wrong the moment a third did: `prod` would have
+# been handed a plain `sha-` tag and put its images into main's stream,
+# defeating the split. Adding a fourth branch must mean adding a rule.
 #
 # `dev` can never become `sha-<commit>` and never becomes `latest`, so
 # "which build is that?" stays answerable and a dev image cannot be picked
@@ -38,6 +45,7 @@ on:
     branches:
       - main
       - dev
+      - prod
     # Documentation cannot change what an image contains.
     paths-ignore:
       - "docs/**"
@@ -190,7 +198,8 @@ jobs:
           # is the whole point of having a dev stack. It is never `latest` and
           # never carries a version, so nothing following releases sees it.
           tags: |
-            type=sha,enable=${{ github.ref != 'refs/heads/dev' }}
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=prod-,enable=${{ github.ref == 'refs/heads/prod' }}
             type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
           flavor: |
@@ -377,7 +386,8 @@ jobs:
         with:
           images: ${{ env.STACK_IMAGE }}
           tags: |
-            type=sha,enable=${{ github.ref != 'refs/heads/dev' }}
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=prod-,enable=${{ github.ref == 'refs/heads/prod' }}
             type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
           flavor: |
