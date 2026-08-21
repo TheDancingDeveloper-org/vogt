@@ -275,6 +275,60 @@ and vogt-dev's OpenRouter chat profile supplies none. Point STT/TTS at a live
 provider (or a local Whisper.cpp + Kokoro pair) and run U1–U5 spoken on a
 desktop with no Web Speech to record that verdict.
 
-### Checkpoint D
+### Checkpoint D — phone background + speak-the-push *(2026-08-21)*
 
-*Not started.*
+**Code half staged; battery number and spoken U1–U5 pass still owed on a
+device.** §3.6 is built (#192, FR-M6). Device validation is deliberately *not*
+in this pass — the code is landable and compiles so a later on-device run is
+pure validation.
+
+What is built:
+
+- **Held foreground service** (`mobile/android/.../VoiceConversationService.java`).
+  A started service held only while a voice conversation is active and released
+  when it ends. Persistent notification names the app ("Vogt") and carries an
+  **"End conversation"** action; a low-importance channel separate from the
+  `vogt-alerts` FCM channel, so the status does not buzz. It declares
+  `foregroundServiceType="microphone|dataSync"` (a conversation uses the mic
+  through the WebView; the socket must keep running), takes a partial
+  `WAKE_LOCK` for the conversation's duration so the assistant socket survives
+  screen-off, and releases it in `onDestroy`. **No microphone is opened here,
+  no wake word, no polling** — the service only keeps the process alive
+  (FR-M6).
+- **Bridge + two-sided end.** `MainActivity.java` injects an `AndroidVoice`
+  bridge (`startConversation()` / `endConversation()`) in the same shape as the
+  existing `AndroidClipboard`. The notification's "End conversation" action
+  routes back through the service, which dispatches a DOM event so the PWA
+  closes the conversation on its side too — either side can end it and both
+  agree.
+- **PWA wiring** (`web/src/voiceService.ts`, `web/src/Assistant.tsx`). Spoken
+  replies being on is the surface's signal that a voice conversation is active:
+  while on, the foreground service is held; when it goes off (or the
+  notification ends it) the service is released. All native calls are guarded
+  behind a native-platform + bridge check, so the desktop PWA is untouched.
+- **Speak-the-push** (FR-M6 / FR-M2). A `pushNotificationReceived` listener
+  speaks an arriving FCM message via the existing TTS path (on-device
+  `speechSynthesis`, or the #190 server-TTS twin) **in addition to** its being
+  shown — but only while a conversation is active. Outside an active
+  conversation the gate is false and FR-M2's shown/handled behaviour is exactly
+  as before.
+- **Measurement hooks.** The service logs conversation start/end (with held
+  duration) to logcat, and the web helper logs start/stop timestamps to the
+  WebView console, so the device tester can bound the 30-minute battery +
+  socket-survival window. No battery number is fabricated here.
+
+What is asserted by tests, not by a person:
+
+| Property | Where | Proof |
+|---|---|---|
+| Service lifecycle levers, End-action DOM round-trip, and push-text extraction are all no-ops off a native platform and drive the bridge on one | `web/src/voiceService.ts`, `web/src/__tests__/voiceService.test.ts` | 7 vitest cases |
+| Speak-the-push routes an arriving FCM message's text to the handler; the active-vs-not gate lives in `Assistant.tsx` | `web/src/voiceService.ts`, `web/src/Assistant.tsx` | vitest (mocked push plugin) |
+| The full web suite stays green with the new wiring | `web/` | `pnpm typecheck` clean, `pnpm test` 440 pass |
+| The native shell compiles with the service, bridge, manifest service + typed foreground-service permissions | `mobile/android` | `./gradlew :app:assembleDebug` |
+
+**Still owed — a person, with the FR-M4 dev APK on a device.** The battery cost
+of a 30-minute held conversation and whether the socket survives screen-off
+(the two numbers §3.6 exists to read) are device measurements this pass does
+not and cannot produce, and the spoken **U1–U5** pass on the phone remains a
+device task. The dev build alongside prod (FR-M4) is the standing blocker for
+running any of it on hardware.
