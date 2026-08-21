@@ -227,6 +227,54 @@ Two things deliberately **not** done at this checkpoint, and why:
 *Not run. Needs a person and a laptop microphone; everything it needs is
 built.*
 
-### Checkpoints C and D
+### Checkpoint C — server-side STT/TTS *(2026-08-21)*
+
+**Code half reached; human spoken pass still owed.** §3.5 is built (#190,
+FR-T12). The engine fronts two routes — `POST /api/assistant/stt` (multipart
+audio → `{text}`) and `POST /api/assistant/tts` (`{text}` → an audio stream) —
+proxied to OpenAI-compatible audio endpoints configured **independently of the
+chat profile**, which is the whole point of FR-T12: the estate's chat runs
+through OpenRouter, which does not front `/audio/transcriptions` and
+`/audio/speech` uniformly, so speech needs its own provider.
+
+We adopted **voicemode's** architecture natively (not as a dependency — it is a
+Python workstation MCP app with local-audio-hardware deps, unfit for the
+headless Rust container): STT and TTS each take an **ordered, comma-separated
+base-URL list**, tried in order — local first, cloud fallback — hitting the same
+OpenAI-compatible `/audio/transcriptions` / `/audio/speech` on each. The
+defaults mirror voicemode exactly (1:1 with its `VOICEMODE_*` vars): STT
+`http://127.0.0.1:2022/v1,https://api.openai.com/v1` model `whisper-1`; TTS
+`http://127.0.0.1:8880/v1,https://api.openai.com/v1` model `tts-1-hd` voice
+`nova`. The key is reused for whichever entry needs one (the cloud endpoint);
+local Whisper.cpp / Kokoro need none.
+
+What is asserted by tests, not by a person:
+
+| Property | Where | Proof |
+|---|---|---|
+| Config keys independent of the chat profile; ordered list; voicemode defaults; key-with-empty-list refused (r20) | `engine/server/src/config.rs` | 3 unit tests |
+| Both halves 404 when unconfigured, per half; the two are independent | `engine/server/src/assistant_speech.rs`, `tests/integration.rs` | proxy unit + 3 integration tests |
+| Routes auth-gated (`assistant` capability) | `engine/server/src/auth.rs`, `tests/integration.rs` | unit + integration (403 without the cap) |
+| Real upstream HTTP: STT sends multipart `file` + `model`; TTS POSTs `{model,input,voice}` and streams the bytes back | `tests/assistant_speech.rs` (mock OpenAI-compatible audio server) | 2 tests asserting what the mock received |
+| Ordered failover: dead entry → next entry; all dead → 404 (not 500); a hanging entry is bounded and moved past | `tests/assistant_speech.rs` | 3 tests |
+| Web client: server-STT path when on-device absent; server TTS playback on reply; silent degrade when unconfigured/404 | `web/src/Assistant.tsx`, `web/src/__tests__/assistantServerSpeech.test.tsx` | 4 vitest cases |
+
+**Audio is not stored** anywhere (FR-T12): the bytes are proxied through and the
+FR-T14 interaction log stays text-only. There is deliberately no debug flag to
+retain audio — the safe default is the only behaviour.
+
+**Unconfigured-degrades-silently is verified in tests**: with no reachable
+provider both routes 404 and every client (server pipeline, on-device Web
+Speech/Capacitor, or neither) falls back to typed input with no error surfaced.
+
+**Still owed — a person, with a configured audio provider.** The verdict
+Checkpoint C exists to reach — *is server-side speech worth keeping over
+on-device Web Speech (quality, latency, cost)?* — cannot be answered here: it
+needs a configured audio provider producing real transcripts and real audio,
+and vogt-dev's OpenRouter chat profile supplies none. Point STT/TTS at a live
+provider (or a local Whisper.cpp + Kokoro pair) and run U1–U5 spoken on a
+desktop with no Web Speech to record that verdict.
+
+### Checkpoint D
 
 *Not started.*
