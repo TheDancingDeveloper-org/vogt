@@ -93,36 +93,28 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  # Never cancelled: an interrupted copy leaves a reference unmirrored, and
-  # the next build is the thing that discovers it.
-  #
-  # Keyed by *commit*, which is the unit of work this job actually has: the
-  # Dockerfiles at a commit name the digests to copy, so two runs of the same
-  # commit want byte-identical work and the second is pure duplication.
-  #
-  # Not per ref, and not one global group either — both were tried and both
-  # were wrong in opposite directions:
-  #
-  #   * One global group shed duplicates by *cancelling* them, which protected
-  #     Docker Hub's anonymous allowance by accident. It also meant an
-  #     unrelated branch's push could cancel the `needs: base-images`
-  #     prerequisite of a build already under way — turning this job's whole
-  #     purpose, "no build starts against an unmirrored reference", into the
-  #     thing that failed the build.
-  #   * Per ref stopped that cancellation and removed the shedding with it.
-  #     Under a fast-forward release model dev, main and prod carry the same
-  #     commit, so a cutover ran this three times over instead of once and
-  #     exhausted the 100/hour per-IP anonymous limit the header above
-  #     describes. `dev` then failed at `FROM` with `429 Too Many Requests`
-  #     against `registry-1.docker.io` — the exact outage this workflow exists
-  #     to prevent, reintroduced by the thing meant to make it more reliable.
-  #
-  # Keying by commit sheds the duplication without cancelling distinct work:
-  # three refs at one commit collapse to one copy, and a different commit's
-  # mirror is never touched.
-  group: mirror-base-images-${{ github.sha }}
-  cancel-in-progress: false
+# No `concurrency:` block, and that absence is deliberate — two of them have
+# been tried here and both broke a build.
+#
+# This workflow is a *prerequisite*: `build.yml` and `release.yml` reach it
+# with `uses:`/`needs:`, so a run of it that gets cancelled fails the build
+# waiting on it. GitHub cancels a **pending** run whenever a newer run joins
+# its group, whatever `cancel-in-progress` says, so any shared group at all
+# puts that failure one coincident push away:
+#
+#   * one global group cancelled an unrelated branch's mirror mid-build;
+#   * per-ref removed the cancellation and with it the deduplication, so a
+#     release that fast-forwards dev -> main -> prod ran three mirrors at once
+#     and exhausted Docker Hub's 100/hour anonymous limit, failing `dev` at
+#     `FROM` with 429 — the exact outage this workflow exists to prevent;
+#   * per-commit deduplicated correctly and cancelled the *callers*: three
+#     refs at one commit, one mirror group, and two builds died four seconds
+#     after starting.
+#
+# Duplicate runs are cheap by construction — a reference already in GHCR is
+# skipped with two manifest HEADs and Docker Hub is never contacted — so the
+# thing worth engineering against is the rate limit, not the duplication. The
+# copy step below retries it.
 
 env:
   # The two halves of the substitution rule. Changing either means changing
@@ -241,8 +233,31 @@ jobs:
             fi
 
             echo "copying $src -> $dst_tagged"
-            src_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$src")"
-            docker buildx imagetools create --tag "$dst_tagged" "$src"
+            # Retried, because the failure this copy actually has is Docker
+            # Hub's anonymous rate limit: 100 pulls/hour per IP, shared by
+            # every build on this runner fleet, answered as `429 Too Many
+            # Requests` from registry-1.docker.io. It is transient by
+            # definition — the window is an hour, and a release burst is what
+            # fills it — so failing the build on the first one turns a
+            # scheduling coincidence into a red pipeline. Backoff is long
+            # because the limit is hourly, not per-second.
+            copied=""
+            for attempt in 1 2 3 4; do
+              src_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$src")" || src_digest=""
+              if [ -n "$src_digest" ] \
+                && docker buildx imagetools create --tag "$dst_tagged" "$src"; then
+                copied=yes
+                break
+              fi
+              if [ "$attempt" -eq 4 ]; then break; fi
+              delay=$((attempt * 45))
+              echo "copy of $src failed (attempt $attempt); retrying in ${delay}s"
+              sleep "$delay"
+            done
+            if [ -z "$copied" ]; then
+              echo "::error::could not copy $src into GHCR after 4 attempts — if this is 429 from registry-1.docker.io the per-IP anonymous limit is exhausted and the window is an hour"
+              exit 1
+            fi
             dst_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$dst_tagged")"
 
             # The copy has to be a copy. If these differ the manifest was
