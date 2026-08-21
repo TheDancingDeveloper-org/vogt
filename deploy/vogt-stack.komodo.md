@@ -1,5 +1,17 @@
 # The merged stack in Komodo
 
+> **Scope / drift warning (2026-08-20).** This file documents the **merged,
+> single-container** shape (`vogt-stack.compose.yml` +
+> `vogt-stack.docker-socket.yml`). The live `vogt-dev` stack no longer runs
+> that — it runs the **split overlay**: `vogt.compose.yml` +
+> `estate.overlay.yml` + `estate.docker-socket.yml`, as two containers (engine
+> front door + core). **`GetStack` on the Komodo API is the source of truth for
+> what is actually deployed**, and the pinned digest lives in the `indexarr/ops`
+> copy — not this file (§1 explains why the compose exists in two repos and
+> drifts). Read this file for the field-by-field *shape* and the ordering
+> logic; do not trust its `file_paths` against the running stack. §5 ("engine
+> session token") already describes the overlay reality.
+
 What to create, in what order, and what each field is for. The compose file
 beside this one is the desired state; this is how Komodo is told about it.
 `DEPLOYMENT.md` §9 is the deploy runbook and takes precedence on sequence;
@@ -36,7 +48,7 @@ Read the ops copy when you want to know what is running.
 | Server | Node B |
 | Repo | `indexarr/ops` |
 | Run directory | `personal/vogt-dev` |
-| File paths | `vogt-stack.compose.yml`, `vogt-stack.docker-socket.yml` |
+| File paths | merged shape: `vogt-stack.compose.yml`, `vogt-stack.docker-socket.yml` — **but live `vogt-dev` runs the overlay** `vogt.compose.yml`, `estate.overlay.yml`, `estate.docker-socket.yml` (confirm with `GetStack`) |
 | Environment | the filled `vogt-stack.env.example` |
 | Webhook | `vogt` **off**; `vogt-dev` **on** — see below |
 
@@ -153,7 +165,7 @@ stops terminals and has no business writing that pod's files (CONFIG.md,
 `engine_token_file`). A token with more capability than that is a token the
 core did not need and a blast radius it should not carry.
 
-## 5. What to watch after it is up
+## 6. What to watch after it is up
 
 `/readyz` carries seven checks and three of them are non-fatal by design, so
 the top-level `ok` can be true while something worth knowing is false:
