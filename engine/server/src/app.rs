@@ -14,7 +14,9 @@ use crate::{
     agent_tasks::{self, AgentTaskRegistry},
     api, assets,
     assistant::AssistantRuntime,
-    assistant_api, auth,
+    assistant_api,
+    assistant_log::AssistantLog,
+    auth,
     config::Config,
     events::EventBus,
     files, git,
@@ -50,6 +52,11 @@ pub struct AppState {
     pub history: Option<Arc<SessionHistory>>,
     /// None when `assistant_api_key` is not configured; routes 404.
     pub assistant: Option<Arc<AssistantRuntime>>,
+    /// The durable assistant interaction log (FR-T14). Engine-local, so an
+    /// absent core costs it nothing (FR-E9). `None` only when the store could
+    /// not be opened, which degrades to a live-only conversation rather than
+    /// refusing the assistant.
+    pub assistant_log: Option<Arc<AssistantLog>>,
     /// None when no vogt-core is configured, which is the engine running as
     /// it always has. The Vogt routes then answer 503 with a named reason
     /// and every session keeps working (FR-E9).
@@ -91,7 +98,23 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             .expect("agent task registry init"),
     );
 
-    let assistant = AssistantRuntime::from_config(&cfg, Arc::clone(&sessions), Arc::clone(&push));
+    // The durable assistant interaction log (FR-T14), opened like session
+    // history: engine-local under `state_dir`, and a failed open degrades to a
+    // live-only conversation rather than refusing the assistant.
+    let assistant_log = match AssistantLog::new(&cfg.state_dir).await {
+        Ok(log) => Some(Arc::new(log)),
+        Err(e) => {
+            tracing::warn!("assistant interaction log disabled: {e}");
+            None
+        }
+    };
+
+    let assistant = AssistantRuntime::from_config(
+        &cfg,
+        Arc::clone(&sessions),
+        Arc::clone(&push),
+        assistant_log.clone(),
+    );
     if assistant.is_some() {
         tracing::info!(model = %cfg.assistant_model, "assistant enabled");
     }
@@ -127,6 +150,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         agent_tasks,
         history,
         assistant,
+        assistant_log,
         vogt_core,
     });
 
@@ -152,6 +176,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     push_api::spawn_vogt_drift_watcher(Arc::clone(&state));
     state.agent_tasks.spawn_scheduler();
     state.agent_tasks.spawn_run_watcher(state.bus.clone());
+    // Background task: enforce the assistant log's retention horizon on a
+    // schedule (FR-T14), so the horizon is a configured maximum rather than
+    // whatever the last caller passed — the failure mode r18 named in the
+    // session log.
+    spawn_assistant_log_retention_sweeper(Arc::clone(&state));
 
     // Public: /healthz, /api/config, /api/push/public-key. None reveal secrets.
     let public = Router::new()
@@ -179,6 +208,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             post(assistant_api::resolve_action).patch(assistant_api::replace_reason),
         )
         .route("/api/assistant/history", get(assistant_api::history))
+        .route("/api/assistant/log", get(assistant_api::log))
         .route("/api/assistant/reset", post(assistant_api::reset))
         .route("/api/events", get(api::events_stream))
         .route("/api/status", get(api::operational_status))
@@ -317,6 +347,31 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .with_state(Arc::clone(&state));
 
     (router, state)
+}
+
+/// Enforce the assistant interaction log's retention horizon on a daily
+/// schedule (FR-T14). Runs one sweep at startup and then every 24 hours, so a
+/// long-running server never lets the log outgrow its configured maximum. A
+/// no-op when the log could not be opened.
+fn spawn_assistant_log_retention_sweeper(state: Arc<AppState>) {
+    let Some(log) = state.assistant_log.clone() else {
+        return;
+    };
+    let retention_days = state.config.assistant_log_retention_days;
+    tokio::spawn(async move {
+        loop {
+            match log.cleanup(retention_days).await {
+                Ok(removed) if removed > 0 => tracing::info!(
+                    removed,
+                    retention_days,
+                    "assistant interaction log retention sweep"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("assistant log retention sweep failed: {e}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+        }
+    });
 }
 
 /// The engine's ordinary error body, at 404, for a path under `/api` that no

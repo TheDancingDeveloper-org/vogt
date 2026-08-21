@@ -384,6 +384,14 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
             return Some(TokenCapability::Sessions);
         }
     }
+    // Reading the durable interaction log is scope-gated even though it is a
+    // GET (FR-T14, FR-S3): it is a cross-conversation record attributable to
+    // each actor, not the caller's own live transcript, so it takes the
+    // `assistant` capability rather than merely a valid token. The in-memory
+    // `/api/assistant/history` read stays ungated, as it was.
+    if path == "/api/assistant/log" && *method == Method::GET {
+        return Some(TokenCapability::Assistant);
+    }
     if path.starts_with("/api/assistant") && *method != Method::GET {
         return Some(TokenCapability::Assistant);
     }
@@ -501,6 +509,7 @@ mod tests {
             assistant_reasoning_effort: None,
             assistant_profiles: vec![],
             assistant_default_profile: None,
+            assistant_log_retention_days: 30,
             public_url: None,
             vogt_core_url: None,
             vogt_import_root: None,
@@ -595,6 +604,12 @@ mod tests {
         assert_eq!(
             required_capability(&Method::GET, "/api/assistant/history"),
             None
+        );
+        // FR-T14: the durable interaction log is scope-gated on read, unlike
+        // the ephemeral in-memory transcript beside it.
+        assert_eq!(
+            required_capability(&Method::GET, "/api/assistant/log"),
+            Some(TokenCapability::Assistant)
         );
     }
 }

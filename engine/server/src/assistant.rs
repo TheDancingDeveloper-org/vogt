@@ -41,6 +41,7 @@ use uuid::Uuid;
 
 use crate::{
     activity::strip_ansi,
+    assistant_log::{AssistantLog, ListQuery, LogEvent, LoggedEntry},
     config::Config,
     error::{ApiError, Result},
     push::PushManager,
@@ -167,6 +168,10 @@ pub struct AssistantReply {
 
 struct PendingAction {
     view: PendingActionView,
+    /// The actor who drove the turn that proposed this card. Held so an expiry
+    /// — which no request drives — is still attributable to whoever asked for
+    /// the action, per FR-T14.
+    actor: String,
     /// Tool-call id the eventual approve/deny result must answer.
     tool_call_id: String,
     /// Results of sibling tool calls from the same assistant message that
@@ -310,6 +315,11 @@ pub struct AssistantRuntime {
     max_tool_calls: u32,
     /// Serializes turns: one user message / action resolution at a time.
     conversation: tokio::sync::Mutex<Conversation>,
+    /// The durable interaction log (FR-T14), or `None` when the engine could
+    /// not open it. A failed open degrades to the prior behaviour — a live
+    /// conversation with no durable record — rather than refusing to serve the
+    /// assistant, the same way `SessionHistory` degrades.
+    log: Option<Arc<AssistantLog>>,
 }
 
 /// Everything one turn needs that is not in the conversation: who is driving
@@ -379,6 +389,7 @@ impl AssistantRuntime {
         cfg: &Config,
         sessions: Arc<SessionRegistry>,
         push: Arc<PushManager>,
+        log: Option<Arc<AssistantLog>>,
     ) -> Option<Arc<Self>> {
         let profiles = Self::profiles_from_config(cfg);
         if profiles.is_empty() {
@@ -402,7 +413,29 @@ impl AssistantRuntime {
             default_profile,
             max_tool_calls: cfg.assistant_max_tool_calls,
             conversation: tokio::sync::Mutex::new(Conversation::default()),
+            log,
         }))
+    }
+
+    /// Append one event to the durable log, best-effort. A failed write warns
+    /// and is dropped: FR-T14 is a record to keep, not a gate on the turn — a
+    /// conversation must not stop working because its disk log did.
+    async fn log_event(&self, actor: &str, event: LogEvent) {
+        if let Some(log) = self.log.as_ref() {
+            if let Err(e) = log.record(actor, event).await {
+                tracing::warn!("assistant interaction log write failed: {e}");
+            }
+        }
+    }
+
+    /// Read the durable interaction log (FR-T14). Scope-gated at the route
+    /// (`assistant` capability) — the runtime returns structured entries with
+    /// external content still delimited, exactly as it was stored.
+    pub async fn read_log(&self, query: ListQuery) -> Result<Vec<LoggedEntry>> {
+        match self.log.as_ref() {
+            Some(log) => log.list(query).await,
+            None => Ok(Vec::new()),
+        }
     }
 
     /// The flat `assistant_*` keys first, as the implicit `default` profile,
@@ -522,7 +555,7 @@ impl AssistantRuntime {
 
     pub async fn pending_action(&self) -> Option<PendingActionView> {
         let mut convo = self.conversation.lock().await;
-        expire_pending(&mut convo);
+        self.expire_pending(&mut convo).await;
         convo.pending.as_ref().map(|p| p.view.clone())
     }
 
@@ -535,7 +568,7 @@ impl AssistantRuntime {
         reason: String,
     ) -> Result<PendingActionView> {
         let mut convo = self.conversation.lock().await;
-        expire_pending(&mut convo);
+        self.expire_pending(&mut convo).await;
         let pending = convo.pending.as_mut().ok_or(ApiError::NotFound)?;
         if pending.view.id() != id {
             return Err(ApiError::NotFound);
@@ -582,6 +615,7 @@ impl AssistantRuntime {
         &self,
         caller: Caller,
         text: String,
+        utterance: Option<String>,
         profile: Option<String>,
     ) -> Result<AssistantReply> {
         let text = text.trim().to_string();
@@ -591,6 +625,13 @@ impl AssistantRuntime {
         if text.len() > 8 * 1024 {
             return Err(ApiError::BadRequest("message too long".into()));
         }
+        // The raw recognised utterance behind a voice turn, if the client sent
+        // one. It is logged beside the composed request so a repaired form
+        // (FR-T13) carries both the raw and the repaired text (FR-T14). A
+        // typed turn has no utterance and logs only the request.
+        let utterance = utterance
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty());
         // Resolved before anything is recorded: a request naming a profile
         // that cannot answer must not first append its text to the transcript.
         let profile = self.profile_for(profile.as_deref())?;
@@ -598,13 +639,30 @@ impl AssistantRuntime {
         // round trip to the core, and holding the lock across it would make
         // one slow core serialize every client of this assistant.
         let turn = self.begin_turn(caller).await;
+        let actor = turn.caller.token_name.clone();
         let mut convo = self.conversation.lock().await;
         convo.profile = Some(profile.name.clone());
-        expire_pending(&mut convo);
+        self.expire_pending(&mut convo).await;
         // A new message while an action is pending implicitly abandons it.
         if convo.pending.is_some() {
-            self.deny_pending_locked(&mut convo, "superseded by a new user message");
+            self.deny_pending_locked(&mut convo, "superseded by a new user message")
+                .await;
         }
+        // Durable record of what came in, in the user->assistant direction, and
+        // the raw utterance beside it when a repair pass changed it (FR-T14).
+        if let Some(raw) = &utterance {
+            let repaired = (raw != &text).then(|| text.clone());
+            self.log_event(
+                &actor,
+                LogEvent::Utterance {
+                    raw: raw.clone(),
+                    repaired,
+                },
+            )
+            .await;
+        }
+        self.log_event(&actor, LogEvent::Request { text: text.clone() })
+            .await;
         convo
             .messages
             .push(json!({"role": "user", "content": text}));
@@ -634,7 +692,7 @@ impl AssistantRuntime {
         let mut convo = self.conversation.lock().await;
         // The route that proposed the card finishes the turn that made it.
         let profile = self.profile_for(convo.profile.as_deref())?;
-        expire_pending(&mut convo);
+        self.expire_pending(&mut convo).await;
         let pending = match convo.pending.take() {
             Some(p) if p.view.id() == id => p,
             Some(p) => {
@@ -643,6 +701,10 @@ impl AssistantRuntime {
             }
             None => return Err(ApiError::NotFound),
         };
+        // The card was proposed by whoever drove that turn; its outcome is
+        // attributed to them, so the log reads as one interaction even when a
+        // different, paired actor pressed approve (FR-T3, FR-T14).
+        let proposer = pending.actor.clone();
         let outcome = if approve {
             match (&pending.view, &pending.vogt) {
                 (PendingActionView::VogtWrite(view), Some(write)) => {
@@ -662,6 +724,30 @@ impl AssistantRuntime {
         } else {
             "user declined".to_string()
         };
+        // The pending action's outcome, and the result the model was shown for
+        // it, both land in the durable log (FR-T14). A denial is as much a fact
+        // to keep as an approval — it is the conversation that did *not* cause a
+        // write, which nothing recorded before.
+        let (action_kind, target, operation, tool_name) = describe_pending(&pending.view);
+        self.log_event(
+            &proposer,
+            LogEvent::PendingAction {
+                action_id: id.to_string(),
+                action: action_kind,
+                target,
+                operation,
+                outcome: if approve { "approved" } else { "denied" }.to_string(),
+            },
+        )
+        .await;
+        self.log_event(
+            &proposer,
+            LogEvent::ToolResult {
+                name: tool_name,
+                content: outcome.clone(),
+            },
+        )
+        .await;
         let mut results = pending.completed_results;
         results.push(json!({
             "role": "tool",
@@ -716,13 +802,62 @@ impl AssistantRuntime {
             .map_err(|e| ApiError::Pty(format!("write input: {e}")))
     }
 
-    fn deny_pending_locked(&self, convo: &mut Conversation, reason: &str) {
+    async fn deny_pending_locked(&self, convo: &mut Conversation, reason: &str) {
         if let Some(pending) = convo.pending.take() {
+            let (action_kind, target, operation, _) = describe_pending(&pending.view);
+            // A card abandoned because a new message arrived is a denial with a
+            // reason, and it is recorded like any other outcome (FR-T14).
+            self.log_event(
+                &pending.actor,
+                LogEvent::PendingAction {
+                    action_id: pending.view.id().to_string(),
+                    action: action_kind,
+                    target,
+                    operation,
+                    outcome: format!("denied: {reason}"),
+                },
+            )
+            .await;
             let mut results = pending.completed_results;
             results.push(json!({
                 "role": "tool",
                 "tool_call_id": pending.tool_call_id,
                 "content": format!("not delivered: {reason}"),
+            }));
+            convo.messages.extend(results);
+        }
+    }
+
+    /// Expire the pending card if it has aged past the TTL, recording the
+    /// `expired` outcome (FR-T14) before it is dropped. A method rather than a
+    /// free function so it reaches the durable log; every caller already holds
+    /// `&self`.
+    async fn expire_pending(&self, convo: &mut Conversation) {
+        let expired = convo
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.created.elapsed() > PENDING_ACTION_TTL);
+        if !expired {
+            return;
+        }
+        if let Some(pending) = convo.pending.take() {
+            let (action_kind, target, operation, _) = describe_pending(&pending.view);
+            self.log_event(
+                &pending.actor,
+                LogEvent::PendingAction {
+                    action_id: pending.view.id().to_string(),
+                    action: action_kind,
+                    target,
+                    operation,
+                    outcome: "expired".to_string(),
+                },
+            )
+            .await;
+            let mut results = pending.completed_results;
+            results.push(json!({
+                "role": "tool",
+                "tool_call_id": pending.tool_call_id,
+                "content": "not delivered: approval timed out",
             }));
             convo.messages.extend(results);
         }
@@ -738,6 +873,7 @@ impl AssistantRuntime {
         profile: &Profile,
     ) -> Result<AssistantReply> {
         convo.messages.extend(carried_results);
+        let actor = turn.caller.token_name.clone();
         let mut tool_trace: Vec<String> = Vec::new();
         let mut rounds = 0u32;
         let mut forced_rounds = 0u32;
@@ -751,6 +887,8 @@ impl AssistantRuntime {
             if forced_rounds > 2 {
                 let text =
                     "I hit my tool budget before finishing — ask again to continue.".to_string();
+                self.log_event(&actor, LogEvent::Reply { text: text.clone() })
+                    .await;
                 convo.transcript.push(TranscriptEntry {
                     role: "assistant".into(),
                     text: text.clone(),
@@ -776,6 +914,13 @@ impl AssistantRuntime {
                     // Surface backend failures as a spoken-friendly reply and
                     // keep the conversation usable.
                     tracing::warn!("assistant backend error: {e}");
+                    self.log_event(
+                        &actor,
+                        LogEvent::BackendError {
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
                     let text = "The assistant backend is unavailable right now.".to_string();
                     convo.transcript.push(TranscriptEntry {
                         role: "assistant".into(),
@@ -809,6 +954,8 @@ impl AssistantRuntime {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                self.log_event(&actor, LogEvent::Reply { text: text.clone() })
+                    .await;
                 convo.transcript.push(TranscriptEntry {
                     role: "assistant".into(),
                     text: text.clone(),
@@ -823,17 +970,36 @@ impl AssistantRuntime {
             }
 
             if force_final {
-                // Budget exhausted: acknowledge without executing anything.
-                let refusals: Vec<Value> = tool_calls
-                    .iter()
-                    .map(|call| {
-                        json!({
-                            "role": "tool",
-                            "tool_call_id": call.get("id").and_then(Value::as_str).unwrap_or_default(),
-                            "content": "not executed: tool budget exhausted, answer with what you have",
-                        })
-                    })
-                    .collect();
+                // Budget exhausted: acknowledge without executing anything. The
+                // model still asked, so each call and its refusal are recorded
+                // (FR-T14) — "every tool call" includes the ones nothing ran.
+                const BUDGET_REFUSAL: &str =
+                    "not executed: tool budget exhausted, answer with what you have";
+                let mut refusals: Vec<Value> = Vec::with_capacity(tool_calls.len());
+                for call in &tool_calls {
+                    let (name, args) = tool_call_name_and_args(call);
+                    self.log_event(
+                        &actor,
+                        LogEvent::ToolCall {
+                            name: name.clone(),
+                            arguments: args,
+                        },
+                    )
+                    .await;
+                    self.log_event(
+                        &actor,
+                        LogEvent::ToolResult {
+                            name,
+                            content: BUDGET_REFUSAL.to_string(),
+                        },
+                    )
+                    .await;
+                    refusals.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call.get("id").and_then(Value::as_str).unwrap_or_default(),
+                        "content": BUDGET_REFUSAL,
+                    }));
+                }
                 convo.messages.extend(refusals);
                 continue;
             }
@@ -856,6 +1022,18 @@ impl AssistantRuntime {
                     .and_then(Value::as_str)
                     .and_then(|raw| serde_json::from_str(raw).ok())
                     .unwrap_or_else(|| json!({}));
+
+                // Every tool call the model made is recorded with its arguments
+                // (FR-T14), before the gate decides whether it runs, waits for
+                // approval, or is refused.
+                self.log_event(
+                    &actor,
+                    LogEvent::ToolCall {
+                        name: name.clone(),
+                        arguments: args.clone(),
+                    },
+                )
+                .await;
 
                 // Everything that mutates goes through one gate, with no
                 // exception and no setting that makes one. `send_input` used
@@ -895,8 +1073,23 @@ impl AssistantRuntime {
                                 "content": "not executed: waiting on user approval of a prior action",
                             }));
                         }
+                        // The proposal is durable the moment it is offered, with
+                        // its outcome to follow on approve/deny/expire (FR-T14).
+                        let (action_kind, target, operation, _) = describe_pending(&view);
+                        self.log_event(
+                            &actor,
+                            LogEvent::PendingAction {
+                                action_id: view.id().to_string(),
+                                action: action_kind,
+                                target,
+                                operation,
+                                outcome: "proposed".to_string(),
+                            },
+                        )
+                        .await;
                         convo.pending = Some(PendingAction {
                             view: view.clone(),
+                            actor: actor.clone(),
                             tool_call_id: call_id,
                             completed_results: results,
                             created: Instant::now(),
@@ -922,10 +1115,19 @@ impl AssistantRuntime {
                         });
                     }
                     Some(Err(e)) => {
+                        let content = format!("error: {e}");
+                        self.log_event(
+                            &actor,
+                            LogEvent::ToolResult {
+                                name: name.clone(),
+                                content: content.clone(),
+                            },
+                        )
+                        .await;
                         results.push(json!({
                             "role": "tool",
                             "tool_call_id": call_id,
-                            "content": format!("error: {e}"),
+                            "content": content,
                         }));
                         continue;
                     }
@@ -935,16 +1137,27 @@ impl AssistantRuntime {
                 let outcome = self
                     .dispatch_tool(&name, &args, &mut tool_trace, turn)
                     .await;
+                let content = match outcome {
+                    Ok(content) => content,
+                    // An error can carry the core's or the engine's own
+                    // words, which are no more the model's than a
+                    // successful answer is.
+                    Err(e) => untrusted("tool-error", &e.to_string()),
+                };
+                // The result is logged exactly as the model is shown it, so any
+                // external content keeps its FR-T4 delimiters in the log too.
+                self.log_event(
+                    &actor,
+                    LogEvent::ToolResult {
+                        name: name.clone(),
+                        content: content.clone(),
+                    },
+                )
+                .await;
                 results.push(json!({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": match outcome {
-                        Ok(content) => content,
-                        // An error can carry the core's or the engine's own
-                        // words, which are no more the model's than a
-                        // successful answer is.
-                        Err(e) => untrusted("tool-error", &e.to_string()),
-                    },
+                    "content": content,
                 }));
             }
             convo.messages.extend(results);
@@ -1315,21 +1528,39 @@ fn parse_session_id(args: &Value) -> Result<Uuid> {
         .ok_or_else(|| ApiError::BadRequest("session_id must be a session UUID".into()))
 }
 
-fn expire_pending(convo: &mut Conversation) {
-    let expired = convo
-        .pending
-        .as_ref()
-        .is_some_and(|p| p.created.elapsed() > PENDING_ACTION_TTL);
-    if expired {
-        if let Some(pending) = convo.pending.take() {
-            let mut results = pending.completed_results;
-            results.push(json!({
-                "role": "tool",
-                "tool_call_id": pending.tool_call_id,
-                "content": "not delivered: approval timed out",
-            }));
-            convo.messages.extend(results);
-        }
+/// Pull the function name and parsed arguments out of a raw OpenAI tool call,
+/// for logging a call the loop is about to refuse.
+fn tool_call_name_and_args(call: &Value) -> (String, Value) {
+    let name = call
+        .pointer("/function/name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let args = call
+        .pointer("/function/arguments")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_else(|| json!({}));
+    (name, args)
+}
+
+/// Flatten a pending card into the columns the durable log records for it:
+/// the action kind, a one-line target, the registry operation (writes only),
+/// and the tool name a resolution's result is filed under.
+fn describe_pending(view: &PendingActionView) -> (String, String, Option<String>, String) {
+    match view {
+        PendingActionView::SendInput(v) => (
+            "send_input".to_string(),
+            v.session_name.clone(),
+            None,
+            "send_input".to_string(),
+        ),
+        PendingActionView::VogtWrite(v) => (
+            "vogt_write".to_string(),
+            v.target.clone(),
+            Some(v.operation.clone()),
+            v.operation.clone(),
+        ),
     }
 }
 
@@ -1451,6 +1682,7 @@ mod tests {
             assistant_reasoning_effort: None,
             assistant_profiles: vec![],
             assistant_default_profile: None,
+            assistant_log_retention_days: 30,
             public_url: None,
             vogt_core_url: None,
             vogt_import_root: None,
@@ -1472,6 +1704,22 @@ mod tests {
             default_profile: 0,
             max_tool_calls: 8,
             conversation: tokio::sync::Mutex::new(Conversation::default()),
+            log: None,
+        }
+    }
+
+    /// Build a durable log under `dir` and hang it on a scripted runtime, so a
+    /// test can prove the record survives dropping the runtime and reopening
+    /// the same directory (FR-T14 restart durability).
+    async fn runtime_with_log(
+        sessions: Arc<SessionRegistry>,
+        script: Vec<Value>,
+        dir: &std::path::Path,
+    ) -> AssistantRuntime {
+        let log = AssistantLog::new(dir).await.expect("open assistant log");
+        AssistantRuntime {
+            log: Some(Arc::new(log)),
+            ..runtime_with_script(sessions, script)
         }
     }
 
@@ -1611,7 +1859,7 @@ mod tests {
     async fn plain_reply_round_trip() {
         let rt = runtime_with_script(test_registry(), vec![final_reply("hello there")]);
         let out = rt
-            .handle_message(terminal_caller(), "hi".into(), None)
+            .handle_message(terminal_caller(), "hi".into(), None, None)
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("hello there"));
@@ -1636,7 +1884,7 @@ mod tests {
             ],
         );
         let out = rt
-            .handle_message(terminal_caller(), "what's going on?".into(), None)
+            .handle_message(terminal_caller(), "what's going on?".into(), None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1674,7 +1922,7 @@ mod tests {
             ],
         );
         let out = rt
-            .handle_message(terminal_caller(), "type it".into(), None)
+            .handle_message(terminal_caller(), "type it".into(), None, None)
             .await
             .unwrap();
         assert!(out.reply.is_none());
@@ -1721,7 +1969,7 @@ mod tests {
             ],
         );
         let out = rt
-            .handle_message(terminal_caller(), "do the thing".into(), None)
+            .handle_message(terminal_caller(), "do the thing".into(), None, None)
             .await
             .unwrap();
         let action = out.pending_action.expect("pending action");
@@ -1756,7 +2004,7 @@ mod tests {
             ..runtime_with_script(sessions, script)
         };
         let out = rt
-            .handle_message(terminal_caller(), "loop forever".into(), None)
+            .handle_message(terminal_caller(), "loop forever".into(), None, None)
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("capped"));
@@ -1773,7 +2021,7 @@ mod tests {
             ],
         );
         let out = rt
-            .handle_message(terminal_caller(), "read it".into(), None)
+            .handle_message(terminal_caller(), "read it".into(), None, None)
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("that session doesn't exist"));
@@ -1822,6 +2070,7 @@ mod tests {
         rt.handle_message(
             terminal_caller(),
             "hi".into(),
+            None,
             Some("openrouter".to_string()),
         )
         .await
@@ -1840,7 +2089,7 @@ mod tests {
             ],
             1,
         );
-        rt.handle_message(terminal_caller(), "hi".into(), None)
+        rt.handle_message(terminal_caller(), "hi".into(), None, None)
             .await
             .unwrap();
         assert_eq!(models_asked_for(&rt), vec!["qwen/qwen3-coder".to_string()]);
@@ -1862,7 +2111,12 @@ mod tests {
             0,
         );
         let err = rt
-            .handle_message(terminal_caller(), "hi".into(), Some("openrouterr".into()))
+            .handle_message(
+                terminal_caller(),
+                "hi".into(),
+                None,
+                Some("openrouterr".into()),
+            )
             .await
             .expect_err("an unknown profile is refused");
         let message = format!("{err:?}");
@@ -1889,7 +2143,12 @@ mod tests {
             0,
         );
         let err = rt
-            .handle_message(terminal_caller(), "hi".into(), Some("subscription".into()))
+            .handle_message(
+                terminal_caller(),
+                "hi".into(),
+                None,
+                Some("subscription".into()),
+            )
             .await
             .expect_err("a claude-* route on this transport is the documented hang");
         let message = format!("{err:?}");
@@ -1957,6 +2216,7 @@ mod tests {
             .handle_message(
                 terminal_caller(),
                 "type it".into(),
+                None,
                 Some("openrouter".into()),
             )
             .await
@@ -2121,7 +2381,7 @@ mod tests {
             &core.base_url,
             None,
         );
-        rt.handle_message(paired_caller(), "hello".into(), None)
+        rt.handle_message(paired_caller(), "hello".into(), None, None)
             .await
             .unwrap();
 
@@ -2145,7 +2405,7 @@ mod tests {
     async fn no_core_configured_means_no_vogt_tools_and_a_working_assistant() {
         let rt = runtime_with_script(test_registry(), vec![final_reply("hi")]);
         let out = rt
-            .handle_message(paired_caller(), "anything?".into(), None)
+            .handle_message(paired_caller(), "anything?".into(), None, None)
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("hi"));
@@ -2167,7 +2427,7 @@ mod tests {
             None,
         );
         let out = rt
-            .handle_message(paired_caller(), "what's on top?".into(), None)
+            .handle_message(paired_caller(), "what's on top?".into(), None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -2228,7 +2488,7 @@ mod tests {
         );
 
         let out = rt
-            .handle_message(terminal_caller(), "file that bug".into(), None)
+            .handle_message(terminal_caller(), "file that bug".into(), None, None)
             .await
             .unwrap();
         assert!(out.reply.is_none());
@@ -2325,7 +2585,7 @@ mod tests {
             None,
         );
         let out = rt
-            .handle_message(paired_caller(), "close WI-7".into(), None)
+            .handle_message(paired_caller(), "close WI-7".into(), None, None)
             .await
             .unwrap();
         let action = out.pending_action.expect("a pending action");
@@ -2361,7 +2621,7 @@ mod tests {
         // Reads work for this caller — the fallback is enough to attribute
         // nothing — so the tools were offered…
         let out = rt
-            .handle_message(terminal_caller(), "comment on WI-7".into(), None)
+            .handle_message(terminal_caller(), "comment on WI-7".into(), None, None)
             .await
             .unwrap();
         let action = out.pending_action.expect("a pending action");
@@ -2512,7 +2772,12 @@ mod tests {
             Some("shared-core-token"),
         );
         let out = rt
-            .handle_message(paired_caller(), "are there any notifications?".into(), None)
+            .handle_message(
+                paired_caller(),
+                "are there any notifications?".into(),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(tool_names_called(&core), vec!["inbox_list"]);
@@ -2538,6 +2803,7 @@ mod tests {
             .handle_message(
                 paired_caller(),
                 "what open issues are there for rustnzbd?".into(),
+                None,
                 None,
             )
             .await
@@ -2580,6 +2846,7 @@ mod tests {
             .handle_message(
                 paired_caller(),
                 "can you work on WI-12 for rustnzbd?".into(),
+                None,
                 None,
             )
             .await
@@ -2636,6 +2903,7 @@ mod tests {
                  gpt 5.6 medium"
                     .into(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2682,6 +2950,7 @@ mod tests {
                 terminal_caller(),
                 "what is the terminal for rustnzbd doing?".into(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2712,7 +2981,7 @@ mod tests {
             Some("shared-core-token"),
         );
         let out = rt
-            .handle_message(paired_caller(), "work on WI-12".into(), None)
+            .handle_message(paired_caller(), "work on WI-12".into(), None, None)
             .await
             .unwrap();
         let id = out.pending_action.expect("a card").id();
@@ -2720,7 +2989,7 @@ mod tests {
         // Said, not tapped. Every phrasing a speaker would reach for.
         for spoken in ["yes", "approve it", "go ahead", "yes, approve, do it"] {
             let answer = rt
-                .handle_message(paired_caller(), spoken.into(), None)
+                .handle_message(paired_caller(), spoken.into(), None, None)
                 .await;
             // The card is abandoned by the new message, so the second and
             // later utterances find nothing to abandon and simply answer.
@@ -2750,7 +3019,7 @@ mod tests {
             &core.base_url,
             Some("core-token"),
         );
-        rt.handle_message(paired_caller(), "any notifications?".into(), None)
+        rt.handle_message(paired_caller(), "any notifications?".into(), None, None)
             .await
             .unwrap();
         assert!(
@@ -2882,7 +3151,7 @@ mod tests {
             None,
         );
         let out = rt
-            .handle_message(paired_caller(), "what is WI-7?".into(), None)
+            .handle_message(paired_caller(), "what is WI-7?".into(), None, None)
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("that item came in from GitHub"));
@@ -2915,7 +3184,7 @@ mod tests {
             None,
         );
         let out = rt
-            .handle_message(paired_caller(), "start work on WI-7".into(), None)
+            .handle_message(paired_caller(), "start work on WI-7".into(), None, None)
             .await
             .unwrap();
         // No card: a card that cannot say what will be recorded is not an
@@ -2985,7 +3254,7 @@ mod tests {
             None,
         );
         let out = rt
-            .handle_message(paired_caller(), "mark WI-7 done".into(), None)
+            .handle_message(paired_caller(), "mark WI-7 done".into(), None, None)
             .await
             .unwrap();
         assert!(
@@ -3081,7 +3350,7 @@ mod tests {
         );
 
         let out = rt
-            .handle_message(terminal_caller(), "do both".into(), None)
+            .handle_message(terminal_caller(), "do both".into(), None, None)
             .await
             .unwrap();
         let action = out.pending_action.expect("a pending action");
@@ -3150,13 +3419,18 @@ mod tests {
         );
 
         let out = rt
-            .handle_message(terminal_caller(), "type it".into(), None)
+            .handle_message(terminal_caller(), "type it".into(), None, None)
             .await
             .unwrap();
         let action = out.pending_action.expect("a pending action");
 
         let out = rt
-            .handle_message(terminal_caller(), "yes, approve it, go ahead".into(), None)
+            .handle_message(
+                terminal_caller(),
+                "yes, approve it, go ahead".into(),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("nothing was typed"));
@@ -3246,7 +3520,7 @@ mod tests {
 
         // The approval path, on a card nobody has read since it was made.
         let out = rt
-            .handle_message(terminal_caller(), "type it".into(), None)
+            .handle_message(terminal_caller(), "type it".into(), None, None)
             .await
             .unwrap();
         let stale = out.pending_action.expect("a pending action");
@@ -3273,7 +3547,7 @@ mod tests {
         // approved: one second inside the window it is still on offer, one
         // second past it is gone.
         let out = rt
-            .handle_message(terminal_caller(), "try again".into(), None)
+            .handle_message(terminal_caller(), "try again".into(), None, None)
             .await
             .unwrap();
         let fresh = out.pending_action.expect("a second pending action");
@@ -3296,6 +3570,170 @@ mod tests {
         assert!(
             !tail.contains("second-text"),
             "an expired action was delivered anyway: {tail}"
+        );
+    }
+
+    // -- Durable interaction log (FR-T14) -----------------------------------
+
+    /// The outcomes recorded for every `pending_action` entry, oldest first.
+    async fn pending_outcomes(rt: &AssistantRuntime) -> Vec<String> {
+        let mut entries = rt.read_log(ListQuery::default()).await.unwrap();
+        entries.reverse(); // read is newest-first; assert in the order they happened
+        entries
+            .into_iter()
+            .filter(|e| e.kind == "pending_action")
+            .filter_map(|e| e.payload["outcome"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// Restart durability + attribution: a conversation logged before the
+    /// runtime is dropped is fully readable by a fresh process opening the same
+    /// state dir, attributed to the actor who drove it.
+    #[tokio::test]
+    async fn the_interaction_log_survives_a_restart_with_actor_attribution() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let rt = runtime_with_log(
+                test_registry(),
+                vec![final_reply("WI-7 is the top bug")],
+                dir.path(),
+            )
+            .await;
+            rt.handle_message(paired_caller(), "what's the top bug".into(), None, None)
+                .await
+                .unwrap();
+            // The runtime is dropped here — mid-conversation, nothing this test
+            // does flushes it. The record must already be on disk.
+        }
+
+        let reopened = AssistantLog::new(dir.path()).await.unwrap();
+        let entries = reopened.list(ListQuery::default()).await.unwrap();
+        let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
+        assert!(kinds.contains(&"request"), "request not durable: {kinds:?}");
+        assert!(kinds.contains(&"reply"), "reply not durable: {kinds:?}");
+        assert!(
+            entries.iter().all(|e| e.actor == "phone"),
+            "actor attribution lost across restart: {entries:?}"
+        );
+        let request = entries.iter().find(|e| e.kind == "request").unwrap();
+        assert_eq!(request.payload["text"], json!("what's the top bug"));
+        let reply = entries.iter().find(|e| e.kind == "reply").unwrap();
+        assert_eq!(reply.payload["text"], json!("WI-7 is the top bug"));
+    }
+
+    /// A denied FR-T2 action appears in the log with its outcome, beside the
+    /// `proposed` entry that recorded it being offered.
+    #[tokio::test]
+    async fn a_denied_pending_action_is_logged_with_its_outcome() {
+        let sessions = test_registry();
+        let session = spawn_cat(&sessions);
+        let _kill = KillOnDrop(Arc::clone(&sessions), session.id);
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime_with_log(
+            Arc::clone(&sessions),
+            vec![
+                tool_call_reply(
+                    "send_input",
+                    json!({"session_id": session.id, "text": "rm -rf /", "submit": true}),
+                ),
+                final_reply("okay, I won't"),
+            ],
+            dir.path(),
+        )
+        .await;
+        let out = rt
+            .handle_message(terminal_caller(), "do the thing".into(), None, None)
+            .await
+            .unwrap();
+        let action = out.pending_action.expect("a pending action");
+        rt.resolve_action(terminal_caller(), action.id(), false)
+            .await
+            .unwrap();
+
+        let outcomes = pending_outcomes(&rt).await;
+        assert_eq!(
+            outcomes,
+            vec!["proposed".to_string(), "denied".to_string()],
+            "a denial must be recorded with its outcome: {outcomes:?}"
+        );
+    }
+
+    /// An expired FR-T2 action appears in the log with its outcome. The card is
+    /// aged past the TTL and then read, which is the path that expires it.
+    #[tokio::test]
+    async fn an_expired_pending_action_is_logged_with_its_outcome() {
+        let sessions = test_registry();
+        let session = spawn_cat(&sessions);
+        let _kill = KillOnDrop(Arc::clone(&sessions), session.id);
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime_with_log(
+            Arc::clone(&sessions),
+            vec![tool_call_reply(
+                "send_input",
+                json!({"session_id": session.id, "text": "echo hi", "submit": true}),
+            )],
+            dir.path(),
+        )
+        .await;
+        let out = rt
+            .handle_message(terminal_caller(), "type it".into(), None, None)
+            .await
+            .unwrap();
+        out.pending_action.expect("a pending action");
+        age_pending_by(&rt, 121).await;
+        assert!(
+            rt.pending_action().await.is_none(),
+            "the card should have expired"
+        );
+
+        let outcomes = pending_outcomes(&rt).await;
+        assert_eq!(
+            outcomes,
+            vec!["proposed".to_string(), "expired".to_string()],
+            "an expiry must be recorded with its outcome: {outcomes:?}"
+        );
+    }
+
+    /// A repaired utterance (FR-T13) is logged with both the raw and repaired
+    /// forms; a typed turn with no utterance logs only its request.
+    #[tokio::test]
+    async fn a_repaired_utterance_logs_raw_and_repaired_through_the_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime_with_log(test_registry(), vec![final_reply("ok")], dir.path()).await;
+        rt.handle_message(
+            paired_caller(),
+            "close WI-7".into(),
+            Some("close whiskey seven".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        let entries = rt.read_log(ListQuery::default()).await.unwrap();
+        let utterance = entries
+            .iter()
+            .find(|e| e.kind == "utterance")
+            .expect("an utterance entry");
+        assert_eq!(utterance.payload["raw"], json!("close whiskey seven"));
+        assert_eq!(utterance.payload["repaired"], json!("close WI-7"));
+    }
+
+    /// A typed turn (no utterance) records the request but no utterance entry —
+    /// the raw/repaired pair is a voice concept and is not invented for text.
+    #[tokio::test]
+    async fn a_typed_turn_logs_a_request_and_no_utterance() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime_with_log(test_registry(), vec![final_reply("ok")], dir.path()).await;
+        rt.handle_message(paired_caller(), "close WI-7".into(), None, None)
+            .await
+            .unwrap();
+        let entries = rt.read_log(ListQuery::default()).await.unwrap();
+        assert!(
+            entries.iter().any(|e| e.kind == "request"),
+            "a typed turn still logs its request"
+        );
+        assert!(
+            !entries.iter().any(|e| e.kind == "utterance"),
+            "a typed turn must not fabricate an utterance"
         );
     }
 }

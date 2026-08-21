@@ -240,6 +240,10 @@ pub struct Config {
     /// Which profile a request that names none runs against. `None` means the
     /// implicit `default` when it exists, else the first configured profile.
     pub assistant_default_profile: Option<String>,
+    /// Retention horizon for the durable assistant interaction log (FR-T14), in
+    /// days. Enforced on a schedule so the horizon is a configured maximum
+    /// rather than whatever the last caller passed. Defaults to 30.
+    pub assistant_log_retention_days: u32,
     /// Where vogt-core imports repositories, when this container runs one.
     /// Read from `VOGT_IMPORT_ROOT` — the core's own variable name, left
     /// unprefixed on purpose: one name for one thing. Read once here rather
@@ -310,6 +314,7 @@ struct FileConfig {
     assistant_reasoning_effort: Option<String>,
     assistant_profiles: Option<Vec<AssistantProfile>>,
     assistant_default_profile: Option<String>,
+    assistant_log_retention_days: Option<u32>,
     public_url: Option<String>,
     vogt_core_url: Option<String>,
     vogt_core_token: Option<String>,
@@ -537,6 +542,9 @@ pub fn load(
             .unwrap_or(false),
         assistant_profiles,
         assistant_default_profile,
+        assistant_log_retention_days: parse_u32_env("ENGINE_ASSISTANT_LOG_RETENTION_DAYS")?
+            .or(from_file.assistant_log_retention_days)
+            .unwrap_or(30),
         // `ENGINE_PUBLIC_URL` is this process's own address, and is not
         // `VOGT_PUBLIC_URL`: that one is the *core's* view of where it is
         // published, which in the merged shape is an internal detail no

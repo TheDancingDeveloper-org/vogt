@@ -181,6 +181,7 @@ fn base_config() -> Config {
         assistant_reasoning_effort: None,
         assistant_profiles: vec![],
         assistant_default_profile: None,
+        assistant_log_retention_days: 30,
         public_url: None,
         vogt_core_url: None,
         vogt_import_root: None,
