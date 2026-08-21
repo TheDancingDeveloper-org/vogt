@@ -1231,6 +1231,59 @@ in this repository long-term, and the final public image tagging policy.
 Renaming a value that is persisted or on the wire is a migration, not a
 search-and-replace, and each will be its own recorded decision.
 
+### Revision r21 — a write goes upstream as the person who made it
+
+*2026-08-21. Write-back gains a per-actor identity: an actor links their own
+forge account by pasting a Personal Access Token, and their upstream comments,
+labels and state changes are then authored by them rather than by the shared
+instance token. Design #178 decision 4, delivered as issue #179. The PWA paste
+surface is a separate follow-up; what lands here is the operation set, the
+storage, the encryption, and the write-path attribution.*
+
+Until now every upstream write wore one face. An instance holds a single forge
+token in a file (FR-S7), and whether a human closed an issue or an agent did,
+GitHub recorded the token's account as the author. That is correct for a sweep,
+which has no person behind it, and wrong for a comment somebody wrote: the
+attribution a reviewer sees upstream should be the actor who acted, not the
+robot they act through.
+
+FR-B6 draws the linking. An actor pastes a PAT; Vogt validates it against the
+forge to learn whose it is, stores it, and from then on builds the write-back
+provider from *that* token when *that* actor drives a write. Four properties
+make it safe to keep a recoverable secret, and each is a requirement rather
+than an implementation note:
+
+1. **Encrypted, not hashed — and that is the opposite of `0005_tokens` on
+   purpose.** A vogt-issued token is stored as a hash because it never needs
+   recovery: a lost one is rotated, not looked up, and a table that can hand
+   back its own credentials is one that leaks them. A forge PAT is the
+   inversion — Vogt must hand it back to the upstream API to write as the
+   actor — so it is stored as Fernet ciphertext under a key the operator holds,
+   and the plaintext is never written. The two categories look alike and are
+   not; the distinction is recorded in the migration and here so nobody
+   "fixes" the accounts table to match the tokens table.
+2. **No key, no feature.** The encryption key lives in a file named by
+   `forge_account_key_file`. Unset, account linking is *off*: an instance with
+   nowhere safe to keep a recoverable secret refuses to store one and says so,
+   rather than inventing a weaker scheme. This is the honesty rule FR-S7
+   already follows for the file token — absence is a stated "not configured",
+   not a silent downgrade.
+3. **The token is never readable back.** No surface returns it. Status reports
+   host, login, scopes and a linked flag — all cleartext, so a status read
+   needs no key — and nothing else. The only reader of the ciphertext is the
+   write path, and it holds the key.
+4. **The blast radius is the token's own scopes, and revocation is a person's
+   act.** A linked PAT can do upstream whatever its scopes allow, attributed to
+   the actor who linked it — so linking is scoped as arming write-back is
+   (FR-S11's `writeback`), not as a routine read. Unlinking deletes Vogt's copy
+   and returns attribution to the file-token fallback, but it cannot revoke the
+   token upstream; the forge is the only place that can, so the requirement is
+   that unlink advises the actor to revoke it there too.
+
+The file token (FR-S7) stays exactly what it was: the fallback for every sweep
+and for any actor who never linked one. Nothing that worked before needs a key
+or a link to keep working.
+
 ## 1. Functional requirements
 
 ### FR-P — Projects & per-repo view
@@ -1396,6 +1449,7 @@ by path or repository URL, and stops there.*
 | FR-B3 | Onboarding a repo with existing GitHub state shall be a read-only consolidation: full backfill of issues, PRs, labels, releases, and CI history as observations. No GitHub mutation shall occur during onboarding; existing GitHub objects are authoritative for themselves, and disagreement raises drift proposals rather than upstream corrections. | M* | DESIGN §4 |
 | FR-B4 | Write-back shall be additive/forward-only under every policy level: create, comment, label, close/reopen. Deletion, history rewriting, and force operations against GitHub shall not exist as capabilities. | M* | DESIGN §4 |
 | FR-B5 | *(decided 2026-08-12)* Comment write-back shall be **outbound only**: comments authored in Vogt post to the linked forge object under `comment_only` and `full`. Inbound forge comments shall remain observations, visible against the linked item, and shall never be copied into the `comments` table. Bidirectional conversation mirroring is deferred (§3). | M* | DESIGN §4 |
+| FR-B6 | *(r21)* An actor shall be able to link their own forge account by supplying a Personal Access Token, scoped to `(actor, host)`, so that write-back driven by that actor is attributed upstream to them rather than to the instance file token (FR-S7), which remains the fallback for sweeps and unlinked actors. The PAT shall be validated against the forge before it is stored, stored **encrypted at rest** (never hashed — recovery is required to call upstream, the deliberate opposite of the hash-only `tokens` of FR-S3) under a key named by `forge_account_key_file`, and never returned by any surface: status shall report host, login, scopes and linked-state only. An unset key file shall disable linking entirely (a feature with nowhere safe to keep a recoverable secret is off, not insecure). Linking and unlinking shall be audited writes gated as arming write-back is (FR-S11's `writeback`); a linked token's blast radius is whatever its own scopes allow, attributed to the actor, and unlinking shall delete the stored copy and advise revoking the token upstream, which is the only place it can be revoked. | S* | DESIGN §4; design #178 dec. 4; #179 |
 
 ### FR-L — Lifecycle & administration
 

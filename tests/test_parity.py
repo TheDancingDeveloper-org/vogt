@@ -304,6 +304,11 @@ SCRIPT: list[tuple[str, StepParams]] = [
         {"project": "parity-project", "policy": "comment_only", "reason": WHY},
     ),
     ("forge.onboard", {"project": "parity-project", "reason": WHY}),
+    # Per-actor account linking (#179): paste, confirm, remove. The token is
+    # validated against the stand-in forge and never echoed back.
+    ("forge.account_link", {"token": "ghp_parity_token", "reason": WHY}),
+    ("forge.account_status", {}),
+    ("forge.account_unlink", {"reason": WHY}),
     ("forge.actions", {}),
     ("export", {"destination": "{root}/export.json", "reason": WHY}),
     ("events.list", {}),
@@ -438,6 +443,29 @@ def _recording_cloner(root: Path) -> Cloner:
     return clone
 
 
+def _stand_in_github(
+    url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
+) -> tuple[int, bytes]:
+    """A forge that validates the parity PAT without a network (#179).
+
+    `forge.account_link` calls `/user` to learn who a token belongs to; the
+    three transports must get the identical answer, so this hands back a fixed
+    login rather than reaching GitHub.
+    """
+    if method == "GET" and url.endswith("/user"):
+        return 200, json.dumps({"login": "parity-user"}).encode()
+    return 404, b""
+
+
+def _forge_key_file(root: Path) -> Path:
+    """A per-instance Fernet key, so account linking is configured in parity."""
+    from cryptography.fernet import Fernet
+
+    path = root / "forge_account_key"
+    path.write_bytes(Fernet.generate_key())
+    return path
+
+
 def _stand_in_engine() -> EngineClient:
     """An engine that answers predictably, so three transports can be compared.
 
@@ -480,12 +508,17 @@ def _fresh(
     root = tmp_path_factory.mktemp(label)
     _write_fixture_tree(root)
     context = build_context(
-        config=VogtConfig(data_dir=root / "instance", import_root=root / "imported"),
+        config=VogtConfig(
+            data_dir=root / "instance",
+            import_root=root / "imported",
+            forge_account_key_file=_forge_key_file(root),
+        ),
         principal=TEST_PRINCIPAL,
         clock=StepClock(),
         id_factory=SequentialIds(),
         cloner=_recording_cloner(root),
         engine=_stand_in_engine(),
+        forge_transport=_stand_in_github,
     )
     init_instance(context, InitParams())
     return context, root

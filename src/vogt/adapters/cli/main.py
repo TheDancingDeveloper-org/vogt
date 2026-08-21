@@ -65,20 +65,27 @@ def build_parser(registry: OperationRegistry) -> argparse.ArgumentParser:
         help="Emit the raw result as JSON instead of formatted text.",
     )
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
-    groups: dict[str, Any] = {}
+    # Sub-parser actions keyed by the command-path prefix they sit under, so a
+    # binding of any depth builds the group parsers it needs. Two levels was
+    # the whole set until `forge account link` (#179) wanted three; keying by
+    # the full prefix generalises it without a special case per depth.
+    subparsers_by_prefix: dict[tuple[str, ...], Any] = {(): subparsers}
 
     for operation in registry.for_transport("cli"):
         path = operation.cli.path
-        if len(path) == 1:
-            command = subparsers.add_parser(path[0], help=operation.summary)
-        else:
-            head = path[0]
-            if head not in groups:
-                group_parser = subparsers.add_parser(head, help=f"{head} operations")
-                groups[head] = group_parser.add_subparsers(
-                    dest=f"{head}_command", metavar="<subcommand>"
+        for depth in range(1, len(path)):
+            prefix = path[:depth]
+            if prefix not in subparsers_by_prefix:
+                parent = subparsers_by_prefix[path[: depth - 1]]
+                group = parent.add_parser(
+                    path[depth - 1], help=f"{path[depth - 1]} operations"
                 )
-            command = groups[head].add_parser(path[1], help=operation.summary)
+                subparsers_by_prefix[prefix] = group.add_subparsers(
+                    dest=f"{'_'.join(prefix)}_command", metavar="<subcommand>"
+                )
+        command = subparsers_by_prefix[path[:-1]].add_parser(
+            path[-1], help=operation.summary
+        )
         add_model_arguments(command, operation.params_model)
         command.set_defaults(**{DEST_OPERATION: operation.name})
 

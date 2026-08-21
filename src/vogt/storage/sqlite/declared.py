@@ -26,6 +26,7 @@ from vogt.core.entities import (
     ContractExemption,
     DriftProposal,
     Event,
+    ForgeAccount,
     InboxTriage,
     Initiative,
     Label,
@@ -785,6 +786,32 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_auth_decision(row) for row in rows]
 
+    # -- forge accounts (per-actor PATs, #179) -----------------------------
+
+    def forge_account(self, *, actor_id: str, host: str) -> ForgeAccount | None:
+        row = self._conn.execute(
+            "SELECT actor_id, host, login, scopes, created_at, updated_at "
+            "FROM forge_accounts WHERE actor_id = ? AND host = ?",
+            (actor_id, host),
+        ).fetchone()
+        return None if row is None else _row_to_forge_account(row)
+
+    def forge_accounts_for_actor(self, actor_id: str) -> list[ForgeAccount]:
+        rows = self._conn.execute(
+            "SELECT actor_id, host, login, scopes, created_at, updated_at "
+            "FROM forge_accounts WHERE actor_id = ? ORDER BY created_at DESC, host",
+            (actor_id,),
+        ).fetchall()
+        return [_row_to_forge_account(row) for row in rows]
+
+    def forge_account_secret(self, *, actor_id: str, host: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT encrypted_token FROM forge_accounts "
+            "WHERE actor_id = ? AND host = ?",
+            (actor_id, host),
+        ).fetchone()
+        return None if row is None else str(row["encrypted_token"])
+
     # -- drift -------------------------------------------------------------
 
     def list_drift(
@@ -1396,6 +1423,40 @@ class SqliteWriteTxn(SqliteReadView):
         )
         return cursor.rowcount > 0
 
+    def upsert_forge_account(
+        self,
+        *,
+        actor_id: str,
+        host: str,
+        login: str,
+        scopes: str,
+        encrypted_token: str,
+        at: datetime,
+    ) -> None:
+        stamp = to_iso(at)
+        # Re-linking keeps the original created_at and rotates everything else,
+        # including the ciphertext. Written portably (no INSERT OR REPLACE)
+        # because NFR-S3 forbids SQLite-only semantics above the backend.
+        cursor = self._conn.execute(
+            "UPDATE forge_accounts SET login = ?, scopes = ?, "
+            "encrypted_token = ?, updated_at = ? WHERE actor_id = ? AND host = ?",
+            (login, scopes, encrypted_token, stamp, actor_id, host),
+        )
+        if cursor.rowcount == 0:
+            self._conn.execute(
+                "INSERT INTO forge_accounts (actor_id, host, login, scopes, "
+                "encrypted_token, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (actor_id, host, login, scopes, encrypted_token, stamp, stamp),
+            )
+
+    def delete_forge_account(self, *, actor_id: str, host: str) -> bool:
+        cursor = self._conn.execute(
+            "DELETE FROM forge_accounts WHERE actor_id = ? AND host = ?",
+            (actor_id, host),
+        )
+        return cursor.rowcount > 0
+
     def insert_writeback(self, record: WriteBackRecord) -> None:
         self._conn.execute(
             "INSERT INTO writeback_actions (id, at, project_id, work_item_id, "
@@ -1903,6 +1964,17 @@ def _upsert_workflow(
             "INSERT INTO workflow_defs (kind, definition, updated_at) VALUES (?, ?, ?)",
             (workflow.kind, definition, to_iso(at)),
         )
+
+
+def _row_to_forge_account(row: sqlite3.Row) -> ForgeAccount:
+    return ForgeAccount(
+        actor_id=str(row["actor_id"]),
+        host=str(row["host"]),
+        login=str(row["login"]),
+        scopes=str(row["scopes"]),
+        created_at=from_iso(str(row["created_at"])),
+        updated_at=from_iso(str(row["updated_at"])),
+    )
 
 
 def _row_to_token(row: sqlite3.Row) -> Token:

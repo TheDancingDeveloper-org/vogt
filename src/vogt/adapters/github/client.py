@@ -56,6 +56,21 @@ class _NoContent:
 NO_CONTENT = _NoContent()
 
 
+@dataclass(frozen=True)
+class GitHubIdentity:
+    """Who a token belongs to, and what it may do.
+
+    `login` comes from the `/user` body; `scopes` is the raw `X-OAuth-Scopes`
+    response header (a comma-separated list, or empty). Scopes ride a header
+    rather than the body, and the `Transport` seam a test substitutes returns
+    only status and body — so through a fake, `scopes` is honestly empty
+    rather than guessed. On the real network path the header is read (#179).
+    """
+
+    login: str
+    scopes: str
+
+
 class Transport(Protocol):
     """How this client actually talks, so tests never need a network.
 
@@ -125,7 +140,7 @@ class GitHubClient:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
 
-        status, body = self._fetch(url, headers)
+        status, body, _headers = self._fetch(url, headers)
         if status == 404:
             # A repository that is gone or private to us is a fact to record
             # as absence, not an exception to raise.
@@ -168,13 +183,44 @@ class GitHubClient:
             headers["Authorization"] = f"Bearer {self.token}"
 
         body = json.dumps(payload).encode("utf-8")
-        status, response = self._fetch(url, headers, body=body, method=method)
+        status, response, _headers = self._fetch(url, headers, body=body, method=method)
         if status == 404:
             return None
         if status >= 400:
             msg = f"GitHub returned {status} for {method} {path}"
             raise GitHubUnavailable(msg)
         return json.loads(response.decode("utf-8")) if response.strip() else {}
+
+    def identity(self) -> GitHubIdentity | None:
+        """Who this token is, or `None` when it is invalid (401/403/404).
+
+        The one place a token is *validated* rather than merely used: linking a
+        per-actor PAT calls this before storing anything, so an invalid paste
+        is refused instead of encrypted (#179). `scopes` is read from the
+        `X-OAuth-Scopes` header — empty through a `Transport` fake, which cannot
+        carry headers, and populated on the real network path.
+        """
+        url = f"{self.api_root}/user"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": USER_AGENT,
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        status, body, response_headers = self._fetch(url, headers)
+        if status in (401, 403, 404):
+            return None
+        if status >= 400:
+            msg = f"GitHub returned {status} for /user"
+            raise GitHubUnavailable(msg)
+        payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+        login = payload.get("login") if isinstance(payload, dict) else None
+        if not login:
+            return None
+        return GitHubIdentity(
+            login=str(login), scopes=response_headers.get("x-oauth-scopes", "")
+        )
 
     def _fetch(
         self,
@@ -183,17 +229,24 @@ class GitHubClient:
         *,
         body: bytes | None = None,
         method: str = "GET",
-    ) -> tuple[int, bytes]:
+    ) -> tuple[int, bytes, dict[str, str]]:
         if self.transport is not None:
-            return self.transport(url, headers, body or b"", method)
+            # The transport seam carries no headers — a fake cannot supply the
+            # scope header — so callers that need one degrade honestly.
+            status, payload = self.transport(url, headers, body or b"", method)
+            return status, payload, {}
         request = urllib.request.Request(url, headers=headers, data=body, method=method)
         try:
             with urllib.request.urlopen(  # https only; api_root is not caller-set
                 request, timeout=self.timeout
             ) as response:
-                return int(response.status), bytes(response.read())
+                return (
+                    int(response.status),
+                    bytes(response.read()),
+                    {k.lower(): v for k, v in response.headers.items()},
+                )
         except urllib.error.HTTPError as exc:  # pragma: no cover - network shape
-            return int(exc.code), bytes(exc.read())
+            return int(exc.code), bytes(exc.read()), {}
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             msg = f"GitHub unreachable: {exc}"
             raise GitHubUnavailable(msg) from exc

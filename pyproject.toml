@@ -21,6 +21,7 @@ dependencies = [
   "pydantic-settings>=2.2",
   "fastapi>=0.111",
   "uvicorn>=0.52.1",
+  "cryptography>=50.0.0",
 ]
 
 [project.urls]

@@ -59,6 +59,18 @@ class InvalidCursor(InvalidRequest):
     code = "invalid_cursor"
 
 
+class ForgeAccountsNotConfigured(InvalidRequest):
+    """Per-actor forge account linking needs a key that this instance lacks.
+
+    Linking stores a recoverable PAT encrypted at rest, so it depends on a
+    Fernet key file (`forge_account_key_file`). With no key there is no way
+    to store a token safely, so the feature is *off* rather than insecure:
+    an honest "not configured" is the only correct answer (issue #179).
+    """
+
+    code = "forge_accounts_not_configured"
+
+
 class InboxEntryNotFound(NotFound):
     """The requested Inbox occurrence is not in the current projection."""
 
