@@ -76,7 +76,10 @@ def client(instance: AppContext, tmp_path: Path) -> Iterator[TestClient]:
             name="Vogt", root_path=str(tmp_path / "vogt"), reason=WHY
         ),
     )
-    native_work_item(instance, kind="bug", title="Sweep drops a page", project="vogt")
+    # Project-less since #183: a native row on an unlinked project is
+    # withdrawn from the ranked views, and what this suite tests is the GUI
+    # serving/serialisation, not the withdrawal.
+    native_work_item(instance, kind="bug", title="Sweep drops a page")
     sweep(instance, SweepParams(reason=WHY))
     with TestClient(build_app(context_factory=lambda: instance)) as test_client:
         yield test_client

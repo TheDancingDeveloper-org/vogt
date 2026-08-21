@@ -238,15 +238,31 @@ def test_adopting_creates_declared_work_linked_to_its_origin(
 
 
 def test_an_adopted_subject_is_not_listed_twice(swept: AppContext) -> None:
-    """Adoption makes a subject real; it does not give it a duplicate."""
+    """Adoption makes a subject real; it does not give it a duplicate.
+
+    Repurposed by #183: the fixture project is *unlinked*, so the declared
+    row an adoption creates is withdrawn from the ranked views (the
+    forge-less work layer is no more) — before #183 this test asserted the
+    declared row replaced the marker. What must hold now is the other half
+    of the same honesty: the subject appears exactly once — as the observed
+    candidate, labelled with what it was adopted as — and the withdrawn
+    declared row is *counted*, never silently dropped. Linking the project
+    migrates the row upstream and the marker stays hidden behind its link
+    (`test_native_migration` pins that path).
+    """
     before = backlog(swept, BacklogParams(limit=50))
     target = next(e for e in before.items if e.origin == "observed")
     adopt(swept, AdoptParams(subject=target.ref, reason="mine now"))
 
     after = backlog(swept, BacklogParams(limit=50))
     assert len(after.items) == len(before.items)
-    assert target.ref not in _refs(after)
-    assert after.declared == 1
+    assert _refs(after).count(target.ref) == 1, "once — as the observed candidate"
+    assert after.declared == 0, "the unlinked project's declared row is withdrawn"
+    assert after.excluded_unlinked == 1, "…and counted, never silently dropped"
+    adopted_entry = next(e for e in after.items if e.ref == target.ref)
+    assert adopted_entry.adopted_as is not None, (
+        "the candidate says what it was adopted as"
+    )
 
 
 def test_adoption_overrides_the_inferred_guess(swept: AppContext) -> None:

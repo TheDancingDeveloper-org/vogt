@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,14 @@ from fastapi.testclient import TestClient
 
 from vogt.adapters.cli.main import EXIT_OK, build_parser, run
 from vogt.adapters.engine import EngineClient
-from vogt.adapters.git import CloneOutcome, Cloner, CloneRequest
+from vogt.adapters.git import (
+    CloneOutcome,
+    Cloner,
+    CloneRequest,
+    Pusher,
+    PushOutcome,
+    PushRequest,
+)
 from vogt.adapters.http.app import API_PREFIX, build_app
 from vogt.adapters.mcp.surface import McpSurface
 from vogt.application.context import AppContext, build_context
@@ -131,6 +139,20 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ),
     # The #181 pivot: an explicit act makes the project upstream-truth.
     ("forge.link", {"project": "parity-project", "reason": WHY}),
+    # The other explicit act (#182): a local-only project is published — the
+    # stand-in forge mints the repository, the injected pusher records the
+    # plain push — and comes back linked on every transport. The fixture
+    # checkout under {root} is a real git repository, so the read-only
+    # publish gate runs for real; only the network edges are stand-ins.
+    (
+        "project.register",
+        {
+            "name": "Parity Publish",
+            "root_path": "{root}/publishable",
+            "reason": WHY,
+        },
+    ),
+    ("forge.publish", {"project": "parity-publish", "reason": WHY}),
     # -- the work plane, both shapes (#181) ---------------------------------
     # Native declared items carry the relation/blocker flows; they belong to
     # no project because `work.create` on an unlinked project is the typed
@@ -475,6 +497,57 @@ def _write_fixture_tree(root: Path) -> None:
         '[tool.uv.sources]\nsibling = { path = "../sibling" }\n',
         encoding="utf-8",
     )
+    _write_publishable_repo(root / "publishable")
+
+
+def _write_publishable_repo(root: Path) -> None:
+    """A real, clean git checkout for `forge.publish`'s read-only gate.
+
+    The gate (`inspect_publish_source`) runs for real on every transport's
+    instance — clean tree, branch `main`, one commit — so publish parity
+    covers the production path up to the network edges, which the stand-in
+    forge and the recording pusher then answer deterministically.
+    """
+    root.mkdir(parents=True)
+    (root / "README.md").write_text("published by the parity harness\n")
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    git("add", ".")
+    git(
+        "-c",
+        "user.email=parity@example.invalid",
+        "-c",
+        "user.name=Parity",
+        "commit",
+        "-q",
+        "-m",
+        "seed",
+    )
+
+
+def _recording_pusher(pushes: list[PushRequest]) -> Pusher:
+    """A pusher that records the request and answers deterministically.
+
+    The revision is fixed for the same reason the cloner's is: three
+    independent checkouts commit at three different instants, and the parity
+    assertion is about the surfaces, not about commit hashing.
+    """
+
+    def push(request: PushRequest) -> PushOutcome:
+        pushes.append(request)
+        return PushOutcome(
+            remote=request.remote, branch=request.branch, revision="0" * 40
+        )
+
+    return push
 
 
 def _recording_cloner(root: Path) -> Cloner:
@@ -543,6 +616,18 @@ class _StandInForge:
                         "html_url": "https://github.com/parity-user/private-thing",
                     },
                 ]
+            ).encode()
+        if method == "POST" and url.rstrip("/").endswith("/user/repos"):
+            # `forge.publish` (#182): mint the repository deterministically.
+            name = str(payload.get("name", ""))
+            return 201, json.dumps(
+                {
+                    "name": name,
+                    "owner": {"login": "parity-user"},
+                    "private": payload.get("private", True),
+                    "default_branch": None,
+                    "html_url": f"https://github.com/parity-user/{name}",
+                }
             ).encode()
         if method == "POST" and url.rstrip("/").endswith("/issues"):
             number = len(self.issues) + 1
@@ -661,6 +746,7 @@ def _fresh(
         clock=StepClock(),
         id_factory=SequentialIds(),
         cloner=_recording_cloner(root),
+        pusher=_recording_pusher([]),
         engine=_stand_in_engine(),
         forge_transport=_StandInForge(),
     )

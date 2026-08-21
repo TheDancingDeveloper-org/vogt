@@ -251,10 +251,21 @@ def test_m2_demo(estate: AppContext, monkeypatch: pytest.MonkeyPatch) -> None:
     assert adopted.item.origin == "adopted"
     assert adopted.inferred_kind == "bug"
 
+    # Repurposed by #183: these projects are unlinked, so the declared row
+    # an adoption creates is withdrawn from the ranked views — before #183
+    # this asserted the row replaced the marker. The subject still appears
+    # exactly once (as the observed candidate, labelled with its adoption),
+    # and the withdrawn row is counted, never silently dropped; linking the
+    # project migrates it upstream (`test_native_migration`).
     ranked_after = backlog(estate, BacklogParams(limit=100))
     refs = [entry.ref for entry in ranked_after.items]
-    assert adopted.item.ref in refs, "the adopted item is ranked as declared work"
-    assert target.ref not in refs, "and is not also listed as an observed subject"
+    assert adopted.item.ref not in refs, (
+        "the declared row is withdrawn until the project links (#183)"
+    )
+    assert refs.count(target.ref) == 1, "the subject is listed exactly once"
+    labelled = next(entry for entry in ranked_after.items if entry.ref == target.ref)
+    assert labelled.adopted_as == adopted.item.ref
+    assert ranked_after.excluded_unlinked >= 1, "the withdrawal is counted"
 
 
 def test_the_same_estate_works_with_no_forge_at_all(estate: AppContext) -> None:

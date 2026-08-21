@@ -89,6 +89,10 @@ def _seed(context: AppContext) -> None:
                 slug=f"project-{index:05d}",
                 name=f"Project {index}",
                 root_path=f"/srv/project-{index:05d}",
+                # Linked, so the seeded native rows stay ranked-view
+                # candidates: since #183 an unlinked project's native items
+                # are withdrawn from the views this benchmark times.
+                link_state="linked",
                 created_at=NOW,
                 updated_at=NOW,
             )

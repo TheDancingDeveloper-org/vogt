@@ -105,6 +105,47 @@ def native_work_item(
     return audited_write(ctx, operation="work.create", reason=reason, body=write)
 
 
+def mark_linked(ctx: AppContext, slug: str) -> None:
+    """Persist `link_state='linked'` for a fixture project, the audited way.
+
+    Since #183 an unlinked project's native rows are withdrawn from every
+    curated surface, so a test whose subject is *not* linking — Board SQL
+    paging, GUI serialisation — needs its fixture project linked for the
+    rows to surface at all. `forge.link` validates credentials and migrates
+    open items, which those tests are not about; this writes the same
+    `link_state` row the real operation writes, with the same audit and
+    event shape, and nothing else.
+    """
+    from vogt.application.services import _resolve
+    from vogt.application.writes import WriteOutcome, audited_write
+    from vogt.core.entities import Actor, Project
+    from vogt.storage.interface import ProjectUpdate, WriteTxn
+
+    def write(txn: WriteTxn, actor: Actor) -> WriteOutcome[Project]:
+        del actor
+        project = _resolve.project(txn, slug)
+        txn.update_project(
+            project.id, ProjectUpdate(link_state="linked"), at=ctx.clock()
+        )
+        updated = txn.project_by_id(project.id)
+        assert updated is not None
+        return WriteOutcome(
+            result=updated,
+            entity_kind="project",
+            entity_id=project.id,
+            payload={"link_state": "linked"},
+            event_kind="forge.linked",
+            summary={"slug": slug, "to": "linked"},
+        )
+
+    audited_write(
+        ctx,
+        operation="forge.link",
+        reason="linked fixture (#183 surface shape)",
+        body=write,
+    )
+
+
 def native_comment(
     ctx: AppContext,
     *,

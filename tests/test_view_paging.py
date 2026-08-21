@@ -68,12 +68,15 @@ def estate(tmp_path: Path) -> AppContext:
         ctx,
         CreateProjectParams(name="Paged", root_path=str(tmp_path), reason=WHY),
     )
+    # Project-less on purpose since #183: native items on an *unlinked*
+    # project are withdrawn from the ranked views, and what this file tests
+    # is the paging mechanism, not the withdrawal (test_unlinked_surfaces
+    # owns that). Items with no project remain first-class native rows.
     for index in range(12):
         native_work_item(
             ctx,
             title=f"item {index:02d}",
             kind="bug" if index % 2 else "feature",
-            project="paged",
         )
     return ctx
 

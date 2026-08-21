@@ -17,7 +17,7 @@ from vogt.application.services import create_work, list_board, register_project
 from vogt.core.entities import WorkItem
 from vogt.errors import InvalidCursor
 
-from tests.conftest import native_work_item
+from tests.conftest import mark_linked, native_work_item
 
 WHY = "board paging test"
 
@@ -33,6 +33,10 @@ def test_cells_page_independently_with_exact_totals(instance: AppContext) -> Non
         instance,
         RegisterProjectParams(name="Alpha", root_path="/srv/alpha", reason=WHY),
     )
+    # Linked, so the native rows surface: since #183 an unlinked project's
+    # rows are withdrawn from the Board, and what this test pages is the
+    # Board SQL, not the withdrawal (test_unlinked_surfaces owns that).
+    mark_linked(instance, "alpha")
     for index in range(7):
         native_work_item(
             instance, kind="feature", title=f"open {index}", project="alpha"
