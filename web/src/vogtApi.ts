@@ -241,7 +241,18 @@ export interface BoardListResult {
   cells: BoardCellPage[];
   column_totals: Record<string, number>;
   lane_totals: Record<string, number>;
+  /** Declared cards the Board draws for this filter, terminal columns included. */
   total: number;
+  /**
+   * How many things the Backlog would consider for this same scope (#187):
+   * declared work plus open forge subjects not yet tracked as work items. The
+   * Board draws only the declared cards, so this is the honest denominator the
+   * surface uses to say what it is leaving out. Optional so an older server is
+   * read as "no observed population known", never as zero candidates.
+   */
+  backlog_candidates?: number;
+  /** The declared-only slice of `backlog_candidates` — the population the rail counts. */
+  declared_total?: number;
   snapshot: string;
   snapshot_at: string;
   revision: number;

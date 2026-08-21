@@ -5215,6 +5215,13 @@ textarea {
   border-left-color: var(--activity-done);
 }
 
+/* The #187 honesty note: a small Board next to a larger outstanding
+   population. An advisory tone, not an alarm — it uses the same running
+   accent the freshness slot does rather than an error colour. */
+.board-banner--candidates {
+  border-left-color: var(--activity-running);
+}
+
 .board-banner-detail {
   font-size: 12px;
 }

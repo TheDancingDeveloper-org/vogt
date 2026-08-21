@@ -681,7 +681,31 @@ class BoardListResult(Result):
     cells: list[BoardCellResult]
     column_totals: dict[str, int]
     lane_totals: dict[str, int]
+    #: The declared Board population: how many declared work items match this
+    #: filter across every column, terminal ones included. Unchanged in
+    #: meaning — the number the Board draws — so existing callers do not shift.
     total: int
+    backlog_candidates: int = Field(
+        default=0,
+        description=(
+            "How many things the Backlog would consider for this same scope "
+            "(#187): declared work plus open forge subjects that are not yet "
+            "tracked as work items. The Board draws only the declared cards, so "
+            "this is almost always larger, and a surface that shows `total` "
+            "without it silently reads a small Board as the size of the estate. "
+            "Computed the observed-inclusive way the Backlog computes it, over "
+            "the same project/kind/priority/assignee/initiative/label filters."
+        ),
+    )
+    declared_total: int = Field(
+        default=0,
+        description=(
+            "The declared-only slice of `backlog_candidates` — non-terminal "
+            "declared work in this scope, the same population the rail counts. "
+            "`backlog_candidates - declared_total` is the observed subjects the "
+            "Board is currently silent about."
+        ),
+    )
     snapshot: str
     snapshot_at: datetime
     revision: int

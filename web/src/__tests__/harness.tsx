@@ -87,6 +87,8 @@ function boardFromWork(handler: Handler): Handler {
     const work = (source.body ?? {}) as {
       items?: Record<string, unknown>[];
       total?: number;
+      backlog_candidates?: number;
+      declared_total?: number;
     };
     const body = call.body ?? {};
     const laneMode = String(body.lane_mode ?? "none");
@@ -135,6 +137,12 @@ function boardFromWork(handler: Handler): Handler {
         column_totals: columnTotals,
         lane_totals: laneTotals,
         total: work.total ?? items.length,
+        // The #187 honesty pair. A legacy `/work` fixture describes declared
+        // work only, so both default to `total` and the Board's candidate
+        // banner stays quiet; a test that wants the banner installs
+        // `/board/list` directly with a larger `backlog_candidates`.
+        backlog_candidates: work.backlog_candidates ?? work.total ?? items.length,
+        declared_total: work.declared_total ?? work.total ?? items.length,
         snapshot: String(body.snapshot ?? "test-board-snapshot"),
         snapshot_at: "2026-08-17T10:01:00Z",
         revision: 1,
