@@ -15,11 +15,11 @@ from vogt.application.models import (
     BoardListParams,
     BoardListResult,
 )
-from vogt.application.services import _resolve
+from vogt.application.services import _resolve, upstream
 from vogt.application.services.views import candidate_population
 from vogt.core.clock import from_iso
 from vogt.core.digest import digest_of
-from vogt.core.entities import WorkItem
+from vogt.core.entities import Project, WorkItem
 from vogt.errors import InvalidCursor, InvalidRequest
 from vogt.storage.interface import BoardCellQuery, ReadView, WorkFilter
 
@@ -33,9 +33,22 @@ def list_board(ctx: AppContext, params: BoardListParams) -> BoardListResult:
     """
     _validate_cells(params)
     with ctx.declared.read() as view:
-        work_filter = _work_filter(view, params)
+        project_row = (
+            None if params.project is None else _resolve.project(view, params.project)
+        )
+        work_filter = _work_filter(view, params, project_row)
         fingerprint = _fingerprint(params)
         revision = view.current_revision()
+
+        # The upstream-truth half of the Board (#181): linked projects'
+        # items live in the observed mirror + overlay, not in `work_items`,
+        # so they are gathered here and merged into every count and page —
+        # each upstream issue exactly once, because `upstream_items` already
+        # excludes adopted subjects and linked projects grow no native rows.
+        upstream_entries = _upstream_entries(
+            ctx, view, params, project_row, work_filter
+        )
+
         requested_snapshot = (
             _decode_token(params.snapshot, kind="snapshot")
             if params.snapshot is not None
@@ -48,7 +61,9 @@ def list_board(ctx: AppContext, params: BoardListParams) -> BoardListResult:
             snapshot = params.snapshot
             assert snapshot is not None
         else:
-            high_water = view.board_high_water(work_filter)
+            high_water = _combined_high_water(
+                view.board_high_water(work_filter), upstream_entries
+            )
             snapshot_at = ctx.clock()
             snapshot = _encode_token(
                 {
@@ -59,6 +74,7 @@ def list_board(ctx: AppContext, params: BoardListParams) -> BoardListResult:
                     "high_water": _dump_high_water(high_water),
                 }
             )
+        upstream_entries = _under_high_water(upstream_entries, high_water)
 
         queries = tuple(
             _cell_query(cell, fingerprint, revision, high_water)
@@ -67,6 +83,8 @@ def list_board(ctx: AppContext, params: BoardListParams) -> BoardListResult:
         counts = view.board_counts(
             work_filter, lane_mode=params.lane_mode, high_water=high_water
         )
+        for (lane, state), extra in _upstream_counts(upstream_entries).items():
+            counts[(lane, state)] = counts.get((lane, state), 0) + extra
         pages = view.board_work_items(
             work_filter,
             lane_mode=params.lane_mode,
@@ -78,9 +96,11 @@ def list_board(ctx: AppContext, params: BoardListParams) -> BoardListResult:
         )
 
     cells: list[BoardCellResult] = []
-    for cell in params.cells:
+    for cell, query in zip(params.cells, queries, strict=True):
         key = (cell.lane_key, cell.state)
-        fetched = pages[key]
+        fetched = _merge_cell(
+            pages[key], upstream_entries, query, limit=params.page_size + 1
+        )
         shown = fetched[: params.page_size]
         cells.append(
             BoardCellResult(
@@ -132,13 +152,11 @@ def list_board(ctx: AppContext, params: BoardListParams) -> BoardListResult:
     )
 
 
-def _work_filter(view: ReadView, params: BoardListParams) -> WorkFilter:
+def _work_filter(
+    view: ReadView, params: BoardListParams, project_row: Project | None
+) -> WorkFilter:
     return WorkFilter(
-        project_id=(
-            None
-            if params.project is None
-            else _resolve.project(view, params.project).id
-        ),
+        project_id=None if project_row is None else project_row.id,
         kinds=tuple(params.kinds or ()),
         states=tuple(params.states or ()),
         priorities=tuple(params.priorities or ()),
@@ -157,6 +175,101 @@ def _work_filter(view: ReadView, params: BoardListParams) -> WorkFilter:
         # controlled by the explicit state filter, not by work.list's default.
         exclude_terminal=False,
     )
+
+
+def _upstream_entries(
+    ctx: AppContext,
+    view: ReadView,
+    params: BoardListParams,
+    project_row: Project | None,
+    work_filter: WorkFilter,
+) -> list[tuple[str, WorkItem]]:
+    """`(lane_key, item)` for every upstream-truth item the scope covers.
+
+    Closed issues are included — the Board draws terminal columns when asked
+    — and the shared `WorkFilter` narrows them exactly as `_work_where`
+    narrows declared rows, so the two halves of a cell mean the same thing.
+    """
+    entries: list[tuple[str, WorkItem]] = []
+    for linked in upstream.linked_projects(view, project_row):
+        for item in upstream.upstream_items(ctx, view, linked, include_closed=True):
+            if not upstream.matches(item, work_filter):
+                continue
+            entries.append((_upstream_lane(params.lane_mode, item), item))
+    entries.sort(key=lambda entry: (entry[1].created_at, entry[1].ref))
+    return entries
+
+
+def _upstream_lane(lane_mode: str, item: WorkItem) -> str:
+    """The lane an upstream item lands in, mirroring `_board_lane_expression`."""
+    if lane_mode == "project":
+        return item.project_slug or ""
+    if lane_mode == "initiative":
+        return item.initiative_id or ""
+    return ""
+
+
+def _combined_high_water(
+    declared: tuple[datetime, str] | None,
+    entries: list[tuple[str, WorkItem]],
+) -> tuple[datetime, str] | None:
+    """One snapshot bound over both halves of the Board."""
+    marks: list[tuple[datetime, str]] = [] if declared is None else [declared]
+    if entries:
+        marks.append(max((item.created_at, item.ref) for _, item in entries))
+    return max(marks) if marks else None
+
+
+def _under_high_water(
+    entries: list[tuple[str, WorkItem]],
+    high_water: tuple[datetime, str] | None,
+) -> list[tuple[str, WorkItem]]:
+    """The same `(created_at, ref) <= high_water` bound the SQL applies."""
+    if high_water is None:
+        return []
+    return [
+        (lane, item)
+        for lane, item in entries
+        if (item.created_at, item.ref) <= high_water
+    ]
+
+
+def _upstream_counts(
+    entries: list[tuple[str, WorkItem]],
+) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for lane, item in entries:
+        key = (lane, item.state)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _merge_cell(
+    sql_items: list[WorkItem],
+    entries: list[tuple[str, WorkItem]],
+    query: BoardCellQuery,
+    *,
+    limit: int,
+) -> list[WorkItem]:
+    """Merge one cell's declared page with its upstream items, in order.
+
+    Both streams are sorted by `(created_at, ref)` and each is complete up
+    to `limit` rows past the cursor, so the first `limit` rows of the merge
+    are the first `limit` rows of the union — which is what makes the cell
+    cursor continue correctly across the two stores.
+    """
+    mine = [
+        item
+        for lane, item in entries
+        if lane == query.lane_key and item.state == query.state
+    ]
+    if query.after_created_at is not None and query.after_ref is not None:
+        after = (query.after_created_at, query.after_ref)
+        mine = [item for item in mine if (item.created_at, item.ref) > after]
+    if not mine:
+        return sql_items[:limit]
+    merged = sorted([*sql_items, *mine], key=lambda item: (item.created_at, item.ref))
+    return merged[:limit]
 
 
 def _validate_cells(params: BoardListParams) -> None:

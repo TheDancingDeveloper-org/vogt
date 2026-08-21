@@ -76,7 +76,7 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
             msg = f"a project with slug {slug!r} is already registered"
             raise Conflict(msg)
 
-    provider = github_provider(ctx.config)
+    provider = github_provider(ctx.config, transport=ctx.forge_transport)
     metadata = _describe(provider, ref)
 
     destination = (
@@ -103,6 +103,14 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
         ),
         operation=PROJECT_IMPORT,
         event_kind=PROJECT_IMPORTED_EVENT,
+        # A clone + consolidate of a forge repo is one of the explicit acts
+        # that make a project upstream-truth (#181): its work items are its
+        # issues from the first read. Without a provider, or without a
+        # consolidation, the project stays unlinked and `forge.link` remains
+        # the way to opt it in later.
+        link_state=(
+            "linked" if params.consolidate and provider is not None else "unlinked"
+        ),
     )
 
     consolidated = None

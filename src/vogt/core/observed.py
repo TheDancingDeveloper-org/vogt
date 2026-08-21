@@ -17,7 +17,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from vogt.core.entities import Observation, Priority, TrustState, WorkItem, WorkKind
+from vogt.core.entities import (
+    Observation,
+    Priority,
+    TrustState,
+    WorkItem,
+    WorkKind,
+    WorkOverlay,
+)
+from vogt.core.workflow import DONE, TERMINAL_STATES, Workflow
 
 #: Observation kinds that represent work somebody might do. Everything else
 #: a collector finds — checkouts, releases, dependency references, CI checks
@@ -122,6 +130,29 @@ def lifecycle_of(observation: Observation) -> str:
     if normalised == "merged":
         return LIFECYCLE_CLOSED
     return LIFECYCLE_UNKNOWN
+
+
+def upstream_state(
+    observation: Observation, overlay: WorkOverlay | None, workflow: Workflow
+) -> str:
+    """Map mirror lifecycle + overlay refinement onto a workflow state (#181).
+
+    Upstream is the truth for open/closed; the overlay refines *which* state
+    within that truth (a vogt `in_progress` on an open issue, a `wont_do` on
+    a closed one). One asymmetry is deliberate: an overlay state is honoured
+    on an *open* subject even when it is terminal, because a write-through
+    close lands upstream before the next sweep refreshes the mirror, and the
+    item somebody just closed must not read `open` for up to a sweep
+    interval. If GitHub genuinely reopened it, the next sync clears the lag
+    and drift keeps the pair honest (#174).
+    """
+    if lifecycle_of(observation) == LIFECYCLE_CLOSED:
+        if overlay and overlay.workflow_state in TERMINAL_STATES:
+            return str(overlay.workflow_state)
+        return DONE
+    if overlay and overlay.workflow_state:
+        return overlay.workflow_state
+    return workflow.initial_state
 
 
 def is_classified(observation: Observation) -> bool:

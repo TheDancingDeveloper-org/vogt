@@ -74,9 +74,11 @@ def collector_registry(ctx: AppContext) -> CollectorRegistry:
     # — the conditional registration that keeps "not configured" honestly out
     # of coverage (D8).
     if has_configured_forge(ctx.config):
-        for sync_collector in forge_sync_collectors(ctx.observed):
+        for sync_collector in forge_sync_collectors(
+            ctx.observed, transport=ctx.forge_transport
+        ):
             registry.add(sync_collector)
-        for read_collector in forge_read_collectors():
+        for read_collector in forge_read_collectors(transport=ctx.forge_transport):
             registry.add(read_collector)
     if ctx.engine is not None:
         registry.add(SessionOutcomeCollector(ctx.engine, _DeclaredSessions(ctx)))

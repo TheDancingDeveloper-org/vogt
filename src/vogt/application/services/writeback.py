@@ -195,7 +195,7 @@ _FILE_TOKEN_IDENTITY = "instance file token"
 
 
 def _writer_provider(
-    ctx: AppContext, actor: Actor, repo_url: str | None
+    ctx: AppContext, actor: Actor | None, repo_url: str | None
 ) -> tuple[ForgeProvider | None, str]:
     """Pick the provider a write lands under, and name whose identity it is.
 
@@ -204,6 +204,11 @@ def _writer_provider(
     provider (`None` when neither is configured). The actor lookup is skipped
     entirely when linking is not configured, so an instance with no key pays
     nothing for the feature.
+
+    `actor` may be `None` for the write-through path (#181), which resolves
+    the provider *before* the declared transaction opens — a principal acting
+    for the first time has no actor row yet, and therefore no linked PAT
+    either, so the file token is the honest answer for them.
     """
     # A token-less parse to learn the host, so the actor's PAT can be found even
     # with no file token to build a provider from. GitHub-only in v1, which is
@@ -214,7 +219,7 @@ def _writer_provider(
     from vogt.adapters.github.client import GitHubClient
 
     gh_ref = None if repo_url is None else github_identity().parse(repo_url)
-    if gh_ref is not None and account_linking_enabled(ctx.config):
+    if actor is not None and gh_ref is not None and account_linking_enabled(ctx.config):
         with ctx.declared.read() as view:
             secret = view.forge_account_secret(actor_id=actor.id, host=gh_ref.host)
             account = view.forge_account(actor_id=actor.id, host=gh_ref.host)
@@ -332,7 +337,7 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
         _record_onboard(ctx, project, params.reason, refused)
         return refused
 
-    provider = provider_for(project.repo_url, ctx.config)
+    provider = provider_for(project.repo_url, ctx.config, transport=ctx.forge_transport)
     if provider is None:
         unconfigured = OnboardResult(
             project=project.slug,
@@ -356,10 +361,14 @@ def onboard(ctx: AppContext, params: OnboardParams) -> OnboardResult:
     # read collectors for labels and releases. Zero mutations by construction —
     # every collector here only ever reads (FR-B3).
     now = ctx.clock()
-    sync = forge_sync_collectors(ctx.observed)
+    sync = forge_sync_collectors(ctx.observed, transport=ctx.forge_transport)
     for collector in sync:
         collector.reset_watermark(project.id, at=now)
-    reads = [c for c in forge_read_collectors() if c.name in _ONBOARD_READS]
+    reads = [
+        c
+        for c in forge_read_collectors(transport=ctx.forge_transport)
+        if c.name in _ONBOARD_READS
+    ]
     sweeper = Sweeper(
         ctx.observed, CollectorContext(config=ctx.config, clock=ctx.clock)
     )

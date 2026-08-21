@@ -37,7 +37,13 @@ from vogt.application.models import (
     WhyResult,
 )
 from vogt.application.services import _resolve
-from vogt.core.entities import Observation, Project, Suppression, WorkItem
+from vogt.core.entities import (
+    Observation,
+    Priority,
+    Project,
+    Suppression,
+    WorkItem,
+)
 from vogt.core.observed import (
     OBSERVED_STATE,
     WORKLIKE_KINDS,
@@ -46,6 +52,7 @@ from vogt.core.observed import (
     is_worklike,
     priority_of,
     title_of,
+    upstream_state,
     work_kind_of,
 )
 from vogt.core.ranking import PENDING_INPUTS, RankingInputs, rank, score_item
@@ -247,13 +254,24 @@ def _observed_candidates(
     *,
     projects: dict[str, Project],
     adopted: dict[str, str],
+    refined: dict[str, tuple[Priority | None, str]] | None = None,
 ) -> list[_Candidate]:
+    """Rankable candidates from the observed half.
+
+    `refined` carries the upstream-truth join (#181): for a subject on a
+    *linked* project it holds the overlay-refined priority (or `None` to
+    keep the observed guess) and the workflow state the item actually shows,
+    so the Backlog lists the same item `work.get` returns — once.
+    """
     candidates: list[_Candidate] = []
     confirmed = ctx.observed.last_confirmed(
         [observation.subject_key for observation in observations]
     )
     for observation in observations:
-        priority = priority_of(observation)
+        overlay_priority, state = (refined or {}).get(
+            observation.subject_key, (None, OBSERVED_STATE)
+        )
+        priority = overlay_priority or priority_of(observation)
         trust = trust_for(
             ctx,
             observed_at=observation.observed_at,
@@ -274,7 +292,7 @@ def _observed_candidates(
                     priority=priority,
                     updated_at=observation.observed_at,
                     trust_state=trust,  # type: ignore[arg-type]
-                    state=OBSERVED_STATE,
+                    state=state,
                 ),
                 entry=RankedItem(
                     origin="observed",
@@ -282,7 +300,7 @@ def _observed_candidates(
                     ref=observation.subject_key,
                     title=title_of(observation),
                     kind=work_kind_of(observation),
-                    state=OBSERVED_STATE,
+                    state=state,
                     priority=priority,
                     project_slug=None if project is None else project.slug,
                     trust_state=trust,  # type: ignore[arg-type]
@@ -419,8 +437,44 @@ def _gather(
                 for observation in kept
                 if observation.subject_key not in adopted
             ]
+            # The upstream-truth join (#181): on a linked project a forge
+            # issue is not a bare observed candidate but the work item
+            # itself, so its overlay refines priority and state here — the
+            # guard that keeps a subject with an overlay row from being
+            # emitted twice or shown under a stale guess. A vogt-only
+            # terminal state (a `wont_do` the forge does not know) drops the
+            # entry the way an upstream closure would, and drift keeps the
+            # disagreement visible.
+            overlays = view.work_overlays(
+                [observation.subject_key for observation in observed]
+            )
+            linked_ids = {
+                pid for pid, p in projects.items() if p.link_state == "linked"
+            }
+            refined: dict[str, tuple[Priority | None, str]] = {}
+            outstanding: list[Observation] = []
+            for observation in observed:
+                if (
+                    observation.project_id in linked_ids
+                    and observation.kind == "forge.issue"
+                ):
+                    overlay = overlays.get(observation.subject_key)
+                    state = upstream_state(
+                        observation,
+                        overlay,
+                        view.workflow_for(work_kind_of(observation)),
+                    )
+                    if state in TERMINAL_STATES:
+                        closed_count += 1
+                        continue
+                    refined[observation.subject_key] = (
+                        overlay.priority if overlay else None,
+                        state,
+                    )
+                outstanding.append(observation)
+            observed = outstanding
             candidates += _observed_candidates(
-                ctx, observed, projects=projects, adopted=adopted
+                ctx, observed, projects=projects, adopted=adopted, refined=refined
             )
 
     ranked = _score_all(candidates, now=ctx.clock())

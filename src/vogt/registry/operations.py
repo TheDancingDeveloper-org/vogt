@@ -64,6 +64,7 @@ from vogt.application.models import (
     ForgeAccountStatusParams,
     ForgeAccountStatusResult,
     ForgeAccountUnlinkParams,
+    ForgeLinkParams,
     ForgeReposParams,
     ForgeReposResult,
     GetProjectParams,
@@ -916,6 +917,22 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.set_write_back,
             route=HttpRoute("POST", "/forge/writeback"),
             cli=CliBinding(("forge", "writeback")),
+        ),
+        # Linking a project is what arms write-through on it (#181): from
+        # here `work.create` opens issues under the resolved credential, so
+        # the scope is `writeback` — FR-S11's "arming write-back and nothing
+        # else" — exactly as `forge.writeback` and the account link are.
+        Operation(
+            name="forge.link",
+            summary="Make a registered project upstream-truth: its work "
+            "items become its forge issues, and work writes go through.",
+            scope="writeback",
+            mutating=True,
+            params_model=ForgeLinkParams,
+            result_model=ProjectResult,
+            handler=services.link_project,
+            route=HttpRoute("POST", "/forge/link"),
+            cli=CliBinding(("forge", "link")),
         ),
         # -- per-actor forge accounts (#179) -------------------------------
         #

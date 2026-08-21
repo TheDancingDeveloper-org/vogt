@@ -1759,6 +1759,19 @@ class ImportResult(Result):
 # -- forge module (M5) -----------------------------------------------------
 
 
+class ForgeLinkParams(Params):
+    """Make a registered project upstream-truth (#181).
+
+    Validated, not assumed: the project must carry a `repo_url` a registered
+    provider matches and a usable credential (the acting actor's PAT from
+    #179, or the FR-S7 file token). A missing precondition is a typed
+    refusal that names it.
+    """
+
+    project: str = Field(description="Project slug.")
+    reason: Reason
+
+
 class SetWriteBackParams(Params):
     project: str
     policy: Literal["none", "comment_only", "full"] = Field(

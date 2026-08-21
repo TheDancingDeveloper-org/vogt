@@ -58,6 +58,7 @@ def _new_project(
     slug: str,
     params: RegisterProjectParams,
     adopts_contract: bool = False,
+    link_state: str = "unlinked",
 ) -> Project:
     """A new project row.
 
@@ -76,6 +77,10 @@ def _new_project(
         lifecycle_state=params.lifecycle_state,
         compliance_status="not_checked",
         contract_adopted_at=now if adopts_contract else None,
+        # Registration never links (#181): `linked` is set only by the acts
+        # that establish upstream truth — import's clone+consolidate here via
+        # this parameter, `forge.link`, and (#182) `forge.publish`.
+        link_state=link_state,  # type: ignore[arg-type]
         exclusions=(
             list(DEFAULT_EXCLUSIONS)
             if params.exclusions is None
@@ -113,6 +118,7 @@ def record_registration(
     operation: str = PROJECT_REGISTER,
     event_kind: str = PROJECT_REGISTERED_EVENT,
     adopts_contract: bool = False,
+    link_state: str = "unlinked",
 ) -> ProjectResult:
     """The declared half of registration, under a caller-named operation.
 
@@ -129,7 +135,11 @@ def record_registration(
             msg = f"a project with slug {slug!r} is already registered"
             raise Conflict(msg)
         project = _new_project(
-            ctx, slug=slug, params=params, adopts_contract=adopts_contract
+            ctx,
+            slug=slug,
+            params=params,
+            adopts_contract=adopts_contract,
+            link_state=link_state,
         )
         txn.insert_project(project)
         return WriteOutcome(

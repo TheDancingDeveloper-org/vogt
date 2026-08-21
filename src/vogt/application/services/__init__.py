@@ -34,6 +34,7 @@ from vogt.application.services.forge_accounts import (
     status_forge_account,
     unlink_forge_account,
 )
+from vogt.application.services.forge_link import link_project
 from vogt.application.services.forge_repos import list_forge_repos
 from vogt.application.services.history import list_audit, list_events
 from vogt.application.services.imports import import_project
@@ -137,6 +138,7 @@ __all__ = [
     "init_instance",
     "issue_token",
     "link_forge_account",
+    "link_project",
     "list_actors",
     "list_audit",
     "list_auth_decisions",

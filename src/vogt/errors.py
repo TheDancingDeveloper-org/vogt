@@ -107,6 +107,59 @@ class ImportBranchDiverged(ImportParityRefused):
     code = "import_branch_diverged"
 
 
+class NotLinked(Conflict):
+    """A write verb needs a forge-linked project, and this one is not (#181).
+
+    Decision 10 of the #178 pivot: on an unlinked project the work write
+    verbs — create, comment, label and state changes — do not fall back to a
+    local-only work model that would silently diverge from the one the linked
+    projects use. The honest answer names the two ways forward: link the
+    project (`forge.link`, or re-import it through `project.import`), or
+    publish it (`forge.publish`, #182). Items with no project at all are
+    untouched by this — there is no project to be linked.
+    """
+
+    code = "project_not_linked"
+
+
+class LinkRefused(InvalidRequest):
+    """`forge.link` found a precondition missing, and names it (#181).
+
+    Linking is an explicit act, so it validates up front what write-through
+    will need: a `repo_url` some registered provider matches, and a usable
+    credential (the acting actor's PAT from #179, or the FR-S7 file token).
+    Refusing here, with the missing piece named, beats a project that links
+    and then fails its first `work.create`.
+    """
+
+    code = "forge_link_refused"
+
+
+class UpstreamWriteRefused(Conflict):
+    """Write-through was refused by policy before anything was sent (#181).
+
+    On a linked project a work write *is* an upstream write (decision 9), so
+    a write-back policy that does not permit the action refuses the whole
+    operation — loudly, naming the policy — rather than committing a local
+    half that the forge never heard about.
+    """
+
+    code = "upstream_write_refused"
+
+
+class UpstreamWriteFailed(VogtError):
+    """The forge rejected or failed a write-through, so nothing changed (#181).
+
+    Decision 9's fail-loud rule: no silent queueing, no eventually-consistent
+    success. The provider call runs inside the declared transaction and this
+    error aborts it, so for `work.create` specifically the caller learns the
+    issue was *not* created and no local row claims otherwise.
+    """
+
+    code = "upstream_write_failed"
+    http_status = 502
+
+
 class InboxEntryNotFound(NotFound):
     """The requested Inbox occurrence is not in the current projection."""
 
