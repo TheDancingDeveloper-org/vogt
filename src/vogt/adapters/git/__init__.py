@@ -14,7 +14,13 @@ from vogt.adapters.git.clone import (
     CloneRequest,
     GitCommandFailed,
     GitUnavailable,
+    PublishSource,
+    Pusher,
+    PushOutcome,
+    PushRequest,
     clone_repository,
+    inspect_publish_source,
+    push_branch,
 )
 
 __all__ = [
@@ -23,5 +29,11 @@ __all__ = [
     "Cloner",
     "GitCommandFailed",
     "GitUnavailable",
+    "PublishSource",
+    "PushOutcome",
+    "PushRequest",
+    "Pusher",
     "clone_repository",
+    "inspect_publish_source",
+    "push_branch",
 ]

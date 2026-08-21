@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from vogt.adapters.engine import EngineClient
-from vogt.adapters.git import Cloner, clone_repository
+from vogt.adapters.git import Cloner, Pusher, clone_repository, push_branch
 from vogt.adapters.github.client import Transport
 from vogt.application.identity import PublicIdentity, identity_from_config
 from vogt.config import VogtConfig, load_config
@@ -38,6 +38,11 @@ class AppContext:
     #: network, and "works offline" is a property this product asserts rather
     #: than hopes for (NFR-PO2).
     cloner: Cloner = clone_repository
+    #: How `forge.publish` pushes the local default branch (#182). Injectable
+    #: for the same reason the cloner is; the real function is exercised
+    #: against a local bare remote in the suite, and it can never force —
+    #: the argv is built in one place and carries no force flag.
+    pusher: Pusher = push_branch
     #: The session engine, or `None` when none is configured — which is the
     #: shape v1 shipped in and stays supported (FR-E9 read from this side).
     #: `None` is not an outage: the `session.*` operations say no engine is
@@ -65,6 +70,7 @@ def build_context(
     clock: Clock = utc_now,
     id_factory: IdFactory = new_id,
     cloner: Cloner = clone_repository,
+    pusher: Pusher = push_branch,
     engine: EngineClient | None = None,
     public_identity: PublicIdentity | None = None,
     forge_transport: Transport | None = None,
@@ -100,6 +106,7 @@ def build_context(
         clock=clock,
         id_factory=id_factory,
         cloner=cloner,
+        pusher=pusher,
         forge_transport=forge_transport,
         # Injectable for the same reason the cloner is: a use-case that talks
         # to another process over HTTP is one the suite could otherwise only

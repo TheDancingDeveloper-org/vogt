@@ -30,6 +30,9 @@ from vogt.errors import (
     Conflict,
     ImportBranchDiverged,
     ImportWorkingTreeDirty,
+    PublishNonFastForward,
+    PublishSourceInvalid,
+    PublishWorkingTreeDirty,
     VogtError,
 )
 
@@ -141,6 +144,136 @@ def clone_repository(request: CloneRequest) -> CloneOutcome:
         destination=destination,
         revision=_read(destination, "rev-parse", "HEAD"),
         default_branch=_read(destination, "rev-parse", "--abbrev-ref", "HEAD"),
+    )
+
+
+# -- publish (#182): the read-only gate, and the one push --------------------
+
+
+@dataclass(frozen=True)
+class PublishSource:
+    """What a publishable checkout looks like: one branch, one commit."""
+
+    root: Path
+    branch: str
+    revision: str
+
+
+@dataclass(frozen=True)
+class PushRequest:
+    """One branch to push to one remote, authenticated per-invocation.
+
+    The token travels the same `GIT_ASKPASS` road the clone's does (FR-S8):
+    it is never embedded in the remote URL, never written to `.git/config`,
+    and never appears in argv — the remote here is the plain clone URL.
+    """
+
+    root: Path
+    remote: str
+    branch: str
+    token: str | None = None
+
+
+@dataclass(frozen=True)
+class PushOutcome:
+    """What was pushed, for the operation's receipt."""
+
+    remote: str
+    branch: str
+    revision: str | None = None
+
+
+#: How `forge.publish` pushes. Injectable for the same reason the cloner is:
+#: the parity harness drives the operation on three transports without a
+#: network, and the real function is exercised against a local bare remote.
+Pusher = Callable[[PushRequest], PushOutcome]
+
+#: What git says when a plain push is refused because the remote is ahead.
+#: Matched in the failure message rather than re-derived, because the exit
+#: code does not distinguish "non-fast-forward" from "auth failed".
+_NON_FAST_FORWARD_MARKS = ("non-fast-forward", "fetch first", "[rejected]")
+
+
+def inspect_publish_source(root: Path) -> PublishSource:
+    """The read-only gate before `forge.publish` creates anything (#182).
+
+    The same posture as `_enforce_import_parity` (#180) at the opposite
+    boundary: reads only — `git status`, `git rev-parse` — and refuses on the
+    first failing condition with a typed receipt naming it. There is no
+    origin to compare against here, because publish is what creates one; what
+    must be explicit is the local state: a git repository, a clean tree, and
+    a named branch pointing at a commit.
+    """
+    resolved = root.expanduser()
+    if shutil.which("git") is None:
+        msg = "git is not installed, so a repository cannot be published"
+        raise GitUnavailable(msg)
+    if not (resolved / ".git").exists():
+        msg = (
+            f"{resolved} is not a git repository; `forge.publish` pushes "
+            "the project's local history, so there must be one — run "
+            "`git init` and commit, then retry"
+        )
+        raise PublishSourceInvalid(msg)
+    dirty = _working_tree_changes(resolved)
+    if dirty:
+        msg = (
+            f"the working tree at {resolved} has uncommitted changes "
+            f"({len(dirty)} path(s), e.g. {dirty[0]!r}); Vogt publishes only "
+            "state you have settled — commit, stash or discard them yourself "
+            "and retry"
+        )
+        raise PublishWorkingTreeDirty(msg)
+    branch = _read(resolved, "rev-parse", "--abbrev-ref", "HEAD")
+    revision = _read(resolved, "rev-parse", "HEAD")
+    if revision is None:
+        msg = (
+            f"{resolved} has no commits, so there is nothing to push; "
+            "commit first, then retry"
+        )
+        raise PublishSourceInvalid(msg)
+    if branch is None or branch == "HEAD":
+        msg = (
+            f"{resolved} is on a detached HEAD, so there is no branch to "
+            "publish as the remote's default; check out a branch and retry"
+        )
+        raise PublishSourceInvalid(msg)
+    return PublishSource(root=resolved, branch=branch, revision=revision)
+
+
+def push_branch(request: PushRequest) -> PushOutcome:
+    """Push one branch, plainly — never `--force`, on any path (#182).
+
+    FR-B4's "no force, ever" is guaranteed here the way the provider surface
+    guarantees "no delete": the argv is built in this one place and carries
+    no force flag, no `+refspec`, no lease. A remote that rejects the push as
+    non-fast-forward is a typed refusal handed back to the person; every
+    other failure keeps its git diagnostic (redacted of credentials).
+    """
+    refspec = f"{request.branch}:refs/heads/{request.branch}"
+    with _AskPass(request.token) as env:
+        try:
+            _run_git(
+                ["push", request.remote, refspec],
+                cwd=request.root,
+                env=env,
+                timeout=CLONE_TIMEOUT_SECONDS,
+            )
+        except GitCommandFailed as exc:
+            detail = str(exc).lower()
+            if any(mark in detail for mark in _NON_FAST_FORWARD_MARKS):
+                msg = (
+                    f"the remote refused branch {request.branch!r} as "
+                    "non-fast-forward, and Vogt never forces a push; the "
+                    "remote's history stands — reconcile it yourself if it "
+                    "is really yours to move"
+                )
+                raise PublishNonFastForward(msg) from exc
+            raise
+    return PushOutcome(
+        remote=request.remote,
+        branch=request.branch,
+        revision=_read(request.root, "rev-parse", "HEAD"),
     )
 
 

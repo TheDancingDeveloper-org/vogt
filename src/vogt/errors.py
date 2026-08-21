@@ -107,6 +107,70 @@ class ImportBranchDiverged(ImportParityRefused):
     code = "import_branch_diverged"
 
 
+class PublishRefused(Conflict):
+    """`forge.publish` found a precondition missing, and names it (#182).
+
+    Publishing is the first verb that creates upstream state and pushes
+    commits, so every precondition is checked before anything leaves the
+    machine: the project must not already be linked or carry a `repo_url`
+    (a repository that already exists upstream is `forge.link`'s job, never
+    publish's to clobber), and the local checkout must be clean and explicit.
+    The subclasses name which condition failed, so the receipt is actionable
+    rather than a bare "refused".
+    """
+
+    code = "forge_publish_refused"
+
+
+class PublishSourceInvalid(PublishRefused):
+    """The project root is not a publishable git checkout (#182).
+
+    No git repository at the root, no commit to push, or a detached HEAD
+    with no branch to name upstream. Publish creates the remote from what is
+    on disk, so a source that cannot answer "which branch, which commit" is
+    refused before any remote state exists.
+    """
+
+    code = "publish_source_invalid"
+
+
+class PublishWorkingTreeDirty(PublishRefused):
+    """The project's working tree has uncommitted changes (#182).
+
+    The same rule as the import parity gate (#180), mirrored at the other
+    boundary: Vogt does not commit, stash or discard on the user's behalf,
+    and publishing a tree whose state the person has not settled would push
+    a history they did not choose. Commit or stash, then retry.
+    """
+
+    code = "publish_working_tree_dirty"
+
+
+class PublishNonFastForward(PublishRefused):
+    """The push was rejected as non-fast-forward, and was not forced (#182).
+
+    FR-B4's "no force, ever" applied to the one place a force flag would be
+    trivially reachable: `forge.publish` runs a plain `git push`, and a
+    remote that is ahead — which for a just-created repository means someone
+    else got there in between — is a refusal handed back to the person, not
+    a history to overwrite.
+    """
+
+    code = "publish_non_fast_forward"
+
+
+class RemoteRepoExists(PublishRefused):
+    """The forge already has a repository by that name (#182).
+
+    Mapped from the forge's own name-conflict answer (GitHub's 422).
+    Publish never adopts, reuses or overwrites an existing remote — that
+    repository is somebody's state, and attaching to it is `forge.link`'s
+    explicit act. Pick another name, or link instead.
+    """
+
+    code = "remote_repo_exists"
+
+
 class NotLinked(Conflict):
     """A write verb needs a forge-linked project, and this one is not (#181).
 
