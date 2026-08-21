@@ -53,7 +53,12 @@ def test_status_before_init_explains_itself(context: AppContext) -> None:
     assert "vogt init" in result.stderr
 
 
-def test_no_command_prints_help() -> None:
+def test_no_command_prints_help(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Python 3.13+ argparse colourises help output, wrapping "usage: vogt" in
+    # ANSI SGR codes so the plain substring check misses. The project targets
+    # 3.11 (where there is no colour), but the suite must pass on newer
+    # interpreters too; NO_COLOR forces argparse's plain formatter.
+    monkeypatch.setenv("NO_COLOR", "1")
     result = run([])
     assert result.exit_code == EXIT_USAGE
     assert "usage: vogt" in result.stdout

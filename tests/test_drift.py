@@ -150,7 +150,7 @@ def _record_checks(
         for revision, name, conclusion, ran_at in runs
     ]
     now = ctx.clock()
-    row = ctx.observed.begin_sweep(collector="gh-actions", scope=[project.id], at=now)
+    row = ctx.observed.begin_sweep(collector="forge-checks", scope=[project.id], at=now)
     ctx.observed.append(row.id, findings, at=now)
     ctx.observed.finish_sweep(row.id, outcome="ok", stats={"projects": 1}, at=now)
     ctx.observed.rebuild_latest()
@@ -826,13 +826,19 @@ def test_an_ambiguous_reference_is_not_one(text: str) -> None:
     assert issue_references(text) == []
 
 
-def test_the_auto_accept_policy_is_asymmetric_for_forge_state() -> None:
-    """Closing on observed evidence, never reopening on its absence (#49)."""
+def test_the_auto_accept_policy_is_symmetric_for_forge_state() -> None:
+    """Both directions now, because closure is observed (#174).
+
+    The old asymmetry (close yes, reopen no) existed only because the
+    open-only scrape never observed a closure, so "upstream is open" was
+    indistinguishable from "closed and never re-read". Phase 2's `state=all`
+    incremental sync makes a reopen as much a produced fact as a close, so
+    accepting one no longer resurrects finished work from an absence."""
     evidence = EvidenceSnapshot(
         subject_key="gh:o/r#1",
         content_digest="d",
         observed_at=datetime(2026, 8, 12, tzinfo=UTC),
-        collector="gh-issues",
+        collector="forge-issues",
     )
     closing = forge_state_mismatch(
         work_item_id="wrk_1",
@@ -855,4 +861,4 @@ def test_the_auto_accept_policy_is_asymmetric_for_forge_state() -> None:
         evidence_observation_id=None,
     )
     assert closing.auto_acceptable is True
-    assert reopening.auto_acceptable is False
+    assert reopening.auto_acceptable is True

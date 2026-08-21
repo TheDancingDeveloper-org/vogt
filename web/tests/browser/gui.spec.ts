@@ -1330,10 +1330,8 @@ test("Sessions owns the tool workspace and retains only terminal continuity", as
   await page.goto("/#/t/browser-session");
   await expect(page.locator(".terminal-host")).toBeVisible();
   await expect(page.getByRole("region", { name: "Sessions" })).toBeVisible();
-  if (test.info().project.name === "desktop") {
-    await expect(page.getByRole("complementary", { name: "Live sessions" }))
-      .toContainText("browser-session");
-  }
+  // The Live Sessions sub-panel was removed (#167); the running session is
+  // listed in the places rail instead.
 
   await page.goto("/#/history");
   await expect(page.locator(".history-view")).toBeVisible();
@@ -1892,7 +1890,9 @@ test("Phone primary surfaces lead with their work, not their controls", async ({
   await installFixtures(page);
 
   const firstUseful = {
-    sessions: ".session-place-row, .sessions-empty",
+    // The Live Sessions roster was removed (#167); Sessions leads with a
+    // waiting card when one needs input, otherwise the machine workspace.
+    sessions: ".session-waiting, .sessions-active-workspace",
     inbox: ".inbox-entry, .inbox-empty",
     board: ".board-card, .board-empty",
     backlog: ".vogt-backlog-row, .vogt-backlog-empty",
@@ -2044,14 +2044,8 @@ test("Phone waiting sessions show the prompt and send terminal input", async ({ 
 
   const card = page.locator(".session-waiting").filter({ hasText: "needs-attention" });
   await expect(card).toBeVisible();
-  // Above the roster: the prompt is what the phone came for.
-  const order = await page.evaluate(() => {
-    const first = document.querySelector(".session-waiting");
-    const roster = document.querySelector(".sessions-place-list, .sessions-empty");
-    if (!first || !roster) return null;
-    return first.getBoundingClientRect().top < roster.getBoundingClientRect().top;
-  });
-  expect(order).toBe(true);
+  // The Live Sessions roster was removed (#167); the waiting card is the
+  // prompt the phone came for, and it leads the surface.
 
   // It shows before it asks: the session's own output, and the target it belongs to.
   await expect(card.getByTestId("waiting-tail")).toContainText("Apply this migration? (y/n)");
@@ -2421,41 +2415,8 @@ test("A resized, collapsed rail does not leak its width into the narrow shell", 
   expect(geometry.entryWidth).toBeGreaterThan(geometry.viewport * 0.8);
 });
 
-test("The Sessions live list resizes, collapses, and remembers both across reload", async ({ page }) => {
-  test.skip(test.info().project.name === "phone", "The live list is a desktop surface");
-  await installFixtures(page, {}, [liveSession]);
-  await page.goto("/#/sessions");
-
-  const sidebar = page.locator(".sessions-place-sidebar");
-  const before = await sidebar.evaluate((node) => node.getBoundingClientRect().width);
-  // Item 2 (r18): the fixed default used to be 220-280px regardless of
-  // content — narrower now, and it is what a reader without a request to
-  // resize sees by default.
-  expect(Math.round(before)).toBe(220);
-
-  const handle = page.locator(".sessions-resize-handle");
-  const box = (await handle.boundingBox())!;
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(box.x + 100, box.y + box.height / 2, { steps: 5 });
-  await page.mouse.up();
-  const widened = await sidebar.evaluate((node) => node.getBoundingClientRect().width);
-  expect(widened).toBeGreaterThan(before + 60);
-
-  await page.getByRole("button", { name: "Hide live sessions" }).click();
-  await expect(sidebar).toBeHidden();
-  await expect(page.getByRole("button", { name: "Show live sessions" })).toBeVisible();
-  // The workspace took the room back — this is the point of collapsing it.
-  const workspaceWidth = await page.locator(".sessions-active-workspace")
-    .evaluate((node) => node.getBoundingClientRect().width);
-  expect(workspaceWidth).toBeGreaterThan(before + widened - 40);
-
-  await page.reload();
-  await expect(page.locator(".sessions-place-sidebar")).toBeHidden();
-  await page.getByRole("button", { name: "Show live sessions" }).click();
-  await expect(page.locator(".sessions-place-sidebar").evaluate((node) => node.getBoundingClientRect().width))
-    .resolves.toBeCloseTo(widened, 0);
-});
+// The Sessions live-list resize/collapse test was removed with the Live
+// Sessions sub-panel (#167); the places rail is where sessions are listed now.
 
 /**
  * History reads archived sessions only (`USER_GUIDE.md` §2: "Archived

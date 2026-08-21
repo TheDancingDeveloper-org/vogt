@@ -17,7 +17,6 @@ import { pendingAction, setPendingAction } from "./pendingAction";
 import SurfaceHeader from "./SurfaceHeader";
 import WaitingSessionCard from "./WaitingSession";
 import { createNarrow } from "./narrow";
-import { createResizablePane } from "./resizablePane";
 
 interface Props {
   currentTool?: SessionTool | null;
@@ -44,11 +43,6 @@ export const SessionTools: Component<Props> = (props) => (
   </nav>
 );
 
-function activityLabel(session: SessionSummary): string {
-  if (session.exit_code !== null) return session.exit_code === 0 ? "exited" : "errored";
-  return session.activity === "waiting-for-input" ? "waiting for input" : session.activity;
-}
-
 const ATTENTION_ORDER: Record<string, number> = {
   "waiting-for-input": 0,
   errored: 1,
@@ -60,18 +54,6 @@ const ATTENTION_ORDER: Record<string, number> = {
 function attentionRank(session: SessionSummary): number {
   if (session.exit_code !== null) return session.exit_code === 0 ? 4 : 1;
   return ATTENTION_ORDER[session.activity] ?? 3;
-}
-
-function activitySince(session: SessionSummary): string {
-  const instant = session.activity_changed_at || session.created_at;
-  if (!instant) return "activity time unavailable";
-  const elapsed = Date.now() - new Date(instant).getTime();
-  if (!Number.isFinite(elapsed) || elapsed < 0) return instant;
-  const minutes = Math.floor(elapsed / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }
 
 function visibleTerminalInput(text: string): string {
@@ -161,17 +143,6 @@ const Sessions: Component<Props> = (props) => {
   // these; the cards are what puts the prompt and its two answers where a
   // thumb is, above the list rather than inside it.
   const narrow = createNarrow();
-  const liveList = createResizablePane({
-    key: "sessions-live-list",
-    // Item 2 (r18): the default was a fixed 220-280px column that stayed
-    // that wide even when it held nothing but "No live sessions are
-    // available." — more real estate than the content, every time, on
-    // every visit. 220px is enough for a session name and its status; a
-    // reader who wants more drags for it, and the width is remembered.
-    defaultWidth: 220,
-    min: 160,
-    max: 480,
-  });
   // Including the ones that exited while waiting: somebody came to this
   // screen to answer that prompt, and a card that says the session is gone is
   // the answer to why they cannot (Stage 9's "refuse safely and explain").
@@ -192,7 +163,15 @@ const Sessions: Component<Props> = (props) => {
           <h1>Sessions</h1>
           </>
         )}
-        honestyClass={sessionsError() ? "surface-header-honesty--outage" : isConnected() ? "surface-header-honesty--fresh" : "surface-header-honesty--stale"}
+        honestyClass={
+          !sessionsStore.ready && !sessionsError()
+            ? "surface-header-honesty--never"
+            : sessionsError()
+              ? "surface-header-honesty--outage"
+              : isConnected()
+                ? "surface-header-honesty--fresh"
+                : "surface-header-honesty--stale"
+        }
         honesty={(
           <div class="sessions-header-honesty" aria-live="polite">
             <p>
@@ -201,8 +180,8 @@ const Sessions: Component<Props> = (props) => {
                 : sessionsError()
                   ? `Sessions unavailable — ${sessionsError()}`
                   : isConnected()
-                    ? `${sessions().length} live · sorted by attention`
-                    : `${sessions().length} from the last answer · stream disconnected; may be stale`}
+                    ? <><strong>{sessions().length} live</strong> · sorted by attention</>
+                    : <><strong>{sessions().length} from the last answer</strong> · stream disconnected; may be stale</>}
             </p>
             <span class={`connection-state ${isConnected() ? "connected" : "disconnected"}`}>
               {isConnected() ? "Connected" : "Disconnected"}
@@ -236,104 +215,11 @@ const Sessions: Component<Props> = (props) => {
         </section>
       </Show>
 
-      <div
-        class="sessions-place-body"
-        classList={{ "sessions-place-body--sidebar-collapsed": !narrow() && liveList.collapsed() }}
-        style={
-          narrow() || liveList.collapsed()
-            ? undefined
-            : { "grid-template-columns": `${liveList.width()}px minmax(0, 1fr)` }
-        }
-      >
-        <Show when={!narrow() && liveList.collapsed()}>
-          <button
-            type="button"
-            class="sessions-sidebar-reopen"
-            aria-label="Show live sessions"
-            title="Show live sessions"
-            onClick={() => liveList.setCollapsed(false)}
-          >
-            ›
-          </button>
-        </Show>
-        <aside
-          class="sessions-place-sidebar"
-          aria-label="Live sessions"
-          hidden={!narrow() && liveList.collapsed()}
-        >
-          <Show when={!narrow()}>
-            <div class="sessions-sidebar-head">
-              <span>Live sessions</span>
-              <button
-                type="button"
-                class="sessions-sidebar-collapse"
-                aria-label="Hide live sessions"
-                title="Hide live sessions"
-                onClick={() => liveList.setCollapsed(true)}
-              >
-                ‹
-              </button>
-            </div>
-          </Show>
-          <Show when={sessionsError()}>
-            {(message) => <p class="sessions-outage" role="alert">Sessions could not be read: {message()}</p>}
-          </Show>
-          <Show when={sessions().length > 0} fallback={<p class="sessions-empty">No live sessions are available.</p>}>
-            <div class="sessions-place-list">
-              <For each={sessions()}>
-                {(session) => (
-                  <article class={`session-place-row ${session.activity === "waiting-for-input" ? "session-place-row--waiting" : ""}`}>
-                    <span class={`activity-dot ${session.exit_code !== null ? (session.exit_code === 0 ? "done" : "errored") : session.activity}`} aria-hidden="true" />
-                    <span class="session-place-main">
-                      <strong>{session.name}</strong>
-                      <span class="session-place-context">
-                        <small>{session.cwd || "default workspace"}</small>
-                      </span>
-                    </span>
-                    <span class="session-place-status">
-                      <strong>{activityLabel(session)}</strong>
-                      <small>{activitySince(session)}</small>
-                    </span>
-                    <button type="button" class="session-place-open" onClick={() => navigate(`/t/${session.id}`)}>Open session</button>
-                  </article>
-                )}
-              </For>
-            </div>
-          </Show>
-        </aside>
-        {/* A sibling of the aside, not a child of it, for the reason the
-            Places rail's own handle is: the aside scrolls, and a handle
-            poking past its own edge is clipped by that scroll box, handing
-            every pointer event meant for it to the aside underneath instead
-            (caught by a browser test that dragged the handle and found the
-            width never moved — `document.elementFromPoint` at the handle's
-            own center resolved to the aside, not the handle). Positioned
-            here, against `.sessions-place-body`'s own `position: relative`,
-            nothing clips it. */}
-        <Show when={!narrow() && !liveList.collapsed()}>
-          <div
-            class="sessions-resize-handle"
-            classList={{ dragging: liveList.dragging() }}
-            style={{ left: `${liveList.width() - 4}px` }}
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize live sessions"
-            aria-valuenow={liveList.width()}
-            aria-valuemin={160}
-            aria-valuemax={480}
-            tabIndex={0}
-            onPointerDown={(event) => liveList.beginResize(event)}
-            onKeyDown={(event) => {
-              if (event.key === "ArrowLeft") {
-                event.preventDefault();
-                liveList.setWidth(liveList.width() - 16);
-              } else if (event.key === "ArrowRight") {
-                event.preventDefault();
-                liveList.setWidth(liveList.width() + 16);
-              }
-            }}
-          />
-        </Show>
+      {/* The Live Sessions sub-panel was removed (#167): the places rail
+          already lists running sessions, and its collapse/resize machinery
+          was upkeep for a redundant secondary view. The body is now just the
+          active workspace. */}
+      <div class="sessions-place-body">
         <div class="sessions-active-workspace">
           <Show when={pendingAction()} keyed>
             {(current) => {

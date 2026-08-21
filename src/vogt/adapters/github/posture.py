@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from vogt.adapters.github.client import GitHubClient, GitHubUnavailable, repo_of
+from vogt.adapters.forge import GitHubProvider
+from vogt.adapters.github.client import GitHubClient, GitHubUnavailable
 from vogt.collectors.base import CollectorContext, Finding, finding
 from vogt.core.entities import Project
 
@@ -44,6 +45,7 @@ class GitHubPostureCollector:
 
     def __init__(self, client: GitHubClient) -> None:
         self._client = client
+        self._provider = GitHubProvider(client)
 
     @property
     def name(self) -> str:
@@ -55,10 +57,10 @@ class GitHubPostureCollector:
 
     def collect(self, ctx: CollectorContext, project: Project) -> Iterable[Finding]:
         del ctx
-        repo = repo_of(project.repo_url)
-        if repo is None:
+        ref = self._provider.parse(project.repo_url)
+        if ref is None:
             return []
-        owner, name = repo
+        owner, name = ref.owner, ref.repo
 
         config = self._version_update_config(owner, name)
         alerts = self._toggle(owner, name, "vulnerability-alerts")

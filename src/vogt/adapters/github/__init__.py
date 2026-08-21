@@ -14,7 +14,30 @@ mutates anything upstream — these collectors only ever read.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from vogt.adapters.github.client import GitHubClient, GitHubUnavailable
-from vogt.adapters.github.collectors import github_collectors
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from vogt.adapters.github.collectors import github_collectors
 
 __all__ = ["GitHubClient", "GitHubUnavailable", "github_collectors"]
+
+
+def __getattr__(name: str) -> Callable[..., object]:
+    """Expose `github_collectors` without importing it at package init.
+
+    The collectors reach through the forge registry (`adapters/forge`), which
+    in turn reads this adapter's client — so importing them eagerly here would
+    make `import vogt.adapters.github.client` pull the whole forge package
+    mid-initialisation, a cycle. Deferring the one heavy name to first use
+    keeps the client a leaf and the public API unchanged (PEP 562).
+    """
+    if name == "github_collectors":
+        from vogt.adapters.github.collectors import github_collectors
+
+        return github_collectors
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)

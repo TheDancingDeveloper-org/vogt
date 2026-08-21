@@ -584,7 +584,13 @@ const Inbox: Component<Props> = (props) => {
           <h1>Inbox</h1>
           </>
         )}
-        honestyClass={failure() ? "surface-header-honesty--outage" : loading() && !result() ? "surface-header-honesty--partial" : "surface-header-honesty--fresh"}
+        honestyClass={
+          failure()
+            ? "surface-header-honesty--outage"
+            : result()
+              ? "surface-header-honesty--fresh"
+              : "surface-header-honesty--never"
+        }
         honesty={(
           <p class="inbox-header-honesty" aria-live="polite">
             {failure()
@@ -592,7 +598,7 @@ const Inbox: Component<Props> = (props) => {
               : loading() && !result()
                 ? "Loading Inbox — no answer yet."
                 : result()
-                  ? `Response ${age(result()!.snapshot_at)}; source coverage remains attached below.`
+                  ? <><strong>Response {age(result()!.snapshot_at)}</strong>; source coverage remains attached below.</>
                   : "No Inbox answer has been read yet."}
           </p>
         )}

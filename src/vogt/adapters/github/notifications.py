@@ -19,10 +19,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from vogt.adapters.forge import GitHubProvider
 from vogt.adapters.github.client import (
     DEFAULT_PER_PAGE,
     GitHubClient,
-    repo_of,
 )
 from vogt.collectors.base import CollectorContext, Finding, finding
 from vogt.core.entities import Project
@@ -54,6 +54,7 @@ class GitHubNotificationCollector:
 
     def __init__(self, client: GitHubClient) -> None:
         self._client = client
+        self._provider = GitHubProvider(client)
 
     @property
     def name(self) -> str:
@@ -65,10 +66,10 @@ class GitHubNotificationCollector:
 
     def collect(self, ctx: CollectorContext, project: Project) -> Iterable[Finding]:
         del ctx
-        repo = repo_of(project.repo_url)
-        if repo is None:
+        ref = self._provider.parse(project.repo_url)
+        if ref is None:
             return []
-        owner, name = repo
+        owner, name = ref.owner, ref.repo
         # A `GitHubUnavailable` here is left to propagate. The commonest
         # cause by far is a token without the notifications scope, which is
         # a configuration fact rather than a fault: the sweeper turns it into

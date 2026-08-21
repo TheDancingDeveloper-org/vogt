@@ -18,10 +18,7 @@ from typing import Any
 
 import pytest
 
-from vogt.adapters.github.notifications import (
-    KIND_NOTIFICATION,
-    GitHubNotificationCollector,
-)
+from vogt.adapters.forge import KIND_NOTIFICATION
 from vogt.application.context import AppContext
 from vogt.application.models import (
     BacklogParams,
@@ -135,7 +132,7 @@ def forge(instance: AppContext, monkeypatch: pytest.MonkeyPatch) -> Forge:
 def test_notifications_are_collected_for_registered_repositories(
     instance: AppContext, forge: Forge
 ) -> None:
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
 
     found = observations(instance, ObservationsParams(kind=KIND_NOTIFICATION))
     assert found.total == 2
@@ -152,7 +149,7 @@ def test_the_scope_is_the_registered_project_list(
     leave Vogt to discard most of it — the system going looking, then
     filtering. Asserted by reading the URLs the adapter actually requested.
     """
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
 
     notification_urls = [url for _, url in forge.requests if "/notifications" in url]
     assert notification_urls, "the collector asked GitHub nothing"
@@ -171,7 +168,7 @@ def test_notifications_never_enter_the_ranked_views(
     would (DESIGN §3.6) — the observed-first hazard arriving through a new
     door.
     """
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
 
     found = observations(instance, ObservationsParams(kind=KIND_NOTIFICATION))
     assert all(not entry.promoted for entry in found.observations)
@@ -186,12 +183,16 @@ def test_a_token_without_the_scope_is_partial_coverage_not_a_failed_sweep(
     """FR-O4: "we could not look" is an answer, and it degrades gracefully."""
     forge.notification_status = 403
 
-    result = sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    result = sweep(
+        instance, SweepParams(collectors=["forge-notifications"], reason=WHY)
+    )
     assert result.reports, "the sweep produced no coverage record"
     assert all(entry.outcome != "ok" for entry in result.reports)
 
     reported = coverage(instance, CoverageParams())
-    assert any(entry.collector == "gh-notifications" for entry in reported.collectors)
+    assert any(
+        entry.collector == "forge-notifications" for entry in reported.collectors
+    )
 
 
 def test_a_project_that_is_not_on_github_is_simply_not_asked_about(
@@ -201,7 +202,7 @@ def test_a_project_that_is_not_on_github_is_simply_not_asked_about(
         instance,
         RegisterProjectParams(name="Local Only", root_path="/srv/local", reason=WHY),
     )
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
 
     assert len([url for _, url in forge.requests if "/notifications" in url]) == 1
 
@@ -209,7 +210,7 @@ def test_a_project_that_is_not_on_github_is_simply_not_asked_about(
 def test_the_subject_url_is_one_a_person_can_open(
     instance: AppContext, forge: Forge
 ) -> None:
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
 
     result = list_notifications(instance, NotificationsParams())
     urls = {entry.title: entry.url for entry in result.notifications}
@@ -221,18 +222,18 @@ def test_the_subject_url_is_one_a_person_can_open(
 
 def test_the_collector_needs_a_network_and_says_so() -> None:
     """NFR-PO2: the forge-less layer runs exactly the offline collectors."""
-    from vogt.adapters.github.client import GitHubClient
+    from vogt.adapters.forge.collectors import ForgeNotificationsCollector
 
-    collector = GitHubNotificationCollector(GitHubClient())
+    collector = ForgeNotificationsCollector()
     assert collector.requires_network is True
-    assert collector.name == "gh-notifications"
+    assert collector.name == "forge-notifications"
 
 
 # -- the view (FR-N3) ------------------------------------------------------
 
 
 def test_the_inbox_reports_what_it_holds(instance: AppContext, forge: Forge) -> None:
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
 
     result = list_notifications(instance, NotificationsParams())
     assert result.total == 2
@@ -250,7 +251,7 @@ def test_the_inbox_says_whose_it_is(instance: AppContext, forge: Forge) -> None:
     who assumes otherwise is reading somebody else's inbox believing it is
     theirs, which is worse than not having the view.
     """
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
 
     result = list_notifications(instance, NotificationsParams())
     assert "instance-scoped" in result.scope
@@ -269,7 +270,7 @@ def test_the_inbox_says_whose_it_is(instance: AppContext, forge: Forge) -> None:
 def test_the_inbox_filters(
     instance: AppContext, forge: Forge, params: NotificationsParams, expected: int
 ) -> None:
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
     assert list_notifications(instance, params).total == expected
 
 
@@ -284,7 +285,7 @@ def test_an_empty_inbox_distinguishes_absence_from_ignorance(
 
 
 def test_the_inbox_carries_freshness(instance: AppContext, forge: Forge) -> None:
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
     result = list_notifications(instance, NotificationsParams())
     assert result.freshness.status != "never_swept"
 
@@ -298,7 +299,7 @@ def test_the_forge_inbox_never_leaks_into_the_events_feed(
     A forge's inbox has a different origin and a different owner; merging
     them would make the cursor meaningless and the provenance unreadable.
     """
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
 
     kinds = {event.kind for event in list_events(instance, ListEventsParams()).events}
     assert KIND_NOTIFICATION not in kinds
@@ -309,7 +310,7 @@ def test_the_forge_inbox_never_leaks_into_the_events_feed(
 def test_normalized_inbox_paginates_and_audits_occurrence_triage(
     instance: AppContext, forge: Forge
 ) -> None:
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
 
     first_page = list_inbox(instance, InboxListParams(limit=1))
     assert len(first_page.entries) == 1
@@ -362,7 +363,7 @@ def test_inbox_cursor_freezes_each_source_before_later_facts_arrive(
     instance: AppContext, forge: Forge
 ) -> None:
     """A continuation cannot duplicate or append a row outside its snapshot."""
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
     first_page = list_inbox(instance, InboxListParams(limit=1))
     assert first_page.next_cursor is not None
     assert first_page.high_water["github"] is not None
@@ -380,7 +381,7 @@ def test_inbox_cursor_freezes_each_source_before_later_facts_arrive(
             },
         }
     )
-    sweep(instance, SweepParams(collectors=["gh-notifications"], reason=WHY))
+    sweep(instance, SweepParams(collectors=["forge-notifications"], reason=WHY))
 
     continuation = list_inbox(
         instance, InboxListParams(limit=10, cursor=first_page.next_cursor)

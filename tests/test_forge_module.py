@@ -757,15 +757,16 @@ def test_an_adopted_link_raises_one_proposal_not_two(
     assert FORGE_STATE_MISMATCH in kinds
 
 
-def test_reopening_finished_work_is_never_automatic(
+def test_reopening_finished_work_is_automatic_once_closure_is_observed(
     instance: AppContext, forge: Forge
 ) -> None:
-    """The direction with no positive evidence behind it (#49).
+    """The reopen direction, now that it has positive evidence (#174).
 
-    `gh-issues` reads open issues, and an unchanged subject is not
-    re-appended — so the newest observation of an issue closed last week
-    still says `open`. Auto-accepting that direction reopens finished work
-    from an absence nobody observed.
+    The old asymmetry (close yes, reopen no) protected against reopening
+    finished work from an *absence* the open-only scrape mistook for an open
+    state. Phase 2's `state=all` incremental sync makes an open observation a
+    produced fact, so a reopen upstream is as observable — and as safe to
+    auto-accept — as a close. The item follows reality back to open.
     """
     ref = _adopted(instance, forge)
     _finish(instance, ref)
@@ -775,10 +776,10 @@ def test_reopening_finished_work_is_never_automatic(
     mismatch = next(p for p in raised.raised if p.kind == FORGE_STATE_MISMATCH)
 
     assert mismatch.proposed_change["to"] == "open"
-    assert raised.auto_accepted == [], "nothing reopens work on its own"
-    assert get_work(instance, GetWorkParams(ref=ref)).item.state == "done"
-    assert "reads open issues only" in mismatch.summary, (
-        "the proposal says what its evidence can and cannot see"
+    assert mismatch.id in raised.auto_accepted, "an observed reopen is automatic"
+    assert get_work(instance, GetWorkParams(ref=ref)).item.state != "done"
+    assert "observed reopen" in mismatch.summary, (
+        "the proposal says its evidence is a produced fact, not an absence"
     )
 
 

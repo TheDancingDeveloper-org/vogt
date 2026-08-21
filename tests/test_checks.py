@@ -27,7 +27,7 @@ def _check(
     return Observation(
         id=f"obs_{revision}_{name}_{index}",
         sweep_id="swp_1",
-        collector="gh-actions",
+        collector="forge-checks",
         kind="ci.check",
         project_id="prj_1",
         subject_key=f"ci:owner/repo@{revision}:{name}",

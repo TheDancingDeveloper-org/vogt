@@ -113,18 +113,18 @@ class DriftFinding:
     def auto_acceptable(self) -> bool:
         """Whether the shipped default policy lets an agent accept this.
 
-        `forge_state_mismatch` is auto-acceptable in **one direction only**,
-        and the asymmetry is about evidence rather than about risk appetite.
-        `gh-issues` reads open issues; a closed one simply stops appearing,
-        and observations are appended only when they change, so the newest
-        observation of a closed issue still says `open` — indefinitely.
-        "Upstream is closed" is therefore a fact somebody produced, while
-        "upstream is open" is also what a closed-and-not-re-read issue looks
-        like. Auto-accepting the second direction reopens finished work from
-        an absence nobody observed (found while building #49's kind).
+        `forge_state_mismatch` is now auto-acceptable in **both** directions
+        (#174). The old one-direction-only rule was about evidence, not risk:
+        the open-only `gh-issues` scrape never observed a closure, so the
+        newest observation of a closed issue said `open` indefinitely, and
+        "upstream is open" was indistinguishable from "closed and never
+        re-read" — auto-accepting a reopen would resurrect finished work from
+        an absence nobody observed. Phase 2's `state=all` incremental sync
+        makes closure a produced fact (`forge-issues`/`forge-prs`), so the
+        distinction the asymmetry protected against no longer exists, and a
+        reopen upstream is now as observable — and as safe to accept — as a
+        close.
         """
-        if self.kind == FORGE_STATE_MISMATCH:
-            return str(self.proposed_change.get("to", "")) == "done"
         return self.kind in AUTO_ACCEPTABLE_KINDS
 
 
@@ -251,20 +251,19 @@ def unresolved_dependency(
 def _last_observed_open(
     subject_key: str, work_ref: str, declared_state: str, evidence: EvidenceSnapshot
 ) -> str:
-    """The other direction, said honestly.
+    """The reopen direction, said honestly.
 
-    `gh-issues` collects open issues, and an unchanged subject is not
-    re-appended, so this evidence dates from when the issue was *last seen
-    open* and a close since then is invisible to that collector. Saying so
-    in the proposal turns a puzzling question into an answerable one:
-    re-consolidate the repository and this either persists or disappears.
+    Once the incremental sync reads `state=all` (#173), an open observation is
+    a produced fact, not the shadow a closed-and-unread subject cast under the
+    old open-only scrape: `forge-issues`/`forge-prs` re-read every state each
+    sweep, so a reopen upstream is observed like any other change and this
+    disagreement is real rather than possibly-stale.
     """
     return (
         f"{subject_key} was open when last observed "
         f"({evidence.observed_at.isoformat()}), but {work_ref} is "
-        f"{declared_state!r} here — `gh-issues` reads open issues only, so a "
-        "close after that time is invisible to it; `forge onboard` re-reads "
-        "closed state"
+        f"{declared_state!r} here — the incremental sync reads all states, so "
+        "this is an observed reopen, not a close it failed to see"
     )
 
 
@@ -357,7 +356,7 @@ def vanished_upstream(
             subject_key=subject_key,
             content_digest="",
             observed_at=swept_at,
-            collector="gh-issues",
+            collector="forge-issues",
             payload={"absent_in_completed_sweep": True},
         ),
         evidence_observation_id=None,

@@ -18,6 +18,7 @@ import {
 } from "./api";
 import { openEditorTab, openTerminalTab } from "./tabs";
 import { createSession } from "./store";
+import { railSections, setRailSection } from "./railSections";
 
 interface Props {
   onOpen?: () => void;
@@ -392,8 +393,16 @@ const FileTree: Component<Props> = (props) => {
         onChange={(e) => void uploadFiles(e.currentTarget.files)}
       />
       <div class="file-tree-header">
-        <h2 class="places-section-header">
-          <span>Files</span>
+        <h2 class="places-section-header" aria-label="Files">
+          <button
+            type="button"
+            class="places-section-toggle"
+            aria-expanded={railSections.files}
+            onClick={() => setRailSection("files", !railSections.files)}
+          >
+            <span class="places-section-caret" aria-hidden="true">{railSections.files ? "▾" : "▸"}</span>
+            <span>Files</span>
+          </button>
           <span class="places-section-header-actions">
             <button
               type="button"
@@ -447,6 +456,7 @@ const FileTree: Component<Props> = (props) => {
           placeholder="Search files…"
           value={searchQuery()}
           onInput={(e) => setSearchQuery(e.currentTarget.value)}
+          hidden={!railSections.files}
         />
       </div>
       <Show when={tree.error}>
@@ -454,7 +464,7 @@ const FileTree: Component<Props> = (props) => {
           {String(tree.error)}
         </div>
       </Show>
-      <div class="tree-scroll">
+      <div class="tree-scroll" hidden={!railSections.files}>
         <Show
           when={searchActive()}
           fallback={

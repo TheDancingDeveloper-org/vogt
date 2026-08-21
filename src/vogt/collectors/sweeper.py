@@ -14,11 +14,24 @@ eleven, and it never touches declared data (NFR-I2).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Protocol, runtime_checkable
 
 from vogt.collectors.base import Collector, CollectorContext, Finding
 from vogt.core.entities import Project
 from vogt.storage.interface import ObservedStore
 from vogt.storage.observed_types import SweepReport
+
+
+@runtime_checkable
+class PostAppend(Protocol):
+    """A collector that has bookkeeping to commit once its append lands.
+
+    The incremental forge sync advances its watermark and records which
+    subjects it confirmed here rather than in `collect`, so a watermark can
+    never move past observations that failed to persist (D1)."""
+
+    def after_append(self, *, at: datetime) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -81,6 +94,12 @@ class Sweeper:
                 failures[project.slug] = f"{type(exc).__name__}: {exc}"
 
         stats = self._store.append(sweep.id, findings, at=self._ctx.clock())
+
+        if isinstance(collector, PostAppend):
+            # Only now that the append has committed does the collector's own
+            # bookkeeping (the sync watermark, `subject_seen`) advance — never
+            # ahead of the evidence it summarises (D1).
+            collector.after_append(at=self._ctx.clock())
 
         if failures and len(failures) == len(projects) and projects:
             outcome = "failed"

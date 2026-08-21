@@ -43,6 +43,11 @@ describe("FileTree", () => {
       </Router>
     ));
 
+    // Files starts collapsed (rail-spec.md B3); expand it before asserting on
+    // its contents, the same as a reader would.
+    expect(screen.getByRole("button", { name: "Files" })).toHaveAttribute("aria-expanded", "false");
+    await fireEvent.click(screen.getByRole("button", { name: "Files" }));
+
     expect(await screen.findByText("source")).toBeVisible();
     expect(screen.getByText("a-very-long-and-identifiable-component-name.tsx")).toBeVisible();
     expect(screen.getByRole("heading", { name: "Files" })).toBeVisible();
@@ -100,6 +105,7 @@ describe("FileTree", () => {
       </Router>
     ));
 
+    await fireEvent.click(screen.getByRole("button", { name: "Files" }));
     expect(await screen.findByText("notes.txt")).toBeVisible();
     await fireEvent.click(screen.getByLabelText("Actions for docs/notes.txt"));
     await fireEvent.click(screen.getByRole("button", { name: "Delete" }));

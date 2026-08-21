@@ -17,8 +17,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from vogt.adapters.forge import (
+    GitHubProvider,
+    RepoRef,
+    github_identity,
+    github_provider,
+)
 from vogt.adapters.git import CloneRequest
-from vogt.adapters.github.client import GitHubClient, repo_of
 from vogt.application.context import AppContext
 from vogt.application.models import (
     ImportProjectParams,
@@ -39,6 +44,12 @@ _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 PROJECT_IMPORT = "project.import"
 PROJECT_IMPORTED_EVENT = "project.imported"
 
+#: Import is GitHub-shaped in v1 (it clones from GitHub and consolidates its
+#: history). The pure identity operations — parsing a reference and building
+#: its URLs — need no credential, so they go through the registry's token-less
+#: identity provider rather than a client of import's own (D2).
+_GITHUB = github_identity()
+
 
 def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjectResult:
     """Clone, register, and consolidate — one operation, one reason.
@@ -49,7 +60,8 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
     scaffolds in the same order, for the same reason.
     """
     owner, repo = _resolve_repo(params.repo)
-    remote = f"https://github.com/{owner}/{repo}.git"
+    ref = RepoRef(host="github.com", owner=owner, repo=repo)
+    remote = _GITHUB.clone_url(ref)
     display_name = params.name or repo
     slug = slugify(display_name)
     if not slug:
@@ -64,8 +76,8 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
             msg = f"a project with slug {slug!r} is already registered"
             raise Conflict(msg)
 
-    client = GitHubClient.from_token_file(ctx.config.github_token_file)
-    metadata = _describe(client, owner, repo)
+    provider = github_provider(ctx.config)
+    metadata = _describe(provider, ref)
 
     destination = (
         Path(params.root_path).expanduser()
@@ -76,7 +88,7 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
         CloneRequest(
             remote=remote,
             destination=destination,
-            token=None if client is None else client.token,
+            token=None if provider is None else provider.clone_token(),
         )
     )
 
@@ -85,7 +97,7 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
         RegisterProjectParams(
             name=display_name,
             root_path=str(outcome.destination),
-            repo_url=f"https://github.com/{owner}/{repo}",
+            repo_url=_GITHUB.web_url(ref),
             lifecycle_state=params.lifecycle_state,
             reason=params.reason,
         ),
@@ -95,14 +107,14 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
 
     consolidated = None
     detail = None
-    if params.consolidate and client is not None:
+    if params.consolidate and provider is not None:
         consolidated = onboard(
             ctx,
             OnboardParams(project=registered.project.slug, reason=params.reason),
         )
     elif params.consolidate:
         detail = (
-            "cloned and registered, but the GitHub adapter is not configured, "
+            "cloned and registered, but the forge adapter is not configured, "
             "so nothing upstream was read — which is 'not collected', not "
             "'there is nothing'"
         )
@@ -133,9 +145,9 @@ def _resolve_repo(reference: str) -> tuple[str, str]:
     request to go looking for it, and nothing here looks.
     """
     candidate = reference.strip()
-    parsed = repo_of(candidate)
+    parsed = _GITHUB.parse(candidate)
     if parsed is not None:
-        return parsed
+        return parsed.owner, parsed.repo
     parts = [part for part in candidate.strip("/").split("/") if part]
     if len(parts) == 2 and all(_NAME.fullmatch(part) for part in parts):
         return parts[0], parts[1].removesuffix(".git")
@@ -151,22 +163,20 @@ def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _describe(client: GitHubClient | None, owner: str, repo: str) -> dict[str, object]:
+def _describe(provider: GitHubProvider | None, ref: RepoRef) -> dict[str, object]:
     """Confirm the repository exists and is visible to this token.
 
     Unconfigured is not an error — a public repository clones perfectly well
     without a token, and refusing to import one because the optional adapter
     is absent would make the core depend on it (NFR-PO1).
     """
-    if client is None:
+    if provider is None:
         return {}
-    payload = client.get(f"/repos/{owner}/{repo}")
+    payload = provider.describe(ref)
     if payload is None:
-        msg = (
-            f"GitHub has no repository {owner}/{repo} visible to this instance's token"
-        )
+        msg = f"the forge has no repository {ref.slug} visible to this instance's token"
         raise NotFound(msg)
-    return payload if isinstance(payload, dict) else {}
+    return payload
 
 
 __all__ = ["PROJECT_IMPORT", "PROJECT_IMPORTED_EVENT", "import_project"]

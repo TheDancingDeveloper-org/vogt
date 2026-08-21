@@ -199,36 +199,10 @@ class GitHubClient:
             raise GitHubUnavailable(msg) from exc
 
 
-#: The one host this adapter can read. Stated as a value rather than left
-#: implicit in `repo_of`'s parsing, so an operation can tell a caller *why*
-#: it read nothing instead of reporting zero and leaving them to guess.
+#: The one host this adapter can read. The registry (`adapters/forge`) now
+#: owns "which forge reads what" and "why nothing was read"; this stays as the
+#: fact `repo_of` parses against, named rather than buried in the string.
 SUPPORTED_HOST = "github.com"
-
-
-def unsupported_reason(repo_url: str | None) -> str | None:
-    """Why this adapter cannot read that repository, or `None` if it can.
-
-    An empty success is the failure mode this exists to prevent. `forge
-    onboard` against a Forgejo project returned `issues: 0, pull_requests: 0,
-    …, detail: null` for a repository with an open issue in it — byte-identical
-    to the honest answer for a repository with no history at all. Half the
-    estate's remaining import queue is Forgejo-hosted, and the import playbook
-    reads an empty consolidation as a signal, so that signal was unreadable
-    for exactly the repositories it was most needed on.
-    """
-    if not repo_url:
-        return (
-            "this project declares no repository URL, so there is no forge to "
-            "read — which is 'not collected', not 'there is nothing'"
-        )
-    if repo_of(repo_url) is not None:
-        return None
-    host = repo_url.split("://")[-1].split("/")[0] or repo_url
-    return (
-        f"the GitHub adapter cannot read {host}; it reads {SUPPORTED_HOST} only, "
-        "so nothing was collected here and no conclusion should be drawn from "
-        "the counts"
-    )
 
 
 def repo_of(repo_url: str | None) -> tuple[str, str] | None:

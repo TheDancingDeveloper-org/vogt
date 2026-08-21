@@ -94,7 +94,7 @@ import {
 import { useLocation, useNavigate, useSearchParams } from "@solidjs/router";
 import { ApiError } from "./api";
 import { openWorkItemTab } from "./tabs";
-import { ViewAgeBadge, createViewAge, onVogtLive } from "./viewAge";
+import { ViewAgeBadge, createViewAge, honestyToneClass, onVogtLive } from "./viewAge";
 import { MeasuredWindow } from "./measuredWindow";
 import SurfaceHeader from "./SurfaceHeader";
 import { ProgressiveFilters, SavedLenses } from "./ProgressiveFilters";
@@ -1864,18 +1864,15 @@ const Board: Component<Props> = (props) => {
         collapseControls
 
         title={<h1>Board</h1>}
-        honestyClass={`surface-header-honesty--${freshness().tone === "live" ? "fresh" : freshness().tone === "outage" || freshness().tone === "waiting" ? "outage" : "stale"}`}
+        honestyClass={honestyToneClass(freshness().tone)}
         honesty={(
           <div class="board-summary" aria-live="polite">
-            {/* A1 (5a): the honesty leads with a bold freshness clause; the
-                counts follow as quiet qualifiers. Tone is carried by the
-                honesty slot's left border, so the lead is plain --fg, not a
-                pill. */}
-            <ViewAgeBadge
+            <strong><ViewAgeBadge
               age={freshness()}
-              class="board-freshness board-freshness--lead"
-            />
-            <span>{items().length} of {total()} loaded</span>
+              class={`board-freshness board-freshness--${freshness().tone}`}
+            /></strong>
+            <span>{items().length} loaded</span>
+            <span>of {total()} matching</span>
             <span>{columns().length} columns</span>
           </div>
         )}

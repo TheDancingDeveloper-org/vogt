@@ -15,8 +15,8 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from vogt.adapters.engine import EngineUnavailable
-from vogt.adapters.github.collectors import KIND_CHECK
-from vogt.adapters.github.notifications import KIND_NOTIFICATION
+from vogt.adapters.forge import KIND_CHECK, KIND_NOTIFICATION
+from vogt.adapters.forge.kinds import COLLECTOR_CHECKS, COLLECTOR_NOTIFICATIONS
 from vogt.application.context import AppContext
 from vogt.application.models import (
     InboxAction,
@@ -612,8 +612,8 @@ def _coverage(
     sweeps = ctx.observed.coverage()
     result: dict[InboxSource, InboxCoverage] = {}
     for source, collector in (
-        (GITHUB_KIND, "gh-notifications"),
-        (CI_KIND, "gh-actions"),
+        (GITHUB_KIND, COLLECTOR_NOTIFICATIONS),
+        (CI_KIND, COLLECTOR_CHECKS),
     ):
         sweep = sweeps.get(collector)
         relevant = [e for e in entries if e.source == source]

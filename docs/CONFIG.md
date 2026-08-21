@@ -28,6 +28,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
+| `forge_token_files` | `VOGT_FORGE_TOKEN_FILES` | map of string to path | *(empty)* | behaviour |
 | `engine_url` | `VOGT_ENGINE_URL` | string, optional | *(no default — must be set)* | exposure |
 | `session_scratch_project` | `VOGT_SESSION_SCRATCH_PROJECT` | string, optional | *(no default — must be set)* | behaviour |
 | `engine_state_dir` | `VOGT_ENGINE_STATE_DIR` | path, optional | *(no default — must be set)* | behaviour |
@@ -105,6 +106,10 @@ How long observation *history* is kept (NFR-I5). The newest observation per subj
 ### `github_token_file`
 
 Path to a file containing a GitHub token. Its absence is what switches the optional forge adapter off, so there is no default: not configured is the ordinary case, and it means forge subjects are 'not collected' rather than absent. A file rather than an environment variable or an argument, so the token never appears in a process listing (FR-S7).
+
+### `forge_token_files`
+
+Per-host forge token files (D8), mapping a forge host to a file holding a token for it — a TOML table `[forge_token_files]` with, e.g., `"github.com" = "/run/secrets/github_token"`. This is the general form of `github_token_file`, which stays as the alias for github.com; a host set here wins over the alias. A host absent from this map has no provider registered, which is what keeps its subjects 'not collected' rather than reported as absent — the same honesty rule the single-token field has always followed. Files rather than environment variables or arguments, so a token never appears in a process listing (FR-S7).
 
 ### `engine_url`
 
