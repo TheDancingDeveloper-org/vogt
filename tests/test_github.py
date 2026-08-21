@@ -328,11 +328,11 @@ def test_forge_issues_reach_the_bug_view(
         client = GitHubClient(token="x", transport=transport)
         for collector in forge_sync_collectors(ctx.observed):
             registry.add(collector)
-        for collector in (
+        for legacy in (
             GitHubActionsCollector(client),
             GitHubReleaseCollector(client),
         ):
-            registry.add(collector)
+            registry.add(legacy)
         return registry
 
     monkeypatch.setattr(collect_service, "collector_registry", registry_with_github)

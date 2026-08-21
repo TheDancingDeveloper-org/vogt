@@ -175,11 +175,11 @@ def _with_github(monkeypatch: pytest.MonkeyPatch) -> None:
         built = CollectorRegistry()
         for collector in forge_sync_collectors(ctx.observed):
             built.add(collector)
-        for collector in (
+        for legacy in (
             GitHubActionsCollector(client),
             GitHubReleaseCollector(client),
         ):
-            built.add(collector)
+            built.add(legacy)
         return built
 
     monkeypatch.setattr(collect_service, "collector_registry", registry)
