@@ -76,11 +76,23 @@ env:
   CACHE_IMAGE: 192.168.1.75:5500/vogt-buildcache
 
 concurrency:
-  # Only the newest commit on a branch is worth an image; older ones in
-  # flight are already superseded. Keyed by ref, so a dev build and a main
-  # build never cancel each other.
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+  # Keyed by *commit*, not by ref, since 2026-08-19.
+  #
+  # "Only the newest commit on a branch is worth an image" is true of a repo
+  # that merges slowly. This one merged to main 23 times in 24 hours — a
+  # median gap of 16 minutes — while this workflow took a median of 19 minutes
+  # and a p90 of 41. Every build was therefore superseded before it finished:
+  # 12 of the last 13 main builds were cancelled, 36% of the repository's
+  # entire CI compute was spent on runs that were thrown away, and main
+  # frequently had no `sha-` image at all. Nothing was left for
+  # `indexarr/ops` to pin, so shipping a fix meant waiting for a quiet window.
+  #
+  # Keying by SHA means no two commits share a group and none can supersede
+  # another — the same reasoning `ci.yml` already records, and for the same
+  # reason. It costs runner time on a burst, which is what the capacity freed
+  # by lifting the runners' four-core cap is for.
+  group: build-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   # Docker Hub is not on the critical path any more (#33): both Dockerfiles
@@ -104,7 +116,8 @@ jobs:
 
   image:
     name: build and publish a commit image
-    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    needs: base-images
+    runs-on: [self-hosted, publish]
     permissions:
       contents: read
       packages: write
@@ -293,7 +306,7 @@ jobs:
     # /opt/vogt out of the core image this run just published, by digest.
     # `needs: pod-base` supplies the toolchain base it now builds `FROM` (#184).
     needs: [base-images, pod-base, image]
-    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    runs-on: [self-hosted, publish]
     permissions:
       contents: read
       packages: write

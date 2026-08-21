@@ -52,7 +52,7 @@ jobs:
 
   distribution:
     name: build distribution
-    runs-on: [self-hosted, node-b, linux, x64]
+    runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v7
 
@@ -87,8 +87,8 @@ jobs:
     # The merged image copies /opt/vogt out of this one by digest (#143).
     outputs:
       digest: ${{ steps.push.outputs.digest }}
-    # `docker`/`publish` is advertised only by the Docker-in-Docker workers.
-    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    # `publish` is advertised only by the Docker-in-Docker workers.
+    runs-on: [self-hosted, publish]
     permissions:
       contents: read
       packages: write
@@ -96,8 +96,6 @@ jobs:
       # there is no key to store or rotate and the signature binds to this
       # repository and this workflow (NFR-C5).
       id-token: write
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
 
@@ -179,6 +177,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           # Layer cache on the estate's local-registry (#184); the push below
           # shares the ref so it re-tags rather than recompiles.
+          #
+          # `-release` is its own cache ref, not the `core-<ref>` one
+          # `build.yml` writes. A release may reuse work a commit build did,
+          # but it must not change what later commit builds start from: the
+          # ordinary path stays the only writer of the ordinary cache, and a
+          # release stays reproducible from its own inputs alone.
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release,mode=max
 
@@ -255,7 +259,7 @@ jobs:
   stack-image:
     name: build, sign and publish the merged image
     needs: [distribution, base-images, pod-base, image]
-    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    runs-on: [self-hosted, publish]
     permissions:
       contents: read
       packages: write
@@ -419,7 +423,7 @@ jobs:
   android:
     name: build and sign the Android shell
     needs: distribution
-    runs-on: [self-hosted, node-b, linux, x64]
+    runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v7
 

@@ -109,7 +109,7 @@ jobs:
   check:
     name: every base image is a mirrored one
     # NFR-C4: every job names a self-hosted runner.
-    runs-on: [self-hosted, node-b, linux, x64]
+    runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v7
 
@@ -155,7 +155,7 @@ jobs:
     # anyway. The check job above is the part that runs on a PR.
     if: github.event_name != 'pull_request'
     # `docker`/`publish` is advertised only by the Docker-in-Docker workers.
-    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    runs-on: [self-hosted, publish]
     permissions:
       contents: read
       packages: write
