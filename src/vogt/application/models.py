@@ -1768,6 +1768,74 @@ class WriteBackListResult(Result):
     actions: list[WriteBackActionView]
 
 
+class ForgeAccountLinkParams(Params):
+    """Link the acting actor's own forge account by pasting a PAT (#179).
+
+    The token is validated against the forge, then stored encrypted at rest
+    and never echoed. Linking arms upstream writes attributed to *you*: the
+    scope of what those writes can do is the scope of the token you paste.
+    """
+
+    host: str = Field(
+        default="github.com",
+        description="The forge host to link. Only github.com is supported in v1.",
+    )
+    token: str = Field(
+        min_length=1,
+        description=(
+            "The Personal Access Token. Validated, then stored encrypted at "
+            "rest under `forge_account_key_file` and never returned by any "
+            "surface. To revoke it, unlink here and revoke it upstream too."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ForgeAccountUnlinkParams(Params):
+    host: str = Field(
+        default="github.com",
+        description="The forge host to unlink. Deletes the stored token.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ForgeAccountStatusParams(Params):
+    host: str | None = Field(
+        default=None,
+        description="Restrict to one host; unset lists every host you linked.",
+    )
+
+
+class ForgeAccountView(Result):
+    """One linked account, never carrying the token."""
+
+    host: str
+    login: str
+    scopes: str = Field(
+        description=(
+            "The token's granted scopes as the forge reports them "
+            "(`X-OAuth-Scopes`), or empty when the forge did not say."
+        )
+    )
+    linked: bool = True
+
+
+class ForgeAccountResult(Result):
+    """The outcome of a link or unlink — status only, never the token."""
+
+    host: str
+    login: str | None = Field(
+        default=None,
+        description="The linked login; null once unlinked.",
+    )
+    scopes: str = ""
+    linked: bool
+
+
+class ForgeAccountStatusResult(Result):
+    accounts: list[ForgeAccountView]
+
+
 class OnboardParams(Params):
     project: str = Field(description="Project slug to consolidate.")
     max_pages: int = Field(

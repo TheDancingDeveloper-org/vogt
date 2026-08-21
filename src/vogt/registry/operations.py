@@ -59,6 +59,11 @@ from vogt.application.models import (
     EventListResult,
     ExportParams,
     ExportResult,
+    ForgeAccountLinkParams,
+    ForgeAccountResult,
+    ForgeAccountStatusParams,
+    ForgeAccountStatusResult,
+    ForgeAccountUnlinkParams,
     GetProjectParams,
     GetWorkParams,
     ImportParams,
@@ -909,6 +914,52 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.set_write_back,
             route=HttpRoute("POST", "/forge/writeback"),
             cli=CliBinding(("forge", "writeback")),
+        ),
+        # -- per-actor forge accounts (#179) -------------------------------
+        #
+        # Linking a personal PAT arms upstream writes attributed to the actor,
+        # so link/unlink take the `writeback` scope: FR-S11 makes that the
+        # scope for arming write-back and nothing else, and a per-actor link is
+        # exactly that — arming it under the actor's own credential rather than
+        # the instance's. `admin` would be heavier than the intent ("manage my
+        # own link") and would deny it to the very agents meant to self-serve.
+        # `account_status` reads only the actor's own cleartext state, so it is
+        # a plain `read`.
+        Operation(
+            name="forge.account_link",
+            summary="Link your own forge account by pasting a PAT, stored "
+            "encrypted; upstream writes are then attributed to you.",
+            scope="writeback",
+            mutating=True,
+            params_model=ForgeAccountLinkParams,
+            result_model=ForgeAccountResult,
+            handler=services.link_forge_account,
+            route=HttpRoute("POST", "/forge/accounts"),
+            cli=CliBinding(("forge", "account", "link")),
+        ),
+        Operation(
+            name="forge.account_status",
+            summary="Whether you have linked a forge account, and as whom. "
+            "Never returns the token.",
+            scope="read",
+            mutating=False,
+            params_model=ForgeAccountStatusParams,
+            result_model=ForgeAccountStatusResult,
+            handler=services.status_forge_account,
+            route=HttpRoute("GET", "/forge/accounts"),
+            cli=CliBinding(("forge", "account", "status")),
+        ),
+        Operation(
+            name="forge.account_unlink",
+            summary="Remove your linked forge account; writes fall back to the "
+            "instance file token.",
+            scope="writeback",
+            mutating=True,
+            params_model=ForgeAccountUnlinkParams,
+            result_model=ForgeAccountResult,
+            handler=services.unlink_forge_account,
+            route=HttpRoute("POST", "/forge/accounts/unlink"),
+            cli=CliBinding(("forge", "account", "unlink")),
         ),
         Operation(
             name="forge.actions",

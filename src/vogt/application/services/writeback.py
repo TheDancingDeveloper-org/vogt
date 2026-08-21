@@ -142,7 +142,15 @@ def attempt(
     # The whole write goes through the provider surface now (#175): it owns the
     # key scheme (`number_of`), the append-only verbs, and — being resolved
     # from the project's own `repo_url` — which forge to speak to.
-    provider = provider_for(repo_url, ctx.config)
+    #
+    # Attribution (#179): when the acting actor has linked their own PAT for
+    # this host, speak upstream as *them*; otherwise the instance file token
+    # (FR-S7) is the fallback, which is what every sweep and unlinked actor
+    # uses. A linked actor can write even when the instance has no file token
+    # at all, so the identity is chosen before the "no forge configured" gate,
+    # not after it. Choosing the identity changes none of the policy machinery
+    # below — only whose credential the write lands under.
+    provider, writer_identity = _writer_provider(ctx, actor, repo_url)
     if provider is None:
         return record.model_copy(
             update={"detail": "no forge is configured to write to for this project"}
@@ -174,11 +182,60 @@ def attempt(
     return record.model_copy(
         update={
             "outcome": result.outcome,
-            "detail": result.detail,
+            "detail": _detail_with_identity(result.detail, writer_identity),
             "source_url": result.source_url,
             "subject_key": result.subject_key or subject_key,
         }
     )
+
+
+#: What the ledger records when no actor PAT applied — a sweep, an unlinked
+#: actor, or an instance with linking switched off.
+_FILE_TOKEN_IDENTITY = "instance file token"
+
+
+def _writer_provider(
+    ctx: AppContext, actor: Actor, repo_url: str | None
+) -> tuple[ForgeProvider | None, str]:
+    """Pick the provider a write lands under, and name whose identity it is.
+
+    Prefers the acting actor's linked PAT for the target host — which works
+    even when the instance has no file token — and falls back to the file-token
+    provider (`None` when neither is configured). The actor lookup is skipped
+    entirely when linking is not configured, so an instance with no key pays
+    nothing for the feature.
+    """
+    # A token-less parse to learn the host, so the actor's PAT can be found even
+    # with no file token to build a provider from. GitHub-only in v1, which is
+    # the same ceiling the whole write path already holds.
+    from vogt.adapters.forge import github_identity
+    from vogt.adapters.forge.accounts import account_linking_enabled, load_cipher
+    from vogt.adapters.forge.github import GitHubProvider
+    from vogt.adapters.github.client import GitHubClient
+
+    gh_ref = None if repo_url is None else github_identity().parse(repo_url)
+    if gh_ref is not None and account_linking_enabled(ctx.config):
+        with ctx.declared.read() as view:
+            secret = view.forge_account_secret(actor_id=actor.id, host=gh_ref.host)
+            account = view.forge_account(actor_id=actor.id, host=gh_ref.host)
+        if secret is not None and account is not None:
+            pat = load_cipher(ctx.config).decrypt(secret)
+            client = GitHubClient(token=pat, transport=ctx.forge_transport)
+            return GitHubProvider(client), account.login
+
+    file_provider = provider_for(repo_url, ctx.config, transport=ctx.forge_transport)
+    return file_provider, _FILE_TOKEN_IDENTITY
+
+
+def _detail_with_identity(detail: str | None, writer_identity: str) -> str:
+    """Fold the writing identity into the ledger row's detail.
+
+    Recorded on every non-skipped attempt so `forge actions` shows whether a
+    write went up as an actor or as the file token (#179). Skipped attempts
+    return earlier and keep their policy explanation untouched.
+    """
+    prefix = f"as {writer_identity}"
+    return prefix if detail is None else f"{prefix}; {detail}"
 
 
 # -- operations ------------------------------------------------------------

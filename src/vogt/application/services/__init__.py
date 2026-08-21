@@ -29,6 +29,11 @@ from vogt.application.services.drift_service import (
     list_drift,
     resolve_drift,
 )
+from vogt.application.services.forge_accounts import (
+    link_forge_account,
+    status_forge_account,
+    unlink_forge_account,
+)
 from vogt.application.services.history import list_audit, list_events
 from vogt.application.services.imports import import_project
 from vogt.application.services.inbox import (
@@ -130,6 +135,7 @@ __all__ = [
     "import_project",
     "init_instance",
     "issue_token",
+    "link_forge_account",
     "list_actors",
     "list_audit",
     "list_auth_decisions",
@@ -165,11 +171,13 @@ __all__ = [
     "snooze_inbox",
     "start_session",
     "status",
+    "status_forge_account",
     "stop_session",
     "suppress",
     "sweep",
     "transition_project",
     "transition_work",
+    "unlink_forge_account",
     "unrelate_work",
     "update_project",
     "update_work",

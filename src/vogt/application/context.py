@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from vogt.adapters.engine import EngineClient
 from vogt.adapters.git import Cloner, clone_repository
+from vogt.adapters.github.client import Transport
 from vogt.application.identity import PublicIdentity, identity_from_config
 from vogt.config import VogtConfig, load_config
 from vogt.core.clock import Clock, utc_now
@@ -42,6 +43,12 @@ class AppContext:
     #: `None` is not an outage: the `session.*` operations say no engine is
     #: configured, and every other operation is unaffected.
     engine: EngineClient | None = None
+    #: How the forge is spoken to, or `None` for the real network. Injectable
+    #: for the same reason the cloner and engine are: linking a per-actor PAT
+    #: validates it against the forge, and the write path builds a provider
+    #: from a linked PAT — both would otherwise reach GitHub, which a test
+    #: cannot depend on (#179). `None` is the deployed shape.
+    forge_transport: Transport | None = None
     #: Where a client should reach this instance (FR-A8). Defaults to what the
     #: configuration says, which is the whole answer when this process is the
     #: door. Behind a front door the adapter resolves it per request from what
@@ -60,6 +67,7 @@ def build_context(
     cloner: Cloner = clone_repository,
     engine: EngineClient | None = None,
     public_identity: PublicIdentity | None = None,
+    forge_transport: Transport | None = None,
 ) -> AppContext:
     """Build a context over the SQLite backend.
 
@@ -92,6 +100,7 @@ def build_context(
         clock=clock,
         id_factory=id_factory,
         cloner=cloner,
+        forge_transport=forge_transport,
         # Injectable for the same reason the cloner is: a use-case that talks
         # to another process over HTTP is one the suite could otherwise only
         # exercise by running that process.
