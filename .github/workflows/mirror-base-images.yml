@@ -96,7 +96,17 @@ permissions:
 concurrency:
   # Never cancelled: an interrupted copy leaves a reference unmirrored, and
   # the next build is the thing that discovers it.
-  group: mirror-base-images
+  #
+  # Per ref, because one global group is shared by the standalone push runs
+  # *and* by every `workflow_call` from `build.yml` and `release.yml`. A
+  # pending run is evicted when a newer one joins its group whatever
+  # `cancel-in-progress` says, so another branch's push could cancel the
+  # `needs: base-images` prerequisite of a build already under way — turning
+  # this job's whole purpose, "no build starts against an unmirrored
+  # reference", into the thing that fails the build. Copies are idempotent
+  # (skipped when the digest is already in GHCR), so concurrent runs across
+  # refs are safe.
+  group: mirror-base-images-${{ github.ref }}
   cancel-in-progress: false
 
 env:

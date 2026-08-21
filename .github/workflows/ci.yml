@@ -44,7 +44,11 @@ concurrency:
   # Keying by SHA means no two pushed commits ever share a group, so none can
   # supersede another. It costs runner time on a burst — every commit is
   # checked, which is the point.
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  # The ref is in the key too, for the reason `build.yml` records at length:
+  # `dev` and `main` carry the same commit once a release fast-forwards, so a
+  # SHA-only group let one branch's push evict the other's pending run — and a
+  # push run that never happens is a commit NFR-C1's path gating never checks.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event.pull_request.number || github.sha }}
   # Why any of this matters: NFR-C1's path gating classifies a push by
   # `before..sha`, so each commit is checked by exactly one run and no later
   # run ever looks at it again. Lose that run and those files are not

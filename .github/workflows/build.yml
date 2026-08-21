@@ -99,7 +99,21 @@ concurrency:
   # another — the same reasoning `ci.yml` already records, and for the same
   # reason. It costs runner time on a burst, which is what the capacity freed
   # by lifting the runners' four-core cap is for.
-  group: build-${{ github.sha }}
+  #
+  # The ref is in the key *as well*, and by SHA alone this is wrong now.
+  # Releases move `dev` → `main` → `prod` by fast-forward, so all three refs
+  # carry the identical commit and a SHA-only group put three different
+  # streams in one. It is not hypothetical: pushing `main` during the prod
+  # cutover cancelled `dev`'s build of the same commit, and `cancel-in-progress`
+  # did not save it — that setting governs runs already *in progress*, while a
+  # still-*pending* run is evicted whenever a newer run joins its group,
+  # always. On a small self-hosted pool almost every run is pending for a
+  # while. `ci.yml` records finding the same hole the same way.
+  #
+  # Each stream builds its own images (`dev-`, `sha-`, `prod-`), so a build
+  # cancelled by a sibling ref is an image that never exists — which for
+  # `prod` means nothing for `indexarr/ops` to pin.
+  group: build-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
