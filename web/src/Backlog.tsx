@@ -609,6 +609,12 @@ const Backlog: Component<Props> = (props) => {
 
   const entries = createMemo<RankedEntry[]>(() => view()?.items ?? []);
 
+  // The #183 link-or-publish CTA: a project scope whose server answer says
+  // "unlinked" has no backlog — the items are empty because linking or
+  // publishing is the way forward, not because there is nothing to do.
+  const scopeUnlinked = createMemo(() => view()?.link_state === "unlinked");
+  const unlinkedPending = createMemo(() => view()?.excluded_unlinked ?? 0);
+
   /**
    * FR-U14's workflow-state filter, applied here rather than in the query.
    *
@@ -1704,6 +1710,25 @@ const Backlog: Component<Props> = (props) => {
             </button>
           </div>
         )}
+      </Show>
+
+      <Show when={!outage() && scopeUnlinked()}>
+        <div class="board-banner board-banner--candidates" role="note">
+          <strong>
+            This project is not linked to a forge, so it has no backlog.
+          </strong>
+          <span class="board-banner-detail">
+            Link or publish this project to track work upstream: pick its
+            repository from <a href="#/projects">Projects</a> (import or{" "}
+            <code>forge link</code>), or create one with{" "}
+            <code>forge publish</code>.
+            {unlinkedPending() > 0
+              ? ` ${unlinkedPending()} existing native ${
+                  unlinkedPending() === 1 ? "item" : "items"
+                } will migrate upstream when you do.`
+              : ""}
+          </span>
+        </div>
       </Show>
 
       <Show when={!outage()}>

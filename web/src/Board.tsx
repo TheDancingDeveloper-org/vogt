@@ -806,6 +806,11 @@ const Board: Component<Props> = (props) => {
   // client-side, it only reports the gap the server measured.
   const [backlogCandidates, setBacklogCandidates] = createSignal<number | null>(null);
   const [declaredTotal, setDeclaredTotal] = createSignal<number | null>(null);
+  // The #183 link-or-publish CTA: "unlinked" on a project scope means the
+  // project has no work surface yet — the server sends empty cells plus this
+  // marker, and the count of native items a link/publish would migrate.
+  const [scopeUnlinked, setScopeUnlinked] = createSignal(false);
+  const [unlinkedPending, setUnlinkedPending] = createSignal(0);
   const [cellPages, setCellPages] = createSignal<Map<string, CellPageState>>(new Map());
   const [columnTotals, setColumnTotals] = createSignal<Record<string, number>>({});
   const [laneTotals, setLaneTotals] = createSignal<Record<string, number>>({});
@@ -1080,6 +1085,10 @@ const Board: Component<Props> = (props) => {
       );
       setDeclaredTotal(
         typeof answer.declared_total === "number" ? answer.declared_total : null,
+      );
+      setScopeUnlinked(answer.link_state === "unlinked");
+      setUnlinkedPending(
+        typeof answer.excluded_unlinked === "number" ? answer.excluded_unlinked : 0,
       );
       setColumnTotals(answer.column_totals ?? {});
       setLaneTotals(answer.lane_totals ?? {});
@@ -1979,6 +1988,25 @@ const Board: Component<Props> = (props) => {
 
       <Show when={ack()}>
         {(message) => <div class="board-banner board-banner--ok">{message()}</div>}
+      </Show>
+
+      <Show when={scopeUnlinked()}>
+        <div class="board-banner board-banner--candidates" role="note">
+          <strong>
+            This project is not linked to a forge, so it has no Board.
+          </strong>
+          <span class="board-banner-detail">
+            Link or publish this project to track work upstream: pick its
+            repository from <a href="#/projects">Projects</a> (import or{" "}
+            <code>forge link</code>), or create one with{" "}
+            <code>forge publish</code>.
+            {unlinkedPending() > 0
+              ? ` ${unlinkedPending()} existing native ${
+                  unlinkedPending() === 1 ? "item" : "items"
+                } will migrate upstream when you do.`
+              : ""}
+          </span>
+        </div>
       </Show>
 
       <Show when={candidateGap()}>

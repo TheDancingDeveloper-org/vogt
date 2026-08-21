@@ -254,6 +254,19 @@ export interface BoardListResult {
   backlog_candidates?: number;
   /** The declared-only slice of `backlog_candidates` — the population the rail counts. */
   declared_total?: number;
+  /**
+   * Set for a project scope (#183): "unlinked" is the machine-readable
+   * link-or-publish CTA — the cells are empty because the project has no
+   * work surface yet, not because there is nothing to do. Null/absent on
+   * the global Board and on older servers.
+   */
+  link_state?: "linked" | "unlinked" | null;
+  /**
+   * Declared rows excluded because their project is unlinked (#183's
+   * withdrawal); on an unlinked project scope, the open native items a
+   * link or publish would migrate.
+   */
+  excluded_unlinked?: number;
   snapshot: string;
   snapshot_at: string;
   revision: number;
@@ -287,6 +300,18 @@ export interface RankedView {
   declared?: number;
   observed?: number;
   suppressed?: number;
+  /**
+   * Set for a project scope (#183): "unlinked" is the machine-readable
+   * link-or-publish CTA — empty items because the project has no work
+   * surface yet. Null/absent on the global view and on older servers.
+   */
+  link_state?: "linked" | "unlinked" | null;
+  /**
+   * Native declared items excluded because their project is unlinked
+   * (#183); on an unlinked project scope, the count a link or publish
+   * would migrate upstream.
+   */
+  excluded_unlinked?: number;
   scope?: string | null;
   freshness: FreshnessSummary;
 }
@@ -541,7 +566,13 @@ export const listWorkflows = () =>
 export const listWork = (
   params: Record<string, unknown> = {},
   signal?: AbortSignal,
-) => call<{ items: WorkItem[]; total?: number }>("work.list", params, "GET", signal);
+) =>
+  call<{
+    items: WorkItem[];
+    total?: number;
+    /** "unlinked" on a project scope is the #183 link-or-publish marker. */
+    link_state?: "linked" | "unlinked" | null;
+  }>("work.list", params, "GET", signal);
 
 export const listBoard = (params: Record<string, unknown>, signal?: AbortSignal) =>
   call<BoardListResult>("board.list", params, "POST", signal);

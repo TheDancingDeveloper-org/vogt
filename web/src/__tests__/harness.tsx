@@ -89,6 +89,8 @@ function boardFromWork(handler: Handler): Handler {
       total?: number;
       backlog_candidates?: number;
       declared_total?: number;
+      link_state?: string | null;
+      excluded_unlinked?: number;
     };
     const body = call.body ?? {};
     const laneMode = String(body.lane_mode ?? "none");
@@ -143,6 +145,10 @@ function boardFromWork(handler: Handler): Handler {
         // `/board/list` directly with a larger `backlog_candidates`.
         backlog_candidates: work.backlog_candidates ?? work.total ?? items.length,
         declared_total: work.declared_total ?? work.total ?? items.length,
+        // The #183 link-or-publish marker rides through unchanged, so a
+        // fixture can describe an unlinked project scope.
+        link_state: work.link_state ?? null,
+        excluded_unlinked: work.excluded_unlinked ?? 0,
         snapshot: String(body.snapshot ?? "test-board-snapshot"),
         snapshot_at: "2026-08-17T10:01:00Z",
         revision: 1,
