@@ -1534,6 +1534,34 @@ def test_the_engine_pins_every_npm_global_it_installs() -> None:
                 )
 
 
+@pytest.mark.skipif(
+    not (REPO_ROOT / "engine" / "Dockerfile").is_file(),
+    reason="the core-alone job (NFR-Q6) deletes engine/; this reads its Dockerfile",
+)
+def test_the_pinned_agent_cli_cannot_update_past_its_pin() -> None:
+    """A pin the tool can walk past at runtime is not a pin (#196).
+
+    Claude Code checks for a newer release on startup. It cannot overwrite the
+    install it runs — `/usr/local`, root-owned, pod runs as `sprooty` — so it
+    writes the update to `NPM_CONFIG_PREFIX`, which is the *persisted*
+    `~/.npm-global`. PATH prefers `/usr/local/bin`, so the update never takes
+    effect and is redone every boot: an unpinned copy accumulating on the data
+    volume, one PATH-ordering change from winning. Observed live on `vogt-dev`
+    — pinned 2.1.236 in the image, 2.1.238 written to the volume minutes after
+    boot — and that ordering has failed before (`Dockerfile.pod` records a
+    theclawbay-managed `codex` shadowing the system wrapper on 2026-07-31).
+
+    `DISABLE_UPDATES` and not `DISABLE_AUTOUPDATER`: the latter stops the
+    background check while leaving `claude update` free to fork the image's
+    version anyway, and here the image is the statement of what runs (NFR-C3).
+    """
+    text = (REPO_ROOT / "engine" / "Dockerfile").read_text("utf-8")
+    assert re.search(r"^ENV\s+DISABLE_UPDATES=1\s*$", text, re.MULTILINE), (
+        "engine/Dockerfile must set DISABLE_UPDATES=1, or the pinned agent CLI "
+        "re-installs itself into the persisted $HOME on every boot (#196)"
+    )
+
+
 def test_latest_moves_only_on_a_semver_tag() -> None:
     """NFR-C3: a commit build never moves `latest`; a release does.
 

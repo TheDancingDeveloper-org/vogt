@@ -247,6 +247,28 @@ RUN pkgs=""; \
         && ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex ; \
     fi
 
+# The pin above is the contract, so the CLI must not undo it at runtime (#196).
+#
+# Claude Code checks for a newer release on startup. It cannot replace the
+# install it is running — that lives in `/usr/local`, owned by root, and the
+# pod runs as `sprooty` — so instead it writes the update to whatever
+# `NPM_CONFIG_PREFIX` names, which is the *persisted* `~/.npm-global`. PATH
+# puts `/usr/local/bin` first, so the update never takes effect and the CLI
+# does it again on the next boot: an unpinned second copy accumulating on the
+# data volume, forever, one PATH-ordering change away from winning. That
+# ordering has already failed once — `Dockerfile.pod` records a theclawbay-
+# managed `~/.npm-global/bin/codex` shadowing the system wrapper on
+# 2026-07-31 — and `2.1.236` is pinned precisely because `2.1.237` shipped a
+# broken `claude.exe` (#147, #148). An updater free to walk past that pin is
+# the same exposure with no gate.
+#
+# `DISABLE_UPDATES` rather than `DISABLE_AUTOUPDATER`: the latter stops the
+# background check but leaves `claude update` able to fork the image's version
+# anyway. Here the image *is* the statement of what runs (NFR-C3), so every
+# update path is closed and a new version arrives the way every other pinned
+# dependency does — by editing the ARG above and rebuilding.
+ENV DISABLE_UPDATES=1
+
 # Cadastre is a separate product. The private estate can opt into its bridge,
 # but neither a normal engine build nor the public core image installs it — so
 # it is gated here rather than baked into the shared pod base, whose `lean`

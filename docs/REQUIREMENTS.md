@@ -1489,6 +1489,46 @@ front-door token's reach over `/api/assistant/*` are all confirmed working
 against a live deployment (#194). The 401 that a CLI token saw on those routes
 is a property of that token's capability set, not a defect.
 
+### Revision r27 — a pinned tool may not update itself past its pin
+
+*2026-08-21 (#196). The image pins the agent CLIs, and one of them was
+re-installing a newer copy of itself on every boot. The pin held; what it did
+not cover was the tool's own updater.*
+
+`engine/Dockerfile` pins `@anthropic-ai/claude-code`, `@openai/codex` and
+`theclawbay`, and `test_the_engine_pins_every_npm_global_it_installs` enforces
+that at build. Claude Code, however, checks for a newer release at startup. It
+cannot overwrite the install it is running — that lives in `/usr/local`, owned
+by root, while the pod runs as `sprooty` — so it writes the update to whatever
+`NPM_CONFIG_PREFIX` names, which is the **persisted** `~/.npm-global`. PATH
+puts `/usr/local/bin` first, so the update never takes effect, so it happens
+again on the next boot.
+
+Observed live on `vogt-dev`: pinned `2.1.236` in the image, `2.1.238` written
+to the data volume seven minutes after boot, both on PATH, the pinned one
+winning. Nothing was broken and nothing was red — the cost was a wasted install
+per boot and a second, unpinned copy accumulating on a volume that outlives
+every redeploy.
+
+Two things make that worth closing rather than tolerating. The ordering that
+saves it **has already failed**: `engine/Dockerfile.pod` records a
+theclawbay-managed `~/.npm-global/bin/codex` shadowing the system wrapper on
+2026-07-31. And the pin exists *because* an unpinned release broke the build —
+`2.1.237` shipped `bin/claude.exe` as a shell stub (#147, #148). An updater
+free to walk past the pin is that same exposure with the gate removed.
+
+**The image now sets `DISABLE_UPDATES=1`.** Not `DISABLE_AUTOUPDATER`, which
+stops the background check but leaves `claude update` able to fork the image's
+version by hand: here the image *is* the statement of what runs (NFR-C3), so
+every update path is closed and a new version arrives the way every other
+pinned dependency does — by editing the ARG and rebuilding. A guard in
+`tests/test_deploy.py` keeps it that way.
+
+The general rule this states: **a tool the image pins must not be able to
+change its own version at runtime.** Where a tool offers no way to disable its
+updater, the honest options are to stop shipping it pinned or to make its
+install directory unwritable — not to rely on PATH order.
+
 ## 1. Functional requirements
 
 ### FR-P — Projects & per-repo view
