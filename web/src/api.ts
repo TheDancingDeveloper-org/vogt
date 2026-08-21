@@ -587,6 +587,40 @@ export const api = {
     req<AssistantReasonPreview>("PATCH", `/api/assistant/actions/${id}`, { reason }),
   assistantHistory: () => req<AssistantHistory>("GET", "/api/assistant/history"),
   assistantReset: () => req<OkResponse>("POST", "/api/assistant/reset"),
+  /**
+   * Server-side STT (FR-T12): upload captured audio, get text back. Used by a
+   * client with no on-device recognizer. Throws `ApiError` with `status: 404`
+   * when the route is unconfigured, which the caller reads as "fall back"
+   * (FR-T6) — audio is proxied, never stored.
+   */
+  assistantStt: async (audio: Blob): Promise<{ text: string }> => {
+    const form = new FormData();
+    // The engine forwards the first file-bearing field regardless of name; the
+    // filename's extension hints the provider at the container.
+    form.append("file", audio, "take.webm");
+    const res = await fetch(`${getBase()}/api/assistant/stt`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: form,
+    });
+    const text = await res.text();
+    if (!res.ok) throw new ApiError(res.status, text);
+    return text ? (JSON.parse(text) as { text: string }) : { text: "" };
+  },
+  /**
+   * Server-side TTS (FR-T12): send reply text, get an audio blob to play. Used
+   * by a client with no on-device synthesis. Throws `ApiError` with
+   * `status: 404` when unconfigured, so the caller falls back (FR-T6).
+   */
+  assistantTts: async (text: string): Promise<Blob> => {
+    const res = await fetch(`${getBase()}/api/assistant/tts`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) throw new ApiError(res.status, await res.text());
+    return res.blob();
+  },
   sessionInput: (id: string, text: string, submit = false) =>
     req<OkResponse>("POST", `/api/sessions/${id}/input`, { text, submit }),
 
@@ -616,6 +650,14 @@ export interface PublicConfig {
   session_templates?: SessionTemplate[];
   /** True when the server has an assistant backend key provisioned. */
   assistant_enabled?: boolean;
+  /**
+   * Whether the server-side speech routes are configured (FR-T12). A client
+   * with no on-device recognizer/synthesis uses them as its speech path, and
+   * these flags let it choose that path by capability rather than by provoking
+   * a 404. Presence only — never a key or a base URL.
+   */
+  assistant_stt_enabled?: boolean;
+  assistant_tts_enabled?: boolean;
   /**
    * Whether this front door has a vogt-core behind it, and where its surfaces
    * are mounted. Presence only — never a token. Read before offering a Vogt
