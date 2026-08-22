@@ -65,6 +65,10 @@ interface PlaceMetricFixtures {
   /** Items per board cell page; 0 or absent serves the whole cell at once. */
   boardPageSize?: number;
   backlogItems?: Record<string, unknown>[];
+  /** The workflows the board reads its columns and legal edges from. */
+  workflows?: Record<string, unknown>[];
+  /** The project registry, so a test can seed more than one swimlane. */
+  projects?: { slug: string; name: string; root_path?: string }[];
 }
 
 async function installFixtures(
@@ -87,6 +91,7 @@ async function installFixtures(
   };
   let inboxCalls = 0;
   const boardRequests: Record<string, unknown>[] = [];
+  const transitionRequests: Record<string, unknown>[] = [];
   const sessionInputs: { id: string; text: string; submit: boolean }[] = [];
   const sessions = [...initialSessions];
   let createdSessions = 0;
@@ -182,6 +187,16 @@ async function installFixtures(
     return route.fulfill({ json: tree });
   });
   await page.route("**/api/tasks**", async (route) => route.fulfill({ json: [] }));
+  // The shell's places rail and assistant poll the engine on mount. Left
+  // unstubbed they reach whatever backend sits behind the dev proxy, and a
+  // 401 from it flips the whole app to the login gate mid-test — so answer
+  // them with benign, empty engine state.
+  await page.route("**/api/git/status**", async (route) => route.fulfill({ json: {
+    repo: "", is_repo: false, branch: "", ahead: 0, behind: 0, entries: [],
+  } }));
+  await page.route("**/api/assistant/history**", async (route) => route.fulfill({ json: {
+    transcript: [],
+  } }));
   await page.route("**/api/vogt/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -196,18 +211,39 @@ async function installFixtures(
       return route.fulfill({ json: { entry: { ...inboxEntry, triage_state: "archived" } } });
     }
     if (url.pathname.endsWith("/workflows")) {
-      return route.fulfill({ json: { workflows: [{ kind: "feature", initial_state: "open", states: ["open", "done"], transitions: { open: ["done"], done: [] } }] } });
+      return route.fulfill({ json: { workflows: metrics.workflows ?? [{ kind: "feature", initial_state: "open", states: ["open", "done"], transitions: { open: ["done"], done: [] } }] } });
+    }
+    if (url.pathname.endsWith("/work/transition")) {
+      const body = request.postDataJSON() as { ref: string; to_state: string; reason: string };
+      transitionRequests.push(body as Record<string, unknown>);
+      const source = (metrics.boardItems ?? boardItems).find((item) => item.ref === body.ref) ?? boardItems[0];
+      return route.fulfill({ json: {
+        item: { ...source, ref: body.ref, state: body.to_state, updated_at: "2026-08-17T11:00:00Z" },
+      } });
     }
     if (url.pathname.endsWith("/board/list")) {
       if (metrics.boardTotal === null) return route.fulfill({ status: 503, body: "work unavailable" });
       const body = request.postDataJSON() as {
         cells?: { lane_key?: string; state?: string; cursor?: string }[];
+        lane_mode?: string;
       };
       boardRequests.push(body as Record<string, unknown>);
       const fixtureItems = metrics.boardItems ?? boardItems;
       const page = metrics.boardPageSize ?? 0;
+      // Which swimlane an item belongs to, so a lane's cell carries only its
+      // own cards (#216 needs two lanes that do not share their contents).
+      const laneMode = body.lane_mode ?? "none";
+      const laneOf = (item: Record<string, unknown>) =>
+        laneMode === "project"
+          ? String(item.project_slug ?? "")
+          : laneMode === "initiative"
+            ? String(item.initiative_id ?? "")
+            : "";
       const cells = (body.cells ?? []).map((cell) => {
-        const all = fixtureItems.filter((item) => item.state === cell.state);
+        const all = fixtureItems.filter(
+          (item) =>
+            item.state === cell.state && laneOf(item) === (cell.lane_key ?? ""),
+        );
         // A bounded cell: the first page carries a cursor, and the request
         // that returns with it gets the rest (NFR-S5, #63).
         const items = page > 0
@@ -221,13 +257,18 @@ async function installFixtures(
           next_cursor: page > 0 && !cell.cursor && all.length > page ? "cursor-1" : null,
         };
       });
+      const columnTotals: Record<string, number> = {};
+      const laneTotals: Record<string, number> = {};
+      for (const item of fixtureItems) {
+        const state = String(item.state ?? "");
+        columnTotals[state] = (columnTotals[state] ?? 0) + 1;
+        const lane = laneOf(item);
+        laneTotals[lane] = (laneTotals[lane] ?? 0) + 1;
+      }
       return route.fulfill({ json: {
         cells,
-        column_totals: {
-          open: fixtureItems.filter((item) => item.state === "open").length,
-          done: fixtureItems.filter((item) => item.state === "done").length,
-        },
-        lane_totals: { "": fixtureItems.length },
+        column_totals: columnTotals,
+        lane_totals: laneTotals,
         total: metrics.boardTotal,
         snapshot: "browser-board-snapshot",
         snapshot_at: "2026-08-17T10:01:00Z",
@@ -248,8 +289,9 @@ async function installFixtures(
     }
     if (url.pathname.endsWith("/projects")) {
       if (metrics.projectsTotal === null) return route.fulfill({ status: 503, body: "projects unavailable" });
+      const projects = metrics.projects ?? [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }];
       return route.fulfill({ json: {
-      projects: [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }],
+      projects,
       total: metrics.projectsTotal,
       } });
     }
@@ -295,7 +337,7 @@ async function installFixtures(
     }
     return route.fulfill({ json: {} });
   });
-  return { inboxCalls: () => inboxCalls, boardRequests, sessions, sessionInputs };
+  return { inboxCalls: () => inboxCalls, boardRequests, transitionRequests, sessions, sessionInputs };
 }
 
 test("History palette results restore the selected session, query and match", async ({ page }) => {
@@ -407,6 +449,130 @@ test("Board dragover/drop uses the real browser gesture and keeps its filter on 
   await expect(
     page.getByRole("group", { name: "Board filters", exact: true }),
   ).toBeVisible();
+});
+
+// #214: a coarse pointer cannot drag and cannot see the Shift+Arrow hint, so
+// the "Move…" control is its only way to move a card. It opens the same
+// composer a drag does, with a state select in place of the drop cell a tap
+// never lands on — and the move it commits is an ordinary `work.transition`.
+test("Phone Board moves a card by tapping Move… and choosing a state", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The touch move control is the coarse-pointer path (#214)");
+  const fixture = await installFixtures(page, {}, [], undefined, {
+    boardItems: [{ ...boardItems[0], ref: "WI-7", title: "Phone move card", state: "open" }],
+    workflows: [{
+      kind: "feature",
+      initial_state: "open",
+      states: ["open", "in_progress", "done"],
+      transitions: { open: ["in_progress", "done"], in_progress: ["done"], done: [] },
+    }],
+  });
+  await page.goto("/#/board?project=vogt");
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+  const card = page.locator(".board-card").filter({ hasText: "Phone move card" });
+  await expect(card).toBeVisible();
+
+  // The control is revealed only by `pointer: coarse`, which is the mobile
+  // emulation's reported pointer — a desk browser never shows it.
+  const move = card.getByRole("button", { name: "Move WI-7" });
+  await expect(move).toBeVisible();
+  // A tap target with real height, not a bare text link.
+  const moveBox = await move.boundingBox();
+  expect(moveBox!.height).toBeGreaterThanOrEqual(24);
+
+  await move.click();
+  // The composer opens in the card's own column — the one a phone can see —
+  // rather than in a target column off screen.
+  const composer = page.locator(".board-composer");
+  await expect(composer).toBeVisible();
+  const select = composer.locator(".board-composer-state select");
+  await expect(select).toBeVisible();
+  // It offers exactly the workflow's listed edges from `open`, in order.
+  await expect(select.locator("option")).toHaveText(["in progress", "done"]);
+  // And it stays inside the phone viewport instead of overflowing it.
+  const selectBox = await select.boundingBox();
+  const viewport = page.viewportSize()!;
+  expect(selectBox!.x).toBeGreaterThanOrEqual(0);
+  expect(selectBox!.x + selectBox!.width).toBeLessThanOrEqual(viewport.width + 1);
+
+  // The open composer is a new visual on the phone; keep a reviewed baseline.
+  await expect(composer).toHaveScreenshot("board-move-composer.png");
+
+  // Choose a state that is not the default first edge, give the reason the
+  // write requires, and confirm.
+  await select.selectOption("done");
+  await composer.locator("textarea").fill("closing it from my phone");
+  await composer.getByRole("button", { name: "Move", exact: true }).click();
+
+  // Exactly the chosen transition was sent — no drag, no drop cell — and the
+  // board says the move landed.
+  await expect.poll(() => fixture.transitionRequests).toEqual([
+    { ref: "WI-7", to_state: "done", reason: "closing it from my phone" },
+  ]);
+  await expect(page.getByText("WI-7 moved to done.")).toBeVisible();
+});
+
+// #216: dropping a card into another lane of its own column changes only the
+// swimlane, which a drag cannot do. The cell is never offered as a target and,
+// when a drop lands there anyway, it says why rather than doing nothing.
+test("Board explains a same-column, other-lane drop instead of swallowing it", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The lane-drop hint is a desktop drag gesture (#216)");
+  const fixture = await installFixtures(page, {}, [], undefined, {
+    boardTotal: 2,
+    projects: [
+      { slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" },
+      { slug: "beta", name: "Beta", root_path: "/workspace/beta" },
+    ],
+    boardItems: [
+      { ...boardItems[0], ref: "WI-7", title: "Vogt lane card", state: "open", project_slug: "vogt" },
+      { ...boardItems[0], ref: "WI-8", title: "Beta lane card", state: "open", project_slug: "beta" },
+    ],
+  });
+  await page.goto("/#/board?lanes=project");
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+  const vogtCard = page.locator(".board-card").filter({ hasText: "Vogt lane card" });
+  const betaCard = page.locator(".board-card").filter({ hasText: "Beta lane card" });
+  await expect(vogtCard).toBeVisible();
+  await expect(betaCard).toBeVisible();
+
+  // Two swimlanes are two rows: the cards share the `open` column but sit at
+  // different heights, which is the arrangement the drop is about to conflate.
+  const vogtBox = await vogtCard.boundingBox();
+  const betaBox = await betaCard.boundingBox();
+  expect(Math.abs(vogtBox!.y - betaBox!.y)).toBeGreaterThan(20);
+
+  // The Beta lane's own `open` cell — where WI-8 lives — differs from the
+  // dragged card's source only by lane.
+  const betaOpen = page.locator('.board-cell[data-state="open"]', {
+    has: page.getByText("Beta lane card"),
+  });
+  // A native HTML5 drag with one shared DataTransfer, dispatched on the real
+  // nodes: the board's move is a drag/drop, and this is the gesture a reader
+  // makes — carried through to the `drop` the cell handles.
+  await page.evaluate(() => {
+    const cardOf = (text: string) =>
+      [...document.querySelectorAll<HTMLElement>(".board-card")].find((node) =>
+        node.textContent?.includes(text),
+      )!;
+    const source = cardOf("Vogt lane card");
+    const target = cardOf("Beta lane card").closest<HTMLElement>(".board-cell")!;
+    const dataTransfer = new DataTransfer();
+    source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer }));
+    target.dispatchEvent(new DragEvent("dragover", { bubbles: true, dataTransfer }));
+    target.dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer }));
+    source.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer }));
+  });
+
+  // The drop is a no-op with the reason left on screen: no composer opened and
+  // no transition was requested.
+  await expect(
+    betaOpen.getByText(
+      "Lanes group cards; to change the project/initiative open the item",
+    ),
+  ).toBeVisible();
+  await expect(betaOpen.locator(".board-composer")).toHaveCount(0);
+  expect(fixture.transitionRequests).toEqual([]);
+  // The card never left its lane.
+  await expect(betaOpen.filter({ has: page.getByText("Vogt lane card") })).toHaveCount(0);
 });
 
 /**

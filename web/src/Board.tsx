@@ -705,6 +705,13 @@ interface PendingMove {
   laneKey: string;
   reason: string;
   phase: "reason" | "saving";
+  /**
+   * Opened by the touch "Move…" control rather than a drag or a Shift+Arrow.
+   * A pick composer carries a state `<select>` (there was no drop cell to name
+   * the target) and draws in the card's *own* cell, so a coarse pointer that
+   * cannot drag still has one place to move a card from — the cell it can see.
+   */
+  pick?: boolean;
 }
 
 interface CellPageState {
@@ -831,6 +838,14 @@ const Board: Component<Props> = (props) => {
 
   const [dragRef, setDragRef] = createSignal<string | null>(null);
   const [dragOver, setDragOver] = createSignal<string | null>(null);
+  /**
+   * The cell where a drag was dropped that changed only the lane, not the
+   * state (#216). `beginMove` refuses a same-state move, so the drop would
+   * otherwise do nothing without saying why — this keeps the explanation on
+   * screen after the pointer has let go. Keyed by the same `dropKey` the
+   * cells use, and cleared the moment a fresh drag starts.
+   */
+  const [laneHint, setLaneHint] = createSignal<string | null>(null);
   const [pending, setPending] = createSignal<PendingMove | null>(null);
   const [refusal, setRefusal] = createSignal<Refusal | null>(null);
   const [ack, setAck] = createSignal<string | null>(null);
@@ -1422,10 +1437,12 @@ const Board: Component<Props> = (props) => {
     return ordered;
   });
 
-  /** Where a card is drawn: the server's state, unless a drop is unsaved. */
+  /** Where a card is drawn: the server's state, unless a drop is unsaved. A
+   *  pick composer (touch) leaves the card in its own cell — the target is not
+   *  chosen until the select settles — so it does not relocate the card. */
   const displayState = (item: WorkItem): string => {
     const move = pending();
-    return move && move.ref === item.ref ? move.to : item.state;
+    return move && !move.pick && move.ref === item.ref ? move.to : item.state;
   };
 
   /**
@@ -1443,7 +1460,11 @@ const Board: Component<Props> = (props) => {
   const placement = createMemo<{ ref: string; to: string } | null>(
     () => {
       const move = pending();
-      return move ? { ref: move.ref, to: move.to } : null;
+      // A pick move keeps the card where it is until it commits: the composer
+      // is drawn in the card's own cell, so relocating the card would take it
+      // off screen on a phone (its target column is not drawn) exactly while
+      // the reader is choosing where it goes.
+      return move && !move.pick ? { ref: move.ref, to: move.to } : null;
     },
     null,
     {
@@ -1463,7 +1484,9 @@ const Board: Component<Props> = (props) => {
   const columnCount = (state: string) => {
     const base = columnTotals()[state] ?? 0;
     const move = pending();
-    if (!move || move.from === move.to) return base;
+    // A pick move has not relocated the card (see `placement`), so the counts
+    // it would imply have not happened yet either.
+    if (!move || move.pick || move.from === move.to) return base;
     return base + (move.to === state ? 1 : 0) - (move.from === state ? 1 : 0);
   };
 
@@ -1483,6 +1506,20 @@ const Board: Component<Props> = (props) => {
     const workflow = (workflows() ?? []).find((one) => one.kind === item.kind);
     if (!workflow) return null;
     return new Set(edgesOf(workflow)[item.state] ?? []);
+  });
+
+  /** The workflow's listed target states for an item's current state — what the
+   *  touch composer's `<select>` offers, in the machine's own order. */
+  const moveTargets = (item: WorkItem): string[] => {
+    const workflow = (workflows() ?? []).find((one) => one.kind === item.kind);
+    if (!workflow) return [];
+    return edgesOf(workflow)[item.state] ?? [];
+  };
+
+  /** The card being dragged, resolved once for every cell to read. */
+  const draggingItem = createMemo(() => {
+    const moving = dragRef();
+    return moving ? (itemByRef().get(moving) ?? null) : null;
   });
 
   const writesDisabled = createMemo(() => outage() !== null);
@@ -1508,6 +1545,23 @@ const Board: Component<Props> = (props) => {
       reason: stickyReason(),
       phase: "reason",
     });
+  };
+
+  /**
+   * Open the move composer from the touch "Move…" control (#214).
+   *
+   * There is no drop cell to name the target, so it opens on the first listed
+   * edge and hands the reader a `<select>` of the rest. It reuses `beginMove`
+   * whole — the same guards, the same pending shape, the same `commitMove` —
+   * and only marks the result a `pick` so the composer knows to draw the
+   * select and stay in the card's own cell.
+   */
+  const beginMovePick = (item: WorkItem) => {
+    const first = moveTargets(item)[0];
+    if (!first) return; // a state with no listed edge has nowhere to go.
+    beginMove(item, first);
+    const open = pending();
+    if (open && open.ref === item.ref) setPending({ ...open, pick: true });
   };
 
   const cancelMove = () => {
@@ -2499,11 +2553,15 @@ const Board: Component<Props> = (props) => {
 
                           const move = createMemo(() => {
                             const current = pending();
-                            return current &&
-                              current.to === column.state &&
-                              current.laneKey === lane.key
-                              ? current
-                              : null;
+                            if (!current || current.laneKey !== lane.key) return null;
+                            // A drag/keyboard move draws its composer in the
+                            // target column; a pick (touch) move draws in the
+                            // card's own column, because that is the one a
+                            // coarse pointer can see and the card has not left.
+                            const here = current.pick
+                              ? current.from === column.state
+                              : current.to === column.state;
+                            return here ? current : null;
                           });
                           const refused = createMemo(() => {
                             const current = refusal();
@@ -2517,10 +2575,33 @@ const Board: Component<Props> = (props) => {
                             const legal = legalTargets();
                             return legal !== null && !legal.has(column.state);
                           });
+                          // #216: this cell is the same state as the card being
+                          // dragged but a different lane. A drop here changes
+                          // only the grouping, which a drag cannot do — so it is
+                          // never a drop *target* (no highlight, below) and,
+                          // when hovered or dropped on, it says why.
+                          const sameStateOtherLane = createMemo(() => {
+                            const dragged = draggingItem();
+                            return (
+                              dragged !== null &&
+                              dragged.state === column.state &&
+                              laneOf(dragged).key !== lane.key
+                            );
+                          });
+                          const laneOnly = createMemo(
+                            () =>
+                              (dragOver() === dropKey && sameStateOtherLane()) ||
+                              laneHint() === dropKey,
+                          );
                           return (
                             <div
                               class={`board-cell${collapsedColumn(column.state) ? " collapsed" : ""}${
-                                dragOver() === dropKey ? " dropping" : ""
+                                // #216: a same-state, other-lane cell is not a
+                                // drop target, so it is never lit as one — only
+                                // cells whose state actually differs highlight.
+                                dragOver() === dropKey && !sameStateOtherLane()
+                                  ? " dropping"
+                                  : ""
                               }${dragRef() && unlisted() ? " unlisted" : ""}`}
                               // Below the narrow breakpoint the board is a
                               // list and the column head row is not rendered
@@ -2554,6 +2635,18 @@ const Board: Component<Props> = (props) => {
                                 if (!ref) return;
                                 const item = itemByRef().get(ref);
                                 if (!item) return;
+                                // #216: a drop that changes only the lane is a
+                                // no-op `beginMove` would swallow silently.
+                                // Leave the explanation where the drop landed
+                                // instead of accepting a drag that does nothing.
+                                if (
+                                  item.state === column.state &&
+                                  laneOf(item).key !== lane.key
+                                ) {
+                                  setLaneHint(dropKey);
+                                  return;
+                                }
+                                setLaneHint(null);
                                 beginMove(item, column.state);
                               }}
                             >
@@ -2561,6 +2654,13 @@ const Board: Component<Props> = (props) => {
                                 <Show when={dragRef() && unlisted()}>
                                   <div class="board-hint">
                                     not a listed edge — Vogt still decides
+                                  </div>
+                                </Show>
+
+                                <Show when={laneOnly()}>
+                                  <div class="board-hint board-hint--lane">
+                                    Lanes group cards; to change the
+                                    project/initiative open the item
                                   </div>
                                 </Show>
 
@@ -2580,6 +2680,43 @@ const Board: Component<Props> = (props) => {
                                           {humanState(current().to)}
                                         </span>
                                       </div>
+                                      {/* #214: a touch move never passed
+                                          through a drop cell, so the target
+                                          state is chosen here. The options are
+                                          the workflow's own listed edges for
+                                          the card, in machine order. */}
+                                      <Show
+                                        when={
+                                          current().pick &&
+                                          itemByRef().get(current().ref)
+                                        }
+                                      >
+                                        {(item) => (
+                                          <label class="board-composer-state">
+                                            <span>Move to</span>
+                                            <select
+                                              value={current().to}
+                                              disabled={current().phase === "saving"}
+                                              onChange={(event) => {
+                                                const open = pending();
+                                                if (!open) return;
+                                                setPending({
+                                                  ...open,
+                                                  to: event.currentTarget.value,
+                                                });
+                                              }}
+                                            >
+                                              <For each={moveTargets(item())}>
+                                                {(state) => (
+                                                  <option value={state}>
+                                                    {humanState(state)}
+                                                  </option>
+                                                )}
+                                              </For>
+                                            </select>
+                                          </label>
+                                        )}
+                                      </Show>
                                       <textarea
                                         rows={2}
                                         ref={(element) =>
@@ -2787,6 +2924,7 @@ const Board: Component<Props> = (props) => {
                                                 }
                                                 setDragRef(item.ref);
                                                 setRefusal(null);
+                                                setLaneHint(null);
                                                 if (event.dataTransfer) {
                                                   event.dataTransfer.effectAllowed = "move";
                                                   event.dataTransfer.setData(
@@ -2827,6 +2965,30 @@ const Board: Component<Props> = (props) => {
                                                   {trustOf(item)}
                                                 </span>
                                                 <span class="board-kind">{item.kind}</span>
+                                                {/* #214: a coarse pointer cannot
+                                                    drag and cannot see the
+                                                    Shift+Arrow hint, so it needs
+                                                    a control of its own. Hidden
+                                                    on fine pointers by CSS,
+                                                    where drag already works. It
+                                                    opens the same composer the
+                                                    drag does. */}
+                                                <button
+                                                  type="button"
+                                                  class="board-card-move"
+                                                  aria-label={`Move ${item.ref}`}
+                                                  disabled={
+                                                    writesDisabled() ||
+                                                    Boolean(pending()) ||
+                                                    moveTargets(item).length === 0
+                                                  }
+                                                  onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    beginMovePick(item);
+                                                  }}
+                                                >
+                                                  Move…
+                                                </button>
                                               </div>
                                               <div
                                                 id={`${cardDomId(item.ref)}-content`}
