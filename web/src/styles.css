@@ -4333,6 +4333,57 @@ textarea {
   gap: 6px;
 }
 
+.agent-task-run-session-link {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-task-run-session-link:hover {
+  text-decoration: underline;
+}
+
+.agent-task-subfield-label {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.agent-task-run-findings {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-task-run-finding {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--accent);
+  background: rgba(88, 166, 255, 0.08);
+  border-radius: 0 4px 4px 0;
+}
+
+.agent-task-finding-text {
+  font-size: 13px;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-task-finding-meta {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
 .agent-tasks-empty {
   padding: 24px 16px;
   text-align: center;

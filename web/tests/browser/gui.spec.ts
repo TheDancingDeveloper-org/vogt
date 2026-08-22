@@ -139,6 +139,7 @@ async function installFixtures(
     { name: "an-identifiable-long-filename.tsx", path: "src/an-identifiable-long-filename.tsx", is_dir: false },
   ],
   metricOverrides: PlaceMetricFixtures = {},
+  agentTasks: Record<string, unknown>[] | null = null,
 ) {
   const metrics = {
     sessionsUnavailable: false,
@@ -247,6 +248,47 @@ async function installFixtures(
     return route.fulfill({ json: tree });
   });
   await page.route("**/api/tasks**", async (route) => route.fulfill({ json: [] }));
+  // Agent-task fixtures: only wired when a caller hands over tasks, so the
+  // routes never shadow tests that stub `/api/agent-tasks` themselves.
+  const agentTaskUpdates: Record<string, unknown>[] = [];
+  const agentTaskRuns: string[] = [];
+  if (agentTasks) {
+    const tasks = agentTasks.map((task) => ({ ...task }));
+    await page.route("**/api/agent-tasks", async (route) =>
+      route.fulfill({ json: tasks }),
+    );
+    await page.route("**/api/agent-tasks/*/run", async (route) => {
+      const id = new URL(route.request().url()).pathname.split("/").at(-2) ?? "";
+      agentTaskRuns.push(id);
+      return route.fulfill({ json: {
+        id: `run-${agentTaskRuns.length}`,
+        task_id: id,
+        started_at: "2026-08-18T00:10:00Z",
+        trigger: "manual",
+        session_id: `run-session-${agentTaskRuns.length}`,
+        session_name: `on-demand-${agentTaskRuns.length}`,
+        prompt_file: "prompt.txt",
+        context_file: "context.txt",
+        status: "running",
+        completed_at: null,
+        exit_code: null,
+        summary: null,
+        findings: [],
+      } });
+    });
+    await page.route("**/api/agent-tasks/*", async (route) => {
+      const method = route.request().method();
+      const id = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
+      const index = tasks.findIndex((task) => task.id === id);
+      if (method === "PATCH") {
+        const body = route.request().postDataJSON() as Record<string, unknown>;
+        agentTaskUpdates.push(body);
+        if (index >= 0) tasks[index] = { ...tasks[index], ...body };
+        return route.fulfill({ json: tasks[index] ?? { ...tasks[0], ...body } });
+      }
+      return route.fulfill({ json: tasks[index] ?? tasks[0] });
+    });
+  }
   // The shell's places rail and assistant poll the engine on mount. Left
   // unstubbed they reach whatever backend sits behind the dev proxy, and a
   // 401 from it flips the whole app to the login gate mid-test — so answer
@@ -415,7 +457,7 @@ async function installFixtures(
     }
     return route.fulfill({ json: {} });
   });
-  return { inboxCalls: () => inboxCalls, boardRequests, transitionRequests, updateRequests, sessions, sessionInputs };
+  return { inboxCalls: () => inboxCalls, boardRequests, transitionRequests, updateRequests, sessions, sessionInputs, agentTaskUpdates, agentTaskRuns };
 }
 
 test("History palette results restore the selected session, query and match", async ({ page }) => {
@@ -2327,6 +2369,69 @@ test("dirty Agent Task drafts guard navigation and browser exit", async ({ page 
     window.dispatchEvent(event);
     return event.defaultPrevented;
   })).toBe(false);
+});
+
+
+test("Agent Tasks show bindings and findings, relabel Run Now, and survive reload", async ({ page }) => {
+  const boundTask = {
+    id: "bound-task",
+    name: "Bound task",
+    prompt: "Original prompt",
+    schedule: { kind: "manual" },
+    status: "active",
+    command: null,
+    cwd: null,
+    env: [],
+    context: null,
+    vogt_project: "vogt",
+    vogt_work_item: "WI-7",
+    notify_on_start: false,
+    notify_on_phrase: null,
+    auto_retry_on_rate_limit: true,
+    next_run: null,
+    last_run: "2026-08-18T00:05:00Z",
+    run_count: 1,
+    runs: [{
+      id: "run-0",
+      task_id: "bound-task",
+      started_at: "2026-08-18T00:00:00Z",
+      trigger: "scheduled",
+      session_id: "session-0",
+      session_name: "nightly-run",
+      prompt_file: "prompt.txt",
+      context_file: "context.txt",
+      status: "completed",
+      completed_at: "2026-08-18T00:05:00Z",
+      exit_code: 0,
+      summary: null,
+      findings: [{ at: "2026-08-18T00:03:00Z", text: "Queue is clear", source: "notify" }],
+    }],
+    created_at: "2026-08-18T00:00:00Z",
+    updated_at: "2026-08-18T00:00:00Z",
+  };
+  await installFixtures(page, {}, [], undefined, {}, [boundTask]);
+
+  await page.goto("/#/tasks");
+  // The Vogt bindings the engine stores now round-trip into the form.
+  await expect(page.getByRole("textbox", { name: "Vogt project" })).toHaveValue("vogt");
+  await expect(page.getByRole("textbox", { name: "Vogt work item" })).toHaveValue("WI-7");
+  // A run's finding is rendered under its row, not lost to a push.
+  await expect(page.getByText("Queue is clear")).toBeVisible();
+
+  const name = page.getByRole("textbox", { name: "Name", exact: true });
+  await expect(name).toHaveValue("Bound task");
+  await expect(page.getByRole("button", { name: "Run Now" })).toBeVisible();
+
+  await name.fill("Bound task edited");
+  // A dirty draft relabels Run Now so a click saves before it runs.
+  await expect(page.getByRole("button", { name: "Save & Run" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Run Now" })).toHaveCount(0);
+
+  // A full reload keeps the unsaved draft, carried in sessionStorage.
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "Name", exact: true }))
+    .toHaveValue("Bound task edited");
+  await expect(page.getByText("Unsaved draft")).toBeVisible();
 });
 
 

@@ -137,6 +137,30 @@ function notifyVogtChanged(seq: number): void {
   for (const listener of vogtListeners) listener(seq);
 }
 
+/** Callers waiting to hear that a session exited (a PTY the engine killed). */
+const sessionKilledListeners = new Set<
+  (id: string, exitCode: number | null) => void
+>();
+
+/**
+ * Subscribe to session exits, as republished on the engine's stream.
+ *
+ * A surface that tracks a run's session — Agent Tasks, whose run rows say
+ * "Still running" until the PTY ends — gets a nudge with the session id that
+ * exited and re-reads what it owns. Returns its own unsubscribe, which every
+ * caller must use on cleanup.
+ */
+export function onSessionKilled(
+  listener: (id: string, exitCode: number | null) => void,
+): () => void {
+  sessionKilledListeners.add(listener);
+  return () => sessionKilledListeners.delete(listener);
+}
+
+function notifySessionKilled(id: string, exitCode: number | null): void {
+  for (const listener of sessionKilledListeners) listener(id, exitCode);
+}
+
 export function startEventStream(): void {
   streamStarted = true;
   if (unsubscribeEvents) return;
@@ -170,6 +194,7 @@ export function startEventStream(): void {
               if (sess) sess.exit_code = ev.exit_code;
             }),
           );
+          notifySessionKilled(ev.id, ev.exit_code);
           break;
         case "activity":
           updateActivity(ev.id, ev.state);

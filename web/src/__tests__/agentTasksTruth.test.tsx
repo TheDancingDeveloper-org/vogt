@@ -8,7 +8,14 @@ import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import AgentTasks, { type AgentTaskDraftGuard } from "../AgentTasks";
-import { api, type AgentTask, type AgentTaskUpsertRequest } from "../api";
+import {
+  api,
+  type AgentTask,
+  type AgentTaskRun,
+  type AgentTaskUpsertRequest,
+} from "../api";
+import { readToolDraft, writeToolDraft } from "../toolDrafts";
+import * as store from "../store";
 
 function task(id: string, name: string, prompt = `${name} prompt`): AgentTask {
   return {
@@ -21,6 +28,8 @@ function task(id: string, name: string, prompt = `${name} prompt`): AgentTask {
     cwd: null,
     env: [],
     context: null,
+    vogt_project: null,
+    vogt_work_item: null,
     notify_on_start: false,
     notify_on_phrase: null,
     auto_retry_on_rate_limit: true,
@@ -33,11 +42,34 @@ function task(id: string, name: string, prompt = `${name} prompt`): AgentTask {
   };
 }
 
+function run(overrides: Partial<AgentTaskRun> = {}): AgentTaskRun {
+  return {
+    id: "run-1",
+    task_id: "task-alpha",
+    started_at: "2026-08-18T00:00:00Z",
+    trigger: "scheduled",
+    session_id: "session-1",
+    session_name: "nightly-run",
+    prompt_file: "prompt.txt",
+    context_file: "context.txt",
+    status: "completed",
+    completed_at: "2026-08-18T00:05:00Z",
+    exit_code: 0,
+    summary: null,
+    findings: [],
+    ...overrides,
+  };
+}
+
 const ALPHA = task("task-alpha", "Alpha review");
 const BETA = task("task-beta", "Beta review");
 
 function mountTasks(
-  props: { registerDraftGuard?: (guard: AgentTaskDraftGuard | null) => void } = {},
+  props: {
+    registerDraftGuard?: (guard: AgentTaskDraftGuard | null) => void;
+    onOpenSession?: (sessionId: string, label: string) => void;
+    onError?: (message: string) => void;
+  } = {},
 ) {
   const history = createMemoryHistory();
   history.set({ value: "/tasks" });
@@ -173,7 +205,9 @@ describe("Agent Task draft ownership", () => {
       target: { value: "Keep this context too" },
     });
 
-    await fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    // Refresh no longer pops the save/discard decision (it preserves the
+    // draft in place); starting another New Task while dirty still does.
+    await fireEvent.click(screen.getByRole("button", { name: "New Task" }));
     await fireEvent.click(screen.getByRole("button", { name: "Save and continue" }));
 
     expect((await screen.findAllByText("Failed to save task: write unavailable"))[0])
@@ -228,5 +262,153 @@ describe("Agent Task draft ownership", () => {
     expect(closed).not.toHaveBeenCalled();
     await fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
     expect(closed).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Agent Task Vogt bindings", () => {
+  it("round-trips the project and work-item bindings through the upsert", async () => {
+    let saved = ALPHA;
+    vi.spyOn(api, "listAgentTasks").mockImplementation(async () => [saved]);
+    const update = vi.spyOn(api, "updateAgentTask").mockImplementation(
+      async (id: string, request: Partial<AgentTaskUpsertRequest>) => {
+        saved = {
+          ...ALPHA,
+          id,
+          vogt_project: request.vogt_project ?? null,
+          vogt_work_item: request.vogt_work_item ?? null,
+        };
+        return saved;
+      },
+    );
+
+    mountTasks();
+    await screen.findByRole("button", { name: /Alpha review/ });
+    await fireEvent.input(screen.getByLabelText("Vogt project"), {
+      target: { value: "vogt" },
+    });
+    await fireEvent.input(screen.getByLabelText("Vogt work item"), {
+      target: { value: "WI-7" },
+    });
+
+    await fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update).toHaveBeenCalledWith(
+      "task-alpha",
+      expect.objectContaining({ vogt_project: "vogt", vogt_work_item: "WI-7" }),
+    );
+    // The saved values survive a re-read into the form.
+    await waitFor(() =>
+      expect(screen.getByLabelText("Vogt project")).toHaveValue("vogt"),
+    );
+    expect(screen.getByLabelText("Vogt work item")).toHaveValue("WI-7");
+  });
+});
+
+describe("Agent Task run findings", () => {
+  it("renders each finding recorded under a run row", async () => {
+    const withFindings: AgentTask = {
+      ...ALPHA,
+      run_count: 1,
+      runs: [
+        run({
+          findings: [
+            { at: "2026-08-18T00:03:00Z", text: "Queue is clear", source: "notify" },
+          ],
+        }),
+      ],
+    };
+    vi.spyOn(api, "listAgentTasks").mockResolvedValue([withFindings]);
+
+    mountTasks();
+    await screen.findByRole("button", { name: /Alpha review/ });
+
+    expect(await screen.findByText("Queue is clear")).toBeVisible();
+    expect(screen.getByText(/notify/)).toBeVisible();
+  });
+});
+
+describe("Agent Task self-refresh", () => {
+  it("reloads the list when a run's session exits", async () => {
+    let listeners: ((id: string, exit: number | null) => void)[] = [];
+    vi.spyOn(store, "onSessionKilled").mockImplementation((listener) => {
+      listeners.push(listener);
+      return () => {
+        listeners = listeners.filter((one) => one !== listener);
+      };
+    });
+    const running: AgentTask = {
+      ...ALPHA,
+      run_count: 1,
+      runs: [run({ status: "running", completed_at: null, exit_code: null, summary: null })],
+    };
+    const list = vi.spyOn(api, "listAgentTasks").mockResolvedValue([running]);
+
+    mountTasks();
+    await screen.findByRole("button", { name: /Alpha review/ });
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+
+    // A stranger's session exiting is ignored; ours triggers a re-read.
+    listeners.forEach((fire) => fire("some-other-session", 0));
+    expect(list).toHaveBeenCalledTimes(1);
+    listeners.forEach((fire) => fire("session-1", 0));
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe("Agent Task safer Run Now", () => {
+  it("relabels Run Now to Save & Run when dirty, saving before it runs", async () => {
+    let saved = ALPHA;
+    vi.spyOn(api, "listAgentTasks").mockImplementation(async () => [saved]);
+    const update = vi.spyOn(api, "updateAgentTask").mockImplementation(
+      async (id: string, request: Partial<AgentTaskUpsertRequest>) => {
+        saved = { ...ALPHA, id, name: request.name ?? ALPHA.name };
+        return saved;
+      },
+    );
+    const runNow = vi.spyOn(api, "runAgentTask").mockResolvedValue(
+      run({ session_id: "run-session", session_name: "on-demand" }),
+    );
+    const openSession = vi.fn();
+
+    mountTasks({ onOpenSession: openSession });
+    await screen.findByRole("button", { name: /Alpha review/ });
+    // Not dirty: the action reads "Run Now".
+    expect(screen.getByRole("button", { name: "Run Now" })).toBeVisible();
+
+    await fireEvent.input(screen.getByLabelText("Name"), {
+      target: { value: "Alpha edited" },
+    });
+    const saveRun = await screen.findByRole("button", { name: "Save & Run" });
+
+    await fireEvent.click(saveRun);
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(runNow).toHaveBeenCalledTimes(1));
+    expect(update).toHaveBeenCalledWith(
+      "task-alpha",
+      expect.objectContaining({ name: "Alpha edited" }),
+    );
+    // The run does not yank the user off Agent Tasks to the session.
+    expect(openSession).not.toHaveBeenCalled();
+  });
+});
+
+describe("Tool draft sessionStorage mirror", () => {
+  afterEach(() => {
+    sessionStorage.clear();
+    vi.resetModules();
+  });
+
+  it("survives a remount that has lost the in-memory map", async () => {
+    writeToolDraft("tasks", { hello: "world" });
+    expect(sessionStorage.getItem("vogt.toolDraft.tasks")).toContain("world");
+
+    // A reload keeps sessionStorage but starts a fresh module: re-import so
+    // the in-memory Map is empty and the read can only come from storage.
+    vi.resetModules();
+    const fresh = await import("../toolDrafts");
+    expect(fresh.readToolDraft("tasks", null)).toEqual({ hello: "world" });
+    // Belt and braces: the original module still reads it too.
+    expect(readToolDraft("tasks", null)).toEqual({ hello: "world" });
   });
 });

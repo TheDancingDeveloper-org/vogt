@@ -453,6 +453,13 @@ export type AgentTaskSchedule =
   | { kind: "interval"; minutes: number }
   | { kind: "daily"; times: string[] };
 
+/** One thing a run reported about itself (engine `AgentTaskFinding`, FR-E7). */
+export interface AgentTaskFinding {
+  at: string;
+  text: string;
+  source: string;
+}
+
 export interface AgentTaskRun {
   id: string;
   task_id: string;
@@ -466,6 +473,7 @@ export interface AgentTaskRun {
   completed_at: string | null;
   exit_code: number | null;
   summary: string | null;
+  findings: AgentTaskFinding[];
 }
 
 export interface AgentTask {
@@ -478,6 +486,8 @@ export interface AgentTask {
   cwd: string | null;
   env: [string, string][];
   context: string | null;
+  vogt_project: string | null;
+  vogt_work_item: string | null;
   notify_on_start: boolean;
   notify_on_phrase: string | null;
   auto_retry_on_rate_limit: boolean;
@@ -497,6 +507,8 @@ export interface AgentTaskUpsertRequest {
   cwd?: string | null;
   env?: [string, string][];
   context?: string | null;
+  vogt_project?: string | null;
+  vogt_work_item?: string | null;
   enabled?: boolean;
   notify_on_start?: boolean;
   notify_on_phrase?: string | null;

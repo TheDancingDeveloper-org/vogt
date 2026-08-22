@@ -18,6 +18,8 @@ const TASK: AgentTask = {
   cwd: null,
   env: [],
   context: null,
+  vogt_project: null,
+  vogt_work_item: null,
   notify_on_start: false,
   notify_on_phrase: null,
   auto_retry_on_rate_limit: true,
