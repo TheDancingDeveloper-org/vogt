@@ -25,10 +25,14 @@ const SplitEditor: Component<Props> = (props) => {
     props.onFocusTab(tabId);
   };
 
-  const handleSplitterDrag = (index: number, e: MouseEvent) => {
+  // Pointer events, not mouse events, so a touch drag resizes the split too
+  // (#240). The handle captures the pointer and listens on `document`, so a
+  // finger that slides off the thin handle keeps driving the resize.
+  const handleSplitterDrag = (index: number, e: PointerEvent) => {
     e.preventDefault();
     const container = containerRef;
     if (!container) return;
+    const handle = e.currentTarget as HTMLElement | null;
 
     const startPos =
       splitStore.direction === "horizontal" ? e.clientY : e.clientX;
@@ -47,7 +51,7 @@ const SplitEditor: Component<Props> = (props) => {
       resizePanePair(index, deltaPercent, startPanes);
     };
 
-    const onMove = (moveEvent: MouseEvent) => {
+    const onMove = (moveEvent: PointerEvent) => {
       pendingPos =
         splitStore.direction === "horizontal"
           ? moveEvent.clientY
@@ -62,17 +66,29 @@ const SplitEditor: Component<Props> = (props) => {
         cancelAnimationFrame(pendingFrame);
         pendingFrame = null;
       }
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onUp);
+      try {
+        handle?.releasePointerCapture?.(e.pointerId);
+      } catch {
+        // No active capture (e.g. a synthetic event) — nothing to release.
+      }
       document.body.classList.remove("is-resizing-split");
       cleanupDrag = undefined;
     };
 
     cleanupDrag?.();
     cleanupDrag = onUp;
+    try {
+      handle?.setPointerCapture?.(e.pointerId);
+    } catch {
+      // Capture is a nicety; the document listeners drive the resize regardless.
+    }
     document.body.classList.add("is-resizing-split");
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onUp);
   };
 
   onCleanup(() => cleanupDrag?.());
@@ -117,7 +133,7 @@ const SplitEditor: Component<Props> = (props) => {
             <Show when={index() < splitStore.panes.length - 1}>
               <div
                 class="split-handle"
-                onMouseDown={(event) => handleSplitterDrag(index(), event)}
+                onPointerDown={(event) => handleSplitterDrag(index(), event)}
               />
             </Show>
           </>

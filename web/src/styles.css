@@ -3693,6 +3693,8 @@ textarea {
   height: 100%;
   width: 100%;
   overflow: hidden;
+  /* Anchors the phone overlay drawer and its scrim to the workspace (#240). */
+  position: relative;
 }
 
 .editor-sidebar {
@@ -3757,6 +3759,40 @@ textarea {
   height: 100%;
   min-height: 0;
   flex: 1 1 auto;
+}
+
+/* The overlay scrim behind the drawer. It only exists on a phone-shaped
+   viewport (#240); on a roomy one the sidebar is an inline column and the
+   scrim stays hidden. */
+.editor-sidebar-backdrop {
+  display: none;
+}
+
+/* Phone editor (#240): the Files sidebar is an overlay drawer, not an inline
+   280px column that would leave the editor a sliver. The workspace defaults to
+   the drawer collapsed (see fileTreeState.defaultSidebarCollapsed), so the
+   editor gets the full width; opening it floats the drawer over the editor. */
+@media (max-width: 768px) {
+  .editor-sidebar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 30;
+    width: min(85%, 320px);
+    max-width: 85%;
+    min-width: 0;
+    resize: none;
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.5);
+  }
+
+  .editor-sidebar-backdrop {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.5);
+  }
 }
 
 .editor-main {
@@ -5152,21 +5188,48 @@ textarea {
 
 .split-handle {
   flex-shrink: 0;
-  background: var(--bd);
+  position: relative;
+  background: transparent;
   cursor: ew-resize;
+  /* Touch must not be claimed by the browser for scroll/zoom, and the hit area
+     is widened to ≥12px so a finger can grab the thin visual line (#240). */
+  touch-action: none;
 }
 
 .split-horizontal .split-handle {
-  height: 4px;
+  height: 12px;
   cursor: ns-resize;
 }
 
 .split-vertical .split-handle {
-  width: 4px;
+  width: 12px;
   cursor: ew-resize;
 }
 
-.split-handle:hover {
+/* The visible 1-line divider, centred inside the wider hit area. */
+.split-handle::after {
+  content: "";
+  position: absolute;
+  background: var(--bd);
+}
+
+.split-vertical .split-handle::after {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 4px;
+  transform: translateX(-50%);
+}
+
+.split-horizontal .split-handle::after {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 4px;
+  transform: translateY(-50%);
+}
+
+.split-handle:hover::after {
   background: var(--accent);
 }
 

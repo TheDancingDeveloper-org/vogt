@@ -1937,14 +1937,107 @@ test("Phone editor keeps the compact Files hierarchy and progressive controls us
   } }));
   await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
 
+  // On a phone the Files sidebar is an overlay drawer that defaults collapsed
+  // (#240) — open it before inspecting the compact hierarchy it holds.
+  await page.locator(".editor-sidebar-expand").tap();
+
   const fileTree = page.locator(".editor-sidebar .file-tree");
   await expect(fileTree).toBeVisible();
   await expect(fileTree.getByRole("heading", { name: "Files" })).toBeVisible();
+  // The Files section defaults collapsed; expand it to reach its search box and
+  // the rest of the compact control hierarchy.
+  if ((await fileTree.getByRole("searchbox", { name: "Search files" }).count()) === 0) {
+    await fileTree.getByRole("button", { name: "Files", exact: true }).tap();
+  }
   await expect(fileTree.getByRole("searchbox", { name: "Search files" })).toBeVisible();
   await expect(fileTree.getByRole("button", { name: "New file" })).toBeVisible();
   await fileTree.getByRole("button", { name: "More file actions" }).tap();
   await expect(fileTree.getByRole("button", { name: "New folder" })).toBeVisible();
   await expect(fileTree.getByRole("button", { name: "Upload files" })).toBeVisible();
+});
+
+test("Phone editor gives the editor the width and floats Files as an overlay drawer (#240)", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The overlay drawer is the phone editor layout");
+  await installFixtures(page);
+  await page.addInitScript(() => {
+    localStorage.setItem("mydevenv2.layoutMode.v1", "ide");
+  });
+  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+
+  // With nothing persisted the drawer defaults collapsed on a phone, so the
+  // editor keeps the full width instead of the old ~95px sliver.
+  await expect(page.locator(".editor-sidebar")).toHaveCount(0);
+  await expect(page.locator(".editor-sidebar-expand")).toBeVisible();
+
+  const viewport = page.viewportSize()!;
+  const contentWidth = await page.locator(".editor-content").evaluate(
+    (element) => element.getBoundingClientRect().width,
+  );
+  expect(contentWidth).toBeGreaterThanOrEqual(viewport.width * 0.7);
+
+  // Opening the drawer floats it over the editor (position: absolute) rather
+  // than pushing the content aside as an inline column, and drops a scrim.
+  await page.locator(".editor-sidebar-expand").tap();
+  const sidebar = page.locator(".editor-sidebar");
+  await expect(sidebar).toBeVisible();
+  await expect(page.locator(".editor-sidebar-backdrop")).toBeVisible();
+  const position = await sidebar.evaluate((element) => getComputedStyle(element).position);
+  expect(position).toBe("absolute");
+
+  // Tapping the scrim (its uncovered strip, right of the drawer and clear of the
+  // fixed bottom nav) dismisses the drawer, restoring the full-width editor.
+  await page.locator(".editor-sidebar-backdrop").tap({
+    position: { x: viewport.width - 12, y: 48 },
+  });
+  await expect(page.locator(".editor-sidebar")).toHaveCount(0);
+});
+
+test("Phone editor splitter resizes on a touch drag (#240)", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The touch splitter is exercised on the phone project");
+  await installFixtures(page, {}, [], [
+    { name: "src", path: "src", is_dir: true },
+    { name: "alpha.tsx", path: "src/alpha.tsx", is_dir: false },
+    { name: "beta.tsx", path: "src/beta.tsx", is_dir: false },
+  ]);
+  await page.addInitScript(() => {
+    localStorage.setItem("mydevenv2.layoutMode.v1", "ide");
+  });
+  // Two open editor tabs are what enables a split. The first goto persists the
+  // tab; the second reloads and opens the second alongside it.
+  await page.goto("/#/e/src%2Falpha.tsx");
+  await page.goto("/#/e/src%2Fbeta.tsx");
+
+  await page.locator('[title="Split right"]').click();
+  const handle = page.locator(".split-handle");
+  await expect(handle).toBeVisible();
+
+  const firstPane = page.locator(".split-pane").first();
+  const widthBefore = (await firstPane.boundingBox())!.width;
+
+  // Drive the splitter with synthetic pointer events (a touch drag), the way a
+  // finger would — mouse events would not reach the pointer handler.
+  await handle.evaluate(async (element) => {
+    const rect = element.getBoundingClientRect();
+    const cy = rect.top + rect.height / 2;
+    const cx = rect.left + rect.width / 2;
+    const make = (type: string, x: number) =>
+      new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: cy,
+        pointerId: 1,
+        pointerType: "touch",
+      });
+    element.dispatchEvent(make("pointerdown", cx));
+    document.dispatchEvent(make("pointermove", cx - 120));
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    document.dispatchEvent(make("pointerup", cx - 120));
+  });
+
+  await expect
+    .poll(async () => (await firstPane.boundingBox())!.width)
+    .toBeLessThan(widthBefore - 40);
 });
 
 for (const height of [700, 900]) {

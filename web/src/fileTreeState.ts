@@ -8,7 +8,36 @@ import { createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 
 const EXPANDED_KEY = "mydevenv2.fileTree.expanded.v1";
-const SIDEBAR_KEY = "mydevenv2.fileTree.sidebarCollapsed.v1";
+// The drawer open/closed state moved to a `vogt.`-prefixed key (#240). The
+// historic `mydevenv2.` key is still read once, as a fallback, so a reader who
+// had explicitly collapsed the sidebar keeps that choice across the rename.
+const SIDEBAR_KEY = "vogt.fileTree.sidebarCollapsed.v1";
+const LEGACY_SIDEBAR_KEY = "mydevenv2.fileTree.sidebarCollapsed.v1";
+
+/** Width (px) at and below which the editor is a phone-shaped surface: the
+ *  Files sidebar becomes an overlay drawer that defaults collapsed so the
+ *  editor keeps the full viewport width (#240). */
+export const NARROW_VIEWPORT_MAX = 768;
+
+/** Whether the current (or given) viewport is phone-shaped (≤768px). */
+export function isNarrowViewport(width?: number): boolean {
+  const w =
+    width ??
+    (typeof window !== "undefined" ? window.innerWidth : Number.POSITIVE_INFINITY);
+  return w <= NARROW_VIEWPORT_MAX;
+}
+
+/** The sidebar's initial collapsed state. An explicit persisted choice always
+ *  wins ("1" collapsed, "0" open); with nothing persisted the drawer defaults
+ *  collapsed on a narrow (phone) viewport and open on a roomy one (#240). */
+export function defaultSidebarCollapsed(
+  persisted: string | null,
+  narrow: boolean,
+): boolean {
+  if (persisted === "1") return true;
+  if (persisted === "0") return false;
+  return narrow;
+}
 
 function readExpanded(): Record<string, boolean> {
   try {
@@ -27,9 +56,11 @@ function readExpanded(): Record<string, boolean> {
 
 function readSidebarCollapsed(): boolean {
   try {
-    return localStorage.getItem(SIDEBAR_KEY) === "1";
+    const persisted =
+      localStorage.getItem(SIDEBAR_KEY) ?? localStorage.getItem(LEGACY_SIDEBAR_KEY);
+    return defaultSidebarCollapsed(persisted, isNarrowViewport());
   } catch {
-    return false;
+    return isNarrowViewport();
   }
 }
 

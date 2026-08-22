@@ -24,6 +24,7 @@ import {
   type TextModel,
 } from "./monaco";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
+import { shouldRenderSideBySide } from "./diffLayout";
 import { listProjects } from "./vogtApi";
 import { repositoryChoices } from "./gitRepositories";
 import { createRetainedRead } from "./retainedRead";
@@ -131,6 +132,14 @@ const DiffView: Component<{
     editor = null;
   };
 
+  // Side-by-side needs two full code columns; on a narrow (phone) host the
+  // diff renders inline instead, and flips back as the host grows (#240).
+  const applyDiffLayout = () => {
+    if (!editor || !host) return;
+    editor.updateOptions({ renderSideBySide: shouldRenderSideBySide(host.clientWidth) });
+    editor.layout();
+  };
+
   const ensureEditor = async (mountedHost: HTMLDivElement) => {
     if (editor) return editor;
     monaco ??= await loadMonaco();
@@ -138,14 +147,14 @@ const DiffView: Component<{
     editor = monaco.editor.createDiffEditor(mountedHost, {
       theme: "vs-dark",
       readOnly: true,
-      renderSideBySide: true,
+      renderSideBySide: shouldRenderSideBySide(mountedHost.clientWidth),
       automaticLayout: false,
       fontFamily:
         '"JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace, monospace',
       fontSize: 13,
       minimap: { enabled: false },
     });
-    resizeObserver = new ResizeObserver(() => editor?.layout());
+    resizeObserver = new ResizeObserver(() => applyDiffLayout());
     resizeObserver.observe(mountedHost);
     return editor;
   };

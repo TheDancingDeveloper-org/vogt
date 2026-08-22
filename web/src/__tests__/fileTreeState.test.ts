@@ -1,11 +1,14 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { createRoot } from "solid-js";
 import {
+  NARROW_VIEWPORT_MAX,
+  defaultSidebarCollapsed,
   expandedPaths,
   fileTreeSearch,
   folderVersion,
   invalidateFolder,
   isExpanded,
+  isNarrowViewport,
   parentFolder,
   resetFileTreeState,
   setExpanded,
@@ -76,6 +79,31 @@ describe("fileTreeState — persistent tree view state (#238)", () => {
       expect(folderVersion("")).toBe(before.root);
       dispose();
     });
+  });
+});
+
+describe("sidebar drawer default — phone overlay (#240)", () => {
+  it("treats ≤768px as narrow and anything above as roomy", () => {
+    expect(isNarrowViewport(375)).toBe(true);
+    expect(isNarrowViewport(NARROW_VIEWPORT_MAX)).toBe(true);
+    expect(isNarrowViewport(NARROW_VIEWPORT_MAX + 1)).toBe(false);
+    expect(isNarrowViewport(1280)).toBe(false);
+  });
+
+  it("defaults the drawer collapsed on a narrow viewport, open on a roomy one", () => {
+    // Nothing persisted: the viewport decides. A phone starts collapsed so the
+    // editor keeps its width; a desktop starts open.
+    expect(defaultSidebarCollapsed(null, true)).toBe(true);
+    expect(defaultSidebarCollapsed(null, false)).toBe(false);
+  });
+
+  it("lets an explicit persisted choice win over the viewport default", () => {
+    // A reader who opened the drawer on a phone keeps it open; one who closed it
+    // on a desktop keeps it closed.
+    expect(defaultSidebarCollapsed("0", true)).toBe(false);
+    expect(defaultSidebarCollapsed("1", false)).toBe(true);
+    expect(defaultSidebarCollapsed("1", true)).toBe(true);
+    expect(defaultSidebarCollapsed("0", false)).toBe(false);
   });
 });
 
