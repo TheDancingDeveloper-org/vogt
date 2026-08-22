@@ -241,6 +241,46 @@ export const KEYBOARD_SHORTCUTS: readonly KeyboardShortcut[] = [
     // not require a particular Shift state so other layouts work too.
     binding: { key: "?", ctrl: false, meta: false, alt: false },
   },
+  {
+    id: "inbox-next-entry",
+    keys: ["j"],
+    description: "Focus the next Inbox entry",
+    category: "Inbox",
+    context: "outside-editable",
+    contextLabel: "Inbox",
+  },
+  {
+    id: "inbox-previous-entry",
+    keys: ["k"],
+    description: "Focus the previous Inbox entry",
+    category: "Inbox",
+    context: "outside-editable",
+    contextLabel: "Inbox",
+  },
+  {
+    id: "inbox-archive-entry",
+    keys: ["e"],
+    description: "Archive the focused Inbox entry",
+    category: "Inbox",
+    context: "outside-editable",
+    contextLabel: "Inbox",
+  },
+  {
+    id: "inbox-snooze-entry",
+    keys: ["s"],
+    description: "Snooze the focused Inbox entry",
+    category: "Inbox",
+    context: "outside-editable",
+    contextLabel: "Inbox",
+  },
+  {
+    id: "inbox-resolve-entry",
+    keys: ["r"],
+    description: "Resolve the focused Inbox entry (restore, or accept/reject a drift)",
+    category: "Inbox",
+    context: "outside-editable",
+    contextLabel: "Inbox",
+  },
 ] as const;
 
 function isEditableTarget(target: EventTarget | null): boolean {

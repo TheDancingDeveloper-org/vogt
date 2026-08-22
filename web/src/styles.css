@@ -785,7 +785,17 @@ textarea {
   flex-direction: column;
   gap: 14px;
   min-height: 0;
+  /* The same frame the board sits in, so the header and the list start where
+     the board's do rather than hard against the shell edge — and the Source
+     select at the right of the header keeps a gutter instead of clipping. */
+  padding: 16px;
   overflow-y: auto;
+}
+
+/* A little more room at the right of the header controls, so the Source
+   select's focus ring and dropdown chevron are never flush with the edge. */
+.inbox-header > .surface-header-controls {
+  padding-inline-end: 4px;
 }
 
 .inbox-surface > .surface-header {
@@ -1078,6 +1088,76 @@ textarea {
   min-height: 44px;
 }
 
+/* The routine triage — Archive / Snooze / Restore — reads as a quieter second
+   row than the primary Open / Adopt / Accept controls beside it. */
+.inbox-entry-actions-secondary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.inbox-entry-actions-secondary button {
+  min-height: 32px;
+  padding: 4px 10px;
+  color: var(--fg-muted);
+  background: transparent;
+  font-size: 12px;
+}
+
+/* The "Open on <source>" deep link sits with the in-app Open, styled as the
+   button's quieter sibling. */
+.inbox-open-source {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 10px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.inbox-open-source:hover,
+.inbox-open-source:focus-visible {
+  text-decoration: underline;
+}
+
+.inbox-snooze-presets {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.inbox-snooze-presets button {
+  min-height: 32px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* One legend line under the header, in the board's own key style. Coarse
+   pointers have no keyboard to legend, so it is hidden there (the `?` help
+   dialog still carries the same keys for anyone who wants them). */
+.inbox-keys {
+  flex: 0 0 auto;
+}
+
+@media (pointer: coarse) {
+  .inbox-keys {
+    display: none;
+  }
+}
+
+/* The batch bar rides the top of the list and sticks there while the reader
+   scrolls a long selection, rather than sitting buried below everything. */
+.inbox-batch-bar {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+}
+
+.inbox-batch-bar--selected {
+  border-color: var(--accent);
+}
+
 .inbox-actions-trigger {
   min-height: 52px !important;
 }
@@ -1117,10 +1197,20 @@ textarea {
   text-align: left;
 }
 
+/* Evidence is folded behind a disclosure now — dense JSON that opens for the
+   selected entry and for a drift entry with a change to weigh, and stays shut
+   otherwise so four entries fit a screen. */
 .inbox-evidence {
   padding: 8px;
   border-left: 3px solid var(--activity-running);
   background: var(--bg);
+}
+
+.inbox-evidence > summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .inbox-evidence pre {
