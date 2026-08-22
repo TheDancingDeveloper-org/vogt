@@ -17,6 +17,7 @@ import Board from "./Board";
 import Sessions from "./Sessions";
 import RouteOutcomeView from "./RouteOutcome";
 import { matchAppShortcut } from "./keyboardShortcuts";
+import { moreSheetItems } from "./phoneMoreSheet";
 import ModKeyRow from "./ModKeyRow";
 import FileTree from "./FileTree";
 import type { FileWorkflow } from "./FileWorkflowDialog";
@@ -319,6 +320,10 @@ const App: Component = () => {
   let settingsRouted = false;
   let settingsHasHistoryReturn = false;
   const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
+  // The phone bottom bar reaches four places; the fifth "More" slot opens this
+  // sheet, which carries every other place plus Settings and Sign out so both
+  // are one tap from the bar rather than a command-palette round trip (#231).
+  const [moreSheetOpen, setMoreSheetOpen] = createSignal(false);
 
   const placesRail = createResizablePane({
     key: "places-rail",
@@ -1047,6 +1052,15 @@ const App: Component = () => {
       setShortcutsOpen(true);
       return;
     }
+    if (shortcut.id === "toggle-places-rail") {
+      // The rail is only a grid column on the desktop shell; below the narrow
+      // breakpoint it is `display: none` and its collapse flag draws nothing,
+      // so toggling it there would be an invisible keypress. The bottom bar's
+      // "More" sheet is the phone equivalent of reaching the rail's places.
+      e.preventDefault();
+      placesRail.setCollapsed(!placesRail.collapsed());
+      return;
+    }
     if (shortcut.id === "new-terminal-session") {
       e.preventDefault();
       void onCreate();
@@ -1111,7 +1125,7 @@ const App: Component = () => {
               type="button"
               class="rail-collapse"
               aria-label="Hide the Places rail"
-              title="Hide the Places rail"
+              title="Hide the Places rail (Ctrl/Cmd+B)"
               onClick={() => placesRail.setCollapsed(true)}
             >
               «
@@ -1382,7 +1396,7 @@ const App: Component = () => {
               type="button"
               class="rail-reopen"
               aria-label="Show the Places rail"
-              title="Show the Places rail"
+              title="Show the Places rail (Ctrl/Cmd+B)"
               onClick={() => placesRail.setCollapsed(false)}
             >
               » Places
@@ -1611,7 +1625,64 @@ const App: Component = () => {
         <a href="#/inbox" class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined}><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" tone="accent" /></a>
         <a href="#/board" class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined}><span>Board</span><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></a>
         <a href="#/backlog" class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined}><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
+        {/* The bar reaches four of eleven places; this fifth slot opens a sheet
+            with the rest plus Settings and Sign out, so every place and both
+            account actions are within two taps from any surface (#231). */}
+        <button
+          type="button"
+          class="phone-more-trigger"
+          aria-haspopup="dialog"
+          aria-expanded={moreSheetOpen()}
+          onClick={() => setMoreSheetOpen(true)}
+        ><span>More</span></button>
       </nav>
+
+      <Show when={moreSheetOpen()}>
+        <Dialog
+          label="More places and actions"
+          dialogClass="phone-more-sheet"
+          backdropClass="phone-more-sheet-backdrop"
+          onClose={() => setMoreSheetOpen(false)}
+          dismissOnBackdrop
+        >
+          <div class="phone-more-sheet-header">
+            <h2>More</h2>
+            <button
+              type="button"
+              class="phone-more-close"
+              onClick={() => setMoreSheetOpen(false)}
+            >Close</button>
+          </div>
+          <div class="phone-more-list">
+            <For
+              each={moreSheetItems({
+                vogtConfigured: Boolean(publicCfg()?.vogt?.configured),
+                guiEnabled: guiEnabled(),
+                assistantEnabled: Boolean(publicCfg()?.assistant_enabled),
+              })}
+            >
+              {(item) =>
+                item.kind === "place" ? (
+                  <a href={item.href} onClick={() => setMoreSheetOpen(false)}>
+                    {item.label}
+                  </a>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMoreSheetOpen(false);
+                      if (item.id === "settings") openSettings();
+                      else void signOut();
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                )
+              }
+            </For>
+          </div>
+        </Dialog>
+      </Show>
 
       {/* A lazy component that is always mounted fetches its chunk at boot,
           which is no saving at all — and turns a flaky fetch of a dialog

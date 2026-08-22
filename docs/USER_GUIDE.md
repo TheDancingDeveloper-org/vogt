@@ -45,7 +45,8 @@ still outstanding and `ROADMAP.md` says so.
    (Until the standalone stack is retired, https://mydevenv2.sprooty.com still
    answers and serves the session engine *without* Vogt — terminals and the
    assistant work, and every Vogt surface reports that no core is configured.)
-2. Open **Settings (⚙)** and paste your bearer token.
+2. Open **Settings** — from the desktop Places rail's footer, or on a phone
+   from the bottom bar's **More** sheet — and paste your bearer token.
 3. **Save & reload.**
 
 The token is a front-door token. What it can do is exactly what its
@@ -56,8 +57,9 @@ write needs its own capability (`sessions`, `filesystem-write`, `git-write`,
 gets a `403` — which means *this credential will never work for this route*,
 as against a `401`'s *try a different one*.
 
-Settings is a routed modal. Whether it is opened from the desktop rail, phone
-palette or command palette, closing it returns to the route that invoked it,
+Settings is a routed modal. Whether it is opened from the desktop rail, the
+phone bottom bar's **More** sheet, or the command palette, closing it returns
+to the route that invoked it,
 including filters in the query string; a direct `#/settings` link falls back
 to Sessions. Browser Back closes a routed Settings view without adding a loop.
 
@@ -350,6 +352,12 @@ so UI changes ship without a new APK; only native plumbing needs one.
   Session**), the tool strip becomes one scrolling row, and the connection
   line moves behind **View controls** — so the terminal keeps at least 40% of
   the screen instead of being pushed off the bottom.
+- **The bottom bar reaches four places** — Sessions, Inbox, Board, Backlog —
+  and a fifth **More** slot opens a sheet with the rest (Projects, Audit, Git,
+  History, Tasks, and GUI stream and Assistant where those are enabled) plus
+  **Settings** and **Sign out**. Every place and both account actions are two
+  taps from any surface. The bar lifts above the soft keyboard rather than
+  hiding under it.
 - **Modifier row** above the soft keyboard: `Esc`, `Tab`, sticky `Ctrl`,
   arrows, `/ | ~`, `Enter`. Tap `Ctrl` then a letter to send `Ctrl+letter`.
 - Use the terminal's labelled **A− / A+** controls for terminal-only font size;
@@ -377,6 +385,7 @@ so UI changes ship without a new APK; only native plumbing needs one.
 | Shortcut | Action |
 |---|---|
 | `Ctrl/Cmd+K` | Command palette |
+| `Ctrl/Cmd+B` | Show or hide the Places rail (desktop) |
 | `Ctrl/Cmd+Shift+T` | New terminal session |
 | `Ctrl/Cmd+Shift+W` | Close active tab |
 | `Ctrl/Cmd+Alt+←/→` | Cycle tabs |

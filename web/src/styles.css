@@ -1117,6 +1117,76 @@ textarea {
   text-align: left;
 }
 
+/* The phone bottom bar's fifth "More" slot opens this sheet. Same bottom-sheet
+   pattern as the Inbox action sheet, carrying the places the four-slot bar
+   cannot reach plus Settings and Sign out (#231). */
+.phone-more-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  /* Keep the sheet clear of the soft keyboard the same way the bottom bar is. */
+  padding: 0 0 var(--keyboard-inset);
+}
+
+.phone-more-sheet {
+  width: 100%;
+  max-width: none;
+  max-height: min(85dvh, 720px);
+  border-radius: 14px 14px 0 0;
+  padding: 12px max(16px, var(--safe-left)) calc(14px + var(--safe-bottom)) max(16px, var(--safe-right));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--bd);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.phone-more-sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.phone-more-sheet-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.phone-more-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.phone-more-list a,
+.phone-more-list button {
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  color: var(--fg);
+  text-decoration: none;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  font: inherit;
+}
+
+.phone-more-list a:hover,
+.phone-more-list button:hover,
+.phone-more-list a:focus-visible,
+.phone-more-list button:focus-visible {
+  background: var(--bg-tab);
+}
+
 .inbox-evidence {
   padding: 8px;
   border-left: 3px solid var(--activity-running);
@@ -1273,18 +1343,22 @@ textarea {
   .phone-bottom-nav {
     position: fixed;
     right: 0;
-    bottom: 0;
     left: 0;
+    /* Lift the bar above the soft keyboard rather than letting the keyboard
+       bury it: `--keyboard-inset` is the visualViewport gap `index.tsx`
+       measures, 0px when no keyboard is up. */
+    bottom: var(--keyboard-inset);
     z-index: 18;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     gap: 2px;
     padding: 6px 8px calc(6px + var(--safe-bottom));
     background: color-mix(in srgb, var(--bg-elev) 94%, transparent);
     border-top: 1px solid var(--bd);
     backdrop-filter: blur(10px);
   }
-  .phone-bottom-nav a {
+  .phone-bottom-nav a,
+  .phone-bottom-nav .phone-more-trigger {
     position: relative;
     padding: 8px 4px;
     color: var(--fg-muted);
@@ -1292,6 +1366,8 @@ textarea {
     text-align: center;
     text-decoration: none;
     font-size: 12px;
+    background: transparent;
+    border: none;
   }
   .phone-bottom-nav .place-count {
     display: inline-flex;
@@ -1306,19 +1382,23 @@ textarea {
     font-size: 10px;
     line-height: 1;
   }
-  .phone-bottom-nav a {
+  .phone-bottom-nav a,
+  .phone-bottom-nav .phone-more-trigger {
     display: flex;
     min-width: 0;
     align-items: center;
     justify-content: center;
     gap: 3px;
   }
-  .phone-bottom-nav a > span:first-child {
+  .phone-bottom-nav a > span:first-child,
+  .phone-bottom-nav .phone-more-trigger > span:first-child {
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .phone-bottom-nav a.active,
-  .phone-bottom-nav a:focus-visible {
+  .phone-bottom-nav a:focus-visible,
+  .phone-bottom-nav .phone-more-trigger[aria-expanded="true"],
+  .phone-bottom-nav .phone-more-trigger:focus-visible {
     color: var(--fg);
     background: rgba(88, 166, 255, 0.16);
   }
@@ -2970,6 +3050,24 @@ textarea {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+@media (max-width: 768px) {
+  /* On a phone the palette is the way Settings, Sign out and every place are
+     reached, and it is opened over a field the soft keyboard is under. Size it
+     to the visualViewport (`--app-height`), lift it above the keyboard
+     (`--keyboard-inset`), and drop the fixed 400px results cap so the list is
+     not clipped behind the keyboard. */
+  .command-palette-backdrop {
+    padding-top: 8vh;
+    padding-bottom: var(--keyboard-inset);
+  }
+  .command-palette {
+    max-height: calc(var(--app-height) - 12vh);
+  }
+  .command-palette-results {
+    max-height: none;
+  }
 }
 
 .visually-hidden {
@@ -8274,6 +8372,7 @@ textarea {
   summary,
   [role="button"],
   .mobile-go-to,
+  .command-palette-item,
   /* Anchors are only targets where they are navigation; an inline link in a
      sentence is text, and 44px of it would be a paragraph with holes. */
   .phone-bottom-nav a,
