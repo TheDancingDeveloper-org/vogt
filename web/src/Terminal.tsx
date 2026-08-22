@@ -3,6 +3,7 @@ import { listSessions } from "./vogtApi";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { SearchAddon, type ISearchResultChangeEvent } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import { openAttach } from "./api";
 import { readClipboardText, writeClipboardText } from "./clipboard";
@@ -25,6 +26,11 @@ import {
   TERMINAL_FONT_SIZE_EVENT,
 } from "./terminalFont";
 import Dialog from "./Dialog";
+import {
+  formatQueuedBytes,
+  formatReconnectStatus,
+  ReconnectTracker,
+} from "./terminalReconnect";
 
 export interface TerminalActions {
   /** Copy the current xterm selection to the system clipboard. Returns true on success. */
@@ -35,7 +41,23 @@ export interface TerminalActions {
   selectAll: () => void;
   /** Optional higher-level action implemented by TerminalWorkspace. */
   focusComposer?: () => void;
+  /** Jump to the next match of `query` in this pane's buffer (find bar). */
+  findNext?: (query: string) => void;
+  /** Jump to the previous match of `query` in this pane's buffer. */
+  findPrevious?: (query: string) => void;
+  /** Drop all search highlights in this pane. */
+  clearSearch?: () => void;
 }
+
+// Search-match highlight colours. matchOverviewRuler and
+// activeMatchColorOverviewRuler are required by the addon's typings; the ruler
+// is off but the fields must be present for onDidChangeResults to fire.
+const SEARCH_DECORATIONS = {
+  matchBackground: "#5c4b00",
+  matchOverviewRuler: "#d29922",
+  activeMatchBackground: "#d29922",
+  activeMatchColorOverviewRuler: "#f0f6fc",
+} as const;
 
 interface Props {
   sessionId: string;
@@ -47,6 +69,10 @@ interface Props {
   interceptInput?: (data: string | ArrayBuffer) => boolean;
   /** Optional callback for user-facing notifications (copy success/failure). */
   onNotify?: (message: string, kind?: "info" | "error") => void;
+  /** Asked to open the workspace find bar (Ctrl/Cmd+Shift+F inside this pane). */
+  onRequestFind?: () => void;
+  /** Reports search match position/count so the find bar can show "i of n". */
+  onSearchResults?: (info: ISearchResultChangeEvent) => void;
 }
 
 // Upper bound on input buffered while the WS is reconnecting. Generous enough
@@ -83,6 +109,7 @@ const TerminalView: Component<Props> = (props) => {
   let term: XTerm | null = null;
   let ws: WebSocket | null = null;
   let fit: FitAddon | null = null;
+  let search: SearchAddon | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let inSnapshot = true;
   let outputPosition: number | undefined;
@@ -92,8 +119,10 @@ const TerminalView: Component<Props> = (props) => {
   let cacheTimer: ReturnType<typeof setTimeout> | null = null;
   let readyToConnect = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let countdownTimer: ReturnType<typeof setInterval> | null = null;
+  let reconnectAt = 0;
   let fitFrame: number | null = null;
-  let reconnectDelay = 500;
+  const reconnect = new ReconnectTracker();
   let destroyed = false;
   let sessionGone = false;
   let visibilityHandler: (() => void) | null = null;
@@ -106,7 +135,22 @@ const TerminalView: Component<Props> = (props) => {
   let pasteTextareaRef: HTMLTextAreaElement | undefined;
   const [showPasteModal, setShowPasteModal] = createSignal(false);
   const [statusText, setStatusText] = createSignal<string | null>("Connecting...");
+  // The interactive reconnect overlay. Non-null only while we are between a
+  // dropped socket and the next successful attach.
+  const [reconnectView, setReconnectView] = createSignal<
+    { attempt: number; nextInSec: number } | null
+  >(null);
+  const [queuedBytes, setQueuedBytes] = createSignal(0);
   let pasteResolve: ((v: string | null) => void) | null = null;
+
+  const syncQueuedBytes = () => setQueuedBytes(pendingInputBytes);
+
+  const clearCountdown = () => {
+    if (countdownTimer !== null) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+    }
+  };
 
   const promptPaste = (): Promise<string | null> =>
     new Promise((resolve) => {
@@ -155,6 +199,7 @@ const TerminalView: Component<Props> = (props) => {
     }
     pendingInput.push(bytes);
     pendingInputBytes += bytes.byteLength;
+    syncQueuedBytes();
   };
 
   const flushPendingInput = () => {
@@ -162,6 +207,7 @@ const TerminalView: Component<Props> = (props) => {
     for (const chunk of pendingInput) ws.send(chunk);
     pendingInput = [];
     pendingInputBytes = 0;
+    syncQueuedBytes();
   };
 
   const dropPendingInput = () => {
@@ -170,6 +216,7 @@ const TerminalView: Component<Props> = (props) => {
     }
     pendingInput = [];
     pendingInputBytes = 0;
+    syncQueuedBytes();
   };
 
   const appendToCache = (data: Uint8Array) => {
@@ -382,6 +429,9 @@ const TerminalView: Component<Props> = (props) => {
     fit = new FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
+    search = new SearchAddon();
+    term.loadAddon(search);
+    search.onDidChangeResults((info) => props.onSearchResults?.(info));
     term.open(hostRef);
     configureTerminalTextarea(term.textarea);
     fitAndResize();
@@ -464,6 +514,13 @@ const TerminalView: Component<Props> = (props) => {
       if (e.type !== "keydown") return true;
       const meta = e.ctrlKey && e.shiftKey;
       const mac = navigator.platform.toLowerCase().includes("mac") && e.metaKey;
+      // Ctrl/Cmd+Shift+F opens the workspace find bar. Handled here so it works
+      // even when xterm holds keyboard focus.
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "f" || e.key === "F")) {
+        e.preventDefault();
+        props.onRequestFind?.();
+        return false;
+      }
       if ((meta || mac) && (e.key === "c" || e.key === "C")) {
         if (term?.hasSelection()) {
           e.preventDefault();
@@ -549,10 +606,23 @@ const TerminalView: Component<Props> = (props) => {
     // (long-press to select → release accidentally clobbers the clipboard).
     // We hold this back and rely on the explicit shortcuts / context menu.
 
+    const runSearch = (dir: "next" | "prev", query: string) => {
+      if (!search) return;
+      if (!query) {
+        search.clearDecorations();
+        return;
+      }
+      if (dir === "next") search.findNext(query, { decorations: SEARCH_DECORATIONS });
+      else search.findPrevious(query, { decorations: SEARCH_DECORATIONS });
+    };
+
     props.registerActions?.({
       copy: copySelection,
       paste: pasteFromClipboard,
       selectAll: () => term?.selectAll(),
+      findNext: (query) => runSearch("next", query),
+      findPrevious: (query) => runSearch("prev", query),
+      clearSearch: () => search?.clearDecorations(),
     });
 
     // Resize plumbing
@@ -589,7 +659,7 @@ const TerminalView: Component<Props> = (props) => {
       if (!readyToConnect) return;
       if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
         if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        reconnectDelay = 500;
+        clearCountdown();
         connect();
       }
     };
@@ -624,6 +694,8 @@ const TerminalView: Component<Props> = (props) => {
     if (!sessionGone) {
       sessionGone = true;
       dropPendingInput();
+      clearCountdown();
+      setReconnectView(null);
       setStatusText("Session unavailable");
       term?.write("\r\n\x1b[31m[session not found — server may have restarted]\x1b[0m\r\n");
     }
@@ -633,24 +705,46 @@ const TerminalView: Component<Props> = (props) => {
     return sessionsStore.ready && !sessionsStore.sessions[props.sessionId];
   }
 
-  function scheduleReconnect(delayMs = reconnectDelay) {
+  function scheduleReconnect(overrideDelayMs?: number) {
     if (destroyed || reconnectTimer !== null) return;
     if (isSessionGone()) { markSessionGone(); return; }
-    setStatusText(inSnapshot ? "Reconnecting terminal..." : "Reconnecting...");
+    const snap = reconnect.scheduleAttempt();
+    const delay = overrideDelayMs ?? snap.delayMs;
+    reconnectAt = Date.now() + delay;
+    // The interactive overlay owns this window; hand it the attempt count and a
+    // live countdown, and drop the plain status text so the two don't overlap.
+    setStatusText(null);
+    setReconnectView({ attempt: snap.attempt, nextInSec: Math.max(0, Math.ceil(delay / 1000)) });
+    clearCountdown();
+    countdownTimer = setInterval(() => {
+      const remain = Math.max(0, Math.ceil((reconnectAt - Date.now()) / 1000));
+      setReconnectView((cur) => (cur ? { ...cur, nextInSec: remain } : cur));
+    }, 250);
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
+      clearCountdown();
       if (!destroyed) connect();
-    }, delayMs);
-    reconnectDelay = Math.min(reconnectDelay * 2, 8_000);
+    }, delay);
+  }
+
+  function retryNow() {
+    if (destroyed) return;
+    if (isSessionGone()) { markSessionGone(); return; }
+    if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    clearCountdown();
+    connect();
   }
 
   function connect() {
     if (isSessionGone()) { markSessionGone(); return; }
     inSnapshot = true;
+    // We are actively attaching now, not waiting to retry — retire the overlay.
+    clearCountdown();
+    setReconnectView(null);
     setStatusText("Loading terminal...");
     ws = openAttach(props.sessionId, outputPosition);
     ws.addEventListener("open", () => {
-      reconnectDelay = 500;
+      reconnect.recover();
       sendResize();
       flushPendingInput();
     });
@@ -694,7 +788,6 @@ const TerminalView: Component<Props> = (props) => {
             setStatusText("Reattaching terminal...");
             // Cancel any timer so the close event below doesn't double-schedule.
             if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-            reconnectDelay = 500;
             ws?.close();
             scheduleReconnect(100);
           }
@@ -710,10 +803,15 @@ const TerminalView: Component<Props> = (props) => {
       term?.write(buf);
     });
     ws.addEventListener("close", () => {
+      // Write the [disconnected] marker once at the start of the outage, not on
+      // every retry, and never through appendToCache — it is a live hint, not
+      // part of the replayable scrollback.
       if (!inSnapshot) {
-        term?.write("\r\n\x1b[33m[disconnected]\x1b[0m\r\n");
+        const { writeMarker } = reconnect.beginOutage();
+        if (writeMarker) {
+          term?.write("\r\n\x1b[33m[disconnected]\x1b[0m\r\n");
+        }
       }
-      setStatusText(inSnapshot ? "Reconnecting terminal..." : "Reconnecting...");
       scheduleReconnect();
     });
     ws.addEventListener("error", () => {
@@ -726,6 +824,7 @@ const TerminalView: Component<Props> = (props) => {
     pendingInput = [];
     pendingInputBytes = 0;
     if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    clearCountdown();
     if (cacheTimer !== null) { clearTimeout(cacheTimer); cacheTimer = null; }
     persistCache();
     if (fitFrame !== null) {
@@ -767,6 +866,7 @@ const TerminalView: Component<Props> = (props) => {
     term = null;
     ws = null;
     fit = null;
+    search = null;
   });
 
   return (
@@ -796,7 +896,28 @@ const TerminalView: Component<Props> = (props) => {
           )}
         </Show>
         <div class="terminal-host" ref={hostRef} />
-        <Show when={statusText()}>
+        <Show when={reconnectView()}>
+          {(info) => (
+            <div class="terminal-status-overlay terminal-reconnect-overlay" role="status">
+              <span class="terminal-reconnect-line">
+                {formatReconnectStatus(info().attempt, info().nextInSec)}
+              </span>
+              <Show when={queuedBytes() > 0}>
+                <span class="terminal-reconnect-queued">
+                  {formatQueuedBytes(queuedBytes())}
+                </span>
+              </Show>
+              <button
+                type="button"
+                class="terminal-reconnect-retry"
+                onClick={() => retryNow()}
+              >
+                Retry now
+              </button>
+            </div>
+          )}
+        </Show>
+        <Show when={!reconnectView() && statusText()}>
           {(text) => <div class="terminal-status-overlay">{text()}</div>}
         </Show>
       </div>

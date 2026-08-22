@@ -1854,6 +1854,25 @@ textarea {
   backdrop-filter: blur(4px);
 }
 
+.terminal-reconnect-overlay {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* The whole point of the overlay is the Retry button, so it must take clicks
+     even though the plain status overlay above does not. */
+  pointer-events: auto;
+}
+.terminal-reconnect-queued {
+  color: var(--activity-warning, #d29922);
+}
+.terminal-reconnect-retry {
+  padding: 2px 8px;
+  font-size: 12px;
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.14);
+  cursor: pointer;
+}
+
 .terminal-workspace {
   flex: 1;
   min-height: 0;
@@ -1912,6 +1931,84 @@ textarea {
 .terminal-workspace-toolbar button.active {
   border-color: var(--accent);
   background: rgba(88, 166, 255, 0.12);
+}
+.terminal-workspace-toolbar button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.terminal-font-readout {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.terminal-font-value {
+  min-width: 22px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.terminal-theme-select {
+  flex: 0 0 auto;
+  max-width: 130px;
+  padding: 3px 6px;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg-elev);
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+}
+.terminal-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--bd);
+  background: var(--bg-elev);
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.terminal-find-input {
+  flex: 1;
+  min-width: 0;
+  max-width: 280px;
+  padding: 3px 8px;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+}
+.terminal-find-count {
+  min-width: 60px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+.terminal-find-bar button {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.terminal-exited-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--bd);
+  background: rgba(210, 153, 34, 0.14);
+  color: var(--fg);
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+.terminal-exited-label {
+  font-weight: 600;
+}
+.terminal-exited-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+.terminal-exited-actions button {
+  padding: 3px 8px;
+  font-size: 12px;
 }
 .terminal-workspace-roster {
   display: flex;

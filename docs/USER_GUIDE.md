@@ -304,6 +304,29 @@ link into its terminal, sorted with whatever wants attention first. When there
 are no sessions at all it becomes a **Start a session** button beside the
 configured presets, rather than an empty panel.
 
+**New sessions are named for you and created straight away.** The **+ Session**
+button, `Ctrl/Cmd+Shift+T` and each split take the working directory's basename
+and deduplicate it — a second shell opened in `…/vogt` becomes `vogt-2`, and a
+pane split off `vogt` reads as `vogt ▸2`. Hold **Shift** on **+ Session** when
+you would rather type the name yourself.
+
+**Search the buffer** with `Ctrl/Cmd+Shift+F` or the toolbar's **Find** button:
+a small find bar opens with the match count and next/previous controls (`Enter`
+and `Shift+Enter` step through matches, `Esc` closes it). The toolbar also
+carries an **A− / size / A+** font readout — the buttons stop at the 9–24 pt
+limits and clicking the number resets to the default — and a color-theme
+picker; both apply to every pane and persist across reloads.
+
+**A dropped connection is visible and recoverable.** When the websocket drops
+mid-session the terminal writes a single `[disconnected]` marker (once per
+outage, not once per retry) and shows a *Reconnecting (try N, next in Xs)*
+overlay with a **Retry now** button that reconnects immediately; anything you
+typed while it was down is queued and its size is shown, then flushed on
+reconnect. When a shell **exits**, an *Exited (code N)* banner offers **Restart
+here** (a fresh shell in the same directory) and **Remove** — removing an
+exited session skips the kill confirmation, since its scrollback is already
+archived to History.
+
 Each session carries an activity state — `idle`, `running`,
 `waiting-for-input`, `errored` — shown in the Sessions roster so an agent
 waiting for approval is visible without opening it. **The state is a
@@ -432,6 +455,7 @@ so UI changes ship without a new APK; only native plumbing needs one.
 | `Ctrl/Cmd+Shift+W` | Close active tab |
 | `Ctrl/Cmd+Alt+←/→` | Cycle tabs |
 | `Ctrl/Cmd+Shift+C` / `V` / `A` | Copy / paste / select all in a terminal |
+| `Ctrl/Cmd+Shift+F` | Find in the terminal buffer |
 | Middle-click | Paste (Linux convention) |
 | Right-click | Copy if there is a selection, else paste |
 | `Ctrl/Cmd+S` | Save file (editor) |

@@ -55,6 +55,7 @@ import {
   startEventStream,
   stopEventStream,
 } from "./store";
+import { autoSessionName } from "./terminalNaming";
 import {
   closeTab,
   focusTab,
@@ -772,6 +773,9 @@ const App: Component = () => {
   const onCreate = async (
     cwd?: string,
     template?: SessionTemplate,
+    // Sessions are created immediately with a cwd-derived name; hold Shift on
+    // the create action (or come in via a template) to be asked for a name.
+    promptForName = true,
   ): Promise<void> => {
     // If template selector should be shown
     if (!template && allTemplates().length > 1) {
@@ -780,12 +784,18 @@ const App: Component = () => {
       return;
     }
 
-    // Default session creation (no template or single template)
-    const name = await promptUser(
-      cwd ? `New session in ${cwd}` : "New session",
-      `shell-${Date.now() % 1000}`,
-      "name",
+    const autoName = autoSessionName(
+      cwd,
+      Object.values(sessionsStore.sessions).map((s) => s.name),
     );
+    let name: string | null = autoName;
+    if (promptForName) {
+      name = await promptUser(
+        cwd ? `New session in ${cwd}` : "New session",
+        autoName,
+        "name",
+      );
+    }
     if (!name) return;
     try {
       const s = await createSession(
@@ -1018,11 +1028,15 @@ const App: Component = () => {
   };
 
   const onCloseSession = async (s: SessionSummary) => {
-    const ok = await confirmUser(
-      `Kill and remove "${s.name}"?`,
-      "The shell and its scrollback will be discarded.",
-    );
-    if (!ok) return;
+    // An exited session has no live shell to kill and its scrollback is already
+    // archived — removing it is not a destructive act, so skip the confirm.
+    if (s.exit_code === null) {
+      const ok = await confirmUser(
+        `Kill and remove "${s.name}"?`,
+        "The shell and its scrollback will be discarded.",
+      );
+      if (!ok) return;
+    }
     closeTabAndNavigate(`term:${s.id}`);
     try {
       try {
@@ -1064,7 +1078,8 @@ const App: Component = () => {
     }
     if (shortcut.id === "new-terminal-session") {
       e.preventDefault();
-      void onCreate();
+      // Ctrl+Shift+T creates immediately with a cwd-derived name.
+      void onCreate(undefined, undefined, false);
       return;
     }
     if (shortcut.id === "close-active-tab") {
@@ -1296,12 +1311,12 @@ const App: Component = () => {
                     type="button"
                     role="menuitem"
                     class="danger"
-                    aria-label={`Close ${s.name}`}
+                    aria-label={s.exit_code !== null ? `Remove ${s.name}` : `Close ${s.name}`}
                     onClick={() => {
                       setOpenMenuId(null);
                       void onCloseSession(s);
                     }}
-                  >Kill &amp; remove</button>
+                  >{s.exit_code !== null ? "Remove" : "Kill & remove"}</button>
                 </div>
                 </>
               )}
@@ -1485,7 +1500,9 @@ const App: Component = () => {
               guiEnabled={guiEnabled()}
               assistantEnabled={Boolean(publicCfg()?.assistant_enabled)}
               hasActiveWorkspace={sessionWorkspaceActive()}
-              onCreateSession={() => void onCreate()}
+              onCreateSession={(promptForName) =>
+                void onCreate(undefined, undefined, promptForName)
+              }
               sessionTemplates={allTemplates()}
               onLaunchTemplate={(template) => void launchTemplateDirect(template)}
             >
@@ -1551,6 +1568,12 @@ const App: Component = () => {
                         }
                         onNotify={(message, kind) =>
                           showToast(message, { kind })
+                        }
+                        onRestartExited={(session) =>
+                          void onDuplicateSession(session)
+                        }
+                        onRemoveExited={(session) =>
+                          void onCloseSession(session)
                         }
                       />
                     )}

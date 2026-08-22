@@ -111,6 +111,14 @@ export const KEYBOARD_SHORTCUTS: readonly KeyboardShortcut[] = [
     contextLabel: "Terminal only",
   },
   {
+    id: "terminal-search",
+    keys: ["Ctrl/Cmd", "Shift", "F"],
+    description: "Find in the terminal buffer",
+    category: "Terminal",
+    context: "terminal",
+    contextLabel: "Terminal only",
+  },
+  {
     id: "terminal-interrupt",
     keys: ["Ctrl", "C"],
     description: "Copy with a selection, otherwise interrupt",
