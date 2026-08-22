@@ -2352,6 +2352,78 @@ test("terminal find bar searches the live buffer and navigates matches (#234)", 
   await expect(page.locator(".terminal-find-bar")).toHaveCount(0);
 });
 
+test("Phone terminal folds pane actions into a ··· menu, keeps errors visible, and never scrolls sideways (#236)", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The overflow menu is the narrow toolbar's");
+  await installFixtures(page, {}, [liveSession]);
+  await stubTerminalAttach(page);
+  // A split that fails, so the error span has something to show — the point of
+  // keeping it visible on a phone.
+  await page.route("**/api/sessions", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    return route.fulfill({ status: 500, body: "engine refused the split" });
+  });
+  await page.goto("/#/t/browser-session");
+  await expect(page.locator(".terminal-host").first()).toBeVisible();
+
+  // The pane-management buttons are behind the ··· menu, not inline: the
+  // toolbar carries no hidden horizontal scroll strip.
+  const overflowToggle = page.getByRole("button", { name: "More terminal actions" });
+  await expect(overflowToggle).toBeVisible();
+  await expect(page.getByRole("button", { name: "Broadcast off" })).toHaveCount(0);
+  const fit = await page.locator(".terminal-workspace-toolbar").evaluate((el) => ({
+    scroll: el.scrollWidth,
+    client: el.clientWidth,
+  }));
+  expect(fit.scroll, JSON.stringify(fit)).toBeLessThanOrEqual(fit.client + 1);
+
+  // Open the menu; the collapsed actions live here.
+  await overflowToggle.click();
+  await expect(page.getByRole("button", { name: "Broadcast off" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Split right" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close pane" })).toBeVisible();
+
+  // A failed split reports into the error span, which is NOT display:none on a
+  // phone any more.
+  await page.getByRole("button", { name: "Split right" }).click();
+  const error = page.locator(".terminal-workspace-error");
+  await expect(error).toBeVisible();
+  await expect(error).toContainText("split failed");
+});
+
+test("Phone terminal surfaces a Copy chip over a live selection (#236)", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The Copy chip is the coarse-pointer copy affordance");
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    // Selectable content on the first row for the drag to land on.
+    socket.send(Buffer.from("SELECTME-ALPHA SELECTME-BETA SELECTME-GAMMA\r\n"));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  const host = page.locator(".terminal-host").first();
+  await expect(host).toBeVisible();
+
+  // No selection, no chip.
+  await expect(page.locator(".terminal-copy-chip")).toHaveCount(0);
+
+  const box = await host.boundingBox();
+  expect(box).not.toBeNull();
+  // Drag across the first row to select text. xterm's write queue drains on
+  // animation frames, so retry the drag until the selection registers.
+  await expect.poll(async () => {
+    await page.mouse.move(box!.x + 8, box!.y + 8);
+    await page.mouse.down();
+    await page.mouse.move(box!.x + 160, box!.y + 8, { steps: 6 });
+    await page.mouse.up();
+    return page.locator(".terminal-copy-chip").count();
+  }, { timeout: 6000 }).toBeGreaterThan(0);
+
+  const chip = page.locator(".terminal-copy-chip");
+  await expect(chip).toBeVisible();
+  await expect(chip).toHaveText("Copy");
+});
+
 test("exited session shows a banner and Remove skips the kill confirm (#235)", async ({ page }) => {
   const exitedSession = {
     ...liveSession,

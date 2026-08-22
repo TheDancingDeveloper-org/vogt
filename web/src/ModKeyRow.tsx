@@ -1,4 +1,11 @@
-import { Component, createSignal, For } from "solid-js";
+import { Component, For } from "solid-js";
+import {
+  altArmed,
+  applyStickyMods,
+  armAlt,
+  armCtrl,
+  ctrlArmed,
+} from "./terminalModifiers";
 
 interface Props {
   /** Send raw bytes/text into the active terminal's PTY stdin. */
@@ -15,64 +22,64 @@ interface Props {
 
 /**
  * Mobile modifier-key row. Visible only on coarse-pointer narrow screens
- * (see styles.css media query). Tapping a "sticky" key like Ctrl arms it for
- * the next character: tap Ctrl, then C → ^C is sent.
+ * (see styles.css media query).
+ *
+ * The sticky `Ctrl`/`Alt` keys arm a shared store (terminalModifiers) rather
+ * than a local signal, so the chord lands on the next character *from the soft
+ * keyboard* too — the terminal input path consumes the same armed state
+ * (#236). Tap `Ctrl`, then `r` → `^R`; tap `Alt`, then `f` → `ESC f`.
  */
 const ModKeyRow: Component<Props> = (props) => {
-  const [ctrlArmed, setCtrlArmed] = createSignal(false);
-
-  const send = (s: string) => {
-    if (ctrlArmed()) {
-      // Convert next letter into ASCII control code 1..26 (Ctrl-A..Ctrl-Z).
-      // For non-letters, fall back to sending as-is preceded by Ctrl semantics
-      // (only letters are meaningfully handled here).
-      const ch = s.length === 1 ? s.toLowerCase() : "";
-      const code = ch.charCodeAt(0);
-      if (code >= 97 && code <= 122) {
-        props.send(String.fromCharCode(code - 96));
-      } else {
-        // Send literally if Ctrl+X doesn't map to a control character.
-        props.send(s);
-      }
-      setCtrlArmed(false);
-      return;
-    }
-    props.send(s);
+  // Route a modkey button's bytes through the same sticky-modifier consumer the
+  // soft keyboard uses, so arming Ctrl then tapping `/` chords too. Multi-byte
+  // sequences (arrows, Home/End) pass straight through.
+  const emit = (data: string) => {
+    const next = applyStickyMods(data);
+    props.send(typeof next === "string" ? next : data);
   };
 
-  const keys: Array<{ label: string; send?: () => void; armed?: () => boolean }> = [
-    { label: "Esc", send: () => send("\x1b") },
-    { label: "Tab", send: () => send("\t") },
-    { label: "^C", send: () => props.send("\x03") },
-    { label: "^D", send: () => props.send("\x04") },
-    { label: "^L", send: () => props.send("\x0c") },
-    { label: "Bksp", send: () => props.send("\x7f") },
+  interface Key {
+    label: string;
+    onPress: () => void;
+    armed?: () => boolean;
+    /** Marks the extra second-tier keys, for a subtle visual grouping. */
+    extra?: boolean;
+  }
+
+  const keys: Array<Key> = [
+    { label: "Esc", onPress: () => emit("\x1b") },
+    { label: "Tab", onPress: () => emit("\t") },
     {
       label: "Ctrl",
-      send: () => setCtrlArmed((v) => !v),
+      onPress: () => armCtrl(),
       armed: () => ctrlArmed(),
     },
-    { label: "←", send: () => send("\x1b[D") },
-    { label: "↑", send: () => send("\x1b[A") },
-    { label: "↓", send: () => send("\x1b[B") },
-    { label: "→", send: () => send("\x1b[C") },
-    { label: "/", send: () => send("/") },
-    { label: "|", send: () => send("|") },
-    { label: "~", send: () => send("~") },
-    { label: "Enter", send: () => send("\r") },
-    { label: "Type", send: () => props.onFocusComposer?.() },
-    { label: "Sel", send: () => props.onSelectAll?.() },
-    { label: "Copy", send: () => props.onCopy?.() },
-    { label: "Paste", send: () => props.onPaste?.() },
+    {
+      label: "Alt",
+      onPress: () => armAlt(),
+      armed: () => altArmed(),
+    },
+    { label: "^C", onPress: () => props.send("\x03") },
+    { label: "^D", onPress: () => props.send("\x04") },
+    { label: "^L", onPress: () => props.send("\x0c") },
+    { label: "Bksp", onPress: () => props.send("\x7f") },
+    { label: "←", onPress: () => emit("\x1b[D") },
+    { label: "↑", onPress: () => emit("\x1b[A") },
+    { label: "↓", onPress: () => emit("\x1b[B") },
+    { label: "→", onPress: () => emit("\x1b[C") },
+    { label: "Home", onPress: () => emit("\x1b[H"), extra: true },
+    { label: "End", onPress: () => emit("\x1b[F"), extra: true },
+    { label: "PgUp", onPress: () => emit("\x1b[5~"), extra: true },
+    { label: "PgDn", onPress: () => emit("\x1b[6~"), extra: true },
+    { label: "/", onPress: () => emit("/") },
+    { label: "|", onPress: () => emit("|") },
+    { label: "~", onPress: () => emit("~") },
+    { label: "Enter", onPress: () => emit("\r") },
+    { label: "Type", onPress: () => props.onFocusComposer?.() },
+    { label: "Sel", onPress: () => props.onSelectAll?.() },
+    { label: "Copy", onPress: () => props.onCopy?.() },
+    { label: "Paste", onPress: () => props.onPaste?.() },
   ];
-
-  // After a non-Ctrl key tap, if Ctrl was armed we already consumed it.
-  // For Ctrl+letter, the actual letter still comes from the soft keyboard —
-  // so when armed, we hook the next single keystroke at the App level too
-  // (parent passes us send(), and the App should intercept terminal data).
-  // For Phase 2 we accept the limitation that Ctrl only chords with the
-  // explicit modkey buttons; chording with the soft keyboard requires deeper
-  // input interception we'll add later.
 
   return (
     <div class="modkey-row" role="toolbar" aria-label="Terminal modifier keys">
@@ -80,8 +87,11 @@ const ModKeyRow: Component<Props> = (props) => {
         {(k) => (
           <button
             type="button"
-            class={k.armed?.() ? "armed" : undefined}
-            onClick={() => k.send?.()}
+            class={[k.armed?.() ? "armed" : "", k.extra ? "modkey-extra" : ""]
+              .filter(Boolean)
+              .join(" ") || undefined}
+            aria-pressed={k.armed ? k.armed() : undefined}
+            onClick={() => k.onPress()}
           >
             {k.label}
           </button>

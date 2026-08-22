@@ -2150,11 +2150,20 @@ textarea {
 
 @media (max-width: 768px) {
   .terminal-workspace-toolbar {
-    overflow-x: auto;
+    /* The overflow actions live in the `···` menu now, so the toolbar wraps
+       instead of hiding buttons behind a horizontal scroll strip (#236). */
+    overflow-x: visible;
+    flex-wrap: wrap;
   }
-  .terminal-workspace-cwd,
-  .terminal-workspace-error {
+  .terminal-workspace-cwd {
     display: none;
+  }
+  /* The error span stays visible on a phone: it is where a split/close failure
+     is reported, and hiding it left touch users with a dead button (#236). */
+  .terminal-workspace-error {
+    flex-basis: 100%;
+    max-width: 100%;
+    order: 99;
   }
   .terminal-workspace-title {
     flex: 1 0 90px;
@@ -2201,11 +2210,67 @@ textarea {
   color: var(--bg);
   border-color: var(--accent);
 }
+/* The second-tier navigation keys (Home/End/PgUp/PgDn) read as a quieter
+   group so the row's first-tier keys stay the ones the eye lands on. */
+.modkey-row button.modkey-extra {
+  color: var(--fg-muted);
+}
 
 @media (max-width: 768px) and (pointer: coarse) {
   .modkey-row {
     display: flex;
   }
+}
+
+/* Toolbar overflow menu (#236): the `···` control and its dropdown of
+   pane-management actions on a phone. */
+.terminal-toolbar-overflow {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.terminal-toolbar-overflow-toggle {
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.terminal-toolbar-overflow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 160px;
+  padding: 6px;
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.terminal-toolbar-overflow-menu button {
+  width: 100%;
+  text-align: left;
+}
+
+/* Floating touch Copy chip (#236): appears over a live selection on a coarse
+   pointer, where there is no right-click and no long-press contextmenu. */
+.terminal-copy-chip {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 30;
+  padding: 6px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  touch-action: manipulation;
 }
 
 .feedback-center {
