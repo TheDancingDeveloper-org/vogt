@@ -19,12 +19,9 @@ client of the core, never the reverse.
   domain model, and roadmap. Update it when decisions change; don't fork
   competing design docs. **It describes what exists** — a capability that was
   designed and never built belongs in `docs/ROADMAP.md`, not here.
-- `design/` — diagrams, mockups, exploratory notes (may be messy). Its two
-  rules are in `design/README.md`: nothing there is a specification, and
-  nothing there is a source of truth about the built product.
-- `docs/RESTRUCTURE.md` — the staged plan for turning the desktop/mobile
-  restructure export into the shipped PWA and phone app. A plan, not a
-  commitment.
+- `design/` — kept as an empty, tracked directory because the project
+  contract requires it. Wireframes and mockups are maintainer working
+  material and live outside the repository (git-ignored `docs/local/`).
 - `src/vogt/` — the implementation. Layer order is strict: `core` (entities,
   ids, time, digests, the workflow engine, the ranking function, the contract)
   → `storage` (interface + the SQLite backend, the only place SQL lives) →

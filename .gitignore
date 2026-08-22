@@ -72,3 +72,8 @@ docs/local/
 # (it lives under docs/local/). Nothing under this name should be committed.
 docs/REQUIREMENTS*.md
 **/REQUIREMENTS.md
+
+# Design canvases and wireframes are maintainer working material, kept under
+# docs/local/. Only the contract-required placeholder stays tracked.
+design/*
+!design/.gitkeep
