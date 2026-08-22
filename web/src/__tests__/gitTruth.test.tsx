@@ -128,10 +128,10 @@ describe("Git read truth", () => {
       .mockResolvedValueOnce(CLEAN_STATUS);
     renderGit();
 
-    expect(await screen.findByRole("button", { name: /src\/App.tsx/ })).toBeVisible();
+    expect(await screen.findByText("src/App.tsx")).toBeVisible();
     await refresh();
     expect(await screen.findByText(/Status is stale: status offline/)).toBeVisible();
-    expect(screen.getByRole("button", { name: /src\/App.tsx/ })).toBeVisible();
+    expect(screen.getByText("src/App.tsx")).toBeVisible();
 
     await fireEvent.click(screen.getByRole("button", { name: "Retry status" }));
     await waitFor(() => expect(screen.queryByText(/status offline/)).not.toBeInTheDocument());
@@ -183,7 +183,7 @@ describe("Git read truth", () => {
       .mockResolvedValueOnce({ path: "src/App.tsx", head: "old", current: "recovered" });
     renderGit();
 
-    await fireEvent.click(await screen.findByRole("button", { name: /src\/App.tsx/ }));
+    await fireEvent.click((await screen.findByText("src/App.tsx")).closest("button")!);
     await waitFor(() => expect(api.gitDiff).toHaveBeenCalledTimes(1));
     await refresh();
     expect(await screen.findByText(/Diff is stale: diff offline/)).toBeVisible();

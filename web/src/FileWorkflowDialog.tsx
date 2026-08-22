@@ -8,6 +8,7 @@ import {
 } from "solid-js";
 import { api, type FileSearchResult } from "./api";
 import Dialog from "./Dialog";
+import { bumpWorkspaceVersion } from "./workspaceVersion";
 
 export type FileWorkflow = "new" | "open";
 
@@ -97,6 +98,9 @@ const FileWorkflowDialog: Component<Props> = (props) => {
     setError(null);
     try {
       await api.writeFile(path, "", true);
+      // The file tree (mounted or not) should reflect the new file without a
+      // manual Refresh (#238).
+      bumpWorkspaceVersion();
       props.onFileCreated?.(path);
       openFile(path);
     } catch (cause) {

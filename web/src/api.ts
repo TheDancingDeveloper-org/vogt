@@ -42,6 +42,10 @@ export interface OkResponse {
 
 export interface WriteFileResponse extends OkResponse {
   bytes: number;
+  /** SHA-256 hex of the bytes just written — the client's new save baseline. */
+  hash?: string;
+  /** On-disk mtime after the write, milliseconds since the Unix epoch. */
+  mtime?: number;
 }
 
 export interface FileOpResponse extends OkResponse {
@@ -366,6 +370,10 @@ export interface FileRead {
   content: string | null;
   content_base64: string | null;
   is_binary: boolean;
+  /** On-disk mtime, ms since the Unix epoch. 0 from a server too old to send it. */
+  mtime?: number;
+  /** SHA-256 hex of the file's bytes; the editor's optimistic-concurrency token. */
+  hash?: string;
 }
 
 export type FileOpRequest =
@@ -537,11 +545,19 @@ export const api = {
     ),
   readFile: (path: string, signal?: AbortSignal) =>
     req<FileRead>("GET", `/api/files?path=${encodeURIComponent(path)}`, undefined, signal),
-  writeFile: (path: string, content: string, create_parents = false) =>
+  writeFile: (
+    path: string,
+    content: string,
+    create_parents = false,
+    if_match?: string,
+  ) =>
     req<WriteFileResponse>("PUT", "/api/files", {
       path,
       content,
       create_parents,
+      // Only sent when the caller has a baseline to guard against: absent
+      // preserves the server's last-writer-wins behaviour (new files, uploads).
+      ...(if_match ? { if_match } : {}),
     }),
   writeFileBase64: (
     path: string,

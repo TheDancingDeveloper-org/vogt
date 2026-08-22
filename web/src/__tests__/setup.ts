@@ -12,6 +12,7 @@ import { clearEditorDrafts } from "../editorDrafts";
 import { clearToolDrafts } from "../toolDrafts";
 import { clearPendingAction } from "../pendingAction";
 import { resetRailSections } from "../railSections";
+import { resetFileTreeState } from "../fileTreeState";
 
 class StubResizeObserver implements ResizeObserver {
   observe(): void {}
@@ -63,6 +64,7 @@ afterEach(() => {
   clearToolDrafts();
   clearPendingAction();
   resetRailSections();
+  resetFileTreeState();
 });
 
 // Unmount what the last test mounted.

@@ -149,6 +149,12 @@ export const KEYBOARD_SHORTCUTS: readonly KeyboardShortcut[] = [
     category: "Editor",
     context: "editor",
     contextLabel: "Editor only",
+    // A binding so a Ctrl/Cmd+S landing outside Monaco (the tab bar, the file
+    // tree, a split header) is caught by the app handler and routed to the
+    // active editor's save, instead of triggering the browser Save-Page dialog
+    // (#237). Inside Monaco or another input the app handler stands down —
+    // Monaco has its own binding, and other inputs are not editors.
+    binding: { key: "s", ctrlOrMeta: true, alt: false, shift: false },
   },
   {
     id: "editor-find",
@@ -340,7 +346,7 @@ export const KEYBOARD_SHORTCUTS: readonly KeyboardShortcut[] = [
   },
 ] as const;
 
-function isEditableTarget(target: EventTarget | null): boolean {
+export function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
   return Boolean(
     target.closest(
