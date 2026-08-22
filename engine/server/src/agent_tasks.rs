@@ -26,7 +26,16 @@ use crate::{
 };
 
 const TASKS_FILE: &str = "agent-tasks.json";
-const DEFAULT_NOTIFY_PHRASE: &str = "MYDEVENV2_NOTIFY:";
+/// The prefix a run prints to ask for a push notification (FR-E7). Renamed to
+/// `VOGT_NOTIFY:` with the product (#203); the engine still recognises the
+/// legacy `MYDEVENV2_NOTIFY:` below, so a client emitting either prefix — and a
+/// task definition created under the old default — keeps working.
+const DEFAULT_NOTIFY_PHRASE: &str = "VOGT_NOTIFY:";
+/// The historical notify prefix, still accepted. A task configured with either
+/// default is matched against *both*, so the downstream web client can switch
+/// its default to `VOGT_NOTIFY:` without stranding runs that still print the
+/// old one (or vice versa).
+const LEGACY_NOTIFY_PHRASE: &str = "MYDEVENV2_NOTIFY:";
 
 /// The one mechanism that produces findings today (FR-E7). Named rather than
 /// implied so that a second one arriving has to say it is a second one.
@@ -1362,6 +1371,36 @@ fn default_notify_phrase() -> Option<String> {
     Some(DEFAULT_NOTIFY_PHRASE.to_string())
 }
 
+/// The prefixes a run's output is scanned for, given the task's configured
+/// notify phrase (#203).
+///
+/// A task left on either default — the current `VOGT_NOTIFY:` or the legacy
+/// `MYDEVENV2_NOTIFY:` a task created before the rename still carries — is
+/// matched against *both*, so a run that prints either prefix is recognised
+/// through the client's own default changeover. A task configured with a
+/// bespoke phrase is matched on exactly that and nothing else.
+fn accepted_notify_phrases(configured: &str) -> Vec<String> {
+    if configured == DEFAULT_NOTIFY_PHRASE || configured == LEGACY_NOTIFY_PHRASE {
+        vec![
+            DEFAULT_NOTIFY_PHRASE.to_string(),
+            LEGACY_NOTIFY_PHRASE.to_string(),
+        ]
+    } else {
+        vec![configured.to_string()]
+    }
+}
+
+/// The earliest accepted phrase present in `tail`, as `(byte index, phrase)`.
+///
+/// "Earliest" so that when a run prints one prefix the message after it is the
+/// one read, regardless of which accepted phrase it was.
+fn find_notify_match<'a>(tail: &str, phrases: &'a [String]) -> Option<(usize, &'a str)> {
+    phrases
+        .iter()
+        .filter_map(|phrase| tail.find(phrase.as_str()).map(|idx| (idx, phrase.as_str())))
+        .min_by_key(|(idx, _)| *idx)
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1491,6 +1530,7 @@ fn spawn_phrase_watcher(
     mut rx: tokio::sync::broadcast::Receiver<crate::pty::OutputChunk>,
 ) {
     let push = Arc::clone(&registry.push);
+    let phrases = accepted_notify_phrases(&phrase);
     tokio::spawn(async move {
         let mut tail = String::new();
         loop {
@@ -1508,8 +1548,8 @@ fn spawn_phrase_watcher(
                 let keep_from = tail.len().saturating_sub(4096);
                 tail.drain(..keep_from);
             }
-            if let Some(idx) = tail.find(&phrase) {
-                let msg = tail[idx + phrase.len()..]
+            if let Some((idx, matched)) = find_notify_match(&tail, &phrases) {
+                let msg = tail[idx + matched.len()..]
                     .lines()
                     .next()
                     .unwrap_or("")
@@ -1683,6 +1723,44 @@ mod tests {
     #[test]
     fn an_unbound_task_has_no_binding_line() {
         assert!(vogt_binding_line(&task_bound_to(None, None)).is_none());
+    }
+
+    #[test]
+    fn a_default_notify_task_accepts_both_the_current_and_legacy_prefix() {
+        // The rename (#203) must not strand a run that still prints the old
+        // prefix, nor an old task definition that still carries it: either
+        // default is matched against both.
+        let both = vec![
+            DEFAULT_NOTIFY_PHRASE.to_string(),
+            LEGACY_NOTIFY_PHRASE.to_string(),
+        ];
+        assert_eq!(accepted_notify_phrases(DEFAULT_NOTIFY_PHRASE), both);
+        assert_eq!(accepted_notify_phrases(LEGACY_NOTIFY_PHRASE), both);
+        // The current default really is the new name; the legacy one is the old.
+        assert_eq!(DEFAULT_NOTIFY_PHRASE, "VOGT_NOTIFY:");
+        assert_eq!(LEGACY_NOTIFY_PHRASE, "MYDEVENV2_NOTIFY:");
+    }
+
+    #[test]
+    fn a_bespoke_notify_phrase_is_matched_on_exactly_itself() {
+        assert_eq!(
+            accepted_notify_phrases("ALERT:"),
+            vec!["ALERT:".to_string()]
+        );
+    }
+
+    #[test]
+    fn find_notify_match_recognises_either_default_prefix_and_reads_the_message() {
+        let phrases = accepted_notify_phrases(DEFAULT_NOTIFY_PHRASE);
+        for prefix in ["VOGT_NOTIFY:", "MYDEVENV2_NOTIFY:"] {
+            let line = format!("noise\n{prefix} the sky is falling\nmore");
+            let (idx, matched) =
+                find_notify_match(&line, &phrases).expect("both defaults are recognised");
+            assert_eq!(matched, prefix);
+            let msg = line[idx + matched.len()..].lines().next().unwrap().trim();
+            assert_eq!(msg, "the sky is falling");
+        }
+        assert!(find_notify_match("nothing to see here", &phrases).is_none());
     }
 
     #[test]

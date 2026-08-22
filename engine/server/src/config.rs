@@ -255,7 +255,7 @@ pub struct Config {
     /// Send `claude-*` model ids to the OpenAI-compatible backend anyway.
     ///
     /// Off by default because those proxy routes hang rather than answer
-    /// (`ASSISTANT.md`, validated August 2026) and a hang is the worst
+    /// (`docs/ENGINE.md` §6, validated August 2026) and a hang is the worst
     /// failure a chat surface can have: it looks like thinking. The escape
     /// hatch exists because the fault is a *proxy's*, not the model's — a
     /// deployment whose proxy serves them correctly is entitled to say so,
@@ -416,16 +416,24 @@ pub fn load(
         None => FileConfig::default(),
     };
 
+    // `ENGINE_BIND`/`ENGINE_TOKEN` are the primary env names (#203); the CLI
+    // flag still wins, and `engine_env` supplies the legacy `MYDEVENV2_*`
+    // fallback with its deprecation warning. Precedence: CLI flag > env >
+    // config file.
     let bind_str = cli_bind
+        .or_else(|| engine_env("ENGINE_BIND").ok().filter(|s| !s.trim().is_empty()))
         .or(from_file.bind)
         .unwrap_or_else(|| "127.0.0.1:8910".to_string());
     let bind: SocketAddr = bind_str
         .parse()
         .map_err(|e| ApiError::Config(format!("invalid bind {bind_str:?}: {e}")))?;
 
-    let token = cli_token.or(from_file.token).ok_or_else(|| {
-        ApiError::Config("token required (ENGINE_TOKEN env or config.token)".into())
-    })?;
+    let token = cli_token
+        .or_else(|| engine_env("ENGINE_TOKEN").ok().filter(|s| !s.trim().is_empty()))
+        .or(from_file.token)
+        .ok_or_else(|| {
+            ApiError::Config("token required (ENGINE_TOKEN env or config.token)".into())
+        })?;
     if token.len() < 16 {
         return Err(ApiError::Config(
             "token must be at least 16 characters".into(),
@@ -715,6 +723,21 @@ pub fn load(
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from),
     })
+}
+
+/// The engine config-file path from the environment, honouring the historical
+/// `MYDEVENV2_CONFIG` alias through `engine_env` (#203).
+///
+/// Resolved here beside `load` rather than as a clap `env` binding so all three
+/// CLI-owned settings — the config path, the bind address and the token — share
+/// the one `ENGINE_`-aware lookup and its deprecation warning. A `--config`
+/// flag on the command line still wins over this in `main`.
+pub fn config_path_from_env() -> Option<std::path::PathBuf> {
+    engine_env("ENGINE_CONFIG")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 /// Read a token from the file `name` points at, if it points anywhere.
@@ -1416,5 +1439,100 @@ mod prefix_tests {
         unsafe { std::env::set_var("MYDEVENV2_OTHER_PREFIX_TEST", "x") };
         assert!(engine_env(other).is_err());
         unsafe { std::env::remove_var("MYDEVENV2_OTHER_PREFIX_TEST") };
+    }
+
+    /// The three settings the CLI parser owns — the token, the bind address and
+    /// the config path — used to read their env forms *only* under the legacy
+    /// `MYDEVENV2_*` names, so a deployment setting `ENGINE_TOKEN` was silently
+    /// ignored. `load` now resolves them through `engine_env`, so `ENGINE_*` is
+    /// honoured and `MYDEVENV2_*` still works as a deprecated alias (#203).
+    ///
+    /// Kept in one test because these three env names are process-global: two
+    /// tests setting `ENGINE_TOKEN` in parallel would race. No other test in
+    /// this crate touches these names or calls `load`.
+    #[test]
+    fn load_honours_engine_token_and_bind_and_keeps_the_legacy_aliases() {
+        // A config file that only fixes `workspace_root` (to a directory that
+        // exists, so the canonicalize in `load` succeeds) — the token and bind
+        // are deliberately left for the environment to supply.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("engine.toml");
+        std::fs::write(
+            &cfg_path,
+            format!("workspace_root = \"{}\"\n", dir.path().display()),
+        )
+        .unwrap();
+
+        let clear = || unsafe {
+            std::env::remove_var("ENGINE_TOKEN");
+            std::env::remove_var("MYDEVENV2_TOKEN");
+            std::env::remove_var("ENGINE_BIND");
+            std::env::remove_var("MYDEVENV2_BIND");
+        };
+        clear();
+
+        // `ENGINE_TOKEN` / `ENGINE_BIND` are honoured (they were ignored before).
+        unsafe {
+            std::env::set_var("ENGINE_TOKEN", "engine-primary-token-0123456789");
+            std::env::set_var("ENGINE_BIND", "127.0.0.1:9001");
+        }
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert_eq!(cfg.token, "engine-primary-token-0123456789");
+        assert_eq!(cfg.bind.port(), 9001);
+
+        // The legacy `MYDEVENV2_*` names still work as aliases.
+        clear();
+        unsafe {
+            std::env::set_var("MYDEVENV2_TOKEN", "legacy-alias-token-0123456789");
+            std::env::set_var("MYDEVENV2_BIND", "127.0.0.1:9002");
+        }
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert_eq!(cfg.token, "legacy-alias-token-0123456789");
+        assert_eq!(cfg.bind.port(), 9002);
+
+        // The current name wins when both are set.
+        unsafe {
+            std::env::set_var("ENGINE_TOKEN", "engine-wins-token-0123456789");
+        }
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert_eq!(cfg.token, "engine-wins-token-0123456789");
+
+        // A `--token` flag still beats the environment entirely.
+        let cfg = load(
+            Some(&cfg_path),
+            None,
+            Some("cli-flag-token-0123456789".to_string()),
+        )
+        .unwrap();
+        assert_eq!(cfg.token, "cli-flag-token-0123456789");
+
+        clear();
+    }
+
+    /// `ENGINE_CONFIG` resolves the config path with the same `MYDEVENV2_CONFIG`
+    /// alias, so `main` can prefer a `--config` flag and fall back to either
+    /// env name (#203).
+    #[test]
+    fn config_path_from_env_honours_both_names() {
+        let clear = || unsafe {
+            std::env::remove_var("ENGINE_CONFIG");
+            std::env::remove_var("MYDEVENV2_CONFIG");
+        };
+        clear();
+        assert!(config_path_from_env().is_none(), "unset means unset");
+
+        unsafe { std::env::set_var("MYDEVENV2_CONFIG", "/etc/legacy.toml") };
+        assert_eq!(
+            config_path_from_env(),
+            Some(std::path::PathBuf::from("/etc/legacy.toml"))
+        );
+
+        unsafe { std::env::set_var("ENGINE_CONFIG", "/etc/engine.toml") };
+        assert_eq!(
+            config_path_from_env(),
+            Some(std::path::PathBuf::from("/etc/engine.toml")),
+            "the current name wins when both are set"
+        );
+        clear();
     }
 }

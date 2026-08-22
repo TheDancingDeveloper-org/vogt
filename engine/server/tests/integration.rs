@@ -466,7 +466,9 @@ async fn agent_task_create_run_and_records_prompt_file() {
         .unwrap();
     let task_id = created["id"].as_str().unwrap().to_string();
     assert_eq!(created["name"], "PX3 price monitor");
-    assert_eq!(created["notify_on_phrase"], "MYDEVENV2_NOTIFY:");
+    // The default notify prefix was renamed to `VOGT_NOTIFY:` (#203); the
+    // engine still recognises the legacy `MYDEVENV2_NOTIFY:` at match time.
+    assert_eq!(created["notify_on_phrase"], "VOGT_NOTIFY:");
 
     let run: Value = client
         .post(format!("{base}/api/agent-tasks/{task_id}/run"))
@@ -480,7 +482,7 @@ async fn agent_task_create_run_and_records_prompt_file() {
     let session_id = run["session_id"].as_str().unwrap().to_string();
     let prompt_text = std::fs::read_to_string(prompt_file).unwrap();
     assert!(prompt_text.contains("Check Australian Hisense PX3 prices"));
-    assert!(prompt_text.contains("MYDEVENV2_NOTIFY:"));
+    assert!(prompt_text.contains("VOGT_NOTIFY:"));
 
     let detail: Value = client
         .get(format!("{base}/api/agent-tasks/{task_id}"))
