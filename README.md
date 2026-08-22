@@ -13,7 +13,10 @@ GitHub and agent integrations add capability when you opt in.
 
 The supported public delivery is the Python core image,
 `ghcr.io/thedancingdeveloper-org/vogt`. Either path below gives you a
-persistent data volume, a health check, and the GUI at `/ui`.
+persistent data volume, a health check, and the GUI at `/ui`. Core-only,
+`/ui` is the legacy vanilla GUI; the full PWA ships with the optional session
+engine overlay instead (`docs/ENGINE.md`), where the legacy GUI moves to
+`/ui-legacy`.
 
 **Published image.** `deploy/vogt.compose.yml` is the base Compose file and
 pulls the published image; `deploy/.env.example` holds the few values a host
@@ -23,9 +26,13 @@ has to state (public URL, port, bind address, image tag):
 git clone https://github.com/TheDancingDeveloper-org/vogt.git
 cd vogt
 cp deploy/.env.example deploy/.env     # set VOGT_PUBLIC_URL, VOGT_IMAGE
-docker compose -f deploy/vogt.compose.yml up -d
+docker compose -f deploy/vogt.compose.yml up -d --wait
 curl http://localhost:8080/health/ready
 ```
+
+`--wait` blocks until the healthcheck reports healthy — `vogt init` and the
+health check's `start_period` (20s) both take a moment, so curling
+immediately after a bare `up -d` can hit connection-refused.
 
 **From source.** Add the one-service build overlay and the same base builds
 the image from this checkout instead of pulling it:

@@ -47,15 +47,20 @@ Compose file serves both.
 the tag — or better, the digest — you intend to run, then:
 
 ```console
-docker compose -f deploy/vogt.compose.yml up -d
+docker compose -f deploy/vogt.compose.yml up -d --wait
 ```
 
 **Build from source.** Add the one-service build overlay and the base builds
 the image from this checkout instead of pulling it (`VOGT_IMAGE` is ignored):
 
 ```console
-docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d
+docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d --wait
 ```
+
+`--wait` blocks until the healthcheck reports healthy. Without it, the curls
+below can race the container: `vogt init` runs first, and the healthcheck's
+`start_period` is 20s, so a curl right after a bare `up -d` can see
+connection-refused rather than a real answer.
 
 The base is never edited; every deployment states only its difference from it
 as an overlay or an environment value. That is the whole customisation model,
@@ -81,6 +86,11 @@ does not migrate them, which is why the Compose command runs `vogt init`
 first. A healthy response includes the declared and observed schema
 versions. Open
 `http://localhost:8080/ui` in a browser to use the GUI.
+
+On this core-only path, `/ui` is the legacy vanilla GUI. The full PWA
+(terminals, agent tasks, the voice assistant) ships with the optional
+session engine overlay instead — see [`docs/ENGINE.md`](ENGINE.md) — where
+this legacy GUI moves to `/ui-legacy`.
 
 Stop or inspect the instance with:
 
@@ -142,7 +152,9 @@ VOGT_PUBLIC_URL=http://127.0.0.1:8000 \
 
 `--no-auth` is suitable only for a loopback listener. For a network listener,
 start with authentication enabled (the default), initialise the instance,
-and issue a scoped token from a trusted local process:
+and issue a scoped token from a trusted local process.
+
+**Local (`uv run`).** The token is bound to the OS user running the command:
 
 ```console
 uv run vogt token issue \
@@ -152,10 +164,26 @@ uv run vogt token issue \
   --reason "create a browser credential"
 ```
 
+**Docker Compose.** The container always runs as a fixed identity, not
+yours, so `local:$(id -un)` names an actor that was never created and the
+command fails with `no actor with identity '...' — create it with 'actor
+create' first`. `vogt init` bootstraps the actor `local:vogt` inside the
+container (the image's default uid, 1000, maps to that username in
+`/etc/passwd` — see the root `Dockerfile`), so issue the token as that actor,
+from the container that owns the data directory:
+
+```console
+docker compose -f deploy/vogt.compose.yml exec vogt \
+  vogt token issue \
+  --actor local:vogt \
+  --name browser \
+  --scopes read,work.write,project.write \
+  --reason "create a browser credential"
+```
+
 The secret is shown once. Store it in a file with restrictive permissions and
 send it as `Authorization: Bearer ...`; never put it in a URL or command-line
-argument. The Compose image uses the same token model when you expose it
-beyond localhost.
+argument.
 
 ## First project and first work item
 
@@ -174,6 +202,34 @@ uv run vogt backlog
 The default collectors read local Git state, configured source markers, and
 dependency references. They return findings; the sweep records observations
 and coverage. A collector cannot silently change declared work.
+
+**Docker Compose.** `deploy/vogt.compose.yml` mounts nothing from the host by
+default, so `--root-path` above has nothing to observe until you bind-mount a
+real checkout into the container. Add a small overlay that mounts the
+repository and sets the uid that owns it (`VOGT_UID` in `deploy/.env`, or
+`user:` directly in the overlay) — see [`docs/CUSTOMISATION.md`, "Observing an
+estate on a host path"](CUSTOMISATION.md#observing-an-estate-on-a-host-path)
+for the full pattern. A minimal example:
+
+```yaml
+# my-overlay.yml
+services:
+  vogt:
+    user: "1000:0"                     # the uid that owns /srv/my-project
+    volumes:
+      - /srv/my-project:/workspace/my-project:rw
+```
+
+```console
+docker compose -f deploy/vogt.compose.yml -f my-overlay.yml up -d --wait
+docker compose -f deploy/vogt.compose.yml exec vogt \
+  vogt project register \
+  --name my-project \
+  --root-path /workspace/my-project \
+  --reason "start tracking this repository"
+docker compose -f deploy/vogt.compose.yml exec vogt \
+  vogt sweep --reason "collect repository state"
+```
 
 To create a new contract-shaped project instead:
 
