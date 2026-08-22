@@ -5182,8 +5182,11 @@ textarea {
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  padding: 16px;
-  gap: 12px;
+  /* #229: the board leads with its cards, so the shell around them is kept
+     tight — the chrome that used to sit here (a legend, a saved-lenses row)
+     moved into the `?` help and the `+ Filter` panel. */
+  padding: 12px 16px;
+  gap: 8px;
   background: var(--bg);
   overflow: hidden;
 }
@@ -5339,6 +5342,16 @@ textarea {
   border: 1px solid var(--bd);
   border-radius: 6px;
   background: var(--bg-elev);
+}
+
+/* #229: no filter applied, so the toolbar is just the `+ Filter` row — the box
+   around it was chrome pushing the first card down. The disclosure panel keeps
+   its own frame when opened. */
+.vogt-filters--flat {
+  gap: 0;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
 }
 
 .vogt-filter-summary {
@@ -5556,22 +5569,6 @@ textarea {
   font-size: 11px;
   color: var(--activity-errored);
   overflow-wrap: anywhere;
-}
-
-.board-keys {
-  margin: 0;
-  font-size: 12px;
-  color: var(--fg-muted);
-}
-
-.board-keys kbd {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  padding: 1px 5px;
-  border: 1px solid var(--bd);
-  border-radius: 4px;
-  background: var(--bg-elev);
-  color: var(--fg);
 }
 
 .board-empty {
@@ -6102,6 +6099,41 @@ textarea {
   font-size: 12px;
 }
 
+/* #229: the "moved" note where the composer stood, not a banner over the
+   board. The done accent the freshness slot uses, kept quiet. */
+.board-ack {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--activity-done);
+  border-radius: 6px;
+  background: rgba(63, 185, 80, 0.08);
+  font-size: 12px;
+  color: var(--fg);
+}
+
+.board-ack-close {
+  border: none;
+  padding: 0 4px;
+  color: var(--fg-muted);
+  line-height: 1;
+}
+
+/* #229: the brief window in which a Forget can be put back. */
+.board-lens-undo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.board-lens-undo button {
+  font-size: 12px;
+}
+
 /* Vogt unreachable: nothing below is current, and it must not look it. */
 .board--outage .board-scroll {
   opacity: 0.65;
@@ -6144,7 +6176,8 @@ textarea {
  */
 @media (max-width: 768px) {
   .vogt-surface.board {
-    padding: 10px;
+    padding: 6px 10px;
+    gap: 6px;
     /* The columns are stacked here, so a column may take more of the screen
        before it starts scrolling inside itself. It still does scroll rather
        than growing without limit: the alternative on a phone is one column
@@ -6166,7 +6199,7 @@ textarea {
     flex: none;
     gap: 7px;
     overflow-x: auto;
-    padding: 2px 0 8px;
+    padding: 0 0 4px;
     scrollbar-width: thin;
   }
 
@@ -6261,15 +6294,6 @@ textarea {
   /* Lane heads stop needing to survive a horizontal scroll. */
   .board-lanehead {
     position: static;
-  }
-}
-
-/* Keyboard hints on a device with no keyboard. The engine hides secondary
-   chrome the same way; gated on the pointer rather than the width so a narrow
-   desktop window keeps its shortcuts. */
-@media (pointer: coarse) {
-  .board-keys {
-    display: none;
   }
 }
 

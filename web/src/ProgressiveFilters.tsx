@@ -15,7 +15,6 @@
 // surface's own layout rules and tests already reach for.
 
 import { For, Show, createSignal, type JSX } from "solid-js";
-import { createNarrow } from "./narrow";
 
 /** One active filter, as the reader sees it: a sentence and a way to drop it. */
 export interface FilterChip {
@@ -38,9 +37,10 @@ interface FiltersProps {
   /**
    * The surface's saved lenses.
    *
-   * Placed here rather than by the surface because where they belong depends
-   * on the width: beside the chips on a desk, and inside this disclosure on a
-   * phone, where a row spent on naming a lens is a row not spent on the work.
+   * Placed here rather than by the surface because they live inside the
+   * `+ Filter` disclosure at every width (#229): naming and recalling a lens
+   * is a filter action, not a permanent row over the work, so the first screen
+   * belongs to the cards until the reader opens the panel.
    */
   lenses?: JSX.Element;
   /** The surface's own filter fields. */
@@ -55,7 +55,6 @@ interface FiltersProps {
  * back there rather than at the top of the document.
  */
 export function ProgressiveFilters(props: FiltersProps): JSX.Element {
-  const narrow = createNarrow();
   const [open, setOpen] = createSignal(false);
   let addButton: HTMLButtonElement | undefined;
 
@@ -68,7 +67,12 @@ export function ProgressiveFilters(props: FiltersProps): JSX.Element {
 
   return (
     <div
-      class={`vogt-filters ${props.prefix}-toolbar`}
+      class={`vogt-filters ${props.prefix}-toolbar${
+        // #229: with nothing applied there is nothing to summarise, so the
+        // toolbar sheds its box and collapses to the single chip row that
+        // offers `+ Filter` — chrome the first screen no longer spends.
+        props.chips.length === 0 ? " vogt-filters--flat" : ""
+      }`}
       role="group"
       aria-label={`${props.surface} filters`}
     >
@@ -127,7 +131,7 @@ export function ProgressiveFilters(props: FiltersProps): JSX.Element {
       >
         <div class={`vogt-filter-panel-grid ${props.prefix}-filter-panel-grid`}>
           {props.children}
-          <Show when={narrow()}>{props.lenses}</Show>
+          {props.lenses}
           <div class={`vogt-filter-actions ${props.prefix}-toolbar-actions`}>
             {props.actions}
             <button type="button" onClick={close}>
@@ -136,7 +140,6 @@ export function ProgressiveFilters(props: FiltersProps): JSX.Element {
           </div>
         </div>
       </div>
-      <Show when={!narrow()}>{props.lenses}</Show>
     </div>
   );
 }
@@ -156,6 +159,12 @@ interface LensProps {
   onForget: (name: string) => void;
   /** Where the lenses live, said out loud — they are per-client (§3). */
   note: JSX.Element;
+  /**
+   * A surface-supplied affordance to undo the last Forget (#229). Forget is
+   * otherwise immediate and unrecoverable; the surface owns the query the
+   * lens carried, so it owns the brief window in which it can be put back.
+   */
+  undo?: JSX.Element;
 }
 
 /** Naming the current combination, and recalling a named one (FR-U14). */
@@ -210,6 +219,7 @@ export function SavedLenses(props: LensProps): JSX.Element {
           </span>
         )}
       </For>
+      {props.undo}
       <span class={`${props.prefix}-muted`}>{props.note}</span>
     </div>
   );

@@ -451,6 +451,49 @@ test("Board dragover/drop uses the real browser gesture and keeps its filter on 
   ).toBeVisible();
 });
 
+// #229: the chrome over the board was pushing the first card past the fold —
+// a legend, a saved-lenses row and a success banner that all belonged
+// elsewhere. With those moved into the `?` help and the `+ Filter` panel, the
+// first card sits inside the first screen; and the card, being a button, opens
+// on a single click of its body and on Space, not only by double-click.
+test("Board leads with the first card, which opens on a click and on Space", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/board");
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+  const card = page.locator(".board-card").filter({ hasText: "Measured board card" });
+  await expect(card).toBeVisible();
+
+  // The first card is above the fold: measured tops were 318px on the desk and
+  // 470px on the phone before the trim.
+  // #229 is about the chrome the *board* puts before the first card — the
+  // legend, the saved-lenses row, the boxed filter bar, the success banner. The
+  // app shell above the surface (the phone's Go-to bar, and a "Realtime
+  // connection lost" banner that shows only because this harness serves no live
+  // event stream) is not the board's to trim, so the budget is measured from
+  // the top of the board surface rather than from the viewport.
+  const chrome = await page.evaluate(() => {
+    const surface = document.querySelector(".vogt-surface.board")!;
+    const cardEl = document.querySelector(".board-card")!;
+    return (
+      cardEl.getBoundingClientRect().top - surface.getBoundingClientRect().top
+    );
+  });
+  const ceiling = test.info().project.name === "phone" ? 300 : 200;
+  expect(chrome, `board chrome before first card ${chrome} under ${ceiling}`)
+    .toBeLessThan(ceiling);
+
+  // A single click of the card body opens the item.
+  await card.locator(".board-card-title").click();
+  await expect(page).toHaveURL(/#\/w\/WI-7/);
+
+  // And Space on the focused card opens it, the way a button is operated.
+  await page.goBack();
+  await expect(card).toBeVisible();
+  await card.focus();
+  await page.keyboard.press("Space");
+  await expect(page).toHaveURL(/#\/w\/WI-7/);
+});
+
 // #214: a coarse pointer cannot drag and cannot see the Shift+Arrow hint, so
 // the "Move…" control is its only way to move a card. It opens the same
 // composer a drag does, with a state select in place of the drop cell a tap
@@ -576,12 +619,11 @@ test("Board explains a same-column, other-lane drop instead of swallowing it", a
 });
 
 /**
- * A narrow shell keeps the saved lenses inside the `+ Filter` disclosure, so
- * the first screen belongs to the work. Anything reaching for a lens control
- * has to open it there first; on a desk it is already beside the chips.
+ * Saved lenses live inside the `+ Filter` disclosure at every width now (#229),
+ * so the first screen belongs to the work. Anything reaching for a lens control
+ * has to open the panel first, on a desk as much as on a phone.
  */
-async function openFilterPanelOnPhone(group: Locator): Promise<void> {
-  if (test.info().project.name !== "phone") return;
+async function openFilterPanel(group: Locator): Promise<void> {
   const add = group.getByRole("button", { name: "+ Filter", exact: true });
   if ((await add.getAttribute("aria-expanded")) === "false") await add.click();
 }
@@ -613,7 +655,7 @@ test("Board progressive filters survive reload, history, and saved-lens recall",
   await expect(filters.getByText("Type: feature")).toBeVisible();
   await expect(filters.getByText("Swimlanes: project")).toBeVisible();
 
-  await openFilterPanelOnPhone(filters);
+  await openFilterPanel(filters);
   await page.locator(".board-saved-recall").click();
   await expect(page).toHaveURL(/project=vogt/);
   await expect(page).toHaveURL(/kind=feature/);
@@ -2073,7 +2115,7 @@ test("Backlog filters are chips, a + Filter disclosure and a named lens", async 
   await expect(panel).toBeHidden();
   await expect(filters.getByRole("button", { name: "+ Filter", exact: true })).toBeFocused();
 
-  await openFilterPanelOnPhone(filters);
+  await openFilterPanel(filters);
   await page.getByLabel("Lens name").fill("Vogt features");
   await page.getByRole("button", { name: "Save lens" }).click();
   await expect(page.locator(".vogt-backlog-saved-recall")).toHaveText("Vogt features");
@@ -2085,7 +2127,7 @@ test("Backlog filters are chips, a + Filter disclosure and a named lens", async 
   await filters.getByRole("button", { name: "Clear all" }).click();
   await expect(page).not.toHaveURL(/kind=feature/);
 
-  await openFilterPanelOnPhone(filters);
+  await openFilterPanel(filters);
   await page.locator(".vogt-backlog-saved-recall").click();
   await expect(page).toHaveURL(/project=vogt/);
   await expect(page).toHaveURL(/kind=feature/);

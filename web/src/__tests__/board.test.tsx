@@ -7,7 +7,7 @@
 // reason this file exists — "the refusal path is written to discard the
 // optimistic position outright and has never discarded one".
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fireEvent, waitFor } from "@solidjs/testing-library";
 import Board from "../Board";
 import {
@@ -266,6 +266,43 @@ describe("FR-U22 — the same move, from the keyboard", () => {
     await waitFor(() => expect(view.url()).toBe("/w/WI-1"));
   });
 
+  it("opens the item on Space and on a single click of the card body (#229)", async () => {
+    fakeVogt();
+    const space = board();
+    await waitFor(() => card(space.container, "WI-1"));
+    fireEvent.keyDown(card(space.container, "WI-1"), { key: " " });
+    await waitFor(() => expect(space.url()).toBe("/w/WI-1"));
+
+    const clicked = board();
+    await waitFor(() => card(clicked.container, "WI-1"));
+    // A click that lands on the card surface, not on a control it wraps.
+    fireEvent.click(
+      card(clicked.container, "WI-1").querySelector(".board-card-title")!,
+    );
+    await waitFor(() => expect(clicked.url()).toBe("/w/WI-1"));
+  });
+
+  it("leaves the ref link and the expand control to open/expand, not the card", async () => {
+    fakeVogt({
+      "GET /work": {
+        body: {
+          items: [workItem({ ref: "WI-1", state: "open", body: "a body worth expanding" })],
+          total: 1,
+        },
+      },
+    });
+    const view = board();
+    await waitFor(() => card(view.container, "WI-1"));
+
+    // Space on the "Show more" control expands in place; it must not open the
+    // item the card stands on.
+    const expand = card(view.container, "WI-1").querySelector<HTMLButtonElement>(
+      ".board-card-expand",
+    )!;
+    fireEvent.keyDown(expand, { key: " " });
+    expect(view.url()).not.toBe("/w/WI-1");
+  });
+
   it("proposes a move with Shift+Arrow and still collects the reason", async () => {
     const vogt = fakeVogt({
       "POST /work/transition": { body: { item: workItem({ state: "in_progress" }) } },
@@ -485,11 +522,11 @@ describe("FR-U17 — trust on every card, and never blank", () => {
     // itself as current.
     const line = container.querySelector(".board-freshness");
     expect(line?.textContent).toMatch(/Polling — updated \d+s ago/);
-    // The note says what the freshness line means. It said the opposite
-    // until the front door started republishing vogt-core's changes — and a
-    // test asserting the old sentence is how a corrected comment fails a
-    // build, which is what happened.
-    expect(container.textContent).toContain("the poll below is the floor");
+    // #229: the "How this view stays current" note was collapsible chrome over
+    // the cards, so it was removed from the surface. The freshness itself — the
+    // half FR-U2 actually requires — is still stated on the badge above, never
+    // presenting a polled view as current.
+    expect(container.querySelector(".board-keys")).toBeNull();
   });
 
   it("puts one on every card, so the aggregate cannot drop the awkward column", async () => {
@@ -661,12 +698,14 @@ describe("FR-U15 — quick-create on the board, which is the half that was missi
 });
 
 describe("FR-U22 — quick-create has a binding, now that there is one to bind", () => {
-  it("opens on `n`, and is announced on the board's own keyboard line", async () => {
+  it("opens on `n` (the legend now lives in the `?` help, not over the cards)", async () => {
     fakeVogt();
     const { container } = board();
     await waitFor(() => card(container, "WI-1"));
 
-    expect(container.querySelector(".board-keys")?.textContent).toContain("raises one");
+    // #229: the always-visible keyboard legend was moved off the surface, so
+    // the board no longer prints one over the work.
+    expect(container.querySelector(".board-keys")).toBeNull();
 
     fireEvent.keyDown(card(container, "WI-1"), { key: "n" });
     await waitFor(() => expect(container.querySelector(".board-create")).toBeTruthy());
@@ -802,6 +841,28 @@ describe("FR-U11 — the filter set is the URL", () => {
     fireEvent.click(clear);
     await waitFor(() => expect(queryOf(view.url()).toString()).toBe(""));
     expect(view.container.textContent).toContain("No filters applied");
+  });
+
+  it('reads a hide-finished selection as one "Finished hidden" chip (#229)', async () => {
+    fakeVogt();
+    const view = board();
+    await waitFor(() => expect(columnNames(view.container).length).toBeGreaterThan(0));
+
+    const hide = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.trim() === "Hide finished columns",
+    )!;
+    fireEvent.click(hide);
+
+    // The state set now equals the board's non-finished columns, which reads as
+    // an intent rather than a raw list of states.
+    await waitFor(() =>
+      expect(
+        [...view.container.querySelectorAll(".board-filter-chip")].some((chip) =>
+          chip.textContent?.includes("Finished hidden"),
+        ),
+      ).toBe(true),
+    );
+    expect(view.container.textContent).not.toContain("State: open");
   });
 
   it("round-trips: the URL it wrote is a URL it can be handed back", async () => {
@@ -945,6 +1006,75 @@ describe("FR-U14 — a combined filter is nameable and recalled", () => {
 
     fireEvent.click(view.container.querySelector<HTMLButtonElement>(".board-saved-drop")!);
     await waitFor(() => expect(view.container.querySelector(".board-saved")).toBeNull());
+  });
+
+  it("confirms before overwriting a lens whose name is already taken (#229)", async () => {
+    fakeVogt();
+    const view = board();
+    await waitFor(() => expect(columnNames(view.container).length).toBeGreaterThan(0));
+
+    pick(view.container, "Project", "beta");
+    fireEvent.input(nameField(view.container), { target: { value: "mine" } });
+    fireEvent.click(saveButton(view.container));
+    await waitFor(() =>
+      expect(view.container.querySelector(".board-saved-recall")?.textContent).toBe("mine"),
+    );
+
+    // A second save under the same name is an overwrite: it asks first, and a
+    // "no" leaves the saved query exactly as it was.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    pick(view.container, "Label", "infra");
+    await waitFor(() => expect(queryOf(view.url()).get("label")).toBe("infra"));
+    fireEvent.input(nameField(view.container), { target: { value: "mine" } });
+    fireEvent.click(saveButton(view.container));
+    expect(confirm).toHaveBeenCalledTimes(1);
+
+    // Still one lens, and recalling it brings back the original set (no label).
+    expect(view.container.querySelectorAll(".board-saved-recall")).toHaveLength(1);
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".board-saved-recall")!);
+    await waitFor(() => expect(queryOf(view.url()).get("label")).toBeNull());
+    expect(queryOf(view.url()).get("project")).toBe("beta");
+
+    // A "yes" replaces it in place.
+    confirm.mockReturnValue(true);
+    pick(view.container, "Label", "infra");
+    await waitFor(() => expect(queryOf(view.url()).get("label")).toBe("infra"));
+    fireEvent.input(nameField(view.container), { target: { value: "mine" } });
+    fireEvent.click(saveButton(view.container));
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(view.container.querySelectorAll(".board-saved-recall")).toHaveLength(1);
+
+    const clear = [...view.container.querySelectorAll("button")].find(
+      (node) => node.textContent?.trim() === "Clear all",
+    )!;
+    fireEvent.click(clear);
+    await waitFor(() => expect(queryOf(view.url()).get("label")).toBeNull());
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".board-saved-recall")!);
+    await waitFor(() => expect(queryOf(view.url()).get("label")).toBe("infra"));
+
+    confirm.mockRestore();
+  });
+
+  it("keeps a forgotten lens recoverable for a short window (#229)", async () => {
+    fakeVogt();
+    const view = board();
+    await waitFor(() => expect(columnNames(view.container).length).toBeGreaterThan(0));
+
+    fireEvent.input(nameField(view.container), { target: { value: "keep" } });
+    fireEvent.click(saveButton(view.container));
+    await waitFor(() => expect(view.container.querySelector(".board-saved")).toBeTruthy());
+
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".board-saved-drop")!);
+    await waitFor(() => expect(view.container.querySelector(".board-saved")).toBeNull());
+
+    // Forget is no longer the end of it: an undo appears and puts it straight
+    // back where it was.
+    const undo = view.container.querySelector<HTMLButtonElement>(".board-lens-undo button")!;
+    expect(undo).toBeTruthy();
+    fireEvent.click(undo);
+    await waitFor(() =>
+      expect(view.container.querySelector(".board-saved-recall")?.textContent).toBe("keep"),
+    );
   });
 
   it("does not let a named view change how often the board refreshes", async () => {
