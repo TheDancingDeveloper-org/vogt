@@ -16,6 +16,7 @@ import type {
 } from "./api";
 import { api } from "./api";
 import Dialog from "./Dialog";
+import { onSessionKilled } from "./store";
 import { focusTab, setTasksDirty } from "./tabs";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 
@@ -41,6 +42,8 @@ interface TaskDraft {
   cwd: string;
   envText: string;
   context: string;
+  vogtProject: string;
+  vogtWorkItem: string;
   enabled: boolean;
   notifyOnStart: boolean;
   notifyOnPhrase: string;
@@ -70,6 +73,8 @@ const EMPTY_DRAFT: TaskDraft = {
   cwd: "",
   envText: "",
   context: "",
+  vogtProject: "",
+  vogtWorkItem: "",
   enabled: true,
   notifyOnStart: false,
   notifyOnPhrase: "MYDEVENV2_NOTIFY:",
@@ -101,6 +106,8 @@ function taskToDraft(task: AgentTask): TaskDraft {
     cwd: task.cwd ?? "",
     envText: task.env.map(([key, value]) => `${key}=${value}`).join("\n"),
     context: task.context ?? "",
+    vogtProject: task.vogt_project ?? "",
+    vogtWorkItem: task.vogt_work_item ?? "",
     enabled: task.status === "active",
     notifyOnStart: task.notify_on_start,
     notifyOnPhrase: task.notify_on_phrase ?? "",
@@ -195,6 +202,8 @@ function buildRequest(draft: TaskDraft): AgentTaskUpsertRequest {
     cwd: draft.cwd.trim() || null,
     env: parseEnv(draft.envText),
     context: draft.context.trim() || null,
+    vogt_project: draft.vogtProject.trim() || null,
+    vogt_work_item: draft.vogtWorkItem.trim() || null,
     enabled: draft.enabled,
     notify_on_start: draft.notifyOnStart,
     notify_on_phrase: draft.notifyOnPhrase.trim() || null,
@@ -203,11 +212,20 @@ function buildRequest(draft: TaskDraft): AgentTaskUpsertRequest {
 }
 
 const AgentTasks = (props: Props) => {
-  const restored = readToolDraft<TasksViewDraft>("tasks", {
+  const stored = readToolDraft<TasksViewDraft>("tasks", {
     selectedTaskId: null,
     draft: { ...EMPTY_DRAFT },
     creating: false,
   });
+  // A draft that outlived a reload may predate a field this build added, so
+  // fold it onto the current shape rather than trusting it wholesale.
+  const restored: TasksViewDraft = {
+    ...stored,
+    draft: { ...EMPTY_DRAFT, ...stored.draft },
+    baseline: stored.baseline
+      ? { ...EMPTY_DRAFT, ...stored.baseline }
+      : undefined,
+  };
   const [tasks, setTasks] = createSignal<AgentTask[]>([]);
   const [tasksLoaded, setTasksLoaded] = createSignal(false);
   const [loading, setLoading] = createSignal(false);
@@ -312,23 +330,42 @@ const AgentTasks = (props: Props) => {
     }
   };
 
-  onMount(() => {
-    props.registerDraftGuard?.({ dirty, requestLeave: requestDraftDecision });
-    void loadTasks();
-  });
-
-  createEffect(() => setTasksDirty(dirty()));
-
-  onCleanup(() => {
-    listRequest += 1;
-    props.registerDraftGuard?.(null);
-    setTasksDirty(false);
+  const persistDraft = (): void => {
     writeToolDraft<TasksViewDraft>("tasks", {
       selectedTaskId: selectedTaskId(),
       draft: cloneDraft(draft()),
       creating: creating(),
       baseline: cloneDraft(baseline()),
     });
+  };
+
+  onMount(() => {
+    props.registerDraftGuard?.({ dirty, requestLeave: requestDraftDecision });
+    void loadTasks();
+    // A run's PTY ending is what turns "Still running" into a real outcome.
+    // The engine records the finding and status on the run, but only a reload
+    // of the list surfaces it — so re-read when a session we launched exits.
+    const unsubscribe = onSessionKilled((sessionId) => {
+      const owns = tasks().some((task) =>
+        task.runs.some((run) => run.session_id === sessionId),
+      );
+      if (owns) void loadTasks(selectedTaskId(), true);
+    });
+    onCleanup(unsubscribe);
+  });
+
+  createEffect(() => setTasksDirty(dirty()));
+
+  // Mirror the live draft to storage on every change, not only on unmount: a
+  // full page reload never runs onCleanup, and that is exactly the case
+  // sessionStorage exists to survive.
+  createEffect(persistDraft);
+
+  onCleanup(() => {
+    listRequest += 1;
+    props.registerDraftGuard?.(null);
+    setTasksDirty(false);
+    persistDraft();
   });
 
   const startCreate = (): void => {
@@ -430,7 +467,10 @@ const AgentTasks = (props: Props) => {
   };
 
   const refreshTasks = (): void => {
-    requestDraftDecision(() => void loadTasks(selectedTaskId()));
+    // A re-read is not a navigation and must not put the draft at risk:
+    // loadTasks preserves the draft when told to, so refresh does exactly
+    // that rather than popping the save/discard decision.
+    void loadTasks(selectedTaskId(), true);
   };
 
   const toggleTask = async (task: AgentTask): Promise<void> => {
@@ -471,13 +511,26 @@ const AgentTasks = (props: Props) => {
   };
 
   const runTaskNow = async (task: AgentTask) => {
-    setRunningTaskId(task.id);
+    // Run the prompt that is on screen, not a stale saved one: when the draft
+    // is dirty, persist it first and only run if the save actually landed.
+    if (dirty()) {
+      const saved = await saveTask();
+      if (!saved) return;
+    }
+    const taskId = selectedTaskId() ?? task.id;
+    setRunningTaskId(taskId);
     try {
-      const run = await api.runAgentTask(task.id);
-      await loadTasks(task.id, dirty());
-      props.onOpenSession?.(run.session_id, run.session_name);
+      await api.runAgentTask(taskId);
+      // Surface the new run as a row and stop here. Auto-navigating to the
+      // session mid-run yanks the user off Agent Tasks and trips the leave
+      // guard; the run row's session name is a link they can follow instead.
+      await loadTasks(taskId, dirty());
     } catch (error) {
-      reportActionFailure("Failed to run task", error, () => void runTaskNow(task));
+      reportActionFailure(
+        "Failed to run task",
+        error,
+        () => void runTaskNow(task),
+      );
     } finally {
       setRunningTaskId(null);
     }
@@ -598,9 +651,13 @@ const AgentTasks = (props: Props) => {
                   <div class="agent-task-toolbar-actions">
                     <button
                       onClick={() => void runTaskNow(task())}
-                      disabled={runningTaskId() === task().id}
+                      disabled={runningTaskId() === task().id || saving()}
                     >
-                      {runningTaskId() === task().id ? "Starting..." : "Run Now"}
+                      {runningTaskId() === task().id
+                        ? "Starting..."
+                        : dirty()
+                          ? "Save & Run"
+                          : "Run Now"}
                     </button>
                     <button onClick={() => void toggleTask(task())}>
                       {task().status === "active" ? "Pause" : "Resume"}
@@ -632,6 +689,30 @@ const AgentTasks = (props: Props) => {
                 value={draft().cwd}
                 onInput={(e) =>
                   setDraft({ ...draft(), cwd: e.currentTarget.value })
+                }
+              />
+            </label>
+
+            <label class="agent-task-field">
+              <span>Vogt project</span>
+              <input
+                type="text"
+                placeholder="Project slug this run is about"
+                value={draft().vogtProject}
+                onInput={(e) =>
+                  setDraft({ ...draft(), vogtProject: e.currentTarget.value })
+                }
+              />
+            </label>
+
+            <label class="agent-task-field">
+              <span>Vogt work item</span>
+              <input
+                type="text"
+                placeholder="Work item ref, e.g. WI-7"
+                value={draft().vogtWorkItem}
+                onInput={(e) =>
+                  setDraft({ ...draft(), vogtWorkItem: e.currentTarget.value })
                 }
               />
             </label>
@@ -669,9 +750,11 @@ const AgentTasks = (props: Props) => {
                 />
               </Show>
               <Show when={draft().scheduleKind === "daily"}>
+                <span class="agent-task-subfield-label">Daily times (UTC)</span>
                 <input
                   type="text"
-                  placeholder="09:00, 17:30"
+                  aria-label="Daily times (UTC)"
+                  placeholder="09:00, 17:30 (UTC)"
                   value={draft().dailyTimes}
                   onInput={(e) =>
                     setDraft({ ...draft(), dailyTimes: e.currentTarget.value })
@@ -819,7 +902,13 @@ const AgentTasks = (props: Props) => {
                             <span class="agent-task-run-trigger">{run.trigger}</span>
                           </div>
                           <div class="agent-task-run-meta">
-                            <span>{run.session_name}</span>
+                            <button
+                              type="button"
+                              class="agent-task-run-session-link"
+                              onClick={() => openRunSession(run)}
+                            >
+                              {run.session_name}
+                            </button>
                             <span>{runStatusLabel(run)}</span>
                             <span>
                               {run.completed_at
@@ -827,6 +916,23 @@ const AgentTasks = (props: Props) => {
                                 : `Prompt ${run.prompt_file}`}
                             </span>
                           </div>
+                          <Show when={(run.findings ?? []).length > 0}>
+                            <ul class="agent-task-run-findings">
+                              <For each={run.findings ?? []}>
+                                {(finding) => (
+                                  <li class="agent-task-run-finding">
+                                    <span class="agent-task-finding-text">
+                                      {finding.text}
+                                    </span>
+                                    <span class="agent-task-finding-meta">
+                                      {finding.source} •{" "}
+                                      {formatLocalDate(finding.at)}
+                                    </span>
+                                  </li>
+                                )}
+                              </For>
+                            </ul>
+                          </Show>
                         </div>
                         <button onClick={() => openRunSession(run)}>Open Session</button>
                       </div>

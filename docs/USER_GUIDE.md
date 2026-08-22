@@ -395,20 +395,35 @@ so attach, scrollback, history, auth and push all work the way they do
 everywhere else.
 
 Task edits remain a draft until **Save Changes** or **Create Task** succeeds.
-Selecting another task, starting a new draft, refreshing, closing the Tasks
-tab, or leaving the route asks whether to save, discard, or remain; a failed
-save keeps every field. An unavailable first read is shown as an error rather
-than as an empty task list. If a refresh fails after a successful read, the
-last task list stays visible, is marked stale, and can be retried in place.
+Selecting another task, starting a new draft, closing the Tasks tab, or leaving
+the route asks whether to save, discard, or remain; a failed save keeps every
+field. **Refresh** is a re-read, not a navigation, so it re-loads the list
+without disturbing the draft rather than raising that question. The draft also
+survives a full page reload — it is mirrored to the browser session, not held
+only in memory. An unavailable first read is shown as an error rather than as
+an empty task list. If a refresh fails after a successful read, the last task
+list stays visible, is marked stale, and can be retried in place.
+
+**Run Now** starts the task immediately. With an unsaved draft on screen it
+reads **Save & Run**: it saves first, so the run uses the prompt you are
+looking at rather than the last saved one. Either way the new run appears as a
+row on the task — its session name is a link — instead of pulling you off Agent
+Tasks into the terminal. A run whose session is still alive reads **Still
+running** and settles to its real outcome on its own once the session exits.
 
 If an agent prints a line beginning with `MYDEVENV2_NOTIFY:`, two things
 happen: a push notification goes out, and the line is **recorded on the run as
 a finding**. The push is a delivery; the finding is the record, and it survives
-a phone that was switched off.
+a phone that was switched off. Findings are listed under their run row, so the
+record is readable in the GUI and not only in a notification.
 
-A task may name a Vogt subject — a project slug, a work item ref, or both. A
-bound run's findings become Vogt observations against that subject, with the
-freshness and trust every other kind of evidence carries.
+A task may name a Vogt subject — a **Vogt project** slug, a **Vogt work item**
+ref, or both, entered on the task form. A bound run's findings become Vogt
+observations against that subject, with the freshness and trust every other
+kind of evidence carries.
+
+Daily schedules are read in **UTC**, and the daily-times field is labelled so —
+a `09:00` is 09:00 UTC, not the reader's local morning.
 
 ## 3. On a phone
 
