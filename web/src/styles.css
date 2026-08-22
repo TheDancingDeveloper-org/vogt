@@ -2119,6 +2119,81 @@ textarea {
 .terminal-pane .terminal-host {
   padding: 4px 0 0 6px;
 }
+/* Per-pane header (#212): a compact strip carrying the pane's session picker,
+   shown only in a split so a lone pane keeps its full height. */
+.terminal-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-bottom: 1px solid #111820;
+  background: var(--bg-elev);
+}
+.terminal-pane-session {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  height: 24px;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--bd);
+  border-radius: 4px;
+}
+/* "Split with…" picker (#212): choose a fresh session or compose an existing
+   one into the new pane. Reachable on a phone as an ordinary dialog. */
+.split-picker-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: min(360px, 90vw);
+}
+.split-picker-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+.split-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.split-picker-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  background: var(--bg-elev);
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  color: var(--fg);
+}
+.split-picker-option:hover,
+.split-picker-option:focus-visible {
+  border-color: var(--accent);
+}
+.split-picker-option-name {
+  flex: 0 1 auto;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.split-picker-option-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .terminal-composer {
   display: none;

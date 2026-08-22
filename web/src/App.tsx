@@ -76,6 +76,7 @@ import {
   tabsStore,
   type Tab,
 } from "./tabs";
+import { terminalWorkspaceHandle } from "./paneComposeBus";
 import type { SessionSummary } from "./api";
 import { getToken, setBase, setToken } from "./api";
 import {
@@ -901,6 +902,28 @@ const App: Component = () => {
     }
   };
 
+  // Compose an existing session into the active terminal workspace beside its
+  // current pane (#212). Creates no session; if no terminal tab is active there
+  // is nowhere to split, so say so rather than failing silently.
+  const onOpenBesideCurrent = (s: SessionSummary) => {
+    setOpenMenuId(null);
+    const activeTab = tabsStore.tabs.find((tab) => tab.id === tabsStore.active);
+    const handle =
+      activeTab?.kind === "terminal"
+        ? terminalWorkspaceHandle(activeTab.id)
+        : undefined;
+    if (!activeTab || activeTab.kind !== "terminal" || !handle) {
+      showToast("Open a terminal tab first, then split it beside this session");
+      return;
+    }
+    if (handle.shownSessionIds().includes(s.id)) {
+      showToast(`${s.name} is already in this workspace`);
+      return;
+    }
+    handle.splitWithSession("row", s.id);
+    navigate(`/t/${activeTab.sessionId}`);
+  };
+
   const onSaveWorkspaceLayout = async () => {
     const now = new Date();
     const suggestedName = `Layout ${now.toLocaleDateString()} ${now.toLocaleTimeString([], {
@@ -963,12 +986,40 @@ const App: Component = () => {
       return true;
     }
 
+    // Terminal tabs whose bound session no longer exists. A saved layout records
+    // bindings, not shells (#212): restore re-attaches to the sessions that are
+    // still alive and offers to spin up fresh ones for the rest.
+    const missingTerminals = layout.tabs.filter(
+      (tab): tab is Extract<Tab, { kind: "terminal" }> =>
+        tab.kind === "terminal" &&
+        sessionsStore.ready &&
+        !sessionsStore.sessions[tab.sessionId],
+    );
+
     if (skipped > 0) {
       showToast(
         `Restored "${layout.name}" and skipped ${skipped} missing live session${skipped === 1 ? "" : "s"}.`,
       );
     } else {
       showToast(`Restored layout "${layout.name}"`);
+    }
+
+    if (missingTerminals.length > 0) {
+      const count = missingTerminals.length;
+      const create = await confirmUser(
+        `Create ${count} missing session${count === 1 ? "" : "s"}?`,
+        `"${layout.name}" referenced ${count} terminal session${count === 1 ? "" : "s"} that no longer exist. Open fresh shells for them?`,
+      );
+      if (create) {
+        for (const tab of missingTerminals) {
+          try {
+            const created = await createSession(tab.label || "session");
+            openTerminalTab(created.id, created.name);
+          } catch (e) {
+            showToast(`create failed: ${(e as Error).message}`, { kind: "error" });
+          }
+        }
+      }
     }
     return true;
   };
@@ -1356,6 +1407,12 @@ const App: Component = () => {
                       void onDuplicateSession(s);
                     }}
                   >Duplicate (same cwd)</button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-label={`Open ${s.name} beside the current pane`}
+                    onClick={() => onOpenBesideCurrent(s)}
+                  >Open beside current</button>
                   <button
                     type="button"
                     role="menuitem"

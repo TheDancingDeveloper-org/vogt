@@ -40,6 +40,7 @@ import {
   signOut,
   type AgentTask,
   type FileSearchResult,
+  type SessionSummary,
   type SessionTemplate,
 } from "./api";
 import {
@@ -55,6 +56,7 @@ import {
 } from "./workspaceLayouts";
 import Dialog from "./Dialog";
 import { historyResultUrl } from "./historyRoute";
+import { terminalWorkspaceHandle } from "./paneComposeBus";
 
 interface HistorySearchResult {
   session_id: string;
@@ -1347,6 +1349,60 @@ const CommandPalette: Component<Props> = (props) => {
       }));
   };
 
+  // Compose an existing session into the active terminal workspace (#212).
+  // Only offered when a terminal tab is active and has registered its handle,
+  // and only for sessions not already shown there. None of these create a PTY.
+  const splitCommands = (): Command[] => {
+    const activeTab = tabsStore.tabs.find((tab) => tab.id === tabsStore.active);
+    if (activeTab?.kind !== "terminal") return [];
+    const handle = terminalWorkspaceHandle(activeTab.id);
+    if (!handle) return [];
+    const shown = new Set(handle.shownSessionIds());
+    const candidates = sessionsStore.order
+      .map((id) => sessionsStore.sessions[id])
+      .filter(
+        (session): session is SessionSummary =>
+          session != null && !shown.has(session.id),
+      );
+    const commands: Command[] = [];
+    for (const session of candidates) {
+      commands.push({
+        id: `split-right-${session.id}`,
+        label: `Split right with ${session.name}`,
+        description: session.cwd || "Compose this session beside the current pane",
+        icon: ">_",
+        action: () => {
+          handle.splitWithSession("row", session.id);
+          props.onClose();
+        },
+        category: "Sessions",
+      });
+      commands.push({
+        id: `split-down-${session.id}`,
+        label: `Split down with ${session.name}`,
+        description: session.cwd || "Compose this session below the current pane",
+        icon: ">_",
+        action: () => {
+          handle.splitWithSession("column", session.id);
+          props.onClose();
+        },
+        category: "Sessions",
+      });
+      commands.push({
+        id: `show-in-pane-${session.id}`,
+        label: `Show ${session.name} in this pane`,
+        description: "Re-target the active pane without changing the layout",
+        icon: ">_",
+        action: () => {
+          handle.showSessionInActivePane(session.id);
+          props.onClose();
+        },
+        category: "Sessions",
+      });
+    }
+    return commands;
+  };
+
   const recentFileCommands = (): Command[] => {
     return getRecentFiles()
       .slice(0, 5)
@@ -1415,6 +1471,7 @@ const CommandPalette: Component<Props> = (props) => {
       // the operator typed themselves, so on an equal score it should surface
       // ahead of a work item that merely happens to tie (#230).
       ...sessionCommands(),
+      ...splitCommands(),
       // A registered project, opened on its own page (FR-U16). The palette
       // navigates and does not write — `/projects?p=<slug>` is the same deep
       // link the Projects surface writes for itself, so what the keyboard

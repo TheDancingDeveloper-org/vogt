@@ -33,10 +33,13 @@ import {
   paneIdFor,
   pruneTerminalLayout,
   removePane,
+  retargetPane,
   type SavedTerminalLayout,
   type SplitDirection,
   type TerminalLayoutNode,
 } from "./terminalLayout";
+import Dialog from "./Dialog";
+import { registerTerminalWorkspace } from "./paneComposeBus";
 import {
   changeTerminalFontSize,
   MAX_TERMINAL_FONT_SIZE,
@@ -121,7 +124,12 @@ function activityClass(session: SessionSummary | undefined): string {
 interface LayoutNodeProps {
   node: TerminalLayoutNode;
   activePaneId: string;
+  /** Whether to draw a per-pane header with its session dropdown (#212). Only
+   *  meaningful in a split; a lone pane keeps its whole height for the shell. */
+  withHeaders: boolean;
+  sessions: SessionSummary[];
   onFocusPane: (paneId: string) => void;
+  onRetargetPane: (paneId: string, sessionId: string) => void;
   interceptPaneInput: (paneId: string, data: string | ArrayBuffer) => boolean;
   registerPaneSend: (
     paneId: string,
@@ -139,6 +147,8 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
       node.type === "pane" ? (
         (() => {
           const paneId = node.id;
+          const paneSession = () =>
+            props.sessions.find((s) => s.id === node.sessionId);
         return (
           <div
             class={`terminal-pane ${
@@ -146,6 +156,34 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
             }`}
             onPointerDown={() => props.onFocusPane(paneId)}
           >
+            <Show when={props.withHeaders}>
+              <div class="terminal-pane-header">
+                <span class={`activity-dot ${activityClass(paneSession())}`} />
+                <label class="visually-hidden" for={`pane-session-${paneId}`}>
+                  Session shown in this pane
+                </label>
+                <select
+                  id={`pane-session-${paneId}`}
+                  class="terminal-pane-session"
+                  aria-label="Session shown in this pane"
+                  title="Show a different session in this pane"
+                  value={node.sessionId}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onChange={(event) => {
+                    const next = event.currentTarget.value;
+                    if (next && next !== node.sessionId) {
+                      props.onRetargetPane(paneId, next);
+                    }
+                  }}
+                >
+                  <For each={props.sessions}>
+                    {(session) => (
+                      <option value={session.id}>{session.name}</option>
+                    )}
+                  </For>
+                </select>
+              </div>
+            </Show>
             <Terminal
               interceptInput={(data) => props.interceptPaneInput(paneId, data)}
               sessionId={node.sessionId}
@@ -169,7 +207,10 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
               <LayoutNodeView
                 node={child}
                 activePaneId={props.activePaneId}
+                withHeaders={props.withHeaders}
+                sessions={props.sessions}
                 onFocusPane={props.onFocusPane}
+                onRetargetPane={props.onRetargetPane}
                 interceptPaneInput={props.interceptPaneInput}
                 registerPaneSend={props.registerPaneSend}
                 registerPaneActions={props.registerPaneActions}
@@ -194,6 +235,11 @@ const TerminalWorkspace: Component<Props> = (props) => {
   // others (#185). Only meaningful with a split; a single pane already fills.
   const [soloed, setSoloed] = createSignal(false);
   const [busy, setBusy] = createSignal<SplitDirection | "close" | null>(null);
+  // When set, the "Split with…" picker is open for this direction (#212): the
+  // operator chooses a fresh session or composes one that already exists.
+  const [splitPickerDir, setSplitPickerDir] = createSignal<SplitDirection | null>(
+    null,
+  );
   const [error, setError] = createSignal<string | null>(null);
   const [draft, setDraft] = createSignal("");
   // Find bar (#234): opened by Ctrl/Cmd+Shift+F or the toolbar button, drives
@@ -302,6 +348,19 @@ const TerminalWorkspace: Component<Props> = (props) => {
     return Boolean(
       pane && panes().length > 1 && pane.sessionId !== props.sessionId,
     );
+  });
+  // Every session, in the order the rail shows them — the choices a pane's
+  // header dropdown offers and the pool the split picker draws from (#212).
+  const allSessions = createMemo(() =>
+    sessionsStore.order
+      .map((id) => sessionsStore.sessions[id])
+      .filter((session): session is SessionSummary => Boolean(session)),
+  );
+  // Sessions not already bound to a pane here: the ones worth composing in,
+  // since a session is never shown in two panes at once.
+  const eligibleSessions = createMemo(() => {
+    const shown = new Set(panes().map((pane) => pane.sessionId));
+    return allSessions().filter((session) => !shown.has(session.id));
   });
 
   const sendToTargets = (data: string | ArrayBuffer, originPaneId?: string) => {
@@ -487,7 +546,61 @@ const TerminalWorkspace: Component<Props> = (props) => {
     }
   };
 
-  const closeActivePane = async () => {
+  // Open the "Split with…" picker, unless nothing exists to compose — then a
+  // split can only mean a fresh session, so skip the extra tap and make one.
+  const requestSplit = (direction: SplitDirection) => {
+    if (busy()) return;
+    if (eligibleSessions().length === 0) {
+      void splitActive(direction);
+      return;
+    }
+    setSplitPickerDir(direction);
+  };
+
+  // Compose a session that already exists into a new pane. Creates no PTY, so
+  // no session is spawned and none is ever shown in two panes at once (#212).
+  const splitWithExisting = (direction: SplitDirection, sessionId: string) => {
+    const pane = activePane();
+    if (!pane || busy()) return;
+    if (containsSession(root(), sessionId)) return;
+    setError(null);
+    const nextPane = makePane(sessionId);
+    let inserted = false;
+    setRoot((current) => {
+      const next = insertPane(current, pane.id, direction, nextPane);
+      inserted = next !== null;
+      return next ?? current;
+    });
+    if (inserted) setActivePaneId(nextPane.id);
+  };
+
+  // Point a pane at another session without disturbing the layout; a clash with
+  // a session already on screen swaps the two. No PTY is created (#212).
+  const retargetPaneTo = (paneId: string, sessionId: string) => {
+    const result = retargetPane(root(), paneId, sessionId);
+    if (!result) return;
+    setError(null);
+    setRoot(result.root);
+    setActivePaneId(result.activePaneId);
+  };
+
+  // Detach the active pane: drop it from the layout but leave its session
+  // running and listed. This never kills or deletes — that is `killActivePane`
+  // below, a separate, confirmed act (#212).
+  const detachActivePane = () => {
+    const pane = activePane();
+    if (!pane || !canCloseActivePane() || busy()) return;
+    setError(null);
+    let nextRoot: TerminalLayoutNode | null = null;
+    setRoot((current) => {
+      nextRoot = removePane(current, pane.id);
+      return nextRoot ?? makePane(props.sessionId);
+    });
+    const nextPane = nextRoot ? firstPane(nextRoot) : null;
+    setActivePaneId(nextPane?.id ?? paneIdFor(props.sessionId));
+  };
+
+  const killActivePane = async () => {
     const pane = activePane();
     if (!pane || !canCloseActivePane() || busy()) return;
     const session = sessionsStore.sessions[pane.sessionId] ?? null;
@@ -512,11 +625,25 @@ const TerminalWorkspace: Component<Props> = (props) => {
       const nextPane = nextRoot ? firstPane(nextRoot) : null;
       setActivePaneId(nextPane?.id ?? paneIdFor(props.sessionId));
     } catch (err) {
-      reportError("close pane failed", err);
+      reportError("kill pane failed", err);
     } finally {
       setBusy(null);
     }
   };
+
+  // Let the command palette and the rail's session menu compose a session into
+  // *this* workspace while it is the active tab (#212).
+  createEffect(() => {
+    const unregister = registerTerminalWorkspace({
+      tabId: props.tabId,
+      shownSessionIds: () => panes().map((pane) => pane.sessionId),
+      splitWithSession: (direction, sessionId) =>
+        splitWithExisting(direction, sessionId),
+      showSessionInActivePane: (sessionId) =>
+        retargetPaneTo(activePaneId(), sessionId),
+    });
+    onCleanup(unregister);
+  });
 
   // The pane-management actions. Rendered inline on a wide toolbar and inside
   // the `···` menu on a phone, so the button logic lives in exactly one place.
@@ -551,36 +678,51 @@ const TerminalWorkspace: Component<Props> = (props) => {
       <button
         onClick={() => {
           setOverflowOpen(false);
-          void splitActive("row");
+          requestSplit("row");
         }}
         disabled={busy() !== null}
-        title="Split right"
+        title="Split right (choose a new or existing session)"
       >
         Split right
       </button>
       <button
         onClick={() => {
           setOverflowOpen(false);
-          void splitActive("column");
+          requestSplit("column");
         }}
         disabled={busy() !== null}
-        title="Split down"
+        title="Split down (choose a new or existing session)"
       >
         Split down
       </button>
       <button
         onClick={() => {
           setOverflowOpen(false);
-          void closeActivePane();
+          detachActivePane();
         }}
         disabled={!canCloseActivePane() || busy() !== null}
         title={
           activePane()?.sessionId === props.sessionId
             ? "Root pane stays with this tab"
-            : "Kill and close active pane"
+            : "Detach the active pane; its session keeps running and returns to the tab list"
         }
       >
         Close pane
+      </button>
+      <button
+        class="danger"
+        onClick={() => {
+          setOverflowOpen(false);
+          void killActivePane();
+        }}
+        disabled={!canCloseActivePane() || busy() !== null}
+        title={
+          activePane()?.sessionId === props.sessionId
+            ? "Root pane stays with this tab"
+            : "Kill the active session and close its pane"
+        }
+      >
+        Kill pane
       </button>
     </>
   );
@@ -763,7 +905,10 @@ const TerminalWorkspace: Component<Props> = (props) => {
         <LayoutNodeView
           node={root()}
           activePaneId={activePaneId()}
+          withHeaders={panes().length > 1}
+          sessions={allSessions()}
           onFocusPane={setActivePaneId}
+          onRetargetPane={retargetPaneTo}
           interceptPaneInput={interceptPaneInput}
           registerPaneSend={(paneId, fn) => {
             if (fn) paneSenders.set(paneId, fn);
@@ -831,6 +976,54 @@ const TerminalWorkspace: Component<Props> = (props) => {
           Enter
         </button>
       </form>
+      <Show when={splitPickerDir()} keyed>
+        {(direction) => (
+          <Dialog
+            label={direction === "row" ? "Split right with…" : "Split down with…"}
+            onClose={() => setSplitPickerDir(null)}
+            dialogClass="split-picker"
+            dismissOnBackdrop
+          >
+            <div class="split-picker-body">
+              <p class="split-picker-title">
+                {direction === "row" ? "Split right" : "Split down"}
+              </p>
+              <div class="split-picker-list" role="listbox" aria-label="Session to show in the new pane">
+                <button
+                  type="button"
+                  class="split-picker-option"
+                  data-dialog-initial-focus
+                  onClick={() => {
+                    setSplitPickerDir(null);
+                    void splitActive(direction);
+                  }}
+                >
+                  <span class="split-picker-option-name">New session (current cwd)</span>
+                  <span class="split-picker-option-meta">Spawns a fresh shell</span>
+                </button>
+                <For each={eligibleSessions()}>
+                  {(session) => (
+                    <button
+                      type="button"
+                      class="split-picker-option"
+                      onClick={() => {
+                        setSplitPickerDir(null);
+                        splitWithExisting(direction, session.id);
+                      }}
+                    >
+                      <span class={`activity-dot ${activityClass(session)}`} />
+                      <span class="split-picker-option-name">{session.name}</span>
+                      <Show when={session.cwd}>
+                        <span class="split-picker-option-meta">{session.cwd}</span>
+                      </Show>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
+          </Dialog>
+        )}
+      </Show>
     </div>
   );
 };

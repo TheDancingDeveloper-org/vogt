@@ -2,12 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   collectPanes,
   commitCreatedPane,
+  containsSession,
+  findPane,
   insertPane,
   makePane,
   normalizeTerminalLayout,
   paneIdFor,
   pruneTerminalLayout,
   removePane,
+  retargetPane,
+  type SavedTerminalLayout,
   type TerminalLayoutNode,
 } from "../terminalLayout";
 
@@ -60,5 +64,84 @@ describe("terminal layout transactions", () => {
     const pruned = pruneTerminalLayout(reloaded!, (id) => id !== "three");
     expect(collectPanes(pruned!).map((pane) => pane.sessionId))
       .toEqual(["one", "two"]);
+  });
+});
+
+// #212: composing existing sessions into a split, re-targeting a pane and
+// detaching one are all pure tree transforms — no session is ever created.
+describe("composing existing sessions (#212)", () => {
+  it("inserts an existing session as a new pane without spawning one", () => {
+    const root = makePane("one");
+    const split = insertPane(root, root.id, "row", makePane("two"));
+    expect(collectPanes(split!).map((pane) => pane.sessionId))
+      .toEqual(["one", "two"]);
+    // Every pane is bound to a session the caller already had, and each pane id
+    // is derived from that session — nothing here manufactures a new one.
+    expect(collectPanes(split!).map((pane) => pane.id))
+      .toEqual([paneIdFor("one"), paneIdFor("two")]);
+  });
+
+  it("re-targets a pane at a session not already shown", () => {
+    const root = insertPane(makePane("one"), paneIdFor("one"), "row", makePane("two"))!;
+    const result = retargetPane(root, paneIdFor("two"), "three");
+    expect(result).not.toBeNull();
+    expect(collectPanes(result!.root).map((pane) => pane.sessionId))
+      .toEqual(["one", "three"]);
+    // The pane's id follows its new session, and the layout is otherwise intact.
+    expect(result!.activePaneId).toBe(paneIdFor("three"));
+    expect(containsSession(result!.root, "two")).toBe(false);
+  });
+
+  it("swaps two panes when the target session is already on screen", () => {
+    const root = insertPane(makePane("one"), paneIdFor("one"), "row", makePane("two"))!;
+    // Point the first pane at "two", which the second pane already shows.
+    const result = retargetPane(root, paneIdFor("one"), "two");
+    expect(collectPanes(result!.root).map((pane) => pane.sessionId))
+      .toEqual(["two", "one"]);
+    // A swap, not a duplication: both sessions survive, exactly once each.
+    expect(collectPanes(result!.root)).toHaveLength(2);
+    expect(result!.activePaneId).toBe(paneIdFor("two"));
+  });
+
+  it("re-targeting a missing pane changes nothing", () => {
+    const root = makePane("one");
+    expect(retargetPane(root, "pane:gone", "two")).toBeNull();
+  });
+
+  it("detaches a pane by dropping it from the tree, leaving its session alone", () => {
+    const root = insertPane(makePane("one"), paneIdFor("one"), "row", makePane("two"))!;
+    const detached = removePane(root, paneIdFor("two"));
+    expect(collectPanes(detached!).map((pane) => pane.sessionId)).toEqual(["one"]);
+    // `removePane` is a layout function only: it names no session-kill verb, so
+    // detaching cannot reach the kill/DELETE path.
+    expect(findPane(detached!, paneIdFor("two"))).toBeNull();
+  });
+
+  it("round-trips a saved layout's session bindings", () => {
+    const saved: SavedTerminalLayout = {
+      root: {
+        type: "split",
+        id: "split:outer",
+        direction: "row",
+        children: [
+          makePane("alpha"),
+          {
+            type: "split",
+            id: "split:inner",
+            direction: "column",
+            children: [makePane("beta"), makePane("gamma")],
+          },
+        ],
+      },
+      activePaneId: paneIdFor("beta"),
+      broadcast: true,
+    };
+    // Persist and reload the way `TerminalWorkspace` does.
+    const reloaded = JSON.parse(JSON.stringify(saved)) as SavedTerminalLayout;
+    const root = normalizeTerminalLayout(reloaded.root);
+    expect(collectPanes(root!).map((pane) => pane.sessionId))
+      .toEqual(["alpha", "beta", "gamma"]);
+    expect(findPane(root!, reloaded.activePaneId)?.sessionId).toBe("beta");
+    expect(reloaded.broadcast).toBe(true);
   });
 });
