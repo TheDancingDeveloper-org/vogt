@@ -23,13 +23,21 @@ import {
   openEditorTab,
   openGuiTab,
   openTasksTab,
+  openAssistantTab,
   recentPlacesStore,
   surfaceHref,
   tabsStore,
 } from "./tabs";
 import { getRecentFiles } from "./recentFiles";
+import { KEYBOARD_SHORTCUTS } from "./keyboardShortcuts";
+import { rankCommands } from "./commandPaletteScore";
+import {
+  readRecentCommandIds,
+  recordRecentCommand,
+} from "./commandPaletteRecent";
 import {
   api,
+  signOut,
   type AgentTask,
   type FileSearchResult,
   type SessionTemplate,
@@ -197,8 +205,54 @@ export interface Command {
   label: string;
   description?: string;
   icon?: string;
+  /** Keyboard shortcut to display on the row, as the chord tokens from
+   *  `KEYBOARD_SHORTCUTS` (e.g. `["Ctrl/Cmd", "K"]`). Display only. */
+  shortcut?: string[];
   action: () => void | Promise<void>;
   category?: string;
+}
+
+/** The chord tokens for a shortcut id, or undefined if there is no binding. */
+function shortcutKeys(shortcutId: string): string[] | undefined {
+  const found = KEYBOARD_SHORTCUTS.find((entry) => entry.id === shortcutId);
+  return found ? [...found.keys] : undefined;
+}
+
+// Recent rows are clones of a real command carrying a distinct DOM id, so the
+// same command can appear once under "Recent" and again in its own category
+// without colliding. `baseIdOf` recovers the real id for recording and lookup.
+const RECENT_ID_PREFIX = "recent-command:";
+function baseIdOf(id: string): string {
+  return id.startsWith(RECENT_ID_PREFIX) ? id.slice(RECENT_ID_PREFIX.length) : id;
+}
+
+// The palette's category tags and glyphs are drawn in a fixed-width column so a
+// row's label always starts at the same x, whatever its icon. Word icons that
+// used to widen the column ("work", "drift", "run", …) map to a short glyph;
+// anything already short (a symbol, one or two characters) is shown as-is.
+const ICON_GLYPHS: Record<string, string> = {
+  work: "WK",
+  drift: "DF",
+  import: "IM",
+  project: "PJ",
+  sym: "{}",
+  run: "▶",
+  paused: "❚❚",
+  git: "GT",
+  file: "FL",
+  dir: "DR",
+  hist: "HS",
+  tasks: "TK",
+  set: "⚙",
+  key: "⌘",
+  layout: "LY",
+  preset: "PS",
+};
+
+function iconGlyph(icon: string): string {
+  if (icon in ICON_GLYPHS) return ICON_GLYPHS[icon]!;
+  if (icon.length <= 2) return icon;
+  return icon.slice(0, 2).toUpperCase();
 }
 
 interface Props {
@@ -209,6 +263,7 @@ interface Props {
   onChooseFile?: () => void;
   onOpenSettings?: () => void;
   guiEnabled?: boolean;
+  assistantEnabled?: boolean;
   onShowShortcuts?: () => void;
   onError?: (message: string) => void;
   templates?: SessionTemplate[];
@@ -950,11 +1005,102 @@ const CommandPalette: Component<Props> = (props) => {
         },
         category: "Vogt",
       },
+      // The places the rail and the phone bar reach — the palette reaches them
+      // too, so the keyboard is never a poorer map than the chrome (#230). Each
+      // navigates and writes nothing, save for Sign out, which is the account's
+      // own deliberate hand-back and lives here because the phone More sheet
+      // offers it alongside the places.
+      {
+        id: "open-inbox",
+        label: "Open Inbox",
+        description: "Attention items awaiting a decision",
+        icon: "inbox",
+        action: () => {
+          navigate("/inbox");
+          props.onClose();
+        },
+        category: "Inbox",
+      },
+      {
+        id: "open-sessions",
+        label: "Open Sessions",
+        description: "Every terminal session, running or idle",
+        icon: ">_",
+        action: () => {
+          navigate("/sessions");
+          props.onClose();
+        },
+        category: "Sessions",
+      },
+      {
+        id: "open-history",
+        label: "Open History",
+        description: "Archived terminal output",
+        icon: "hist",
+        action: () => {
+          openHistoryTab();
+          navigate("/history");
+          props.onClose();
+        },
+        category: "History",
+      },
+      {
+        id: "open-git",
+        label: "Open Git",
+        description: "Git status for the workspace root",
+        icon: "git",
+        action: () => {
+          openGitTab("");
+          navigate("/g/");
+          props.onClose();
+        },
+        category: "Git",
+      },
+      {
+        id: "open-tasks-place",
+        label: "Open Tasks",
+        description: "Recurring agent tasks",
+        icon: "tasks",
+        action: () => {
+          openTasksTab();
+          navigate("/tasks");
+          props.onClose();
+        },
+        category: "Tasks",
+      },
+      ...(props.assistantEnabled
+        ? [
+            {
+              id: "open-assistant",
+              label: "Open Assistant",
+              description: "The configured voice and chat assistant",
+              icon: "assistant",
+              action: () => {
+                openAssistantTab();
+                navigate("/assistant");
+                props.onClose();
+              },
+              category: "Assistant",
+            },
+          ]
+        : []),
+      {
+        id: "sign-out",
+        label: "Sign out",
+        description: "Hand the credential back and return to the login screen",
+        icon: "out",
+        action: () => {
+          props.onClose();
+          signOut();
+        },
+        category: "Account",
+      },
       {
       id: "new-session",
       label: "New Terminal Session",
       description: "Create a new shell session",
       icon: ">_",
+      shortcut: shortcutKeys("new-terminal-session"),
       action: () => {
         props.onClose();
         props.onCreateSession?.();
@@ -1037,6 +1183,7 @@ const CommandPalette: Component<Props> = (props) => {
       label: "Keyboard Shortcuts",
       description: "View all keyboard shortcuts",
       icon: "key",
+      shortcut: shortcutKeys("show-shortcut-help"),
       action: () => {
         props.onShowShortcuts?.();
         props.onClose();
@@ -1251,15 +1398,28 @@ const CommandPalette: Component<Props> = (props) => {
     }));
   };
 
-  const allCommands = (): Command[] => {
+  // `limit` caps the two provider lists that the palette loads 200-deep for
+  // name search (work items and projects). On the empty query only ~10 of each
+  // are worth showing — enough that Open Tabs, Recent Files and Sessions stay
+  // on screen instead of being pushed off by 200 work items. A typed query
+  // passes no limit, so the scorer still searches the whole set.
+  const allCommands = (limit?: number): Command[] => {
+    const projects = limit ? vogtProjects().slice(0, limit) : vogtProjects();
+    const items = limit ? workItems().slice(0, limit) : workItems();
     return [
       ...baseCommands(),
       ...projectCommands(),
+      ...tabCommands(),
+      ...recentFileCommands(),
+      // Sessions before work items: a session name is a short, memorable thing
+      // the operator typed themselves, so on an equal score it should surface
+      // ahead of a work item that merely happens to tie (#230).
+      ...sessionCommands(),
       // A registered project, opened on its own page (FR-U16). The palette
       // navigates and does not write — `/projects?p=<slug>` is the same deep
       // link the Projects surface writes for itself, so what the keyboard
       // reaches and what a shared link reaches are the same place (FR-U11).
-      ...vogtProjects().map<Command>((project) => ({
+      ...projects.map<Command>((project) => ({
         id: `vogt-project-${project.slug}`,
         label: `Open project ${project.name}`,
         description: project.slug,
@@ -1270,7 +1430,7 @@ const CommandPalette: Component<Props> = (props) => {
         },
         category: "Vogt",
       })),
-      ...workItems().map<Command>((item) => ({
+      ...items.map<Command>((item) => ({
         id: `vogt-work-${item.ref}`,
         label: `${item.ref} — ${item.title}`,
         description: [item.kind, item.state, item.project_slug]
@@ -1284,14 +1444,35 @@ const CommandPalette: Component<Props> = (props) => {
         },
         category: "Vogt",
       })),
-      ...tabCommands(),
-      ...recentFileCommands(),
-      ...sessionCommands(),
       ...templateCommands(),
       ...taskCommands(),
       ...savedLayoutCommands(),
       ...providerCommands(),
     ];
+  };
+
+  const EMPTY_QUERY_CAP = 10;
+
+  // The last few commands the operator actually ran, resolved against the live
+  // command set (an id whose command is gone this open is simply skipped) and
+  // cloned with a distinct DOM id so a Recent row and the same command's own
+  // row do not share an id. Shown only on the empty query, at the top.
+  const recentCommands = (): Command[] => {
+    const ids = readRecentCommandIds();
+    if (ids.length === 0) return [];
+    const byId = new Map(allCommands().map((command) => [command.id, command]));
+    const out: Command[] = [];
+    for (const id of ids) {
+      const command = byId.get(id);
+      if (command) {
+        out.push({
+          ...command,
+          id: `${RECENT_ID_PREFIX}${command.id}`,
+          category: "Recent",
+        });
+      }
+    }
+    return out;
   };
 
   const filteredCommands = () => {
@@ -1314,18 +1495,22 @@ const CommandPalette: Component<Props> = (props) => {
         }];
       }
       if (!term) return projectCommands();
-      return projectCommands().filter(
-        (cmd) =>
-          fuzzyMatch(term, cmd.label) ||
-          (cmd.description && fuzzyMatch(term, cmd.description)),
-      );
+      return rankCommands(term, projectCommands());
     }
-    if (!q) return allCommands();
-    return allCommands().filter(
-      (cmd) =>
-        fuzzyMatch(q, cmd.label) ||
-        (cmd.description && fuzzyMatch(q, cmd.description)),
-    );
+    // The empty query shows the recents first, then the capped base list —
+    // with the recents removed from their own categories below, so a command
+    // never appears twice (which would also collide two rows on one DOM id).
+    if (!q) {
+      const recent = recentCommands();
+      const recentIds = new Set(recent.map((command) => baseIdOf(command.id)));
+      const rest = allCommands(EMPTY_QUERY_CAP).filter(
+        (command) => !recentIds.has(command.id),
+      );
+      return [...recent, ...rest];
+    }
+    // A typed query is scored, not merely filtered: a label match outranks a
+    // description-only one, and the whole (uncapped) set is searched.
+    return rankCommands(q, allCommands());
   };
 
   const selectedCommand = () => filteredCommands()[selectedIndex()];
@@ -1349,6 +1534,13 @@ const CommandPalette: Component<Props> = (props) => {
     });
   });
 
+  // Every activation path runs a command through here, so recency is recorded
+  // once, in one place, whether the command was reached by Enter or by click.
+  const execute = (command: Command): void | Promise<void> => {
+    recordRecentCommand(baseIdOf(command.id));
+    return command.action();
+  };
+
   const handleKeyDown = (e: KeyboardEvent) => {
     const cmds = filteredCommands();
     if (e.key === "ArrowDown") {
@@ -1363,7 +1555,7 @@ const CommandPalette: Component<Props> = (props) => {
       e.preventDefault();
       const cmd = cmds[selectedIndex()];
       if (cmd) {
-        void cmd.action();
+        void execute(cmd);
       }
     }
   };
@@ -1447,18 +1639,23 @@ const CommandPalette: Component<Props> = (props) => {
                   class={`command-palette-item ${
                     selectedIndex() === index() ? "selected" : ""
                   }`}
-                  onClick={() => void cmd.action()}
+                  onClick={() => void execute(cmd)}
                   onPointerMove={() => setSelectedIndex(index())}
                 >
-                  <Show when={cmd.icon}>
-                    <span class="command-icon">{cmd.icon}</span>
-                  </Show>
+                  <span class="command-icon" aria-hidden="true">
+                    {iconGlyph(cmd.icon ?? "")}
+                  </span>
                   <div class="command-content">
                     <div class="command-label">{cmd.label}</div>
                     <Show when={cmd.description}>
                       <div class="command-description">{cmd.description}</div>
                     </Show>
                   </div>
+                  <Show when={cmd.shortcut && cmd.shortcut.length > 0}>
+                    <span class="command-shortcut" aria-hidden="true">
+                      <For each={cmd.shortcut}>{(key) => <kbd>{key}</kbd>}</For>
+                    </span>
+                  </Show>
                   <Show when={cmd.category}>
                     <span class="command-category">{cmd.category}</span>
                   </Show>

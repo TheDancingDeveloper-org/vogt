@@ -14,6 +14,7 @@ import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { createSignal } from "solid-js";
 import CommandPalette, { invalidateCommandPaletteProviders } from "../CommandPalette";
+import { clearRecentCommands } from "../commandPaletteRecent";
 import { refreshSessions } from "../store";
 import { fakeVogt, settle, workItem, type FakeVogt } from "./harness";
 
@@ -64,7 +65,13 @@ function palette(fileCallbacks: {
   };
 }
 
-afterEach(() => invalidateCommandPaletteProviders());
+afterEach(() => {
+  invalidateCommandPaletteProviders();
+  // Executing a command records it as Recent (localStorage, shared across
+  // tests in this file); clear it so one test's click is not the next test's
+  // top row.
+  clearRecentCommands();
+});
 
 describe("file workflow commands", () => {
   it("offers only file commands backed by a real workflow", async () => {
@@ -501,5 +508,75 @@ describe("FR-U16 — sessions are a read surface, and reachable by name", () => 
     // palette that failed to build its list at all.
     await waitFor(() => expect(view.text()).toContain("Open Board"));
     expect(view.text()).not.toContain("Jump to session");
+  });
+});
+
+describe("#230 — missing places, the empty-query cap, and Recent", () => {
+  it("offers Open Inbox, Open Sessions and Open History as navigate commands", async () => {
+    fakeVogt(ESTATE);
+    const view = palette();
+    await settle();
+    for (const label of ["Open Inbox", "Open Sessions", "Open History", "Open Git", "Open Tasks", "Sign out"]) {
+      expect(view.text()).toContain(label);
+    }
+  });
+
+  it("offers Open Assistant only when the assistant is enabled", async () => {
+    fakeVogt(ESTATE);
+    const without = palette();
+    await settle();
+    expect(without.text()).not.toContain("Open Assistant");
+    without.unmount();
+
+    const history = createMemoryHistory();
+    history.set({ value: "/board" });
+    const withAssistant = render(() => (
+      <MemoryRouter history={history}>
+        <Route
+          path="*rest"
+          component={() => (
+            <CommandPalette open={true} onClose={() => {}} assistantEnabled={true} />
+          )}
+        />
+      </MemoryRouter>
+    ));
+    await settle();
+    expect(withAssistant.container.textContent).toContain("Open Assistant");
+  });
+
+  it("caps work items to ten on the empty query but finds the rest by name", async () => {
+    const items = Array.from({ length: 12 }, (_, i) =>
+      workItem({ ref: `WI-${i}`, title: `capitem-${i}` }),
+    );
+    fakeVogt({
+      "GET /projects": { body: { projects: [] } },
+      "GET /work": { body: { items, total: items.length } },
+    });
+    const view = palette();
+    await waitFor(() => expect(view.text()).toContain("capitem-0"));
+
+    // The eleventh and twelfth are off the empty list…
+    expect(view.text()).not.toContain("capitem-10");
+    expect(view.text()).not.toContain("capitem-11");
+
+    // …but a typed query searches the whole 200-deep set.
+    view.type("capitem-11");
+    await waitFor(() => expect(view.text()).toContain("capitem-11"));
+  });
+
+  it("lists a just-executed command under Recent on the next open", async () => {
+    fakeVogt(ESTATE);
+    const first = palette();
+    await settle();
+    first.click("Open Audit"); // records vogt-audit
+    first.unmount();
+
+    const second = palette();
+    await settle();
+    const categories = [...second.container.querySelectorAll(".command-category")].map(
+      (node) => node.textContent,
+    );
+    expect(categories[0]).toBe("Recent");
+    expect(second.container.querySelector(".command-label")?.textContent).toBe("Open Audit");
   });
 });
