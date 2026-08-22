@@ -69,6 +69,7 @@ import {
   initialRoute,
   recentPlacesStore,
   rememberPlace,
+  surfaceHref,
   snapshotTabs,
   tabsStore,
   type Tab,
@@ -1153,8 +1154,8 @@ const App: Component = () => {
           <nav class="places-nav">
             <div class="places-group">
               <span class="places-group-label">Work</span>
-              <a class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined} href="#/board"><span>Board</span><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></a>
-              <a class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined} href="#/backlog"><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
+              <a class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined} href={`#${surfaceHref(recentPlacesStore.places, "/board")}`}><span>Board</span><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></a>
+              <a class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined} href={`#${surfaceHref(recentPlacesStore.places, "/backlog")}`}><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
               <a class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined} href="#/inbox"><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" tone="accent" /></a>
             </div>
             <Show when={publicCfg()?.vogt?.configured}>
@@ -1623,8 +1624,8 @@ const App: Component = () => {
       <nav class="phone-bottom-nav" aria-label="Primary navigation">
         <a href="#/sessions" class={currentPlace("sessions") ? "active" : ""} aria-current={currentPlace("sessions") ? "page" : undefined}><span>Sessions</span><PlaceCount metric={sessionMetric()} label="sessions" /></a>
         <a href="#/inbox" class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined}><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" tone="accent" /></a>
-        <a href="#/board" class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined}><span>Board</span><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></a>
-        <a href="#/backlog" class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined}><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
+        <a href={`#${surfaceHref(recentPlacesStore.places, "/board")}`} class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined}><span>Board</span><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></a>
+        <a href={`#${surfaceHref(recentPlacesStore.places, "/backlog")}`} class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined}><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
         {/* The bar reaches four of eleven places; this fifth slot opens a sheet
             with the rest plus Settings and Sign out, so every place and both
             account actions are within two taps from any surface (#231). */}

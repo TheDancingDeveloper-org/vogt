@@ -144,7 +144,10 @@ a target-state select — the workflow's own legal edges for that card.
   through `+ Filter` and shown as individually removable chips. The URL remains
   the shareable/restorable source of truth, and a combination can be named and
   recalled as a saved lens (per device; shared server-side lenses are
-  deliberately not built — `REQUIREMENTS.md` §3).
+  deliberately not built — `REQUIREMENTS.md` §3). Opening an item and coming
+  back keeps the filter set — through Browser Back, and through the rail,
+  command palette and phone bottom bar, which return to the last filtered view
+  the surface held rather than a bare board.
 - **Quick-create** raises an item without leaving the board.
 - Long cards expand and collapse in place so their full title and body remain
   readable without leaving the bounded, measured Board.
