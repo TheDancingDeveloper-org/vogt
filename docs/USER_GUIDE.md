@@ -466,8 +466,11 @@ panel with **Retry**. Previously loaded content remains visible but is marked
 stale; an empty archive is shown only after a successful empty response.
 
 Session templates pre-configure command, cwd and environment, and can be
-matched to a repository name or path prefix. Custom ones live in the engine's
-TOML config:
+matched to a repository name or path prefix. The presets you create in the
+**Workspace Presets** editor are stored in this browser — they are not synced
+across devices or shared with the engine, and the editor says so. Deleting a
+preset asks first, and Escape will not discard a half-typed one. Presets the
+operator ships as defaults live instead in the engine's TOML config:
 
 ```toml
 [[session_templates]]
@@ -502,9 +505,9 @@ Tasks into the terminal. A run whose session is still alive reads **Still
 running** and settles to its real outcome on its own once the session exits.
 
 If an agent prints a line beginning with the notify phrase (by default
-`MYDEVENV2_NOTIFY:`, kept for existing task definitions), two things
-happen: a push notification goes out, and the line is **recorded on the run as
-a finding**. The push is a delivery; the finding is the record, and it survives
+`VOGT_NOTIFY:`; the older `MYDEVENV2_NOTIFY:` is still accepted for existing
+task definitions), two things happen: a push notification goes out, and the
+line is **recorded on the run as a finding**. The push is a delivery; the finding is the record, and it survives
 a phone that was switched off. Findings are listed under their run row, so the
 record is readable in the GUI and not only in a notification.
 
@@ -630,8 +633,11 @@ sessions rank ahead of work items. A command bound to a keyboard shortcut shows
 it on its row, and the commands you have run most recently appear under
 **Recent** at the top of the empty palette. **New File** opens a form with
 separate workspace destination and filename fields; **Open File…** opens a
-searchable workspace-file chooser. Cancelling either returns focus to the
-palette invoker, and creation writes only after **Create file** succeeds.
+searchable workspace-file chooser whose results you can walk with the arrow keys
+and open with Enter, without leaving the search box. Cancelling either returns
+focus to the palette invoker, and creation writes only after **Create file**
+succeeds — and refuses, rather than silently overwriting, if a file already
+lives at that path.
 Other mutating verbs whose collector is a *place* — quick-create, the drift inbox,
 the import form — open that view and do nothing else; per-item verbs
 (transition, comment, start session) are reached through the item's own entry,
@@ -651,8 +657,10 @@ Tasks, work items, and projects load independently, so one unavailable provider
 does not block navigation commands. Prefix a query with `#` to discover
 workspace project actions from manifests; that bounded scan is deferred until
 it is requested and reused on later openings. Prefix with `/`, `>`, or `@` for
-file, archived-output, or current-file symbol search. Closing or changing a
-special search cancels its obsolete request. Choose **Refresh Command Palette
+file, archived-output, or current-file symbol search. Typing `?` on its own
+lists these prefix modes as a legend, so the vocabulary is discoverable once the
+placeholder text has scrolled away. Closing or changing a special search cancels
+its obsolete request. Choose **Refresh Command Palette
 Data** when a write elsewhere makes a cached command list out of date.
 
 Prefix a palette query with `>` to search archived terminal output. Choosing a

@@ -108,11 +108,20 @@ const TreeNodeView: Component<NodeProps> = (props) => {
   const [loading, setLoading] = createSignal(false);
   const status = () => statusForPath(props.statusEntries, props.node.path);
 
+  const [loadError, setLoadError] = createSignal<string | null>(null);
+
   const loadKids = async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const tree = await api.tree(props.node.path, 0);
       setKids(tree);
+    } catch (cause) {
+      // A failed expand must not become an unhandled rejection (the effect
+      // calls this with `void`): report it in place and leave the folder open
+      // with a notice rather than throwing out of the render tree (#247).
+      setLoadError(`Could not open this folder: ${(cause as Error).message}`);
+      setKids([]);
     } finally {
       setLoading(false);
     }
@@ -243,6 +252,11 @@ const TreeNodeView: Component<NodeProps> = (props) => {
           <Show when={loading()}>
             <div class="meta" style={{ padding: "2px 8px", color: "var(--fg-muted)" }}>
               loading…
+            </div>
+          </Show>
+          <Show when={loadError()}>
+            <div class="meta" role="alert" style={{ padding: "2px 8px", color: "var(--activity-errored)" }}>
+              {loadError()}
             </div>
           </Show>
           <For each={kids() ?? []}>

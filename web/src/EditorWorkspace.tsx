@@ -68,6 +68,23 @@ const EditorWorkspace: Component<Props> = (props) => {
     }
   });
 
+  // Keep the active tab in view: switching to a tab that scrolled off the end
+  // of a crowded strip (Ctrl+Tab, a palette jump) should reveal it, not leave
+  // the reader looking at a strip that shows no active tab (#247).
+  let tabStripRef: HTMLDivElement | undefined;
+  createEffect(() => {
+    const active = tabsStore.active;
+    if (!active || !tabStripRef) return;
+    queueMicrotask(() => {
+      const el = tabStripRef?.querySelector<HTMLElement>(
+        `[data-editor-tab-id="${CSS.escape(active)}"]`,
+      );
+      // `scrollIntoView` is absent under jsdom; the optional call keeps the
+      // effect a no-op there rather than throwing out of the microtask.
+      el?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+    });
+  });
+
   return (
     <div class="editor-workspace">
       <Show when={!sidebarCollapsed()}>
@@ -123,13 +140,14 @@ const EditorWorkspace: Component<Props> = (props) => {
             </div>
           }
         >
-          <div class="editor-tabs">
+          <div class="editor-tabs" ref={tabStripRef}>
             <For each={editorTabs()}>
               {(tab) => (
                 <div
                   class={`editor-tab ${
                     tabsStore.active === tab.id ? "active" : ""
                   }`}
+                  data-editor-tab-id={tab.id}
                   title={tab.path}
                 >
                   <button
@@ -164,6 +182,8 @@ const EditorWorkspace: Component<Props> = (props) => {
                 onClick={() => setSplit("vertical")}
                 disabled={!canSplit()}
                 class={splitStore.direction === "vertical" ? "active" : ""}
+                aria-label="Split editor right"
+                aria-pressed={splitStore.direction === "vertical"}
                 title="Split right"
               >
                 ||
@@ -172,6 +192,8 @@ const EditorWorkspace: Component<Props> = (props) => {
                 onClick={() => setSplit("horizontal")}
                 disabled={!canSplit()}
                 class={splitStore.direction === "horizontal" ? "active" : ""}
+                aria-label="Split editor down"
+                aria-pressed={splitStore.direction === "horizontal"}
                 title="Split down"
               >
                 =
@@ -181,6 +203,7 @@ const EditorWorkspace: Component<Props> = (props) => {
                   setSplitDirection("none", editorTabs(), activeEditorTab()?.id ?? null)
                 }
                 disabled={!splitActive()}
+                aria-label="Unsplit editor"
                 title="Unsplit"
               >
                 1

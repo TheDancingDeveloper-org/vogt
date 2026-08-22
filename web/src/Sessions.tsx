@@ -17,7 +17,7 @@ import { pendingAction, setPendingAction } from "./pendingAction";
 import SurfaceHeader from "./SurfaceHeader";
 import WaitingSessionCard from "./WaitingSession";
 import SessionList from "./SessionList";
-import { attentionRank } from "./sessionRowModel";
+import { sortSessionsByAttention } from "./sessionRowModel";
 import { createNarrow } from "./narrow";
 
 interface Props {
@@ -66,22 +66,22 @@ const Sessions: Component<Props> = (props) => {
   const [pendingBusy, setPendingBusy] = createSignal(false);
   const [reasonDraft, setReasonDraft] = createSignal("");
   const [reasonBusy, setReasonBusy] = createSignal(false);
-  const sessions = createMemo(() => sessionsStore.order
-    .map((id) => sessionsStore.sessions[id])
-    .filter((session): session is SessionSummary => Boolean(session))
-    .sort((left, right) => {
-      const currentPending = pendingAction();
-      const pendingSession = currentPending?.kind === "send_input"
-        ? currentPending.session_id
-        : null;
-      const pendingDelta = Number(right.id === pendingSession)
-        - Number(left.id === pendingSession);
-      if (pendingDelta !== 0) return pendingDelta;
-      const attentionDelta = attentionRank(left) - attentionRank(right);
-      if (attentionDelta !== 0) return attentionDelta;
-      return Date.parse(right.activity_changed_at || right.created_at)
-        - Date.parse(left.activity_changed_at || left.created_at);
-    }));
+  const sessions = createMemo(() => {
+    // Attention order is the shared spine (the rail orders the same way); a
+    // stable partition then floats the session awaiting this reader's input to
+    // the very top without disturbing the attention order beneath it.
+    const currentPending = pendingAction();
+    const pendingSession = currentPending?.kind === "send_input"
+      ? currentPending.session_id
+      : null;
+    return sortSessionsByAttention(
+      sessionsStore.order
+        .map((id) => sessionsStore.sessions[id])
+        .filter((session): session is SessionSummary => Boolean(session)),
+    ).sort((left, right) =>
+      Number(right.id === pendingSession) - Number(left.id === pendingSession),
+    );
+  });
 
   const readPending = async () => {
     try {

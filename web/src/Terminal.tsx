@@ -74,6 +74,10 @@ interface Props {
   onRequestFind?: () => void;
   /** Reports search match position/count so the find bar can show "i of n". */
   onSearchResults?: (info: ISearchResultChangeEvent) => void;
+  /** The PTY program set its window title (OSC 0/2) — drives the tab label. */
+  onTitle?: (title: string) => void;
+  /** The PTY rang the bell (BEL) — drives the tab's activity dot. */
+  onBell?: () => void;
 }
 
 // Upper bound on input buffered while the WS is reconnecting. Generous enough
@@ -167,12 +171,18 @@ const TerminalView: Component<Props> = (props) => {
       setShowPasteModal(true);
     });
 
+  // Closing the paste modal leaves focus on the (now-gone) dialog; hand it back
+  // to the PTY so the next keystroke lands in the terminal, not nowhere. Queued
+  // so it runs after Dialog's own focus-restore teardown.
+  const refocusTerminal = () => queueMicrotask(() => term?.focus());
+
   const confirmPasteModal = () => {
     const text = pasteTextareaRef?.value ?? "";
     const resolve = pasteResolve;
     pasteResolve = null;
     setShowPasteModal(false);
     resolve?.(text || null);
+    refocusTerminal();
   };
 
   const cancelPasteModal = () => {
@@ -180,6 +190,7 @@ const TerminalView: Component<Props> = (props) => {
     pasteResolve = null;
     setShowPasteModal(false);
     resolve?.(null);
+    refocusTerminal();
   };
 
   const sendToPty = (data: string | ArrayBuffer) => {
@@ -444,6 +455,13 @@ const TerminalView: Component<Props> = (props) => {
     search = new SearchAddon();
     term.loadAddon(search);
     search.onDidChangeResults((info) => props.onSearchResults?.(info));
+    // A PTY program's window title (OSC 0/2) names the tab, and its bell (BEL)
+    // lights the tab's activity dot — neither reached the tabs before.
+    term.onTitleChange((title) => {
+      const trimmed = title.trim();
+      if (trimmed) props.onTitle?.(trimmed);
+    });
+    term.onBell(() => props.onBell?.());
     term.open(hostRef);
     configureTerminalTextarea(term.textarea);
     fitAndResize();

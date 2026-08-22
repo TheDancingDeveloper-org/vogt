@@ -75,6 +75,36 @@ describe("FileTree", () => {
     await waitFor(() => expect(api.tree).toHaveBeenCalledWith("source", 0));
   });
 
+  it("reports a failed folder expand in place instead of throwing (#247)", async () => {
+    vi.spyOn(api, "tree").mockImplementation(async (path) => {
+      if (path === "source") throw new Error("permission denied");
+      return [{ name: "source", path: "source", is_dir: true }];
+    });
+    vi.spyOn(api, "gitStatus").mockResolvedValue({
+      repo: "",
+      is_repo: false,
+      branch: "",
+      ahead: 0,
+      behind: 0,
+      entries: [],
+    });
+
+    render(() => (
+      <Router>
+        <Route path="*" component={() => <FileTree />} />
+      </Router>
+    ));
+
+    await fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    await fireEvent.click(await screen.findByLabelText("Expand source"));
+
+    // The rejection surfaces as an inline alert; the tree keeps standing.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not open this folder: permission denied",
+    );
+    expect(screen.getByText("source")).toBeVisible();
+  });
+
   it("dismisses a folder's actions picker on collapse, outside-click and Escape (#186)", async () => {
     vi.spyOn(api, "tree").mockImplementation(async (path) =>
       path === "source"

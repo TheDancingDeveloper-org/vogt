@@ -580,3 +580,26 @@ describe("#230 — missing places, the empty-query cap, and Recent", () => {
     expect(second.container.querySelector(".command-label")?.textContent).toBe("Open Audit");
   });
 });
+
+describe("#247 — the ? help lists the prefix modes", () => {
+  it("shows #, @, / and > when the reader types ?", async () => {
+    fakeVogt(ESTATE);
+    const view = palette();
+    await settle();
+    view.type("?");
+
+    const help = view.container.querySelector(".command-palette-modehelp");
+    expect(help, "the ? mode-help panel is not shown").toBeTruthy();
+    const rows = [...help!.querySelectorAll(".command-palette-modehelp-row")].map(
+      (node) => node.textContent ?? "",
+    );
+    expect(rows.some((text) => text.includes("#"))).toBe(true);
+    expect(rows.some((text) => text.includes("@"))).toBe(true);
+    expect(rows.some((text) => text.includes("/"))).toBe(true);
+    expect(rows.some((text) => text.includes(">"))).toBe(true);
+    // The command list is hidden while the legend is up.
+    expect(
+      view.container.querySelector(".command-palette-results")?.hasAttribute("hidden"),
+    ).toBe(true);
+  });
+});

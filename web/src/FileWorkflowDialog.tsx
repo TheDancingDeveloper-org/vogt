@@ -28,11 +28,24 @@ function filePath(directory: string, filename: string): string {
   return cleanDirectory ? `${cleanDirectory}/${filename}` : filename;
 }
 
+/** True when a file already reads back at `path`. A read that fails (a 404, or
+ *  the network being down) is treated as "not there" — the create then either
+ *  succeeds or surfaces the real write error, never a silent overwrite. */
+async function fileAlreadyExists(path: string): Promise<boolean> {
+  try {
+    await api.readFile(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const FileWorkflowDialog: Component<Props> = (props) => {
   const [destination, setDestination] = createSignal("");
   const [filename, setFilename] = createSignal("");
   const [query, setQuery] = createSignal("");
   const [results, setResults] = createSignal<FileSearchResult[]>([]);
+  const [activeIndex, setActiveIndex] = createSignal(0);
   const [searching, setSearching] = createSignal(false);
   const [searched, setSearched] = createSignal(false);
   const [submitting, setSubmitting] = createSignal(false);
@@ -57,6 +70,7 @@ const FileWorkflowDialog: Component<Props> = (props) => {
         (files) => {
           if (!active) return;
           setResults(files);
+          setActiveIndex(0);
           setSearching(false);
           setSearched(true);
         },
@@ -97,6 +111,14 @@ const FileWorkflowDialog: Component<Props> = (props) => {
     setSubmitting(true);
     setError(null);
     try {
+      // The engine's PUT is last-writer-wins, so a create at an occupied path
+      // would silently replace the file that lives there. Refuse instead: if
+      // the path already reads back, stop and let the reader pick another name.
+      // (`create_parents` stays true — the dialog promises to make folders.)
+      if (await fileAlreadyExists(path)) {
+        setError(`A file already exists at ${path}. Choose a different name to avoid overwriting it.`);
+        return;
+      }
       await api.writeFile(path, "", true);
       // The file tree (mounted or not) should reflect the new file without a
       // manual Refresh (#238).
@@ -132,11 +154,38 @@ const FileWorkflowDialog: Component<Props> = (props) => {
                 data-dialog-initial-focus
                 value={query()}
                 placeholder="Filename or path"
+                role="combobox"
+                aria-expanded={results().length > 0}
+                aria-controls="file-workflow-results"
+                aria-activedescendant={
+                  results().length > 0 ? `file-workflow-result-${activeIndex()}` : undefined
+                }
                 onInput={(event) => setQuery(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  // Arrow keys walk the matches; Enter opens the highlighted one
+                  // without the reader ever leaving the search box.
+                  const total = results().length;
+                  if (total === 0) return;
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setActiveIndex((index) => (index + 1) % total);
+                  } else if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setActiveIndex((index) => (index - 1 + total) % total);
+                  } else if (event.key === "Enter") {
+                    const chosen = results()[activeIndex()];
+                    if (chosen) {
+                      event.preventDefault();
+                      openFile(chosen.path);
+                    }
+                  }
+                }}
               />
             </label>
             <div
+              id="file-workflow-results"
               class="file-workflow-results"
+              role="listbox"
               aria-label="Matching workspace files"
               aria-live="polite"
             >
@@ -147,11 +196,15 @@ const FileWorkflowDialog: Component<Props> = (props) => {
                 <div class="file-workflow-status">No matching files</div>
               </Show>
               <For each={results()}>
-                {(file) => (
+                {(file, index) => (
                   <button
                     type="button"
-                    class="file-workflow-result"
+                    id={`file-workflow-result-${index()}`}
+                    class={`file-workflow-result${index() === activeIndex() ? " active" : ""}`}
+                    role="option"
+                    aria-selected={index() === activeIndex()}
                     aria-label={`${file.name} — ${file.path}`}
+                    onPointerMove={() => setActiveIndex(index())}
                     onClick={() => openFile(file.path)}
                   >
                     <span>{file.name}</span>

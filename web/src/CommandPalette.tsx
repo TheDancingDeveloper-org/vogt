@@ -1625,6 +1625,17 @@ const CommandPalette: Component<Props> = (props) => {
     maybeSearchSpecial(value);
   };
 
+  // Typing `?` opens a legend for the prefix modes. Until now the modes were
+  // spelled out only in the input placeholder, which vanishes the moment the
+  // reader starts typing (#247).
+  const PREFIX_MODES: { prefix: string; label: string }[] = [
+    { prefix: "#", label: "Workspace actions" },
+    { prefix: "@", label: "Symbols in the workspace" },
+    { prefix: "/", label: "Files in the workspace" },
+    { prefix: ">", label: "Session history" },
+  ];
+  const showModeHelp = () => query().trim() === "?";
+
   const specialMessage = () => {
     const q = query().trim();
     if (q.startsWith("#")) {
@@ -1673,11 +1684,25 @@ const CommandPalette: Component<Props> = (props) => {
             data-dialog-initial-focus
           />
         </div>
+        <Show when={showModeHelp()}>
+          <div class="command-palette-modehelp" aria-label="Prefix modes">
+            <p class="command-palette-modehelp-title">Prefix modes</p>
+            <For each={PREFIX_MODES}>
+              {(mode) => (
+                <div class="command-palette-modehelp-row">
+                  <kbd>{mode.prefix}</kbd>
+                  <span>{mode.label}</span>
+                </div>
+              )}
+            </For>
+          </div>
+        </Show>
         <div
           id={listboxId}
           class="command-palette-results"
           role="listbox"
           aria-label="Command results"
+          hidden={showModeHelp()}
         >
           <Show
             when={filteredCommands().length > 0}

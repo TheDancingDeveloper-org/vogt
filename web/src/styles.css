@@ -1772,6 +1772,11 @@ textarea {
 .activity-dot.done {
   background: var(--activity-done);
 }
+/* A PTY bell rang while this session was unfocused: ring the dot until opened. */
+.activity-dot.bell {
+  box-shadow: 0 0 0 2px var(--activity-waiting);
+  animation: pulse 0.7s ease-in-out infinite;
+}
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
@@ -2595,6 +2600,11 @@ textarea {
   padding: 9px 10px;
   text-align: left;
 }
+.file-workflow-result.active {
+  background: var(--bg-elev);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
 .file-workflow-result small {
   color: var(--fg-muted);
   overflow-wrap: anywhere;
@@ -2918,6 +2928,16 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
+}
+/* With no repo chosen, the slot holds a prompt, not a path — style it like the
+   surfaces' kickers rather than a monospace path strip (#247). */
+.git-repo--placeholder {
+  font-family: inherit;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 .git-branch {
   font-weight: 600;
@@ -3578,6 +3598,31 @@ textarea {
   padding: 40px 20px;
   text-align: center;
   color: var(--fg-muted);
+}
+
+.command-palette-modehelp {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.command-palette-modehelp-title {
+  margin: 0 0 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.command-palette-modehelp-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg);
+}
+.command-palette-modehelp-row kbd {
+  min-width: 1.6em;
+  text-align: center;
 }
 
 .command-palette-footer {
@@ -5106,6 +5151,13 @@ textarea {
   flex: 1;
   overflow-y: auto;
   padding: 16px 20px;
+}
+
+.template-editor-note {
+  margin: 0;
+  padding: 8px 20px 0;
+  color: var(--fg-muted);
+  font-size: 12px;
 }
 
 .template-editor-list {
@@ -7106,6 +7158,11 @@ textarea {
     overflow-x: auto;
     padding: 0 0 4px;
     scrollbar-width: thin;
+  }
+  /* More states scroll off the right edge: fade them out as a scroll cue. */
+  .board-phone-states--clipped {
+    -webkit-mask-image: linear-gradient(to right, #000 82%, transparent 100%);
+    mask-image: linear-gradient(to right, #000 82%, transparent 100%);
   }
 
   .board-phone-state {

@@ -68,6 +68,10 @@ interface Props {
   onRestartExited?: (session: SessionSummary) => void;
   /** Remove an exited session (reuses the close-session flow; no kill prompt). */
   onRemoveExited?: (session: SessionSummary) => void;
+  /** The tab's own session set its window title (OSC 0/2) — relabels the tab. */
+  onTitle?: (title: string) => void;
+  /** A pane rang the bell (BEL) — lights the tab's activity dot. */
+  onBell?: (sessionId: string) => void;
 }
 
 const STORAGE_KEY = "mydevenv2.terminalLayouts.v1";
@@ -139,6 +143,11 @@ interface LayoutNodeProps {
   onNotify?: (message: string, kind?: "info" | "error") => void;
   onRequestFind: () => void;
   onPaneSearchResults: (paneId: string, info: ISearchResultChangeEvent) => void;
+  /** A pane's PTY set its window title — the workspace relabels the tab when
+   *  the title belongs to the tab's own session. */
+  onPaneTitle: (sessionId: string, title: string) => void;
+  /** A pane's PTY rang the bell — the workspace lights the tab's activity. */
+  onPaneBell: (sessionId: string) => void;
 }
 
 const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
@@ -196,6 +205,8 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
               onSearchResults={(info) =>
                 props.onPaneSearchResults(paneId, info)
               }
+              onTitle={(title) => props.onPaneTitle(node.sessionId, title)}
+              onBell={() => props.onPaneBell(node.sessionId)}
             />
           </div>
         );
@@ -217,6 +228,8 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
                 onNotify={props.onNotify}
                 onRequestFind={props.onRequestFind}
                 onPaneSearchResults={props.onPaneSearchResults}
+                onPaneTitle={props.onPaneTitle}
+                onPaneBell={props.onPaneBell}
               />
             )}
           </For>
@@ -921,6 +934,12 @@ const TerminalWorkspace: Component<Props> = (props) => {
           onNotify={props.onNotify}
           onRequestFind={openFind}
           onPaneSearchResults={onPaneSearchResults}
+          onPaneTitle={(sessionId, title) => {
+            // Only the tab's own session names the tab; a split showing another
+            // session's shell must not rewrite the label out from under it.
+            if (sessionId === props.sessionId) props.onTitle?.(title);
+          }}
+          onPaneBell={(sessionId) => props.onBell?.(sessionId)}
         />
       </div>
       <form
