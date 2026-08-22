@@ -1083,6 +1083,12 @@ textarea {
 }
 
 .inbox-action-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  justify-content: center;
+  z-index: 30;
   align-items: flex-end;
   padding: 0;
 }

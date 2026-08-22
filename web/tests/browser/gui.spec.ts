@@ -621,6 +621,11 @@ test("Phone Inbox uses source pills and a focus-safe bottom action sheet", async
   await expect(page).toHaveURL(/#\/inbox\?source=drift$/);
   await expect(page.getByRole("region", { name: "Drift evidence" })).toContainText("observed_state");
 
+  const entryTitle = page.locator(".inbox-entry h2").first();
+  const entrySummary = page.locator(".inbox-entry-summary").first();
+  const closedTitleWidth = (await entryTitle.boundingBox())!.width;
+  const closedSummaryWidth = (await entrySummary.boundingBox())!.width;
+
   const trigger = page.getByRole("button", { name: "Inbox actions" });
   await trigger.click();
   const sheet = page.getByRole("dialog", { name: `Actions for ${inboxEntry.title}` });
@@ -631,6 +636,38 @@ test("Phone Inbox uses source pills and a focus-safe bottom action sheet", async
   expect(targetHeights.every((height) => height >= 52)).toBe(true);
   await expect(sheet.getByRole("button", { name: "Reject proposed change…" })).toBeVisible();
   await expect(sheet.getByPlaceholder("Why this triage decision?")).toHaveCount(0);
+
+  // #219: backdropClass replaces (rather than augments) the Dialog's default
+  // "modal-backdrop" class, so the action sheet's own backdrop rule has to be
+  // a fully self-contained fixed overlay or the "sheet" just flows inline.
+  const backdrop = page.locator(".inbox-action-sheet-backdrop");
+  const backdropStyle = await backdrop.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { position: style.position, alignItems: style.alignItems, display: style.display };
+  });
+  expect(backdropStyle.position).toBe("fixed");
+  expect(backdropStyle.alignItems).toBe("flex-end");
+  expect(backdropStyle.display).toBe("flex");
+
+  const viewport = page.viewportSize()!;
+  const backdropBox = (await backdrop.boundingBox())!;
+  expect(Math.round(backdropBox.x)).toBe(0);
+  expect(Math.round(backdropBox.y)).toBe(0);
+  expect(Math.round(backdropBox.width)).toBe(viewport.width);
+  expect(Math.round(backdropBox.height)).toBe(viewport.height);
+
+  const sheetBox = (await sheet.boundingBox())!;
+  expect(Math.round(sheetBox.y + sheetBox.height)).toBeCloseTo(viewport.height, -1);
+
+  // The entry behind the sheet must keep its full-width layout: a backdrop
+  // that isn't taken out of document flow squeezes the entry instead of
+  // covering it, which is the exact regression #219 reported.
+  const openTitleWidth = (await entryTitle.boundingBox())!.width;
+  const openSummaryWidth = (await entrySummary.boundingBox())!.width;
+  expect(Math.round(openTitleWidth)).toBe(Math.round(closedTitleWidth));
+  expect(Math.round(openSummaryWidth)).toBe(Math.round(closedSummaryWidth));
+
+  await expect(sheet).toHaveScreenshot("inbox-action-sheet-phone.png");
 
   await sheet.getByRole("button", { name: "Reject proposed change…" }).click();
   await sheet.getByPlaceholder("Why this triage decision?").fill("the observed evidence was reviewed");
