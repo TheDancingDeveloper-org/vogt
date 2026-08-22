@@ -39,6 +39,7 @@ import {
   backlog,
   commentWork,
   getWork,
+  listActors,
   listAudit,
   listEvents,
   listObservations,
@@ -46,6 +47,7 @@ import {
   listWorkflows,
   startSession,
   stopSession,
+  transitionWork,
   updateWork,
   why,
   type AuditRecord,
@@ -140,6 +142,26 @@ interface Contribution {
  *  the editor offers it rather than deriving it from whatever this item
  *  happens to be. */
 const PRIORITIES = ["p0", "p1", "p2", "p3", "p4"] as const;
+
+/** Vogt's effort scale (`0002_work.sql`: the `effort` CHECK). A closed set, and
+ *  clearable — the empty option is "no effort set", which `clear_effort` writes. */
+const EFFORTS = ["xs", "s", "m", "l", "xl"] as const;
+
+/** A comma-separated label field parsed to the set it names, blanks dropped. */
+function parseLabels(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((one) => one.trim())
+    .filter((one) => one.length > 0);
+}
+
+/** Whether two label sets hold the same names, order ignored — labels are a set
+ *  on the item and a diff on the wire, so "same set" is the only question. */
+function sameLabels(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const other = new Set(b);
+  return a.every((one) => other.has(one));
+}
 
 function relationsOf(item: WorkItem): RelationView[] {
   return (item.relations ?? []) as RelationView[];
@@ -785,11 +807,13 @@ const WorkItemDetail: Component<Props> = (props) => {
   const [accepted, setAccepted] = createSignal<{ ref: string; item: WorkItem } | null>(
     null,
   );
-  /** What was submitted and is not yet answered. Discarded on refusal. */
+  /** What was submitted and is not yet answered, as the patch it makes to the
+   *  item on screen. Discarded on refusal. One signal serves both writes that
+   *  render optimistically — the edit and the Move-to transition — because only
+   *  one of them is ever in flight at a time. */
   const [optimistic, setOptimistic] = createSignal<{
     ref: string;
-    title: string;
-    priority: string;
+    patch: Partial<WorkItem>;
   } | null>(null);
 
   const serverItem = createMemo<WorkItem | null>(() => {
@@ -812,7 +836,7 @@ const WorkItemDetail: Component<Props> = (props) => {
     if (!server) return null;
     const draft = optimistic();
     if (!draft || draft.ref !== props.itemRef) return server;
-    return { ...server, title: draft.title, priority: draft.priority };
+    return { ...server, ...draft.patch };
   });
 
   const comments = createMemo<CommentView[]>(() => {
@@ -851,6 +875,18 @@ const WorkItemDetail: Component<Props> = (props) => {
   );
 
   const [workflows] = createResource(() => attempt(() => listWorkflows()));
+
+  // The actors an item can be assigned to, for the editor's assignee picker.
+  // Read once: the roster is not per-item, and an empty answer is a real one —
+  // the picker then offers only "nobody", never a made-up name.
+  const [actors] = createResource(() => attempt(() => listActors()));
+
+  const actorOptions = createMemo<{ identity_ref: string; display_name: string }[]>(
+    () => {
+      const loaded = actors();
+      return loaded && loaded.ok ? loaded.value.actors : [];
+    },
+  );
 
   // -- this item's state history (FR-U5) ------------------------------------
   //
@@ -1110,6 +1146,23 @@ const WorkItemDetail: Component<Props> = (props) => {
     return [...flow.states];
   });
 
+  /** The states this item may move *to*, from where it is now.
+   *
+   *  Read from the workflow's adjacency when it is declared — the same hint the
+   *  board draws its legal drops from — and never including the state it is
+   *  already in. The server still decides what is legal (FR-U4); this only
+   *  keeps the select from offering an edge the workflow does not name. When no
+   *  adjacency is declared it falls back to every other state, so the control
+   *  is never empty for a workflow that simply did not list its edges. */
+  const moveTargets = createMemo<string[]>(() => {
+    const current = item();
+    const flow = workflowForKind();
+    if (!current || !flow) return [];
+    const declared = flow.transitions?.[current.state];
+    if (declared && declared.length > 0) return [...declared];
+    return flow.states.filter((state) => state !== current.state);
+  });
+
   // -- what the two feeds add up to -----------------------------------------
 
   const moves = createMemo<Move[]>(() => {
@@ -1232,6 +1285,13 @@ const WorkItemDetail: Component<Props> = (props) => {
   const [editing, setEditing] = createSignal(false);
   const [draftTitle, setDraftTitle] = createSignal("");
   const [draftPriority, setDraftPriority] = createSignal("p2");
+  const [draftBody, setDraftBody] = createSignal("");
+  /** "" is "no effort set" — the clearable end of the closed scale. */
+  const [draftEffort, setDraftEffort] = createSignal("");
+  /** "" is "nobody" — the assignee cleared. */
+  const [draftAssignee, setDraftAssignee] = createSignal("");
+  /** The labels, comma-separated, as the field edits them. */
+  const [draftLabels, setDraftLabels] = createSignal("");
   /** What the server refused, so the rollback can be *stated* and not merely
    *  performed. Holds no value the server rejected as a live field value. */
   const [rolledBack, setRolledBack] = createSignal<string | null>(null);
@@ -1243,6 +1303,10 @@ const WorkItemDetail: Component<Props> = (props) => {
     // refused value must not come back when the editor is reopened.
     setDraftTitle(current.title);
     setDraftPriority(current.priority);
+    setDraftBody(current.body ?? "");
+    setDraftEffort(current.effort ?? "");
+    setDraftAssignee(current.assignee_identity_ref ?? "");
+    setDraftLabels((current.labels ?? []).join(", "));
     setRolledBack(null);
     setEditing(true);
   };
@@ -1250,7 +1314,14 @@ const WorkItemDetail: Component<Props> = (props) => {
   const editChanged = () => {
     const current = serverItem();
     if (!current) return false;
-    return draftTitle().trim() !== current.title || draftPriority() !== current.priority;
+    return (
+      draftTitle().trim() !== current.title ||
+      draftPriority() !== current.priority ||
+      draftBody() !== (current.body ?? "") ||
+      draftEffort() !== (current.effort ?? "") ||
+      draftAssignee() !== (current.assignee_identity_ref ?? "") ||
+      !sameLabels(parseLabels(draftLabels()), current.labels ?? [])
+    );
   };
 
   const editReady = () => draftTitle().trim().length > 0 && editChanged();
@@ -1261,11 +1332,55 @@ const WorkItemDetail: Component<Props> = (props) => {
     const ref = props.itemRef;
     const title = draftTitle().trim();
     const priority = draftPriority();
+    const body = draftBody();
+    const effort = draftEffort();
+    const assignee = draftAssignee();
+    const labels = parseLabels(draftLabels());
+
+    // Send only what changed, and render only what was sent. `work.update`
+    // edits labels as a diff (`add_labels`/`remove_labels`), not a
+    // replacement, and clears effort and assignee with flags rather than an
+    // empty value — so the params and the optimistic patch are built together,
+    // field by field, from the same comparison against the server's item.
+    const params: Record<string, unknown> & { ref: string; reason: string } = {
+      ref,
+      reason,
+    };
+    const patch: Partial<WorkItem> = {};
+    if (title !== current.title) {
+      params.title = title;
+      patch.title = title;
+    }
+    if (priority !== current.priority) {
+      params.priority = priority;
+      patch.priority = priority;
+    }
+    if (body !== (current.body ?? "")) {
+      params.body = body;
+      patch.body = body;
+    }
+    if (effort !== (current.effort ?? "")) {
+      if (effort) params.effort = effort;
+      else params.clear_effort = true;
+      patch.effort = effort || null;
+    }
+    if (assignee !== (current.assignee_identity_ref ?? "")) {
+      if (assignee) params.assignee = assignee;
+      else params.clear_assignee = true;
+      patch.assignee_identity_ref = assignee || null;
+    }
+    const currentLabels = current.labels ?? [];
+    const added = labels.filter((one) => !currentLabels.includes(one));
+    const removed = currentLabels.filter((one) => !labels.includes(one));
+    if (added.length > 0) params.add_labels = added;
+    if (removed.length > 0) params.remove_labels = removed;
+    if (added.length > 0 || removed.length > 0) patch.labels = labels;
+
     setRolledBack(null);
     // Optimistic: the page reads as the change while Vogt is deciding.
-    setOptimistic({ ref, title, priority });
+    setOptimistic({ ref, patch });
     try {
-      const answer = await updateWork({ ref, title, priority, reason });
+      const answer = await updateWork(params);
       const updated = answer?.item;
       setOptimistic(null);
       // The server's answer, not what was typed. If Vogt normalised the
@@ -1283,6 +1398,52 @@ const WorkItemDetail: Component<Props> = (props) => {
       throw error;
     }
   };
+
+  // -- the Move-to transition (FR-U4, FR-U12) -------------------------------
+  //
+  // The same three rules as the edit and the board's drag: the move renders
+  // optimistically, the server's answer replaces it field for field, and a
+  // refusal — a 409 above all, the state having moved under it — discards the
+  // optimistic state outright and says what it went back to. It is a
+  // `ReasonForm` like every other write here, so a move with no typed reason
+  // cannot submit (FR-W1, r6).
+
+  const [moveTarget, setMoveTarget] = createSignal("");
+  /** What a refused move went back to, stated rather than merely performed. */
+  const [movedBack, setMovedBack] = createSignal<string | null>(null);
+
+  const moveReady = () => {
+    const current = serverItem();
+    const to = moveTarget();
+    return Boolean(current) && to.length > 0 && to !== current?.state;
+  };
+
+  const submitMove = async (reason: string) => {
+    const current = serverItem();
+    const to = moveTarget();
+    if (!current || !to || to === current.state) return;
+    const ref = props.itemRef;
+    setMovedBack(null);
+    setOptimistic({ ref, patch: { state: to } });
+    try {
+      const answer = await transitionWork(ref, to, reason);
+      const updated = answer?.item;
+      setOptimistic(null);
+      if (updated) setAccepted({ ref, item: updated });
+      setMoveTarget("");
+      void refetchWork();
+      void refetchHistory();
+      void refetchReasons();
+    } catch (error) {
+      setOptimistic(null);
+      setMovedBack(`${ref} is still ${current.state}.`);
+      throw error;
+    }
+  };
+
+  /** Whether the start-a-session form is open. Closed by default (#224): the
+   *  form is 300px of chrome above the evidence a reader came for. */
+  const [startOpen, setStartOpen] = createSignal(false);
 
   const submitComment = async (reason: string) => {
     const result = await commentWork(props.itemRef, commentBody().trim(), reason);
@@ -1333,7 +1494,7 @@ const WorkItemDetail: Component<Props> = (props) => {
             disabled={!item() || Boolean(vogtWritesBlocked())}
             title={
               vogtWritesBlocked() ??
-              "Change the title or priority, through a form that collects a reason"
+              "Change the title, priority, assignee, effort, labels or description, through a form that collects a reason"
             }
             onClick={() => (editing() ? setEditing(false) : openEditor())}
           >
@@ -1431,6 +1592,62 @@ const WorkItemDetail: Component<Props> = (props) => {
                       </For>
                     </select>
                   </label>
+                  {/* The assignee picker is a native select on purpose: it is
+                      keyboard-operable without a line of our own — focus, then
+                      the arrow keys or the option's first letters — which a
+                      bespoke listbox would have to earn back. "nobody" is the
+                      cleared state, written with `clear_assignee`. */}
+                  <label class="wid-field">
+                    <span>Assignee</span>
+                    <select
+                      class="wid-assignee"
+                      aria-label="Assignee"
+                      value={draftAssignee()}
+                      disabled={Boolean(vogtWritesBlocked())}
+                      onInput={(event) => setDraftAssignee(event.currentTarget.value)}
+                    >
+                      <option value="">nobody</option>
+                      <For each={actorOptions()}>
+                        {(actor) => (
+                          <option value={actor.identity_ref}>
+                            {actor.display_name} ({actor.identity_ref})
+                          </option>
+                        )}
+                      </For>
+                    </select>
+                  </label>
+                  <label class="wid-field">
+                    <span>Effort</span>
+                    <select
+                      value={draftEffort()}
+                      disabled={Boolean(vogtWritesBlocked())}
+                      onInput={(event) => setDraftEffort(event.currentTarget.value)}
+                    >
+                      <option value="">no effort set</option>
+                      <For each={EFFORTS}>
+                        {(effort) => <option value={effort}>{effort}</option>}
+                      </For>
+                    </select>
+                  </label>
+                  <label class="wid-field">
+                    <span>Labels</span>
+                    <input
+                      type="text"
+                      placeholder="comma-separated, e.g. infra, docs"
+                      value={draftLabels()}
+                      disabled={Boolean(vogtWritesBlocked())}
+                      onInput={(event) => setDraftLabels(event.currentTarget.value)}
+                    />
+                  </label>
+                  <label class="wid-field">
+                    <span>Description</span>
+                    <textarea
+                      rows={5}
+                      value={draftBody()}
+                      disabled={Boolean(vogtWritesBlocked())}
+                      onInput={(event) => setDraftBody(event.currentTarget.value)}
+                    />
+                  </label>
                   <Show when={rolledBack()}>
                     {(note) => (
                       <p class="wid-rolledback" role="status">
@@ -1452,6 +1669,69 @@ const WorkItemDetail: Component<Props> = (props) => {
                   >
                     {(body) => <p class="wid-body">{body()}</p>}
                   </Show>
+                </section>
+
+                {/* Comments sit directly under the Description (#224): the
+                    conversation about an item is what a reader scrolls to next,
+                    not something below the machinery of state and sessions. */}
+                <section class="wid-panel">
+                  <div class="wid-panel-head">
+                    <h3>Comments</h3>
+                    <span class="wid-hint">{comments().length} recorded</span>
+                  </div>
+                  <Show
+                    when={comments().length > 0}
+                    fallback={
+                      <p class="wid-absent">
+                        No comment has been written on {props.itemRef}.
+                      </p>
+                    }
+                  >
+                    <ul class="wid-comments">
+                      <For each={comments()}>
+                        {(comment) => (
+                          <li class="wid-comment">
+                            <div class="wid-comment-head">
+                              <span>{comment.actor_display_name ?? "unattributed"}</span>
+                              <span>{formatWhen(comment.created_at)}</span>
+                            </div>
+                            <p class="wid-body">{comment.body}</p>
+                          </li>
+                        )}
+                      </For>
+                    </ul>
+                  </Show>
+
+                  <Show when={writeBack()}>
+                    {(status) => (
+                      <p class="wid-hint">
+                        Upstream write-back: {status()}
+                        {status() === "failed"
+                          ? " — the comment is recorded here regardless."
+                          : ""}
+                      </p>
+                    )}
+                  </Show>
+
+                  <ReasonForm
+                    submitLabel="Add comment"
+                    busyLabel="Posting…"
+                    placeholder="why this comment is being added"
+                    blockedBy={vogtWritesBlocked()}
+                    ready={() => commentBody().trim().length > 0}
+                    onFailure={props.onError}
+                    onSubmit={submitComment}
+                  >
+                    <label class="wid-field">
+                      <span>Comment</span>
+                      <textarea
+                        rows={4}
+                        value={commentBody()}
+                        disabled={Boolean(vogtWritesBlocked())}
+                        onInput={(event) => setCommentBody(event.currentTarget.value)}
+                      />
+                    </label>
+                  </ReasonForm>
                 </section>
 
                 <section class="wid-panel">
@@ -1477,6 +1757,50 @@ const WorkItemDetail: Component<Props> = (props) => {
                           </span>
                         )}
                       </For>
+                    </div>
+                  </Show>
+                  {/* Move to (FR-U4, FR-U12): the rail above says where the
+                      item is; this moves it, optimistically and through a form
+                      that collects a reason. The select offers the workflow's
+                      declared edges from here — the server still decides what
+                      is legal. Absent when there is nowhere legal to move, so
+                      it never offers an empty choice. */}
+                  <Show when={moveTargets().length > 0}>
+                    <div class="wid-move-to">
+                      <ReasonForm
+                        submitLabel="Move"
+                        busyLabel="Moving…"
+                        placeholder="why this is moving"
+                        blockedBy={vogtWritesBlocked()}
+                        ready={moveReady}
+                        onSubmit={submitMove}
+                        onFailure={props.onError}
+                      >
+                        <label class="wid-field">
+                          <span>Move to</span>
+                          <select
+                            class="wid-move-select"
+                            aria-label="Move to"
+                            value={moveTarget()}
+                            disabled={Boolean(vogtWritesBlocked())}
+                            onInput={(event) =>
+                              setMoveTarget(event.currentTarget.value)
+                            }
+                          >
+                            <option value="">Choose a state…</option>
+                            <For each={moveTargets()}>
+                              {(state) => <option value={state}>{state}</option>}
+                            </For>
+                          </select>
+                        </label>
+                        <Show when={movedBack()}>
+                          {(note) => (
+                            <p class="wid-rolledback" role="status">
+                              {note()}
+                            </p>
+                          )}
+                        </Show>
+                      </ReasonForm>
                     </div>
                   </Show>
                   {/* How it got here (FR-U5's "state history"). The rail above
@@ -1507,9 +1831,7 @@ const WorkItemDetail: Component<Props> = (props) => {
                         when={moves().length > 0}
                         fallback={
                           <p class="wid-absent">
-                            {props.itemRef} has no recorded moves. Its state
-                            changes appear here as they are made — an empty list
-                            here is "it has not moved", not "the moves were lost".
+                            {props.itemRef} has no recorded moves yet.
                           </p>
                         }
                       >
@@ -1761,50 +2083,75 @@ const WorkItemDetail: Component<Props> = (props) => {
                     </ul>
                   </Show>
 
+                  {/* Collapsed by default (#224): the start form is 300px of
+                      chrome, and a reader most often comes to this panel to
+                      read what a session did, not to open one. */}
                   <div class="wid-start">
-                    <h4>Start a session for {props.itemRef}</h4>
-                    <p class="wid-hint">
-                      The session opens in the project's registered tree with
-                      this item's brief written for the agent to read.
-                    </p>
-                    <ReasonForm
-                      submitLabel="Start session"
-                      busyLabel="Starting…"
-                      placeholder="why a session is being opened for this item"
-                      blockedBy={sessionWritesBlocked()}
-                      onFailure={props.onError}
-                      onSubmit={submitStart}
-                    >
-                      <label class="wid-field">
-                        <span>Template</span>
-                        <select
-                          value={template()}
-                          disabled={Boolean(sessionWritesBlocked())}
-                          onInput={(event) => setTemplate(event.currentTarget.value)}
+                    <Show
+                      when={startOpen()}
+                      fallback={
+                        <button
+                          type="button"
+                          class="wid-inline-btn wid-start-open"
+                          onClick={() => setStartOpen(true)}
                         >
-                          <option value="">Default shell</option>
-                          <For each={templates() ?? []}>
-                            {(entry) => (
-                              <option value={entry.name} title={entry.description}>
-                                {entry.name}
-                              </option>
-                            )}
-                          </For>
-                        </select>
-                      </label>
-                      <label class="wid-field">
-                        <span>Session name (optional)</span>
-                        <input
-                          type="text"
-                          placeholder={`derived from ${props.itemRef}`}
-                          value={sessionName()}
-                          disabled={Boolean(sessionWritesBlocked())}
-                          onInput={(event) =>
-                            setSessionName(event.currentTarget.value)
-                          }
-                        />
-                      </label>
-                    </ReasonForm>
+                          Start a session for {props.itemRef}…
+                        </button>
+                      }
+                    >
+                      <div class="wid-panel-head">
+                        <h4>Start a session for {props.itemRef}</h4>
+                        <button
+                          type="button"
+                          class="wid-inline-btn"
+                          onClick={() => setStartOpen(false)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                      <p class="wid-hint">
+                        The session opens in the project's registered tree with
+                        this item's brief written for the agent to read.
+                      </p>
+                      <ReasonForm
+                        submitLabel="Start session"
+                        busyLabel="Starting…"
+                        placeholder="why a session is being opened for this item"
+                        blockedBy={sessionWritesBlocked()}
+                        onFailure={props.onError}
+                        onSubmit={submitStart}
+                      >
+                        <label class="wid-field">
+                          <span>Template</span>
+                          <select
+                            value={template()}
+                            disabled={Boolean(sessionWritesBlocked())}
+                            onInput={(event) => setTemplate(event.currentTarget.value)}
+                          >
+                            <option value="">Default shell</option>
+                            <For each={templates() ?? []}>
+                              {(entry) => (
+                                <option value={entry.name} title={entry.description}>
+                                  {entry.name}
+                                </option>
+                              )}
+                            </For>
+                          </select>
+                        </label>
+                        <label class="wid-field">
+                          <span>Session name (optional)</span>
+                          <input
+                            type="text"
+                            placeholder={`derived from ${props.itemRef}`}
+                            value={sessionName()}
+                            disabled={Boolean(sessionWritesBlocked())}
+                            onInput={(event) =>
+                              setSessionName(event.currentTarget.value)
+                            }
+                          />
+                        </label>
+                      </ReasonForm>
+                    </Show>
                   </div>
                 </section>
 
@@ -1992,66 +2339,6 @@ const WorkItemDetail: Component<Props> = (props) => {
                     </Show>
                   </Show>
                 </section>
-
-                <section class="wid-panel">
-                  <div class="wid-panel-head">
-                    <h3>Comments</h3>
-                    <span class="wid-hint">{comments().length} recorded</span>
-                  </div>
-                  <Show
-                    when={comments().length > 0}
-                    fallback={
-                      <p class="wid-absent">
-                        No comment has been written on {props.itemRef}.
-                      </p>
-                    }
-                  >
-                    <ul class="wid-comments">
-                      <For each={comments()}>
-                        {(comment) => (
-                          <li class="wid-comment">
-                            <div class="wid-comment-head">
-                              <span>{comment.actor_display_name ?? "unattributed"}</span>
-                              <span>{formatWhen(comment.created_at)}</span>
-                            </div>
-                            <p class="wid-body">{comment.body}</p>
-                          </li>
-                        )}
-                      </For>
-                    </ul>
-                  </Show>
-
-                  <Show when={writeBack()}>
-                    {(status) => (
-                      <p class="wid-hint">
-                        Upstream write-back: {status()}
-                        {status() === "failed"
-                          ? " — the comment is recorded here regardless."
-                          : ""}
-                      </p>
-                    )}
-                  </Show>
-
-                  <ReasonForm
-                    submitLabel="Add comment"
-                    busyLabel="Posting…"
-                    placeholder="why this comment is being added"
-                    blockedBy={vogtWritesBlocked()}
-                    ready={() => commentBody().trim().length > 0}
-                    onFailure={props.onError}
-                    onSubmit={submitComment}
-                  >
-                    <label class="wid-field">
-                      <span>Comment</span>
-                      <textarea
-                        rows={4}
-                        value={commentBody()}
-                        disabled={Boolean(vogtWritesBlocked())}
-                        onInput={(event) => setCommentBody(event.currentTarget.value)}
-                      />
-                    </label>
-                  </ReasonForm>
-                </section>
               </div>
 
               <aside class="wid-aside">
@@ -2108,10 +2395,8 @@ const WorkItemDetail: Component<Props> = (props) => {
                 <section class="wid-panel">
                   <h3>Audit trail</h3>
                   <p class="wid-note">
-                    Every write to {props.itemRef} is audited with who, what
-                    and why. The browser holds the filters, the paging and the
-                    time range, so this links there rather than rendering a
-                    second, thinner copy of it.
+                    Every write to {props.itemRef} — creates, updates,
+                    transitions and comments — is audited with who, what and why.
                   </p>
                   <a
                     class="wid-action"
@@ -2119,13 +2404,6 @@ const WorkItemDetail: Component<Props> = (props) => {
                   >
                     Open the audit trail for {props.itemRef}
                   </a>
-                  <p class="wid-note">
-                    A comment is audited against the comment rather than against
-                    the item, and the query follows that link — so this trail is
-                    the creates, the updates, the transitions{" "}
-                    <em>and</em> the conversation above, and not three quarters
-                    of the story.
-                  </p>
                 </section>
               </aside>
             </div>

@@ -216,6 +216,8 @@ describe("FR-U5 — one item, one page, and everything about it on it", () => {
   });
 
   it("offers the control that starts a session on this item", async () => {
+    // #224: the form is collapsed by default, behind a button that names it.
+    // Opening it is what reveals the fields and the submit.
     fullItem();
     const { container } = detail();
 
@@ -225,9 +227,21 @@ describe("FR-U5 — one item, one page, and everything about it on it", () => {
       return found!;
     });
     expect(start.textContent).toContain("Start a session for WI-1");
-    const submit = [...start.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Start session",
-    );
+    // Collapsed: the submit is not on the page until the control is opened.
+    expect(
+      [...start.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Start session",
+      ),
+    ).toBeFalsy();
+
+    fireEvent.click(start.querySelector<HTMLButtonElement>(".wid-start-open")!);
+    const submit = await waitFor(() => {
+      const found = [...start.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Start session",
+      );
+      expect(found).toBeTruthy();
+      return found!;
+    });
     expect(submit).toBeTruthy();
   });
 
@@ -808,6 +822,309 @@ describe("FR-U12 — an inline edit renders optimistically and the server decide
     expect(submit.disabled).toBe(true);
     fireEvent.submit(form.querySelector("form")!);
     expect(vogt.matching("POST /work/update")).toHaveLength(0);
+  });
+});
+
+// -- #213: the Move-to transition, from the detail page ---------------------
+//
+// The same three rules as the board's drag and the inline edit: the move
+// renders optimistically, the server's answer is authoritative, and a refusal
+// — a 409 above all — is rolled back visibly to the state it was in.
+
+/** The body textarea in the editor — `field` above returns inputs and selects,
+ *  and the description is the one control that is neither. */
+function bodyField(form: HTMLElement): HTMLTextAreaElement {
+  const found = [...form.querySelectorAll<HTMLElement>(".wid-field")].find((node) =>
+    (node.querySelector("span")?.textContent ?? "").startsWith("Description"),
+  );
+  const control = found?.querySelector<HTMLTextAreaElement>("textarea");
+  if (!control) throw new Error("the editor has no Description field");
+  return control;
+}
+
+/** The Move-to control under the state rail, or a failure that names it. */
+function moveForm(container: HTMLElement): HTMLElement {
+  const found = container.querySelector<HTMLElement>(".wid-move-to");
+  if (!found) throw new Error("the item page has no Move-to control");
+  return found;
+}
+
+/** The single state chip in the facts row — what the page says the item is. */
+function stateChip(container: HTMLElement): string {
+  return container.querySelector(".wid-chip--state")?.textContent ?? "";
+}
+
+describe("#213 — a work item's state is changed from its own page", () => {
+  it("offers only the workflow's declared edges from the current state", async () => {
+    fakeVogt();
+    const { container } = detail();
+
+    const select = (await waitFor(() => {
+      const control = field(moveForm(container), "Move to") as HTMLSelectElement;
+      expect(control).toBeTruthy();
+      return control;
+    })) as HTMLSelectElement;
+    const options = [...select.querySelectorAll("option")]
+      .map((option) => option.value)
+      .filter((value) => value.length > 0);
+    // FEATURE_WORKFLOW: open → in_progress / wont_do, and never open itself.
+    expect(options).toEqual(["in_progress", "wont_do"]);
+  });
+
+  it("sends work.transition with the reason the user typed, and moves optimistically", async () => {
+    const vogt = fakeVogt({
+      "POST /work/transition": {
+        body: {
+          item: workItem({ state: "in_progress", updated_at: "2026-08-03T00:00:00Z" }),
+          comments: [],
+          sessions: [],
+        },
+      },
+    });
+    const { container } = detail();
+    await waitFor(() => expect(stateChip(container)).toBe("open"));
+
+    const form = moveForm(container);
+    fireEvent.input(field(form, "Move to"), { target: { value: "in_progress" } });
+    fireEvent.input(field(form, "Reason"), { target: { value: "picked it up" } });
+    fireEvent.submit(form.querySelector("form")!);
+
+    await waitFor(() => expect(vogt.matching("POST /work/transition")).toHaveLength(1));
+    expect(vogt.matching("POST /work/transition")[0]?.body).toEqual({
+      ref: "WI-1",
+      to_state: "in_progress",
+      reason: "picked it up",
+    });
+    // The rail follows the server's answer.
+    await waitFor(() => expect(stateChip(container)).toBe("in_progress"));
+  });
+
+  it("shows the move the moment it is submitted, before Vogt answers", async () => {
+    const answer = held();
+    fakeVogt({ "POST /work/transition": answer.handler });
+    const { container } = detail();
+    await waitFor(() => expect(stateChip(container)).toBe("open"));
+
+    const form = moveForm(container);
+    fireEvent.input(field(form, "Move to"), { target: { value: "in_progress" } });
+    fireEvent.input(field(form, "Reason"), { target: { value: "starting it" } });
+    fireEvent.submit(form.querySelector("form")!);
+
+    // Vogt has been asked and has not answered: the rail already reads the
+    // move, and the page already admits it is not yet true.
+    await answer.asked;
+    await waitFor(() => expect(stateChip(container)).toBe("in_progress"));
+    expect(facts(container)).toContain("unsaved — Vogt is deciding");
+
+    answer.answer({
+      body: {
+        item: workItem({ state: "in_progress", updated_at: "2026-08-03T00:00:00Z" }),
+        comments: [],
+        sessions: [],
+      },
+    });
+    await waitFor(() => expect(facts(container)).not.toContain("unsaved"));
+    expect(stateChip(container)).toBe("in_progress");
+  });
+
+  it("rolls a refused move back to the state it was in, on a 409", async () => {
+    const REFUSED = "work.transition: WI-1 already moved to done";
+    fakeVogt({ "POST /work/transition": refusal(409, REFUSED) });
+    const { container } = detail();
+    await waitFor(() => expect(stateChip(container)).toBe("open"));
+
+    const form = moveForm(container);
+    fireEvent.input(field(form, "Move to"), { target: { value: "in_progress" } });
+    fireEvent.input(field(form, "Reason"), { target: { value: "starting it" } });
+    fireEvent.submit(form.querySelector("form")!);
+
+    // The server's own sentence, and the rollback stated as many words.
+    await waitFor(() =>
+      expect(moveForm(container).querySelector(".wid-failure")?.textContent).toContain(
+        REFUSED,
+      ),
+    );
+    expect(stateChip(container)).toBe("open");
+    expect(facts(container)).not.toContain("unsaved");
+    expect(moveForm(container).querySelector(".wid-rolledback")?.textContent).toContain(
+      "WI-1 is still open",
+    );
+  });
+
+  it("will not move without a reason the user typed", async () => {
+    const vogt = fakeVogt();
+    const { container } = detail();
+    const form = await waitFor(() => moveForm(container));
+    const submit = [...form.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.type === "submit",
+    )!;
+
+    fireEvent.input(field(form, "Move to"), { target: { value: "in_progress" } });
+    expect(submit.disabled).toBe(true);
+    fireEvent.submit(form.querySelector("form")!);
+    expect(vogt.matching("POST /work/transition")).toHaveLength(0);
+  });
+});
+
+// -- #213: the editor now changes assignee, effort, labels and body ---------
+
+describe("#213 — the editor changes assignee, effort, labels and body", () => {
+  it("opens the actor picker as a keyboard-operable select on the item's assignee", async () => {
+    fakeVogt({
+      "GET /work/get": {
+        body: {
+          item: workItem({ assignee_identity_ref: "local:ana" }),
+          comments: [],
+          sessions: [],
+        },
+      },
+      "GET /actors": {
+        body: {
+          actors: [
+            { identity_ref: "local:ana", display_name: "Ana" },
+            { identity_ref: "local:bo", display_name: "Bo" },
+          ],
+        },
+      },
+    });
+    const { container } = detail();
+    await waitFor(() => expect(facts(container)).toContain("assignee: local:ana"));
+
+    const form = await openEditor(container);
+    const picker = field(form, "Assignee") as HTMLSelectElement;
+    // A native select is focusable and keyboard-driven without any code of our
+    // own — the a11y property #213 needs from the picker.
+    expect(picker.tagName).toBe("SELECT");
+    await waitFor(() =>
+      expect(picker.querySelectorAll("option").length).toBeGreaterThan(2),
+    );
+    expect(picker.value).toBe("local:ana");
+  });
+
+  it("sends assignee, effort, labels and body through work.update", async () => {
+    const vogt = fakeVogt({
+      "GET /actors": {
+        body: {
+          actors: [
+            { identity_ref: "local:ana", display_name: "Ana" },
+            { identity_ref: "local:bo", display_name: "Bo" },
+          ],
+        },
+      },
+      "POST /work/update": {
+        body: { item: workItem(), comments: [], sessions: [] },
+      },
+    });
+    const { container } = detail();
+    await waitFor(() => expect(facts(container)).toContain("p2"));
+
+    const form = await openEditor(container);
+    await waitFor(() =>
+      expect(
+        (field(form, "Assignee") as HTMLSelectElement).querySelectorAll("option").length,
+      ).toBeGreaterThan(1),
+    );
+    fireEvent.input(field(form, "Assignee"), { target: { value: "local:bo" } });
+    fireEvent.input(field(form, "Effort"), { target: { value: "m" } });
+    fireEvent.input(field(form, "Labels"), { target: { value: "infra, docs" } });
+    fireEvent.input(bodyField(form), { target: { value: "A real body now." } });
+    fireEvent.input(field(form, "Reason"), { target: { value: "triaged" } });
+    fireEvent.submit(form.querySelector("form")!);
+
+    await waitFor(() => expect(vogt.matching("POST /work/update")).toHaveLength(1));
+    // Only what changed, and labels as an add-diff — not a replacement.
+    expect(vogt.matching("POST /work/update")[0]?.body).toEqual({
+      ref: "WI-1",
+      reason: "triaged",
+      assignee: "local:bo",
+      effort: "m",
+      body: "A real body now.",
+      add_labels: ["infra", "docs"],
+    });
+  });
+
+  it("clears the assignee and effort and removes a label with the diff flags", async () => {
+    const vogt = fakeVogt({
+      "GET /work/get": {
+        body: {
+          item: workItem({
+            assignee_identity_ref: "local:ana",
+            effort: "l",
+            labels: ["infra", "docs"],
+          }),
+          comments: [],
+          sessions: [],
+        },
+      },
+      "GET /actors": {
+        body: { actors: [{ identity_ref: "local:ana", display_name: "Ana" }] },
+      },
+      "POST /work/update": {
+        body: { item: workItem(), comments: [], sessions: [] },
+      },
+    });
+    const { container } = detail();
+    await waitFor(() => expect(facts(container)).toContain("assignee: local:ana"));
+
+    const form = await openEditor(container);
+    // The editor opens on the server's own values.
+    expect((field(form, "Effort") as HTMLSelectElement).value).toBe("l");
+    expect((field(form, "Labels") as HTMLInputElement).value).toBe("infra, docs");
+
+    fireEvent.input(field(form, "Assignee"), { target: { value: "" } });
+    fireEvent.input(field(form, "Effort"), { target: { value: "" } });
+    fireEvent.input(field(form, "Labels"), { target: { value: "infra" } });
+    fireEvent.input(field(form, "Reason"), { target: { value: "unassigning" } });
+    fireEvent.submit(form.querySelector("form")!);
+
+    await waitFor(() => expect(vogt.matching("POST /work/update")).toHaveLength(1));
+    expect(vogt.matching("POST /work/update")[0]?.body).toEqual({
+      ref: "WI-1",
+      reason: "unassigning",
+      clear_assignee: true,
+      clear_effort: true,
+      remove_labels: ["docs"],
+    });
+  });
+});
+
+// -- #224: the page leads with the item, not its machinery ------------------
+
+describe("#224 — the item page collapses its chrome and leads with comments", () => {
+  it("keeps the start-a-session form collapsed until it is asked for", async () => {
+    fakeVogt();
+    const { container } = detail();
+
+    const start = await waitFor(() => {
+      const found = container.querySelector<HTMLElement>(".wid-start");
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    // Collapsed: the template picker and the submit are not on the page.
+    expect(start.querySelector("select")).toBeNull();
+    expect(
+      [...start.querySelectorAll("button")].some(
+        (button) => button.textContent?.trim() === "Start session",
+      ),
+    ).toBe(false);
+
+    fireEvent.click(start.querySelector<HTMLButtonElement>(".wid-start-open")!);
+    await waitFor(() => expect(start.querySelector("select")).toBeTruthy());
+  });
+
+  it("places Comments directly under Description", async () => {
+    fakeVogt();
+    const { container } = detail();
+
+    await waitFor(() => panelNamed(container, "Comments"));
+    const headings = [...container.querySelectorAll(".wid-main .wid-panel h3")].map(
+      (node) => node.textContent,
+    );
+    const description = headings.indexOf("Description");
+    const comments = headings.indexOf("Comments");
+    expect(description).toBeGreaterThanOrEqual(0);
+    // Comments is the very next panel after Description.
+    expect(comments).toBe(description + 1);
   });
 });
 

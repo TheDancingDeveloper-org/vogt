@@ -189,6 +189,15 @@ fresh. An observation whose payload does not carry the flag at all reads as
 `unverified`, not as blank: a blank says "no opinion" when the honest answer is
 "nobody checked".
 
+**The item is edited from this page, not only read.** A **Move to** control
+under the state rail changes its state, offering the workflow's legal edges and
+collecting the typed reason every write needs; the move renders optimistically
+and rolls back visibly if the server refuses it. An **Edit** panel changes the
+title, priority, assignee (a keyboard-operable picker over the actor roster),
+effort, labels and description, through the same reason-collecting form. Adding
+a comment is a third such form. The **Start a session** form is collapsed behind
+a button so the page leads with the item rather than its machinery.
+
 **Start session** opens a PTY in the project's registered working tree, with
 this item's brief — description, `why`, relations — written to a prompt file the
 agent is pointed at. The session is linked back: the item shows its live
@@ -405,7 +414,9 @@ palette invoker, and creation writes only after **Create file** succeeds.
 Other mutating verbs whose collector is a *place* — quick-create, the drift inbox,
 the import form — open that view and do nothing else; per-item verbs
 (transition, comment, start session) are reached through the item's own entry,
-which opens the page carrying all three forms.
+which opens the page carrying all three forms: the **Move to** control changes
+its state, the comment form adds a comment, and **Start a session** — collapsed
+behind a button — opens one. Each collects the typed reason its write needs.
 
 Opening the palette always focuses a blank query and selects its first result.
 Arrow keys change the announced selection, Enter activates it, Tab stays inside
