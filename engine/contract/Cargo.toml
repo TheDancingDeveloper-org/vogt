@@ -1,13 +1,13 @@
 [package]
-name = "mydevenv2-contract"
+name = "vogt-engine-contract"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://repo.indexarr.net/indexarr/MyDevEnv2"
+repository = "https://github.com/TheDancingDeveloper-org/vogt"
 rust-version = "1.80"
 
 [lib]
-name = "mydevenv2_contract"
+name = "vogt_engine_contract"
 path = "src/lib.rs"
 
 [dependencies]

@@ -1,5 +1,5 @@
 [package]
-name = "mydevenv2-server"
+name = "vogt-engine-server"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,15 +7,15 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "mydevenv2-server"
+name = "vogt-engine"
 path = "src/main.rs"
 
 [lib]
-name = "mydevenv2_server"
+name = "vogt_engine_server"
 path = "src/lib.rs"
 
 [dependencies]
-mydevenv2-contract = { path = "../contract" }
+vogt-engine-contract = { path = "../contract" }
 axum = { version = "0.8", features = ["macros", "ws", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

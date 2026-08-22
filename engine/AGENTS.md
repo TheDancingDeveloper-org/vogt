@@ -63,7 +63,7 @@ Single binary, multi-tab PWA. `rust-embed` bakes the Solid PWA bundle into the R
 Browser / iOS PWA / Android Capacitor APK
    |   HTTPS + WSS via your reverse proxy
    v
-Axum server (mydevenv2-server) — bind :8910
+Axum server (vogt-engine-server) — bind :8910
    |-- /api/sessions/*             PTY lifecycle (bearer-token)
    |-- /api/sessions/:id/attach    WebSocket (snapshot replay -> live binary frames)
    |-- /api/events                 SSE — server-wide session state changes
@@ -91,7 +91,7 @@ still do.
 ```bash
 # Run server (mint a token first, >=16 chars)
 export MYDEVENV2_TOKEN="$(openssl rand -hex 24)"
-(cd engine && cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910)
+(cd engine && cargo run -p vogt-engine-server -- --bind 127.0.0.1:8910)
 
 # Tests
 (cd engine && cargo test --all)    # unit + integration (HTTP + WS)
@@ -102,7 +102,7 @@ export MYDEVENV2_TOKEN="$(openssl rand -hex 24)"
 (cd engine && cargo build --release)
 
 # UI development (Vite proxies /api + WS to the backend):
-# terminal 1: cd engine && cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
+# terminal 1: cd engine && cargo run -p vogt-engine-server -- --bind 127.0.0.1:8910
 # terminal 2: cd web && pnpm dev   -> http://127.0.0.1:5173
 ```
 

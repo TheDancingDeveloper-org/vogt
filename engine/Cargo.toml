@@ -5,7 +5,7 @@ members = ["server", "contract"]
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://repo.indexarr.net/indexarr/MyDevEnv2"
+repository = "https://github.com/TheDancingDeveloper-org/vogt"
 rust-version = "1.80"
 
 [profile.release]

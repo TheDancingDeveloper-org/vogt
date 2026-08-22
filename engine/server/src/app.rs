@@ -436,6 +436,6 @@ pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
     let bind = cfg.bind;
     let (router, _state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    tracing::info!(addr = %bind, "mydevenv2-server listening");
+    tracing::info!(addr = %bind, "vogt-engine listening");
     axum::serve(listener, router).await
 }

@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-pub use mydevenv2_contract::ActivityState;
+pub use vogt_engine_contract::ActivityState;
 use once_cell::sync::Lazy;
 use regex::bytes::RegexSet;
 

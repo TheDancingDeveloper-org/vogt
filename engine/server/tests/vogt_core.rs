@@ -19,7 +19,7 @@ use axum::{
     routing::any,
     Json, Router,
 };
-use mydevenv2_server::{
+use vogt_engine_server::{
     app::router,
     auth::{ScopedTokenConfig, TokenCapability},
     Config,
@@ -862,7 +862,7 @@ async fn the_core_s_changes_are_republished_on_this_server_s_stream() {
     let mut cfg = base_config();
     cfg.vogt_core_url = Some(core_url);
     cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
-    let (router, state) = mydevenv2_server::app::router(cfg).await;
+    let (router, state) = vogt_engine_server::app::router(cfg).await;
     drop(router);
 
     let mut stream = state.bus.subscribe();
@@ -911,7 +911,7 @@ async fn the_follower_does_not_replay_history_at_boot() {
     let mut cfg = base_config();
     cfg.vogt_core_url = Some(core_url);
     cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
-    let (router, state) = mydevenv2_server::app::router(cfg).await;
+    let (router, state) = vogt_engine_server::app::router(cfg).await;
     drop(router);
 
     let mut stream = state.bus.subscribe();
@@ -934,7 +934,7 @@ async fn no_core_token_means_no_follower_and_no_401_every_five_seconds() {
         token.vogt_core_token = None;
         token.vogt_core_token_file = None;
     }
-    let (router, _state) = mydevenv2_server::app::router(cfg).await;
+    let (router, _state) = vogt_engine_server::app::router(cfg).await;
     drop(router);
 
     tokio::time::sleep(Duration::from_secs(7)).await;
@@ -1294,7 +1294,7 @@ async fn nothing_under_a_machine_namespace_is_ever_answered_by_the_pwa() {
         "/index.html",
     ];
 
-    for namespace in mydevenv2_server::app::MACHINE_NAMESPACES {
+    for namespace in vogt_engine_server::app::MACHINE_NAMESPACES {
         for shape in shapes {
             let path = format!("{namespace}{shape}");
             // Both credentials states: an anonymous prober and a client that

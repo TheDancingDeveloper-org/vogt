@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 use base64::Engine as _;
-use mydevenv2_contract::{
+use vogt_engine_contract::{
     FileEntry, FileRead, FileSearchResult, SearchHit, TreeNode, WriteFileResponse, WriteReq,
 };
 use serde::{Deserialize, Serialize};

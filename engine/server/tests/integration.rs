@@ -9,8 +9,8 @@ use std::{
 
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
-use mydevenv2_contract::SessionDetail;
-use mydevenv2_server::{app::router, Config};
+use vogt_engine_contract::SessionDetail;
+use vogt_engine_server::{app::router, Config};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use time::OffsetDateTime;
@@ -3565,7 +3565,7 @@ async fn server_speech_routes_404_when_unconfigured() {
 /// addition to the unit test in `auth.rs`.
 #[tokio::test]
 async fn server_speech_routes_require_the_assistant_capability() {
-    use mydevenv2_server::auth::{ScopedTokenConfig, TokenCapability};
+    use vogt_engine_server::auth::{ScopedTokenConfig, TokenCapability};
 
     let mut cfg = test_config();
     // A token that may do sessions but not assistant.

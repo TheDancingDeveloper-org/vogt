@@ -191,7 +191,7 @@ pub fn spawn_activity_watcher(state: Arc<AppState>) {
 /// at it.
 ///
 /// Spelled as the core spells it: `DRIFT_RAISED_EVENT` in
-/// `services/drift_service.py`. `mydevenv2-contract` gave `drift.opened` as
+/// `services/drift_service.py`. `vogt-engine-contract` gave `drift.opened` as
 /// its example of a kind — a string the core has never emitted — and a filter
 /// written from that comment would match nothing while looking correct. That
 /// comment is fixed now; this note stays, because the next person adding a

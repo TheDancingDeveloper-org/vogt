@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ENGINE_BIN = REPO_ROOT / "engine" / "target" / "debug" / "mydevenv2-server"
+ENGINE_BIN = REPO_ROOT / "engine" / "target" / "debug" / "vogt-engine"
 
 pytestmark = pytest.mark.skipif(
     not ENGINE_BIN.is_file(),

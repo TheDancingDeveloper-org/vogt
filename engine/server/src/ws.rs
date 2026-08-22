@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use mydevenv2_contract::{ClientControl, ServerControl};
+use vogt_engine_contract::{ClientControl, ServerControl};
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;

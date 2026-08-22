@@ -358,7 +358,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --entrypoint vogt "$CANDIDATE" --version
-          docker run --rm --entrypoint mydevenv2-server "$CANDIDATE" --help >/dev/null
+          docker run --rm --entrypoint vogt-engine "$CANDIDATE" --help >/dev/null
           echo "both halves are present and start"
 
       - uses: docker/build-push-action@v6

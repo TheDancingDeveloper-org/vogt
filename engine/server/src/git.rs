@@ -7,7 +7,7 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use mydevenv2_contract::{BranchInfo, DiffResp, GitStatus, LogEntry, StatusEntry, StatusKind};
+use vogt_engine_contract::{BranchInfo, DiffResp, GitStatus, LogEntry, StatusEntry, StatusKind};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 

@@ -10,7 +10,7 @@ use std::{
 };
 
 use bytes::Bytes;
-pub use mydevenv2_contract::{SessionSpec, SessionSummary};
+pub use vogt_engine_contract::{SessionSpec, SessionSummary};
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, PtySize};
 use tokio::sync::{broadcast, Notify};
