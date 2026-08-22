@@ -12,6 +12,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_COMPOSE = REPO_ROOT / "deploy" / "vogt.compose.yml"
 BUILD_OVERLAY = REPO_ROOT / "deploy" / "vogt.build.yml"
+ENGINE_OVERLAY = REPO_ROOT / "deploy" / "engine.overlay.yml"
 ESTATE_OVERLAY = REPO_ROOT / "deploy" / "estate.overlay.yml"
 PUBLIC_ENV = REPO_ROOT / "deploy" / ".env.example"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
@@ -253,3 +254,123 @@ def test_the_estate_overlay_does_not_gate_on_an_assistant_endpoint() -> None:
         "VOGT_STACK_IMAGE",
         "MYDEVENV2_TOKEN",
     }, f"unexpected required variables: {sorted(required)}"
+
+
+# ── The generic engine overlay (#202) ───────────────────────────────────────
+#
+# `deploy/engine.overlay.yml` is the public, estate-neutral counterpart of the
+# estate overlay: it adds the session engine in front of the core with no host
+# paths, no tailnet, and no maintainer integrations. These mirror the base's
+# own contracts — loopback by default, an overlay states differences only, and
+# nothing private leaks into a file a stranger is meant to run.
+
+# Estate leaks the public overlay must never carry. `sprooty` is deliberately
+# absent from this list: `/home/sprooty` is the engine *image's* build-time
+# home directory (its `USER`), a container path, not an estate host mount — the
+# host-bind test below is what proves no estate *path* is bound in.
+ESTATE_MARKERS = (
+    "mydevenv2",
+    "tailscale",
+    "infisical",
+    "komodo",
+    "cadastre",
+    "theclawbay",
+    "indexarr",
+    "winrarhost",
+    "sprooty.com",
+    "100.92",  # the estate tailnet
+    "/mnt/",  # the estate's host volume root
+)
+
+
+def test_the_engine_overlay_builds_the_engine_and_fronts_the_core() -> None:
+    """An overlay states differences only, and this one adds the engine.
+
+    No engine image is published, so the overlay always builds one from
+    `engine/Dockerfile`, lifting the published core in via `CORE_IMAGE`; it
+    then proxies to the sibling core by service name rather than running one.
+    """
+    overlay = _without_comments(ENGINE_OVERLAY.read_text(encoding="utf-8"))
+    assert "engine:" in overlay
+    assert "dockerfile: engine/Dockerfile" in overlay
+    assert "CORE_IMAGE:" in overlay
+    assert 'VOGT_CORE_URL: "http://vogt:8000"' in overlay
+    assert "VOGT_CORE_TOKEN_FILE:" in overlay
+    # The engine's own token is the one required operator value (>=16 chars),
+    # exactly as the base requires only VOGT_PUBLIC_URL.
+    assert re.search(r"ENGINE_TOKEN:\s*\"\$\{ENGINE_TOKEN:\?", overlay)
+
+
+def test_the_engine_overlay_publishes_to_loopback_unless_told_otherwise() -> None:
+    """The host interface is an exposure decision, so the overlay refuses one.
+
+    Like the base, the engine's published port defaults to `127.0.0.1`; the
+    engine's own in-container socket is 0.0.0.0 so the published port reaches
+    it, which is the one place the two must differ.
+    """
+    overlay = _without_comments(ENGINE_OVERLAY.read_text(encoding="utf-8"))
+    assert "${ENGINE_BIND:-127.0.0.1}:" in overlay
+    assert 'ENGINE_BIND: "0.0.0.0:8910"' in overlay
+
+
+def test_the_engine_overlay_carries_no_estate_addresses_or_paths() -> None:
+    overlay = _without_comments(ENGINE_OVERLAY.read_text(encoding="utf-8")).lower()
+    for marker in ESTATE_MARKERS:
+        assert marker.lower() not in overlay, f"estate marker leaked: {marker}"
+
+
+def test_the_engine_overlay_uses_named_volumes_not_host_binds() -> None:
+    """A fresh named volume keeps the image's ownership; a host bind would
+    arrive root-owned and break the pod, and would tie the file to one host.
+
+    Every volume mount source must be a bare name (a declared named volume),
+    never an absolute path, a relative path, a `~` home, or a `${VAR:-/path}`
+    whose default is a path.
+    """
+    overlay = _without_comments(ENGINE_OVERLAY.read_text(encoding="utf-8"))
+    # Isolate each service's `volumes:` list; ports and secrets live under
+    # their own keys and are not volume mounts.
+    volume_blocks = re.findall(
+        r"^    volumes:\n((?:      - .+\n)+)", overlay, re.MULTILINE
+    )
+    assert volume_blocks, "the overlay should mount a named volume for the pod"
+    sources = []
+    for block in volume_blocks:
+        for line in block.splitlines():
+            entry = line.strip().lstrip("- ").strip().strip("\"'")
+            source = entry.split(":", 1)[0]
+            sources.append(source)
+    assert sources, "expected at least one volume mount"
+    for source in sources:
+        assert not source.startswith(("/", ".", "~", "$")), (
+            f"host-path bind mount, not a named volume: {source!r}"
+        )
+    # The declared named volume must exist under the top-level `volumes:` key.
+    assert re.search(r"^volumes:\n(?:  .+\n)*  engine-home:", overlay, re.MULTILINE)
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="docker not present")
+def test_docker_compose_renders_the_base_and_the_engine_overlay() -> None:
+    """Compose itself agrees the two files merge into one valid deployment."""
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(PUBLIC_COMPOSE),
+            "-f",
+            str(ENGINE_OVERLAY),
+            "config",
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "VOGT_PUBLIC_URL": "http://localhost:8080",
+            "ENGINE_TOKEN": "0123456789abcdef0123",
+        },
+    )
+    if result.returncode != 0:
+        pytest.skip(f"docker compose unavailable: {result.stderr.strip()[:200]}")
+    assert "http://vogt:8000" in result.stdout
+    assert "127.0.0.1" in result.stdout
