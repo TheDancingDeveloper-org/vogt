@@ -9,13 +9,15 @@ import {
   type JSX,
 } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
-import { api, type AssistantPendingAction } from "./api";
+import { api, type AssistantPendingAction, type SessionTemplate } from "./api";
 import { sessionsStore, sessionsError, isConnected } from "./store";
 import type { SessionSummary } from "./api";
 import type { SessionTool } from "./routeModel";
 import { pendingAction, setPendingAction } from "./pendingAction";
 import SurfaceHeader from "./SurfaceHeader";
 import WaitingSessionCard from "./WaitingSession";
+import SessionList from "./SessionList";
+import { attentionRank } from "./sessionRowModel";
 import { createNarrow } from "./narrow";
 
 interface Props {
@@ -25,6 +27,10 @@ interface Props {
   children?: JSX.Element;
   hasActiveWorkspace?: boolean;
   onCreateSession?: () => void;
+  /** Presets the overview offers when there are no sessions to list (#233). */
+  sessionTemplates?: SessionTemplate[];
+  /** Launch one of those presets straight into its terminal. */
+  onLaunchTemplate?: (template: SessionTemplate) => void;
 }
 
 export const SessionTools: Component<Props> = (props) => (
@@ -42,19 +48,6 @@ export const SessionTools: Component<Props> = (props) => (
     </Show>
   </nav>
 );
-
-const ATTENTION_ORDER: Record<string, number> = {
-  "waiting-for-input": 0,
-  errored: 1,
-  running: 2,
-  idle: 3,
-  exited: 4,
-};
-
-function attentionRank(session: SessionSummary): number {
-  if (session.exit_code !== null) return session.exit_code === 0 ? 4 : 1;
-  return ATTENTION_ORDER[session.activity] ?? 3;
-}
 
 function visibleTerminalInput(text: string): string {
   return text.replace(/[\x00-\x1f\x7f]/g, (char) => {
@@ -143,6 +136,12 @@ const Sessions: Component<Props> = (props) => {
   // these; the cards are what puts the prompt and its two answers where a
   // thumb is, above the list rather than inside it.
   const narrow = createNarrow();
+  // On a narrow shell, once a terminal or a machine tool owns the screen the
+  // Sessions surface header is chrome over it: the two-line honesty folds and
+  // the whole header shrinks to a title and "+ Session" so the terminal is not
+  // pushed off-screen (#232). On the overview, and on any desk, the header is
+  // itself and stays open.
+  const collapsed = () => narrow() && Boolean(props.hasActiveWorkspace);
   // Including the ones that exited while waiting: somebody came to this
   // screen to answer that prompt, and a card that says the session is gone is
   // the answer to why they cannot (Stage 9's "refuse safely and explain").
@@ -155,7 +154,8 @@ const Sessions: Component<Props> = (props) => {
       aria-label="Sessions"
     >
       <SurfaceHeader
-        class="sessions-header"
+        class={`sessions-header${collapsed() ? " sessions-header--compact" : ""}`}
+        collapseHonesty={collapsed()}
         label="Sessions header"
         title={(
           <>
@@ -201,7 +201,7 @@ const Sessions: Component<Props> = (props) => {
           </button>
         ) : undefined}
       />
-      <Show when={narrow() && waiting().length > 0}>
+      <Show when={narrow() && !props.hasActiveWorkspace && waiting().length > 0}>
         <section class="sessions-waiting" aria-label="Sessions waiting for input">
           <For each={waiting()}>
             {(session) => (
@@ -273,9 +273,59 @@ const Sessions: Component<Props> = (props) => {
             {(message) => <p class="sessions-outage" role="alert">Approval could not be completed: {message()}</p>}
           </Show>
           <Show when={!props.hasActiveWorkspace}>
-            <div class="sessions-workspace-empty">
-              <h2>Choose a session or tool</h2>
-              <p>Terminals, files and machine tools stay inside this Sessions workspace.</p>
+            <div class="sessions-overview" aria-label="Sessions overview">
+              <Show
+                when={sessions().length > 0}
+                fallback={(
+                  <div class="sessions-workspace-empty">
+                    <h2>No sessions yet</h2>
+                    <p>
+                      Start a terminal session to run work on this machine, or
+                      launch one of the presets below.
+                    </p>
+                    <Show when={props.onCreateSession}>
+                      <button
+                        type="button"
+                        class="sessions-start"
+                        onClick={() => props.onCreateSession?.()}
+                      >
+                        Start a session
+                      </button>
+                    </Show>
+                    <Show when={(props.sessionTemplates?.length ?? 0) > 0}>
+                      <ul class="sessions-template-list" aria-label="Session presets">
+                        <For each={props.sessionTemplates}>
+                          {(template) => (
+                            <li>
+                              <button
+                                type="button"
+                                onClick={() => props.onLaunchTemplate?.(template)}
+                              >
+                                <span class="sessions-template-name">{template.name}</span>
+                                <Show when={template.description}>
+                                  <span class="sessions-template-desc">{template.description}</span>
+                                </Show>
+                              </button>
+                            </li>
+                          )}
+                        </For>
+                      </ul>
+                    </Show>
+                  </div>
+                )}
+              >
+                <div class="sessions-overview-list">
+                  <h2 class="sessions-overview-heading">Running sessions</h2>
+                  {/* On a narrow shell the waiting sessions are already the
+                      attention cards above, so the list carries the rest;
+                      on a desk there are no cards and it carries them all. */}
+                  <SessionList
+                    sessions={sessions()}
+                    omit={narrow() ? waiting().map((session) => session.id) : []}
+                    label="Running sessions"
+                  />
+                </div>
+              </Show>
             </div>
           </Show>
           <div

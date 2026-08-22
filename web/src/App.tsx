@@ -72,7 +72,7 @@ import {
   tabsStore,
   type Tab,
 } from "./tabs";
-import type { ActivityState, SessionSummary } from "./api";
+import type { SessionSummary } from "./api";
 import { getToken, setBase, setToken } from "./api";
 import {
   deleteWorkspaceLayout,
@@ -98,7 +98,13 @@ import {
   createPlaceMetrics,
   type PlaceMetric,
 } from "./placeMetrics";
-import { createNow, formatAgo, onVogtLive } from "./viewAge";
+import { createNow, onVogtLive } from "./viewAge";
+import {
+  activityClass,
+  activityLabel,
+  sessionActivityAge,
+  sessionStateWord,
+} from "./sessionRowModel";
 import { railSections, setRailSection } from "./railSections";
 
 // -- what the first screen does not have to carry (NFR-S5, #104) -----------
@@ -276,43 +282,6 @@ const LoginScreen: Component<LoginScreenProps> = (props) => {
     </main>
   );
 };
-
-function activityClass(s: SessionSummary): string {
-  if (s.exit_code !== null) {
-    return s.exit_code === 0 ? "done" : "errored";
-  }
-  return s.activity;
-}
-
-function activityLabel(s: ActivityState, exit: number | null): string {
-  if (exit !== null) return exit === 0 ? "exited (0)" : `errored (${exit})`;
-  switch (s) {
-    case "waiting-for-input":
-      return "waiting for input";
-    default:
-      return s;
-  }
-}
-
-/** How long a session has held its current activity, from the one timestamp
- *  the engine actually reports. Absent on an older engine — omitted rather
- *  than guessed (rail-spec.md's own withdrawn "node-b · actor:tim" line is
- *  the reminder of what inventing a value here would repeat). */
-function sessionActivityAge(s: SessionSummary, now: number): string | null {
-  if (!s.activity_changed_at) return null;
-  const changed = Date.parse(s.activity_changed_at);
-  if (Number.isNaN(changed)) return null;
-  return formatAgo(now - changed);
-}
-
-/** The rail's session-row state word, beside the dot (rail-spec.md B2):
- *  "waiting for input · 40s", "running · 6m". Colour is never the only
- *  signal, so this line exists whether or not the age is known. */
-function sessionStateWord(s: SessionSummary, now: number): string {
-  const label = activityLabel(s.activity, s.exit_code);
-  const age = sessionActivityAge(s, now);
-  return age ? `${label} · ${age}` : label;
-}
 
 /**
  * Where each tab was last seen, including its query string.
@@ -1502,6 +1471,8 @@ const App: Component = () => {
               assistantEnabled={Boolean(publicCfg()?.assistant_enabled)}
               hasActiveWorkspace={sessionWorkspaceActive()}
               onCreateSession={() => void onCreate()}
+              sessionTemplates={allTemplates()}
+              onLaunchTemplate={(template) => void launchTemplateDirect(template)}
             >
               <div class="tab-view">
                 {/* The terminal is xterm and the editor is Monaco; both are

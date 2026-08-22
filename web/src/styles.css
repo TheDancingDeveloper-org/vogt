@@ -1446,6 +1446,100 @@ textarea {
   .sessions-audit-note { display: none; }
 }
 
+/* The Sessions overview (#233): with sessions it is a real list, not an empty
+   panel; with none it points at the one thing to do next. It fills the
+   workspace and scrolls inside it rather than growing the surface. */
+.sessions-overview {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.sessions-overview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 0;
+}
+.sessions-overview-heading {
+  margin: 0;
+  padding: 4px 12px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.sessions-start {
+  align-self: center;
+  margin-top: 4px;
+  padding: 8px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: rgba(88, 166, 255, 0.14);
+  color: var(--fg);
+  font-weight: 600;
+}
+.sessions-template-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  width: min(100%, 360px);
+  text-align: left;
+}
+.sessions-template-list button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  text-align: left;
+}
+.sessions-template-name { font-weight: 600; }
+.sessions-template-desc { color: var(--fg-muted); font-size: 12px; }
+
+/* The shared running-sessions list (SessionList), reusing the `.session-row`
+   grammar the desktop rail draws. Anchors here, so a row is a link. */
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.session-list > li { display: flex; }
+.session-list .session-row {
+  flex: 1;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+/* The compact Sessions header (#232): once a terminal owns a phone's screen,
+   the kicker goes, the honesty folds behind the disclosure, and the Tools
+   strip becomes one horizontally-scrolling row rather than a wrapping block
+   that stacked ~560px of chrome above the xterm. */
+.sessions-header--compact .place-kicker { display: none; }
+.sessions-header--compact .sessions-tools {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding: 4px 0;
+  border-bottom: none;
+}
+.sessions-header--compact .sessions-tools > span { display: none; }
+.sessions-header--compact .sessions-tools a { flex: 0 0 auto; white-space: nowrap; }
+
 .connection-banner {
   display: flex;
   align-items: center;
@@ -1696,7 +1790,12 @@ textarea {
 }
 .terminal-layout {
   flex: 1;
-  min-height: 0;
+  /* A floor, not the usual `min-height: 0`: the flex chain from `.sessions-
+     place` down already carries `min-height: 0` at every link, which is what
+     lets a lone terminal fill. The 40dvh floor is what keeps the xterm on
+     screen when a header still sits above it — the #232 case where the pane
+     had measured 2px tall on a phone. */
+  min-height: 40dvh;
   min-width: 0;
   display: flex;
   gap: 4px;
