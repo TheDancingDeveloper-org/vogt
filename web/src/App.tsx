@@ -16,7 +16,8 @@ import type { AgentTaskDraftGuard } from "./AgentTasks";
 import Board from "./Board";
 import Sessions from "./Sessions";
 import RouteOutcomeView from "./RouteOutcome";
-import { matchAppShortcut } from "./keyboardShortcuts";
+import { isEditableTarget, matchAppShortcut } from "./keyboardShortcuts";
+import { saveRegisteredEditor } from "./editorRegistry";
 import { moreSheetItems } from "./phoneMoreSheet";
 import ModKeyRow from "./ModKeyRow";
 import FileTree from "./FileTree";
@@ -109,6 +110,7 @@ import {
   sessionStateWord,
 } from "./sessionRowModel";
 import { railSections, setRailSection } from "./railSections";
+import { setExpanded } from "./fileTreeState";
 
 // -- what the first screen does not have to carry (NFR-S5, #104) -----------
 //
@@ -849,6 +851,37 @@ const App: Component = () => {
     }
   };
 
+  // Cross-links from a session to its files and its Git (#238). A session
+  // carries a cwd; "Git here" opens the Git tab rooted there, and "Open files
+  // here" reveals that folder in the workspace file tree when it lies under the
+  // workspace root.
+  const onGitHere = (s: SessionSummary) => {
+    setOpenMenuId(null);
+    const cwd = s.cwd?.trim();
+    navigate(cwd ? `/g/${encodeURIComponent(cwd)}` : "/g");
+  };
+  const onOpenFilesHere = async (s: SessionSummary) => {
+    setOpenMenuId(null);
+    setRailSection("files", true);
+    const cwd = s.cwd?.replace(/\/+$/, "") ?? "";
+    try {
+      const status = await apiModule.operationalStatus();
+      const root = status.storage.workspace_root.replace(/\/+$/, "");
+      if (cwd && (cwd === root || cwd.startsWith(`${root}/`))) {
+        const rel = cwd === root ? "" : cwd.slice(root.length + 1);
+        // Expand each ancestor down to the folder so it is revealed in place.
+        let acc = "";
+        for (const part of rel.split("/").filter(Boolean)) {
+          acc = acc ? `${acc}/${part}` : part;
+          setExpanded(acc, true);
+        }
+      }
+    } catch {
+      // Best effort: without the workspace root we still open the Files section.
+    }
+    navigate("/sessions");
+  };
+
   const onDuplicateSession = async (s: SessionSummary) => {
     try {
       const name = `${s.name}-copy`;
@@ -1067,6 +1100,19 @@ const App: Component = () => {
       setShortcutsOpen(true);
       return;
     }
+    if (shortcut.id === "editor-save") {
+      // Monaco binds Ctrl/Cmd+S itself, and other inputs are not editors, so
+      // the app handler only steps in when the keystroke lands OUTSIDE any
+      // editable surface (the tab bar, the file tree, a split header) with an
+      // editor tab active. That is exactly the case where the browser would
+      // otherwise pop its Save-Page dialog (#237).
+      if (isEditableTarget(e.target)) return;
+      const active = tabsStore.tabs.find((t) => t.id === tabsStore.active);
+      if (active?.kind === "editor" && saveRegisteredEditor(active.id)) {
+        e.preventDefault();
+      }
+      return;
+    }
     if (shortcut.id === "toggle-places-rail") {
       // The rail is only a grid column on the desktop shell; below the narrow
       // breakpoint it is `display: none` and its collapse flag draws nothing,
@@ -1280,6 +1326,18 @@ const App: Component = () => {
                       navigate(`/t/${s.id}`);
                     }}
                   >Attach</button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-label={`Open files at ${s.cwd || "the workspace"}`}
+                    onClick={() => void onOpenFilesHere(s)}
+                  >Open files here</button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-label={`Open Git at ${s.cwd || "the workspace"}`}
+                    onClick={() => onGitHere(s)}
+                  >Git here</button>
                   <button
                     type="button"
                     role="menuitem"
@@ -1509,7 +1567,12 @@ const App: Component = () => {
               <div class="tab-view">
                 {/* The terminal is xterm and the editor is Monaco; both are
                     fetched when a pane that needs one is opened. */}
-                <Show when={isIDEMode && editorWorkspaceActive()}>
+                {/* Mount the editor workspace once and keep it in the DOM
+                    behind display:none. Gating the mount on
+                    `editorWorkspaceActive()` unmounted Monaco and the file tree
+                    on every switch away, so their state (open folders, sidebar,
+                    search) never actually retained (#238). */}
+                <Show when={isIDEMode}>
                   <div
                     class="retained-tab-pane"
                     data-tab-kind="editor-workspace"

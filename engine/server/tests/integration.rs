@@ -2363,6 +2363,97 @@ async fn file_api_round_trip() {
 }
 
 #[tokio::test]
+async fn read_returns_hash_and_mtime_and_if_match_guards_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "original").unwrap();
+
+    let cfg = Config {
+        default_cwd: tmp.path().to_path_buf(),
+        workspace_root: tmp.path().canonicalize().unwrap(),
+        ..test_config()
+    };
+    let (router, _state) = router(cfg).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // Read exposes a content hash and an mtime.
+    let r: Value = client
+        .get(format!("{base}/api/files?path=note.txt"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["content"], "original");
+    let hash = r["hash"].as_str().expect("read returns a hash").to_string();
+    assert_eq!(hash.len(), 64, "sha-256 hex is 64 chars");
+    assert!(r["mtime"].as_u64().unwrap() > 0, "read returns an mtime");
+
+    // Happy path: writing with the matching if_match succeeds and hands back a
+    // fresh baseline hash/mtime.
+    let w = client
+        .put(format!("{base}/api/files"))
+        .json(&json!({ "path": "note.txt", "content": "edited by me", "if_match": hash }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(w.status(), StatusCode::OK);
+    let wbody: Value = w.json().await.unwrap();
+    let new_hash = wbody["hash"].as_str().expect("write returns new hash");
+    assert_ne!(new_hash, hash, "baseline advanced after the write");
+    assert!(wbody["mtime"].as_u64().unwrap() > 0);
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("note.txt")).unwrap(),
+        "edited by me"
+    );
+
+    // Simulate an external change on disk, then attempt to save against the now
+    // stale baseline: the write is refused with 409 Conflict and the file is
+    // left untouched.
+    std::fs::write(tmp.path().join("note.txt"), "changed underfoot").unwrap();
+    let stale = client
+        .put(format!("{base}/api/files"))
+        .json(&json!({ "path": "note.txt", "content": "my clobber", "if_match": new_hash }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let body: Value = stale.json().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap().contains("changed on disk"),
+        "conflict body should explain the staleness; got {body:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("note.txt")).unwrap(),
+        "changed underfoot",
+        "a conflicting write must not clobber the newer on-disk content"
+    );
+
+    // Without if_match the write still wins unconditionally (legacy behaviour).
+    let force = client
+        .put(format!("{base}/api/files"))
+        .json(&json!({ "path": "note.txt", "content": "forced" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(force.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("note.txt")).unwrap(),
+        "forced"
+    );
+}
+
+#[tokio::test]
 async fn file_name_search_returns_matching_paths() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join("docs")).unwrap();

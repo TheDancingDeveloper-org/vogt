@@ -128,6 +128,11 @@ interface PlaceMetricFixtures {
   actors?: { identity_ref: string; display_name: string }[];
   /** The Markdown body `/work/get` returns for WI-7, for the renderer (#222). */
   workBody?: string;
+  /** Seed files the `/api/files` fixture serves, keyed by workspace path. Reads
+   *  return a content hash + mtime; a write carrying a stale `if_match` gets a
+   *  409, so a test can simulate an external change and prove the editor's
+   *  on-disk conflict handling (#237). */
+  files?: Record<string, string>;
 }
 
 async function installFixtures(
@@ -246,6 +251,54 @@ async function installFixtures(
       ] });
     }
     return route.fulfill({ json: tree });
+  });
+  // A stateful file store, so a read hands back a hash/mtime and a write with a
+  // stale `if_match` conflicts (#237). Registered before any test-specific
+  // `/api/files` route, which — being registered later — wins where present.
+  // A regex keeps this off `/api/files/op` and `/api/files/download`.
+  const fileHash = (s: string) => {
+    let h = 5381;
+    for (let i = 0; i < s.length; i += 1) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+    return h.toString(16);
+  };
+  const fileStore = new Map<string, string>(Object.entries(metrics.files ?? {}));
+  let fileMtime = 1000;
+  await page.route(/\/api\/files(\?|$)/, async (route) => {
+    const request = route.request();
+    if (request.method() === "PUT") {
+      const body = request.postDataJSON() as {
+        path: string;
+        content?: string;
+        if_match?: string;
+      };
+      const currentHash = fileHash(fileStore.get(body.path) ?? "");
+      if (body.if_match !== undefined && body.if_match !== currentHash) {
+        return route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "file changed on disk since it was read" }),
+        });
+      }
+      const content = body.content ?? "";
+      fileStore.set(body.path, content);
+      fileMtime += 1;
+      return route.fulfill({
+        json: { ok: true, bytes: content.length, hash: fileHash(content), mtime: fileMtime },
+      });
+    }
+    const path = new URL(request.url()).searchParams.get("path") ?? "";
+    const content = fileStore.get(path) ?? "";
+    return route.fulfill({
+      json: {
+        path,
+        size: content.length,
+        content,
+        content_base64: null,
+        is_binary: false,
+        mtime: fileMtime,
+        hash: fileHash(content),
+      },
+    });
   });
   await page.route("**/api/tasks**", async (route) => route.fulfill({ json: [] }));
   // Agent-task fixtures: only wired when a caller hands over tasks, so the
@@ -457,7 +510,22 @@ async function installFixtures(
     }
     return route.fulfill({ json: {} });
   });
-  return { inboxCalls: () => inboxCalls, boardRequests, transitionRequests, updateRequests, sessions, sessionInputs, agentTaskUpdates, agentTaskRuns };
+  return {
+    inboxCalls: () => inboxCalls,
+    boardRequests,
+    transitionRequests,
+    updateRequests,
+    sessions,
+    sessionInputs,
+    agentTaskUpdates,
+    agentTaskRuns,
+    // Simulate a change to a file made outside this editor — the next save
+    // against the pre-change hash will 409 (#237).
+    externalChange: (path: string, content: string) => {
+      fileStore.set(path, content);
+      fileMtime += 1;
+    },
+  };
 }
 
 test("History palette results restore the selected session, query and match", async ({ page }) => {
@@ -2424,6 +2492,103 @@ test("dirty editor requests browser exit confirmation only until save", async ({
     window.dispatchEvent(event);
     return event.defaultPrevented;
   })).toBe(false);
+});
+
+test("Editor surfaces an on-disk change with Overwrite / Reload (#237)", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Monaco lifecycle is validated in the desktop browser project");
+  const editFile = "src/an-identifiable-long-filename.tsx";
+  const fixture = await installFixtures(page, {}, [], undefined, {
+    files: { [editFile]: "export const answer = 42;\n" },
+  });
+  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+  const editor = page.locator(".monaco-editor");
+  await expect(editor).toBeVisible();
+  // Make an edit so the tab is dirty and Save is live.
+  await editor.click();
+  await page.keyboard.type(" // mine");
+  const save = page.getByRole("button", { name: "Save", exact: true });
+  await expect(save).toBeEnabled();
+
+  // Someone changes the file on disk behind the editor's back.
+  fixture.externalChange(editFile, "export const answer = 99;\n");
+  await save.click();
+
+  // The save is refused and the choice is surfaced inline, not applied silently.
+  const banner = page.getByRole("alert").filter({ hasText: "File changed on disk" });
+  await expect(banner).toBeVisible();
+  await expect(banner.getByRole("button", { name: "Overwrite" })).toBeVisible();
+  await expect(banner.getByRole("button", { name: "Reload" })).toBeVisible();
+
+  // Reload takes the disk's newer content; the tab is clean again.
+  await banner.getByRole("button", { name: "Reload" }).click();
+  await expect(page.locator(".monaco-editor .view-lines")).toContainText("99");
+  await expect(save).toBeDisabled();
+});
+
+test("Editor workspace keeps its file-tree expansion across a tab switch (#238)", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The retained editor workspace is a desktop shell");
+  await installFixtures(page, {}, [], undefined, {
+    files: { "src/an-identifiable-long-filename.tsx": "export const answer = 42;\n" },
+  });
+  await page.addInitScript(() => {
+    localStorage.setItem("mydevenv2.layoutMode.v1", "ide");
+  });
+  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+
+  const sidebar = page.locator(".editor-sidebar .file-tree");
+  await expect(sidebar).toBeVisible();
+  await sidebar.getByRole("button", { name: "Files", exact: true }).click();
+  await sidebar.getByRole("button", { name: "Expand src" }).click();
+  await expect(sidebar.getByText("nested-component.tsx")).toBeVisible();
+
+  // Switch to a non-editor place and back: the workspace stays mounted, so the
+  // expansion is retained rather than collapsing (#238).
+  await page.goto("/#/sessions");
+  await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
+
+  const sidebarAgain = page.locator(".editor-sidebar .file-tree");
+  await expect(sidebarAgain.getByRole("button", { name: "Collapse src" })).toBeVisible();
+  await expect(sidebarAgain.getByText("nested-component.tsx")).toBeVisible();
+});
+
+test("Git Stage all stages every change and unblocks committing (#239)", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The full Git tab is validated in the desktop browser project");
+  await installFixtures(page);
+  let staged = false;
+  await page.route("**/api/git/status**", async (route) => route.fulfill({ json: {
+    repo: "vogt", is_repo: true, branch: "dev", ahead: 0, behind: 0,
+    entries: staged
+      ? [
+          { path: "src/a.ts", index: "M", worktree: " ", kind: "staged" },
+          { path: "src/b.ts", index: "A", worktree: " ", kind: "staged" },
+        ]
+      : [
+          { path: "src/a.ts", index: " ", worktree: "M", kind: "modified" },
+          { path: "src/b.ts", index: "?", worktree: "?", kind: "untracked" },
+        ],
+  } }));
+  await page.route("**/api/git/branch**", async (route) =>
+    route.fulfill({ json: { current: "dev", all: ["dev"] } }),
+  );
+  await page.route("**/api/git/log**", async (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/git/op**", async (route) => {
+    const body = route.request().postDataJSON() as { op: string };
+    if (body.op === "stage") staged = true;
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.goto("/#/g/vogt");
+
+  const commit = page.getByRole("button", { name: /Commit staged/ });
+  // A message alone is not enough while nothing is staged — the hint says why.
+  await page.getByPlaceholder("Commit message").fill("stage it all");
+  await expect(commit).toBeDisabled();
+  await expect(page.getByText(/Stage a file to enable committing/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Stage all" }).click();
+
+  // Staging flips the working tree to the index and unblocks the commit.
+  await expect(commit).toBeEnabled();
+  await expect(page.getByText(/Stage a file to enable committing/)).toHaveCount(0);
 });
 
 test("History distinguishes an archive outage from an empty archive and recovers", async ({ page }) => {

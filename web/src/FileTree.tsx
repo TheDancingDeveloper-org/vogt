@@ -19,6 +19,17 @@ import {
 import { openEditorTab, openTerminalTab } from "./tabs";
 import { createSession } from "./store";
 import { railSections, setRailSection } from "./railSections";
+import {
+  expandedPaths,
+  fileTreeSearch,
+  folderVersion,
+  invalidateFolder,
+  isExpanded,
+  parentFolder,
+  setExpanded,
+  setFileTreeSearch,
+} from "./fileTreeState";
+import { workspaceVersion } from "./workspaceVersion";
 
 interface Props {
   onOpen?: () => void;
@@ -87,13 +98,34 @@ function duplicatePath(path: string): string {
 }
 
 const TreeNodeView: Component<NodeProps> = (props) => {
-  const [open, setOpen] = createSignal(false);
+  // Expansion lives in a module store keyed by path, so an expanded folder
+  // survives a tab switch and a workspace remount instead of collapsing (#238).
+  const open = () => isExpanded(props.node.path);
   const [actionsOpen, setActionsOpen] = createSignal(false);
   const [kids, setKids] = createSignal<TreeNode[] | null>(
     props.node.children ?? null,
   );
   const [loading, setLoading] = createSignal(false);
   const status = () => statusForPath(props.statusEntries, props.node.path);
+
+  const loadKids = async () => {
+    setLoading(true);
+    try {
+      const tree = await api.tree(props.node.path, 0);
+      setKids(tree);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Load (and reload) an expanded folder's children. Tracks this folder's own
+  // invalidation counter, so a file op that touches this folder refetches
+  // exactly it — the rest of the tree keeps its loaded, expanded state (#238).
+  createEffect(() => {
+    if (!props.node.is_dir || !open()) return;
+    folderVersion(props.node.path);
+    void loadKids();
+  });
   let rowRef: HTMLDivElement | undefined;
   let actionsRef: HTMLDivElement | undefined;
 
@@ -140,25 +172,17 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     });
   });
 
-  const toggle = async () => {
+  const toggle = () => {
     if (!props.node.is_dir) {
       props.onOpenFile(props.node.path);
       return;
     }
     const next = !open();
-    setOpen(next);
+    setExpanded(props.node.path, next);
     // Collapsing a folder must take its picker with it: an actions menu left
-    // open over a now-hidden folder is orphaned on screen (#186).
+    // open over a now-hidden folder is orphaned on screen (#186). The children
+    // are (re)fetched by the expansion effect above, not here.
     if (!next) closeActions();
-    if (next && (kids() === null || kids()?.length === 0)) {
-      setLoading(true);
-      try {
-        const tree = await api.tree(props.node.path, 0);
-        setKids(tree);
-      } finally {
-        setLoading(false);
-      }
-    }
   };
 
   return (
@@ -255,8 +279,10 @@ const FileTree: Component<Props> = (props) => {
       return [];
     }
   });
-  const [searchQuery, setSearchQuery] = createSignal("");
-  const [debouncedSearchQuery, setDebouncedSearchQuery] = createSignal("");
+  // Search query is hoisted to the module store so it survives a tab switch.
+  const searchQuery = fileTreeSearch;
+  const setSearchQuery = setFileTreeSearch;
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = createSignal(fileTreeSearch());
   const [uploadTarget, setUploadTarget] = createSignal<string>("");
   const [moreActionsOpen, setMoreActionsOpen] = createSignal(false);
   const moreActionsId = `file-tree-more-actions-${createUniqueId()}`;
@@ -276,10 +302,52 @@ const FileTree: Component<Props> = (props) => {
     else console.error(message);
   };
 
+  // A full manual refresh (the ↻ button): the root, Git markers, and every
+  // currently-expanded folder's children.
   const refreshTree = () => {
     void refetch();
     void refetchGitStatus();
+    for (const path of expandedPaths()) invalidateFolder(path);
   };
+
+  // Refetch after a file op affecting `folder`: only that parent, so the rest
+  // of the tree keeps its expanded state (#238). The root level is served by
+  // the `tree` resource, not a per-folder node, so it refetches directly.
+  const refreshFolder = (folder: string) => {
+    if (folder === "") void refetch();
+    else invalidateFolder(folder);
+    void refetchGitStatus();
+  };
+
+  // A save, a Git op or a file created elsewhere bumps the workspace version;
+  // reflect it in the root and the Git markers without a manual refresh. The
+  // first run is the initial mount, already covered by the resources' own fetch.
+  let firstVersion = true;
+  createEffect(() => {
+    workspaceVersion();
+    if (firstVersion) {
+      firstVersion = false;
+      return;
+    }
+    void refetch();
+    void refetchGitStatus();
+  });
+
+  // Coming back to the tab is a moment the tree may be stale (an agent wrote
+  // files, a terminal ran git). Reconcile on focus and on becoming visible.
+  const revalidate = () => {
+    void refetch();
+    void refetchGitStatus();
+  };
+  const onVisibility = () => {
+    if (document.visibilityState === "visible") revalidate();
+  };
+  window.addEventListener("focus", revalidate);
+  document.addEventListener("visibilitychange", onVisibility);
+  onCleanup(() => {
+    window.removeEventListener("focus", revalidate);
+    document.removeEventListener("visibilitychange", onVisibility);
+  });
 
   createEffect(() => {
     const query = searchQuery();
@@ -305,7 +373,7 @@ const FileTree: Component<Props> = (props) => {
     try {
       await api.writeFile(path, "", true);
       openFile(path);
-      refreshTree();
+      refreshFolder(parentFolder(path));
     } catch (e) {
       reportError(`new file failed: ${(e as Error).message}`);
     }
@@ -322,7 +390,7 @@ const FileTree: Component<Props> = (props) => {
     if (!path) return;
     try {
       await api.fileOp({ op: "mkdir", path, parents: true });
-      refreshTree();
+      refreshFolder(parentFolder(path));
     } catch (e) {
       reportError(`mkdir failed: ${(e as Error).message}`);
     }
@@ -356,7 +424,10 @@ const FileTree: Component<Props> = (props) => {
         to: nextPath,
         create_parents: true,
       });
-      refreshTree();
+      // Both ends move: the source folder loses the entry, the destination
+      // folder gains it.
+      refreshFolder(parentFolder(node.path));
+      refreshFolder(parentFolder(nextPath));
       if (!node.is_dir && result.path) {
         openFile(result.path);
       }
@@ -381,7 +452,7 @@ const FileTree: Component<Props> = (props) => {
         to: nextPath,
         create_parents: true,
       });
-      refreshTree();
+      refreshFolder(parentFolder(nextPath));
       if (!node.is_dir && result.path) {
         openFile(result.path);
       }
@@ -405,7 +476,7 @@ const FileTree: Component<Props> = (props) => {
         path: node.path,
         recursive: node.is_dir,
       });
-      refreshTree();
+      refreshFolder(parentFolder(node.path));
     } catch (e) {
       reportError(`delete failed: ${(e as Error).message}`);
     }
@@ -418,6 +489,7 @@ const FileTree: Component<Props> = (props) => {
 
   const uploadFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    const targetDir = uploadTarget();
     try {
       for (const file of Array.from(files)) {
         const buffer = await file.arrayBuffer();
@@ -425,10 +497,10 @@ const FileTree: Component<Props> = (props) => {
         let binary = "";
         for (const byte of bytes) binary += String.fromCharCode(byte);
         const b64 = btoa(binary);
-        const dest = joinPath(uploadTarget(), file.name);
+        const dest = joinPath(targetDir, file.name);
         await api.writeFileBase64(dest, b64, true);
       }
-      refreshTree();
+      refreshFolder(targetDir);
     } catch (e) {
       reportError(`upload failed: ${(e as Error).message}`);
     } finally {

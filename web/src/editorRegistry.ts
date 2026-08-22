@@ -9,6 +9,11 @@ interface EditorRegistration {
   path: string;
   getEditor: () => StandaloneEditor | null;
   getModel: () => TextModel | null;
+  /** Persist the editor's current buffer. Registered so a Ctrl/Cmd+S that
+   *  lands outside Monaco (the tab bar, the file tree, a split header) can
+   *  still save the active editor instead of falling through to the browser's
+   *  Save-Page dialog (#237). */
+  save?: () => void | Promise<void>;
 }
 
 export interface EditorSymbolResult {
@@ -66,6 +71,18 @@ export function registerEditor(tabId: string, registration: EditorRegistration):
 
 export function hasRegisteredEditor(tabId: string): boolean {
   return editors.has(tabId);
+}
+
+/**
+ * Save the editor registered for `tabId`, if any. Returns whether a save was
+ * dispatched — the caller uses the result to decide whether it still needs to
+ * let the keystroke through (it never does when we saved).
+ */
+export function saveRegisteredEditor(tabId: string): boolean {
+  const save = editors.get(tabId)?.save;
+  if (!save) return false;
+  void save();
+  return true;
 }
 
 export async function listEditorSymbols(tabId: string): Promise<EditorSymbolResult[]> {

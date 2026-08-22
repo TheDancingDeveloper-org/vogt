@@ -27,6 +27,9 @@ import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { listProjects } from "./vogtApi";
 import { repositoryChoices } from "./gitRepositories";
 import { createRetainedRead } from "./retainedRead";
+import { openEditorTab } from "./tabs";
+import { bumpWorkspaceVersion } from "./workspaceVersion";
+import { consumePendingReveal, pendingRevealPath } from "./gitReveal";
 
 interface Props {
   repo: string;
@@ -410,6 +413,9 @@ const GitTab: Component<Props> = (props) => {
         logRead.retry(),
       ]);
       setDiffRefreshKey((value) => value + 1);
+      // A stage/commit/checkout can change the working tree the file tree
+      // renders (and its Git markers) — reflect it there too (#238).
+      bumpWorkspaceVersion();
       return response;
     } catch (e) {
       setActionError(formatApiError(e));
@@ -419,20 +425,99 @@ const GitTab: Component<Props> = (props) => {
     }
   };
 
+  // Success banners are transient: clear an `actionInfo` after a few seconds so
+  // it does not linger as a stale claim after the state it described moved on
+  // (#239). An error stays until the next action replaces it.
+  createEffect(() => {
+    if (!actionInfo()) return;
+    const timer = window.setTimeout(() => setActionInfo(null), 4000);
+    onCleanup(() => window.clearTimeout(timer));
+  });
+
+  // "Reveal in Git" from the editor stashes a path and routes here. Once this
+  // repo's status is loaded, claim the path if it tracks it — selecting the
+  // file so the reader lands on its diff. A path this repo does not track is
+  // left pending for whichever repo does (#238).
+  createEffect(() => {
+    const pending = pendingRevealPath();
+    if (!pending) return;
+    const entries = status()?.entries;
+    if (!entries) return;
+    if (entries.some((entry) => entry.path === pending)) {
+      setSelected(pending);
+      consumePendingReveal();
+    }
+  });
+
+  // Whether an arbitrary entry (not just the selected one) can be staged or
+  // unstaged — for the per-row controls (#239).
+  const entryStageable = (entry: GitStatusEntry) =>
+    entry.kind === "untracked" || entry.worktree !== " ";
+  const entryUnstageable = (entry: GitStatusEntry) =>
+    entry.index !== " " && entry.index !== "?";
+
+  const stageEntry = async (entry: GitStatusEntry) => {
+    const response = await runGitOp({ op: "stage", repo: props.repo, path: entry.path });
+    if (!response) return;
+    // After staging, the file's changes live on the index — show that side of
+    // the diff instead of leaving the reader on the now-empty Worktree view.
+    setSelected(entry.path);
+    setDiffStaged(true);
+    setActionInfo(`Staged ${entry.path}`);
+  };
+
+  const unstageEntry = async (entry: GitStatusEntry) => {
+    const response = await runGitOp({ op: "unstage", repo: props.repo, path: entry.path });
+    if (!response) return;
+    setSelected(entry.path);
+    setDiffStaged(false);
+    setActionInfo(`Unstaged ${entry.path}`);
+  };
+
   const stageSelected = async () => {
     const entry = selectedEntry();
     if (!entry) return;
-    const response = await runGitOp({ op: "stage", repo: props.repo, path: entry.path });
-    if (!response) return;
-    setActionInfo(`Staged ${entry.path}`);
+    await stageEntry(entry);
   };
 
   const unstageSelected = async () => {
     const entry = selectedEntry();
     if (!entry) return;
-    const response = await runGitOp({ op: "unstage", repo: props.repo, path: entry.path });
-    if (!response) return;
-    setActionInfo(`Unstaged ${entry.path}`);
+    await unstageEntry(entry);
+  };
+
+  const stageableEntries = createMemo(
+    () => status()?.entries.filter(entryStageable) ?? [],
+  );
+
+  // Stage every currently-unstaged change in one go, refetching once at the end
+  // rather than after each file (#239).
+  const stageAll = async () => {
+    const targets = stageableEntries();
+    if (targets.length === 0) return;
+    setBusyAction("stage");
+    setActionError(null);
+    setActionInfo(null);
+    try {
+      for (const entry of targets) {
+        await api.gitOp({ op: "stage", repo: props.repo, path: entry.path });
+      }
+      await Promise.all([
+        statusRead.retry(),
+        branchesRead.retry(),
+        logRead.retry(),
+      ]);
+      setDiffRefreshKey((value) => value + 1);
+      bumpWorkspaceVersion();
+      setDiffStaged(true);
+      setActionInfo(
+        `Staged ${targets.length} file${targets.length === 1 ? "" : "s"}`,
+      );
+    } catch (e) {
+      setActionError(formatApiError(e));
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   const discardSelected = async () => {
@@ -763,6 +848,11 @@ const GitTab: Component<Props> = (props) => {
                       {busy("commit") ? "Committing..." : "Commit staged"}
                     </button>
                   </div>
+                  <Show when={!notRepo() && stagedCount() === 0}>
+                    <p class="meta git-commit-hint">
+                      Stage a file to enable committing — use a row's + or Stage all.
+                    </p>
+                  </Show>
                 </div>
               </div>
             </section>
@@ -771,7 +861,18 @@ const GitTab: Component<Props> = (props) => {
               class={`git-status-panel ${statusRead.stale() ? "stale" : ""}`}
               aria-label="Working tree status"
             >
-              <div class="git-section-title">Status</div>
+              <div class="git-section-title git-status-heading">
+                <span>Status</span>
+                <button
+                  type="button"
+                  class="git-stage-all"
+                  onClick={() => void stageAll()}
+                  disabled={notRepo() || busyAction() !== null || stageableEntries().length === 0}
+                  title="Stage every unstaged change"
+                >
+                  {busy("stage") ? "Staging..." : "Stage all"}
+                </button>
+              </div>
               <Show
                 when={!notRepo() && (status()?.entries.length ?? 0) > 0}
                 fallback={
@@ -792,15 +893,45 @@ const GitTab: Component<Props> = (props) => {
                       <div class="git-group">{kindLabel[kind]}</div>
                       <For each={grouped()[kind]}>
                         {(entry) => (
-                          <button
-                            type="button"
-                            class={`git-entry ${selected() === entry.path ? "selected" : ""}`}
-                            onClick={() => setSelected(entry.path)}
-                            title={`${entry.index}${entry.worktree} ${entry.path}`}
+                          <div
+                            class={`git-entry-row ${selected() === entry.path ? "selected" : ""}`}
                           >
-                            <span class={`git-badge git-${kind}`}>{kindBadge[kind]}</span>
-                            <span class="git-path">{entry.path}</span>
-                          </button>
+                            <button
+                              type="button"
+                              class={`git-entry ${selected() === entry.path ? "selected" : ""}`}
+                              onClick={() => setSelected(entry.path)}
+                              title={`${entry.index}${entry.worktree} ${entry.path}`}
+                            >
+                              <span class={`git-badge git-${kind}`}>{kindBadge[kind]}</span>
+                              <span class="git-path">{entry.path}</span>
+                            </button>
+                            <div class="git-entry-actions">
+                              <Show when={entryStageable(entry)}>
+                                <button
+                                  type="button"
+                                  class="git-entry-stage"
+                                  aria-label={`Stage ${entry.path}`}
+                                  title={`Stage ${entry.path}`}
+                                  onClick={() => void stageEntry(entry)}
+                                  disabled={busyAction() !== null}
+                                >
+                                  +
+                                </button>
+                              </Show>
+                              <Show when={entryUnstageable(entry)}>
+                                <button
+                                  type="button"
+                                  class="git-entry-unstage"
+                                  aria-label={`Unstage ${entry.path}`}
+                                  title={`Unstage ${entry.path}`}
+                                  onClick={() => void unstageEntry(entry)}
+                                  disabled={busyAction() !== null}
+                                >
+                                  {"−"}
+                                </button>
+                              </Show>
+                            </div>
+                          </div>
                         )}
                       </For>
                     </Show>
@@ -857,6 +988,15 @@ const GitTab: Component<Props> = (props) => {
                   <div class="git-diff-toolbar">
                     <div class="git-diff-path">{entry().path}</div>
                     <div class="git-diff-actions">
+                    <button
+                      onClick={() => {
+                        openEditorTab(entry().path);
+                        void navigate(`/e/${encodeURIComponent(entry().path)}`);
+                      }}
+                      title="Open this file in the editor"
+                    >
+                      Open file
+                    </button>
                     <button
                       class={diffStaged() ? "" : "active"}
                       onClick={() => setDiffStaged(false)}

@@ -223,6 +223,14 @@ pub struct FileRead {
     pub content_base64: Option<String>,
     #[serde(default)]
     pub is_binary: bool,
+    /// On-disk modification time, milliseconds since the Unix epoch. Lets a
+    /// client detect that a file changed underneath it since it last read.
+    #[serde(default)]
+    pub mtime: u64,
+    /// SHA-256 of the file's bytes, hex-encoded. The robust, content-based
+    /// half of optimistic concurrency: pass it back as `WriteReq::if_match`.
+    #[serde(default)]
+    pub hash: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -234,6 +242,12 @@ pub struct WriteReq {
     pub content_base64: Option<String>,
     #[serde(default)]
     pub create_parents: bool,
+    /// Optimistic-concurrency guard: the SHA-256 hex the client last read for
+    /// this file. When present and the on-disk hash no longer matches, the
+    /// write is refused with 409 Conflict rather than clobbering newer content.
+    /// Absent (`None`) preserves the original last-writer-wins behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_match: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +381,13 @@ impl OkResponse {
 pub struct WriteFileResponse {
     pub ok: bool,
     pub bytes: usize,
+    /// SHA-256 hex of the bytes just written — the client adopts this as its
+    /// new `if_match` baseline without needing to re-read the file.
+    #[serde(default)]
+    pub hash: String,
+    /// On-disk mtime after the write, milliseconds since the Unix epoch.
+    #[serde(default)]
+    pub mtime: u64,
 }
 
 #[cfg(test)]

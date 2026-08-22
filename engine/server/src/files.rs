@@ -12,6 +12,7 @@ use mydevenv2_contract::{
     FileEntry, FileRead, FileSearchResult, SearchHit, TreeNode, WriteFileResponse, WriteReq,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tokio_util::io::ReaderStream;
 
@@ -27,6 +28,30 @@ fn rel_to(root: &Path, p: &Path) -> String {
         Ok(r) => r.to_string_lossy().into_owned(),
         Err(_) => p.to_string_lossy().into_owned(),
     }
+}
+
+/// SHA-256 of a byte slice, hex-encoded. Content-based ETag for a file — the
+/// robust half of the editor's optimistic-concurrency guard.
+fn hash_bytes(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    let digest = h.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// A file's modified time as milliseconds since the Unix epoch, or 0 when the
+/// platform can't report it (never a hard failure — mtime is advisory).
+fn mtime_millis(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +134,8 @@ pub async fn read_file(
         )));
     }
     let bytes = tokio::fs::read(&p).await?;
+    let hash = hash_bytes(&bytes);
+    let mtime = mtime_millis(&meta);
     let is_binary = looks_binary(&bytes);
     let resp = if is_binary {
         FileRead {
@@ -117,6 +144,8 @@ pub async fn read_file(
             content: None,
             content_base64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
             is_binary: true,
+            mtime,
+            hash,
         }
     } else {
         // Replace invalid UTF-8 with U+FFFD rather than refusing — most "text"
@@ -128,6 +157,8 @@ pub async fn read_file(
             content: Some(s),
             content_base64: None,
             is_binary: false,
+            mtime,
+            hash,
         }
     };
     Ok(Json(resp))
@@ -196,9 +227,38 @@ pub async fn write_file(
         }
     }
     let p = workspace_path::resolve_for_write(&state.config.workspace_root, &req.path)?;
+
+    // Optimistic-concurrency guard. When the client sends the hash it last
+    // read, compare it against the current on-disk bytes and refuse the write
+    // if the file changed underneath it. A missing file hashes as empty, so a
+    // client that read real content and then finds the file gone also conflicts.
+    if let Some(expected) = req.if_match.as_deref() {
+        let current_hash = match tokio::fs::read(&p).await {
+            Ok(cur) => hash_bytes(&cur),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => hash_bytes(&[]),
+            Err(e) => return Err(ApiError::Io(e)),
+        };
+        if current_hash != expected {
+            return Err(ApiError::Conflict(format!(
+                "file changed on disk since it was read (expected {expected}, found {current_hash}); \
+                 reload before saving to avoid clobbering newer content"
+            )));
+        }
+    }
+
     let n = bytes.len();
     tokio::fs::write(&p, &bytes).await?;
-    Ok(Json(WriteFileResponse { ok: true, bytes: n }))
+    let hash = hash_bytes(&bytes);
+    let mtime = tokio::fs::metadata(&p)
+        .await
+        .map(|m| mtime_millis(&m))
+        .unwrap_or(0);
+    Ok(Json(WriteFileResponse {
+        ok: true,
+        bytes: n,
+        hash,
+        mtime,
+    }))
 }
 
 #[derive(Debug, Serialize)]

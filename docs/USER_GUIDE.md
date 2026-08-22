@@ -108,6 +108,15 @@ show a quiet status letter such as `M`, and the labelled row menu retains
 rename/move, duplicate, download, delete, upload-here, terminal and preset
 operations where they apply.
 
+Which folders are expanded, the search query and the editor sidebar's collapse
+state are remembered, so switching to another tab and back leaves the tree as
+you left it rather than collapsing to the root. A file operation refetches only
+the affected folder, and the tree reconciles its rows and Git markers when the
+workspace changes under it — a save, a Git action, a new file — and when the tab
+regains focus. A session's row menu also offers **Open files here** and **Git
+here**, which jump to that session's working directory in the file tree and the
+Git tab.
+
 | Surface | Link | What it is |
 |---|---|---|
 | **Board** | `#/board` | Work items in columns. The columns *are* the workflow's states, read from the server — not written down anywhere in the client. |
@@ -314,6 +323,19 @@ listeners and large editor surfaces do not run in the background. Editor text
 and view position are retained while switching tools, and any dirty editor
 also activates the browser/PWA exit confirmation until it is saved.
 
+**Saving is guarded against clobbering.** The editor remembers the version it
+last read; a save that would overwrite a file changed on disk since then is
+refused and shown inline as **File changed on disk** with **Overwrite** and
+**Reload** — Overwrite forces your version past the guard, Reload takes the
+disk's newer content. The toolbar's **Reload** button discards local changes
+and re-reads at any time, and **Save** is disabled while the file is clean.
+`Ctrl/Cmd+S` saves the active editor even when focus is on the tab bar, the file
+tree or a split header rather than inside Monaco. If an unsaved draft is
+restored on top of a file the disk has since moved past, the editor says
+**Restored unsaved draft; disk differs** so the mismatch is not silent. The
+toolbar also carries **Reveal in Git**, which opens the Git tab and selects the
+file where a repository tracks it.
+
 With no tool open, the Sessions overview is a live list of the running
 sessions — name, activity dot and state word, and working directory — each a
 link into its terminal, sorted with whatever wants attention first. When there
@@ -357,6 +379,13 @@ boundary; projects outside that boundary remain visible but unavailable. It
 does not crawl the workspace or discover unregistered repositories. Choosing a
 project writes its workspace-relative path into `#/g/<repo>`, so reload and
 browser Back/Forward preserve the selection.
+
+Each status row carries its own **+** / **−** to stage or unstage it, and a
+**Stage all** beside the Status heading stages every change at once; staging a
+file flips the diff to the index side rather than leaving you on the emptied
+worktree view. **Commit staged** is disabled while nothing is staged, with a
+hint saying so, and the diff toolbar's **Open file** opens the selected file in
+the editor. Success banners clear themselves after a few seconds.
 
 Git status, branches, commit history and the selected diff report failures in
 their own panels and offer Retry. If a refresh fails after a successful read,

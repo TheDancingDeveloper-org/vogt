@@ -2617,6 +2617,31 @@ textarea {
   min-height: 0;
   min-width: 0;
 }
+/* Inline notices between the toolbar and the editor: a stale-save conflict and
+   a restored-but-stale draft (#237). */
+.editor-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  font-size: 12px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--bd);
+}
+.editor-banner-conflict {
+  background: rgba(210, 153, 34, 0.16);
+  color: var(--fg);
+}
+.editor-banner-draft {
+  background: rgba(88, 166, 255, 0.12);
+  color: var(--fg);
+}
+.editor-banner-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
 
 /* Git tab */
 .git-shell {
@@ -2868,6 +2893,62 @@ textarea {
 }
 .git-entry.selected {
   background: rgba(88, 166, 255, 0.1);
+}
+/* A status row: the selectable entry plus per-row stage/unstage controls. */
+.git-entry-row {
+  display: flex;
+  align-items: center;
+}
+.git-entry-row .git-entry {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.git-entry-actions {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding-right: 6px;
+  opacity: 0;
+}
+.git-entry-row:hover .git-entry-actions,
+.git-entry-row:focus-within .git-entry-actions {
+  opacity: 1;
+}
+.git-entry-stage,
+.git-entry-unstage {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  line-height: 1;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--fg);
+  cursor: pointer;
+}
+.git-entry-stage:hover,
+.git-entry-unstage:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.git-entry-stage:disabled,
+.git-entry-unstage:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.git-status-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.git-stage-all {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.git-commit-hint {
+  margin: 4px 0 0;
+  color: var(--fg-muted);
+  font-size: 11px;
 }
 .git-path {
   font-family: ui-monospace, monospace;

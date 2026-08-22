@@ -3,11 +3,11 @@ import {
   For,
   Show,
   createEffect,
-  createSignal,
   untrack,
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import Editor from "./Editor";
+import { sidebarCollapsed, setSidebarCollapsed } from "./fileTreeState";
 import FileTree from "./FileTree";
 import SplitEditor from "./SplitEditor";
 import {
@@ -32,7 +32,6 @@ interface Props {
 
 const EditorWorkspace: Component<Props> = (props) => {
   const navigate = useNavigate();
-  const [sidebarCollapsed, setSidebarCollapsed] = createSignal(false);
 
   const editorTabs = () =>
     tabsStore.tabs.filter((tab): tab is Extract<Tab, { kind: "editor" }> => {
