@@ -712,7 +712,7 @@ test("Board progressive filters survive reload, history, and saved-lens recall",
   await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
 
   const filters = page.getByRole("group", { name: "Board filters" });
-  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(filters.getByText("Project: Vogt")).toBeVisible();
   await expect(filters.getByText("Swimlanes: project")).toBeVisible();
   await expect(page.getByRole("group", { name: "Add Board filters" })).toBeHidden();
 
@@ -727,7 +727,7 @@ test("Board progressive filters survive reload, history, and saved-lens recall",
   await page.getByRole("button", { name: "Save lens" }).click();
   await expect(page.locator(".board-saved-recall")).toHaveText("Vogt features");
 
-  await filters.getByRole("button", { name: "Remove filter Project: vogt" }).click();
+  await filters.getByRole("button", { name: "Remove filter Project: Vogt" }).click();
   await expect(page).not.toHaveURL(/project=vogt/);
   await page.reload();
   await expect(filters.getByText("Type: feature")).toBeVisible();
@@ -742,7 +742,7 @@ test("Board progressive filters survive reload, history, and saved-lens recall",
   await page.goto("/#/board?label=infra");
   await expect(filters.getByText("Label: infra")).toBeVisible();
   await page.goBack();
-  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(filters.getByText("Project: Vogt")).toBeVisible();
   await expect(filters.getByText("Type: feature")).toBeVisible();
   await page.goForward();
   await expect(filters.getByText("Label: infra")).toBeVisible();
@@ -759,7 +759,7 @@ test("Board filters survive a return through the rail, not just browser Back", a
   await page.goto("/#/board?project=vogt");
   await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
   const filters = page.getByRole("group", { name: "Board filters" });
-  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(filters.getByText("Project: Vogt")).toBeVisible();
 
   // Open the item, which unmounts the Board (the surface mounts only while the
   // path is exactly `/board`).
@@ -773,7 +773,7 @@ test("Board filters survive a return through the rail, not just browser Back", a
 
   await expect(page).toHaveURL(/project=vogt/);
   await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
-  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(filters.getByText("Project: Vogt")).toBeVisible();
 });
 
 test("Backlog filters survive a return through the rail, not just browser Back", async ({ page }) => {
@@ -782,7 +782,7 @@ test("Backlog filters survive a return through the rail, not just browser Back",
   await page.goto("/#/backlog?project=vogt");
   await expect(page.getByRole("heading", { name: "Backlog" })).toBeVisible();
   const filters = page.getByRole("group", { name: "Backlog filters" });
-  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(filters.getByText("Project: Vogt")).toBeVisible();
 
   // Open the item from its ref link, which unmounts the Backlog.
   await page.locator(".vogt-backlog-link").first().click();
@@ -793,7 +793,97 @@ test("Backlog filters survive a return through the rail, not just browser Back",
 
   await expect(page).toHaveURL(/project=vogt/);
   await expect(page.getByRole("heading", { name: "Backlog" })).toBeVisible();
-  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(filters.getByText("Project: Vogt")).toBeVisible();
+});
+
+// #217: a ref is a machine handle, not a name. Every surface that renders a
+// project slug or an actor identity ref resolves it through the loaded lists to
+// the human name, keeps the raw ref on the element's `title`, and — for a
+// project — links to that project.
+test("Board card shows resolved project and assignee names, with the raw refs kept in the title", async ({ page }) => {
+  await installFixtures(page, {}, [], undefined, {
+    projects: [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }],
+    actors: [{ identity_ref: "local:ana", display_name: "Ana" }],
+    boardItems: [{
+      ...boardItems[0], ref: "WI-7", title: "Named refs card", state: "open",
+      project_slug: "vogt", assignee_identity_ref: "local:ana",
+    }],
+  });
+  await page.goto("/#/board");
+  const card = page.locator(".board-card").filter({ hasText: "Named refs card" });
+  await expect(card).toBeVisible();
+  const meta = card.locator(".board-card-meta");
+
+  // The project reads as its name, links to the project, and carries the slug.
+  const projectLink = meta.locator("a.board-card-project");
+  await expect(projectLink).toHaveText("Vogt");
+  await expect(projectLink).toHaveAttribute("title", "vogt");
+  await expect(projectLink).toHaveAttribute("href", "#/projects?p=vogt");
+
+  // The assignee reads as its display name, with the identity ref in the title.
+  const assignee = meta.locator("span[title='local:ana']");
+  await expect(assignee).toHaveText("Ana");
+});
+
+// #217: the counts on a project's Work panel are the way into that project's
+// board, backlog and audit, filtered to it.
+test("Projects Work panel cross-links the counts to the board, backlog and audit for the project", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The desktop panel layout is enough to prove the links (#217)");
+  await installFixtures(page, {}, [], undefined, {
+    projects: [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }],
+  });
+  await page.route("**/api/vogt/projects/brief**", async (route) => route.fulfill({ json: {
+    project: { slug: "vogt", name: "Vogt", lifecycle_state: "active", trust_state: "verified" },
+    open_work: 3,
+    open_bugs: 1,
+    by_state: { open: 2, in_progress: 1 },
+    by_kind: { feature: 2, bug: 1 },
+    compliance_status: "not_applicable",
+    freshness: { status: "fresh" },
+  } }));
+  // The overview also draws a compliance panel; give it a well-formed answer so
+  // the panel renders rather than the whole detail erroring on empty data.
+  await page.route("**/api/vogt/compliance**", async (route) => route.fulfill({ json: {
+    contract_version: "1.0", checked_at: "2026-08-17T10:00:00Z", age_seconds: 0,
+    failing: [], detail: null,
+  } }));
+  await page.goto("/#/projects?p=vogt");
+
+  const work = page.locator(".vogt-projects-panel").filter({ hasText: "Work" });
+  await expect(work).toBeVisible();
+  // The four cross-links carry the project as `?project=vogt`.
+  await expect(work.locator('a[href="#/board?project=vogt"]')).toHaveText("3");
+  await expect(work.locator('a[href="#/backlog?view=bugs&project=vogt"]')).toHaveText("1");
+  await expect(work.locator('a[href="#/board?project=vogt&state=open"]')).toContainText("open: 2");
+  await expect(work.locator('a[href="#/audit?project=vogt"]')).toBeVisible();
+
+  // Following the open-work link lands on the Board, scoped to the project, and
+  // the filter chip names the project it landed on.
+  await work.locator('a[href="#/board?project=vogt"]').click();
+  await expect(page).toHaveURL(/project=vogt/);
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+  await expect(
+    page.getByRole("group", { name: "Board filters" }).getByText("Project: Vogt"),
+  ).toBeVisible();
+});
+
+// #227: the registry is where you go to find a project, so it filters.
+test("Projects registry narrows the list to a name/slug search", async ({ page }) => {
+  await installFixtures(page, {}, [], undefined, {
+    projectsTotal: 3,
+    projects: [
+      { slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" },
+      { slug: "cadastre", name: "Cadastre", root_path: "/workspace/cadastre" },
+      { slug: "beta", name: "Beta", root_path: "/workspace/beta" },
+    ],
+  });
+  await page.goto("/#/projects");
+  const cards = page.locator(".vogt-projects-card");
+  await expect(cards).toHaveCount(3);
+
+  await page.getByRole("searchbox", { name: "Filter projects" }).fill("cad");
+  await expect(cards).toHaveCount(1);
+  await expect(cards.first()).toContainText("Cadastre");
 });
 
 test("Phone Board renders one URL-selected workflow state without widening the server filter", async ({ page }) => {
@@ -2335,7 +2425,7 @@ test("Backlog filters are chips, a + Filter disclosure and a named lens", async 
   await page.goto("/#/backlog?project=vogt");
 
   const filters = page.getByRole("group", { name: "Backlog filters", exact: true });
-  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(filters.getByText("Project: Vogt")).toBeVisible();
   await expect(page.getByRole("group", { name: "Add Backlog filters" })).toBeHidden();
   // The legacy always-open select grid is gone: the selects live behind the
   // disclosure, not above the ranked work.
@@ -2358,7 +2448,7 @@ test("Backlog filters are chips, a + Filter disclosure and a named lens", async 
   await page.getByRole("button", { name: "Save lens" }).click();
   await expect(page.locator(".vogt-backlog-saved-recall")).toHaveText("Vogt features");
 
-  await filters.getByRole("button", { name: "Remove filter Project: vogt" }).click();
+  await filters.getByRole("button", { name: "Remove filter Project: Vogt" }).click();
   await expect(page).not.toHaveURL(/project=vogt/);
   await expect(page).toHaveURL(/kind=feature/);
 
@@ -2371,7 +2461,7 @@ test("Backlog filters are chips, a + Filter disclosure and a named lens", async 
   await expect(page).toHaveURL(/kind=feature/);
 
   await page.reload();
-  await expect(filters.getByText("Project: vogt")).toBeVisible();
+  await expect(filters.getByText("Project: Vogt")).toBeVisible();
   await expect(filters.getByText("Type: feature")).toBeVisible();
 });
 

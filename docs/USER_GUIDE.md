@@ -148,6 +148,11 @@ a target-state select — the workflow's own legal edges for that card.
   back keeps the filter set — through Browser Back, and through the rail,
   command palette and phone bottom bar, which return to the last filtered view
   the surface held rather than a bare board.
+- **Names, not refs.** A card names its project and its assignee rather than
+  showing the raw slug or identity ref, resolving each through the lists the
+  board already loaded and keeping the raw ref in the element's tooltip when
+  they differ; the filter chips name the project and assignee the same way. The
+  project on a card is a link to its Projects page.
 - **Quick-create** raises an item without leaving the board.
 - Long cards expand and collapse in place so their full title and body remain
   readable without leaving the bounded, measured Board. An expanded body is
@@ -185,7 +190,9 @@ together, and every row can say why it is where it is.
   **Start a session…** sits on that collapsed line next to **More**, so it does
   not need the detail opened first. On a phone the row leads with its title and
   keeps a single compact meta line under it — `ref · kind · state · score`, with
-  *why* an inline link — and the session act moves into the expanded detail.
+  *why* an inline link — and the session act moves into the expanded detail. The
+  row names its project rather than showing the slug, keeps the slug in the
+  tooltip, and links it to that project's Projects page.
 - **More** opens the rest of the row in place: an observed subject's
   provenance, the ranking factors behind its score, and the acts that row
   actually has. Declared rows offer Open and Select; observed subjects offer
@@ -242,6 +249,15 @@ holds the current answer rather than swapping it out from under you.
 A project page shows its brief, CI status, contract compliance with the
 criteria that failed, the dependency graph, the import form, and the drift
 inbox.
+
+The **registry list** filters by a name-or-slug search and sorts by name,
+lifecycle or trust, all client-side — the estate returns every registered
+project, so narrowing and ordering are presentation, not another query. A
+project's **Work** panel is the way into that project's work: its counts are
+links — open work to the Board scoped to the project, open bugs to the bugs
+view, each by-state count to that state on the Board, and an Audit link to
+every write against the project. Each is the same `?project=<slug>` (or
+`?p=<slug>`) deep link a pasted URL restores.
 
 The drift inbox shows **both sides of each disagreement, with provenance and
 age, before any action is possible**. Accept and reject each collect a typed

@@ -68,6 +68,7 @@ import {
 import { MeasuredWindow } from "./measuredWindow";
 import SurfaceHeader from "./SurfaceHeader";
 import { ProgressiveFilters, SavedLenses } from "./ProgressiveFilters";
+import { actorName as resolveActorName, projectName as resolveProjectName } from "./refNames";
 
 interface Props {
   onError?: (message: string) => void;
@@ -696,6 +697,19 @@ const Backlog: Component<Props> = (props) => {
     if (filter().actor) seen.add(filter().actor);
     return [...seen].sort();
   });
+
+  // The loaded rows, for resolving a slug or an identity ref to a name. The
+  // ranked entries carry only the slug, so the name comes from the registry.
+  const projectRows = createMemo(() => {
+    const result = projects();
+    return result && result.ok ? result.value.projects : [];
+  });
+  const projectLabel = (slug: string) => resolveProjectName(projectRows(), slug);
+  const actorRows = createMemo(() => {
+    const result = actors();
+    return result && result.ok ? result.value.actors : [];
+  });
+  const actorLabel = (ref: string) => resolveActorName(actorRows(), ref);
 
   const facetNote = createMemo(() => {
     const missing: string[] = [];
@@ -1392,8 +1406,13 @@ const Backlog: Component<Props> = (props) => {
 
   const activeFilterChips = createMemo(() => {
     const active = filter();
-    const chips: { key: string; label: string }[] = [];
-    if (active.project) chips.push({ key: "project", label: `Project: ${active.project}` });
+    const chips: { key: string; label: string; title?: string }[] = [];
+    if (active.project)
+      chips.push({
+        key: "project",
+        label: `Project: ${projectLabel(active.project)}`,
+        title: active.project,
+      });
     if (active.kinds.length)
       chips.push({ key: "kinds", label: `Type: ${active.kinds.join(", ")}` });
     if (active.states.length)
@@ -1407,7 +1426,12 @@ const Backlog: Component<Props> = (props) => {
     if (active.label) chips.push({ key: "label", label: `Label: ${active.label}` });
     if (active.initiative)
       chips.push({ key: "initiative", label: `Initiative: ${active.initiative}` });
-    if (active.actor) chips.push({ key: "actor", label: `Actor: ${active.actor}` });
+    if (active.actor)
+      chips.push({
+        key: "actor",
+        label: `Actor: ${actorLabel(active.actor)}`,
+        title: active.actor,
+      });
     return chips;
   });
 
@@ -1986,7 +2010,20 @@ const Backlog: Component<Props> = (props) => {
 
                           <div class="vogt-backlog-row-tags">
                             <span>{entry.priority}</span>
-                            <span>{entry.project_slug ?? "no project"}</span>
+                            <Show
+                              when={entry.project_slug}
+                              fallback={<span>no project</span>}
+                            >
+                              {(slug) => (
+                                <a
+                                  class="vogt-backlog-rowproject"
+                                  href={`#/projects?p=${encodeURIComponent(slug())}`}
+                                  title={slug()}
+                                >
+                                  {projectLabel(slug())}
+                                </a>
+                              )}
+                            </Show>
                             <For each={entry.labels ?? []}>
                               {(label) => <span class="vogt-backlog-rowlabel">{label}</span>}
                             </For>

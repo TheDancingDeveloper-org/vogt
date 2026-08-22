@@ -988,7 +988,13 @@ describe("#213 — the editor changes assignee, effort, labels and body", () => 
       },
     });
     const { container } = detail();
-    await waitFor(() => expect(facts(container)).toContain("assignee: local:ana"));
+    // #217: the chip shows the actor's display name, and keeps the raw
+    // identity ref on its `title` so the machine handle is never lost.
+    await waitFor(() => expect(facts(container)).toContain("assignee: Ana"));
+    const assigneeChip = [...container.querySelectorAll<HTMLElement>(".wid-chip")].find(
+      (node) => node.textContent?.startsWith("assignee:"),
+    );
+    expect(assigneeChip?.getAttribute("title")).toBe("local:ana");
 
     const form = await openEditor(container);
     const picker = field(form, "Assignee") as HTMLSelectElement;
@@ -1064,7 +1070,7 @@ describe("#213 — the editor changes assignee, effort, labels and body", () => 
       },
     });
     const { container } = detail();
-    await waitFor(() => expect(facts(container)).toContain("assignee: local:ana"));
+    await waitFor(() => expect(facts(container)).toContain("assignee: Ana"));
 
     const form = await openEditor(container);
     // The editor opens on the server's own values.
