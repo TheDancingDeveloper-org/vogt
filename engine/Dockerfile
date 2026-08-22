@@ -84,8 +84,13 @@ ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.9.18
 # lives in the workflow rather than in this line, unlike the mirrored bases
 # above whose digests Renovate maintains here.
 ARG POD_BASE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean
-# The published public core image, digest-pinned. No default: see stage 3.
-ARG CORE_IMAGE
+# The published public core image, lifted whole in stage 3. The default names
+# the public `:latest` tag so `docker build -f engine/Dockerfile .` works from a
+# clean clone with no `--build-arg`; it is a readable placeholder for a local
+# build, not a supported way to produce a shipped image. CI always overrides it
+# with a **digest** so a commit-identified build pins both halves — see stage 3
+# and `.github/workflows/build.yml`, exactly as `POD_BASE_IMAGE` above.
+ARG CORE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt:latest
 # Off by default (prod). `.github/workflows/build.yml` passes
 # INSTALL_AI_CLIENTS=true when the ref is the `dev` branch — the branch that
 # also produces the `:dev` and `dev-<sha>` tags — to bake in codex + claude
@@ -129,6 +134,7 @@ COPY engine/Cargo.toml engine/Cargo.lock ./
 COPY engine/contract/Cargo.toml ./contract/Cargo.toml
 COPY engine/contract/src ./contract/src
 COPY engine/server/Cargo.toml ./server/Cargo.toml
+COPY engine/server/build.rs ./server/build.rs
 COPY engine/server/src ./server/src
 COPY --from=web-build /app/web/dist /app/web/dist
 # BuildKit cache mounts keep registry/git deps + the target dir warm across
@@ -139,9 +145,9 @@ COPY --from=web-build /app/web/dist /app/web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/engine/target \
-    cargo build --release -p mydevenv2-server \
-    && cp target/release/mydevenv2-server /usr/local/bin/mydevenv2-server \
-    && strip /usr/local/bin/mydevenv2-server
+    cargo build --release -p vogt-engine-server \
+    && cp target/release/vogt-engine /usr/local/bin/vogt-engine \
+    && strip /usr/local/bin/vogt-engine
 
 FROM ${UV_IMAGE} AS uv
 
@@ -163,9 +169,11 @@ FROM ${UV_IMAGE} AS uv
 # interpreter. Verified by copying `/opt/vogt` from the published image into
 # a bare `ubuntu` and running `vogt --version`.
 #
-# CORE_IMAGE has no default on purpose. A floating tag here would silently
-# decouple the two halves of a commit-identified build; `build.yml` passes the
-# digest its own core job just pushed.
+# CORE_IMAGE defaults to the public `:latest` tag (declared at the top of this
+# file) so a bare `docker build` works from a clean clone. A floating tag would
+# silently decouple the two halves of a commit-identified build, so `build.yml`
+# always passes the digest its own core job just pushed — the default is the
+# local-build convenience, never the shipped path.
 ARG CORE_IMAGE
 FROM ${CORE_IMAGE} AS core
 
@@ -281,8 +289,8 @@ RUN if [ "$INSTALL_CADASTRE_MCP" = "true" ]; then \
 
 # The server binary (built in stage 2 with the web bundle embedded; cache
 # mounts in stage 2 mean we have to copy out of /usr/local/bin, not /app).
-COPY --from=server-build /usr/local/bin/mydevenv2-server /usr/local/bin/mydevenv2-server
-RUN chmod +x /usr/local/bin/mydevenv2-server
+COPY --from=server-build /usr/local/bin/vogt-engine /usr/local/bin/vogt-engine
+RUN chmod +x /usr/local/bin/vogt-engine
 
 # The other half. `/opt/vogt` carries the standalone interpreter *and* the
 # venv built against it — see stage 3; splitting them here is how you get a

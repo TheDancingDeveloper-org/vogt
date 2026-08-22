@@ -155,7 +155,12 @@ RUN api="https://api.github.com/repos/github/github-mcp-server/releases/latest" 
     && install -m 755 /tmp/github-mcp-server /usr/local/bin/github-mcp-server \
     && rm -f /tmp/github-mcp-server-release.json /tmp/github-mcp-server.tar.gz /tmp/github-mcp-server
 
-# Tailscale (TUN device must be passed in at runtime)
+# Tailscale — OPTIONAL. The client is installed here, but nothing joins a
+# tailnet by default: `entrypoint.sh` runs `tailscale up` only when
+# `TAILSCALE_AUTH_KEY` is set (and the pod is given the TUN device +
+# NET_ADMIN). A generic image left with that variable unset never touches
+# Tailscale, so this line bakes in a capability, not a network. Estate pods opt
+# in via `deploy/estate.overlay.yml`.
 RUN . /etc/os-release \
     && curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${VERSION_CODENAME}.noarmor.gpg" \
        > /usr/share/keyrings/tailscale-archive-keyring.gpg \

@@ -67,8 +67,8 @@ sessions, stays ready, and refuses the Vogt routes with a named reason
 
 ```
 engine/           its own Cargo workspace — the repository root is not one
-  server/         mydevenv2-server: PTYs, HTTP, WS, SSE, the front door
-  contract/       mydevenv2-contract: shared wire DTOs
+  server/         vogt-engine-server crate → `vogt-engine` binary: PTYs, HTTP, WS, SSE, the front door
+  contract/       vogt-engine-contract: shared wire DTOs
   Dockerfile      the merged image (context is the repository root)
   Dockerfile.pod  the dev-pod toolchain base the merged image builds on
   deploy/         entrypoint, MCP registration and credential helpers, a
@@ -181,7 +181,7 @@ export ENGINE_EXTRA_TOKENS_JSON='[
 
 # 2. Run — from engine/, which is the Cargo workspace root
 cd engine
-cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
+cargo run -p vogt-engine-server -- --bind 127.0.0.1:8910
 ```
 
 Engine settings are read from `ENGINE_*` environment variables, with the
@@ -250,7 +250,7 @@ For UI work, run the server and the Vite dev server in parallel — Vite proxies
 ```bash
 # terminal 1
 cd engine
-ENGINE_TOKEN=$(openssl rand -hex 24) cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
+ENGINE_TOKEN=$(openssl rand -hex 24) cargo run -p vogt-engine-server -- --bind 127.0.0.1:8910
 # terminal 2
 cd web && pnpm dev   # -> http://127.0.0.1:5173, paste the token into Settings
 ```
@@ -262,7 +262,7 @@ cd engine                        # the Cargo workspace root
 cargo fmt --check
 cargo clippy -- -D warnings
 cargo test                       # server unit + integration (HTTP + WS)
-cargo test -p mydevenv2-contract # shared wire-contract tests
+cargo test -p vogt-engine-contract # shared wire-contract tests
 
 cd ../web && pnpm typecheck      # PWA TypeScript check
 cd ../web && pnpm test           # 75 jsdom tests over the five Vogt surfaces
@@ -367,7 +367,7 @@ is wrong.
 
 ### Contract crate
 
-Rust DTOs live in `engine/contract/` (`mydevenv2-contract`). They were shared
+Rust DTOs live in `engine/contract/` (`vogt-engine-contract`). They were shared
 with the archived native client, which the merge left behind, so the server is
 now the only consumer in this tree. Those types cover:
 

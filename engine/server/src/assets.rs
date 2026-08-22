@@ -8,14 +8,15 @@ use rust_embed::RustEmbed;
 
 /// Embedded PWA bundle. Built by `web/` (pnpm build) prior to `cargo build`.
 ///
-/// **`web/dist/` must exist before this crate compiles.** The comment here
-/// used to claim a missing directory yields an empty asset set and a
-/// headless server; it does not. The derive fails to expand and the crate
-/// dies with three errors about `WebAssets` having no `get`, which reads
-/// like a version mismatch in `rust-embed` rather than a missing build step.
-/// An empty `web/dist/` is enough — CI creates a placeholder file there
-/// before building, and so should anything else that builds the engine
-/// without the PWA.
+/// **`web/dist/` must exist before this crate compiles.** A missing directory
+/// does not yield an empty asset set and a headless server: the derive fails to
+/// expand and the crate dies with three errors about `WebAssets` having no
+/// `get`, which reads like a version mismatch in `rust-embed` rather than a
+/// missing build step. An empty `web/dist/` is enough, so `build.rs` writes a
+/// placeholder `index.html` there when the real PWA bundle is absent — that is
+/// what lets a bare `cargo build` succeed on a clean clone. The Docker build
+/// still runs the real `pnpm build` first, so the shipped image embeds the
+/// actual bundle rather than the placeholder.
 #[derive(RustEmbed)]
 #[folder = "../../web/dist/"]
 #[prefix = ""]
@@ -63,7 +64,7 @@ fn not_found() -> Response {
     }
     (
         StatusCode::NOT_FOUND,
-        "MyDevEnv2 web bundle not present (build with: cd web && pnpm build).\n",
+        "Vogt web bundle not present (build with: cd web && pnpm build).\n",
     )
         .into_response()
 }

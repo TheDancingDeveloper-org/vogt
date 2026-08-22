@@ -176,6 +176,12 @@ services:
       MYDEVENV2_BIND: 0.0.0.0:8910
       MYDEVENV2_SCROLLBACK_BYTES: "${MYDEVENV2_SCROLLBACK_BYTES:-4194304}"
       MYDEVENV2_PUBLIC_URL: "${VOGT_PUBLIC_URL:?the URL clients reach the front door at}"
+      # The engine's CORS allow-list. The clean-clone default is local dev only
+      # (estate-neutral, so a public build ships no maintainer hostname), so the
+      # estate names its own PWA origin here. The old host stays through the
+      # transition — an origin removed too early is a CORS failure in a live
+      # browser, and the cost of one extra entry is nothing.
+      ENGINE_ALLOWED_ORIGINS: "${ENGINE_ALLOWED_ORIGINS:-https://vogt.sprooty.com,https://mydevenv2.sprooty.com}"
       RUST_LOG: "${RUST_LOG:-info}"
 
       # Agent auth and its optional integrations.

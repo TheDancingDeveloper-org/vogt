@@ -19,7 +19,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use mydevenv2_server::{app::router, Config};
+use vogt_engine_server::{app::router, Config};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 

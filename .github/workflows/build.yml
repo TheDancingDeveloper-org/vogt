@@ -458,7 +458,7 @@ jobs:
           # processes, so it is asked about both — and about the seam, which
           # is the part that cannot be checked by reading.
           docker run --rm --entrypoint vogt "$CANDIDATE" --version
-          docker run --rm --entrypoint mydevenv2-server "$CANDIDATE" --help >/dev/null
+          docker run --rm --entrypoint vogt-engine "$CANDIDATE" --help >/dev/null
           echo "both halves are present and start"
 
           # The dev image is a working pod, and a pod without the AI clients

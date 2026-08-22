@@ -132,10 +132,10 @@ pub async fn history(State(state): State<Arc<AppState>>) -> Result<Json<HistoryR
 
 pub async fn reset(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<mydevenv2_contract::OkResponse>> {
+) -> Result<Json<vogt_engine_contract::OkResponse>> {
     let rt = runtime(&state)?;
     rt.reset().await;
-    Ok(Json(mydevenv2_contract::OkResponse::new(true)))
+    Ok(Json(vogt_engine_contract::OkResponse::new(true)))
 }
 
 #[derive(Debug, Deserialize)]

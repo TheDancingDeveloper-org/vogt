@@ -299,4 +299,4 @@ fi
 
 # `exec` so the server becomes the container's foreground process from here;
 # SIGTERM from `docker stop` reaches it cleanly. Pass through any args.
-exec /usr/local/bin/mydevenv2-server "$@"
+exec /usr/local/bin/vogt-engine "$@"

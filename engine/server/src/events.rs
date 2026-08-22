@@ -1,4 +1,4 @@
-pub use mydevenv2_contract::ServerEvent;
+pub use vogt_engine_contract::ServerEvent;
 use tokio::sync::broadcast;
 
 #[derive(Clone)]

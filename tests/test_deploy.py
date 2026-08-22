@@ -573,7 +573,7 @@ def test_both_halves_run_before_the_merged_image_is_pushed(workflow: str) -> Non
     job = (WORKFLOWS / workflow).read_text(encoding="utf-8")
     job = job[job.index("  stack-image:") :]
     smoke_vogt = job.index("--entrypoint vogt")
-    smoke_engine = job.index("--entrypoint mydevenv2-server")
+    smoke_engine = job.index("--entrypoint vogt-engine")
     push = job.index("push: true")
     assert max(smoke_vogt, smoke_engine) < push, (
         f"{workflow}: smoke-test the candidate, then push it"
@@ -1634,16 +1634,23 @@ def test_the_engine_takes_its_core_from_the_published_image() -> None:
 
     It used to run a second `uv sync` of the same source, so "the private path
     is the public path plus configuration" was a claim about two builds
-    agreeing that nobody could check. Now it is a digest — and `CORE_IMAGE`
-    must have no default, because a floating tag would silently decouple the
-    two halves of a commit-identified build (NFR-C3).
+    agreeing that nobody could check. Now it is a digest — and NFR-C3's real
+    guarantee is that CI passes that digest, checked below. `CORE_IMAGE` carries
+    a default so a clean clone can `docker build` with no `--build-arg` (#269),
+    but only the public `:latest` placeholder tag: a floating *internal* tag
+    would silently decouple the two halves of a commit-identified build, and CI
+    overrides the placeholder with the digest regardless (same treatment as
+    `POD_BASE_IMAGE`).
     """
     text = ENGINE_DOCKERFILE.read_text("utf-8")
     assert "FROM ${CORE_IMAGE} AS core" in text
     assert "COPY --from=core /opt/vogt /opt/vogt" in text
     assert "AS core-build" not in text, "the engine must not build a second core"
-    assert not re.search(r"^ARG CORE_IMAGE=", text, re.MULTILINE), (
-        "CORE_IMAGE must not default; the caller pins the digest"
+    default = re.search(r"^ARG CORE_IMAGE=(.+)$", text, re.MULTILINE)
+    assert default is not None, "CORE_IMAGE needs a default so a clean clone builds"
+    assert default.group(1).strip() == "ghcr.io/thedancingdeveloper-org/vogt:latest", (
+        "the CORE_IMAGE default must be the public :latest placeholder, "
+        "never an internal/floating tag; CI overrides it with the digest"
     )
 
     for name in ("build.yml", "release.yml"):

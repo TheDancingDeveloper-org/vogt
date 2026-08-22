@@ -514,13 +514,19 @@ pub fn load(
     )?;
 
     let workspace_root_raw = from_file.workspace_root.map(std::path::PathBuf::from);
-    let workspace_root = workspace_root_raw
+    let workspace_root_candidate = workspace_root_raw
         .or_else(|| dirs_home().map(|h| h.join("Working")))
         .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| std::path::PathBuf::from("/"));
-    let workspace_root = workspace_root
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // Canonicalise if possible, but do not make a missing default tree fatal:
+    // a stranger cloning the repo has no `$HOME/Working`, so fall back to the
+    // current directory (canonicalised) and finally to the raw path rather than
+    // aborting startup. A deployment that wants a specific root sets
+    // `workspace_root` in the config file and gets that path back.
+    let workspace_root = workspace_root_candidate
         .canonicalize()
-        .map_err(|e| ApiError::Config(format!("workspace_root {workspace_root:?}: {e}")))?;
+        .or_else(|_| std::env::current_dir().and_then(|d| d.canonicalize()))
+        .unwrap_or(workspace_root_candidate);
 
     let auto_agent_auth = match engine_env("ENGINE_AUTO_AGENT_AUTH") {
         Ok(v) => Some(parse_bool_env("ENGINE_AUTO_AGENT_AUTH", &v)?),
@@ -1103,16 +1109,12 @@ fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<
             return list;
         }
     }
-    // Defaults: deployed PWA + Vite dev server. Adjust via ENGINE_ALLOWED_ORIGINS
-    // for staging/preview environments.
-    //
-    // The merged product is served from `vogt.sprooty.com` (M14's naming
-    // decision). The old host stays in this list for the transition period:
-    // an origin removed too early is a CORS failure in a browser somebody is
-    // using, and the cost of one extra entry is nothing.
+    // Estate-neutral default: only the local Vite dev server, so a clean clone
+    // works for local development without shipping any maintainer's hostnames.
+    // A real deployment names its own PWA origin(s) via ENGINE_ALLOWED_ORIGINS
+    // (comma-separated) or the config file — the estate stack sets it in
+    // `deploy/estate.overlay.yml`.
     vec![
-        "https://vogt.sprooty.com".to_string(),
-        "https://mydevenv2.sprooty.com".to_string(),
         "http://localhost:5173".to_string(),
         "http://127.0.0.1:5173".to_string(),
     ]
