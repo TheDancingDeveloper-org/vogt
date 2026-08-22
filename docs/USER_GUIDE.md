@@ -570,8 +570,17 @@ number waiting for input. Desktop session rows are keyboard links: focus a row
 and press Enter or Space to open it, then Tab to the labelled bookmark,
 duplicate and close controls.
 
-**The command palette reaches every read surface by fuzzy name** — projects and
-work items included, so `myprj` finds `my-project`. **New File** opens a form with
+**The command palette reaches every surface the Places rail and phone bar do,
+and every read surface by fuzzy name** — projects and work items included, so
+`myprj` finds `my-project`. Alongside the views, it navigates to **Open Inbox**,
+**Open Sessions**, **Open History**, **Open Git**, **Open Tasks** and — when the
+assistant is configured — **Open Assistant**, and it offers **Sign out**; the
+keyboard is never a poorer map than the chrome. Matches are ranked, not merely
+filtered: a name match always outranks one that only appears in a row's
+description, so typing a session's name surfaces that session first, and
+sessions rank ahead of work items. A command bound to a keyboard shortcut shows
+it on its row, and the commands you have run most recently appear under
+**Recent** at the top of the empty palette. **New File** opens a form with
 separate workspace destination and filename fields; **Open File…** opens a
 searchable workspace-file chooser. Cancelling either returns focus to the
 palette invoker, and creation writes only after **Create file** succeeds.

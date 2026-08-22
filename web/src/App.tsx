@@ -1193,7 +1193,7 @@ const App: Component = () => {
               «
             </button>
           </div>
-          <button type="button" class="rail-go-to" onClick={() => setCommandPaletteOpen(true)}>Go to…</button>
+          <button type="button" class="rail-go-to" title="Go to… (Ctrl/Cmd+K)" onClick={() => setCommandPaletteOpen(true)}>Go to…</button>
           {/* B1: a pointer, not a second WaitingSession. Outage wins ties over
               a waiting session; "running" never earns a card. Click routes to
               the one waiting session's own terminal, or to Sessions when
@@ -1457,7 +1457,7 @@ const App: Component = () => {
           />
         </Show>
         <main class="main">
-          <button type="button" class="mobile-go-to" onClick={() => setCommandPaletteOpen(true)}>
+          <button type="button" class="mobile-go-to" title="Go to… (Ctrl/Cmd+K)" onClick={() => setCommandPaletteOpen(true)}>
             Go to…
           </button>
           {/* The rail's own reopen affordance, in `main`'s own document flow
@@ -1891,6 +1891,7 @@ const App: Component = () => {
         onChooseFile={() => setFileWorkflow("open")}
         onOpenSettings={openSettings}
         guiEnabled={guiEnabled()}
+        assistantEnabled={Boolean(publicCfg()?.assistant_enabled)}
         onShowShortcuts={() => setShortcutsOpen(true)}
         onError={(message) => showToast(message, { kind: "error" })}
         templates={availableTemplates()}

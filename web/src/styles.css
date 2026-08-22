@@ -3429,8 +3429,34 @@ textarea {
 }
 
 .command-icon {
-  font-size: 18px;
+  /* A fixed, monospace column so every label starts at the same x, whatever
+     the row's glyph — a two-letter category tag, a symbol, or nothing. */
   flex-shrink: 0;
+  width: 28px;
+  text-align: center;
+  font-family: var(--mono, ui-monospace, "SFMono-Regular", Menlo, monospace);
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.command-shortcut {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.command-shortcut kbd {
+  font-family: var(--mono, ui-monospace, "SFMono-Regular", Menlo, monospace);
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  border: 1px solid var(--bd);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg-muted);
+  white-space: nowrap;
 }
 
 .command-content {

@@ -1636,6 +1636,63 @@ test("Repeated palette opening defers and reuses workspace discovery", async ({ 
   expect(manifestRequests).toBe(9);
 });
 
+test("Command palette lists the machine places, shows shortcuts, and ranks a session above a work item", async ({ page }) => {
+  await installFixtures(
+    page,
+    {},
+    [
+      {
+        id: "ses-deploy",
+        name: "deploy-preview",
+        cwd: "/workspace/vogt",
+        activity: "idle",
+        exit_code: null,
+        scrollback_bytes: 0,
+        created_at: "2026-08-18T08:00:00Z",
+      },
+    ],
+  );
+  // The palette lists work items from the /work endpoint; give it one whose
+  // title contains the query word so it competes with the session.
+  await page.route(/\/api\/vogt\/work(\?|$)/, async (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            ref: "WI-42", title: "deploy the shell", kind: "feature", state: "open",
+            priority: "normal", project_slug: "vogt", trust_state: "verified", labels: [],
+          },
+        ],
+        total: 1,
+        freshness: { status: "fresh" },
+      },
+    }),
+  );
+  await page.goto("/#/sessions");
+
+  await page.getByRole("button", { name: "Go to…" }).click();
+  const palette = page.getByRole("dialog", { name: "Command palette" });
+  await expect(palette).toBeVisible();
+
+  // The machine places the rail and phone bar expose are reachable by name in
+  // the palette too (#230): Inbox, Sessions and History were all missing.
+  for (const label of ["Open Inbox", "Open Sessions", "Open History"]) {
+    await expect(palette.getByText(label, { exact: true })).toBeVisible();
+  }
+
+  // A command with a keyboard binding shows it on the row. New Terminal Session
+  // is bound to Ctrl/Cmd+Shift+T.
+  const newSession = palette.getByRole("option", { name: /New Terminal Session/ });
+  await expect(newSession.locator("kbd", { hasText: "Ctrl/Cmd" })).toBeVisible();
+
+  // Typing a session-name prefix surfaces that session above the work item that
+  // merely contains the word: a name match beats a description/word match, and
+  // sessions are listed before work items on a tie.
+  await palette.getByRole("combobox", { name: "Search commands" }).fill("deploy");
+  await expect(palette.getByRole("option").first()).toContainText("deploy-preview");
+  await expect(palette.getByText("deploy the shell")).toBeVisible();
+});
+
 test("Dialog focus is contained and restored, and feedback matches its live region", async ({ page }) => {
   test.skip(test.info().project.name === "phone", "Settings is a desktop route");
   await installFixtures(page);
