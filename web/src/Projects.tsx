@@ -61,7 +61,14 @@ import {
   type FreshnessSummary,
 } from "./vogtApi";
 import { openWorkItemTab } from "./tabs";
-import { ViewAgeBadge, createLoadStamp, createViewAge, onVogtLive } from "./viewAge";
+import SurfaceHeader from "./SurfaceHeader";
+import {
+  ViewAgeBadge,
+  createLoadStamp,
+  createViewAge,
+  honestyToneClass,
+  onVogtLive,
+} from "./viewAge";
 
 interface Props {
   onError?: (message: string) => void;
@@ -1350,63 +1357,92 @@ const Projects: Component<Props> = (props) => {
 
   return (
     <div class="vogt-surface vogt-projects">
-      <header class="vogt-projects-header">
-        {/* The route says where it is as a heading and not only as a crumb:
-            a crumb is a control, and a phone arriving on a secondary route
-            needs the title (FR-U23, Stage 3). */}
-        <h1 class="vogt-projects-title">{place().project || "Projects"}</h1>
-        <nav class="vogt-projects-crumbs" aria-label="Where you are">
-          <button
-            type="button"
-            class={`vogt-projects-crumb${place().project ? "" : " active"}`}
-            onClick={() => setPlace({ ...place(), project: "", view: "overview" })}
-          >
-            Projects
-          </button>
-          <Show when={place().project}>
-            {(slug) => (
-              <>
-                <span class="vogt-projects-muted">/</span>
-                <span class="vogt-projects-crumb active">{slug()}</span>
-              </>
-            )}
-          </Show>
-        </nav>
-        <div class="vogt-projects-views" role="group" aria-label="Views">
-          <For each={VIEWS}>
-            {(name) => (
+      <SurfaceHeader
+        class="vogt-projects-header"
+        label="Projects header"
+        title={(
+          <>
+            {/* The route says where it is as a heading and not only as a
+                crumb: a crumb is a control, and a phone arriving on a
+                secondary route needs the title (FR-U23, Stage 3). */}
+            <h1 class="vogt-projects-title">{place().project || "Projects"}</h1>
+            <nav class="vogt-projects-crumbs" aria-label="Where you are">
               <button
                 type="button"
-                aria-pressed={place().view === name}
-                class={`vogt-projects-viewtab${place().view === name ? " active" : ""}`}
-                disabled={!place().project && (name === "overview" || name === "deps")}
-                title={
-                  !place().project && (name === "overview" || name === "deps")
-                    ? "Pick a project first — this view is about one project"
-                    : undefined
-                }
-                onClick={() => move("view", name)}
+                class={`vogt-projects-crumb${place().project ? "" : " active"}`}
+                onClick={() => setPlace({ ...place(), project: "", view: "overview" })}
               >
-                {name === "overview"
-                  ? "Project"
-                  : name === "deps"
-                    ? "Dependencies"
-                    : name === "drift"
-                      ? "Drift inbox"
-                      : "Import"}
+                Projects
               </button>
-            )}
-          </For>
-        </div>
-        <ViewAgeBadge
-          age={viewAge()}
-          class="vogt-projects-age"
-          title="How long ago this view last got an answer from Vogt — not how old the evidence behind it is, which each panel says for itself"
-        />
-        <button type="button" onClick={refresh}>
-          Refresh
-        </button>
-      </header>
+              <Show when={place().project}>
+                {(slug) => (
+                  <>
+                    <span class="vogt-projects-muted">/</span>
+                    <span class="vogt-projects-crumb active">{slug()}</span>
+                  </>
+                )}
+              </Show>
+            </nav>
+          </>
+        )}
+        honestyClass={honestyToneClass(viewAge().tone)}
+        honesty={(
+          <div class="vogt-projects-honesty" aria-live="polite">
+            <strong>
+              <ViewAgeBadge
+                age={viewAge()}
+                class="vogt-projects-age"
+                title="How long ago this view last got an answer from Vogt — not how old the evidence behind it is, which each panel says for itself"
+              />
+            </strong>
+          </div>
+        )}
+        controls={(
+          /* The views are the surface's own navigation, not chrome, so they
+             are never folded on a phone: they are a scrollable segmented
+             control instead, which keeps Import reachable at any width
+             (#228). */
+          <div
+            class="vogt-projects-views surface-header-tabs"
+            role="group"
+            aria-label="Views"
+          >
+            <For each={VIEWS}>
+              {(name) => {
+                const perProject = name === "overview" || name === "deps";
+                const disabled = () => !place().project && perProject;
+                return (
+                  <button
+                    type="button"
+                    aria-pressed={place().view === name}
+                    class={`vogt-projects-viewtab${place().view === name ? " active" : ""}`}
+                    disabled={disabled()}
+                    title={
+                      disabled()
+                        ? "Pick a project first — this view is about one project"
+                        : undefined
+                    }
+                    onClick={() => move("view", name)}
+                  >
+                    {name === "overview"
+                      ? "Project"
+                      : name === "deps"
+                        ? "Dependencies"
+                        : name === "drift"
+                          ? "Drift inbox"
+                          : "Import"}
+                  </button>
+                );
+              }}
+            </For>
+          </div>
+        )}
+        action={(
+          <button type="button" onClick={refresh}>
+            Refresh
+          </button>
+        )}
+      />
 
       <Show when={note()}>
         {(message) => (

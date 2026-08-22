@@ -67,14 +67,28 @@ rather than leaving an admin token in a browser.
 
 ## 2. The surfaces
 
-Board, Backlog, Inbox, and Sessions share one working-header order: the
-surface title, the freshness/evidence or connection truth that qualifies its
-answer, view controls, then the primary action. A surface can omit a control
-or action, but it does not move the truth statement away from the answer it
-qualifies. On narrow screens and at increased browser zoom those regions wrap
-in the same reading and keyboard order. Longer implementation detail is
-available from the header's disclosure where a surface needs it; unavailable,
-empty, loading, and partial answers remain named in the surface's own words.
+Board, Backlog, Inbox, Sessions, Projects and the work item share one
+working-header order: the surface title, the freshness/evidence or connection
+truth that qualifies its answer, view controls, then the primary action. That
+truth is stated the same way everywhere — an age pill reading `<mode> — updated
+Ns ago` (Live, Polling, Paused, Stale, or an outage), so how current a surface
+is looks the same wherever you are. A surface can omit a control or action, but
+it does not move the truth statement away from the answer it qualifies. On
+narrow screens and at increased browser zoom those regions wrap in the same
+reading and keyboard order. Longer implementation detail is available from the
+header's disclosure where a surface needs it; unavailable, empty, loading, and
+partial answers remain named in the surface's own words. Where a surface has
+nothing to show, the empty state offers the next act rather than a dead panel:
+an empty Board offers **Quick create**, **Clear filters** and a link to
+register a project; an empty Backlog names the collector freshness it would
+rank from and offers **Quick create**.
+
+Board and Backlog both carry a **Refresh** cadence in their header — every
+10/20/60 seconds, or off — beside a manual **Refresh now**; the age pill says
+which is in force. Projects’ header keeps its Project / Dependencies / Drift
+inbox / Import views as a segmented control that scrolls rather than wraps, so
+Import stays reachable at any width, and a view that needs a project first says
+so on the disabled tab.
 
 Board, Backlog, Inbox, Projects, Audit, work items and Sessions are stable,
 non-closable places. Sessions contains the terminal/editor panes and machine
@@ -99,7 +113,12 @@ On desktop, the whole Places rail scrolls as one column when running sessions
 make it taller than the window. Files therefore remains reachable rather than
 being squeezed behind a separately scrolling session list; when visible it
 keeps a 260px minimum containing its heading, search, rows and controls. The
-compact header keeps **New file** and **Refresh** immediate, while **New
+rail's footer — **Settings**, **Sign out** and the connection indicator — is
+pinned to the bottom of that scroller, so it stays reachable however long the
+session list grows. You can drag the rail's right edge to resize it and
+double-click that edge (or press **Home** with it focused) to return it to the
+default width; **Ctrl/Cmd+B** hides and shows the rail. The compact Files
+header keeps **New file** and **Refresh** on one row, while **New
 folder** and **Upload files** sit under **More file actions**. Each row keeps
 the name first, folders disclose nested rows with a caret, Git-changed files
 show a quiet status letter such as `M`, and the labelled row menu retains

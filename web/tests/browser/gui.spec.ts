@@ -743,6 +743,77 @@ test("primary surface headers keep their shared order and geometry across zoom",
   }
 });
 
+/**
+ * The same slot-order and geometry contract, now that Projects and the Work
+ * item wear the shared header too (#228). Kept a separate, shorter walk rather
+ * than folded into the spec above: these two surfaces make far more calls per
+ * mount, and stretching one test to six routes across two widths and five
+ * zooms made it flaky under a loaded box, not more truthful.
+ */
+test("Projects and Work item headers answer the shared geometry contract", async ({ page }) => {
+  await installFixtures(page, {}, [liveSession]);
+  const routes = [
+    { goto: "/#/projects", content: ".vogt-projects-list" },
+    { goto: "/#/w/WI-7", content: ".wid-facts" },
+  ] as const;
+  const zooms = ["80%", "100%", "150%", "200%"] as const;
+  const widths = test.info().project.name === "phone" ? [390] : [1280, 768];
+
+  for (const width of widths) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const route of routes) {
+      await page.goto(route.goto);
+      const header = page.locator("[data-surface-header]:visible");
+      await expect(header).toBeVisible();
+      await expect(page.locator(route.content).first()).toBeVisible();
+
+      const more = header.locator(".surface-header-more");
+      if (await more.count()) {
+        if ((await more.getAttribute("aria-expanded")) === "false") await more.click();
+      }
+
+      const slots = await header.locator(":scope > [data-surface-header-slot]")
+        .evaluateAll((elements) => elements.map((element) =>
+          element.getAttribute("data-surface-header-slot"),
+        ));
+      expect(slots).toEqual(
+        ["title", "honesty", "spacer", "controls", "action", "detail"]
+          .filter((slot) => slots.includes(slot)),
+      );
+
+      for (const zoom of zooms) {
+        await page.locator("html").evaluate((element, nextZoom) => {
+          element.style.zoom = nextZoom;
+        }, zoom);
+        await expect(header).toBeVisible();
+        const geometry = await header.evaluate((element) => {
+          const viewportWidth = document.documentElement.clientWidth;
+          const viewportHeight = document.documentElement.clientHeight;
+          const essential = [...element.querySelectorAll<HTMLElement>(
+            '[data-surface-header-slot="honesty"], [data-surface-header-slot="controls"], [data-surface-header-slot="action"]',
+          )];
+          return {
+            route: window.location.hash,
+            zoom: document.documentElement.style.zoom,
+            documentOverflow: document.documentElement.scrollWidth > viewportWidth + 1,
+            headerOverflow: element.scrollWidth > element.clientWidth + 1,
+            essentialOffscreen: essential.filter((child) => {
+              const box = child.getBoundingClientRect();
+              return box.left < -1 || box.right > viewportWidth + 1
+                || box.top < -1 || box.top >= viewportHeight - 1
+                || box.width === 0;
+            }).map((child) => child.dataset.surfaceHeaderSlot),
+          };
+        });
+        expect(geometry.documentOverflow, JSON.stringify(geometry)).toBe(false);
+        expect(geometry.headerOverflow, JSON.stringify(geometry)).toBe(false);
+        expect(geometry.essentialOffscreen, JSON.stringify(geometry)).toEqual([]);
+      }
+      await page.locator("html").evaluate((element) => { element.style.zoom = "100%"; });
+    }
+  }
+});
+
 test("Phone shell keeps labelled primary navigation and Go to reachability", async ({ page }) => {
   await installFixtures(page);
   await page.setViewportSize({ width: 390, height: 844 });
@@ -2430,4 +2501,124 @@ test("History explains an empty archive when live sessions are still running", a
 
   await expect(page.getByText("No archived sessions.", { exact: false })).toBeVisible();
   await expect(page.getByText(/session is currently running/)).toBeVisible();
+});
+
+
+/**
+ * #228: every primary surface now wears the one shared header — Projects and
+ * the Work item joined Board, Backlog, Inbox and Sessions — with the honesty
+ * standardised to the same age pill. The screenshot is the visual half of the
+ * slot-order/geometry contract the zoom spec asserts numerically; the honesty
+ * slot is masked because it counts seconds and would otherwise flake.
+ */
+const SURFACE_HEADERS = [
+  { name: "board", goto: "/#/board", content: ".board-scroll, .board-empty" },
+  { name: "backlog", goto: "/#/backlog", content: ".vogt-backlog-listwrap, .vogt-backlog-empty" },
+  { name: "inbox", goto: "/#/inbox", content: ".inbox-list" },
+  { name: "sessions", goto: "/#/sessions", content: ".sessions-place-body" },
+  { name: "projects", goto: "/#/projects", content: ".vogt-projects-list" },
+  { name: "workitem", goto: "/#/w/WI-7", content: ".wid-facts" },
+] as const;
+
+test("all six surface headers share the grammar and read the same at both sizes", async ({ page }) => {
+  await installFixtures(page, {}, [liveSession]);
+  const order = ["title", "honesty", "spacer", "controls", "action", "detail"];
+
+  for (const surface of SURFACE_HEADERS) {
+    await page.goto(surface.goto);
+    const header = page.locator("[data-surface-header]:visible").first();
+    await expect(header).toBeVisible();
+    await expect(page.locator(surface.content).first()).toBeVisible();
+
+    // A narrow shell folds a surface's chrome behind one disclosure; open it so
+    // the whole header is in the shot rather than half of it.
+    const more = header.locator(".surface-header-more");
+    if (await more.count()) {
+      if ((await more.getAttribute("aria-expanded")) === "false") await more.click();
+    }
+
+    const slots = await header
+      .locator(":scope > [data-surface-header-slot]")
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("data-surface-header-slot")),
+      );
+    expect(slots, `${surface.name} keeps the shared slot order`).toEqual(
+      order.filter((slot) => slots.includes(slot)),
+    );
+
+    await expect(header).toHaveScreenshot(`surface-header-${surface.name}.png`, {
+      // The age pill counts seconds; masking it is what keeps the shot stable.
+      mask: [header.locator('[data-surface-header-slot="honesty"]')],
+    });
+  }
+});
+
+/**
+ * The desktop half of #245's rail: a surface remembered under two different
+ * queries is one place, so its chip appears once — not two identically
+ * labelled chips, the bug the query-keyed-but-path-labelled recents had.
+ */
+test("Recent places dedupes a surface visited under different queries", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+  await installFixtures(page);
+
+  await page.goto("/#/board?project=vogt");
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+  await page.goto("/#/board?lanes=project");
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+
+  const recent = page.locator(".places-recent");
+  await expect(recent).toBeVisible();
+  // One Board chip, pointing at the latest of the two visited queries.
+  await expect(recent.getByRole("link", { name: "Board" })).toHaveCount(1);
+  await expect(recent.getByRole("link", { name: "Board" })).toHaveAttribute(
+    "href",
+    "#/board?lanes=project",
+  );
+});
+
+/**
+ * The other desktop half of #245: with a full session list the rail's footer —
+ * Settings, Sign out, the connection dot — used to sit below the fold and be
+ * unreachable at 1440×900. Pinned now, it is in the viewport without scrolling.
+ */
+test("The rail footer stays reachable at 1440x900 with sessions present", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The places rail is a desktop surface");
+  const crowd = Array.from({ length: 30 }, (_, index) => ({
+    ...liveSession,
+    id: `footer-crowd-${index}`,
+    name: `Crowded session ${index + 1}`,
+  }));
+  await installFixtures(page, {}, crowd);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/#/sessions");
+
+  const settings = page.getByRole("button", { name: "Settings" });
+  await expect(settings).toBeVisible();
+  await expect(settings).toBeInViewport();
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeInViewport();
+});
+
+/**
+ * #246: an empty Board is one panel that offers the next act — Quick create,
+ * Clear filters, Register a project — not four per-column "Nothing here" with
+ * no way out.
+ */
+test("An empty Board offers one panel with a next action, not four dead cells", async ({ page }) => {
+  await installFixtures(page, {}, [], undefined, {
+    boardItems: [],
+    boardTotal: 0,
+  });
+  await page.goto("/#/board");
+
+  const empty = page.locator(".board-empty--actions");
+  await expect(empty).toBeVisible();
+  await expect(empty).toContainText("No work items match");
+  await expect(empty.getByRole("button", { name: "Quick create" })).toBeVisible();
+  await expect(empty.getByRole("link", { name: "Register a project" })).toBeVisible();
+  // The four per-column "Nothing here" are gone.
+  await expect(page.locator(".board-cell-empty")).toHaveCount(0);
+
+  await empty.getByRole("button", { name: "Quick create" }).click();
+  await expect(page.getByRole("textbox", { name: "Title" }).first()).toBeVisible();
 });

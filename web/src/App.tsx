@@ -66,6 +66,7 @@ import {
   openTerminalTab,
   replaceTabs,
   initialRoute,
+  recentPlaceLabel,
   recentPlacesStore,
   rememberPlace,
   snapshotTabs,
@@ -749,7 +750,15 @@ const App: Component = () => {
         "/gui": "GUI stream",
         "/assistant": "Assistant",
       };
-      const label = labels[path] ?? (path.startsWith("/w/") ? decodeURIComponent(path.slice(3)) : path);
+      // A terminal chip is named by its live session, not the opaque id in
+      // its URL; everything else keeps the route label. Dedupe on the surface
+      // path (see `rememberPlace`) then means two filtered visits to one
+      // surface leave one chip, not two that read the same (#245).
+      const label = recentPlaceLabel(
+        `${path}${currentSearch}`,
+        labels,
+        (id) => sessionsStore.sessions[id]?.name,
+      );
       rememberPlace(`${path}${currentSearch}`, label);
     }
   });
@@ -1385,16 +1394,22 @@ const App: Component = () => {
             aria-valuemax={420}
             tabIndex={0}
             onPointerDown={(event) => placesRail.beginResize(event)}
+            onDblClick={() => placesRail.reset()}
             onKeyDown={(event) => {
               // The pointer drag has a keyboard equivalent, the same way a
               // Board card's Shift+Arrow move exists beside its drag: a
-              // control reachable only by mouse is not reachable.
+              // control reachable only by mouse is not reachable. Home is the
+              // keyboard twin of the double-click that resets the width — the
+              // escape hatch for a rail dragged somewhere the reader regrets.
               if (event.key === "ArrowLeft") {
                 event.preventDefault();
                 placesRail.setWidth(placesRail.width() - 16);
               } else if (event.key === "ArrowRight") {
                 event.preventDefault();
                 placesRail.setWidth(placesRail.width() + 16);
+              } else if (event.key === "Home") {
+                event.preventDefault();
+                placesRail.reset();
               }
             }}
           />

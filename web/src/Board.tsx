@@ -1336,6 +1336,17 @@ const Board: Component<Props> = (props) => {
   };
 
   /**
+   * A board with columns but no matching work — one empty panel, not four
+   * per-column "Nothing here" (#246). Not while a read is in flight (that is
+   * "loading", not "empty"), not during an outage (nothing was read at all),
+   * and not for an unlinked project scope, which has its own link-or-publish
+   * banner rather than an empty one.
+   */
+  const boardEmpty = createMemo(
+    () => total() === 0 && !loading() && !outage() && !scopeUnlinked(),
+  );
+
+  /**
    * The honesty gap (#187): the Board draws declared cards, but the estate's
    * outstanding work also includes open forge subjects nobody has adopted as
    * a work item yet. Both numbers are the server's — this only decides whether
@@ -2322,7 +2333,7 @@ const Board: Component<Props> = (props) => {
           </div>
         }
       >
-        <Show when={phone()}>
+        <Show when={phone() && !boardEmpty()}>
           <div
             class="board-phone-states"
             role="group"
@@ -2343,6 +2354,32 @@ const Board: Component<Props> = (props) => {
             </For>
           </div>
         </Show>
+        <Show when={boardEmpty()}>
+          <div class="board-empty board-empty--actions" role="status">
+            <span>No work items match.</span>
+            <div class="board-empty-actions">
+              <button
+                type="button"
+                onClick={openQuickCreate}
+                disabled={writesDisabled()}
+                title={
+                  writesDisabled()
+                    ? "Vogt cannot be asked right now, so nothing can be raised"
+                    : "Raise a work item without leaving the board"
+                }
+              >
+                Quick create
+              </button>
+              <Show when={hasFilters()}>
+                <button type="button" onClick={clearFilters}>
+                  Clear filters
+                </button>
+              </Show>
+              <a href="#/projects">Register a project</a>
+            </div>
+          </div>
+        </Show>
+        <Show when={!boardEmpty()}>
         <div class="board-scroll">
           <div class="board-grid">
             <div class="board-headrow" style={{ "grid-template-columns": gridTemplate() }}>
@@ -2917,9 +2954,6 @@ const Board: Component<Props> = (props) => {
                                     </div>
                                   )}
                                 </Show>
-                                <Show when={cards().length === 0 && !move() && !refused() && pageState()}>
-                                  <div class="board-cell-empty">Nothing here</div>
-                                </Show>
                                 <Show when={!pageState()}>
                                   <div class="board-cell-status">Loading cell…</div>
                                 </Show>
@@ -2940,6 +2974,7 @@ const Board: Component<Props> = (props) => {
             </For>
           </div>
         </div>
+        </Show>
       </Show>
     </div>
   );

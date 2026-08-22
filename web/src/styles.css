@@ -468,6 +468,17 @@ textarea {
   gap: 6px;
   padding-top: 10px;
   border-top: 1px solid var(--bd);
+  /* Pinned to the foot of the rail's own scroller (#245): with a full session
+     list the footer used to sit below the fold, so Settings and Sign out were
+     unreachable at 1440×900 without scrolling. `margin-top: auto` keeps it at
+     the bottom when the rail is short; `sticky` keeps it on screen when it is
+     not. The elevated background is what stops the scrolling list showing
+     through it. */
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  z-index: 2;
+  background: var(--bg-elev);
 }
 .rail-connection {
   display: inline-flex;
@@ -1195,13 +1206,16 @@ textarea {
 }
 .places-section-header-actions {
   display: flex;
-  flex-wrap: wrap;
+  /* One row, never wrapped: the +, ↻ and ⋯ are a single cluster and a wrap
+     dropped ⋯ onto its own line, jumping the header's height (#245). */
+  flex-wrap: nowrap;
   justify-content: flex-end;
   gap: 4px;
 }
 .places-section-header-actions button {
-  min-width: 26px;
-  min-height: 24px;
+  flex: 0 0 auto;
+  min-width: 28px;
+  min-height: 28px;
   padding: 2px 5px;
   font-size: 10px;
 }
@@ -4504,18 +4518,17 @@ textarea {
   flex-direction: column;
   gap: 12px;
 }
-.wid-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
+/* The work-item header is a `SurfaceHeader` now (#228); its layout is the
+   shared grammar's. `.wid-header` only carries what is specific to this
+   surface, and must not re-declare the flex row the shared component owns. */
 .wid-heading {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+}
+.wid-honesty {
+  margin: 0;
 }
 .wid-heading h2 {
   margin: 0;
@@ -4525,11 +4538,6 @@ textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   color: var(--fg-muted);
-}
-.wid-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 .wid-facts {
   display: flex;
@@ -4614,7 +4622,6 @@ textarea {
     padding: 12px;
   }
 
-  .wid-header,
   .wid-form-actions {
     flex-direction: column;
     align-items: stretch;
@@ -5481,6 +5488,43 @@ textarea {
   text-align: center;
 }
 
+/* One board-level empty, in place of four per-column "Nothing here" (#246):
+   a board with no matching work says so once and offers the way out — raise
+   one, clear what is narrowing the board, or register a project to work in. */
+.board-empty--actions {
+  gap: 14px;
+}
+.board-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.board-empty-actions button,
+.board-empty-actions a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.board-empty-actions button:hover,
+.board-empty-actions a:hover {
+  border-color: var(--accent);
+}
+.board-empty-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .board-scroll {
   flex: 1;
   min-height: 0;
@@ -6267,6 +6311,12 @@ textarea {
   grid-column: span 2;
 }
 
+/* The header's refresh-cadence field (#228), the Board's `--tight` twin: a
+   fixed floor so the select does not collapse to its shortest option. */
+.vogt-backlog-field--tight {
+  min-width: 130px;
+}
+
 .vogt-backlog-field select,
 .vogt-backlog-field input[type="text"],
 .vogt-backlog-savedname {
@@ -6708,6 +6758,36 @@ textarea {
   color: var(--fg-muted);
   font-size: 13px;
 }
+.vogt-backlog-empty p {
+  margin: 0 0 8px;
+}
+/* An empty ranking that offers a way forward (#246): it names the collector
+   freshness the ranking would draw on, so "nothing ranked" and "nothing has
+   looked" stop reading alike, and offers Quick create. */
+.vogt-backlog-empty-freshness {
+  font-size: 12px;
+}
+.vogt-backlog-empty-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+.vogt-backlog-empty-action:hover {
+  border-color: var(--accent);
+}
+@media (pointer: coarse) {
+  .vogt-backlog-empty-action {
+    min-height: 44px;
+  }
+}
 
 .vogt-backlog-explain {
   border: 1px solid var(--accent);
@@ -6868,14 +6948,9 @@ textarea {
   overflow-y: auto;
 }
 
-.vogt-projects-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
+/* The Projects header is a `SurfaceHeader` now (#228); the shared grammar
+   owns its flex row, so this must not re-declare it. What is left here is the
+   surface's own bits: crumbs, the segmented views, the freshness pill. */
 .vogt-projects-crumbs {
   display: flex;
   align-items: center;
@@ -7628,11 +7703,6 @@ textarea {
     padding: 10px;
   }
 
-  .vogt-projects-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .vogt-projects-crumbs {
     flex-wrap: wrap;
   }
@@ -8357,6 +8427,17 @@ textarea {
   border: 1px solid var(--bd);
   border-radius: 8px;
   background: var(--bg);
+  /* A segmented control that scrolls rather than wraps or overflows the
+     header: Projects carries four tabs, and Import must stay reachable at a
+     phone width and under zoom without the whole bar spilling sideways. */
+  flex-wrap: nowrap;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.surface-header-controls .surface-header-tabs button {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 .surface-header-controls .surface-header-tabs button {
   min-height: 26px;
