@@ -26,7 +26,8 @@ interface Props {
   assistantEnabled?: boolean;
   children?: JSX.Element;
   hasActiveWorkspace?: boolean;
-  onCreateSession?: () => void;
+  /** Create a session. `promptForName` (Shift held) asks for a name first. */
+  onCreateSession?: (promptForName?: boolean) => void;
   /** Presets the overview offers when there are no sessions to list (#233). */
   sessionTemplates?: SessionTemplate[];
   /** Launch one of those presets straight into its terminal. */
@@ -196,7 +197,11 @@ const Sessions: Component<Props> = (props) => {
           />
         )}
         action={props.onCreateSession ? (
-          <button type="button" onClick={() => props.onCreateSession?.()}>
+          <button
+            type="button"
+            onClick={(event) => props.onCreateSession?.(event.shiftKey)}
+            title="New session (hold Shift to name it)"
+          >
             + Session
           </button>
         ) : undefined}
@@ -287,7 +292,7 @@ const Sessions: Component<Props> = (props) => {
                       <button
                         type="button"
                         class="sessions-start"
-                        onClick={() => props.onCreateSession?.()}
+                        onClick={(event) => props.onCreateSession?.(event.shiftKey)}
                       >
                         Start a session
                       </button>

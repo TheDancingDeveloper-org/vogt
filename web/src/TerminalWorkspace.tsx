@@ -6,8 +6,10 @@ import {
   createMemo,
   createSignal,
   onCleanup,
+  onMount,
 } from "solid-js";
 import Terminal, { type TerminalActions } from "./Terminal";
+import type { ISearchResultChangeEvent } from "@xterm/addon-search";
 import type { SessionSummary } from "./api";
 import {
   createSession,
@@ -35,7 +37,21 @@ import {
   type SplitDirection,
   type TerminalLayoutNode,
 } from "./terminalLayout";
-import { changeTerminalFontSize } from "./terminalFont";
+import {
+  changeTerminalFontSize,
+  MAX_TERMINAL_FONT_SIZE,
+  MIN_TERMINAL_FONT_SIZE,
+  readTerminalFontSize,
+  resetTerminalFontSize,
+  TERMINAL_FONT_SIZE_EVENT,
+} from "./terminalFont";
+import {
+  getThemeName,
+  setThemeName,
+  THEMES,
+  TERMINAL_THEME_EVENT,
+} from "./terminalThemes";
+import { autoSplitName } from "./terminalNaming";
 
 interface Props {
   tabId: string;
@@ -45,6 +61,10 @@ interface Props {
   confirmClosePane?: (session: SessionSummary | null) => Promise<boolean>;
   onError?: (message: string) => void;
   onNotify?: (message: string, kind?: "info" | "error") => void;
+  /** Restart an exited session in place (reuses the duplicate-session flow). */
+  onRestartExited?: (session: SessionSummary) => void;
+  /** Remove an exited session (reuses the close-session flow; no kill prompt). */
+  onRemoveExited?: (session: SessionSummary) => void;
 }
 
 const STORAGE_KEY = "mydevenv2.terminalLayouts.v1";
@@ -109,6 +129,8 @@ interface LayoutNodeProps {
   ) => void;
   registerPaneActions: (paneId: string, actions: TerminalActions | null) => void;
   onNotify?: (message: string, kind?: "info" | "error") => void;
+  onRequestFind: () => void;
+  onPaneSearchResults: (paneId: string, info: ISearchResultChangeEvent) => void;
 }
 
 const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
@@ -132,6 +154,10 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
                 props.registerPaneActions(paneId, actions)
               }
               onNotify={props.onNotify}
+              onRequestFind={props.onRequestFind}
+              onSearchResults={(info) =>
+                props.onPaneSearchResults(paneId, info)
+              }
             />
           </div>
         );
@@ -148,6 +174,8 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
                 registerPaneSend={props.registerPaneSend}
                 registerPaneActions={props.registerPaneActions}
                 onNotify={props.onNotify}
+                onRequestFind={props.onRequestFind}
+                onPaneSearchResults={props.onPaneSearchResults}
               />
             )}
           </For>
@@ -168,7 +196,61 @@ const TerminalWorkspace: Component<Props> = (props) => {
   const [busy, setBusy] = createSignal<SplitDirection | "close" | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [draft, setDraft] = createSignal("");
+  // Find bar (#234): opened by Ctrl/Cmd+Shift+F or the toolbar button, drives
+  // the active pane's search addon.
+  const [findOpen, setFindOpen] = createSignal(false);
+  const [findQuery, setFindQuery] = createSignal("");
+  const [findResults, setFindResults] = createSignal<ISearchResultChangeEvent | null>(null);
+  // A toolbar readout of the terminal-only font size, kept in step with the
+  // A−/A+ controls and any other pane that changed it.
+  const [fontSize, setFontSize] = createSignal(readTerminalFontSize());
+  const [themeName, setThemeNameSignal] = createSignal(getThemeName());
   let composerRef: HTMLTextAreaElement | undefined;
+  let findInputRef: HTMLInputElement | undefined;
+
+  onMount(() => {
+    const onFont = (event: Event) => {
+      const next = (event as CustomEvent<{ fontSize?: number }>).detail?.fontSize;
+      if (typeof next === "number") setFontSize(next);
+    };
+    const onTheme = (event: Event) => {
+      const next = (event as CustomEvent<{ name?: string }>).detail?.name;
+      if (typeof next === "string") setThemeNameSignal(next);
+    };
+    window.addEventListener(TERMINAL_FONT_SIZE_EVENT, onFont);
+    window.addEventListener(TERMINAL_THEME_EVENT, onTheme);
+    onCleanup(() => {
+      window.removeEventListener(TERMINAL_FONT_SIZE_EVENT, onFont);
+      window.removeEventListener(TERMINAL_THEME_EVENT, onTheme);
+    });
+  });
+
+  const openFind = () => {
+    setFindOpen(true);
+    queueMicrotask(() => {
+      findInputRef?.focus();
+      findInputRef?.select();
+    });
+  };
+
+  const runFind = (dir: "next" | "prev") => {
+    const query = findQuery();
+    const actions = paneActions.get(activePaneId());
+    if (!actions) return;
+    if (dir === "next") actions.findNext?.(query);
+    else actions.findPrevious?.(query);
+  };
+
+  const closeFind = () => {
+    setFindOpen(false);
+    setFindResults(null);
+    paneActions.get(activePaneId())?.clearSearch?.();
+  };
+
+  const onPaneSearchResults = (paneId: string, info: ISearchResultChangeEvent) => {
+    // The find bar only ever drives the active pane, so only its results matter.
+    if (paneId === activePaneId()) setFindResults(info);
+  };
   const paneSenders = new Map<string, (data: string | ArrayBuffer) => void>();
   const paneActions = new Map<string, TerminalActions>();
   let disposed = false;
@@ -336,9 +418,10 @@ const TerminalWorkspace: Component<Props> = (props) => {
     setError(null);
     try {
       const source = sessionsStore.sessions[pane.sessionId];
-      const base = source?.name || "shell";
-      const suffix = direction === "row" ? "right" : "down";
-      const name = `${base}-${suffix}-${Date.now() % 1000}`;
+      // Splits read as children of the session they came from: `vogt ▸2`,
+      // `vogt ▸3`, deduped against every live session name.
+      const existingNames = Object.values(sessionsStore.sessions).map((s) => s.name);
+      const name = autoSplitName(source?.cwd, existingNames);
       let session: SessionSummary;
       try {
         session = await createSession(name, undefined, source?.cwd || undefined);
@@ -422,21 +505,54 @@ const TerminalWorkspace: Component<Props> = (props) => {
         <Show when={error()}>
           <span class="terminal-workspace-error">{error()}</span>
         </Show>
+        <span class="terminal-font-readout" role="group" aria-label="Terminal font size">
+          <button
+            type="button"
+            onClick={() => changeTerminalFontSize(-1)}
+            disabled={fontSize() <= MIN_TERMINAL_FONT_SIZE}
+            title="Decrease terminal font size (browser zoom still scales the whole app)"
+            aria-label="Decrease terminal font size"
+          >
+            A−
+          </button>
+          <button
+            type="button"
+            class="terminal-font-value"
+            onClick={() => resetTerminalFontSize()}
+            title="Reset terminal font size to the default"
+            aria-label={`Terminal font size ${fontSize()}, click to reset`}
+          >
+            {fontSize()}
+          </button>
+          <button
+            type="button"
+            onClick={() => changeTerminalFontSize(1)}
+            disabled={fontSize() >= MAX_TERMINAL_FONT_SIZE}
+            title="Increase terminal font size (browser zoom still scales the whole app)"
+            aria-label="Increase terminal font size"
+          >
+            A+
+          </button>
+        </span>
+        <select
+          class="terminal-theme-select"
+          aria-label="Terminal color theme"
+          title="Terminal color theme"
+          value={themeName()}
+          onChange={(event) => setThemeName(event.currentTarget.value)}
+        >
+          <For each={Object.keys(THEMES)}>
+            {(name) => <option value={name}>{name}</option>}
+          </For>
+        </select>
         <button
           type="button"
-          onClick={() => changeTerminalFontSize(-1)}
-          title="Decrease terminal font size (browser zoom still scales the whole app)"
-          aria-label="Decrease terminal font size"
+          class={findOpen() ? "active" : ""}
+          onClick={() => (findOpen() ? closeFind() : openFind())}
+          title="Search the terminal buffer (Ctrl/Cmd+Shift+F)"
+          aria-label="Find in terminal"
         >
-          A−
-        </button>
-        <button
-          type="button"
-          onClick={() => changeTerminalFontSize(1)}
-          title="Increase terminal font size (browser zoom still scales the whole app)"
-          aria-label="Increase terminal font size"
-        >
-          A+
+          Find
         </button>
         <button
           class={broadcastEnabled() ? "active" : ""}
@@ -484,6 +600,77 @@ const TerminalWorkspace: Component<Props> = (props) => {
           Close pane
         </button>
       </div>
+      <Show when={findOpen()}>
+        <div class="terminal-find-bar" role="search">
+          <input
+            ref={findInputRef}
+            class="terminal-find-input"
+            type="text"
+            placeholder="Find in terminal…"
+            aria-label="Find in terminal"
+            value={findQuery()}
+            onInput={(event) => {
+              setFindQuery(event.currentTarget.value);
+              runFind("next");
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                runFind(event.shiftKey ? "prev" : "next");
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                closeFind();
+              }
+            }}
+          />
+          <span class="terminal-find-count" aria-live="polite">
+            {findResults() && findResults()!.resultCount > 0
+              ? `${findResults()!.resultIndex + 1} of ${findResults()!.resultCount}`
+              : findQuery()
+                ? "No matches"
+                : ""}
+          </span>
+          <button type="button" onClick={() => runFind("prev")} aria-label="Previous match" title="Previous match">
+            ↑
+          </button>
+          <button type="button" onClick={() => runFind("next")} aria-label="Next match" title="Next match">
+            ↓
+          </button>
+          <button type="button" onClick={() => closeFind()} aria-label="Close find" title="Close find (Esc)">
+            Esc
+          </button>
+        </div>
+      </Show>
+      <Show when={activeSession()?.exit_code != null}>
+        <div class="terminal-exited-banner" role="status">
+          <span class="terminal-exited-label">
+            Exited (code {activeSession()!.exit_code})
+          </span>
+          <span class="terminal-exited-actions">
+            <button
+              type="button"
+              onClick={() => {
+                const session = activeSession();
+                if (session) props.onRestartExited?.(session);
+              }}
+              title="Open a fresh shell in the same working directory"
+            >
+              Restart here
+            </button>
+            <button
+              type="button"
+              class="danger"
+              onClick={() => {
+                const session = activeSession();
+                if (session) props.onRemoveExited?.(session);
+              }}
+              title="Remove this exited session (scrollback is already archived)"
+            >
+              Remove
+            </button>
+          </span>
+        </div>
+      </Show>
       <Show when={panes().length > 1}>
         <div class="terminal-workspace-roster">
           <span class={`terminal-workspace-roster-badge ${broadcastEnabled() ? "active" : ""}`}>
@@ -518,6 +705,8 @@ const TerminalWorkspace: Component<Props> = (props) => {
             else paneActions.delete(paneId);
           }}
           onNotify={props.onNotify}
+          onRequestFind={openFind}
+          onPaneSearchResults={onPaneSearchResults}
         />
       </div>
       <form

@@ -37,3 +37,7 @@ export function writeTerminalFontSize(fontSize: number): number {
 export function changeTerminalFontSize(delta: number): number {
   return writeTerminalFontSize(readTerminalFontSize() + delta);
 }
+
+export function resetTerminalFontSize(): number {
+  return writeTerminalFontSize(DEFAULT_TERMINAL_FONT_SIZE);
+}

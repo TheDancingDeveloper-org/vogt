@@ -2278,6 +2278,65 @@ test("terminal leaves browser zoom gestures alone and offers explicit font contr
   }
 });
 
+test("terminal find bar searches the live buffer and navigates matches (#234)", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Find is exercised in the desktop browser project");
+  await installFixtures(page, {}, [liveSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    // Two lines carrying a unique token, so a search has something to find and
+    // more than one match to step through.
+    socket.send(Buffer.from("FINDTHISLINE alpha\r\nFINDTHISLINE beta\r\n"));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/browser-session");
+  await expect(page.locator(".terminal-host")).toBeVisible();
+
+  await page.getByRole("button", { name: "Find in terminal" }).click();
+  const input = page.getByRole("textbox", { name: "Find in terminal" });
+  await expect(input).toBeFocused();
+  await input.fill("FINDTHISLINE");
+
+  const count = page.locator(".terminal-find-count");
+  // The xterm write queue drains on animation frames, so drive Next until the
+  // buffer has been indexed and both matches are reported.
+  await expect.poll(async () => {
+    await page.getByRole("button", { name: "Next match" }).click();
+    return (await count.textContent()) ?? "";
+  }, { timeout: 5000 }).toContain("of 2");
+
+  await input.focus();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".terminal-find-bar")).toHaveCount(0);
+});
+
+test("exited session shows a banner and Remove skips the kill confirm (#235)", async ({ page }) => {
+  const exitedSession = {
+    ...liveSession,
+    id: "exited-session",
+    name: "exited-session",
+    exit_code: 137,
+  };
+  await installFixtures(page, {}, [exitedSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+  await page.goto("/#/t/exited-session");
+
+  const banner = page.locator(".terminal-exited-banner");
+  await expect(banner).toContainText("Exited (code 137)");
+
+  await banner.getByRole("button", { name: "Remove" }).click();
+  // Removing an exited session is not destructive, so no confirm dialog appears
+  // and the session is gone: the workspace drops to its session-unavailable
+  // state and the exited banner with it.
+  await expect(page.getByText(/no longer available/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Confirm" })).toHaveCount(0);
+  await expect(banner).toHaveCount(0);
+});
+
 test("dirty editor requests browser exit confirmation only until save", async ({ page }) => {
   test.skip(test.info().project.name === "phone", "Monaco lifecycle is validated in the desktop browser project");
   await installFixtures(page);
