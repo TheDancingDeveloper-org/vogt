@@ -9650,3 +9650,136 @@ a.vogt-projects-tag:hover {
     min-height: 44px;
   }
 }
+
+/* -- the assistant surface (#242) ----------------------------------------- */
+/* Lifted out of Assistant.tsx's inline styles so the composer and its
+   controls wrap rather than overflow on a narrow phone (the head and the form
+   both `flex-wrap`, which is what keeps the layout intact at 360px). */
+.assistant {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+  gap: 10px;
+}
+.assistant-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.assistant-head__title {
+  flex: 1;
+}
+.assistant-scroll {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px;
+}
+.assistant-empty {
+  opacity: 0.6;
+  font-size: 13px;
+}
+.assistant-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 85%;
+}
+.assistant-row--user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+.assistant-row--assistant {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+.assistant-trace {
+  font-size: 11px;
+  opacity: 0.55;
+}
+.assistant-bubble {
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.assistant-bubble--user {
+  background: var(--accent);
+  color: #fff;
+}
+.assistant-bubble--assistant {
+  background: rgba(110, 118, 129, 0.25);
+  color: inherit;
+}
+/* A failed send reads as unsent — dimmed, and outlined the colour the rest of
+   the app uses for something that did not land. */
+.assistant-row--failed .assistant-bubble--user {
+  opacity: 0.75;
+  background: transparent;
+  color: var(--fg);
+  border: 1px dashed var(--activity-errored);
+}
+.assistant-failed-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--activity-errored);
+}
+.assistant-copy {
+  align-self: flex-start;
+  font-size: 11px;
+  padding: 1px 8px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.assistant-copy:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.assistant-retry {
+  font-size: 12px;
+  padding: 1px 10px;
+  border: 1px solid var(--activity-errored);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--activity-errored);
+  cursor: pointer;
+}
+.assistant-countdown {
+  font-size: 12px;
+  color: var(--activity-running);
+}
+.assistant-form {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.assistant-input {
+  flex: 1 1 180px;
+  min-width: 0;
+  resize: none;
+  min-height: 38px;
+  max-height: 160px;
+  overflow-y: auto;
+  line-height: 1.4;
+  font: inherit;
+}
+.assistant-mic--off {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.assistant-stop {
+  border-color: var(--activity-waiting);
+  color: var(--activity-waiting);
+}

@@ -372,6 +372,13 @@ async function installFixtures(
   await page.route("**/api/assistant/history**", async (route) => route.fulfill({ json: {
     transcript: [],
   } }));
+  // A default assistant turn: a plain acknowledgement. Individual tests
+  // register their own `**/api/assistant/message` handler afterwards to fail
+  // it, hold it open, or answer with Markdown — a later route wins in
+  // Playwright, so those overrides take precedence over this default (#242).
+  await page.route("**/api/assistant/message", async (route) => route.fulfill({ json: {
+    reply: "Acknowledged.", pending_action: null, tool_trace: [],
+  } }));
   await page.route("**/api/vogt/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -4035,4 +4042,93 @@ test("The item body renders Markdown, and the raw toggle shows its source", asyn
   // And back again.
   await description.getByRole("button", { name: "Rendered" }).click();
   await expect(description.locator(".md-body h1")).toHaveText("Heading one");
+});
+
+// -- the assistant composer's ergonomics (#242) ----------------------------
+//
+// A failed send that keeps what was typed, a Stop that cancels an in-flight
+// turn, a multi-line composer, and Markdown replies — exercised end to end in
+// a real browser, with the assistant message endpoint mocked per test.
+
+async function openAssistant(page: Page): Promise<void> {
+  await installFixtures(page, { assistant_enabled: true });
+  await page.goto("/#/assistant");
+  await expect(page.locator(".assistant-input")).toBeVisible();
+}
+
+test("a failed assistant send keeps the draft and offers a retry", async ({ page }) => {
+  await openAssistant(page);
+  // The engine refuses this turn.
+  await page.route("**/api/assistant/message", async (route) =>
+    route.fulfill({ status: 502, body: "upstream down" }),
+  );
+
+  await page.locator(".assistant-input").fill("what is on top?");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  // The message is not eaten by the failure, and a Retry is offered.
+  await expect(page.locator(".assistant-input")).toHaveValue("what is on top?");
+  await expect(page.getByTestId("assistant-retry")).toBeVisible();
+  await expect(page.locator(".assistant-row--failed")).toBeVisible();
+});
+
+test("Stop cancels an assistant send in flight", async ({ page }) => {
+  await openAssistant(page);
+  // A turn that never answers on its own: only the client's abort ends it.
+  await page.route("**/api/assistant/message", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    try {
+      await route.fulfill({ json: { reply: "late", pending_action: null, tool_trace: [] } });
+    } catch {
+      /* aborted by Stop before it could answer */
+    }
+  });
+
+  await page.locator(".assistant-input").fill("summarise the backlog");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  // While busy, Stop replaces Send; clicking it aborts the request and the
+  // composer comes back with the message intact and Send restored.
+  const stop = page.getByTestId("assistant-stop");
+  await expect(stop).toBeVisible();
+  await stop.click();
+  await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+  await expect(page.locator(".assistant-input")).toHaveValue("summarise the backlog");
+});
+
+test("Shift+Enter inserts a newline while Enter sends", async ({ page }) => {
+  await openAssistant(page);
+
+  const composer = page.locator(".assistant-input");
+  await composer.click();
+  await composer.pressSequentially("line one");
+  await composer.press("Shift+Enter");
+  await composer.pressSequentially("line two");
+
+  // The newline is in the value, and nothing was sent yet.
+  await expect(composer).toHaveValue("line one\nline two");
+  await expect(page.getByText("Acknowledged.")).toHaveCount(0);
+
+  // Plain Enter sends the whole multi-line message.
+  await composer.press("Enter");
+  await expect(page.getByText("Acknowledged.")).toBeVisible();
+});
+
+test("an assistant Markdown reply renders a code block", async ({ page }) => {
+  await openAssistant(page);
+  await page.route("**/api/assistant/message", async (route) =>
+    route.fulfill({ json: {
+      reply: "Run this:\n\n```sh\ncargo test\n```\n",
+      pending_action: null,
+      tool_trace: [],
+    } }),
+  );
+
+  await page.locator(".assistant-input").fill("how do I test?");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const code = page.locator("pre.md-pre code");
+  await expect(code).toBeVisible();
+  await expect(code).toContainText("cargo test");
+  await expect(page.getByTestId("assistant-copy")).toBeVisible();
 });

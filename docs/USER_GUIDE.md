@@ -303,6 +303,14 @@ Absent unless the operator set an API key — the routes answer `404` and every
 client hides the surface, so an unprovisioned deployment looks unprovisioned
 rather than broken.
 
+You type in a composer that grows with your message: **Enter** sends,
+**Shift+Enter** starts a new line, and a pasted block keeps its line breaks. A
+reply comes back rendered as Markdown — headings, lists, links and fenced code
+— with a copy control beside it. While a reply is on its way a **Stop** button
+replaces Send and cancels the request cleanly; a send that cannot reach the
+engine is left in place marked unsent, with your text restored and a **Retry**.
+**Clear** empties the whole conversation, and asks before it does.
+
 The assistant talks to any **OpenAI-compatible chat endpoint**: the engine
 reads `ENGINE_ASSISTANT_API_KEY`, `ENGINE_ASSISTANT_BASE_URL` and
 `ENGINE_ASSISTANT_MODEL`, so a hosted provider, a proxy or a local server all
@@ -316,8 +324,8 @@ It can read every session's scrollback and a curated read slice of Vogt
 `work.list`, `compliance`). It can propose four Vogt writes and typing into a
 terminal — and **every one of those waits for you to approve it on screen**.
 One pending action at a time, carrying the exact payload, the target, and the
-reason that will be written to the audit log; it expires after 120 seconds and
-a new message abandons it.
+reason that will be written to the audit log; it expires after 120 seconds —
+the card counts the seconds down — and a new message abandons it.
 
 **Voice never approves.** Speech reaches the assistant only as a user message,
 and an approval is a tap. Push-to-talk is *held*, not toggled — press to open

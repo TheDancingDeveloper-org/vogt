@@ -20,10 +20,11 @@ import {
   type AssistantPendingAction,
   type AssistantReply,
   type AssistantSendInputAction,
-  type AssistantTranscriptEntry,
   type AssistantVogtWriteAction,
 } from "./api";
 import { listProjects } from "./vogtApi";
+import { renderMarkdown } from "./markdown";
+import { writeClipboardText } from "./clipboard";
 import { describeRepairs, repairUtterance } from "./voiceRepair";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { pendingAction, setPendingAction } from "./pendingAction";
@@ -35,6 +36,38 @@ import {
 } from "./voiceService";
 
 const TTS_PREF_KEY = "mydevenv2.assistant.tts";
+
+/** How long the server holds a pending action before it expires (FR-T2). The
+ *  card counts down against this so an approval you can no longer make stops
+ *  inviting you to make it. Kept in step with `PENDING_ACTION_TTL` in the
+ *  engine's `assistant.rs`. */
+const PENDING_ACTION_TTL_MS = 120_000;
+
+/** A transcript row plus the two things the server never sends: whether an
+ *  optimistic user turn failed to reach the engine, so it can offer a Retry
+ *  instead of masquerading as a recorded message (#242). */
+export interface AssistantUiEntry {
+  role: "user" | "assistant";
+  text: string;
+  tool_trace?: string[];
+  /** A send that errored or was refused: shown as failed, with a Retry. */
+  failed?: boolean;
+}
+
+/**
+ * Whether the transcript is scrolled close enough to the end that new content
+ * should follow it down (#242). Pulled out as a pure function so the "don't
+ * yank a reader who scrolled up back to the bottom" rule is testable without a
+ * layout engine — jsdom reports every scroll metric as zero.
+ */
+export function nearBottom(
+  scrollTop: number,
+  clientHeight: number,
+  scrollHeight: number,
+  pad = 120,
+): boolean {
+  return scrollHeight - scrollTop - clientHeight <= pad;
+}
 
 // The Web Speech recognizer, read defensively. TypeScript's DOM lib does not
 // declare the vendor-prefixed `webkitSpeechRecognition`, and Firefox ships
@@ -99,6 +132,9 @@ interface AssistantProps {
   onError: (message: string) => void;
   /** Sessions renders the shared action card when composed in its workspace. */
   pendingHosted?: boolean;
+  /** Clearing the conversation is destructive, so it is confirmed before it
+   *  happens. Absent (e.g. in a bare mount) falls back to clearing directly. */
+  confirmAction?: (title: string, body?: string) => Promise<boolean>;
 }
 
 function speakSentences(text: string) {
@@ -181,8 +217,15 @@ export default function Assistant(props: AssistantProps) {
     text: "",
     profile: "",
   });
-  const [transcript, setTranscript] = createSignal<AssistantTranscriptEntry[]>([]);
+  const [transcript, setTranscript] = createSignal<AssistantUiEntry[]>([]);
   const [busy, setBusy] = createSignal(false);
+  // The controller for the turn in flight, so the Stop button can abort it
+  // (#242). Null when nothing is outstanding.
+  const [inFlight, setInFlight] = createSignal<AbortController | null>(null);
+  // Seconds left before the pending action expires (FR-T2). Null when there is
+  // no card; ticks down from 120 so an approval that can no longer be made
+  // stops asking to be made.
+  const [pendingSecondsLeft, setPendingSecondsLeft] = createSignal<number | null>(null);
   const [reasonDraft, setReasonDraft] = createSignal("");
   const [reasonBusy, setReasonBusy] = createSignal(false);
   const [draft, setDraft] = createSignal(restored.text);
@@ -210,7 +253,12 @@ export default function Assistant(props: AssistantProps) {
   const [profile, setProfile] = createSignal(restored.profile);
 
   let scroller: HTMLDivElement | undefined;
-  let inputEl: HTMLInputElement | undefined;
+  let inputEl: HTMLTextAreaElement | undefined;
+  // Whether the reader was pinned to the end just before the transcript grew.
+  // Read in the scroll effect so appending a message follows the conversation
+  // down only when the reader was already there, and never yanks one who
+  // scrolled up to re-read (#242). Updated on every scroll, before the append.
+  let stuckToBottom = true;
   // The server-TTS clip currently playing, if any, so it can be stopped the
   // moment the speaker sends again or leaves (FR-T12). On-device synthesis is
   // stopped through `speechSynthesis.cancel()`; this is its `<audio>` twin.
@@ -273,15 +321,64 @@ export default function Assistant(props: AssistantProps) {
     });
   };
 
+  /** Remember whether the reader is at the end, so the next append knows
+   *  whether to follow it. Called on the scroller's own scroll. */
+  const onScroll = () => {
+    if (!scroller) return;
+    stuckToBottom = nearBottom(
+      scroller.scrollTop,
+      scroller.clientHeight,
+      scroller.scrollHeight,
+    );
+  };
+
+  /** Size the composer to its content, up to a ceiling (#242): a pasted or
+   *  dictated multi-line message is visible without a scrollbar, and a long
+   *  one scrolls inside a bounded box instead of swallowing the transcript. */
+  const growComposer = () => {
+    const el = inputEl;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  };
+
   createEffect(() => {
     transcript();
     pendingAction();
-    scrollToEnd();
+    // Only chase the end when the reader was already there. A reader who
+    // scrolled up to re-read an answer keeps their place while a reply lands.
+    if (stuckToBottom) scrollToEnd();
+  });
+
+  // Keep the composer's height in step with its content, dictation included.
+  createEffect(() => {
+    draft();
+    queueMicrotask(growComposer);
   });
 
   createEffect(() => {
     const action = pendingAction();
     setReasonDraft(action?.kind === "vogt_write" ? action.reason : "");
+  });
+
+  // The pending card's expiry countdown (FR-T2). The server sends no deadline,
+  // so the clock starts from when the card arrived here — close enough that a
+  // card reading "0s" is one the engine has already dropped. Cleared, and the
+  // interval stopped, the moment there is no card.
+  createEffect(() => {
+    const action = pendingAction();
+    if (!action) {
+      setPendingSecondsLeft(null);
+      return;
+    }
+    const deadline = Date.now() + PENDING_ACTION_TTL_MS;
+    const tick = () => {
+      const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+      setPendingSecondsLeft(left);
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    onCleanup(() => clearInterval(timer));
   });
 
   // A voice conversation being *active* is, on this surface, spoken replies
@@ -402,14 +499,54 @@ export default function Assistant(props: AssistantProps) {
     setDraft("");
     setBusy(true);
     haltSpeech();
-    setTranscript((cur) => [...cur, { role: "user", text: trimmed }]);
+    // The optimistic bubble is held by reference so the outcome can find it
+    // again: a success leaves it be, a failure marks it, and a Stop removes
+    // it. Kept off `failed` so it renders as an ordinary in-flight turn.
+    const userEntry: AssistantUiEntry = { role: "user", text: trimmed };
+    setTranscript((cur) => [...cur, userEntry]);
+    const controller = new AbortController();
+    setInFlight(controller);
     try {
-      applyReply(await api.assistantMessage(trimmed, profile() || undefined));
+      applyReply(
+        await api.assistantMessage(trimmed, profile() || undefined, controller.signal),
+      );
     } catch (e) {
-      props.onError(`assistant: ${String(e)}`);
+      // Restore the message either way — a failed or cancelled send must not
+      // eat what was typed (#242).
+      setDraft(trimmed);
+      if (controller.signal.aborted) {
+        // Stopped by the reader: the request never reached a recorded turn, so
+        // drop the optimistic bubble rather than leave a phantom the server
+        // never answered. No toast — a deliberate cancel is not an error.
+        setTranscript((cur) => cur.filter((entry) => entry !== userEntry));
+      } else {
+        // Failed: keep the bubble but mark it, so it reads as unsent and
+        // offers a Retry instead of pretending it landed.
+        setTranscript((cur) =>
+          cur.map((entry) => (entry === userEntry ? { ...entry, failed: true } : entry)),
+        );
+        props.onError(`assistant: ${String(e)}`);
+      }
     } finally {
       setBusy(false);
+      setInFlight(null);
+      // Return the caret to the composer so the next message can be typed
+      // without reaching for the mouse — after a send, a retry, or a stop.
+      inputEl?.focus();
     }
+  };
+
+  /** Abort the turn in flight (the Stop button). The request tears down
+   *  cleanly and the engine treats the dropped connection as a cancellation. */
+  const stop = () => {
+    inFlight()?.abort();
+  };
+
+  /** Resend a message whose send failed, dropping the failed bubble first so
+   *  the retry does not stack a second copy beneath it (#242). */
+  const retry = (entry: AssistantUiEntry) => {
+    setTranscript((cur) => cur.filter((row) => row !== entry));
+    void send(entry.text);
   };
 
   const resolve = async (approve: boolean) => {
@@ -440,6 +577,15 @@ export default function Assistant(props: AssistantProps) {
   };
 
   const reset = async () => {
+    // Clearing throws away the whole conversation, so it asks first — the same
+    // guard the destructive controls elsewhere in the app use.
+    if (props.confirmAction) {
+      const ok = await props.confirmAction(
+        "Clear the conversation?",
+        "This removes the whole transcript. It cannot be undone.",
+      );
+      if (!ok) return;
+    }
     haltSpeech();
     try {
       await api.assistantReset();
@@ -704,18 +850,9 @@ export default function Assistant(props: AssistantProps) {
   };
 
   return (
-    <div
-      style={{
-        display: "flex",
-        "flex-direction": "column",
-        flex: 1,
-        "min-height": 0,
-        padding: "12px",
-        gap: "10px",
-      }}
-    >
-      <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
-        <strong style={{ flex: 1 }}>Assistant</strong>
+    <div class="assistant">
+      <div class="assistant-head">
+        <strong class="assistant-head__title">Assistant</strong>
         {/*
           Offered only when there is a choice to make (FR-T9). One configured
           profile is not a decision, and a select with one option is a control
@@ -740,6 +877,9 @@ export default function Assistant(props: AssistantProps) {
         </Show>
         <button
           type="button"
+          class="assistant-toggle"
+          aria-pressed={ttsOn()}
+          aria-label={ttsOn() ? "Spoken replies on" : "Spoken replies off"}
           title={ttsOn() ? "Disable spoken replies" : "Speak replies aloud"}
           onClick={toggleTts}
         >
@@ -750,19 +890,9 @@ export default function Assistant(props: AssistantProps) {
         </button>
       </div>
 
-      <div
-        ref={scroller}
-        style={{
-          flex: 1,
-          "overflow-y": "auto",
-          display: "flex",
-          "flex-direction": "column",
-          gap: "10px",
-          padding: "4px",
-        }}
-      >
+      <div ref={scroller} class="assistant-scroll" onScroll={onScroll}>
         <Show when={transcript().length === 0 && !pendingAction()}>
-          <div style={{ opacity: 0.6, "font-size": "13px" }}>
+          <div class="assistant-empty">
             Ask about your terminal sessions — “what is the build doing?”,
             “is any agent stuck?”, “answer yes to the prompt in session two” —
             or about your work: “what's the top bug?”, “why is WI-7 ranked
@@ -772,35 +902,59 @@ export default function Assistant(props: AssistantProps) {
         <For each={transcript()}>
           {(entry) => (
             <div
-              style={{
-                "align-self": entry.role === "user" ? "flex-end" : "flex-start",
-                "max-width": "85%",
-                display: "flex",
-                "flex-direction": "column",
-                gap: "4px",
-              }}
+              class={`assistant-row assistant-row--${entry.role}${
+                entry.failed ? " assistant-row--failed" : ""
+              }`}
             >
               <Show when={entry.role === "assistant" && entry.tool_trace?.length}>
-                <div style={{ "font-size": "11px", opacity: 0.55 }}>
+                <div class="assistant-trace">
                   <For each={entry.tool_trace}>
                     {(step) => <div>· {step}</div>}
                   </For>
                 </div>
               </Show>
-              <div
-                style={{
-                  padding: "8px 12px",
-                  "border-radius": "12px",
-                  background:
-                    entry.role === "user" ? "#1f6feb" : "rgba(110, 118, 129, 0.25)",
-                  color: entry.role === "user" ? "#fff" : "inherit",
-                  "white-space": "pre-wrap",
-                  "word-break": "break-word",
-                  "font-size": "14px",
-                }}
-              >
-                {entry.text}
+              <div class={`assistant-bubble assistant-bubble--${entry.role}`}>
+                {/*
+                  Assistant replies are Markdown now (#242, reusing #222's
+                  sanitising renderer): fenced code and lists arrive as real
+                  nodes rather than literal `#` and backticks. Every node is
+                  built, never injected — a `<script>` in a reply is inert
+                  text. A user's own message stays verbatim, pre-wrapped.
+                */}
+                <Show when={entry.role === "assistant"} fallback={entry.text}>
+                  <div class="md-body">{renderMarkdown(entry.text)}</div>
+                </Show>
               </div>
+              <Show when={entry.role === "assistant" && entry.text.trim()}>
+                <button
+                  type="button"
+                  class="assistant-copy"
+                  data-testid="assistant-copy"
+                  title="Copy this reply"
+                  aria-label="Copy this reply"
+                  onClick={() => {
+                    void writeClipboardText(entry.text).catch((e) =>
+                      props.onError(`copy: ${String(e)}`),
+                    );
+                  }}
+                >
+                  ⧉ Copy
+                </button>
+              </Show>
+              <Show when={entry.failed}>
+                <div class="assistant-failed-note">
+                  <span>Not sent.</span>
+                  <button
+                    type="button"
+                    class="assistant-retry"
+                    data-testid="assistant-retry"
+                    disabled={busy()}
+                    onClick={() => retry(entry)}
+                  >
+                    Retry
+                  </button>
+                </div>
+              </Show>
             </div>
           )}
         </For>
@@ -861,13 +1015,30 @@ export default function Assistant(props: AssistantProps) {
                   </>
                 )}
               </Show>
-              <div style={{ display: "flex", gap: "8px" }}>
+              <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
                 <button type="button" disabled={busy()} onClick={() => void resolve(true)}>
                   ✓ Approve
                 </button>
                 <button type="button" disabled={busy()} onClick={() => void resolve(false)}>
                   ✗ Deny
                 </button>
+                {/*
+                  The 120s expiry, counting down (FR-T2). The server drops the
+                  card at zero, so an approval you can no longer make stops
+                  inviting you to make it — and the last few seconds are visible
+                  rather than a surprise.
+                */}
+                <Show when={pendingSecondsLeft() !== null}>
+                  <span
+                    class="assistant-countdown"
+                    data-testid="assistant-countdown"
+                    aria-live="polite"
+                  >
+                    {(pendingSecondsLeft() ?? 0) > 0
+                      ? `expires in ${pendingSecondsLeft()}s`
+                      : "expired"}
+                  </span>
+                </Show>
               </div>
             </div>
           )}
@@ -894,24 +1065,53 @@ export default function Assistant(props: AssistantProps) {
       </Show>
 
       <form
-        style={{ display: "flex", gap: "8px" }}
+        class="assistant-form"
         onSubmit={(e) => {
           e.preventDefault();
           void send(draft());
         }}
       >
-        <input
+        <textarea
           ref={inputEl}
-          type="text"
+          class="assistant-input"
+          rows={1}
           value={draft()}
           disabled={busy()}
           placeholder={listening() ? "listening…" : "Ask about sessions or work"}
-          style={{ flex: 1 }}
           onInput={(e) => setDraft(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            // Enter sends; Shift+Enter (and IME composition) inserts a newline,
+            // so a multi-line message is typed in place (#242). The Send button
+            // stays the pointer route via the form's submit.
+            if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+              e.preventDefault();
+              void send(draft());
+            }
+          }}
         />
-        <Show when={sttAvailable()}>
+        {/*
+          The mic is shown even when it cannot be used, with the reason in its
+          title, rather than hidden — a control that vanishes leaves the reader
+          wondering whether voice exists at all (#242).
+        */}
+        <Show
+          when={sttAvailable()}
+          fallback={
+            <button
+              type="button"
+              class="assistant-mic assistant-mic--off"
+              data-testid="mic-unavailable"
+              disabled
+              title="Voice input isn't available in this browser."
+              aria-label="Voice input unavailable in this browser"
+            >
+              🎙
+            </button>
+          }
+        >
           <button
             type="button"
+            class="assistant-mic"
             data-testid="mic"
             data-listening={listening() ? "yes" : "no"}
             title={listening() ? "Release to send" : "Hold to speak"}
@@ -953,9 +1153,27 @@ export default function Assistant(props: AssistantProps) {
             🎙
           </button>
         </Show>
-        <button type="submit" disabled={busy() || !draft().trim()}>
-          Send
-        </button>
+        {/*
+          Stop while a turn is in flight, Send otherwise (#242). Stop aborts the
+          request; the engine treats the dropped connection as a cancellation.
+        */}
+        <Show
+          when={busy()}
+          fallback={
+            <button type="submit" disabled={!draft().trim()}>
+              Send
+            </button>
+          }
+        >
+          <button
+            type="button"
+            class="assistant-stop"
+            data-testid="assistant-stop"
+            onClick={stop}
+          >
+            Stop
+          </button>
+        </Show>
       </form>
     </div>
   );

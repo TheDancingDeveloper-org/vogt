@@ -59,6 +59,13 @@ pub struct MessageReq {
     pub profile: Option<String>,
 }
 
+/// One conversational turn.
+///
+/// Cancellation-safe by construction (#242): the composer's Stop button aborts
+/// the fetch, which closes the connection, and axum drops this handler's future
+/// at its next await point. Dropping it cancels the in-flight request to the
+/// model with it, releases the conversation lock, and logs nothing — a client
+/// that went away is not an error and needs no cleanup path of its own.
 pub async fn message(
     State(state): State<Arc<AppState>>,
     identity: Option<Extension<AuthorizedIdentity>>,
