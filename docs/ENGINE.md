@@ -168,7 +168,7 @@ fail to start if the helper has nothing to broker.
 
 ```bash
 # 1. Mint a token (>=16 chars)
-export MYDEVENV2_TOKEN="$(openssl rand -hex 24)"
+export ENGINE_TOKEN="$(openssl rand -hex 24)"
 
 # Optional: scoped tokens and a write-rate cap for the primary token.
 # Capability names: sessions, filesystem-write, git-write, gui-control,
@@ -185,19 +185,20 @@ cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
 ```
 
 Engine settings are read from `ENGINE_*` environment variables, with the
-legacy `MYDEVENV2_*` names accepted as aliases. The three values the CLI
-parser itself owns — the token, the bind address and the config path — are
-the exception: they are read **only** under their legacy names
-(`MYDEVENV2_TOKEN`, `MYDEVENV2_BIND`, `MYDEVENV2_CONFIG`), or passed as
-`--token` / `--bind` / `--config`. Prefer the environment for the token so it
-does not appear in process listings.
+legacy `MYDEVENV2_*` names accepted as aliases for one release (they log a
+deprecation warning at startup). This now includes the three values the CLI
+parser owns — the token, the bind address and the config path: they read
+`ENGINE_TOKEN`, `ENGINE_BIND` and `ENGINE_CONFIG` (legacy `MYDEVENV2_TOKEN`,
+`MYDEVENV2_BIND`, `MYDEVENV2_CONFIG` still work), or the `--token` / `--bind` /
+`--config` flags, which win over the environment. Prefer the environment for
+the token so it does not appear in process listings.
 
 Optional TOML config, passed with `--config engine.toml`. Precedence is
 CLI flags > env > config file:
 
 ```toml
 bind = "0.0.0.0:8910"
-token = "..."                  # or MYDEVENV2_TOKEN
+token = "..."                  # or ENGINE_TOKEN
 scrollback_bytes = 4194304
 default_shell = "/bin/bash"
 default_cwd   = "/srv/workspace"
@@ -249,7 +250,7 @@ For UI work, run the server and the Vite dev server in parallel — Vite proxies
 ```bash
 # terminal 1
 cd engine
-MYDEVENV2_TOKEN=$(openssl rand -hex 24) cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
+ENGINE_TOKEN=$(openssl rand -hex 24) cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
 # terminal 2
 cd web && pnpm dev   # -> http://127.0.0.1:5173, paste the token into Settings
 ```
@@ -274,7 +275,7 @@ and `mobile/` deleted to prove it.
 ### 3.5 Smoke test with curl + websocat
 
 ```bash
-TOKEN=$MYDEVENV2_TOKEN
+TOKEN=$ENGINE_TOKEN
 BASE=http://127.0.0.1:8910
 
 curl -s $BASE/healthz

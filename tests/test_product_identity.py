@@ -108,7 +108,11 @@ def test_compatibility_names_remain_explicitly_stable() -> None:
     assert 'const TOKEN_KEY = "mydevenv2.token"' in api
     assert 'id: "mydevenv2-alerts"' in push
     assert '"com.sprooty.mydevenv2"' in capacitor
-    assert 'DEFAULT_NOTIFY_PHRASE: &str = "MYDEVENV2_NOTIFY:"' in agent_tasks
+    # The default notify prefix was renamed to `VOGT_NOTIFY:` (#203), but the
+    # legacy `MYDEVENV2_NOTIFY:` must remain an accepted prefix so existing task
+    # definitions and any client still emitting it keep working.
+    assert 'DEFAULT_NOTIFY_PHRASE: &str = "VOGT_NOTIFY:"' in agent_tasks
+    assert 'LEGACY_NOTIFY_PHRASE: &str = "MYDEVENV2_NOTIFY:"' in agent_tasks
     assert (
         "#7EE787"
         in (android / "res" / "drawable-v24" / "ic_launcher_foreground.xml").read_text()

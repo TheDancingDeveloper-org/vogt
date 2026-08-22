@@ -8,16 +8,19 @@ use tracing_subscriber::EnvFilter;
 #[command(name = "mydevenv2-server", version, about = "MyDevEnv2 server")]
 struct Cli {
     /// Path to a TOML config file. Optional; env vars and CLI flags override.
-    #[arg(short, long, env = "MYDEVENV2_CONFIG")]
+    /// Env: `ENGINE_CONFIG` (legacy `MYDEVENV2_CONFIG` still accepted).
+    #[arg(short, long)]
     config: Option<std::path::PathBuf>,
 
     /// Bind address (host:port). Overrides config.
-    #[arg(long, env = "MYDEVENV2_BIND")]
+    /// Env: `ENGINE_BIND` (legacy `MYDEVENV2_BIND` still accepted).
+    #[arg(long)]
     bind: Option<String>,
 
     /// Bearer token required for all API/WS calls. Overrides config.
+    /// Env: `ENGINE_TOKEN` (legacy `MYDEVENV2_TOKEN` still accepted).
     /// SECURITY: prefer passing via env so it doesn't appear in process listings.
-    #[arg(long, env = "MYDEVENV2_TOKEN", hide_env_values = true)]
+    #[arg(long)]
     token: Option<String>,
 }
 
@@ -32,7 +35,13 @@ async fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
-    let cfg = match config::load(cli.config.as_deref(), cli.bind, cli.token) {
+    // The three settings the CLI parser owns resolve their env forms through
+    // config's `ENGINE_`-aware helper, so `ENGINE_CONFIG`/`ENGINE_BIND`/
+    // `ENGINE_TOKEN` are the primary names and the legacy `MYDEVENV2_*` names
+    // still work with a deprecation warning (#203). A `--config` flag wins over
+    // the environment; the bind and token env forms are resolved inside `load`.
+    let config_path = cli.config.or_else(config::config_path_from_env);
+    let cfg = match config::load(config_path.as_deref(), cli.bind, cli.token) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config error: {e}");

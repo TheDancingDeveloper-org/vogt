@@ -130,7 +130,9 @@ fi
 # carries neutral infrastructure tooling; optional agents can be installed by
 # the user. A dedicated Infisical machine identity enables on-demand service
 # auth through `mydevenv2-agent-auth` without exporting tokens to PID 1.
-agent_auth_required="${MYDEVENV2_AGENT_AUTH_REQUIRED:-0}"
+# `ENGINE_AGENT_AUTH_REQUIRED` is the current name; `MYDEVENV2_AGENT_AUTH_REQUIRED`
+# is still accepted as a legacy alias for one release (#203).
+agent_auth_required="${ENGINE_AGENT_AUTH_REQUIRED:-${MYDEVENV2_AGENT_AUTH_REQUIRED:-0}}"
 if [[ -n "${INFISICAL_CLIENT_ID:-}" && -n "${INFISICAL_CLIENT_SECRET:-}" ]]; then
     echo "agent service auth available via mydevenv2-agent-auth"
     if [[ "$agent_auth_required" == "1" || "$agent_auth_required" == "true" ]]; then
