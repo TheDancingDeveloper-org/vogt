@@ -2,30 +2,32 @@
 
 Status: **built and current as of 2026-08-15** · this document describes what
 the engine *is*, not what it was planned to be. Where a capability was designed
-and never delivered, it is not described here — it is a numbered gap in
-[`REQUIREMENTS.md`](REQUIREMENTS.md) §7.
+and never delivered, it is not described here; outstanding engine work is
+tracked in the GitHub issue tracker and [`ROADMAP.md`](ROADMAP.md).
 
-The session engine is the Rust half of Vogt. It was MyDevEnv2, a standalone
-product, until the merge recorded in [`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md)
-made it Vogt's execution surface. It runs PTYs, streams them over WebSocket,
-serves the PWA, and — since M9 — is the merged product's **front door**: the
-only listening process, proxying `/api/vogt` and `/mcp` to the Python core on
-loopback.
+The session engine is the Rust half of Vogt. It began life as a standalone
+product and was merged into this repository to become Vogt's execution
+surface. It runs PTYs, streams them over WebSocket, serves the PWA, and is the
+merged product's **front door**: the only listening process, proxying
+`/api/vogt` and `/mcp` to the Python core on loopback.
 
-This file is the single reference for the engine. It replaced eight separate
-documents (`API_CONTRACT.md`, `ASSISTANT.md`, `AGENT_TASKS.md`, `INTENT.md`,
-`PLAN.md`, `TOOLING.md`, `USER_GUIDE.md`, `uplift.md`) that described MyDevEnv2
-as its own product, each with its own idea of what the product was called and
-which tree it lived in. Their still-true content is here, in
-[`DEPLOYMENT.md`](DEPLOYMENT.md) §10–§11, in
-[`USER_GUIDE.md`](USER_GUIDE.md), and — for everything they proposed and
-nobody built — in `REQUIREMENTS.md` §7.
+**The engine is optional.** The Python core (the repository-root `Dockerfile`,
+published as `ghcr.io/thedancingdeveloper-org/vogt`) is a complete product on
+its own. The engine, the PWA under `web/` and the Android shell under
+`mobile/` are built from source with `engine/Dockerfile` — §3 and
+[`DEPLOYMENT.md`](DEPLOYMENT.md) cover both paths.
+
+This file is the single reference for the engine: what it owns, how to run
+it, the full wire contract, the assistant and its threat model, agent tasks.
+The `FR-xx` / `NFR-xx` identifiers that appear throughout are stable
+requirement ids from the product's requirements baseline, which is not part
+of the repository; each rule they label is stated in words beside them.
 
 Companion documents: [`DESIGN.md`](DESIGN.md) (the product's architecture),
-[`REQUIREMENTS.md`](REQUIREMENTS.md) (the numbered baseline, including every
-requirement the engine carries), [`DEPLOYMENT.md`](DEPLOYMENT.md) (topologies,
-the runtime image's toolchain, and the stacks), [`USER_GUIDE.md`](USER_GUIDE.md)
-(how a person drives it).
+[`DEPLOYMENT.md`](DEPLOYMENT.md) (production deployment: images, compose,
+env, reverse proxy, backups, upgrades), [`USER_GUIDE.md`](USER_GUIDE.md) (how
+a person drives it), [`VOICE_DELIVERY.md`](VOICE_DELIVERY.md) (the voice
+assistant's delivery status).
 
 ---
 
@@ -68,30 +70,26 @@ engine/           its own Cargo workspace — the repository root is not one
   server/         mydevenv2-server: PTYs, HTTP, WS, SSE, the front door
   contract/       mydevenv2-contract: shared wire DTOs
   Dockerfile      the merged image (context is the repository root)
-  deploy/         entrypoint, agent-auth helpers, the standalone compose
+  Dockerfile.pod  the dev-pod toolchain base the merged image builds on
+  deploy/         entrypoint, MCP registration and credential helpers, a
+                  sample standalone compose file
 web/              the Solid/Vite PWA — the product's GUI, embedded at build time
 mobile/           the Capacitor 8 Android shell that loads the deployed PWA
 ```
 
-There is no `.woodpecker/` under `engine/` any more, and a path naming one is
-stale. The fork brought the engine's Woodpecker pipeline across with it, and
-in this repository it never ran: Woodpecker builds the Forgejo repositories
-and Vogt is on GitHub. What it did do was describe a second, plausible-looking
-way to publish this Dockerfile and redeploy production, which is a dangerous
-thing for a file to say when nothing executes it. The engine's checks run in
-`.github/workflows/ci.yml` and its image is built by
-`.github/workflows/build.yml`; `indexarr/MyDevEnv2` on the forge keeps its own
-pipeline for the standalone stacks (`docs/DEPLOYMENT.md` §11).
+The engine's checks run in `.github/workflows/ci.yml` and its image is built
+by `.github/workflows/build.yml`.
 
-Crate names, the config prefix (`MYDEVENV2_*`) and the container's own
-identity still say MyDevEnv2. That is deliberate and is not drift: the names
-divide by *process*, not by product, and renaming them is a stack-environment
-migration on a live deployment. `MERGE_MYDEVENV2.md` §11.1 records the sunset
-order — move the host, retire the standalone stack, *then* alias the names.
-The same compatibility rule keeps the Android application and notification
-channel IDs, browser storage/event keys, and `MYDEVENV2_NOTIFY:` task hook;
-none is presentation copy. Browser/route titles, install labels, login/errors,
+Crate names, binary and helper names (`mydevenv2-*`), and the legacy
+`MYDEVENV2_*` environment prefix still carry the engine's pre-merge name.
+That is deliberate and is not drift: the names divide by *process*, not by
+product, and renaming them is a migration on every live deployment. The same
+compatibility rule keeps the Android application and notification channel
+IDs, browser storage/event keys, and the `MYDEVENV2_NOTIFY:` task hook; none
+is presentation copy. Browser/route titles, install labels, login/errors,
 notification channel labels and notification content all use **Vogt**.
+Engine settings are read under `ENGINE_*` (see §3); the legacy `MYDEVENV2_*`
+names are still accepted as aliases and log a warning at startup.
 
 `engine/` is its own Cargo workspace, so every `cargo` invocation runs from
 `engine/`. The Rust binary embeds the repository-root `web/dist/` via
@@ -101,6 +99,73 @@ see nothing change.
 
 ## 3. Running it
 
+Two ways: build the merged image, or run the binary from source. Both need
+the PWA built first (§3.3), because the binary embeds it.
+
+### 3.1 Toolchain and the merged image
+
+From source you need a stable Rust toolchain, Node 22 with `pnpm`, and
+`ripgrep` on `$PATH` (the search routes shell out to `rg`). `git` is needed for
+the git routes.
+
+The merged image is built from the **repository root**, not from `engine/`:
+
+```bash
+docker build -f engine/Dockerfile \
+  --build-arg CORE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt:latest \
+  -t vogt-engine .
+```
+
+The Dockerfile has four stages: the PWA bundle, the Rust binary with that
+bundle embedded, the published core image (lifted whole, so the merged image
+runs *the* public core rather than a second build of it — `CORE_IMAGE` has no
+default on purpose), and the runtime. The runtime stage starts `FROM` a
+**dev-pod base** (`engine/Dockerfile.pod`, published as
+`ghcr.io/thedancingdeveloper-org/vogt-pod-base:{lean,full}-*`): an Ubuntu
+image carrying the toolchains an agent working *inside* a session is likely to
+want — Node, Rust, Java/Gradle, the Android SDK, and in the `full` variant
+Flutter. It is a development pod rather than a hardened service image — it
+runs as a named user with `sudo`, with a writable home — which is why the
+core-only image at the repository root still exists and is the one to use
+when you do not want sessions at all.
+
+Build arguments worth knowing, all off by default: `INSTALL_AI_CLIENTS=true`
+bakes in the `codex` and `claude` CLIs at Renovate-pinned versions (otherwise
+agents are user-managed inside the pod); `INSTALL_CADASTRE_MCP=true` installs
+the optional Cadastre MCP bridge (§4); a further provider-specific agent CLI
+has its own build arg in the same block. `POD_BASE_IMAGE` selects the pod
+base; CI passes it by digest.
+
+The image's entrypoint (`engine/deploy/entrypoint.sh`) supervises the
+container: it optionally joins a VPN (`TAILSCALE_AUTH_KEY`), optionally starts
+a headless compositor for the GUI surface (`START_SWAY=1`), starts the Python
+core on loopback when `VOGT_CORE_URL` names a loopback address, then execs the
+engine as PID 1's child. With `VOGT_CORE_URL` unset the container runs the
+engine alone (FR-E9). `engine/deploy/docker-compose.yml` is a sample
+standalone compose file for that image; it carries values from the
+maintainer's own deployment and must be read as a template, not used as-is.
+[`DEPLOYMENT.md`](DEPLOYMENT.md) is the production guide.
+
+The helper scripts the image installs under `/usr/local/bin/mydevenv2-*`:
+
+| Helper | Source | What it does | Needed? |
+|---|---|---|---|
+| `mydevenv2-entrypoint` | `deploy/entrypoint.sh` | container supervisor, above | yes |
+| `mydevenv2-mcp-bootstrap` | `deploy/mcp-bootstrap.sh` | registers Vogt's MCP server (and, opt-in, Cadastre's) with the agent CLIs present in the image | optional — without it an agent registers MCP servers by hand |
+| `mydevenv2-vogt-mcp` | `deploy/vogt-mcp-auth.sh` | stdio bridge to Vogt's `/mcp` for clients that cannot take a bearer directly; uses the session's own token | optional |
+| `mydevenv2-rust-analyzer-mcp` | `deploy/rust-analyzer-mcp.sh` | starts `rust-analyzer-mcp` anchored to the nearest `Cargo.toml` | optional |
+| `mydevenv2-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
+| `codex` wrapper | `deploy/codex-full-access.sh` | runs Codex without its nested sandbox, because the pod is the isolation boundary | only with `INSTALL_AI_CLIENTS` |
+| `mydevenv2-agent-auth` | `deploy/agent-auth.sh` | brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`) | **optional, and coupled to the maintainer's secrets manager** — see §9 |
+| `mydevenv2-cadastre-mcp` | `deploy/cadastre-mcp-auth.sh` | stdio bridge to a Cadastre MCP endpoint | only with `CADASTRE_MCP_ENABLED=1` |
+
+Nothing in the engine itself depends on `agent-auth`: with
+`ENGINE_AUTO_AGENT_AUTH` unset (the default) sessions are plain shells, and
+the two "(protected)" session templates that wrap an agent CLI in it simply
+fail to start if the helper has nothing to broker.
+
+### 3.2 From source
+
 ```bash
 # 1. Mint a token (>=16 chars)
 export MYDEVENV2_TOKEN="$(openssl rand -hex 24)"
@@ -108,8 +173,8 @@ export MYDEVENV2_TOKEN="$(openssl rand -hex 24)"
 # Optional: scoped tokens and a write-rate cap for the primary token.
 # Capability names: sessions, filesystem-write, git-write, gui-control,
 # agent-tasks-write, push-write, history-write, assistant, vogt-write
-export MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE=600
-export MYDEVENV2_EXTRA_TOKENS_JSON='[
+export ENGINE_MUTATING_REQUEST_LIMIT_PER_MINUTE=600
+export ENGINE_EXTRA_TOKENS_JSON='[
   {"name": "readonly", "token": "replace-with-another-16+-char-secret",
    "capabilities": []}
 ]'
@@ -119,7 +184,15 @@ cd engine
 cargo run -p mydevenv2-server -- --bind 127.0.0.1:8910
 ```
 
-Optional TOML config, passed with `--config mydevenv2.toml`. Precedence is
+Engine settings are read from `ENGINE_*` environment variables, with the
+legacy `MYDEVENV2_*` names accepted as aliases. The three values the CLI
+parser itself owns — the token, the bind address and the config path — are
+the exception: they are read **only** under their legacy names
+(`MYDEVENV2_TOKEN`, `MYDEVENV2_BIND`, `MYDEVENV2_CONFIG`), or passed as
+`--token` / `--bind` / `--config`. Prefer the environment for the token so it
+does not appear in process listings.
+
+Optional TOML config, passed with `--config engine.toml`. Precedence is
 CLI flags > env > config file:
 
 ```toml
@@ -127,14 +200,13 @@ bind = "0.0.0.0:8910"
 token = "..."                  # or MYDEVENV2_TOKEN
 scrollback_bytes = 4194304
 default_shell = "/bin/bash"
-default_cwd   = "/home/sprooty/Working"
-workspace_root = "/home/sprooty/Working"
+default_cwd   = "/srv/workspace"
+workspace_root = "/srv/workspace"      # default: ~/Working
 activity_idle_after_ms = 1500
-state_dir = "/home/sprooty/.local/share/mydevenv2"
+state_dir = "/var/lib/vogt-engine"     # default: ~/.local/share/mydevenv2
 vapid_subject = "mailto:admin@example.invalid"
 allowed_origins = [
-  "https://vogt.sprooty.com",
-  "https://mydevenv2.sprooty.com",
+  "https://vogt.example.com",
   "http://localhost:5173",
   "http://127.0.0.1:5173",
 ]
@@ -150,16 +222,21 @@ mutating_requests_per_minute = 60
 ```
 
 `capabilities = []` means "authenticated read-only token". Recommended token
-policy: keep `MYDEVENV2_TOKEN` as the admin/recovery credential, use a scoped
+policy: keep the primary token as the admin/recovery credential, use a scoped
 interactive token for normal browser use, a scoped read-only token for passive
 viewers, and a separate `gui-control` token if a browser regularly launches GUI
 processes. The PWA's Settings modal stores device-local named auth profiles, so
 the primary token need never sit in a browser's `localStorage`.
 
+To run the engine as the front door for a core, set `VOGT_CORE_URL` to the
+core's address and `VOGT_CORE_TOKEN` (or `VOGT_CORE_TOKEN_FILE`) to a core
+token; per-front-door-token pairings go on `extra_tokens` entries as
+`vogt_core_token_file`. The assistant is configured in §6.
+
 Which values the *core* reads is [`CONFIG.md`](CONFIG.md), which is generated
 from `src/vogt/config.py` and does not describe this process.
 
-### 3.1 Refreshing the embedded PWA
+### 3.3 Refreshing the embedded PWA
 
 ```bash
 cd web && pnpm install && pnpm build
@@ -177,7 +254,7 @@ MYDEVENV2_TOKEN=$(openssl rand -hex 24) cargo run -p mydevenv2-server -- --bind 
 cd web && pnpm dev   # -> http://127.0.0.1:5173, paste the token into Settings
 ```
 
-### 3.2 Tests
+### 3.4 Tests
 
 ```bash
 cd engine                        # the Cargo workspace root
@@ -194,7 +271,7 @@ The Python core's suite runs from the repository root and does not need either
 toolchain — `NFR-Q6` keeps it that way, and CI runs it with `engine/`, `web/`
 and `mobile/` deleted to prove it.
 
-### 3.3 Smoke test with curl + websocat
+### 3.5 Smoke test with curl + websocat
 
 ```bash
 TOKEN=$MYDEVENV2_TOKEN
@@ -217,15 +294,17 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" $BASE/api/sessions/$ID/kill
 curl -s -X DELETE -H "Authorization: Bearer $TOKEN" $BASE/api/sessions/$ID
 ```
 
-The merged stack has its own five-check smoke script,
-`scripts/smoke_merged_stack.sh` — see `DEPLOYMENT.md` §9.2. It exists because
-the failure worth catching is not a crash but a front door that comes up,
-passes its healthcheck and serves no Vogt.
+The merged stack has its own smoke script, `scripts/smoke_merged_stack.sh`,
+which checks the front door end to end. It exists because the failure worth
+catching is not a crash but a front door that comes up, passes its healthcheck
+and serves no Vogt.
 
 ## 4. Agent-facing MCP servers inside the pod
 
-The runtime image bundles two MCP servers so agents running in a session can
-reach a Rust LSP and GitHub without the user wiring anything.
+The runtime image bundles MCP servers so agents running in a session can
+reach a Rust LSP, GitHub and Vogt itself without the user wiring anything.
+Everything in this section is about the *image*; a from-source engine has
+none of it and loses nothing the engine's own routes provide.
 
 **Rust LSP.** `mydevenv2-rust-analyzer-mcp` wraps `rust-analyzer-mcp` and
 starts it from the nearest parent directory containing a `Cargo.toml`, which
@@ -241,32 +320,32 @@ Set `MYDEVENV2_RUST_ANALYZER_WORKSPACE` for that MCP entry if a client launches
 it from a non-Rust directory.
 
 **GitHub.** `/usr/local/bin/github-mcp-server`, resolved to latest at image
-build time. It needs `GITHUB_PERSONAL_ACCESS_TOKEN`; inside an
-`mydevenv2-agent-auth` shell that is already available as `$GH_TOKEN`.
+build time. It needs `GITHUB_PERSONAL_ACCESS_TOKEN` — a PAT you supply to the
+session's environment (the `agent-auth` helper, where configured, exports one
+as `$GH_TOKEN`).
 
 ```bash
 codex mcp add github -- env GITHUB_PERSONAL_ACCESS_TOKEN=$GH_TOKEN github-mcp-server stdio
 claude mcp add --scope project github -e GITHUB_PERSONAL_ACCESS_TOKEN=$GH_TOKEN -- github-mcp-server stdio
 ```
 
-Use `GITHUB_AUSAGENTSMITH_PAT` instead of `GH_TOKEN` for a second instance
-scoped to the AusAgentSmith-org identity.
-
 **Vogt.** A session started for a project or work item registers Vogt's own MCP
 server automatically, carrying a per-session actor-scoped token, so an agent's
 writes are attributed to that session's actor rather than to a shared identity
-(FR-E5, FR-S10). `DEPLOYMENT.md` §7.2 is the credential's story.
+(FR-E5, FR-S10). The session exports the endpoint as `VOGT_URL` and
+`mcp-bootstrap.sh` registers it; `VOGT_MCP_URL` overrides the endpoint, and
+with neither set the bootstrap falls back to the front door on loopback.
 
-**Cadastre — optional, off by default.** Cadastre is a separate product, not
-part of Vogt (NFR-O5). `mydevenv2-mcp-bootstrap` registers it, and
+**Cadastre — optional, off by default.** Cadastre is a separate product — an
+external MCP server an agent in a session may additionally be pointed at —
+and is not part of Vogt (NFR-O5). `mydevenv2-mcp-bootstrap` registers it, and
 `mydevenv2-agent-auth` fetches its bearer and probes it, only when the
 deployment opts in:
 
 | Env | Default | Effect |
 |---|---|---|
-| `CADASTRE_MCP_ENABLED` | `0` | `1` registers and probes Cadastre. At `0` the bootstrap still registers Vogt, and `agent-auth check` reports `skip: Cadastre MCP (optional integration disabled)` rather than failing. |
-| `CADASTRE_MCP_URL` | the estate endpoint | Where the bridge points. |
-| `MYDEVENV2_CADASTRE_SECRET_NAME` | `HOMELAB_CADASTRE_HTTP_TOKEN` | Which Infisical secret holds the bearer. |
+| `CADASTRE_MCP_ENABLED` | `0` | `1` registers and probes the bridge. At `0` the bootstrap still registers Vogt, and `agent-auth check` reports `skip: Cadastre MCP (optional integration disabled)` rather than failing. |
+| `CADASTRE_MCP_URL` | none usable — set it if you enable the bridge | Where the bridge points. The bearer is expected in `CADASTRE_HTTP_TOKEN`, or brokered by `agent-auth`. |
 
 The image installs `cadastre[mcp-client]` only under the
 `INSTALL_CADASTRE_MCP` build argument, which is also off by default — so
@@ -334,8 +413,7 @@ section that documents it.
   for mutating requests use it, the access line below quotes it, and
   `/api/vogt` and `/mcp` send it to the core, which attaches it to every line
   it writes while serving that request. That is what makes a slow request
-  followable across two runtimes with two logging stacks — `docs/DEPLOYMENT.md`
-  §12. A caller-supplied id is checked before it is logged (identifier
+  followable across two runtimes with two logging stacks. A caller-supplied id is checked before it is logged (identifier
   characters, 64 bytes) and replaced when it is not, and the audit lines still
   carry the token's *name* and never its value.
 - Every request produces one `tracing` line: `request_id`, `method`, `path`,
@@ -369,8 +447,8 @@ section that documents it.
 - `GET /readyz` -> `{"ok": bool, "checks": [{"name","ok","detail","fatal"}]}`
   — seven checks: `workspace_root` (readable directory), `state_dir`
   (writable, proved by writing and removing a probe file), `tailscale`
-  (skipped unless `TAILSCALE_AUTH_KEY` is set), `gui` (skipped unless
-  `START_SWAY`), `vogt_core`, `workspace_agreement` (the core imports inside
+  (the image's optional VPN join; skipped unless `TAILSCALE_AUTH_KEY` is set),
+  `gui` (skipped unless `START_SWAY`), `vogt_core`, `workspace_agreement` (the core imports inside
   this server's workspace root — FR-E3) and `backup_agreement` (`vogt backup`
   would cover this server's `state_dir` — NFR-I6). `200` when every *fatal*
   check passes, `503` otherwise; the last three are non-fatal by design, so a
@@ -427,7 +505,7 @@ field — the brief the session's agent should start from:
 ```json
 {
   "name": "VOGT-42 fix the flaky forge test",
-  "cwd": "Active/apps/vogt",
+  "cwd": "apps/vogt",
   "prompt": "Fix the flaky forge test.\n\nWhy: it blocks the release."
 }
 ```
@@ -459,7 +537,7 @@ Three rules, each written against a specific failure:
 ```json
 {
   "name": "scratch/scratch",
-  "cwd": "Active/scratch",
+  "cwd": "scratch",
   "command": ["mydevenv2-agent-auth", "run", "--", "codex"],
   "model": "gpt-5.6",
   "effort": "medium"
@@ -499,7 +577,7 @@ to them: session prompts are retained by liveness, not by count.
     "activity": "idle|running|waiting-for-input|errored",
     "exit_code": null,
     "scrollback_bytes": 123,
-    "cwd": "Active/apps/MyDevEnv2",
+    "cwd": "apps/vogt",
     "created_at": "2026-07-06T00:00:00Z"
   },
   "scrollback_pos": 123,
@@ -840,7 +918,7 @@ engine was down is never republished and never notified. The proposal itself
 is not lost — it stays open in the drift inbox until somebody rules on it — so
 what a redeploy costs is the interruption, not the work. The alternative, a
 second persisted cursor read only by the notifier, buys that back at the price
-of a phone that can replay an estate's history after a restart; a missed buzz
+of a phone that can replay a deployment's history after a restart; a missed buzz
 is recoverable by opening the app, and a notification channel someone switched
 off is not.
 
@@ -1028,50 +1106,92 @@ The Vogt half is independently absent: with no `vogt_core_url`, or with a core
 that is not answering, the `vogt_*` tools are simply not offered that turn and
 the terminal half works exactly as before (FR-T6, FR-E9).
 
-### Configuration
+### Configuring the assistant provider
 
+The assistant talks to **any OpenAI-compatible chat endpoint** — one that
+answers `POST {base_url}/chat/completions` with `tools` / `tool_calls`. A
+hosted provider, a routing proxy, or a local server all work; the difference
+is a URL, a key and a model id. Three settings turn it on:
 
-> **Environment prefix.** These are `ENGINE_*` as of #144. The historical
-> `MYDEVENV2_*` names are still accepted for one release and log a warning at
-> startup naming both, so a stack that has not been redeployed yet keeps
-> working. The prefix is not `VOGT_`: that belongs to the core, which shares
-> this process's environment in the merged image, and `VOGT_ENGINE_URL`,
-> `_STATE_DIR` and `_TOKEN_FILE` are already the *core's* settings for
-> reaching the engine — putting engine-owned settings in that namespace would
-> read worse than the historical name.
+```bash
+# A hosted provider
+ENGINE_ASSISTANT_BASE_URL=https://api.openai.com/v1
+ENGINE_ASSISTANT_API_KEY=sk-...
+ENGINE_ASSISTANT_MODEL=gpt-5.4-mini
 
-| Key (TOML) | Env | Default |
-|---|---|---|
-| `assistant_api_key` | `ENGINE_ASSISTANT_API_KEY` | unset (feature off) |
-| `assistant_base_url` | `ENGINE_ASSISTANT_BASE_URL` | none — required once `assistant_api_key` is set |
-| `assistant_model` | `ENGINE_ASSISTANT_MODEL` | `gpt-5.4-mini` |
-| `assistant_max_tool_calls` | `ENGINE_ASSISTANT_MAX_TOOL_CALLS` | `8` |
-| `assistant_reasoning_effort` | `ENGINE_ASSISTANT_REASONING_EFFORT` | unset |
-| `assistant_allow_claude_proxy` | `ENGINE_ASSISTANT_ALLOW_CLAUDE_PROXY` | `false` |
-| `assistant_profiles` | `ENGINE_ASSISTANT_PROFILES_JSON` | `[]` |
-| `assistant_default_profile` | `ENGINE_ASSISTANT_DEFAULT_PROFILE` | the implicit `default` |
-| `assistant_log_retention_days` | `ENGINE_ASSISTANT_LOG_RETENTION_DAYS` | `30` |
-| `assistant_stt_base_urls` | `ENGINE_ASSISTANT_STT_BASE_URLS` (comma-separated) | `http://127.0.0.1:2022/v1,https://api.openai.com/v1` |
-| `assistant_stt_model` | `ENGINE_ASSISTANT_STT_MODEL` | `whisper-1` |
-| `assistant_stt_api_key` | `ENGINE_ASSISTANT_STT_API_KEY` | unset (local entry needs none) |
-| `assistant_tts_base_urls` | `ENGINE_ASSISTANT_TTS_BASE_URLS` (comma-separated) | `http://127.0.0.1:8880/v1,https://api.openai.com/v1` |
-| `assistant_tts_model` | `ENGINE_ASSISTANT_TTS_MODEL` | `tts-1-hd` |
-| `assistant_tts_voice` | `ENGINE_ASSISTANT_TTS_VOICE` | `nova` |
-| `assistant_tts_api_key` | `ENGINE_ASSISTANT_TTS_API_KEY` | unset (local entry needs none) |
-| `assistant_speech_attempt_timeout_ms` | `ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS` | `30000` |
+# A local OpenAI-compatible server (e.g. llama.cpp, vLLM, Ollama's /v1)
+ENGINE_ASSISTANT_BASE_URL=http://127.0.0.1:11434/v1
+ENGINE_ASSISTANT_API_KEY=local      # any non-empty value; the key is what enables the feature
+ENGINE_ASSISTANT_MODEL=qwen3-coder
+```
+
+With no key the assistant is **off**: its routes answer 404 and the PWA hides
+the tab (FR-T6). A key with no base URL is a *startup error*, not a silent
+default — the engine refuses to guess where a secret should be sent (r20).
+
+> **Environment prefix.** Engine settings are `ENGINE_*`. The legacy
+> `MYDEVENV2_*` names are still accepted as aliases and log a warning at
+> startup naming both. The prefix is not `VOGT_`: that belongs to the core,
+> which shares this process's environment in the merged image, and
+> `VOGT_ENGINE_URL`, `_STATE_DIR` and `_TOKEN_FILE` are already the *core's*
+> settings for reaching the engine.
+
+Every setting, with the TOML key for a `--config` file and its default
+(`engine/server/src/config.rs` is the authority):
+
+| Key (TOML) | Env | Default | Meaning |
+|---|---|---|---|
+| `assistant_api_key` | `ENGINE_ASSISTANT_API_KEY` | unset (feature off) | bearer sent to the chat endpoint; presence enables the assistant |
+| `assistant_base_url` | `ENGINE_ASSISTANT_BASE_URL` | none — required once a key is set | OpenAI-compatible base URL (`/chat/completions` is appended) |
+| `assistant_model` | `ENGINE_ASSISTANT_MODEL` | `gpt-5.4-mini` | model id sent with every request |
+| `assistant_max_tool_calls` | `ENGINE_ASSISTANT_MAX_TOOL_CALLS` | `8` | upper bound on tool-call rounds per user message |
+| `assistant_reasoning_effort` | `ENGINE_ASSISTANT_REASONING_EFFORT` | unset | forwarded as `reasoning_effort` (e.g. `minimal`, `medium`) when set |
+| `assistant_allow_claude_proxy` | `ENGINE_ASSISTANT_ALLOW_CLAUDE_PROXY` | `false` | send `claude-*` model ids anyway — see below |
+| `assistant_profiles` | `ENGINE_ASSISTANT_PROFILES_JSON` | `[]` | additional named providers, a JSON array of profile objects (below) |
+| `assistant_default_profile` | `ENGINE_ASSISTANT_DEFAULT_PROFILE` | the implicit `default` | which profile a request that names none runs on |
+| `assistant_log_retention_days` | `ENGINE_ASSISTANT_LOG_RETENTION_DAYS` | `30` | horizon of the durable interaction log, enforced by a daily sweep |
+| `assistant_stt_base_urls` | `ENGINE_ASSISTANT_STT_BASE_URLS` (comma-separated) | empty (server STT off) | ordered list of OpenAI-compatible `/audio/transcriptions` bases |
+| `assistant_stt_model` | `ENGINE_ASSISTANT_STT_MODEL` | `whisper-1` | transcription model |
+| `assistant_stt_api_key` | `ENGINE_ASSISTANT_STT_API_KEY` | unset | key for whichever STT entry needs one; a local server needs none |
+| `assistant_tts_base_urls` | `ENGINE_ASSISTANT_TTS_BASE_URLS` (comma-separated) | empty (server TTS off) | ordered list of OpenAI-compatible `/audio/speech` bases |
+| `assistant_tts_model` | `ENGINE_ASSISTANT_TTS_MODEL` | `tts-1-hd` | speech model |
+| `assistant_tts_voice` | `ENGINE_ASSISTANT_TTS_VOICE` | `nova` | voice name; `/audio/speech` requires one |
+| `assistant_tts_api_key` | `ENGINE_ASSISTANT_TTS_API_KEY` | unset | key for whichever TTS entry needs one |
+| `assistant_speech_attempt_timeout_ms` | `ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS` | `30000` | per-attempt bound on one speech upstream, not on the whole request |
+
+The Vogt half of the assistant needs no key of its own: it uses
+`vogt_core_url` — the same core the front door proxies — and the
+`vogt_core_token_file` pairing on each front-door token's `extra_tokens`
+entry (§3). A deployment with only the shared `vogt_core_token` gets Vogt
+*reads* in the assistant and a named refusal on writes; pairing a token is
+how it opts that token in.
 
 #### Server-side speech (FR-T12, r16)
 
 STT/TTS are configured **independently of the chat profile** above — chat may
-run through OpenRouter while audio uses OpenAI or a local Whisper.cpp + Kokoro
-pair. Each half's base URLs are an **ordered fallback list** adopting
-voicemode's `VOICEMODE_STT_BASE_URLS` / `VOICEMODE_TTS_BASE_URLS` semantics:
-entry 1 first, later entries on a connection failure or non-2xx — local first,
-cloud fallback. A half is enabled when its list is non-empty; the key is reused
-for whichever entry needs one (the cloud endpoint) and a local entry needs none.
-Each attempt is bounded by `assistant_speech_attempt_timeout_ms`. When the list
-is empty or every entry fails the route answers **404**, so the client falls
-back (FR-T6). Audio is never stored.
+run through one provider while audio uses another, or a local Whisper.cpp +
+Kokoro pair. Each half's base URLs are an **ordered fallback list**, adopting
+the semantics of [voicemode](https://github.com/mbailey/voicemode)'s
+`VOICEMODE_STT_BASE_URLS` / `VOICEMODE_TTS_BASE_URLS`: entry 1 first, later
+entries on a connection failure or non-2xx — local first, cloud fallback. A
+half is enabled when its list is non-empty; the key is reused for whichever
+entry needs one (the cloud endpoint) and a local entry needs none. A key set
+against an empty list is a startup error, as for chat. Each attempt is
+bounded by `assistant_speech_attempt_timeout_ms`. When the list is empty or
+every entry fails the route answers **404**, so the client falls back to
+on-device recognition or typing (FR-T6). Audio is never stored.
+
+Both lists **ship empty**: an earlier defaulted list made `/api/config`
+advertise a backend nobody was running (r26). voicemode's own lists are the
+paste-in when you want its shape — e.g. a local whisper server first, then a
+hosted fallback:
+
+```bash
+ENGINE_ASSISTANT_STT_BASE_URLS=http://127.0.0.1:2022/v1,https://api.openai.com/v1
+ENGINE_ASSISTANT_TTS_BASE_URLS=http://127.0.0.1:8880/v1,https://api.openai.com/v1
+ENGINE_ASSISTANT_STT_API_KEY=sk-...   # used only by the entry that needs it
+ENGINE_ASSISTANT_TTS_API_KEY=sk-...
+```
 
 #### Provider profiles (FR-T9, r16)
 
@@ -1083,21 +1203,24 @@ heard of profiles keeps exactly the behaviour it had and gains a name a
 request can say. `assistant_profiles` is *additional*.
 
 ```toml
-assistant_default_profile = "clawbay"
+assistant_default_profile = "hosted"
 
 [[assistant_profiles]]
-name = "clawbay"
-base_url = "https://api.theclawbay.com/v1"
+name = "hosted"
+base_url = "https://api.openai.com/v1"
 api_key = "sk-…"
 model = "gpt-5.4-mini"
 
 [[assistant_profiles]]
-name = "openrouter"
-base_url = "https://openrouter.ai/api/v1"
-api_key = "sk-or-…"
-model = "qwen/qwen3-coder"
+name = "local"
+base_url = "http://127.0.0.1:11434/v1"
+api_key = "local"
+model = "qwen3-coder"
 reasoning_effort = "medium"
 ```
+
+The same list as an environment variable is a JSON array of the same
+objects: `ENGINE_ASSISTANT_PROFILES_JSON='[{"name":"local","base_url":"http://127.0.0.1:11434/v1","api_key":"local","model":"qwen3-coder"}]'`.
 
 `POST /api/assistant/message` takes an optional `profile` naming one. An
 unknown name is refused and the configured ones are listed; a profile whose
@@ -1107,7 +1230,7 @@ deployment's). Approving a card resumes on the profile that proposed it: an
 approval that continued on another model would hand one conversation's tool
 results to a model that never saw it.
 
-The route-level guard now fires only when *no* configured profile can answer.
+The route-level guard fires only when *no* configured profile can answer.
 With one profile that is the original rule exactly; with two it is the honest
 generalisation — a broken second profile must not stop the history of a
 conversation held on a working one from being read.
@@ -1118,36 +1241,28 @@ and a base URL is an exposure value (NFR-D2).
 
 **A Claude subscription is not a profile.** It has no HTTP API to point a
 `base_url` at, so the way to spend one is the `Claude Code (protected)`
-session template — a session, not the assistant loop. That is why r16 routes
-around the r12 deferral of a native Anthropic backend rather than reversing
-it.
+session template — a session, not the assistant loop.
 
-The Vogt half needs no assistant-specific key. It uses `vogt_core_url` — the
-same core the front door proxies — and the `vogt_core_token_file` pairing on
-each front-door token's `extra_tokens` entry. A deployment with only the
-shared `vogt_core_token` gets Vogt *reads* in the assistant and a named
-refusal on writes; pairing a token is how it opts that token in.
+#### `claude-*` model ids are refused by default (FR-T7)
 
-The backend must be OpenAI-compatible (`POST {base_url}/chat/completions`
-with `tools` / `tool_calls`). Notes from validation against The Claw Bay
-(August 2026): GPT models respond quickly with correct tool calls; the
-`claude-*` proxy routes hung and are **now refused rather than avoided by
-convention** (FR-T7). A `claude-*` model id on this transport makes every
-assistant route answer with a sentence naming the model, the transport and
-the setting that overrides it — because a hang is the worst failure a chat
-surface can have, being indistinguishable from thinking, and the 60-second
-client timeout that used to catch it reported "took too long" for something
-that was never going to answer.
+Validated in August 2026 against hosted OpenAI-compatible proxies: GPT models
+responded quickly with correct tool calls, while the proxies' `claude-*`
+routes hung. A hang is the worst failure a chat surface can have, being
+indistinguishable from thinking, and the 60-second client timeout that used
+to catch it reported "took too long" for something that was never going to
+answer. So a `claude-*` model id on this transport is **refused rather than
+avoided by convention**: every assistant route answers with a sentence naming
+the model, the transport and the setting that overrides it.
 
-`assistant_allow_claude_proxy` turns the refusal off. It exists because the
-fault is a *proxy's* rather than the model's: a deployment whose proxy serves
-those routes correctly is entitled to say so and to own the result.
+`assistant_allow_claude_proxy` (per profile, or `ENGINE_ASSISTANT_ALLOW_CLAUDE_PROXY`
+for the implicit default) turns the refusal off. It exists because the fault
+is a *proxy's* rather than the model's: a deployment whose proxy serves those
+routes correctly is entitled to say so and to own the result.
 
-**The loop is OpenAI-compatible only, and that is now a decision.** FR-T7 once
-asked for a native Anthropic backend as well; the clause was deferred at r12,
-on the grounds that the hang was the failure worth fixing and a second
-transport buys a choice of vendor rather than a capability.
-`REQUIREMENTS.md` §3 carries it.
+**The loop is OpenAI-compatible only, and that is a decision.** A native
+Anthropic backend was once asked for as well and was deferred at r12, on the
+grounds that the hang was the failure worth fixing and a second transport
+buys a choice of vendor rather than a capability.
 
 ### Tools
 
@@ -1289,10 +1404,11 @@ become instructions.
   paired core token whose own scopes the core enforces.
 
 One clause of the assistant's requirements is short, and it is not described
-above as though it existed: FR-T5's voice validation pass against domain
-vocabulary. `REQUIREMENTS.md` §7 carries it, with what is missing and what it
-costs. FR-T7's native Anthropic backend was the other, and was deferred at r12
-rather than left owed — §3.
+above as though it existed: FR-T5's spoken validation pass of the recogniser
+against domain vocabulary (project slugs, `WI-n` ids) has not been run by a
+person — [`VOICE_DELIVERY.md`](VOICE_DELIVERY.md) tracks it. FR-T7's native
+Anthropic backend was the other, and was deferred at r12 rather than left
+owed — the provider section above.
 
 ### Voice
 
@@ -1400,7 +1516,7 @@ agent's transcript. None of it may become an instruction to this system. The
 assistant enforces the same rule structurally at §6; here it is a property of
 what a finding *is*: a recorded observation with a source, never a command.
 
-What a task's findings are *for* is `REQUIREMENTS.md` FR-E7 — a bound run's
+What a task's findings are *for* is FR-E7 — a bound run's
 findings are collectable by vogt-core's `session-outcomes` collector, as
 evidence with freshness and trust like everything else. Nothing is pushed from
 the engine into Vogt's stores; the binding makes the run collectable, and
@@ -1410,14 +1526,11 @@ collection stays Vogt's own act.
 
 ## 8. What the engine does not do
 
-Named here so the absences read as decisions rather than omissions. Each one
-that is *owed* carries a requirement ID; each one that was *withdrawn* is in
-`REQUIREMENTS.md` §7 with the reason.
+Named here so the absences read as decisions rather than omissions.
 
 - **It never decides to run anything.** Every session traces to a person or to
-  a schedule a person created. Autonomous work pickup is deferred by name
-  (`REQUIREMENTS.md` §3), and it is the surviving core of the non-goal r9
-  reversed.
+  a schedule a person created. Autonomous work pickup is deferred by name,
+  and it is the surviving core of the non-goal r9 reversed.
 - **It is not an IDE.** Monaco is a tab type; there are no language servers in
   the client, no extension ecosystem, and no collaborative editing.
 - **It has no editor logic, terminal rendering, or language servers
@@ -1427,33 +1540,34 @@ that is *owed* carries a requirement ID; each one that was *withdrawn* is in
   is: read scrollback, read a curated slice of Vogt, and — after an on-screen
   approval — type into a PTY or make one of four Vogt writes as the approving
   user.
-- **The archived GPUI desktop client was not carried across.** It stayed in the
-  MyDevEnv2 repository, which is now its archive. A reference to `client/`
+- **There is no native desktop client.** The engine's pre-merge repository
+  had one; it was deprecated and not carried across. A reference to `client/`
   anywhere in this tree names something that is not here.
 - **Nothing here is a second backlog.** The engine's outstanding work lives in
-  `REQUIREMENTS.md` §7 and `ROADMAP.md`, because an item without a requirement
-  is nobody's plan.
+  the GitHub issue tracker and `ROADMAP.md`, because an item without a
+  requirement is nobody's plan.
 
 ## 9. Optional integrations — what each does when absent
 
-The engine ships client code for a number of services this estate runs. Every
-one of them is **absent by default**, and its absence is a reported, honest
-state rather than a fault (NFR-O5) — an engine with all of them off is a
-complete product. A public reader inherits the clients; this table is so they
-are also told what each one costs when the service behind it is not there.
+The engine ships client code for a number of external services. Every one of
+them is **absent by default**, and its absence is a reported, honest state
+rather than a fault (NFR-O5) — an engine with all of them off is a complete
+product. This table is so a reader is also told what each one costs when the
+service behind it is not there, and exactly which setting turns it on.
 
-Several carry an **estate-address default** — a value that points at *this*
-estate and that a public operator must change or unset. Those are marked.
+| Integration | What it is for | Turned on by | What its absence means |
+|---|---|---|---|
+| **Assistant provider** (any OpenAI-compatible chat endpoint) | the assistant's tool-use loop | `ENGINE_ASSISTANT_API_KEY` + `ENGINE_ASSISTANT_BASE_URL` (+ `_MODEL`, profiles) — §6 | The assistant routes answer 404 and the PWA hides its tab (FR-T6). A key with no `_BASE_URL` is a *startup error*, not a silent default (r20). |
+| **Speech provider** (OpenAI-compatible audio endpoints) | server-side STT/TTS for the assistant | `ENGINE_ASSISTANT_STT_BASE_URLS` / `ENGINE_ASSISTANT_TTS_BASE_URLS` (+ `_MODEL`, `_VOICE`, `_API_KEY`) — §6 | Each half answers 404 independently; the client falls back to on-device speech or typing. |
+| **Vogt core** | the front door, the assistant's Vogt tools, the event follower | `VOGT_CORE_URL` + `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` — §3, §5 | The engine is bootable alone (FR-E9): sessions work, `/readyz` stays ready, the Vogt routes answer `503` with a named reason. |
+| **FCM** (native push) | push to the Android shell | `ENGINE_FCM_SERVICE_ACCOUNT_JSON` (a Firebase service-account JSON, single line) | The FCM transport is disabled; browser web-push still works for any subscription. VAPID keys are generated and persisted under `state_dir`. |
+| **GUI streaming** | the GUI tab's live stream of launched processes | `GUI_STREAM_URL` (+ `START_SWAY=1`, and `GUI_STREAM_VERIFIED=1` once an operator has watched it work) | `/readyz` reports `gui: disabled` and the GUI surface's affordances are withdrawn with a stated reason (FR-E10). |
+| **Agent CLIs** (`codex`, `claude`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build, or a user-managed install in the pod's home | Sessions are ordinary shells; the two "(protected)" templates cannot start. |
+| **Cadastre** (external MCP server) | an extra MCP server for agents in a session | `INSTALL_CADASTRE_MCP=true` at build + `CADASTRE_MCP_ENABLED=1` + `CADASTRE_MCP_URL` (§4) | Agents in a session cannot reach it; every other MCP server and all core function is unchanged. A separate product, never assumed present. |
+| **Agent service auth** | brokering third-party service credentials (GitHub and others) into a session from a secrets manager | `ENGINE_AUTO_AGENT_AUTH=1` + the `agent-auth.sh` helper's own secrets-manager settings (see its header) | Sessions run without those credentials pre-loaded; nothing in the engine depends on it. **The shipped helper is written against the maintainer's secrets manager and service list** — treat it as a template for your own, or leave it off. |
 
-| Integration | Turned on by | What its absence means |
-|---|---|---|
-| **Cadastre** (MCP bridge) | `CADASTRE_MCP_ENABLED=1` + `CADASTRE_MCP_URL` (§4), token brokered by `agent-auth.sh` | Agents in a session cannot reach Cadastre; every other MCP server and all core function is unchanged. A separate product, never assumed present. **`CADASTRE_MCP_URL` defaults to an estate address.** |
-| **Assistant provider** | `MYDEVENV2_ASSISTANT_API_KEY` (+ `_BASE_URL`, `_MODEL`) (§6) | The assistant routes answer 404 and the PWA hides its tab (FR-T6). A key with no `_BASE_URL` is a *startup error*, not a silent default (r20). |
-| **theclawbay** | `INSTALL_THECLAWBAY=1` build arg | A provider-specific agent CLI is simply not installed; sessions run every other tool. Opt-in since r20. |
-| **FCM / web push** | `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` | The FCM (native) transport is disabled; browser web-push still works for any subscription. |
-| **GUI streaming** | `GUI_STREAM_URL` (+ `START_SWAY`) | `/readyz` reports `gui: disabled` and the GUI surface's affordances are withdrawn with a stated reason. Production runs with it off and unverified (FR-E10). |
-| **sccache over Redis** | `SCCACHE_REDIS` | Rust builds in a session fall back to no shared cache — slower, never broken. **Defaults to an estate Redis (`redis://100.92.54.45:6380`); a public operator must change or unset it.** |
-| **Agent service auth** (Infisical, Komodo, Woodpecker, Forgejo, GitHub) | `engine/deploy/agent-auth.sh` + `INFISICAL_*` | **Estate tooling** — see the script's own header. It brokers this estate's service credentials into a session on demand. Absent, sessions run without those credentials pre-loaded; nothing in the core product depends on it. |
+Operator-local notes about a particular deployment belong in the git-ignored
+`docs/local/`, not here.
 
 The core product's own optional integrations — GitHub collection, MCP, remote
 MCP, and the session engine itself — are in

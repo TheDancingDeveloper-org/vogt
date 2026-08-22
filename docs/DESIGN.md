@@ -3,25 +3,28 @@
 Status: **v0.3 (revision r5), built**; **§1.2 reversed at r9** (2026-08-14 —
 Vogt runs the work it governs) · design 2026-08-12, reconciled against the
 delivered v1 on 2026-08-12, and against the merged product on 2026-08-15.
-Scope: standalone product. Cadastre is prior art and a lessons source, not a
-dependency — see §11.
+Scope: standalone product. Cadastre — the maintainer's earlier, private
+infrastructure register — is prior art and a lessons source, not a
+dependency; see §11.
 
 **This document describes what Vogt *is*.** That rule was tightened on
 2026-08-15 and it changes how to read the sections below. Where the build
 decided something differently from an earlier draft, the decision is described
 in place and the withdrawn alternative is named so the absence reads as a
 choice. Where something was designed and **never delivered**, it is *not*
-described here as though it existed: it is a numbered gap in
-[`REQUIREMENTS.md`](REQUIREMENTS.md) §7, with what is missing and what its
+described here as though it existed: it is a numbered gap in the
+requirements baseline's gap register, with what is missing and what its
 absence costs. A design document that describes unbuilt things is the most
 expensive kind of wrong, because it reads exactly like one that does not.
 
-The requirement-by-requirement delivery verification is `REQUIREMENTS.md` §5
-(v1) and §6 (v2).
+The numbered requirements baseline (`FR-*`/`NFR-*` identifiers, revision
+history, delivery verification and the gap register) is maintained outside
+this repository; the identifiers are stable and are quoted here as plain
+text so that a rule can be found by name, but every rule is also stated in
+words.
 
-Companion documents: [`REQUIREMENTS.md`](REQUIREMENTS.md) (numbered FR/NFR
-baseline, the revision history, and §7's gap register),
-[`SCHEMA.md`](SCHEMA.md), [`DEPLOYMENT.md`](DEPLOYMENT.md),
+Companion documents: [`SCHEMA.md`](SCHEMA.md),
+[`DEPLOYMENT.md`](DEPLOYMENT.md),
 [`ROADMAP.md`](ROADMAP.md), [`ENGINE.md`](ENGINE.md) (the session engine's
 own reference), [`USER_GUIDE.md`](USER_GUIDE.md).
 
@@ -78,9 +81,9 @@ Consequences:
 - Enforcing anything. Vogt reports; the human or agent acts (§5).
 
 **The agent-runner reversal (r9).** Vogt now runs the work it governs.
-MyDevEnv2 is merged in as Vogt's session engine — from the `dev` branch of
-MyDevEnv2, head `2214a7d` — and with it come PTY sessions, agent tasks and
-an assistant, so a work item can *open a coding session* in its project's
+A previously separate session-engine codebase is merged in as Vogt's
+session engine (`engine/`, `web/`, `mobile/`), and with it come PTY
+sessions, agent tasks and an assistant, so a work item can *open a coding session* in its project's
 tree instead of only describing one. The design change is recorded here
 rather than in a deleted bullet because the original line was not a mistake:
 Vogt had no execution surface, and a tracker that claims to run agents
@@ -92,16 +95,16 @@ which can act starts acting on its own. That worry is answered by a
 narrower rule, which survives and is now the boundary: **Vogt never decides
 to run anything on its own.** Every session traces to a person, or to a
 schedule a person created. Autonomous work pickup — an agent taking the top
-backlog item because it was there — is deferred by name in
-[`REQUIREMENTS.md`](REQUIREMENTS.md) §3, and §5.1's rule that collection
-scope is the registered project list is untouched. §2.1 also stands
+backlog item because it was there — is a named, deferred non-requirement,
+and §5.1's rule that collection scope is the registered project list is
+untouched. §2.1 also stands
 unchanged: an execution surface is not an enforcement surface, and nothing
 in the merged product consumes compliance, trust or drift status as a
 precondition for running anything.
 
-The numbered form of all this is `REQUIREMENTS.md` revision **r9** (families
-FR-E, FR-T, FR-M, and the appended FR-U/FR-S/NFR rows); the merge's own
-reasoning is [`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md).
+The numbered form of all this is requirements revision **r9** (families
+FR-E, FR-T, FR-M, and the appended FR-U/FR-S/NFR rows); the engine's own
+reference is [`ENGINE.md`](ENGINE.md).
 
 ### 1.3 Alternatives considered
 
@@ -110,8 +113,8 @@ this proposal must answer.
 
 | Alternative | Why not |
 |---|---|
-| **GitHub Issues/Projects + an MCP shim** | Covers the write plane well and would delete a third of this design. It cannot express the parts that motivate the product: coverage-modelled observation ("has anything even looked at this repo lately?"), declared-vs-observed separation with typed drift, cross-project dependency references, contract compliance, or a ranked global view over repos that are *not* on GitHub. It also makes every answer network-bound and rate-limited, and puts the estate's index inside a service the owner does not run. |
-| **Jira / Linear / self-hosted alternatives (Plane, Taiga)** | Same write plane, none of the observation layer, and all of them assume work is *entered*. The estate's problem is the opposite: work already exists in the filesystem and on the forge and nobody has an index of it. Bending one of these into an observation platform is more work than the observation platform. |
+| **GitHub Issues/Projects + an MCP shim** | Covers the write plane well and would delete a third of this design. It cannot express the parts that motivate the product: coverage-modelled observation ("has anything even looked at this repo lately?"), declared-vs-observed separation with typed drift, cross-project dependency references, contract compliance, or a ranked global view over repos that are *not* on GitHub. It also makes every answer network-bound and rate-limited, and puts the index of your own estate inside a service you do not run. |
+| **Jira / Linear / self-hosted alternatives (Plane, Taiga)** | Same write plane, none of the observation layer, and all of them assume work is *entered*. The problem Vogt exists for is the opposite: work already exists in the filesystem and on the forge and nobody has an index of it. Bending one of these into an observation platform is more work than the observation platform. |
 | **A pile of scripts + a Markdown index** | The honest baseline, and what exists today. It fails on freshness (no answer to "when was this last true"), on provenance, and on being usable by agents without bespoke parsing per script. |
 | **Extend cadastre** | Rejected for domain reasons, see §11. |
 
@@ -145,7 +148,7 @@ Inverted from cadastre (its anti-learnings for this domain):
 | Read-only map, no write-back | **Owns the write plane**, incl. opt-in GitHub write-back | It's a tracker; creating/closing/moving work is the product |
 | No people model | Actors (humans *and* agents) are core entities from day one | Retrofitting assignment/attribution is miserable |
 | Hand-rolled ASGI | FastAPI | Free OpenAPI, validation, auth middleware; big API surface planned |
-| Docs state defaults | Config schema is single source of truth; docs/examples generated from it | The :18081/:18092 stale-default incident |
+| Docs state defaults | Config schema is single source of truth; docs/examples generated from it | A stale port default in the docs once sent every client to the wrong listener |
 
 ### 2.1 Reporting, not enforcing; and never going looking (r2/r3)
 
@@ -178,8 +181,8 @@ that Vogt answers when asked and stamps the answer with its age.
 
 The intended eventual replacement for the heavier version of that
 machinery is an AI integration reading the observation store and
-recommending — recorded as a **non-committed stretch goal**
-(`REQUIREMENTS.md` §3), designed for by nothing in v1.
+recommending — recorded as a **non-committed stretch goal**, designed for
+by nothing in v1.
 
 ---
 
@@ -320,9 +323,9 @@ Model:
 - **Every edge is observed.** Reference kind is `path | git | declared`, and
   the delivered producers are the two manifest kinds: a dependency that lives
   only in a deploy script or in someone's head is not in the graph. `declared`
-  is a `RefKind` member nothing writes — the gap and what it costs are
-  `REQUIREMENTS.md` §7 (**FR-D9**); `SCHEMA.md` §2.2 records the same absence
-  in the schema.
+  is a `RefKind` member nothing writes — a recorded gap (**FR-D9**: declared
+  dependencies with no manifest producer); `SCHEMA.md` §2.2 records the same
+  absence in the schema.
 - **Resolution is by path or repo URL** to a registered project. Internal
   edges are exactly the ones expressed as paths and git URLs, which is why
   package identity is not needed. Unresolved internal-looking references
@@ -516,7 +519,7 @@ src/vogt/      unchanged, and still the only definition of an operation
 The engine's own reference — what it owns, how to run it, its full wire
 contract, the assistant and the agent-task scheduler — is
 [`ENGINE.md`](ENGINE.md). It is one document because it used to be eight, each
-describing MyDevEnv2 as a separate product.
+describing the engine as a separate product.
 
 Two properties hold the shape together, and both are asserted rather than
 described. **The registry is still the single definition**: the PWA's route
@@ -529,7 +532,7 @@ and its own MCP when no engine is present, and CI runs the suite with
 The direction of dependency is the thing to preserve. The engine calls the
 core, and the core calls the engine only for sessions — four operations
 across a loopback boundary, which is what makes two processes worth having
-instead of one language argument (`MERGE_MYDEVENV2.md` §4).
+instead of one language argument.
 
 - **Transport parity tests**: for each use-case, a matrix test drives it via
   CLI, REST, and MCP and asserts identical results and identical audit rows.
@@ -584,7 +587,7 @@ REST/CLI/GUI are peers over the same operations.
   `tools/list` and `tools/call` time. Ungranted tools are invisible, not
   erroring — an agent's tool list is exactly what it can do. Note the
   honest limitation: scopes are instance-wide in v1, so an agent with
-  `work.write` can write to every project (deferred, `REQUIREMENTS.md` §3),
+  `work.write` can write to every project (per-project scopes are deferred),
   and in the loopback topology there is no authentication at all.
 - **Both allow and deny decisions are audited** — into `auth_decisions`
   (`SCHEMA.md` §2.1), separately from the declared-write audit, because a
@@ -600,14 +603,16 @@ REST/CLI/GUI are peers over the same operations.
   transitioning; the scope decides whether that consequence is switched on.
 - **Transports**: stdio (local, same data-dir, no server required) and
   streamable HTTP at `/mcp` on the same port as REST/GUI/health (see
-  `DEPLOYMENT.md` §1). A `vogt-mcp-remote` stdio bridge serves agent
+  [`DEPLOYMENT.md`](DEPLOYMENT.md)). A `vogt-mcp-remote` stdio bridge serves agent
   products that can only spawn local processes; it discovers the remote's
   actual tool list at startup and reports version skew as a single stderr
   warning — never to stdout (MCP framing channel), never fatal.
 - **Protocol versions**: unsupported MCP protocol versions are refused with
   the supported list named. Nothing outside a real MCP client (health
   checks especially) ever pins a protocol version.
-- **No default endpoint** ships anywhere — see `DEPLOYMENT.md` §4.
+- **No default endpoint** ships anywhere: a client must be told where its
+  instance is, because a baked-in URL is exposure and identity, not
+  allocation (see §9, r4).
 
 ### 4.2 API surface sketch (v1)
 
@@ -824,7 +829,7 @@ repository; nothing is listed, searched or suggested. The distinction is not
 academic — the difference between "clone what I named" and "show me what I
 have" is the difference between one command and a permanent classification
 problem, and the second one arrives disguised as a dropdown on the import
-form (`REQUIREMENTS.md` §3, deferred by r6).
+form (deferred by r6 as a named non-requirement).
 
 Three properties make the operation safe to repeat. The clone lands before
 the declared write, so a failed registration leaves a checkout rather than a
@@ -857,7 +862,7 @@ otherwise be trivially embeddable.
 ## 7. Storage & operations
 
 Schema and data topology: [`SCHEMA.md`](SCHEMA.md).
-Deployment and network topologies: [`DEPLOYMENT.md`](DEPLOYMENT.md).
+Deployment: [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 - Two SQLite files; declared store has monotonic revision + audit + events +
   migrations tables; observed store is append-only with a retention policy
@@ -879,12 +884,13 @@ Deployment and network topologies: [`DEPLOYMENT.md`](DEPLOYMENT.md).
   defaults fails the build).
 - Packaging: `uv tool install`, or an OCI image on GHCR with SBOM +
   keyless signature. GUI ships in the image.
-- **Deployment target (r4)**: a Docker Compose stack on Node B, deployed by
-  Komodo from the `indexarr/ops` GitOps repository, tailnet-bound, with TLS
-  terminated in-process from the host's Tailscale certificate. The image is
-  digest-pinned in ops; publishing (a tag) and deploying (a digest bump)
-  are separate acts. Full topology, hardening, and the Node B failure modes
-  worth knowing in advance: [`DEPLOYMENT.md`](DEPLOYMENT.md) §2.2–§2.3, §6.
+- **Deployment shape (r4)**: a Docker Compose stack running the published
+  image, with the image digest pinned in whatever holds the operator's
+  desired state, bound to a private-network address (TLS can terminate
+  in-process or at a reverse proxy). Publishing (a tag) and deploying (a
+  digest bump) are separate acts. The generic guide — images, compose, env,
+  reverse proxy, backups, upgrades, the optional engine — is
+  [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ---
 
@@ -927,14 +933,13 @@ Deployment and network topologies: [`DEPLOYMENT.md`](DEPLOYMENT.md).
 - **Releases stay tag-driven** so a merge can never cut one, and no push
   can deploy one (NFR-D10). What r5 changed is that obtaining a *deployable
   artefact* no longer requires inventing a version number for it —
-  `REQUIREMENTS.md` r5 records why three versions in one afternoon was the
-  symptom.
-- **Every job names a self-hosted runner** (`runs-on: [self-hosted, node-b,
-  linux, x64, …]`); GitHub-hosted runners are prohibited estate-wide and
-  the repository joins the `public-node-b` runner group before its first
-  workflow exists. The self-hosted image preinstalls no language runtime,
-  so `setup-uv` is explicit, and only the two Docker-in-Docker workers
-  advertise `docker`/`publish`.
+  cutting three releases in one afternoon just to get a testable image was
+  the symptom r5 fixed.
+- **Every job names a self-hosted runner** (`runs-on: [self-hosted, …]`,
+  NFR-C4) and assumes nothing about its image: language runtimes are
+  installed explicitly (`setup-uv`), and only the workers that build and
+  push images carry the `publish` label. A fork that prefers GitHub-hosted
+  runners changes the `runs-on` lines and nothing else.
 
 ---
 
@@ -942,12 +947,13 @@ Deployment and network topologies: [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 Resolved 2026-08-12 (r1):
 
-- **Licence: MIT** — matching cadastre. Developed in a private repository
-  under `TheDancingDeveloper-org` first; public at a milestone of the
-  owner's choosing (NFR-O1).
+- **Licence: MIT**. Developed in a private repository under
+  `TheDancingDeveloper-org` first; public at a milestone of the owner's
+  choosing (NFR-O1).
 - **Name: Vogt** (final) — the German reeve/bailiff who oversaw an estate
-  (Vogtei), enforced its rules, and answered for its work; sits alongside
-  cadastre (the land register). Package/CLI `vogt`, env prefix `VOGT_*`.
+  (Vogtei), enforced its rules, and answered for its work; the
+  counterpart of a cadastre (a land register). Package/CLI `vogt`, env
+  prefix `VOGT_*`.
 - Drift autonomy → low-risk auto-accept defaults (§3.2).
 - Notifications → audit-backed `/events` feed, no push in v1 (§4.2).
 - M4 auth → **token-only**: scoped bearer tokens bound to actors,
@@ -979,8 +985,8 @@ Resolved 2026-08-12 (r3):
   scope is the registered project list; the contract is evaluated on
   demand and reported with its age. FR-G5–G8 deferred.
 - AI-assisted drift detection and recommendation is recorded as a
-  **non-committed stretch goal** (`REQUIREMENTS.md` §3) — the reason the
-  scheduler stays small, and something no v1 requirement may lean on.
+  **non-committed stretch goal** — the reason the scheduler stays small,
+  and something no v1 requirement may lean on.
 
 Resolved 2026-08-12 (the last of the open questions):
 
@@ -999,25 +1005,25 @@ Resolved 2026-08-12 (the last of the open questions):
 
 Resolved 2026-08-12 (r4):
 
-- **Deployment target: a Node B Compose stack deployed by Komodo**
-  (`DEPLOYMENT.md` §2.2). Desired state in `indexarr/ops` at
-  `personal/vogt/`, image from GHCR digest-pinned, exposure bound to the
-  Tailscale address with no public DNS and no Caddyfile entry. `personal/`
-  rather than `prod/` because this is homelab infrastructure, matching
-  `personal/cadastre`.
-- **TLS terminates in-process, not behind a proxy** (NFR-D6 revised). Node
-  B's Caddy is host infrastructure rather than a Komodo stack, and a
-  tailnet-only listener that already holds a Tailscale-issued certificate
-  gains nothing from fronting it.
+- **Deployment target: a Compose stack running the GHCR image, digest-pinned,
+  bound to a private-network address** ([`DEPLOYMENT.md`](DEPLOYMENT.md)).
+  The desired state (compose file plus pinned digest) lives in version
+  control, not on the host.
+- **TLS may terminate in-process** (NFR-D6 revised). A listener that is
+  only reachable on a private network and already holds a certificate
+  gains nothing from a reverse proxy in front of it; a proxy remains the
+  right answer where it is already the host's ingress.
 - **"No default port anywhere" was too broad** (NFR-D2 revised). Defaults
-  that encode exposure or identity stay forbidden; defaults that are pure
-  host allocation are now *required*, because gating them is what broke
-  every cadastre deploy after `cadastre#42`. The distinction is what the
-  value decides, not whether it is a number.
+  that encode exposure or identity (a public hostname, a bind to all
+  interfaces, an endpoint URL) stay forbidden; defaults that are pure host
+  allocation (the listen port) are now *required*, because a `${X:?}` gate
+  on an allocation value turns every deploy into a hunt for a number nobody
+  cares about. The distinction is what the value decides, not whether it is
+  a number.
 - **Publish and deploy are separate acts** (NFR-D10). A tag publishes a
   signed image; production moves only when a human or agent bumps the
-  pinned digest in ops and runs `DeployStack`. Automating that bump via
-  `ops/scripts/komodo-deploy.sh` stays available and is not v1 scope.
+  pinned digest and redeploys the stack. Automating that bump is not v1
+  scope.
 
 Nothing is open. New questions get appended here as they arise.
 
@@ -1040,17 +1046,18 @@ stage rather than a feature one.
 
 Two of those stages end in a demo that has not been run, because neither can be
 run without a browser and a phone: M11's and M13's. `ROADMAP.md` says so at
-each stage and `REQUIREMENTS.md` §7 carries them as gaps, so that "built"
-nowhere quietly means "watched working".
+each stage and the gap register carries them, so that "built" nowhere
+quietly means "watched working".
 
 ---
 
 ## 11. Relationship to cadastre
 
-Cadastre (the land register — infrastructure, hosts, services) and Vogt
-(the reeve — product work, backlog, project health) are separate products
-with separate domains and separate stores. **Vogt does not import from
-cadastre and does not couple to its API in v1.**
+Cadastre (the maintainer's private land register — infrastructure, hosts,
+services) and Vogt (the reeve — product work, backlog, project health) are
+separate products with separate domains and separate stores. **Vogt does not
+import from cadastre and does not couple to its API in v1**; nothing in
+this repository needs it to exist.
 
 The cost of that decision is real and should be stated rather than
 discovered: the declared/observed split, coverage modelling, trust
@@ -1068,7 +1075,7 @@ both codebases (`declared`/`observed`, `sweep`, `coverage`, `trust_state`,
 after v1 is a mechanical refactor rather than a redesign. Revisit at v1
 with two working implementations to compare.
 
-The related open question — whether cadastre eventually feeds *in* as a
-collector, adding infrastructure context to a project's brief — stays open,
-and is a read-only integration over its REST API if it happens. It is not
-a v1 dependency in either direction.
+The related open question — whether an infrastructure register eventually
+feeds *in* as a collector, adding infrastructure context to a project's
+brief — stays open, and would be an optional, read-only external
+integration if it happens. It is not a dependency in either direction.

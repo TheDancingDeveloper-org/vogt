@@ -1,14 +1,17 @@
 # Voice assistant — delivery status and remaining scope
 
-*2026-08-21. Companion to `VOICE_POC.md` and `REQUIREMENTS.md` r16/r18
-(FR-T5–T14, FR-M4, FR-M6). This file records what is delivered, what is
-enabled where, and what remains — each remainder tracked as a GitHub issue
-under the tracker [#188](https://github.com/TheDancingDeveloper-org/vogt/issues/188).*
+*2026-08-21. Companion to [`VOICE_POC.md`](VOICE_POC.md) (the POC's design
+and findings) and [`ENGINE.md`](ENGINE.md) §6 (the assistant's reference,
+including **Configuring the assistant provider**). The `FR-Txx` / `FR-Mxx`
+ids are stable requirement identifiers; each rule they label is stated in
+words. This file records what is delivered, how to enable it, and what
+remains — each remainder tracked as a GitHub issue under the tracker
+[#188](https://github.com/TheDancingDeveloper-org/vogt/issues/188).*
 
 ## 1. What is delivered
 
-**Checkpoint A of the POC is built, tested and merged to `dev`**
-(`VOICE_POC.md` §6 is the evidence, with per-piece test counts):
+**Checkpoint A of the POC is built and tested** (`VOICE_POC.md` §6 is the
+evidence, with per-piece test counts):
 
 - Provider profiles (FR-T9): named OpenAI-compatible `{base_url, key, model,
   effort}` sets — `engine/server/src/{config,assistant,assistant_api,gui}.rs`.
@@ -25,36 +28,56 @@ under the tracker [#188](https://github.com/TheDancingDeveloper-org/vogt/issues/
 - The FR-T2 gate holds against spoken approval; both mutating journeys cost
   exactly one tap.
 
-**Voice input today is mobile-only.** The microphone is gated on the
-Capacitor `SpeechRecognition` native plugin; a desktop browser gets typed
-input plus spoken replies (Web Speech synthesis). This is why the *website*
-shows no mic even with the assistant enabled — the desktop STT path is
-Checkpoint B, not a regression.
+**Built since, code half only** (the spoken and on-device passes are still
+owed — `VOICE_POC.md` §6 records each):
+
+- Desktop microphone via Web Speech where the browser has it (#189).
+- Server-side STT/TTS (FR-T12, #190): `POST /api/assistant/stt` / `tts`
+  proxied to OpenAI-compatible audio endpoints —
+  `engine/server/src/assistant_speech.rs`.
+- The durable, attributable interaction log (FR-T14, #193) —
+  `engine/server/src/assistant_log.rs`.
+- The phone's foreground service and speak-the-push (FR-M6, #192), compiled
+  but never run on hardware.
+
+**Voice input without any of that is mobile-only.** The on-device microphone
+is the Capacitor `SpeechRecognition` plugin; a desktop browser without Web
+Speech and without a configured server STT gets typed input plus spoken
+replies (Web Speech synthesis).
 
 **[voicemode](https://github.com/mbailey/voicemode) is a pattern, not a
 dependency.** FR-T12 adopts its architecture — STT/TTS behind
 OpenAI-compatible audio endpoints so cloud and local Whisper.cpp + Kokoro
-are interchangeable by configuration. None of that pipeline is built yet.
+are interchangeable by configuration.
 
-## 2. What is enabled where
+## 2. Enabling it
 
-Enabled on **vogt-dev (Node B)** on 2026-08-21. The Komodo stack environment
-gained, per `VOICE_POC.md` §3.1 and the r20 key-destination rule:
+The assistant is off until a chat provider is configured, and the PWA hides
+its tab until then. Any OpenAI-compatible chat endpoint works; the three
+settings that turn it on are:
 
-| Variable | Value |
+| Variable | Example |
 |---|---|
-| `MYDEVENV2_ASSISTANT_API_KEY` | Infisical `apps/prod` `OpenRouter_Token` |
-| `MYDEVENV2_ASSISTANT_BASE_URL` | `https://openrouter.ai/api/v1` |
-| `MYDEVENV2_ASSISTANT_MODEL` | `openai/gpt-5.4-mini` |
+| `ENGINE_ASSISTANT_BASE_URL` | `https://api.openai.com/v1`, or a local server such as `http://127.0.0.1:11434/v1` |
+| `ENGINE_ASSISTANT_API_KEY` | the provider's key (any non-empty value for a local server that needs none) |
+| `ENGINE_ASSISTANT_MODEL` | a model id the endpoint serves, e.g. `gpt-5.4-mini` |
 
-OpenRouter is the chosen default provider. The stack was redeployed and
-`https://vogt-dev.sprooty.com/api/config` answers `assistant_enabled: true`,
-so the PWA renders the tab. Rollback is removing the three lines and
-redeploying. Two caveats, both carried by
-[#194](https://github.com/TheDancingDeveloper-org/vogt/issues/194): the
-end-to-end GUI round trip is **not yet validated** (a CLI probe with the
-engine token 401s — a capability question, not proof of breakage), and the
-key is a shared token with a **$5 limit**.
+Server-side speech is separate and also off by default:
+`ENGINE_ASSISTANT_STT_BASE_URLS` / `ENGINE_ASSISTANT_TTS_BASE_URLS` name
+ordered lists of OpenAI-compatible audio endpoints (e.g. a local whisper/TTS
+server first, a hosted one as fallback), with `_MODEL`, `_VOICE` and `_API_KEY`
+beside them. The full table — every variable, its TOML key, default and
+semantics, plus named provider profiles — is
+[`ENGINE.md` §6, "Configuring the assistant provider"](ENGINE.md#configuring-the-assistant-provider).
+Legacy `MYDEVENV2_*` names are accepted as aliases.
+
+Rollback is removing the variables and restarting. Two caveats a deployment
+should expect, both carried by
+[#194](https://github.com/TheDancingDeveloper-org/vogt/issues/194): a probe
+with the *engine's* primary token can `401` on `/api/assistant/*` — that is a
+capability question (the `assistant` capability), not proof of breakage — and
+a shared provider key with a spend limit should be replaced with a dedicated
+one before anyone relies on it.
 
 ## 3. What remains
 
@@ -62,10 +85,10 @@ key is a shared token with a **$5 limit**.
 |---|---|---|---|
 | [#189](https://github.com/TheDancingDeveloper-org/vogt/issues/189) | Checkpoint B: desktop mic via Web Speech `webkitSpeechRecognition`, then the spoken five-utterance pass with findings into `VOICE_POC.md` §6 | `VOICE_POC.md` §3.4, §4–5; FR-T13 | — |
 | [#190](https://github.com/TheDancingDeveloper-org/vogt/issues/190) | Checkpoint C: engine `POST /api/assistant/stt` / `tts` proxying OpenAI-compatible audio endpoints; MediaRecorder capture and `<audio>` playback; 404-and-fall-back when unconfigured | `VOICE_POC.md` §3.5; FR-T12; voicemode | — |
-| [#191](https://github.com/TheDancingDeveloper-org/vogt/issues/191) | FR-M4: FCM client entry for the dev application id, so a dev APK installs beside prod and registers for push | REQUIREMENTS FR-M4, §7.2 | — |
+| [#191](https://github.com/TheDancingDeveloper-org/vogt/issues/191) | FR-M4: FCM client entry for the dev application id, so a dev APK installs beside prod and registers for push | FR-M4 | — |
 | [#192](https://github.com/TheDancingDeveloper-org/vogt/issues/192) | Checkpoint D: foreground service for active conversations, speak-the-push, the battery number, and the phone half of FR-T13 (first hardware validation of mobile voice at all) | `VOICE_POC.md` §3.6; FR-M6 | #191 |
-| [#193](https://github.com/TheDancingDeveloper-org/vogt/issues/193) | FR-T14: durable, attributable, both-directions interaction log — today only a capped in-memory transcript in `engine/server/src/assistant.rs` | REQUIREMENTS FR-T14 (r18) | — |
-| [#194](https://github.com/TheDancingDeveloper-org/vogt/issues/194) | Ops: validate the enabled assistant end-to-end in the GUI; dedicated/raised-limit key as its own Infisical secret; declare the env facts | this file §2 | — |
+| [#193](https://github.com/TheDancingDeveloper-org/vogt/issues/193) | FR-T14: durable, attributable, both-directions interaction log — built (`engine/server/src/assistant_log.rs`); see the issue for what remains | FR-T14 (r18) | — |
+| [#194](https://github.com/TheDancingDeveloper-org/vogt/issues/194) | Ops: validate the enabled assistant end-to-end in the GUI; a dedicated, raised-limit provider key; record the env facts | this file §2 | — |
 
 The only hard edge is #191 → #192. Everything else is independently
 pickable. The POC's exit criteria (`VOICE_POC.md` §5) close when #189 and

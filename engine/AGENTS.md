@@ -1,66 +1,59 @@
 # Agent Guide — the `engine/` subtree
 
 This file is the canonical guidance for AI agents working on Vogt's session
-engine. It was MyDevEnv2, merged into Vogt, and it now lives in this
+engine. It was a standalone product, merged into Vogt, and it now lives in this
 repository's `engine/` subtree with `web/` and `mobile/` beside it at the
 repository root. **Paths here are relative to the repository root, not to
 `engine/`**, because a document that moved and kept its old relative paths is a
 document that lies quietly.
 
-**`docs/engine/` no longer exists** *(2026-08-15)*. The engine's eight
-documents were consolidated into [`docs/ENGINE.md`](../docs/ENGINE.md), with
-the runtime image in `docs/DEPLOYMENT.md` §10 and the stacks in §11. If a path
-below ever names `docs/engine/`, it is stale and this table is the map:
-`API_CONTRACT` → `ENGINE.md` §5, `ASSISTANT` → §6, `AGENT_TASKS` → §7,
-`INTENT`/`PLAN` → §1–§2, `TOOLING` → `DEPLOYMENT.md` §10, `KOMODO` → §11,
-`uplift` → `REQUIREMENTS.md` §7, `USER_GUIDE` → `docs/USER_GUIDE.md`.
+The engine's documentation is [`docs/ENGINE.md`](../docs/ENGINE.md): what it
+is, building and running it, the wire contract (§5), the assistant (§6), agent
+tasks (§7), and its optional integrations (§9). Production deployment of the
+merged image is [`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md).
 
 Above this file sits [`AGENTS.md`](../AGENTS.md) at the repository root, which
-owns the Python core and the repo-wide rules, and
-`/home/sprooty/Working/AGENTS.md` — not linked, because it is a path on one
-machine and a link that resolves nowhere else is worse than a name — which owns
-the estate. There is no `CLAUDE.md` anywhere in this repository — the merge did
-not carry MyDevEnv2's pointer file across, and the estate's `~/Working/CLAUDE.md`
-exists only to redirect to `AGENTS.md`.
+owns the Python core and the repo-wide rules. `CLAUDE.md` files in this
+repository are pointers to the `AGENTS.md` beside them and carry no rules of
+their own.
 
 Documentation ownership for the engine:
 
 - `docs/ENGINE.md` — what the engine is, running it, the wire contract, the
-  assistant, agent tasks, the WebSocket protocol, smoke tests
+  assistant, agent tasks, the WebSocket protocol, smoke tests, optional
+  integrations
 - `engine/AGENTS.md` — coding-agent workflow, guardrails, project-specific rules
 - `engine/README.md` — a pointer to the two above, and the two facts that bite
   before anybody has read either
-- `docs/DEPLOYMENT.md` §10 — runtime/dev-pod toolchain inventory
-- `docs/DEPLOYMENT.md` §11 — the standalone stacks: environment, rollout, recovery
-- `docs/REQUIREMENTS.md` §7 — what was designed here and never built. **The
-  engine has no separate backlog**; an outstanding item needs a requirement
-  before it is anybody's plan.
+- `docs/DEPLOYMENT.md` — deploying the images, including the optional engine
+- **The engine has no separate backlog**; outstanding work is a GitHub issue
+  or an entry in `docs/ROADMAP.md`.
 
 Before changing files here:
 
-- Read `/home/sprooty/Working/AGENTS.md` for workspace-wide infrastructure, CI/CD, secrets, commit rules, and service access paths.
 - Read the repository-root `AGENTS.md` before touching anything outside `engine/`, `web/`, or `mobile/`.
-- Follow this file for MyDevEnv2-specific build, deploy, and runtime guidance.
-- Do not add a `CLAUDE.md` here; `AGENTS.md` is the only agent-guidance file this repository keeps, at both levels.
+- Follow this file for engine-specific build, deploy, and runtime guidance.
+- Do not add rules to a `CLAUDE.md`; `AGENTS.md` is the guidance file at both levels.
 
 ## 1. Quick reference
 
 | | |
 |---|---|
 | Type | Rust (Axum) + Solid/Vite PWA (embedded via `rust-embed`) + Capacitor Android wrap |
-| Repo | `github.com/TheDancingDeveloper-org/vogt`, subtree `engine/`. `repo.indexarr.net/indexarr/MyDevEnv2` is the pre-merge origin and remains the archive for the deprecated GPUI desktop client. |
+| Repo | `github.com/TheDancingDeveloper-org/vogt`, subtree `engine/` |
 | Cargo workspace root | `engine/` (`engine/Cargo.toml`, members `server` and `contract`). The repository root is a Python project, not a Rust workspace. |
-| CI pipeline | `.github/workflows/ci.yml` (fmt/clippy/test, PWA typecheck and tests, Android shell) and `.github/workflows/build.yml` (the merged image, cosign-signed, to GHCR). The engine's Woodpecker pipeline is **not** in this tree: the fork vendored a copy at `engine/.woodpecker/server.yml`, it never ran here, and it has been deleted. `indexarr/MyDevEnv2` on the forge keeps the running copy, and that is the one the standalone stacks below are built by. |
-| Deploys to | Komodo stack `prod-mydevenv2` (ops repo path `personal/mydevenv2/`) — target periphery is the one running mydevenv2.sprooty.com (see ops repo) |
-| Image | `repo.indexarr.net/indexarr/mydevenv2` (`:latest` + `:<sha>`) |
-| Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port) |
-| Public URL | `https://mydevenv2.sprooty.com` |
-| DB / state | None (Postgres-less by design). Sessions in-memory; push subscriptions persisted as JSON under `state_dir`. |
-| Secrets used at runtime | `MYDEVENV2_TOKEN` (primary API bearer), optional `MYDEVENV2_EXTRA_TOKENS_JSON` (scoped JSON token list), `HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY` (Tailscale userspace), `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID` / `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET` (required production agent service auth), optional `MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON` for native FCM — all in Infisical `apps` and pasted into the Komodo stack `environment`. VAPID keys are generated and persisted under `state_dir`. |
+| CI pipeline | `.github/workflows/ci.yml` (fmt/clippy/test, PWA typecheck and tests, Android shell) and `.github/workflows/build.yml` (the merged image, cosign-signed, to GHCR). |
+| Image | built from `engine/Dockerfile` with the repository root as context; `engine/Dockerfile.pod` is the toolchain base it starts from (`docs/ENGINE.md` §3) |
+| Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port; `/api/vogt`, `/mcp` and `/ui-legacy` proxied to the core) |
+| DB / state | No database. Sessions in-memory; agent tasks, push subscriptions and the assistant log persisted under `state_dir` (JSON and SQLite). |
+| Secrets used at runtime | `MYDEVENV2_TOKEN` (primary API bearer — the CLI parser still reads this name only), optional `ENGINE_EXTRA_TOKENS_JSON` (scoped JSON token list), optional `ENGINE_FCM_SERVICE_ACCOUNT_JSON` for native FCM, optional `ENGINE_ASSISTANT_API_KEY` and the speech keys (`docs/ENGINE.md` §6), optional `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` for the front door. VAPID keys are generated and persisted under `state_dir`. |
 
-From-scratch rewrite of MyDevEnv v1 (a separate estate checkout, not part of this repository): same centrally-hosted, Tailscale-accessible dev environment goal, built without the v1 surface area of a code-server fork and multiple half-finished native clients. Active status: everything the merged product depends on is built and deployed; the legacy GPUI desktop client was deprecated on July 7, 2026 and left behind in the MyDevEnv2 repo by the merge. The old plan's "Phase 7", a KVM-backed Android emulator VM, was **never built and is not owed** — it is a withdrawal recorded in `docs/REQUIREMENTS.md` §7.3, not pending work. Reviving it would be a new requirement.
-
-A pre-prod validation stack, `dev-mydevenv2`, also exists (`https://mydevenv2-dev.sprooty.com`, Komodo stack, desired state in ops's `personal/mydevenv2-dev/` on `main`) — see `docs/DEPLOYMENT.md` §11 for its deploy flow, disk layout, and why it exists.
+A from-scratch rewrite of an earlier centrally-hosted dev environment: the
+same goal, built without a code-server fork and multiple half-finished native
+clients. Everything the merged product depends on is built; the native desktop
+client was deprecated on July 7, 2026 and left behind in the pre-merge
+repository. A KVM-backed Android emulator VM from the old plan was **never
+built and is not owed**; reviving it would be a new requirement.
 
 ## 2. Architecture
 
@@ -68,7 +61,7 @@ Single binary, multi-tab PWA. `rust-embed` bakes the Solid PWA bundle into the R
 
 ```text
 Browser / iOS PWA / Android Capacitor APK
-   |   HTTPS + WSS via Caddy at mydevenv2.sprooty.com
+   |   HTTPS + WSS via your reverse proxy
    v
 Axum server (mydevenv2-server) — bind :8910
    |-- /api/sessions/*             PTY lifecycle (bearer-token)
@@ -77,11 +70,14 @@ Axum server (mydevenv2-server) — bind :8910
    |-- /api/dir, /api/tree, /api/files, /api/search   workspace_root-scoped, ripgrep
    |-- /api/git/{status,diff,log,branch}              shells out to git
    |-- /api/push/*                 VAPID web-push + FCM HTTP v1
-   |-- /api/gui/*                  swaymsg-driven GUI launcher (Phase 5)
+   |-- /api/gui/*                  compositor-driven GUI launcher
+   |-- /api/agent-tasks/*          scheduled agent runs
+   |-- /api/assistant/*            the tool-use assistant (404 until configured)
+   |-- /api/vogt/*, /mcp, /ui-legacy   proxied to vogt-core on loopback
    `-- /                            embedded PWA (rust-embed)
 ```
 
-See `docs/ENGINE.md` §1-§2 for what the engine owns and how it is shaped, and `docs/MERGE_MYDEVENV2.md` for why it is a separate process at all.
+See `docs/ENGINE.md` §1-§2 for what the engine owns and how it is shaped, and `docs/DESIGN.md` for why it is a separate process at all.
 
 ## 3. Build / test / run
 
@@ -110,50 +106,60 @@ export MYDEVENV2_TOKEN="$(openssl rand -hex 24)"
 # terminal 2: cd web && pnpm dev   -> http://127.0.0.1:5173
 ```
 
-Optional TOML config at `mydevenv2.toml` (CLI > env > config); see
-`docs/ENGINE.md` §3 for keys.
+Optional TOML config via `--config` (CLI > env > config); see
+`docs/ENGINE.md` §3 for keys. Engine settings are `ENGINE_*`; the legacy
+`MYDEVENV2_*` names are still accepted as aliases, and the token/bind/config
+CLI flags are read only under the legacy names.
 
 ## 4. Deployment
 
-Two pipelines exist and only one of them is in this repository, which is the
-first thing to get straight before reading anything below. **This** tree is
-built by GitHub Actions, described in `AGENTS.md` and in the workflow files
-themselves. The Woodpecker pipeline that still builds `prod-mydevenv2` and
-`dev-mydevenv2` belongs to `indexarr/MyDevEnv2` on the forge and is edited
-there. The fork left a copy of it at `engine/.woodpecker/server.yml`; it never
-ran here — Woodpecker's repository list does not contain Vogt, and Vogt is on
-GitHub — and it has been deleted, along with its `install-sccache.sh`, because
-a file describing how to publish a competing image and redeploy production is
-worse than no file when nothing executes it.
+**Publishing is not deploying.** `.github/workflows/build.yml` builds the
+merged image and pushes it to GHCR; nothing in this repository deploys it
+anywhere (NFR-D10). How to run the published images, and how to build and run
+the merged one, is `docs/DEPLOYMENT.md`; the engine-specific build story
+(stages, build args, the pod base, the helper scripts) is `docs/ENGINE.md` §3.
 
-Non-standard bits of the forge's pipeline, kept here because the stacks it
-deploys are still running and the reasons are not written down there:
+Things about the build that are easy to get wrong:
 
-- Custom `clone:` block uses `git_auth_token` because the default OAuth clone started 403'ing at pipeline #17. Reference pattern in root Woodpecker pitfalls #2 / #6.
-- `sccache` uses Redis on Node B (`100.92.54.45:6380`) for its `fmt` / `clippy` / `test` steps. Do not `apt install sccache`; Debian's package lacks Redis support. Its `install-sccache.sh` resolves the latest GitHub release at CI run time and verifies it against the sha256 digest that release's own API response publishes — not a hardcoded version/checksum. **This repository does not use it**: `ci.yml` caches with `Swatinem/rust-cache` instead, because that Redis is a Node B service that has OOM-crash-looped and a build cache able to take CI down is the wrong trade when the runners are what is scarce.
-- `mkdir -p web/dist && touch web/dist/.placeholder` before `clippy` and `test` so `rust-embed` compiles before the image build produces the real bundle. That is the repository-root `web/dist/`, which is what `engine/server/src/assets.rs` embeds (`#[folder = "../../web/dist/"]`). `ci.yml` builds the real bundle first and keeps the placeholder only as a guard.
-- `mobile-apk` builds the Capacitor signed release APK and uploads it to Forgejo releases API tag `apk-latest`, not the generic-package registry. Signing material comes from Woodpecker secrets `mydevenv2_android_keystore_base64`, `mydevenv2_android_keystore_password`, `mydevenv2_android_key_alias`, and `mydevenv2_android_key_password`. Idempotence is delete-then-create using `scripts/forgejo-api.sh` from `indexarr/ops`. That keystore and that registry stayed with the forge; `release.yml` signs from GitHub secrets and publishes the APK as a workflow artefact.
-- `cimg/android` runs as `circleci` (UID 3434) but the workspace was cloned by `alpine/git` as root. That pipeline does `sudo chown -R circleci:circleci .` before pnpm.
-- Its Komodo deploy pins the SHA in `ops/personal/mydevenv2/docker-compose.yml` through standard `scripts/komodo-deploy.sh` (`STACK_NAME=prod-mydevenv2 STACK_DIR=personal/mydevenv2`). Nothing in this repository does that or should: publishing is not deploying (NFR-D10), and Vogt has never deployed from CI.
-- The native desktop client is deprecated as of July 7, 2026 and its `client/`
-  tree did not come across in the merge — it stayed in the MyDevEnv2 repo,
-  which is now its archive. Its old Linux/Windows release workflows were
-  removed. A thin desktop wrapper, if ever reintroduced, starts from that
-  archive, not from this tree.
+- `rust-embed` compiles `web/dist/` into the binary, so `clippy` and `test`
+  need the directory to exist. `ci.yml` builds the real bundle first and keeps
+  `mkdir -p web/dist && touch web/dist/.placeholder` only as a guard. A
+  production build must embed a real bundle.
+- `engine/Dockerfile` takes the repository root as its build context and
+  requires `CORE_IMAGE` (the published core image, by digest in CI) — it lifts
+  the core out of that image rather than building it a second time.
+- The runtime stage starts from `engine/Dockerfile.pod`, the dev-pod toolchain
+  base, published separately and passed in by digest as `POD_BASE_IMAGE`.
+  Toolchain changes go there; per-commit things (the agent CLIs, the optional
+  Cadastre bridge) stay in `engine/Dockerfile`.
+- `release.yml` signs the Android APK from GitHub secrets (a keystore the
+  repository does not carry; the job is inert until one is configured) and
+  publishes it as a workflow artefact.
+- The native desktop client is deprecated as of July 7, 2026 and its
+  `client/` tree did not come across in the merge. A thin desktop wrapper, if
+  ever reintroduced, starts from that archive, not from this tree.
 
-Runtime container: multi-stage `engine/Dockerfile` produces an Ubuntu 26.04 runtime carrying the full `docs/DEPLOYMENT.md` §10 toolchain set, Sway, Selkies-GStreamer, Tailscale userspace, neutral service CLIs (`infisical`, `gh`, `git`, `curl`), and the embedded PWA. `engine/deploy/entrypoint.sh` orchestrates Tailscale -> optional Sway -> server. `docs/DEPLOYMENT.md` §10 owns the package/tool inventory; §11 owns the production compose and overlay details.
+Runtime container: `engine/Dockerfile` produces an Ubuntu runtime carrying the
+pod toolchain, an optional headless compositor and stream for the GUI tab,
+neutral service CLIs (`gh`, `git`, `curl`), and the embedded PWA.
+`engine/deploy/entrypoint.sh` orchestrates optional VPN join -> optional
+compositor -> optional vogt-core on loopback -> the engine.
 
-Codex and Claude are deliberately not installed by the production container bootstrap. The dev image installs both; its system `codex` launcher deliberately disables Codex's nested approvals and sandbox so trusted agents have normal container-user filesystem and network access across the complete `/home/sprooty/Working` workspace. The `opencode` CLI is bundled in every image; other AI clients remain user-managed in production. Production default-shell sessions are authenticated through `mydevenv2-agent-auth`; explicit-command sessions can invoke the helper directly.
+`codex` and `claude` are deliberately not installed by default
+(`INSTALL_AI_CLIENTS=false`); a deployment either builds with the flag or
+manages the CLIs in the pod's persisted home. The system `codex` launcher
+installed with the flag disables Codex's nested approvals and sandbox, because
+the pod is the isolation boundary. The `opencode` CLI is bundled in every
+image.
 
-Outstanding before the GUI tab is operational in production: set
-`START_SWAY=1`, set `GUI_STREAM_URL`, verify a launched process renders through
-Selkies from inside the pod, and only then set `GUI_STREAM_VERIFIED=1`. The
-stack itself, auth identity, workspace mount, and Komodo deploy path already
-exist.
+The GUI tab is off until an operator sets `START_SWAY=1`, sets
+`GUI_STREAM_URL`, verifies a launched process renders through the stream from
+inside the pod, and only then sets `GUI_STREAM_VERIFIED=1`.
 
 ## 5. Agent service authentication
 
-MyDevEnv2 provides a neutral credential bridge for agents:
+The image carries a credential broker, `mydevenv2-agent-auth`
+(`engine/deploy/agent-auth.sh`):
 
 ```bash
 mydevenv2-agent-auth check
@@ -161,79 +167,38 @@ mydevenv2-agent-auth run -- <command>
 mydevenv2-agent-auth shell
 ```
 
-With `MYDEVENV2_AUTO_AGENT_AUTH=1`, sessions created without an explicit
+With `ENGINE_AUTO_AGENT_AUTH=1`, sessions created without an explicit
 `command` automatically use `mydevenv2-agent-auth shell`. Explicit-command
-sessions are not wrapped.
+sessions are not wrapped; the two "(protected)" session templates wrap their
+agent CLI explicitly.
 
-These commands require the read-only Infisical Universal Auth credentials `INFISICAL_CLIENT_ID` and `INFISICAL_CLIENT_SECRET`, injected by the Komodo stack from:
+The helper fetches service credentials (GitHub and others) from a secrets
+manager into the child-process environment only. Do not persist fetched
+tokens in the workspace, shell profiles, local Git config, or logs.
 
-- `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID`
-- `HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET`
+**As shipped, the script is written against the maintainer's own secrets
+manager, project ids and service list** — it is an optional integration
+(`docs/ENGINE.md` §9), off by default, and a public deployment should treat it
+as a template for its own broker or leave it off. With it off, sessions are
+plain shells and nothing in the engine misses it. The lesson its history
+carries: a container created with empty broker credentials starts a
+healthy-looking server whose sessions silently have no service access, so a
+deployment that *requires* the broker should set
+`MYDEVENV2_AGENT_AUTH_REQUIRED=1` (read by the entrypoint) and let startup
+fail loudly instead.
 
-The helper fetches Forgejo, Woodpecker, GitHub, Komodo, and Cadastre credentials into the child-process environment only. Do not persist fetched tokens in the workspace, shell profiles, local Git config, or logs. Cadastre uses the `HOMELAB_CADASTRE_HTTP_TOKEN` secret and the private endpoint `https://winrarhost.tailc7d3c.ts.net:18092/mcp`.
+## 6. Workspace
 
-Use `mydevenv2-agent-auth check` to prove authenticated access to:
-
-- Forgejo API: `https://repo.indexarr.net/api/v1/user`
-- Forgejo git: `https://repo.indexarr.net/indexarr/ops.git`
-- Woodpecker API: `https://ci.indexarr.net/api/user`
-- GitHub org API: `gh api orgs/AusAgentSmith-org`
-- Komodo API: `http://100.92.54.45:3011/read`
-- Cadastre MCP: `https://winrarhost.tailc7d3c.ts.net:18092/mcp`
-
-The production compose requires both identity values and validates the broker
-at startup. If either is missing or invalid, deployment must fail rather than
-starting a healthy-looking server without service access.
-
-### June 2026 auth recovery note
-
-Root cause: the running MyDevEnv2 container was created on June 12, 2026 at
-03:05 UTC with empty `INFISICAL_CLIENT_ID` / `INFISICAL_CLIENT_SECRET` values,
-even though Komodo later held valid identity credentials. Existing sessions
-inherited PID 1's stale environment. Default sessions also launched plain Bash,
-so only explicit `mydevenv2-agent-auth shell` sessions loaded Forgejo,
-Woodpecker, GitHub, Komodo, and Docker access. SSH was intentionally not
-configured, and the container user lacked the host Docker socket group
-(`984`).
-
-Fixes applied here:
-
-- Default interactive sessions can auto-wrap through the auth broker
-  (`MYDEVENV2_AUTO_AGENT_AUTH=1`).
-- Production compose requires the Infisical identity credentials and sets
-  authenticated shells as the default. Direct host Docker access, including
-  socket GID `984`, lives in the `engine/deploy/docker-compose.docker-socket.yml` overlay.
-- Startup can require and validate agent authentication before serving traffic.
-
-Validation for the recovery covered Infisical, Forgejo, Woodpecker, GitHub,
-Komodo, Docker access, Clippy, and the full Rust test suite.
-
-## 6. Workspace synchronization
-
-MyDevEnv2 does not expose an SSH server. Its workspace is a Node B host bind mount:
-
-- Node B host path: `/mnt/2tnvme/docker/volumes/mydevenv2/workspace`
-- Container path: `/home/sprooty/Working`
-- Local workspace path: `/home/sprooty/Working`
-
-The workspace-root `mutagen.yml` must therefore target:
-
-```yaml
-beta: "sprooty@100.92.54.45:/mnt/2tnvme/docker/volumes/mydevenv2/workspace"
-```
-
-To recover sync on a fresh client:
-
-1. Confirm certificate-based Node B access with `ssh -o BatchMode=yes sprooty@100.92.54.45 hostname`.
-2. Confirm the live mount with `docker inspect mydevenv2` on Node B; do not target the old MyDevEnv v1 endpoint `root@dev.sprooty.com:/config/workspace`.
-3. From `/home/sprooty/Working`, run `mutagen project terminate` and `mutagen project start`.
-4. Verify both endpoints are connected with `mutagen sync list --long`. The initial full-workspace scan can take several minutes.
-
-The sync mode is `two-way-safe`. VCS metadata, machine-local Claude settings, generated Claude worktrees, virtualenvs, and dependency/build directories are intentionally ignored by `mutagen.yml`. Real source conflicts must not be resolved by resetting the session or selecting one side without first preserving and reviewing both versions.
+The engine serves one `workspace_root` (default `~/Working`; inside the image
+that is the pod user's `~/Working`, declared as a volume). Every file, search and git route is
+scoped to it, and `cwd` on a session is resolved inside it. The image does
+not run an SSH server: the workspace is a bind mount or volume on the host,
+and anything that synchronises it (rsync, mutagen, a shared filesystem) is a
+deployment's own choice.
 
 ## 7. Rules for AI agents
 
-- API auth is bearer-token based, but tokens are no longer implicitly equivalent: the primary `MYDEVENV2_TOKEN` has full access, while optional entries from `MYDEVENV2_EXTRA_TOKENS_JSON` can be scoped to `sessions`, `filesystem-write`, `git-write`, `gui-control`, `agent-tasks-write`, `push-write`, `history-write`, and `assistant`. Public routes remain `/healthz`, `/readyz`, `/api/push/public-key`, and `/api/config`. Do not add new public routes without thinking about CSRF; the PWA stores the token in `localStorage` and sends it via `Authorization:` header. WebSocket currently falls back to a `?token=` query param.
+- API auth is bearer-token based, but tokens are no longer implicitly equivalent: the primary token has full access, while optional entries from `ENGINE_EXTRA_TOKENS_JSON` can be scoped to `sessions`, `filesystem-write`, `git-write`, `gui-control`, `agent-tasks-write`, `push-write`, `history-write`, `assistant` and `vogt-write`. Public routes remain `/healthz`, `/readyz`, `/api/push/public-key`, and `/api/config`. Do not add new public routes without thinking about CSRF; the PWA stores the token in `localStorage` and sends it via `Authorization:` header. WebSocket currently falls back to a `?token=` query param.
 - WebSocket attach protocol is ordered: `snapshot-start` text frame -> <=64 KiB binary scrollback chunks -> `snapshot-done` text -> live binary. Client text frames must be JSON (`{"type":"resize"|"ping"|...}`); binary frames are written verbatim to PTY stdin. Lag causes the server to send `{"type":"lag",...}` and close; the client should reattach.
 - `workspace_root` is the boundary for all file APIs. Path-traversal is strict-component-checked, binary detection runs, and reads cap at 5 MiB. Do not introduce a file endpoint that bypasses these checks.
 - Activity state machine drives push delivery: `idle` / `running` / `waiting-for-input` / `errored`. Push fires on entry to `waiting-for-input`. The heuristic is regex on stripped output tail; adjust with care because false positives become phone notifications.
@@ -243,21 +208,19 @@ The sync mode is `two-way-safe`. VCS metadata, machine-local Claude settings, ge
 
 ## 8. Cross-refs
 
-- `docs/ENGINE.md` — everything about the engine: what it owns, running it, the
-  wire contract (§5), the assistant (§6), agent tasks (§7), the WebSocket
-  protocol and the smoke tests
-- `docs/DEPLOYMENT.md` §10 — toolchain set for the dev pod, including agent-auth
-  bootstrap expectations
-- `docs/DEPLOYMENT.md` §11 — one-time Komodo stack creation, overlays, recovery
-- `docs/MERGE_MYDEVENV2.md` — why the engine is a separate process in a separate
-  language, argued rather than assumed
-- `engine/deploy/docker-compose.yml`, `engine/deploy/entrypoint.sh` — runtime orchestration
+- `docs/ENGINE.md` — everything about the engine: what it owns, building and
+  running it (§3), the wire contract (§5), the assistant (§6), agent tasks
+  (§7), optional integrations (§9)
+- `docs/DEPLOYMENT.md` — deploying the published images and the merged one
+- `docs/DESIGN.md` — the product's architecture, including why the engine is a
+  separate process in a separate language
+- `engine/deploy/entrypoint.sh`, `engine/deploy/docker-compose.yml` — runtime
+  orchestration and a sample standalone compose file (a template, not a
+  deployment)
 - `AGENTS.md` (repository root) — the Python core, the operation registry, and the repo-wide rules
 
 ## 9. Status / backlog
 
-The engine has no backlog of its own. What was designed here and never built is
-`docs/REQUIREMENTS.md` §7, where each gap is either a numbered requirement or a
-recorded withdrawal. Vogt's own roadmap is
-`docs/ROADMAP.md` and is a separate list; do not merge the two. Move backlog
-items to Forgejo issues if they become unwieldy.
+The engine has no backlog of its own. Outstanding engine work is a GitHub
+issue on the repository; Vogt's roadmap is `docs/ROADMAP.md` and is a
+separate list; do not merge the two.

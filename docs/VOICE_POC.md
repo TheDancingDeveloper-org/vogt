@@ -1,8 +1,12 @@
 # Voice-first Vogt — proof of concept
 
-*2026-08-17. Companion to `REQUIREMENTS.md` r16 (FR-T9–T13, FR-M6). This is
-the POC's scope, sequence and exit criteria — not a design of the finished
-feature. It is expected to be wrong in places; its job is to find out where.*
+*2026-08-17. A design and history record: the POC's scope, sequence, exit
+criteria and findings — not a design of the finished feature. It is expected
+to be wrong in places; its job was to find out where. The delivery status is
+[`VOICE_DELIVERY.md`](VOICE_DELIVERY.md); the assistant's reference, including
+how to configure a provider, is [`ENGINE.md`](ENGINE.md) §6. `FR-xx` ids are
+stable requirement identifiers (r16 of the baseline); each rule is stated in
+words where it is used.*
 
 ## 1. What the POC has to prove
 
@@ -54,9 +58,9 @@ Ordered so each step is demonstrable on its own and the hardware step is last.
   that profile's `base_url`/key/model. FR-T7's `claude-*` refusal is
   evaluated per profile.
 - `/api/config` advertises `assistant_profiles: [{name, default_model}]`.
-- **POC targets:** `clawbay` (`https://api.theclawbay.com/v1`, GPT models —
-  the validated path) and `openrouter` (`https://openrouter.ai/api/v1`). Both
-  are OpenAI-compatible; the difference is a URL and a key.
+- **POC targets:** two hosted OpenAI-compatible proxies — one serving GPT
+  models (the validated path), one a multi-vendor router. The difference is a
+  URL and a key; any endpoint that speaks the protocol would do.
 - **Claude subscription** is *not* a profile: it is the
   `Claude Code (protected)` session template. U3/U4 spawn it; the assistant
   loop itself does not run on it.
@@ -100,20 +104,18 @@ Ordered so each step is demonstrable on its own and the hardware step is last.
   `POST /api/assistant/tts` (`{text}` → audio stream), each proxied to
   configured OpenAI-compatible audio endpoints (`assistant_stt_base_url`,
   `assistant_tts_base_url`, keys, model/voice names). 404 when unconfigured.
-- POC provider: OpenAI's audio endpoints via The Claw Bay if it fronts them,
-  else OpenAI direct. Local Whisper.cpp + Kokoro are configuration, tried
-  only if the cloud path works.
+- POC provider: a hosted OpenAI-compatible audio endpoint first. Local
+  Whisper.cpp + Kokoro are configuration, tried only if the cloud path works.
 - Client: MediaRecorder capture → STT route; TTS route → `<audio>`; the
   existing Web Speech path stays as fallback and as the phone's first try.
 
 ### 3.6 Phone: background + speak-the-push (FR-M6) — *needs the dev APK, FR-M4*
 
 > **FR-M4's blocker is cleared on the configuration side (2026-08-21).** The
-> Firebase project `mydevenv2` really does carry an Android app for
-> `com.sprooty.mydevenv2.dev` (app id `1:1022775516765:android:5ef85b3f…`),
-> matching the checked-in `google-services.json` — verified against the console,
-> not inferred from the file. Nothing needs creating in Firebase. What is left
-> is the on-device pass: install the dev APK beside prod, confirm both register
+> Firebase project behind the checked-in `google-services.json` carries an
+> Android app for the dev application id — verified against the console, not
+> inferred from the file. Nothing needs creating in Firebase. What is left is
+> the on-device pass: install the dev APK beside prod, confirm both register
 > for push and route correctly. The Checkpoint D code (#192) is built and
 > compiles; it has never run on hardware.
 
@@ -142,8 +144,8 @@ Ordered so each step is demonstrable on its own and the hardware step is last.
   phone and it is the same recognizer problem.
 - **Checkpoint C** decides whether server-side speech is worth keeping over
   on-device Web Speech (quality, latency, cost).
-- **Checkpoint D** is the phone. It needs FR-M4's dev build alongside prod,
-  which is the blocker already recorded in §7.2 of `REQUIREMENTS.md`.
+- **Checkpoint D** is the phone. It needs FR-M4's dev build alongside prod
+  (a second application id so a dev APK installs beside the production one).
 
 Each checkpoint is a demo and a written note in this file's §6. Stopping at
 any checkpoint leaves a working, narrower thing.
@@ -156,7 +158,7 @@ The POC is *done* when:
   a row with a real recognizer, and the repair pass's misses are listed.
 - The approval-tap count per journey is recorded for U3 and U4, with a
   one-line verdict: tolerable / not.
-- Provider switching (`clawbay` ↔ `openrouter`) is a config change plus a
+- Provider switching between two profiles is a config change plus a
   request field, and a Claude session spawned by U3 runs on the subscription
   via the protected template.
 - FR-M6's battery number exists, or the reason it does not (no device) is
@@ -170,18 +172,19 @@ from §6, not before.
 
 ### The deployment itself — chat validated end to end *(2026-08-21)*
 
-Against the live `vogt-dev` (fresh store, `dev-af35786`): a typed U1 — *"are
-there any notifications?"* — posted to `/api/assistant/message` with a GUI
-front-door token returned **HTTP 200** and a real answer, reporting 21 active
-notifications and naming the failing CI checks it had just read from the
-estate. So the chat profile (OpenRouter, `openai/gpt-5.4-mini`), the tool loop,
-and the front-door token's reach over `/api/assistant/*` are confirmed working
-against a real deployment, not a fixture (#194).
+Against a live pre-production deployment (fresh store, a `dev-<sha>` image):
+a typed U1 — *"are there any notifications?"* — posted to
+`/api/assistant/message` with a GUI front-door token returned **HTTP 200** and
+a real answer, reporting 21 active notifications and naming the failing CI
+checks it had just read. So the chat profile (a hosted multi-vendor router
+serving `openai/gpt-5.4-mini`), the tool loop, and the front-door token's
+reach over `/api/assistant/*` are confirmed working against a real
+deployment, not a fixture (#194).
 
 The 401 an earlier CLI smoke test saw on that route was the *engine* token's
 capability set, not a defect — a GUI session token authenticates it correctly.
-Key hygiene (the shared OpenRouter token with a small limit) stays a deliberate
-follow-up on #194.
+Key hygiene (a shared provider key with a small spend limit) stays a
+deliberate follow-up on #194.
 
 
 ### Checkpoint A — the five utterances, typed *(2026-08-17)*
@@ -251,8 +254,7 @@ Two things deliberately **not** done at this checkpoint, and why:
 ### Checkpoint B — desktop microphone
 
 *Not run. Needs a person and a laptop microphone; everything it needs is
-built* — the Web Speech path shipped with #189 and is live on `vogt-dev` as of
-`dev-af35786`. What is owed is the five utterances spoken three times each,
+built* — the Web Speech path shipped with #189. What is owed is the five utterances spoken three times each,
 with the recognizer misses and the U3/U4 approval-tap counts written here.
 
 ### Checkpoint C — server-side STT/TTS *(2026-08-21)*
@@ -261,9 +263,9 @@ with the recognizer misses and the U3/U4 approval-tap counts written here.
 FR-T12). The engine fronts two routes — `POST /api/assistant/stt` (multipart
 audio → `{text}`) and `POST /api/assistant/tts` (`{text}` → an audio stream) —
 proxied to OpenAI-compatible audio endpoints configured **independently of the
-chat profile**, which is the whole point of FR-T12: the estate's chat runs
-through OpenRouter, which does not front `/audio/transcriptions` and
-`/audio/speech` uniformly, so speech needs its own provider.
+chat profile**, which is the whole point of FR-T12: a chat profile on a
+multi-vendor router does not necessarily front `/audio/transcriptions` and
+`/audio/speech`, so speech needs its own provider.
 
 We adopted **voicemode's** architecture natively (not as a dependency — it is a
 Python workstation MCP app with local-audio-hardware deps, unfit for the
@@ -302,7 +304,7 @@ Speech/Capacitor, or neither) falls back to typed input with no error surfaced.
 Checkpoint C exists to reach — *is server-side speech worth keeping over
 on-device Web Speech (quality, latency, cost)?* — cannot be answered here: it
 needs a configured audio provider producing real transcripts and real audio,
-and vogt-dev's OpenRouter chat profile supplies none. Point STT/TTS at a live
+and a router-only chat profile supplies none. Point STT/TTS at a live
 provider (or a local Whisper.cpp + Kokoro pair) and run U1–U5 spoken on a
 desktop with no Web Speech to record that verdict.
 

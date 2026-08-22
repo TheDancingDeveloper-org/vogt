@@ -1,34 +1,39 @@
 # Vogt — Deliverable Stages (v0.3, revision r15)
 
 Status: **M0–M6 delivered — v1 is built** (2026-08-12); **M7 and M8 are
-post-v1**; **M9–M14 are v2** — the MyDevEnv2 merge, added by
-`REQUIREMENTS.md` revision r9 (2026-08-14). **M9–M13 are built**
+post-v1**; **M9–M14 are v2** — the session-engine merge, added by
+requirements revision r9 (2026-08-14). **M9–M13 are built**
 (2026-08-14); M11 now has automated Chromium GUI evidence, while its live
 stack/manual conformance evidence and M13's device evidence remain outstanding.
 
 **M14 is delivered except for the acts that are somebody's to take.** The
 merge is on `main`, both image streams are built and signed, CI is green
-across both halves on the self-hosted runners, and `REQUIREMENTS.md` §6's
-fourth pass has taken the "short or absent" column from twenty-five conjuncts
-to ten. Every one of those ten is a decision rather than unfinished work, and
-§6.2 names which: a dev-stack deploy and a prod deploy, an APK signing
-keystore that lives in the retired forge, a native Anthropic backend deferred
+across both halves, and the fourth pass of the v2 delivery verification has
+taken the "short or absent" column from twenty-five conjuncts to ten. Every
+one of those ten is a decision rather than unfinished work: a development
+deploy and a production deploy, an APK signing keystore that lives in the
+retired forge, a native Anthropic backend deferred
 at priority C, a voice pass that needs a device, and four rows where the
 argued position is now stated instead of an owed item. What remains of this
 stage is retiring the old stacks once the merged one has carried load, and
-sunsetting the `MYDEVENV2_*` aliases after their transition period.
+sunsetting the legacy `MYDEVENV2_*` environment names (still accepted as
+aliases of the `ENGINE_*` names) after their transition period.
 
-Requirement IDs refer to `REQUIREMENTS.md`; per its §4, scope changes here
-must update that document in the same change.
+Requirement IDs (`FR-*`, `NFR-*`) refer to the numbered requirements
+baseline, which is maintained outside this repository. The IDs are stable
+and append-only — an ID is never renumbered or reused — so they are quoted
+here as plain text; every rule they name is also stated in words where it
+matters.
 
 Each stage below carries an "as built" note recording where the delivery
 differed from the sketch. What those notes cannot say is whether the set of
-them adds up to the requirements baseline — that is `REQUIREMENTS.md` §5,
-written after v1 by checking the build against every ID. It found seven
-requirements short of their text (FR-G1, FR-D2, FR-L1, FR-S3, FR-S6,
-NFR-I3, NFR-S4) and one CI gate that does not fire on the paths most likely
-to trip it (NFR-Q4).
-**Nothing in this document should be read as delivered until §5 agrees.**
+them adds up to the requirements baseline — that is the delivery
+verification, written after v1 by checking the build against every ID. It
+found seven requirements short of their text (FR-G1, FR-D2, FR-L1, FR-S3,
+FR-S6, NFR-I3, NFR-S4) and one CI gate that does not fire on the paths most
+likely to trip it (NFR-Q4).
+**Nothing in this document should be read as delivered until that
+verification agrees.**
 
 ## The cut lines
 
@@ -41,7 +46,7 @@ to trip it (NFR-Q4).
   **M6** adds the GUI. **v1 = M0–M6.**
 - M5 precedes M6 and the order is fixed: build the GUI once, against
   complete data.
-- **v2 = M9–M13** (r9): the merge with MyDevEnv2, after which Vogt runs the
+- **v2 = M9–M13** (r9): the session-engine merge, after which Vogt runs the
   work it governs. **Merge-MVP = M9–M10** — the first build where a work item
   can open a coding session. M14 is consolidation and delivers no new ID.
 - M9 precedes M10 for the same reason M5 precedes M6, from the other
@@ -58,11 +63,11 @@ operation the stage added.
 | M1 | Core tracker | Local work tracking over CLI + REST + MCP stdio | FR-P1, FR-P2, FR-P4, FR-P5, FR-G11, FR-W1–W3, FR-W6–W9, FR-V1–V3, FR-A1–A4, FR-A5(stdio), FR-S6, FR-N1, FR-N2, NFR-Q3 |
 | M2 | Eyes *(MVP)* | Collectors incl. read-only GitHub, observed-first, suppression, trust & freshness | FR-O1–O4, FR-O5a, FR-O6, FR-O7, FR-W4, FR-W5, FR-W10, FR-W11, FR-G12, FR-G15, FR-V4, FR-D1–D4, FR-P3, FR-R4, FR-L3, NFR-I2, NFR-I4, NFR-I5, NFR-S1, NFR-S2, NFR-S4, NFR-PO1, NFR-PO2 |
 | M3 | Contract & drift | On-demand contract checks; the drift proposal lifecycle | FR-G1, FR-G3, FR-G4, FR-G13, FR-G14, FR-R1–R3, FR-R5, FR-D5, FR-D8 |
-| M4 | Service | Node B stack via Komodo, auth, remote MCP, ops | FR-A5(full), FR-A6, FR-A7, FR-S3–S5, FR-S7, FR-L1(full), FR-L2, NFR-D1–D10, NFR-C5, NFR-PO4, NFR-O2 |
+| M4 | Service | A deployed Compose stack, auth, remote MCP, ops | FR-A5(full), FR-A6, FR-A7, FR-S3–S5, FR-S7, FR-L1(full), FR-L2, NFR-D1–D10, NFR-C5, NFR-PO4, NFR-O2 |
 | M5 | GitHub module | Consolidation, forge drift, write-back | FR-O5b, FR-B1–B5, FR-D6 |
 | M6 | GUI | The visual surface over the same API | FR-U1, FR-U2 |
 | M7 | Onboarding & inbox *(post-v1)* | Import a repository from GitHub; collect its notifications | FR-P6, FR-P7, FR-S8, FR-O8, FR-N3, FR-U3 |
-| M8 | Reachable by an agent *(post-v1)* | `connect`, and the five estate prerequisites behind it | FR-A8; `DEPLOYMENT.md` §7 (1–5) |
+| M8 | Reachable by an agent *(post-v1)* | `connect`, and the five deployment prerequisites behind it | FR-A8 |
 | M9 | Foundations *(v2)* | One repo, one stack, one published port; both halves' CI green | NFR-D11, NFR-D12, NFR-C6, NFR-Q6, FR-U9 |
 | M10 | Coding sessions *(v2, merge-MVP)* | A work item can open a session in its project's tree | FR-E1–E5, FR-E8, FR-E9, FR-S9, FR-S10; *(r18)* FR-E12 |
 | M11 | GUI uplift *(v2, restructure)* | The Solid PWA becomes the single front end, then gains places, Inbox, and measured high-volume surfaces | FR-N4–N5, FR-U4–U8, FR-U10–U25, NFR-S5 |
@@ -71,9 +76,9 @@ operation the stage added.
 | M14 | Consolidation *(ongoing)* | Old stacks retired, names settled, r9 verified against the build | NFR-I6 (unclaimed by any other stage) |
 
 Deferred and withdrawn requirement IDs (FR-G2, FR-G5–G10, FR-D7) appear in
-no stage by design — see `REQUIREMENTS.md` §3.
+no stage by design — they are named non-requirements in the baseline.
 
-**On the numbering of M9–M14.** `MERGE_MYDEVENV2.md` §14 drafted these
+**On the numbering of M9–M14.** The merge design originally drafted these
 stages as M8–M13, on the stated grounds that M7 was the last one. M8 was
 already taken by *Reachable by an agent* above — the stage during which r8's
 protocol-negotiation failure was found — so the merge stages start at M9.
@@ -315,17 +320,17 @@ renders its evidence.
    independently. The test deletes `observed.sqlite3` outright and the
    proposal still renders its evidence.
 4. **`mirrored_source` was listed here and not built** — for eleven stages,
-   without appearing in `REQUIREMENTS.md` §7's gap register either, because
-   that register was assembled from gaps documents *stated* and this one was
-   visible only by grepping for the identifier. Delivered at r15 as its own
-   collector; `REQUIREMENTS.md` r15 records both the delivery and the
-   register's blind spot.
+   without appearing in the gap register either, because that register was
+   assembled from gaps documents *stated* and this one was visible only by
+   grepping for the identifier. Delivered at r15 as its own collector; r15
+   records both the delivery and the register's blind spot.
 
-## M4 — Service (the Node B stack)
+## M4 — Service (the deployed stack)
 
 **Objective**: from local tool to always-on service with real identity,
-running where it will actually live — `DEPLOYMENT.md` §2.2 is the target,
-not a shape to be decided at this stage.
+running where it will actually live — a Compose stack on the maintainer's
+host, per [`DEPLOYMENT.md`](DEPLOYMENT.md), not a shape to be decided at
+this stage.
 
 Deliverables:
 - `serve`: one port, path-routed GUI-placeholder / `/api` / `/mcp` /
@@ -341,33 +346,33 @@ Deliverables:
   allocation values defaulted).
 - `release.yml` completes: buildx image, SBOM and provenance attestations,
   keyless cosign sign over the digest, push to
-  `ghcr.io/thedancingdeveloper-org/vogt`, tag-triggered only, on
-  `[self-hosted, node-b, linux, x64, docker, publish]`. *(As built: the
+  `ghcr.io/thedancingdeveloper-org/vogt`, tag-triggered only, on a
+  self-hosted runner carrying the `publish` label. *(As built: the
   attestations are buildkit's rather than a separate syft run, and cosign
   signs without a separate `attest` step. `build.yml` joins it at r5 —
-  see `REQUIREMENTS.md`.)*
-- The ops-repo stack: `indexarr/ops` → `personal/vogt/docker-compose.yml`,
-  digest-pinned, tailnet-bound, hardened per NFR-D9, healthchecked on
-  `/health/ready`. **Allocate the port here** and verify it free on Node B
-  before committing (see `DEPLOYMENT.md` §2.2).
+  see the r5 note at the end of this document.)*
+- The deployed stack: a compose file held in version control, digest-pinned,
+  bound to a private-network address, hardened per NFR-D9 (read-only root
+  filesystem, dropped capabilities, non-root user), healthchecked on
+  `/health/ready`. **Allocate the port here** and verify it free on the
+  host before committing.
 
 **Demo**: tag a release → GitHub Actions publishes a signed image and
-nothing deploys; pin the digest in `indexarr/ops`, `DeployStack`
-`personal-vogt`, and the stack comes up on Node B. From a dev box on the
-tailnet, Claude Code connects via the bridge with a read-only token —
-write tools are absent from its tool list; swap to a `work.write` token —
-they appear. Probe `/health/ready` with plain curl over the Tailscale
-address (and confirm nothing answers on the LAN address). Backup, destroy
-the stack, redeploy, restore — state intact. Then revert the digest and
-redeploy to prove rollback.
+nothing deploys; pin the digest, redeploy the stack, and it comes up. From
+a workstation on the same private network, Claude Code connects via the
+bridge with a read-only token — write tools are absent from its tool list;
+swap to a `work.write` token — they appear. Probe `/health/ready` with plain
+curl on the private address (and confirm nothing answers on any other
+interface). Backup, destroy the stack, redeploy, restore — state intact.
+Then revert the digest and redeploy to prove rollback.
 
 ### M4 as built — four notes
 
-1. **Port 18094 is allocated, and was verified free** rather than
-   inherited from `DEPLOYMENT.md`. Cadastre holds 18090 and 18092; 18095
-   was already in use. The compose file carries it as a *default*, not a
-   `${X:?}` gate — gating allocation values is what cost cadastre every
-   deploy after `cadastre#42`.
+1. **The port was allocated and verified free on the host** rather than
+   inherited from a document. The compose file carries it as a *default*,
+   not a `${X:?}` gate — gating allocation values turns every deploy into
+   a hunt for a number nobody cares about, which is the NFR-D2 revision
+   recorded in `DESIGN.md` §9.
 2. **The served context carries the authenticated principal.** The first
    version resolved the token correctly and then ran the operation under a
    context built from the OS user, so every audited write through the
@@ -486,10 +491,10 @@ quietly reversed.
 4. **FR-L3 had never been built.** Found by walking every must-have
    requirement ID and asking which are cited nowhere in `src/` or `tests/`.
    FR-L3 has two halves — collectors run "on an in-process schedule" *and*
-   are triggerable on demand — and only the second existed. `DEPLOYMENT.md`
-   §1 has listed "collector scheduler (in-process background sweeps)" in the
-   `serve` process diagram since M4, so the deployment document described
-   something that did not run. Built at M6 and covered by
+   are triggerable on demand — and only the second existed. The deployment
+   document had listed "collector scheduler (in-process background sweeps)"
+   in the `serve` process diagram since M4, so it described something that
+   did not run. Built at M6 and covered by
    `tests/test_scheduler.py`; the requirement belonged to M2.
 
 The GUI is read-only. Resolving drift, transitioning work and setting a
@@ -545,8 +550,8 @@ what it could simply have known.
 **The temptation this stage must refuse** is the repository picker. An import
 form with a text field is one HTTP call away from an import form with a
 dropdown of your repositories, and that dropdown is the registration
-candidate listing r3 removed (was FR-G8). `REQUIREMENTS.md` §3 defers it
-again by name so that adding it is a decision rather than a Tuesday.
+candidate listing r3 removed (was FR-G8). The baseline defers it again by
+name so that adding it is a decision rather than a Tuesday.
 
 ### M7 as built — one deviation and three notes
 
@@ -585,13 +590,13 @@ resolution stays out — resolving from a list *is* a button.
 
 ## v2 — the merge (M9–M14)
 
-Added by `REQUIREMENTS.md` revision **r9**, which reverses `DESIGN.md`
-§1.2's *"being an agent runner"* non-goal: MyDevEnv2 becomes Vogt's session
-engine, and Vogt runs the work it governs. The surviving boundary is that
-Vogt never decides to run anything on its own — every session traces to a
-person or to a schedule a person created (`REQUIREMENTS.md` §3, autonomous
-work pickup). The design behind these stages is
-[`MERGE_MYDEVENV2.md`](MERGE_MYDEVENV2.md) §§1–11; sizes are relative
+Added by requirements revision **r9**, which reverses `DESIGN.md` §1.2's
+*"being an agent runner"* non-goal: a previously separate session-engine
+codebase becomes Vogt's session engine (`engine/`, `web/`, `mobile/` —
+see [`ENGINE.md`](ENGINE.md)), and Vogt runs the work it governs. The
+surviving boundary is that Vogt never decides to run anything on its own —
+every session traces to a person or to a schedule a person created;
+autonomous work pickup is a named non-requirement. Sizes are relative
 (S < M < L), and as everywhere in this document, "as built" notes come after
 the stage is built, not before.
 
@@ -604,21 +609,22 @@ that both halves now answer at the same address.
 Delivers NFR-D11, NFR-D12, NFR-C6, NFR-Q6, FR-U9.
 
 Deliverables:
-- **The repo merge, with history**, from **MyDevEnv2@dev** (head `2214a7d`)
+- **The repo merge, with history**, from the engine's development branch
   via `git subtree`: `engine/` (Rust workspace), `web/` (Solid PWA),
-  `mobile/` (Capacitor shell), MyDevEnv2's documents under `docs/engine/`.
-  The archived GPUI desktop client is not carried over
-  (`REQUIREMENTS.md` §3). Provenance is the `dev` branch, not `main`: `dev`
-  is where the Vogt MCP registration and the ContextKeeper work already
-  live, and merging `main` would mean re-doing them.
+  `mobile/` (Capacitor shell), and the engine's documents (since folded
+  into `ENGINE.md`). The archived GPUI desktop client is not carried over.
+  Provenance is the development branch, not `main`, because that is where
+  the Vogt MCP registration and the ContextKeeper work already lived, and
+  merging `main` would mean re-doing them.
 - **The front door** (NFR-D11): the Rust engine is the single listening
   process — PWA, native APIs, WebSocket attach, `/api/vogt` and `/mcp`
   reverse-proxied to vogt-core, and aggregate health. Vogt-core binds
   loopback only. Every port that serves MCP still serves plain HTTP health
   (FR-A7), which is the invariant the proxy is most likely to quietly lose.
 - **The dev/prod split** (NFR-D12), branch-shaped before anything else
-  lands: `dev` → `:dev` images → the `dev-vogt` stack on Node B; only `main`
-  reaches prod. Mobile, voice and push are verifiable nowhere else.
+  lands: `dev` → `:dev` images → the maintainer's development instance;
+  only `main` reaches production. Mobile, voice and push are verifiable
+  nowhere else.
 - **Merged CI** (NFR-C6): Rust fmt/clippy/test, web typecheck and APK build
   join the Python suite, under NFR-C3's build-vs-release discipline.
 - **Both absence-modes green** (NFR-Q6): the forge-less run, unchanged, and
@@ -647,7 +653,7 @@ more could honestly be claimed.
 **The deviation is closed, on 2026-08-14, and by a runner rather than by
 this container.** `build.yml`'s `stack-image` job ran for the first time:
 28m53s, `engine/Dockerfile` built with the repository as its context, `vogt
---version` and `mydevenv2-server --help` both run *inside* the candidate
+--version` and the engine's `--help` both run *inside* the candidate
 before it was pushed, the digest signed, and `dev` plus `dev-ee18adc`
 published to `ghcr.io/thedancingdeveloper-org/vogt-stack` — which
 `deploy/vogt-stack.compose.yml` now pins in place of the placeholder digest
@@ -658,8 +664,8 @@ step, copying uv's standalone CPython between build stages, holds: `vogt
 What is still unproven is the *stack*, as opposed to the image — the two
 processes coming up together under `entrypoint.sh`, the engine finding the
 core on loopback, and `/readyz` reporting a core it actually reached. That
-needs the compose stack up (`DEPLOYMENT.md` §9.4) and
-`scripts/smoke_merged_stack.sh` pointed at it, and it is a deploy, which is
+needs the compose stack up and `scripts/smoke_merged_stack.sh` pointed at
+it, and it is a deploy, which is
 a human act (NFR-D10).
 
 1. **`ReadinessCheck` grew a `fatal` flag, and the core's probe is not
@@ -674,28 +680,29 @@ a human act (NFR-D10).
 2. **Supervision is the entrypoint, not a framework.** s6-overlay and
    supervisord were both weighed and rejected: this container is a
    development pod that already sequences optional daemons in an ordered
-   script, runs as `sprooty` rather than root, and gets tini as PID 1 from
+   script, runs as an unprivileged user rather than root, and gets tini as PID 1 from
    the compose. A second init system would have displaced that tini, put
    PID 1 back to root, and split startup order across two places — for two
    long-lived processes. The core is a backoff respawn loop; the engine
    stays what `exec` replaces the shell with, so the container's lifetime is
    the front door's lifetime. The core's listen address is *derived from*
    `VOGT_CORE_URL`, so "loopback only, never published" is enforced rather
-   than commented, and §5.2's two-service fallback still works unchanged.
+   than commented, and the two-container fallback (engine and core as separate
+   services) still works unchanged.
 
-3. **`vogt init` now runs before every `serve`.** `DEPLOYMENT.md` §5
-   records that nothing migrates — `serve` does not, and there is no `vogt
+3. **`vogt init` now runs before every `serve`.** The deployment document
+   recorded that nothing migrates — `serve` does not, and there is no `vogt
    migrate` — leaving a manual "run `vogt init` after a digest bump" step
    that a deploy would eventually skip. The supervisor runs it in the retry
    loop. The gap in the *product* is still open (FR-L1); what closed is the
    gap in this deployment.
 
-4. **What the merged CI does not carry over from Woodpecker**, each for a
-   reason and each written into the workflow: sccache-over-Redis (that
-   Redis OOM-crash-looped and blocked the pipeline — `Swatinem/rust-cache`
-   replaces it), the Forgejo registry pushes and Komodo deploy steps (Vogt
-   does not deploy from CI, NFR-D10), and **APK release signing**, whose
-   keystore lives in the retired forge — the APK builds unsigned, and where
+4. **What the merged CI does not carry over from the engine's previous
+   pipeline**, each for a reason and each written into the workflow: a
+   shared Rust compile cache backed by a Redis that OOM-crash-looped and
+   blocked the pipeline (`Swatinem/rust-cache` replaces it), the private
+   registry pushes and deploy steps (Vogt does not deploy from CI, NFR-D10),
+   and **APK release signing**, whose keystore lives in the retired forge — the APK builds unsigned, and where
    a signed one gets published is an untaken release decision, not an
    oversight.
 
@@ -713,8 +720,8 @@ a human act (NFR-D10).
 
 **Still open after M9**: the merged image has no TLS (the engine has none;
 where the core terminated TLS in-process, the merged port speaks plain HTTP
-over WireGuard, and whether Caddy or `tailscale serve` fronts it is the
-ingress decision §11.1 leaves open), CI does not yet build
+and expects a reverse proxy or a private network in front of it — the
+ingress decision the merge design leaves open), CI does not yet build
 `engine/Dockerfile` with a repository-root context, and the merged image's
 registry name is a placeholder awaiting that decision.
 
@@ -761,16 +768,16 @@ the registry's tree, the brief on disk where the engine put it, an agent
 inside that terminal posting a comment with the credential its session was
 given, and the audit reading
 `agent:session:ses_01KZZ1XPW5GMG6NMKG6BV7Q7RE` beside a `session.start` from
-`local:sprooty`.
+`local:<os-user>`.
 
 **Running it live is what found the requirement failing.** Three
 independent places overwrote a session's token with the pod's shared one,
 and every one of them failed silently — the agent authenticated, wrote,
 and got a 200, while the audit log recorded the wrong actor:
 
-1. `mydevenv2-agent-auth` fetched the pod's Vogt token unconditionally, and
-   with `MYDEVENV2_AUTO_AGENT_AUTH=1` — the deployed setting — it is what
-   launches every session's shell.
+1. The engine's agent-auth helper fetched the pod's Vogt token
+   unconditionally, and with automatic agent auth enabled — the deployed
+   setting — it is what launches every session's shell.
 2. The MCP wrapper Claude Code and OpenCode are registered with re-brokers
    through that same helper before running the bridge.
 3. The stdio bridge read only `VOGT_TOKEN_FILE`, which the broker rewrites.
@@ -859,7 +866,7 @@ evidence and reasoned actions, labelled phone navigation and Go to reachability;
 the jsdom suite also covers migration, keyboard/batch Inbox decisions and the
 Sessions exact-payload approval review. What remains is the live-server
 refusal round-trip, a large-estate browser fixture, the full route sweep and
-the live-stack observation listed in `REQUIREMENTS.md` §7.2.
+the live-stack observation recorded in the gap register.
 
 That is also why the legacy GUI is still here. FR-U9's condition — every
 operation it exposes is rendered by a PWA surface — was reached, and a test
@@ -906,8 +913,8 @@ carries the reminder and the order of operations: run the demo, then delete
    NFR-S5's "does not fetch the estate to render a page" holds, true
    virtualization does not. Bulk drift accept does not exist, by §3.
 
-**Open after M11** — the live/manual browser conformance evidence described in
-`REQUIREMENTS.md` §7.2, and `backlog`/`bugs` having no `offset`, so there is no
+**Open after M11** — the live/manual browser conformance evidence the gap
+register describes, and `backlog`/`bugs` having no `offset`, so there is no
 way to page past the top 200 of a ranked view (**FR-V5**).
 
 The third said comments were audited against the comment rather than the work
@@ -934,8 +941,8 @@ Deliverables:
   mean a new hand-maintained schema.
 - **The gated write set** (FR-T2): every mutating tool through the
   pending-action gate — one at a time, exact payload shown, expiring
-  unapproved, approved only on screen. Voice never approves
-  (`REQUIREMENTS.md` §3).
+  unapproved, approved only on screen. Voice never approves — a stated
+  non-requirement, not an omission.
 - **Honest attribution** (FR-T3): an assistant-initiated write is audited to
   the approving user's actor with a `why` from the conversation.
 - **Threat-model extension** (FR-T4): Vogt reads are external content by the
@@ -989,8 +996,9 @@ does not.
    **The other half is now deferred rather than outstanding (r12.)** The hang
    was the failure that mattered and it is closed; a second transport buys a
    choice of vendor rather than a capability, and nothing in v2 depends on
-   Anthropic specifically. `REQUIREMENTS.md` §3 carries the decision and r12
-   the argument. So M12 delivered FR-T7 as it now stands, and this stage has
+   Anthropic specifically; the assistant speaks to any OpenAI-compatible
+   chat endpoint (`ENGINE_ASSISTANT_BASE_URL`, `ENGINE_ASSISTANT_API_KEY`,
+   `ENGINE_ASSISTANT_MODEL`). r12 carries the argument. So M12 delivered FR-T7 as it now stands, and this stage has
    nothing left open against it.
 
 ## M13 — Mobile MVP1 (S–M)
@@ -1023,18 +1031,18 @@ outcome lands and the only place it is readable. The original sentence said
 no surface can show that: `vogtApi.ts` has no `observations` binding, so no
 Vogt surface in the PWA reads the observed store at all, and the item page's
 "Collected evidence" panel is the ranking's contributions rather than
-evidence. The evidence is real, tested and CLI-only — `REQUIREMENTS.md` §6.2
-carries the row (FR-U17's provisional clause) and this line is not allowed to
-imply otherwise.
+evidence. The evidence is real, tested and CLI-only — the delivery
+verification carries the row (FR-U17's provisional clause) and this line is
+not allowed to imply otherwise.
 
 ### M13 as built — three notes and a thing that was already wrong
 
 **The APK assembles; nothing was ever installed.** The first version of this
-note said there was no Android SDK here. That was wrong — `/opt/android-sdk`,
-Gradle 9.7 and Java 21 are in this image, and `cap sync` plus
+note said there was no Android SDK in the build environment. That was wrong —
+the SDK, Gradle 9.7 and Java 21 were present, and `cap sync` plus
 `./gradlew assembleDebug` produce a 5.5M debug APK whose manifest reads
-`application-label:'Vogt'`, `package: com.sprooty.mydevenv2`, pointing at
-`vogt.sprooty.com` with cleartext off. So the build is proven and the
+`application-label:'Vogt'`, pointing at the configured server URL with
+cleartext off. So the build is proven and the
 configuration's branches are proven against a real Gradle run rather than
 only under node.
 
@@ -1051,15 +1059,15 @@ signing is also still absent — the keystore lives in the retired forge — so
 what CI produces is an unsigned debug artefact.
 
 1. **The shell was pointing at the wrong stack, and it looked like it
-   worked.** `capacitor.config.ts` hardcoded `mydevenv2.sprooty.com` — the
+   worked.** `capacitor.config.ts` hardcoded the hostname of the
    standalone engine, with no vogt-core behind it. An APK built on that
    default reaches a front door where `/api/vogt` answers 503, `vogt.
    configured` is false, and the four Vogt tabs are hidden or in their outage
    state, while terminals and the assistant work perfectly. The build now
    asks for the URL and fails without one, because the merged stack has no
-   settled name (§11.1) and NFR-D2 forbids inventing one. `cleartext` follows
-   the scheme rather than being hardcoded `false`, which the tailnet's plain
-   HTTP had turned into a runtime network error.
+   settled name and NFR-D2 forbids inventing one. `cleartext` follows the
+   scheme rather than being hardcoded `false`, which a plain-HTTP deployment
+   on a private network had turned into a runtime network error.
 
 2. **FR-M2's "and for nothing else by default" was already false.** Idle-stall
    and agent-task-started notifications both defaulted on, and neither is in
@@ -1100,15 +1108,16 @@ that appears.
 no new requirement ID, which is the point.
 
 Deliverables:
-- The standalone stacks retired (`prod/dev-mydevenv2`, `personal/vogt`) once
-  the merged stack has carried the load.
-- The name and domain decision (`MERGE_MYDEVENV2.md` §11.1), and the sunset
-  of the `MYDEVENV2_*` config aliases after their transition period.
-- **The r9 as-built reconciliation**: `REQUIREMENTS.md` and `DESIGN.md`
-  brought back against what was actually built, in the usual style —
-  including a §5-style delivery verification of every ID r9 added, by §5.5's
-  method and §5.4a's per-conjunct rule. *(Done: `REQUIREMENTS.md` §6, and
-  `DESIGN.md` §4's merged-tree section.)*
+- The standalone stacks (the old engine-only and core-only deployments)
+  retired once the merged stack has carried the load.
+- The name and domain decision, and the sunset of the legacy `MYDEVENV2_*`
+  config aliases (still accepted as aliases for the `ENGINE_*` names) after
+  their transition period.
+- **The r9 as-built reconciliation**: the requirements baseline and
+  `DESIGN.md` brought back against what was actually built, in the usual
+  style — including a delivery verification of every ID r9 added, with
+  each conjunct of a requirement's text judged separately. *(Done: the v2
+  delivery verification, and `DESIGN.md` §4's merged-tree section.)*
 - **NFR-I6** — backup and restore covering the whole product as one act: the
   core's SQLite, the engine's `state_dir`, and enough metadata to
   re-establish FR-E3's path agreement after a restore. *(Built. It had
@@ -1118,8 +1127,8 @@ Deliverables:
   needs to restore one.)*
 
 **Demo**: there is none, and that is honest — the acceptance test for this
-stage is `REQUIREMENTS.md` §5 agreeing with the build, which is the same bar
-v1 was held to.
+stage is the delivery verification agreeing with the build, which is the
+same bar v1 was held to.
 
 ### M14 as built, so far — what the pipeline settled
 
@@ -1136,8 +1145,7 @@ for the first time and all three had been asserted in prose:
    filesystem; `check_docs.py` now rejects absolute paths outright. The engine
    job failed on `sudo apt-get` with *root is not in the sudoers file* — the
    runner is root, so there was nothing to elevate from. Neither was a code
-   defect and neither was findable by reading. `REQUIREMENTS.md` §6.3 finding
-   16.
+   defect and neither was findable by reading.
 2. **"Needs hardware" was wrong, and is retired from the documents.** It
    described this container. The runners have the Docker daemon and the
    Android SDK it lacks, and on the same day they produced the merged image
@@ -1180,11 +1188,11 @@ for the first time and all three had been asserted in prose:
    few minutes cancelled the first run and the next run's range began after
    it. A lint error reached `dev` and sat there green; it was found by
    running `ruff` by hand. Cancellation is now pull-requests-only, whose runs
-   classify against the merge base. `REQUIREMENTS.md` §6.3 finding 19.
+   classify against the merge base.
 
 Still open, and each is somebody's decision rather than unfinished work: the
-standalone stacks are retired only after the merged stack carries load
-(§9.5); the `MYDEVENV2_*` aliases sunset after their transition period; and
+standalone stacks are retired only after the merged stack carries load;
+the `MYDEVENV2_*` aliases sunset after their transition period; and
 the APK keystore lives in the retired forge, so where a signed APK is
 published is an untaken decision.
 
@@ -1214,7 +1222,7 @@ The requirement was conflating two acts that only look alike:
 
 What NFR-C3 was protecting is intact. Merging still cannot cut a release: no
 semver tag, no `latest`, no wheel. Merging still cannot deploy: production
-moves only when a digest is pinned in `indexarr/ops` and `DeployStack` runs
+moves only when an operator pins a new digest and redeploys the stack
 (NFR-D10). What it loses is the accidental coupling that made a version bump
 the price of a hotfix.
 

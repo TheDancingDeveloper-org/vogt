@@ -6,7 +6,11 @@ foundation; the three issues designed here change the **work model itself** and
 carry a schema migration of the live declared store, so they are sequenced as a
 deliberate, separately-reviewed step rather than folded into the foundation
 deploy. This document is the plan of record for that step; delete it once #183
-closes and the decisions have moved into `REQUIREMENTS.md`/`DESIGN.md`._
+closes and the decisions have moved into the requirements register and
+`DESIGN.md`. The requirements register (`FR-*`/`NFR-*` IDs) is maintained by
+the maintainer outside the repository, in the git-ignored `docs/local/`; IDs
+below are stable identifiers, and the rule each one carries is stated in
+words beside it._
 
 **Predecessors already delivered:** the provider seam (#172), incremental
 all-state sync + watermarks + `last_confirmed` (#173), symmetric drift (#174),
@@ -21,7 +25,7 @@ the current tree.
 
 ## 1. What exists today (the starting point)
 
-The estate runs a **dual work model** — this is exactly the thing #181 removes.
+Vogt today runs a **dual work model** — this is exactly the thing #181 removes.
 
 - **Declared work items** live in the declared SQLite store as `WorkItem`
   rows (`src/vogt/core/entities.py`), `wrk_*` ids, a human `ref` (`WI-N`), an
@@ -97,9 +101,9 @@ the observed store already is that mirror.
 
 > **Migration discipline.** This is a schema change to the declared store; pin
 > the migration id before landing (the migration-identity CI guard). It is the
-> reason this work is deferred out of the foundation deploy — the final
-> `vogt-dev` redeploy runs declared migrations against the live DB, and the
-> estate's real work items (small in number today: ~2 native) must be handled
+> reason this work is deferred out of the foundation deploy — a redeploy runs
+> declared migrations against the live DB, and an instance's existing native
+> work items (few on the maintainer's own instance, but real) must be handled
 > by the migration, not stranded. The migration must decide those 2 native
 > items' fate the same way #183's link-migration does (publish upstream, then
 > re-key) — so **#181's migration and #183 are the same event** for already-
@@ -161,9 +165,10 @@ New registry op `forge.publish`: create a remote repo under the linked actor's
 PAT (#179) and push the local default branch.
 
 - **This is the first destructive-capable verb** beyond the deliberately
-  non-destructive FR-B4 set (`comment/create_issue/add_labels/set_state`). It
+  non-destructive write-back set (FR-B4: `comment/create_issue/add_labels/set_state`,
+  never force, never delete). It
   *creates upstream state and pushes commits*. It therefore needs its own
-  `REQUIREMENTS.md` revision with an FR-ID and a bounded rationale:
+  requirements revision with an FR-ID and a bounded rationale:
   - refuses if the remote already exists (typed refusal, never a clobber);
   - **never force-pushes, ever** (mirror FR-B4's "no force" invariant into the
     push path — `git push` without `--force`, and refuse a non-fast-forward);
@@ -180,8 +185,8 @@ PAT (#179) and push the local default branch.
 - Publish creates the named repo under the linked actor and pushes the default
   branch; a naming/existing-repo conflict is a typed refusal, not a clobber.
 - No force-push, ever.
-- Documented in REQUIREMENTS with its FR-ID + bounded rationale; DESIGN
-  describes it only once built.
+- Documented in the requirements register with its FR-ID + bounded
+  rationale; DESIGN describes it only once built.
 - A published project is thereafter linked/upstream-truth.
 
 ---
@@ -196,11 +201,11 @@ projects.
   carry what maps), then re-key to the subject key and fold the vogt-only fields
   into the overlay. **No open native item is silently dropped.** Closed/archived
   native items: default **leave historical, migrate only open** — record the
-  choice in REQUIREMENTS.
-- **Guarantee withdrawal (REQUIREMENTS).** A new revision withdraws the
+  choice in the requirements register.
+- **Guarantee withdrawal (requirements).** A new revision withdraws the
   "forge-less layer stays real" guarantee. The designed-but-now-withdrawn
-  capability is noted in `REQUIREMENTS.md` **§7** (the gap register), **not**
-  DESIGN.md (which describes only what exists). Cross-reference #178.
+  capability is noted in the requirements register's gap section (§7),
+  **not** DESIGN.md (which describes only what exists). Cross-reference #178.
 - **Surface change.** Unlinked projects show **no** backlog/work surfaces —
   instead a **link/publish CTA**. This is the web counterpart to #181 §2.4's
   typed error.
@@ -214,7 +219,7 @@ projects.
 
 - Linking/publishing a project with N open native items creates N upstream
   issues, re-keyed and overlaid; no native open item silently dropped.
-- REQUIREMENTS carries the withdrawal revision + §7 gap-register entry; the
+- The requirements register carries the withdrawal revision + §7 gap entry; the
   former honesty tests now assert the CTA/typed-error behaviour and pass.
 - An unlinked project renders the link/publish CTA and no backlog.
 
@@ -224,7 +229,7 @@ projects.
 
 ```
 #179 linking ─┐
-#180 import  ─┼─► (foundation: additive, no work-model migration) ─► deploy A (this session)
+#180 import  ─┼─► (foundation: additive, no work-model migration) ─► deploy A (foundation)
 #187 honesty ─┘
 
 #181 model + migration ─┐
@@ -232,11 +237,11 @@ projects.
 #182 publish            ─┘
 ```
 
-- **Deploy A** (this session's redeploy) carries the foundation only. `#187`
+- **Deploy A** carries the foundation only. `#187`
   keeps the Board honest until convergence.
 - **Deploy B** is the work-model migration. It must: pin its migration id; back
-  up the declared store first (the estate's `vogt backup` covers it); migrate
-  the ~2 live native items via the #183 path; and be walked against a restore
+  up the declared store first (`vogt backup` covers it); migrate every live
+  native item via the #183 path; and be walked against a restore
   rehearsal before firing, because it rewrites the live work store. This is why
   it is not bundled with A.
 
@@ -257,7 +262,7 @@ projects.
 
 - #181, #182, #183 acceptance boxes all green.
 - One declared migration, id-pinned, rehearsed on a live-DB copy.
-- REQUIREMENTS revisions: upstream-truth model; the publish verb + FR-ID; the
+- Requirements revisions: upstream-truth model; the publish verb + FR-ID; the
   forge-less guarantee withdrawal + §7 gap entry.
 - DESIGN.md updated to describe only what now exists.
 - The Board and Backlog converge (closing #187 for real); its interim banner is

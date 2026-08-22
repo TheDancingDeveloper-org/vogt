@@ -33,22 +33,32 @@ uv run python scripts/gen_config_docs.py
 - Preserve the declared/observed split: collectors return findings and do
   not write authoritative state.
 - Keep optional integrations optional. A missing GitHub token, MCP client,
-  Cadastre deployment, or session engine must not break core workflows.
-- Update the relevant design or requirements revision when a decision changes
-  the architecture or the product contract.
+  external MCP server, assistant provider, or session engine must not break
+  core workflows; it must surface as "not collected" or "not configured".
+- Update `docs/DESIGN.md` when a decision changes the architecture or the
+  product contract, and `docs/ROADMAP.md` when something designed is
+  deferred.
 - Run the generated-document and link checks before submitting.
 
 ## Scope boundaries
 
 The public supported path is the Python core and its generic Docker/Compose
-delivery. The Rust session engine and mobile shell have their own toolchains
-and deployment concerns; do not make them a prerequisite for a core change.
-Read [`opensource.md`](../opensource.md) before changing packaging or
-deployment files.
+delivery (`Dockerfile`, `deploy/vogt.compose.yml`, `deploy/vogt.build.yml`,
+`deploy/.env.example`). The Rust session engine, PWA, and mobile shell have
+their own toolchains (`engine/AGENTS.md`, [`ENGINE.md`](ENGINE.md)) and their
+own image; do not make them a prerequisite for a core change. Read
+[`opensource.md`](../opensource.md) before changing packaging or deployment
+files — `tests/test_public_delivery.py` pins that the public example stays
+self-contained, and a change that introduces a private path, registry, secret
+broker, or external service into it will fail there.
+
+Repository-wide conventions for agents and people — layer order, the
+transport-parity rule, logging — are in [`AGENTS.md`](../AGENTS.md).
 
 ## Pull requests
 
 Describe the behavior change, the surfaces it affects, and the verification
-commands run. If a change keeps a compatibility alias for a private or
-historical identifier, explain its migration/removal plan rather than hiding
-the alias in a generic example.
+commands run. If a change keeps a compatibility alias for a
+historical identifier, explain its migration/removal plan and record it in
+[`opensource.md`](../opensource.md) rather than hiding the alias in a generic
+example.
