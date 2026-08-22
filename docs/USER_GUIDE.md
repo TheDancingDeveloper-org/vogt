@@ -174,16 +174,26 @@ together, and every row can say why it is where it is.
 - **Filters** by project, label, initiative, actor, type and state are added
   through `+ Filter` and shown as individually removable chips, exactly as on
   the board. The URL carries the set, and a combination can be named and
-  recalled as a saved lens (per device).
+  recalled as a saved lens (per device). The **state** filter is the one
+  exception: the ranked views take no state parameter, so it narrows the page
+  already loaded rather than the estate. Its chip says so — `State: open · this
+  page only` — and the count reads `N of M loaded rows`. Selecting rows and
+  then changing the state filter keeps the selection: the rows are still on the
+  loaded page, only hidden from view.
 - **A row is as tall as what it says.** Rank, ref, trust, age and score stay on
   the row's first line; the title wraps rather than ending in an ellipsis.
+  **Start a session…** sits on that collapsed line next to **More**, so it does
+  not need the detail opened first. On a phone the row leads with its title and
+  keeps a single compact meta line under it — `ref · kind · state · score`, with
+  *why* an inline link — and the session act moves into the expanded detail.
 - **More** opens the rest of the row in place: an observed subject's
   provenance, the ranking factors behind its score, and the acts that row
-  actually has. Declared rows offer Open, Select and starting a session;
-  observed subjects offer Adopt and Suppress. Nothing moves to a dialog.
+  actually has. Declared rows offer Open and Select; observed subjects offer
+  Adopt and Suppress. Nothing moves to a dialog.
 - **Bulk transition and bulk labelling** each collect their own typed reason,
   are applied one audited write at a time, and report each refusal against the
-  item that was refused.
+  item that was refused. The bulk bar is pinned to the top of the list while
+  anything is selected, so it stays in reach after the reader has scrolled.
 
 ### 2.3 A work item
 

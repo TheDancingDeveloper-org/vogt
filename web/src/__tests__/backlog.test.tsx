@@ -347,6 +347,69 @@ describe("FR-U6 / FR-U15 — quick-create refuses to submit without a typed reas
   });
 });
 
+describe("#226 — the State filter is page-only, says so, and keeps the selection", () => {
+  const TWO_STATES = {
+    "GET /backlog": {
+      body: {
+        items: [
+          rankedEntry({ ref: "WI-1", state: "open" }),
+          rankedEntry({ ref: "WI-2", title: "Second", state: "in_progress" }),
+        ],
+        freshness: freshness(),
+      },
+    },
+  };
+
+  /** A State chip, disambiguated from the Type chips by its state name. */
+  function stateChip(container: HTMLElement, name: string): HTMLButtonElement {
+    const found = [...container.querySelectorAll<HTMLButtonElement>(".vogt-backlog-chip")].find(
+      (node) => node.textContent === name,
+    );
+    if (!found) throw new Error(`no state chip "${name}"`);
+    return found;
+  }
+
+  it("suffixes the State chip with 'this page only' and counts N of M loaded rows", async () => {
+    fakeVogt(TWO_STATES);
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    fireEvent.click(stateChip(container, "open"));
+    await waitFor(() => expect(rows(container)).toHaveLength(1));
+
+    // The count states the filter narrowed the loaded page rather than the
+    // estate: one of the two rows this page loaded.
+    expect(container.querySelector(".vogt-backlog-count")?.textContent).toContain(
+      "1 of 2 loaded rows",
+    );
+
+    // The chip carries the same honesty the summary does.
+    const chip = [...container.querySelectorAll(".vogt-filter-chip")].find((node) =>
+      node.textContent?.includes("State:"),
+    );
+    expect(chip?.textContent).toContain("this page only");
+  });
+
+  it("keeps a selection across a State-chip change rather than dropping it silently", async () => {
+    fakeVogt(TWO_STATES);
+    const { container } = backlog();
+    await waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    await selectAll(container);
+    expect(container.querySelector(".vogt-backlog-bulk strong")?.textContent).toBe(
+      "2 selected",
+    );
+
+    // Narrowing to one state hides the other row but must not deselect it: the
+    // ref is still on the loaded page, only filtered from view.
+    fireEvent.click(stateChip(container, "open"));
+    await waitFor(() => expect(rows(container)).toHaveLength(1));
+    expect(container.querySelector(".vogt-backlog-bulk strong")?.textContent).toBe(
+      "2 selected",
+    );
+  });
+});
+
 describe("FR-U17 — trust on every ranked row, and never blank", () => {
   it("reads an absent trust state as unverified", async () => {
     fakeVogt({

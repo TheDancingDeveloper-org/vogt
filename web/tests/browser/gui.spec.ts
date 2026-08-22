@@ -2464,6 +2464,115 @@ test("Backlog ranked rows size to their content and expand in place", async ({ p
   await expect(declared.getByRole("button", { name: "Open", exact: true })).toHaveCount(0);
 });
 
+// #226: the row's most common act is reachable from the collapsed row rather
+// than hidden inside the expanded detail, and the page-only State filter says
+// so — a suffixed chip and an "N of M loaded rows" summary — because the ranked
+// views take no state parameter.
+test("Backlog reaches Start a session… from the collapsed row and counts a page-only State filter", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Collapsed-row reach and the summary are the desktop contract");
+  await installFixtures(page, {}, [], undefined, {
+    backlogTotal: 2,
+    backlogItems: [
+      {
+        ref: "WI-1", title: "First ranked item", kind: "feature", state: "open",
+        priority: "normal", project_slug: "vogt", trust_state: "verified", labels: [],
+        score: 2, updated_at: "2026-08-17T10:00:00Z", origin: "declared",
+      },
+      {
+        ref: "WI-2", title: "Second ranked item", kind: "feature", state: "in_progress",
+        priority: "normal", project_slug: "vogt", trust_state: "verified", labels: [],
+        score: 1, updated_at: "2026-08-17T10:00:00Z", origin: "declared",
+      },
+    ],
+  });
+  await page.goto("/#/backlog");
+
+  const first = page.locator(".vogt-backlog-row").filter({ hasText: "First ranked item" });
+  await expect(first).toBeVisible();
+  // The row is collapsed — no detail — yet "Start a session…" is right there in
+  // the facts row's overflow next to More, not one disclosure away.
+  await expect(first.locator(".vogt-backlog-row-detail")).toHaveCount(0);
+  await expect(first.getByRole("button", { name: "Less" })).toHaveCount(0);
+  await expect(
+    first.locator(".vogt-backlog-row-quick .vogt-backlog-row-session"),
+  ).toBeVisible();
+  await expect(first.getByRole("button", { name: "Start a session…" })).toBeVisible();
+
+  // Applying a State filter marks it page-only and re-counts the loaded page.
+  const filters = page.getByRole("group", { name: "Backlog filters", exact: true });
+  await filters.getByRole("button", { name: "+ Filter", exact: true }).click();
+  const panel = page.getByRole("group", { name: "Add Backlog filters" });
+  await panel.getByRole("button", { name: "open", exact: true }).click();
+  await expect(filters.getByText("State: open · this page only")).toBeVisible();
+  await expect(page.locator(".vogt-backlog-count")).toContainText("1 of 2 loaded rows");
+});
+
+// #226 on the phone: the row leads with its title, keeps one compact meta line
+// under it, and the bulk bar follows the selection to the top of the scroller
+// rather than sitting off-screen above the ranked page.
+test("Phone Backlog leads with title-first rows, marks the page-only State filter and sticks the bulk bar", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The compact phone row and sticky bulk bar are the narrow-shell contract");
+  const items = Array.from({ length: 6 }, (_, index) => ({
+    ref: `WI-${index + 1}`,
+    title: `Row ${index + 1}`,
+    kind: "feature",
+    // The leading rows carry a short state so the compact meta line stays on
+    // one row; the last carries a longer one purely so the State chip below has
+    // a second value to pick.
+    state: index < 5 ? "open" : "in_progress",
+    priority: "normal",
+    project_slug: "vogt",
+    trust_state: "verified",
+    labels: [],
+    score: 6 - index,
+    updated_at: "2026-08-17T10:00:00Z",
+    origin: "declared",
+  }));
+  await installFixtures(page, {}, [], undefined, {
+    backlogTotal: items.length,
+    backlogItems: items,
+  });
+  await page.goto("/#/backlog");
+
+  const rows = page.locator(".vogt-backlog-row");
+  await expect(rows.first()).toBeVisible();
+
+  // At least three rows fit inside the list's own visible viewport: the compact
+  // title-first layout, not a facts row that pushes the third row past the fold.
+  const withinList = await page.evaluate(() => {
+    const list = document.querySelector(".vogt-backlog-list")!.getBoundingClientRect();
+    return [...document.querySelectorAll(".vogt-backlog-row")].filter((node) => {
+      const box = node.getBoundingClientRect();
+      return box.height > 0 && box.top >= list.top - 1 && box.bottom <= list.bottom + 1;
+    }).length;
+  });
+  expect(withinList).toBeGreaterThanOrEqual(3);
+
+  // Title first: the title box sits above the meta (facts) line in the row.
+  const order = await rows.first().evaluate((row) => {
+    const title = row.querySelector<HTMLElement>(".vogt-backlog-row-title")!.getBoundingClientRect();
+    const facts = row.querySelector<HTMLElement>(".vogt-backlog-row-facts")!.getBoundingClientRect();
+    return { titleTop: title.top, factsTop: facts.top };
+  });
+  expect(order.titleTop).toBeLessThan(order.factsTop);
+
+  // Selecting a row raises the bulk bar, stuck to the top of the list scroller.
+  await rows.first().getByRole("checkbox").check();
+  const bar = page.locator(".vogt-backlog-bulk");
+  await expect(bar).toBeVisible();
+  expect(await bar.evaluate((element) => getComputedStyle(element).position)).toBe("sticky");
+  const barBox = (await bar.boundingBox())!;
+  const listBox = (await page.locator(".vogt-backlog-list").boundingBox())!;
+  expect(Math.round(barBox.y)).toBeLessThanOrEqual(Math.round(listBox.y) + 2);
+
+  // The State chip, once applied, is marked page-only here too.
+  const filters = page.getByRole("group", { name: "Backlog filters", exact: true });
+  await filters.getByRole("button", { name: "+ Filter", exact: true }).click();
+  const panel = page.getByRole("group", { name: "Add Backlog filters" });
+  await panel.getByRole("button", { name: "in_progress", exact: true }).click();
+  await expect(filters.getByText("State: in_progress · this page only")).toBeVisible();
+});
+
 
 
 /**

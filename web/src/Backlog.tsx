@@ -741,11 +741,23 @@ const Backlog: Component<Props> = (props) => {
     visible().filter((entry) => entry.origin === "declared").map((entry) => entry.ref),
   );
 
-  // A ref that scrolled out of the filter is a ref the user can no longer see
-  // they selected, so it stops being selected.
+  // What can still be selected is what the *loaded page* declares, not what the
+  // client-side state filter currently shows: a ref hidden by toggling a State
+  // chip has not left the estate, so a selection made before the toggle is kept
+  // (#226). A genuinely new page — a refetch, a different query — is a different
+  // list, and a ref that is no longer on it can no longer be acted on, so it
+  // stops being selected.
+  const loadedSelectable = createMemo(
+    () =>
+      new Set(
+        entries()
+          .filter((entry) => entry.origin === "declared")
+          .map((entry) => entry.ref),
+      ),
+  );
+
   createEffect(
-    on(visible, () => {
-      const live = new Set(selectableRefs());
+    on(loadedSelectable, (live) => {
       setSelected((current) => current.filter((ref) => live.has(ref)));
     }),
   );
@@ -909,6 +921,15 @@ const Backlog: Component<Props> = (props) => {
     // Each act collects its own reason: one left in the field could otherwise
     // justify a different write on a different row (r6).
     setRowReason("");
+    // "Start a session…" is reachable from the collapsed row now (#226); the
+    // reason form it opens lives in the row's detail, so the row is expanded to
+    // put it on screen. A row already open is left as it is.
+    setExpandedRows((current) => {
+      if (current.has(ref)) return current;
+      const next = new Set(current);
+      next.add(ref);
+      return next;
+    });
   };
 
   const ROW_ACT_WORDS: Record<RowActKind, string> = {
@@ -958,7 +979,14 @@ const Backlog: Component<Props> = (props) => {
         <button type="button" onClick={() => toggleSelected(entry.ref)}>
           {selectedSet().has(entry.ref) ? "Deselect" : "Select"}
         </button>
-        <button type="button" onClick={() => beginRowAct(entry.ref, "session")}>
+        {/* "Start a session…" lives in the collapsed facts row on a desk (#226);
+            on a phone that row is a single compact meta line, so the act is here
+            in the detail instead. CSS shows exactly one of the two per width. */}
+        <button
+          type="button"
+          class="vogt-backlog-row-session-detail"
+          onClick={() => beginRowAct(entry.ref, "session")}
+        >
           Start a session…
         </button>
       </Show>
@@ -1127,6 +1155,138 @@ const Backlog: Component<Props> = (props) => {
     refresh();
   };
 
+  // The batch controls, rendered inside the list scroller and pinned to its top
+  // while anything is selected (#226). Above the list, the bar scrolled out of
+  // sight the moment the reader moved down the ranked page; here it follows the
+  // selection it acts on.
+  const bulkBar = () => (
+    <Show when={selected().length > 0 || bulkOutcomes().length > 0}>
+      {/* Two rows, two forms, two reasons. A single form with two submit
+          buttons would let a reason typed for a state change be recorded as
+          the justification for a labelling. */}
+      <div class="vogt-backlog-bulk">
+        <Show when={selected().length > 0}>
+          <form
+            class="vogt-backlog-bulk-row"
+            onSubmit={(event) => void submitBulk(event)}
+          >
+            <strong>{selected().length} selected</strong>
+            <label class="vogt-backlog-field">
+              <span>Transition to</span>
+              <select
+                value={optionValue(bulkState(), workflowStates())}
+                onInput={(event) => setBulkState(event.currentTarget.value)}
+              >
+                <option value="">Pick a state</option>
+                <For each={workflowStates()}>
+                  {(state) => <option value={state}>{state}</option>}
+                </For>
+              </select>
+            </label>
+            <label class="vogt-backlog-field vogt-backlog-field-wide">
+              <span>Reason for this batch (recorded against every item in it)</span>
+              <input
+                type="text"
+                required
+                value={bulkReason()}
+                placeholder="Why are these moving?"
+                onInput={(event) => setBulkReason(event.currentTarget.value)}
+              />
+            </label>
+            <button type="submit" disabled={!bulkReady() || bulkRunning()}>
+              {bulkRunning() ? "Transitioning…" : "Transition"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelected([])}
+              disabled={bulkRunning()}
+            >
+              Deselect
+            </button>
+          </form>
+
+          {/* Bulk label (FR-U6), on the same batch and under the same rule. */}
+          <form
+            class="vogt-backlog-bulk-row"
+            onSubmit={(event) => void submitBulkLabel(event)}
+          >
+            <label class="vogt-backlog-field">
+              <span>Label</span>
+              <select
+                value={bulkLabelMode()}
+                onInput={(event) =>
+                  setBulkLabelMode(
+                    event.currentTarget.value === "remove" ? "remove" : "add",
+                  )
+                }
+              >
+                <option value="add">Add</option>
+                <option value="remove">Remove</option>
+              </select>
+            </label>
+            <label class="vogt-backlog-field">
+              <span>{bulkLabelMode() === "add" ? "To apply" : "To take off"}</span>
+              <select
+                value={optionValue(bulkLabel(), bulkLabelOptions())}
+                onInput={(event) => setBulkLabel(event.currentTarget.value)}
+              >
+                <option value="">Pick a label</option>
+                <For each={bulkLabelOptions()}>
+                  {(name) => <option value={name}>{name}</option>}
+                </For>
+              </select>
+            </label>
+            <label class="vogt-backlog-field vogt-backlog-field-wide">
+              <span>Reason for this batch (recorded against every item in it)</span>
+              <input
+                type="text"
+                required
+                value={bulkLabelReason()}
+                placeholder="Why are these being labelled?"
+                onInput={(event) => setBulkLabelReason(event.currentTarget.value)}
+              />
+            </label>
+            <button type="submit" disabled={!bulkLabelReady() || bulkLabelRunning()}>
+              {bulkLabelRunning()
+                ? "Labelling…"
+                : bulkLabelMode() === "add"
+                  ? "Add label"
+                  : "Remove label"}
+            </button>
+            <Show when={bulkLabelMode() === "remove" && removableLabels().length === 0}>
+              <span class="vogt-backlog-muted">
+                nothing selected carries a label, so there is none to take off
+              </span>
+            </Show>
+          </form>
+        </Show>
+        {/* The outcomes outlive the selection: a batch that succeeded empties
+            the selection, and the report of what was written to whom is the
+            part the user still needs. */}
+        <Show when={bulkOutcomes().length}>
+          <ul class="vogt-backlog-outcomes">
+            <For each={bulkOutcomes()}>
+              {(outcome) => (
+                <li class={outcome.ok ? "ok" : "failed"}>
+                  <span class="vogt-backlog-mono">{outcome.ref}</span> {outcome.message}
+                </li>
+              )}
+            </For>
+          </ul>
+          <div>
+            <button
+              type="button"
+              onClick={() => setBulkOutcomes([])}
+              disabled={bulkRunning() || bulkLabelRunning()}
+            >
+              Dismiss
+            </button>
+          </div>
+        </Show>
+      </div>
+    </Show>
+  );
+
   // -- virtualization (NFR-S5) ---------------------------------------------
 
   let scroller: HTMLDivElement | undefined;
@@ -1237,7 +1397,13 @@ const Backlog: Component<Props> = (props) => {
     if (active.kinds.length)
       chips.push({ key: "kinds", label: `Type: ${active.kinds.join(", ")}` });
     if (active.states.length)
-      chips.push({ key: "states", label: `State: ${active.states.join(", ")}` });
+      // The suffix is the whole honesty of this filter: it narrows the loaded
+      // page rather than asking the estate, because the ranked views take no
+      // state parameter (#226).
+      chips.push({
+        key: "states",
+        label: `State: ${active.states.join(", ")} · this page only`,
+      });
     if (active.label) chips.push({ key: "label", label: `Label: ${active.label}` });
     if (active.initiative)
       chips.push({ key: "initiative", label: `Initiative: ${active.initiative}` });
@@ -1275,6 +1441,12 @@ const Backlog: Component<Props> = (props) => {
         class="vogt-backlog-header"
         label="Backlog header"
         title={<h1>Backlog</h1>}
+        // On a phone the view-age line, the Backlog/Bugs switch, Refresh and
+        // the freshness disclosure fold behind one control so the first screen
+        // belongs to the ranked work rather than to the chrome over it (#226,
+        // the same first-viewport treatment #229 gave the Board).
+        collapseControls
+        collapseHonesty
         honestyClass={honestyToneClass(viewAge().tone)}
         honesty={(
           <div class="vogt-backlog-honesty" aria-live="polite">
@@ -1558,140 +1730,17 @@ const Backlog: Component<Props> = (props) => {
         </form>
       </Show>
 
-      <Show when={selected().length > 0 || bulkOutcomes().length > 0}>
-        {/* Two rows, two forms, two reasons. A single form with two submit
-            buttons would let a reason typed for a state change be recorded as
-            the justification for a labelling. */}
-        <div class="vogt-backlog-bulk">
-          <Show when={selected().length > 0}>
-            <form
-              class="vogt-backlog-bulk-row"
-              onSubmit={(event) => void submitBulk(event)}
-            >
-              <strong>{selected().length} selected</strong>
-              <label class="vogt-backlog-field">
-                <span>Transition to</span>
-                <select
-                  value={optionValue(bulkState(), workflowStates())}
-                  onInput={(event) => setBulkState(event.currentTarget.value)}
-                >
-                  <option value="">Pick a state</option>
-                  <For each={workflowStates()}>
-                    {(state) => <option value={state}>{state}</option>}
-                  </For>
-                </select>
-              </label>
-              <label class="vogt-backlog-field vogt-backlog-field-wide">
-                <span>Reason for this batch (recorded against every item in it)</span>
-                <input
-                  type="text"
-                  required
-                  value={bulkReason()}
-                  placeholder="Why are these moving?"
-                  onInput={(event) => setBulkReason(event.currentTarget.value)}
-                />
-              </label>
-              <button type="submit" disabled={!bulkReady() || bulkRunning()}>
-                {bulkRunning() ? "Transitioning…" : "Transition"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelected([])}
-                disabled={bulkRunning()}
-              >
-                Deselect
-              </button>
-            </form>
-
-            {/* Bulk label (FR-U6), on the same batch and under the same rule. */}
-            <form
-              class="vogt-backlog-bulk-row"
-              onSubmit={(event) => void submitBulkLabel(event)}
-            >
-              <label class="vogt-backlog-field">
-                <span>Label</span>
-                <select
-                  value={bulkLabelMode()}
-                  onInput={(event) =>
-                    setBulkLabelMode(
-                      event.currentTarget.value === "remove" ? "remove" : "add",
-                    )
-                  }
-                >
-                  <option value="add">Add</option>
-                  <option value="remove">Remove</option>
-                </select>
-              </label>
-              <label class="vogt-backlog-field">
-                <span>{bulkLabelMode() === "add" ? "To apply" : "To take off"}</span>
-                <select
-                  value={optionValue(bulkLabel(), bulkLabelOptions())}
-                  onInput={(event) => setBulkLabel(event.currentTarget.value)}
-                >
-                  <option value="">Pick a label</option>
-                  <For each={bulkLabelOptions()}>
-                    {(name) => <option value={name}>{name}</option>}
-                  </For>
-                </select>
-              </label>
-              <label class="vogt-backlog-field vogt-backlog-field-wide">
-                <span>Reason for this batch (recorded against every item in it)</span>
-                <input
-                  type="text"
-                  required
-                  value={bulkLabelReason()}
-                  placeholder="Why are these being labelled?"
-                  onInput={(event) => setBulkLabelReason(event.currentTarget.value)}
-                />
-              </label>
-              <button type="submit" disabled={!bulkLabelReady() || bulkLabelRunning()}>
-                {bulkLabelRunning()
-                  ? "Labelling…"
-                  : bulkLabelMode() === "add"
-                    ? "Add label"
-                    : "Remove label"}
-              </button>
-              <Show when={bulkLabelMode() === "remove" && removableLabels().length === 0}>
-                <span class="vogt-backlog-muted">
-                  nothing selected carries a label, so there is none to take off
-                </span>
-              </Show>
-            </form>
-          </Show>
-          {/* The outcomes outlive the selection: a batch that succeeded empties
-              the selection, and the report of what was written to whom is the
-              part the user still needs. */}
-          <Show when={bulkOutcomes().length}>
-            <ul class="vogt-backlog-outcomes">
-              <For each={bulkOutcomes()}>
-                {(outcome) => (
-                  <li class={outcome.ok ? "ok" : "failed"}>
-                    <span class="vogt-backlog-mono">{outcome.ref}</span> {outcome.message}
-                  </li>
-                )}
-              </For>
-            </ul>
-            <div>
-              <button
-                type="button"
-                onClick={() => setBulkOutcomes([])}
-                disabled={bulkRunning() || bulkLabelRunning()}
-              >
-                Dismiss
-              </button>
-            </div>
-          </Show>
-        </div>
-      </Show>
-
       <div class="vogt-backlog-count">
         <Show when={counts()} fallback={<span>—</span>}>
           {(summary) => (
             <span>
-              {visible().length} shown
-              <Show when={visible().length !== entries().length}>
-                {" "}
-                of {entries().length} loaded
+              <Show
+                when={filter().states.length}
+                fallback={<>{visible().length} shown</>}
+              >
+                {/* The State filter is page-only, so the count says so out
+                    loud: N of the M rows this page loaded (#226). */}
+                {visible().length} of {entries().length} loaded rows
               </Show>
               <Show when={summary().considered !== null}>
                 {" "}
@@ -1780,6 +1829,7 @@ const Backlog: Component<Props> = (props) => {
             ref={(node) => (scroller = node)}
             onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
           >
+            {bulkBar()}
             <Show
               when={visible().length}
               fallback={
@@ -1883,6 +1933,12 @@ const Backlog: Component<Props> = (props) => {
                                 {trustOf(entry)}
                               </span>
                             </span>
+                            {/* Kind and state ride the facts line so that on a
+                                phone, where the secondary facts fold away, the
+                                one surviving meta line reads ref · kind · state
+                                · score (#226). */}
+                            <span class="vogt-backlog-cell-kind">{entry.kind}</span>
+                            <span class="vogt-backlog-cell-state">{entry.state}</span>
                             <span class="vogt-backlog-age">{formatWhen(entry.updated_at)}</span>
                             <span class="vogt-backlog-cell-score">
                               <button
@@ -1895,15 +1951,28 @@ const Backlog: Component<Props> = (props) => {
                                 <span class="vogt-backlog-why">why</span>
                               </button>
                             </span>
-                            <button
-                              type="button"
-                              class="vogt-backlog-row-toggle"
-                              aria-expanded={expanded()}
-                              aria-controls={detailId}
-                              onClick={() => toggleRow(entry.ref)}
-                            >
-                              {expanded() ? "Less" : "More"}
-                            </button>
+                            <div class="vogt-backlog-row-quick">
+                              {/* A declared row's most common act is reachable
+                                  without opening the detail first (#226). */}
+                              <Show when={entry.origin === "declared"}>
+                                <button
+                                  type="button"
+                                  class="vogt-backlog-row-session"
+                                  onClick={() => beginRowAct(entry.ref, "session")}
+                                >
+                                  Start a session…
+                                </button>
+                              </Show>
+                              <button
+                                type="button"
+                                class="vogt-backlog-row-toggle"
+                                aria-expanded={expanded()}
+                                aria-controls={detailId}
+                                onClick={() => toggleRow(entry.ref)}
+                              >
+                                {expanded() ? "Less" : "More"}
+                              </button>
+                            </div>
                           </div>
 
                           {/* FR-U25: the title wraps to what it says, and the
@@ -1916,8 +1985,6 @@ const Backlog: Component<Props> = (props) => {
                           </div>
 
                           <div class="vogt-backlog-row-tags">
-                            <span>{entry.kind}</span>
-                            <span>{entry.state}</span>
                             <span>{entry.priority}</span>
                             <span>{entry.project_slug ?? "no project"}</span>
                             <For each={entry.labels ?? []}>
