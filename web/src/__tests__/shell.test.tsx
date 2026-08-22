@@ -289,7 +289,11 @@ describe("shared live steering", () => {
       expect(container.querySelector('.phone-bottom-nav [aria-label="12 Board work items"]')).toBeTruthy();
       expect(container.querySelector('.phone-bottom-nav [aria-label="7 Backlog candidates"]')).toBeTruthy();
       expect(container.querySelector('.places-section-label [aria-label="2 running sessions"]')).toBeTruthy();
-      expect(container.querySelectorAll(".session-row.waiting")).toHaveLength(1);
+      // Scoped to the rail: the desktop Sessions overview now also lists the
+      // running sessions as rows (#233), so the waiting session is drawn once
+      // in the rail and once in that list. This assertion is about the rail's
+      // own highlight of the one session waiting for input.
+      expect(container.querySelectorAll(".places-rail-session-area .session-row.waiting")).toHaveLength(1);
       expect(container.querySelector(".rail-connection.connected .rail-connection-dot")).toBeTruthy();
     });
 

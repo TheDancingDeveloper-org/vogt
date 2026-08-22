@@ -37,6 +37,14 @@ export interface SurfaceHeaderProps {
    * surface's own navigation or filtering.
    */
   collapseControls?: boolean;
+  /**
+   * Whether a narrow client may fold `honesty` away behind the same
+   * disclosure. Opt-in for the same reason `collapseControls` is: a status
+   * line worth reading is not chrome. The Sessions surface asks for it only
+   * once a terminal is open, where the connection line is a sentence a reader
+   * already had on the way in and the whole screen belongs to the terminal.
+   */
+  collapseHonesty?: boolean;
   class?: string;
   label?: string;
 }
@@ -46,12 +54,18 @@ export const SurfaceHeader: Component<SurfaceHeaderProps> = (props) => {
   const [open, setOpen] = createSignal(false);
   const controlsId = createUniqueId();
 
-  /** Something to disclose, a surface willing to, and a narrow client. */
-  const collapsible = () =>
+  /** Something to disclose, a surface willing to, and a narrow client. The
+   *  controls/detail fold and the honesty fold are independent — Sessions asks
+   *  for the second without the first — but they share one disclosure. */
+  const controlsCollapsible = () =>
     narrow() &&
     props.collapseControls === true &&
     (props.controls !== undefined || props.detail !== undefined);
-  const shown = () => !collapsible() || open();
+  const honestyCollapsible = () =>
+    narrow() && props.collapseHonesty === true && props.honesty !== undefined;
+  const collapsible = () => controlsCollapsible() || honestyCollapsible();
+  const controlsShown = () => !controlsCollapsible() || open();
+  const honestyShown = () => !honestyCollapsible() || open();
 
   return (
     <header
@@ -66,6 +80,7 @@ export const SurfaceHeader: Component<SurfaceHeaderProps> = (props) => {
         <div
           class={`surface-header-honesty${props.honestyClass ? ` ${props.honestyClass}` : ""}`}
           data-surface-header-slot="honesty"
+          hidden={!honestyShown()}
         >
           {props.honesty}
         </div>
@@ -91,7 +106,7 @@ export const SurfaceHeader: Component<SurfaceHeaderProps> = (props) => {
           id={controlsId}
           class="surface-header-controls"
           data-surface-header-slot="controls"
-          hidden={!shown()}
+          hidden={!controlsShown()}
         >
           {props.controls}
         </div>
@@ -105,7 +120,7 @@ export const SurfaceHeader: Component<SurfaceHeaderProps> = (props) => {
         <div
           class="surface-header-detail"
           data-surface-header-slot="detail"
-          hidden={!shown()}
+          hidden={!controlsShown()}
         >
           {props.detail}
         </div>

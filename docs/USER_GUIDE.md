@@ -250,6 +250,12 @@ listeners and large editor surfaces do not run in the background. Editor text
 and view position are retained while switching tools, and any dirty editor
 also activates the browser/PWA exit confirmation until it is saved.
 
+With no tool open, the Sessions overview is a live list of the running
+sessions — name, activity dot and state word, and working directory — each a
+link into its terminal, sorted with whatever wants attention first. When there
+are no sessions at all it becomes a **Start a session** button beside the
+configured presets, rather than an empty panel.
+
 Each session carries an activity state — `idle`, `running`,
 `waiting-for-input`, `errored` — shown in the Sessions roster so an agent
 waiting for approval is visible without opening it. **The state is a
@@ -330,7 +336,15 @@ so UI changes ship without a new APK; only native plumbing needs one.
   send those keystrokes to that session's terminal — they are terminal input,
   not Vogt approvals, and the card says so. If the prompt cannot be read, or
   the session has exited, the card says that instead and offers nothing to
-  press.
+  press. Below the cards, the running sessions that are *not* waiting still
+  list as rows, so an idle or busy session is one tap from its terminal.
+- **Opening a terminal or tool collapses the Sessions header.** On the
+  overview the header is the surface's own — kicker, title, the connection
+  line and the tool strip. Once a terminal, History, Git, Assistant or Tasks
+  owns the screen, that header folds to a single row (the title and **+
+  Session**), the tool strip becomes one scrolling row, and the connection
+  line moves behind **View controls** — so the terminal keeps at least 40% of
+  the screen instead of being pushed off the bottom.
 - **Modifier row** above the soft keyboard: `Esc`, `Tab`, sticky `Ctrl`,
   arrows, `/ | ~`, `Enter`. Tap `Ctrl` then a letter to send `Ctrl+letter`.
 - Use the terminal's labelled **A− / A+** controls for terminal-only font size;

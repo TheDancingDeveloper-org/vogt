@@ -810,7 +810,9 @@ test("Places counts expose live workload meaning without overflowing the phone b
     await expect(page.locator('.places-nav [aria-label="23456 Projects"]')).toBeVisible();
     await expect(page.locator('.places-nav [aria-label^="1 sessions waiting for input"]')).toBeVisible();
     await expect(page.locator('.places-section-label [aria-label^="2 running sessions"]')).toBeVisible();
-    await expect(page.locator(".session-row.waiting")).toContainText("needs-attention");
+    // The desktop Sessions overview also lists this session as a row (#233), so
+    // scope to the rail's own highlight of the one waiting for input.
+    await expect(page.locator(".places-rail-session-area .session-row.waiting")).toContainText("needs-attention");
   }
 });
 
@@ -1342,6 +1344,181 @@ test("Sessions owns the tool workspace and retains only terminal continuity", as
   await expect(page.locator('[data-tab-kind="terminal"]')).toHaveCount(1);
   await expect(page.locator('[data-tab-kind="history"]')).toHaveCount(0);
   await expect(page.locator('[data-tab-kind="tasks"]')).toHaveCount(1);
+});
+
+// Three sessions in the three states the Sessions shell has to keep reachable
+// and legible at once: an idle one, one waiting for input, one running (#232,
+// #233, #231's reachability half).
+const THREE_SESSIONS = [
+  {
+    id: "sess-idle", name: "idle-shell", cwd: "/workspace/vogt",
+    activity: "idle", exit_code: null, scrollback_bytes: 1024,
+    created_at: "2026-08-18T08:00:00Z", activity_changed_at: "2026-08-18T08:00:00Z",
+  },
+  {
+    id: "sess-wait", name: "needs-answer", cwd: "/workspace/api",
+    activity: "waiting-for-input", exit_code: null, scrollback_bytes: 1024,
+    created_at: "2026-08-18T08:00:00Z", activity_changed_at: "2026-08-18T08:00:30Z",
+  },
+  {
+    id: "sess-busy", name: "running-build", cwd: "/workspace/web",
+    activity: "running", exit_code: null, scrollback_bytes: 1024,
+    created_at: "2026-08-18T08:00:00Z", activity_changed_at: "2026-08-18T08:00:10Z",
+  },
+];
+
+/** Answer a terminal's attach socket the way the split tests do, so a `/t/:id`
+ *  route renders its layout rather than hanging on the WebSocket. */
+async function stubTerminalAttach(page: Page): Promise<void> {
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+}
+
+test("Phone Sessions shell keeps the terminal on screen and folds the header (#232)", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The collapsed shell is the narrow client's");
+  await installFixtures(page, {}, THREE_SESSIONS);
+  await stubTerminalAttach(page);
+
+  await page.goto("/#/t/sess-idle");
+  await expect(page.locator(".terminal-host").first()).toBeVisible();
+
+  // #232: the xterm had measured ~2px tall behind ~560px of header. The 40dvh
+  // floor on `.terminal-layout` is what keeps it on screen.
+  const geometry = await page.evaluate(() => {
+    const layout = document.querySelector(".terminal-layout");
+    const host = document.querySelector(".terminal-host");
+    return {
+      layout: layout ? layout.getBoundingClientRect().height : 0,
+      host: host ? host.getBoundingClientRect().height : 0,
+      viewport: window.innerHeight,
+    };
+  });
+  // The 1px tolerance is subpixel: 40dvh of a 664px viewport is 265.6, and the
+  // layout measures 265.594 — the floor is met, the remainder is rounding.
+  expect(geometry.layout, JSON.stringify(geometry)).toBeGreaterThanOrEqual(geometry.viewport * 0.4 - 1);
+  expect(geometry.host, JSON.stringify(geometry)).toBeGreaterThanOrEqual(geometry.viewport * 0.35);
+
+  // The collapsed header is one row: the title and "+ Session". The two-line
+  // honesty is folded behind the same disclosure SurfaceHeader already owns.
+  const header = page.locator(".sessions-header");
+  await expect(header.locator('[data-surface-header-slot="honesty"]')).toBeHidden();
+  await expect(header.getByRole("button", { name: "+ Session" })).toBeVisible();
+  const more = header.locator(".surface-header-more");
+  await expect(more).toBeVisible();
+  // Folded, never removed: the disclosure brings the connection line back.
+  await more.click();
+  await expect(header.locator('[data-surface-header-slot="honesty"]')).toBeVisible();
+});
+
+test("Phone machine tools open with their work in the first screen, not below a wall of header (#232)", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The first-screen floor is the narrow client's");
+  await installFixtures(page, { assistant_enabled: true }, THREE_SESSIONS);
+  await stubTerminalAttach(page);
+  await page.route("**/api/history/**", async (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/assistant/**", async (route) =>
+    route.fulfill({ json: { transcript: [], pending_action: null } }),
+  );
+  await page.route("**/api/git/status**", async (route) => route.fulfill({ json: {
+    repo: "vogt", is_repo: true, branch: "main", ahead: 0, behind: 0, entries: [],
+  } }));
+  await page.route("**/api/git/branch**", async (route) =>
+    route.fulfill({ json: { current: "main", all: ["main"] } }),
+  );
+  await page.route("**/api/git/log**", async (route) => route.fulfill({ json: [] }));
+
+  const topOf = async (selector: string): Promise<number> =>
+    page.locator(selector).first().evaluate((node) => node.getBoundingClientRect().top);
+  // Navigate within the loaded shell (a hash change, not a fresh load), so the
+  // public config a tool route consults to open its tab is already in hand —
+  // the Assistant tab in particular opens only once `assistant_enabled` is
+  // known.
+  const openTool = async (hash: string) => {
+    await page.evaluate((next) => { window.location.hash = next; }, hash);
+  };
+
+  await page.goto("/#/sessions");
+  await expect(page.locator(".sessions-place")).toBeVisible();
+
+  await openTool("#/history");
+  await expect(page.locator(".history-view")).toBeVisible();
+  expect(await topOf(".history-view"), "History content").toBeLessThan(400);
+
+  await openTool("#/g");
+  await expect(page.locator(".git-repository-picker")).toBeVisible();
+  expect(await topOf(".git-repository-picker"), "Git chooser").toBeLessThan(400);
+
+  await openTool("#/assistant");
+  const composer = page.getByPlaceholder("Ask about sessions or work");
+  await expect(composer).toBeVisible();
+  // The Assistant content region begins high on the screen — the pane top is
+  // where #232 had pushed everything to ~855px.
+  expect(await topOf('[data-tab-kind="assistant"]'), "Assistant pane").toBeLessThan(400);
+});
+
+test("Phone Sessions overview reaches idle and busy sessions, not only the waiting card (#231/#233)", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The overview list is the narrow body");
+  await installFixtures(page, {}, THREE_SESSIONS);
+  await page.goto("/#/sessions");
+
+  // The waiting session is an attention card above; the idle and busy ones are
+  // reachable as rows in the list, each a link to its terminal.
+  await expect(page.getByRole("article", { name: /needs-answer is waiting for input/ })).toBeVisible();
+  const list = page.locator(".session-list");
+  await expect(list.locator('a[href="#/t/sess-idle"]')).toContainText("idle-shell");
+  await expect(list.locator('a[href="#/t/sess-busy"]')).toContainText("running-build");
+  // The waiting session is not duplicated as a row: it is the card.
+  await expect(list.locator('a[href="#/t/sess-wait"]')).toHaveCount(0);
+
+  await list.locator('a[href="#/t/sess-idle"]').click();
+  await expect(page).toHaveURL(/#\/t\/sess-idle$/);
+});
+
+test("Desktop Sessions overview lists the running sessions as links (#233)", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The overview panel is the desktop body");
+  await installFixtures(page, {}, THREE_SESSIONS);
+  await page.goto("/#/sessions");
+
+  const overview = page.locator(".sessions-overview-list");
+  await expect(overview).toBeVisible();
+  // All three, waiting included — there are no attention cards on a desk.
+  await expect(overview.locator('.session-list a[href="#/t/sess-idle"]')).toContainText("idle-shell");
+  await expect(overview.locator('.session-list a[href="#/t/sess-wait"]')).toContainText("needs-answer");
+  await expect(overview.locator('.session-list a[href="#/t/sess-busy"]')).toContainText("running-build");
+
+  await overview.locator('.session-list a[href="#/t/sess-busy"]').click();
+  await expect(page).toHaveURL(/#\/t\/sess-busy$/);
+});
+
+test("Desktop Sessions overview points an empty machine at a start (#233)", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The overview panel is the desktop body");
+  await installFixtures(page, {}, []);
+  await page.goto("/#/sessions");
+
+  // With no sessions the body is a call to action, not an empty panel that
+  // never says how to leave it.
+  await expect(page.locator(".sessions-overview")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start a session" })).toBeVisible();
+});
+
+test("Phone Sessions overview and collapsed terminal header look right", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "Phone composition is the narrow client's");
+  await installFixtures(page, {}, THREE_SESSIONS);
+  await stubTerminalAttach(page);
+
+  await page.goto("/#/sessions");
+  await expect(page.locator(".session-list").first()).toBeVisible();
+  await expect(page.locator(".sessions-place")).toHaveScreenshot("sessions-phone-overview.png", {
+    // The age beside each state word and the live connection line are wall-clock
+    // and stream-state relative; the composition around them is what is pinned.
+    mask: [page.locator(".session-list .state"), page.locator(".sessions-header-honesty")],
+  });
+
+  await page.goto("/#/t/sess-idle");
+  await expect(page.locator(".terminal-host").first()).toBeVisible();
+  await expect(page.locator(".sessions-header")).toHaveScreenshot("sessions-phone-terminal-header.png");
 });
 
 test("Git chooser is addressable and a failed panel recovers in place", async ({ page }) => {
