@@ -163,6 +163,9 @@ async function installFixtures(
   const sessionInputs: { id: string; text: string; submit: boolean }[] = [];
   const sessions = [...initialSessions];
   let createdSessions = 0;
+  // A session DELETE is the kill path; composing a split and detaching a pane
+  // must never reach it (#212), so a test can assert this stays at zero.
+  let sessionDeletes = 0;
   await page.addInitScript(() => {
     localStorage.setItem("mydevenv2.token", "browser-test-token");
   });
@@ -228,6 +231,7 @@ async function installFixtures(
       return route.fulfill({ json: { ok: true } });
     }
     if (route.request().method() === "DELETE") {
+      sessionDeletes += 1;
       const id = new URL(route.request().url()).pathname.split("/").at(-1);
       const index = sessions.findIndex((session) => session.id === id);
       if (index >= 0) sessions.splice(index, 1);
@@ -539,6 +543,8 @@ async function installFixtures(
   });
   return {
     inboxCalls: () => inboxCalls,
+    createdSessions: () => createdSessions,
+    sessionDeletes: () => sessionDeletes,
     boardRequests,
     transitionRequests,
     updateRequests,
@@ -2557,9 +2563,43 @@ test("terminal split commits atomically, nests, closes and survives reload", asy
 
   await page.reload();
   await expect(page.locator(".terminal-pane")).toHaveCount(3);
+  // "Close pane" detaches the active pane now (#212): the session keeps running,
+  // so there is no kill confirmation and the layout simply drops a pane.
   await page.getByRole("button", { name: "Close pane" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
   await expect(page.locator(".terminal-pane")).toHaveCount(2);
+});
+
+test("a split composes an existing session, and closing a pane detaches it without killing (#212)", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Split geometry is validated in the desktop browser project");
+  const besideSession = {
+    ...liveSession,
+    id: "beside-session",
+    name: "beside-session",
+    cwd: "/workspace/other",
+  };
+  const fixture = await installFixtures(page, {}, [liveSession, besideSession]);
+  await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+    socket.onMessage(() => undefined);
+    socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: 0, scrollback_pos: 0 }));
+    socket.send(JSON.stringify({ type: "snapshot-done" }));
+  });
+
+  await page.goto("/#/t/browser-session");
+  await expect(page.locator(".terminal-pane")).toHaveCount(1);
+
+  // "Split right" offers a picker because a session that is not on screen
+  // exists; choosing it composes that existing session into the new pane.
+  await page.getByRole("button", { name: "Split right" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: /beside-session/ }).click();
+  await expect(page.locator(".terminal-pane")).toHaveCount(2);
+  // The whole point of #212: composing an existing session spawns nothing.
+  expect(fixture.createdSessions()).toBe(0);
+
+  // "Close pane" detaches the active pane: the layout drops back to one pane
+  // and the session is left running — no kill, so no DELETE ever fires.
+  await page.getByRole("button", { name: "Close pane" }).click();
+  await expect(page.locator(".terminal-pane")).toHaveCount(1);
+  expect(fixture.sessionDeletes()).toBe(0);
 });
 
 test("terminal split retries at the default cwd when the source cwd is outside the workspace", async ({ page }) => {

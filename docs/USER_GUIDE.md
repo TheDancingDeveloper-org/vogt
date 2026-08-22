@@ -371,10 +371,24 @@ are no sessions at all it becomes a **Start a session** button beside the
 configured presets, rather than an empty panel.
 
 **New sessions are named for you and created straight away.** The **+ Session**
-button, `Ctrl/Cmd+Shift+T` and each split take the working directory's basename
-and deduplicate it — a second shell opened in `…/vogt` becomes `vogt-2`, and a
-pane split off `vogt` reads as `vogt ▸2`. Hold **Shift** on **+ Session** when
-you would rather type the name yourself.
+button, `Ctrl/Cmd+Shift+T` and a fresh-shell split take the working directory's
+basename and deduplicate it — a second shell opened in `…/vogt` becomes
+`vogt-2`, and a pane split off `vogt` reads as `vogt ▸2`. Hold **Shift** on
+**+ Session** when you would rather type the name yourself.
+
+**Splitting composes sessions, not only new ones.** *Split right* and *Split
+down* open a small chooser: start a fresh shell in the current directory, or
+pick any running session not already on screen — that session moves into the
+new pane and nothing is spawned. Each pane in a split carries a header dropdown
+that re-targets it at another session without disturbing the layout; choosing a
+session already shown in another pane swaps the two. The command palette reaches
+the same acts (*Split right with…*, *Show … in this pane*), and a session's rail
+menu offers **Open beside current**. **Close pane** detaches a pane and leaves
+its session running and listed — closing never kills; killing a shell is the
+separate, confirmed **Kill pane**. **Broadcast** fans typing, paste and the
+composer out to every pane at once, and **Maximise** lifts the active pane to
+full size while the others keep running, hidden; both persist per tab. On a
+phone one pane shows at a time, and the chooser is still reachable.
 
 **Search the buffer** with `Ctrl/Cmd+Shift+F` or the toolbar's **Find** button:
 a small find bar opens with the match count and next/previous controls (`Enter`

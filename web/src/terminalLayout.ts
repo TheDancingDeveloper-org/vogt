@@ -151,6 +151,58 @@ export function removePane(
   return changed ? { ...node, children } : node;
 }
 
+/**
+ * Rewrite each pane's session according to `remap`, leaving unmapped panes
+ * untouched by reference so only the panes that changed re-render (and their
+ * terminals re-attach). Panes carry a session-derived id, so a remapped pane
+ * gets a fresh id and its `<Terminal>` remounts against the new session.
+ */
+function mapPaneSessions(
+  node: TerminalLayoutNode,
+  remap: Map<string, string>,
+): TerminalLayoutNode {
+  if (node.type === "pane") {
+    const next = remap.get(node.sessionId);
+    return next && next !== node.sessionId ? makePane(next) : node;
+  }
+  let changed = false;
+  const children = node.children.map((child) => {
+    const mapped = mapPaneSessions(child, remap);
+    if (mapped !== child) changed = true;
+    return mapped;
+  });
+  return changed ? { ...node, children } : node;
+}
+
+/**
+ * Point a pane at a different session without changing the layout.
+ *
+ * If that session is already shown in another pane the two panes swap, so a
+ * session is never duplicated across the tree. Returns the new root and the id
+ * the retargeted pane now carries, or null when the target pane is gone.
+ */
+export function retargetPane(
+  root: TerminalLayoutNode,
+  targetPaneId: string,
+  sessionId: string,
+): { root: TerminalLayoutNode; activePaneId: string } | null {
+  const target = findPane(root, targetPaneId);
+  if (!target) return null;
+  if (target.sessionId === sessionId) {
+    return { root, activePaneId: target.id };
+  }
+  const remap = new Map<string, string>([[target.sessionId, sessionId]]);
+  // The session is already on screen: swap, so the pane that held it takes on
+  // the session the target used to show rather than vanishing.
+  if (containsSession(root, sessionId)) {
+    remap.set(sessionId, target.sessionId);
+  }
+  return {
+    root: mapPaneSessions(root, remap),
+    activePaneId: paneIdFor(sessionId),
+  };
+}
+
 export function pruneTerminalLayout(
   node: TerminalLayoutNode,
   sessionExists: (sessionId: string) => boolean,
