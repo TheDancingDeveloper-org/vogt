@@ -301,16 +301,22 @@ def test_a_write_through_the_front_door_is_audited_as_the_paired_actor(
     pod's shared identity, which is the failure this pairing exists against:
     every session's work filed under one name, silently, with the writes all
     succeeding.
+
+    The write exercised is `label.create`, not `work.create`. Since the
+    upstream-truth pivot (#181, decision 10) a work write refuses an unlinked
+    project, and the fixture's `alpha` is registered but not forge-linked; a
+    label is an instance-wide `work.write` that does not gate on a project, so
+    it drives the same audited write path through both processes without
+    dragging a forge provider and credential into a test whose subject is the
+    actor that survives the hop, not linking.
     """
     for actor in ("alpha", "beta"):
         status, body = post(
             pair["base"],
-            "/api/vogt/work",
+            "/api/vogt/labels",
             f"front-door-{actor}-token-000000",
             {
-                "kind": "bug",
-                "title": f"{actor} was here",
-                "project": "alpha",
+                "name": f"{actor}-was-here",
                 "reason": "front door test",
             },
         )
@@ -322,7 +328,7 @@ def test_a_write_through_the_front_door_is_audited_as_the_paired_actor(
             "audit",
             "list",
             "--operation",
-            "work.create",
+            "label.create",
             "--limit",
             "10",
             data_dir=Path(pair["data_dir"]),
