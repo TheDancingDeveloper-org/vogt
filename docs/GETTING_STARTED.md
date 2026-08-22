@@ -1,22 +1,22 @@
 # Getting started with Vogt
 
-This guide gets a new operator from a checkout to a working Python-core
-instance. It does not require Rust, Node, a forge, an AI provider, MCP, or
-Cadastre. Those integrations are optional and are documented separately.
+This guide gets a new operator from nothing to a working Python-core
+instance. It does not require Rust, Node, a forge token, an AI provider, or an
+MCP client. Those integrations are optional and are documented separately.
+Production concerns — a reverse proxy, TLS, digest pinning, backups on a
+schedule, the optional session engine — are in
+[`docs/DEPLOYMENT.md`](DEPLOYMENT.md); this guide stops at a working instance.
 
 ## Choose an installation path
 
 There are two supported ways to run the core:
 
 - **Docker Compose** — the recommended self-hosting path. It gives you a
-  persistent data volume, a health check, and a reproducible image build.
+  persistent data volume, a health check, and a choice between the published
+  image and an image built from the checkout.
 - **Local Python** — useful for development or a single-user workstation.
   It writes to the normal Vogt data directory unless you set
   `VOGT_DATA_DIR`.
-
-The project also maintains a remote development deployment at
-[`https://vogt-dev.sprooty.com/`](https://vogt-dev.sprooty.com/). A remote
-instance still needs its own token; the URL does not grant access.
 
 ## Docker Compose (recommended)
 
@@ -39,18 +39,27 @@ container cannot infer the address clients will use. For a local installation,
 the example value `http://localhost:8080` is correct. Change `VOGT_PORT` if
 port 8080 is already in use.
 
-Start the core. `deploy/vogt.compose.yml` is the base and pulls a published
-image. To build it from this checkout instead, add the build overlay:
+Start the core. There are two ways to obtain the image, and the same base
+Compose file serves both.
+
+**Published image.** `deploy/vogt.compose.yml` on its own pulls
+`ghcr.io/thedancingdeveloper-org/vogt`. Set `VOGT_IMAGE` in `deploy/.env` to
+the tag — or better, the digest — you intend to run, then:
+
+```console
+docker compose -f deploy/vogt.compose.yml up -d
+```
+
+**Build from source.** Add the one-service build overlay and the base builds
+the image from this checkout instead of pulling it (`VOGT_IMAGE` is ignored):
 
 ```console
 docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d
 ```
 
-Once the image is published and you are pinning it, the base runs on its own:
-
-```console
-docker compose -f deploy/vogt.compose.yml up -d
-```
+The base is never edited; every deployment states only its difference from it
+as an overlay or an environment value. That is the whole customisation model,
+and [`docs/CUSTOMISATION.md`](CUSTOMISATION.md) is the long form.
 
 The Compose command runs the idempotent `vogt init` bootstrap before serving,
 so a new named volume is ready without a manual container shell step. It is
@@ -201,9 +210,22 @@ VOGT_DATA_DIR=/path/to/vogt vogt-mcp
 ```
 
 For a remote instance, configure `VOGT_URL` and `VOGT_TOKEN_FILE` for
-`vogt-mcp-remote`. Do not install or configure Cadastre unless you have a
-separate, explicit Cadastre deployment; the public Vogt image has no Cadastre
-dependency and does not contact one.
+`vogt-mcp-remote`. Other MCP servers you may run alongside Vogt in an agent
+client — an infrastructure register such as Cadastre, a language server — are
+your agent's configuration, not Vogt's; the public image installs, contacts,
+and requires none of them.
+
+## Optional session engine
+
+The Rust session engine and its PWA (`engine/`, `web/`) add terminal
+sessions, file and git APIs, agent tasks, push notifications, and a
+voice/chat assistant. They are a separate image, built from source with
+`engine/Dockerfile`, and the core reaches them only when `VOGT_ENGINE_URL`
+and `VOGT_ENGINE_TOKEN_FILE` are set. Nothing in this guide needs them.
+[`docs/ENGINE.md`](ENGINE.md) covers building and running the engine; the
+assistant provider is any OpenAI-compatible chat endpoint, configured with
+`ENGINE_ASSISTANT_BASE_URL`, `ENGINE_ASSISTANT_API_KEY`, and
+`ENGINE_ASSISTANT_MODEL`.
 
 ## Backup, upgrade, and removal
 
@@ -236,9 +258,9 @@ This removes the example's named data volume and cannot be undone by Docker.
 - [`docs/CUSTOMISATION.md`](CUSTOMISATION.md) names the supported extension
   points — configuration, Compose overlays, image extension, your own front
   door — for a deployment that needs more than the base.
-- [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) is the reference customisation — the
-  maintainer's estate deployment, with each choice annotated by the extension
-  point it uses. Read it for worked examples of exposure, TLS, host mounts and
-  token brokering; it is not a second installation path.
-- [`opensource.md`](../opensource.md) explains why the public path is
-  Python-core-first and how the current private deployment is preserved.
+- [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) is the production guide — exposure,
+  reverse proxy and TLS, digest pinning, backups, upgrades, and running the
+  optional engine next to the core.
+- [`docs/ENGINE.md`](ENGINE.md) is the optional session engine's reference.
+- [`opensource.md`](../opensource.md) states the public boundary: what is
+  supported, what is optional, and which legacy names remain as aliases.

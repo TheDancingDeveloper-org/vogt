@@ -1,26 +1,31 @@
 # Vogt — User Guide
 
-Vogt is the product name everywhere a person encounters it: the browser and
-route titles, sign-in screen, installed web/Android app and notifications. The
-installed PWA keeps `/` as its manifest identity, so an installation formerly
-labelled MyDevEnv2 upgrades in place to Vogt instead of appearing as a second
-app. Refresh an already-open window once after deployment to receive the new
-service worker, offline page and notification artwork.
+Vogt is a single-tenant work register for software projects: declared work
+items, observed evidence about them, a ranked backlog that can explain itself,
+and an audit log that records who changed what and why. It is reachable four
+ways — a CLI, a web GUI, a REST API and an MCP server — all generated from one
+operation registry, so anything this guide describes on one surface exists on
+the others too (§8).
 
-Some deliberately invisible compatibility identifiers retain the historical
-name: browser storage and event keys, Rust crate/config names, the Android
-package and notification-channel IDs, and the `MYDEVENV2_NOTIFY:` task hook.
-Which of those are renameable and which are migrations is inventoried on
-[#144](https://github.com/TheDancingDeveloper-org/vogt/issues/144).
-Changing those as presentation copy would instead discard local preferences,
-break protocols or FCM, create a second Android app, or invalidate existing
-task definitions. Their user-facing labels and messages still say Vogt.
+The web GUI, terminals, editor, git panel, scheduled agent tasks and the voice
+assistant are served by the **session engine**, an optional Rust component
+built from source (`engine/`, `web/`; see [`ENGINE.md`](ENGINE.md)). A
+deployment that runs only the Python core still has everything in §2.1–2.4,
+§7 and §8 over CLI, REST and MCP; the engine adds §1, §2.5–2.7, §3 and §4.
+Install, configuration and the published Docker image are covered in
+[`GETTING_STARTED.md`](GETTING_STARTED.md) and [`DEPLOYMENT.md`](DEPLOYMENT.md);
+every environment variable is listed in [`CONFIG.md`](CONFIG.md).
 
-Status: **current as of 2026-08-18**, and describing one product. It replaced
-`docs/engine/USER_GUIDE.md`, which was written in June 2026 for MyDevEnv2
-standing alone and therefore documented terminals, the editor and git while
-saying nothing about backlogs, boards, drift or audit — half a product, under
-the wrong name.
+The engine was once a separate product, and a few deliberately invisible
+compatibility identifiers keep the historical name: browser storage keys, some
+Rust crate and config names, the Android package and notification-channel IDs,
+and the agent-task notify phrase (§2.7). Legacy `MYDEVENV2_*` environment
+names are still accepted as aliases for `ENGINE_*`. Renaming those would
+discard local preferences, break push delivery, create a second Android app or
+invalidate existing task definitions, so they stay; every user-facing label
+says Vogt.
+
+Status: **current as of 2026-08-18**, and describing one product.
 
 **One honest caveat, stated once and not repeated.** Everything below is
 implemented and covered by tests. The Solid surfaces have jsdom coverage
@@ -33,28 +38,30 @@ still outstanding and `ROADMAP.md` says so.
 
 ## 1. Getting in
 
-> The addresses in this section are **the maintainer's own deployment**, used
-> here so the walkthrough has something concrete to point at. Substitute your
-> own instance throughout. If you do not have one yet,
-> [`GETTING_STARTED.md`](GETTING_STARTED.md) builds one, and
-> [`DEPLOYMENT.md`](DEPLOYMENT.md) is the reference customisation these
-> addresses belong to.
+This section assumes an instance that runs the session engine, which serves
+the GUI. If you do not have one yet, [`GETTING_STARTED.md`](GETTING_STARTED.md)
+builds a core-only instance and [`ENGINE.md`](ENGINE.md) §3 adds the engine.
 
-1. Open **https://vogt.sprooty.com** — the merged product: Vogt's work
-   surfaces and the session engine's terminals on one address.
-   (Until the standalone stack is retired, https://mydevenv2.sprooty.com still
-   answers and serves the session engine *without* Vogt — terminals and the
-   assistant work, and every Vogt surface reports that no core is configured.)
+1. Open your instance's address in a browser. The engine serves the GUI at
+   `/` and proxies the core's API behind it, so work surfaces and terminals
+   share one origin.
 2. Open **Settings (⚙)** and paste your bearer token.
 3. **Save & reload.**
 
-The token is a front-door token. What it can do is exactly what its
-capabilities list says: reading needs only a valid token, and each kind of
-write needs its own capability (`sessions`, `filesystem-write`, `git-write`,
-`gui-control`, `agent-tasks-write`, `push-write`, `history-write`,
-`assistant`, `vogt-write`). A token that authenticates but lacks the capability
-gets a `403` — which means *this credential will never work for this route*,
-as against a `401`'s *try a different one*.
+The token is an **engine token** — the primary token the operator set in the
+engine's config, or an entry in its `extra_tokens` list (`ENGINE.md` §3). What
+it can do is exactly what its capabilities list says: reading needs only a
+valid token, and each kind of write needs its own capability (`sessions`,
+`filesystem-write`, `git-write`, `gui-control`, `agent-tasks-write`,
+`push-write`, `history-write`, `assistant`, `vogt-write`). A token that
+authenticates but lacks the capability gets a `403` — which means *this
+credential will never work for this route*, as against a `401`'s *try a
+different one*.
+
+Vogt writes made through the GUI are performed with the **core token** the
+operator paired with your engine token, so they are audited to your actor, not
+to a shared one. Core tokens are issued with `vogt token issue` (see
+`GETTING_STARTED.md`); the CLI, REST and MCP surfaces use them directly.
 
 Settings is a routed modal. Whether it is opened from the desktop rail, phone
 palette or command palette, closing it returns to the route that invoked it,
@@ -118,8 +125,8 @@ operations where they apply.
 | **Git** | `#/g`, `#/g/<repo>` | Choose a registered project, then inspect status, diff, log and branches or stage/unstage/discard/commit/checkout. |
 | **Tasks** | `#/tasks` | Scheduled agent runs: create, edit, pause, resume, run now, inspect. |
 | **History** | `#/history` | Archived scrollback from sessions that have ended, full-text searchable. |
-| **Assistant** | `#/assistant` | The conversational surface — absent entirely unless the deployment provisioned it. |
-| **GUI** | `#/gui` | Hidden unless the server reports a configured stream, a shipped Selkies feature and an operator-recorded end-to-end verification. An old/direct link otherwise explains that the surface is unavailable. |
+| **Assistant** | `#/assistant` | The conversational surface — absent entirely unless the operator configured an assistant API provider (§2.5). |
+| **GUI** | `#/gui` | Desktop streaming (Selkies/KasmVNC) — hidden unless the engine has `GUI_STREAM_URL` set, was built with the feature, and the operator recorded an end-to-end verification with `GUI_STREAM_VERIFIED=true`. An old/direct link otherwise explains that the surface is unavailable. |
 
 ### 2.1 The board
 
@@ -137,7 +144,8 @@ state the server refused.
   through `+ Filter` and shown as individually removable chips. The URL remains
   the shareable/restorable source of truth, and a combination can be named and
   recalled as a saved lens (per device; shared server-side lenses are
-  deliberately not built — `REQUIREMENTS.md` §3).
+  deliberately not built — per-user server state would make the instance
+  multi-tenant, and it is not).
 - **Quick-create** raises an item without leaving the board.
 - Long cards expand and collapse in place so their full title and body remain
   readable without leaving the bounded, measured Board.
@@ -145,7 +153,7 @@ state the server refused.
   columns, open its detail, quick-create.
 
 **Every write asks for a reason, and will not submit without one.** That is not
-a form-validation quirk; it is the product's rule (FR-W1). The reason is what
+a form-validation quirk; it is the product's rule. The reason is what
 the audit log stores, and a board that armed one reason for a session is how
 fifty audit rows end up saying "triage". A drop does pre-fill the last reason
 the server accepted, which is a form with a required field rather than a
@@ -214,9 +222,17 @@ Vogt does not compare the copies or claim either has drifted.
 
 ### 2.5 The assistant
 
-Absent unless the deployment set an API key — the routes answer `404` and every
+Absent unless the operator set an API key — the routes answer `404` and every
 client hides the surface, so an unprovisioned deployment looks unprovisioned
 rather than broken.
+
+The assistant talks to any **OpenAI-compatible chat endpoint**: the engine
+reads `ENGINE_ASSISTANT_API_KEY`, `ENGINE_ASSISTANT_BASE_URL` and
+`ENGINE_ASSISTANT_MODEL`, so a hosted provider, a proxy or a local server all
+work if they speak that API. Voice is separate and also optional:
+`ENGINE_ASSISTANT_STT_*` and `ENGINE_ASSISTANT_TTS_*` name speech-to-text and
+text-to-speech endpoints, and without them the assistant is text-only. The
+full table is in [`ENGINE.md`](ENGINE.md) §6.
 
 It can read every session's scrollback and a curated read slice of Vogt
 (`backlog`, `bugs`, `why`, `project.brief`, `project.list`, `work.get`,
@@ -307,7 +323,8 @@ save keeps every field. An unavailable first read is shown as an error rather
 than as an empty task list. If a refresh fails after a successful read, the
 last task list stays visible, is marked stale, and can be retried in place.
 
-If an agent prints a line beginning with `MYDEVENV2_NOTIFY:`, two things
+If an agent prints a line beginning with the notify phrase (by default
+`MYDEVENV2_NOTIFY:`, kept for existing task definitions), two things
 happen: a push notification goes out, and the line is **recorded on the run as
 a finding**. The push is a delivery; the finding is the record, and it survives
 a phone that was switched off.
@@ -318,13 +335,19 @@ freshness and trust every other kind of evidence carries.
 
 ## 3. On a phone
 
-The Android shell is a Capacitor wrapper whose WebView loads the deployed PWA,
-so UI changes ship without a new APK; only native plumbing needs one.
+The PWA works in a phone browser as it is. The optional Android shell
+(`mobile/`) is a Capacitor wrapper whose WebView loads your instance's PWA, so
+UI changes ship without a new APK; only native plumbing needs one. It is built
+from source, not published.
 
 - **Push** arrives for the things worth an interruption and nothing else by
   default: a session entering `waiting-for-input` or `errored`, new drift, and
   the agent-task notify hook. `idle_stall` and `agent_task_started` exist and
-  default off. Quiet hours digest instead of sending.
+  default off. Quiet hours digest instead of sending. Browser web-push needs
+  only the engine's VAPID keypair, generated into its state directory on first
+  run; push to the Android shell additionally needs
+  `ENGINE_FCM_SERVICE_ACCOUNT_JSON`, and without it only browser subscriptions
+  are delivered.
 - **A session waiting for input becomes a card**, above the roster, showing
   the prompt it is actually waiting on. **Send y + Enter** and **Send Ctrl-C**
   send those keystrokes to that session's terminal — they are terminal input,
@@ -379,7 +402,7 @@ and press Enter or Space to open it, then Tab to the labelled bookmark,
 duplicate and close controls.
 
 **The command palette reaches every read surface by fuzzy name** — projects and
-work items included, so `rstnz` finds `rustnzb`. **New File** opens a form with
+work items included, so `myprj` finds `my-project`. **New File** opens a form with
 separate workspace destination and filename fields; **Open File…** opens a
 searchable workspace-file chooser. Cancelling either returns focus to the
 palette invoker, and creation writes only after **Create file** succeeds.
@@ -413,8 +436,7 @@ command opens History with its archived-output search field focused.
 ## 5. When something is missing rather than broken
 
 Vogt is two processes, and each keeps working when the other does not. This is
-a designed property, not a degradation to be surprised by (FR-E9, FR-U21), and
-the surfaces say which case they are in rather than rendering empty data as
+a designed property, not a degradation to be surprised by, and the surfaces say which case they are in rather than rendering empty data as
 truth.
 
 | What is down | What still works | What you see |
@@ -452,8 +474,7 @@ scope the token does not hold all say which they are.
 
 **Can I use it offline?** No. Installed PWAs show an explicit offline fallback
 page rather than pretending to support disconnected use — a queued offline
-write could not carry an honest freshness answer, so none is offered
-(`REQUIREMENTS.md` §3).
+write could not carry an honest freshness answer, so none is offered.
 
 **Where are my files?** On the server, under the workspace root — the same tree
 Vogt's project registry records paths in. That agreement is checked and
@@ -468,12 +489,13 @@ should have their own.
 
 **How do I back up?** `vogt backup` takes the core's SQLite *and* the engine's
 state directory — session history, push subscriptions, the VAPID keypair — as
-one act, plus a manifest recording where the estate was (NFR-I6). Your own work
-is in git, in the workspace.
+one act, plus a manifest recording what was backed up from where. Your own
+work is in git, in the workspace. `DEPLOYMENT.md` covers restore.
 
 **How do I update?** The PWA updates itself; hard-refresh if it seems stuck.
-The deployment moves when a digest is bumped in the ops repository — publishing
-an image and deploying it are separate acts on purpose.
+The server side moves when the operator pulls a new image (or rebuilds from
+source) and restarts — publishing an image and deploying it are separate acts
+on purpose, and `DEPLOYMENT.md` describes the upgrade order.
 
 ## 8. Driving it from a terminal or an agent
 
@@ -499,9 +521,16 @@ criterion your project cannot meet at all — a Cargo workspace has no root
 `src/` — is declared with `contract inapplicable` and a reason, and stops
 being counted as a failure while staying on the report.
 
-For an agent, `vogt-mcp` speaks MCP over stdio against the same data directory,
-and `vogt-mcp-remote` bridges stdio to a remote instance's `/mcp`. An agent's
-tool list is exactly what its token may do — ungranted tools are absent rather
-than present-and-refusing — and every write it makes requires a reason and
-lands an audit row carrying it. `DEPLOYMENT.md` §7 is the full story of
-reaching an instance from an agent environment.
+The same operations are REST routes under `/api/` — send the core token as
+`Authorization: Bearer …`; `GET /openapi.json` lists them. For an agent,
+`vogt-mcp` speaks MCP over stdio against the same data directory
+(`VOGT_DATA_DIR`), and `vogt-mcp-remote` bridges stdio to a remote instance's
+`/mcp` using `VOGT_URL` and `VOGT_TOKEN_FILE`. An agent's tool list is exactly
+what its token may do — ungranted tools are absent rather than
+present-and-refusing — and every write it makes requires a reason and lands an
+audit row carrying it.
+
+The only optional integration on the core side is **GitHub** collection and
+write-back, enabled by `VOGT_GITHUB_TOKEN_FILE`; absent means "GitHub was not
+collected", never "no GitHub subjects". Vogt does not require or contact any
+other external service. `CONFIG.md` has the variables.

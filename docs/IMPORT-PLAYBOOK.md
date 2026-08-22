@@ -9,7 +9,10 @@ the first write is in phase 4. **Stop and ask a human** wherever a step says
 DECISION — those are the points where guessing produces a project record that
 is wrong in a way later sweeps will not correct.
 
-The worked example throughout is `rustnzb`, the first import.
+The worked example throughout is `rustnzb`, a Rust workspace whose local
+checkout lives at `/srv/work/rustnzbd` and whose GitHub repository was
+transferred between organisations shortly before import. Substitute your own
+project, path and remote.
 
 ---
 
@@ -20,20 +23,21 @@ vogt status          # or MCP `status`
 vogt connect         # what a client needs to reach this instance
 ```
 
-Record `instance_id`, `principal`, `data_dir`. There is more than one Vogt
-instance (a dev one and the Node B production stack); importing into the wrong
-one is silent and only shows up later as "the project isn't there".
+Record `instance_id`, `principal`, `data_dir`. If you run more than one Vogt
+instance (a development one and a production one, say), importing into the
+wrong one is silent and only shows up later as "the project isn't there".
 
 Then confirm your credential can write projects:
 
 - `project.register`, `project.import`, `contract.check`, `sweep`,
   `forge.onboard` and `forge.writeback` all need scope **`project.write`**.
-- The agent token in Infisical (`apps/prod/HOMELAB_VOGT_AGENT_TOKEN`) carries
-  only `read` + `work.write`. It **cannot** register a project.
+- A typical agent token carries only `read` + `work.write`. It **cannot**
+  register a project; `vogt status` shows the scopes of the token in use.
 - So the import is run either from the CLI inside the instance
-  (`docker exec vogt vogt project register ...` on Node B, or `uv run vogt ...`
-  in a dev checkout), or with a token minted for the job
-  (`docker exec vogt vogt token issue`, admin-only).
+  (`docker exec vogt vogt project register ...` against the container, or
+  `uv run vogt ...` in a source checkout), or with a token minted for the job
+  (`vogt token issue --scopes read,work.write,project.write ...`, which only
+  a local process with access to the data directory can do).
 
 DECISION if no `project.write` path is available: stop; ask for a token or for
 the CLI to be run on your behalf. Do not fall back to recording the project as
@@ -55,14 +59,14 @@ gh api orgs/<owner>/repos --jq '.[].full_name' | grep -i <name>
 "works" is not evidence the repo still lives there. `full_name` in the body is
 the authority; cross-check with the org listing.
 
-- rustnzb: the remembered URL `github.com/AusAgentSmith-org/rustnzb` redirects.
+- rustnzb: the remembered URL `github.com/<old-org>/rustnzb` redirects.
   `full_name` is `TheDancingDeveloper-org/rustnzb`, and the repo is absent from
-  the AusAgentSmith-org listing. The canonical remote is
+  the old organisation's listing. The canonical remote is
   `https://github.com/TheDancingDeveloper-org/rustnzb`.
 
 Also check for other copies of the same code that are not the remote: a
-Forgejo mirror at `repo.indexarr.net/indexarr/<name>`, a second working tree, a
-sibling directory with a different name. List them in the import note. A single
+self-hosted Forgejo/Gitea mirror, a second working tree, a sibling directory
+with a different name. List them in the import note. A single
 source of truth is a claim about *all* the copies, not just the one you found
 first.
 
@@ -85,16 +89,18 @@ is news rather than ambiguity. That is right for a repo you have never had
 locally — and wrong for a repo the user actively develops in, because it
 manufactures the second copy you were trying to eliminate.
 
-- rustnzb has a live working tree at `/home/sprooty/Working/Active/apps/rustnzbd`
+- rustnzb has a live working tree at `/srv/work/rustnzbd`
   on branch `release/v1.4.5`. → **register the local path**, and set `repo_url`
   to the canonical remote from phase 1. Then run `forge onboard` explicitly to
   get the consolidation step `import` would have done.
 
 Confirm the instance can actually *read* `root_path` before registering: the
-collectors run inside the Vogt process. Existing projects (`vogt`, `cadastre`)
-are registered under `/home/sprooty/Working/...` and their `git-local` and
-`source-markers` sweeps report `ok`, so that path is visible to this instance.
-Check `coverage` after phase 5 to prove it for yours.
+collectors run inside the Vogt process, so in a container the repository
+must be bind-mounted into it (see `docs/CUSTOMISATION.md`) and the registered
+path must be the one *inside* the container. If an existing
+project under the same parent directory has `git-local` and `source-markers`
+sweeps reporting `ok`, that directory is visible to this instance. Check
+`coverage` after phase 5 to prove it for yours.
 
 ## 3. Pre-flight review (read-only)
 
@@ -147,10 +153,10 @@ could act on: what, why, and a reference.
 ```
 vogt project register \
   --name rustnzb \
-  --root-path /home/sprooty/Working/Active/apps/rustnzbd \
+  --root-path /srv/work/rustnzbd \
   --repo-url https://github.com/TheDancingDeveloper-org/rustnzb \
   --lifecycle-state active \
-  --reason "Onboard rustnzb as the first non-Vogt project; canonical remote is TheDancingDeveloper-org after the AusAgentSmith transfer."
+  --reason "Onboard rustnzb; canonical remote is TheDancingDeveloper-org after the org transfer."
 ```
 
 Verify: `project get --slug rustnzb` returns the record, `repo_url` matches
@@ -169,7 +175,7 @@ vogt drift detect --reason "First drift pass after onboarding rustnzb."
 ```
 
 - `sweep` runs the collectors; narrow it to the new project so you are not
-  paying for the whole estate.
+  paying for every registered project.
 - `forge onboard` is read-only upstream. It is what `project import` would have
   run for you; registering a local path skips it, so run it explicitly.
 - `contract check --project` (not `--path`) is what records the status —
@@ -189,7 +195,10 @@ vogt drift list --project rustnzb
 A brief that shows `observed_version` matching the repo's actual release, and a
 `ci_status` matching what GitHub Actions says, is the signal the import landed.
 `gh-posture` reporting `partial` for one project is a known collector wart, not
-an import failure — read its `detail` before treating it as one.
+an import failure — read its `detail` before treating it as one. If no
+`VOGT_GITHUB_TOKEN_FILE` is configured, `forge onboard` and the GitHub
+collectors report "not collected" rather than an empty upstream; that is the
+optional integration being absent, not a finding.
 
 ## 6. Write-back policy — the last decision, made explicitly
 

@@ -2,7 +2,9 @@
 
 Status: **built** (reconciled against the delivered v1 on 2026-08-12; the
 as-built shape of §3.2 is the note at the end of that section, and the
-requirement-by-requirement verification is `REQUIREMENTS.md` §5).
+requirement-by-requirement verification lives with the requirements
+baseline, outside this repository; `FR-*`/`NFR-*` IDs are quoted as plain
+text).
 Types are indicative; DDL is written
 at M0. Companion to `DESIGN.md` §3 (domain model) and §7 (storage).
 
@@ -25,8 +27,8 @@ agent-task runs (FR-E6, FR-E7) arrive as observations of two new kinds,
 (§3.1) — which is what r4's §2.6 said would happen and what nothing had
 built. This revision is recorded because the previous one described that
 mechanism as existing: a document that reasons from an unbuilt thing to a
-schema decision is the failure `REQUIREMENTS.md` §5.3 found in this file, and
-r5 is the correction as well as the build.
+schema decision is the failure the v1 delivery verification found in this
+file, and r5 is the correction as well as the build.
 
 ## 1. Storage topology
 
@@ -139,7 +141,7 @@ into `latest_dep_refs` (§3.2). The third kind survives in the `RefKind` type
 and in FR-D2's text, but nothing can produce one — `DESIGN.md` §3.5's
 `project link A depends_on B` was never given an operation, and the registry
 has no `project.link`. An edge no manifest expresses cannot be recorded.
-Tracked as **FR-D9** in `REQUIREMENTS.md` §7.
+Tracked as gap **FR-D9** (declared dependency edges have no producer).
 
 *r2 removals*: `contracts` — the contract carries a version string
 (`DESIGN.md` §5), so a table of versioned contract bodies bought nothing at
@@ -147,8 +149,8 @@ one contract per instance; the evaluated result lives in
 `projects.compliance_status` with its `compliance_checked_at`. *As built*,
 the contract is a versioned constant in `core/contract.py` rather than
 configuration, so there is no per-instance contract body anywhere — which is
-why removing the table cost nothing, and is also the FR-G1 gap
-(`REQUIREMENTS.md` §7).
+why removing the table cost nothing, and is also the FR-G1 gap (the
+contract is not configurable per instance).
 `packages` — with dependency edges resolved by path and repo URL, published
 package identity is no longer needed to build the internal graph.
 
@@ -312,7 +314,7 @@ there" are different questions with different write disciplines.
 
 *This paragraph described a mechanism that did not exist until r5.* It was
 written at r4 as the reason for an absent column and was read for a year as a
-statement of fact; `REQUIREMENTS.md` §6.3 finding 4 is what caught it. The
+statement of fact; the v2 delivery verification is what caught it. The
 mechanism is now the `session-outcomes` collector
 (`src/vogt/collectors/session_outcomes.py`), and what it can and cannot say is
 worth knowing before trusting a number it produced:
@@ -503,8 +505,8 @@ fixture exists from M2 and asserts the interactive-query target in CI
 (NFR-S4) — *as built*, at 500 projects and **5,000** work items rather than
 100k, because seeding 100k rows per run costs minutes and proves nothing
 about the query shape. It is a tripwire for an accidental per-item query
-inside a ranked view; it is not evidence of the envelope
-(`REQUIREMENTS.md` §5.1).
+inside a ranked view; it is not evidence of the NFR-S1 envelope (the
+ranked views staying interactive at the stated estate size).
 
 Retention (NFR-I5), in precedence order — a row is pruned only if no rule
 protects it:

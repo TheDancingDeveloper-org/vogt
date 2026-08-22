@@ -2,12 +2,12 @@
 
 *Read on 2026-08-16 against `integry/propr` at `d537c25` (v1.1.0), its
 Docusaurus documentation set under `docs/docs/`, and this repository's
-`README.md`, `docs/ENGINE.md` and `docs/REQUIREMENTS.md` §7.*
+`README.md`, `docs/ENGINE.md` and the requirements gap register.*
 
 **What this document is.** A comparison against one adjacent product, and a
 ranked list of features it has that Vogt could adopt. It is **not a backlog and
-nothing in it is scheduled** — the same rule `REQUIREMENTS.md` §7.5 states for
-the gap register. An item here becomes work when it becomes a numbered
+nothing in it is scheduled** — the same rule the requirements gap register
+states for itself. An item here becomes work when it becomes a numbered
 requirement, and not before. Where an item touches a requirement that already
 exists, or a decision already taken, this document says so by ID rather than
 re-opening it.
@@ -25,7 +25,7 @@ They are not competitors. They occupy adjacent halves of the same problem and
 overlap in one place.
 
 **Vogt is a tracker with a doing-surface.** Projects, backlog, bugs, ranking,
-drift, contract, audit, and — since the MyDevEnv2 merge — PTY sessions bound to
+drift, contract, audit, and — since the session-engine merge — PTY sessions bound to
 work items. Its centre of gravity is *knowing what is true, with provenance and
 freshness*. Its principles are in `README.md`: observed-first, reports never
 enforces, never goes looking, declared vs observed always separated, every
@@ -134,7 +134,7 @@ names carry the model identifier so concurrent runs never collide.
 
 Vogt opens a session **in the project's registered root path**, and
 `engine/server/src/git.rs` operates on that checkout directly. That is exactly
-the hole `REQUIREMENTS.md` §7.1 **FR-E11** names: *"Two agents can edit one
+the hole gap **FR-E11** names: *"Two agents can edit one
 checkout concurrently and neither is told. No audit row records the loss,
 because both writes are legitimate."*
 
@@ -263,8 +263,8 @@ and it makes *"why did nothing run last night"* answerable.
   (forge-optional), which is load-bearing here — plain folders and local git
   are first-class in Vogt and the GitHub adapter only ever *adds*.
 - **Label-triggered autonomous pickup.** ProPR's entire intake is "label an
-  issue and an agent starts." Autonomous work pickup is deferred by name in
-  `REQUIREMENTS.md` §3 and named again in `ENGINE.md` §8 as the surviving core
+  issue and an agent starts." Autonomous work pickup is deferred by name as
+  a non-requirement, and named again in `ENGINE.md` §8 as the surviving core
   of a reversed non-goal. Adopt the *routing* idea — a label selects agent and
   model — without the *triggering* idea.
 - **Authoritative state living in forge labels.** ProPR's

@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SKIP_DIRS = {".git", ".venv", "node_modules", "dist", "build", ".mypy_cache"}
+SKIP_DIRS = {".git", ".venv", "node_modules", "dist", "build", ".mypy_cache", "local"}
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 EXTERNAL = ("http://", "https://", "mailto:", "tel:")
 

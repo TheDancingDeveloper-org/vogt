@@ -125,7 +125,7 @@ rest.
 
 What Compose handles: the named volume in the base file is
 *project-scoped*, so two deployments started under different project names
-(`docker compose -p vogt-prod …`) already get separate volumes and separate
+(`docker compose -p vogt-staging …`) already get separate volumes and separate
 networks. Use a distinct project name for each instance and most of the
 problem does not arise.
 
@@ -144,8 +144,8 @@ What you must still change per instance:
 
 If your overlay pins a subnet, do not pick it by incrementing from the
 instance next door; enumerate what is actually in use first.
-[`DEPLOYMENT.md` §4.7](DEPLOYMENT.md) lists the full set with the commands,
-and what each collision looks like when it happens.
+[`DEPLOYMENT.md`](DEPLOYMENT.md#24-a-second-instance-on-the-same-host) has
+the worked command line.
 
 ### Putting your own front door in front of Vogt
 
@@ -296,7 +296,7 @@ complete, supported product.
 | **MCP** | running `vogt-mcp`, or `/mcp` on a running server | Agents cannot connect; nothing else changes |
 | **Remote MCP** | `vogt-mcp-remote` with `VOGT_URL` and `VOGT_TOKEN_FILE` | As above |
 | **Session engine** | `engine_url`, `engine_token_file`, `engine_state_dir` | `session.*` operations report that no engine is configured; nothing else is affected |
-| **Engine integrations** (Cadastre, assistant, GUI stream, push, sccache, agent-auth) | the session engine's own configuration | Documented in [`ENGINE.md`](ENGINE.md) §9 — each is absent by default and says so; several carry estate-address defaults a public operator must change |
+| **Engine integrations** (voice assistant provider, speech, push, GUI stream, external MCP servers) | the session engine's own `ENGINE_*` configuration | Documented in [`DEPLOYMENT.md` §5.2](DEPLOYMENT.md#52-engine-integrations) and [`ENGINE.md`](ENGINE.md) §9 — each is absent by default and says so |
 
 Tokens are always given as a *file path*, never as a value in the
 environment: a token in the environment is a token in every `docker inspect`.
@@ -316,13 +316,14 @@ environment: a token in the environment is a token in every `docker inspect`.
 
 ## A worked example
 
-The maintainer's own deployment is the largest customisation that exists: a
-Rust session engine as the front door, the core detached behind it, a
-tailnet-only published port, a secret broker, and a pod full of agent
-tooling. It is built entirely from the extension points above — front door,
-detached core, host mounts, uid selection, optional integrations — and is
-documented in [`DEPLOYMENT.md`](DEPLOYMENT.md) as the reference customisation
-rather than as the way Vogt is meant to be run.
+The largest customisation this repository knows about is a two-service
+deployment: the session engine as the front door on the published port, the
+core detached behind it on the Compose network, a shared workspace mount, a
+chosen uid, and a bootstrapped core token. It is built entirely from the
+extension points above — front door, detached core, host mounts, uid
+selection, optional integrations — and is described in
+[`DEPLOYMENT.md`](DEPLOYMENT.md) §3.2 and §6 rather than as the way Vogt is
+meant to be run.
 
 You can read it as a diff. [`deploy/estate.overlay.yml`](../deploy/estate.overlay.yml)
 is that deployment expressed against this same base:
@@ -333,9 +334,13 @@ docker compose -f deploy/vogt.compose.yml -f deploy/estate.overlay.yml up -d
 
 It adds one service and some configuration. It does not rebuild, repin, or
 restate the core — that is the published image, unmodified, which is what
-makes "the private path is the public path plus configuration" a claim you
-can check rather than one you have to believe.
+makes "a customised deployment is the public image plus configuration" a
+claim you can check rather than one you have to believe
+(`tests/test_public_delivery.py` checks it). Treat the overlay as a pattern:
+its mount paths and the engine image it names are one operator's choices,
+not defaults, and an engine image has to be built from source first.
 
 If your deployment needs something none of these layers reach, that is worth
 an issue. The generic base is only generic if the customisations people
-actually need are supported ones.
+actually need are supported ones. Notes about a particular host of your own
+belong in the git-ignored `docs/local/`.

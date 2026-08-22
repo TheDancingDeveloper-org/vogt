@@ -61,3 +61,14 @@ vogt-engine-token
 deploy/github-token
 deploy/vogt-core-token
 deploy/vogt-engine-token
+
+# Operator-local documents. Runbooks, cutover plans and estate notes that are
+# specific to one deployment and have no place in a public repository — the
+# same reasoning as `deploy/.env` above. `docs/` proper is the product's
+# documentation; this is the operator's.
+docs/local/
+
+# Requirements documentation is maintained outside the public repository
+# (it lives under docs/local/). Nothing under this name should be committed.
+docs/REQUIREMENTS*.md
+**/REQUIREMENTS.md

@@ -8,9 +8,11 @@ there. It lives here.
 Two rules for anything filed in this directory:
 
 - **Nothing here is a specification.** A wireframe is not a requirement. What
-  is owed lives in `docs/REQUIREMENTS.md` — its numbered tables for what is
-  agreed, §7 for what was designed and not built. If a mockup here shows a
-  behaviour nobody has written down, it is an idea, not a plan.
+  is owed lives in the requirements register — numbered `FR-*`/`NFR-*` tables
+  for what is agreed, a gap section for what was designed and not built —
+  which the maintainer keeps outside the repository in the git-ignored
+  `docs/local/`. If a mockup here shows a behaviour nobody has written down,
+  it is an idea, not a plan.
 - **Nothing here is a source of truth about the built product.** The screens
   below were drawn against a commit and will drift from it. Where a document
   here and the code disagree, the code is right and the document is old.
@@ -41,12 +43,13 @@ They pull React and a webfont from public CDNs, so a machine with no outbound
 network renders them unstyled rather than not at all. Keep each `.dc.html`
 beside `support.js`; nothing else links between them.
 
-**What was planned from it.** [`../docs/RESTRUCTURE.md`](../docs/RESTRUCTURE.md)
-is the staged plan for building these screens — nine stages, each citing the
-file here it came from and the guardrail clause it obeys, so a claim in the
-plan can be checked against this directory rather than trusted. It is a plan
-and not a requirement, which is the first rule above holding: nothing in it is
-owed until its Stage 0 mints an ID in `docs/REQUIREMENTS.md`.
+**What was planned from it.** A staged plan for building these screens —
+nine stages, each citing the file here it came from and the guardrail clause
+it obeys — was written alongside this export; it is a working document kept
+in `docs/local/` rather than the repository, and `docs/DESIGN.md` describes
+whatever of it has since been built. It was a plan and not a requirement,
+which is the first rule above holding: nothing in it was owed until its
+Stage 0 minted a requirement ID.
 
 **Why the guardrails document is the one to read first.** It is the only part
 of this export that is not a drawing: it states the constraints the screens
@@ -54,8 +57,8 @@ obey, and every one of them is lifted from the product's own principles rather
 than invented — provenance and freshness on every answer, declared and observed
 visually distinct, reporting never enforcing, "nothing to say" and "not
 collected" given different copy, every write taking a reason, agents named as
-the actors they are. Those are FR-O4, FR-R4, FR-G13, FR-S1 and FR-E4 wearing
-colour and spacing. A screen that breaks one of them is wrong here for the same
+the actors they are. Those are the product's requirements (FR-O4, FR-R4,
+FR-G13, FR-S1, FR-E4) wearing colour and spacing. A screen that breaks one of them is wrong here for the same
 reason the equivalent code would be wrong.
 
 **What was deliberately not imported.** The export also carried a copy of
