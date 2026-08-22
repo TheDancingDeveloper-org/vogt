@@ -37,9 +37,9 @@ A core with nothing else configured is a complete, supported product.
 that embeds the web UI from `web/`, owns the terminals a work item's session
 runs in, hosts the voice assistant, and can act as the front door in front
 of the core. It is built from `engine/Dockerfile`; there is no published
-image for it and no public Compose file that runs it yet (§3.2). Without it
-the core's `session.*` operations report that no engine is configured, and
-nothing else changes.
+image for it, but a generic Compose overlay builds and runs one beside the
+core (§3.2). Without it the core's `session.*` operations report that no
+engine is configured, and nothing else changes.
 
 **The mobile shell** (optional) — a Capacitor wrapper under `mobile/` around
 the same PWA. Nothing server-side depends on it; it is built from source
@@ -178,26 +178,35 @@ run it as a system service, wrap exactly that `init && serve` pair.
 
 ### 3.2 The session engine and PWA
 
-There is no published engine image and no public Compose file that runs
-one. Build `engine/Dockerfile` from the **repository root** (its context
-includes `web/` and `src/`) and run it with the variables in §5.2:
+There is no published engine image, so the engine is always built from the
+checkout. The generic overlay `deploy/engine.overlay.yml` does that and wires
+the engine in front of the core in one command:
 
 ```console
-docker build -f engine/Dockerfile \
-  --build-arg CORE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt:v0.2.0 \
-  -t vogt-engine:local .
+cp deploy/.env.example deploy/.env          # fill in the "session engine" block
+openssl rand -hex 32 > deploy/vogt-core-token
+docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d
 ```
 
-`CORE_IMAGE` is the published core, lifted whole into the engine image so
-that one container carries both halves; the engine's entrypoint then runs
-the core on loopback when `VOGT_CORE_URL` names a loopback address (§5.2).
-The engine's base image (`POD_BASE_IMAGE`) and its toolchain build args are
-described at the top of that file and in [`ENGINE.md`](ENGINE.md) §3, which
-also covers running the engine from `cargo` without a container.
+The overlay builds `engine/Dockerfile` from the **repository root** (its
+context includes `web/` and `src/`), publishes the engine on loopback, and
+points it at the core over the Compose network. The only value you must set is
+`ENGINE_TOKEN` (the engine's own bearer token, ≥16 characters); §5.2 lists the
+rest, all optional. Like the base, it exposes nothing on a network interface
+until you set `ENGINE_BIND`.
 
-Be aware before you build it: the engine image is a **development pod**, not
-a hardened service image — it carries a writable home, `sudo`, optional
-agent CLIs, and an entrypoint that supports integrations this repository's
+`CORE_IMAGE` is the published core, lifted whole into the engine image so that
+one container carries both halves; the overlay passes it as a build arg,
+defaulting to the same image the base runs. The engine then proxies to the
+sibling core because `VOGT_CORE_URL` names it (§5.2) — it runs its own core
+only when that URL is a loopback address. The engine's base image
+(`POD_BASE_IMAGE`) and toolchain build args are described at the top of the
+Dockerfile and in [`ENGINE.md`](ENGINE.md) §3, which also covers running the
+engine from `cargo` without a container.
+
+Be aware before you run it: the engine image is a **development pod**, not a
+hardened service image — it carries a writable home, `sudo`, optional agent
+CLIs, and an entrypoint that supports integrations this repository's
 maintainer uses. It cannot be run `read_only` the way the core can.
 
 ## 4. Configuration
@@ -260,9 +269,11 @@ Beyond these the core needs only SQLite (bundled with Python) and `git`
 
 ### 5.2 Engine integrations
 
-These are read by the engine process, not the core. `ENGINE_*` is the current
-prefix; legacy `MYDEVENV2_*` names are still accepted as aliases for one
-release and log a warning. Each can also be set in the engine's TOML config
+These are read by the engine process, not the core. `deploy/engine.overlay.yml`
+(§3.2) already wires the common ones from `deploy/.env`, so for a Compose
+deployment you set these in `.env` rather than by hand. `ENGINE_*` is the
+current prefix; legacy `MYDEVENV2_*` names are still accepted as aliases for
+one release and log a warning. Each can also be set in the engine's TOML config
 file under the same name without the prefix ([`ENGINE.md`](ENGINE.md) §3).
 
 | Integration | Purpose | Optional | When absent | Configured by |

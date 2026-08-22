@@ -1,0 +1,161 @@
+# The session engine, as a generic overlay on the public base.
+#
+#   cp deploy/.env.example deploy/.env        # then fill in the engine block
+#   docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d
+#
+# The base (`deploy/vogt.compose.yml`) runs vogt-core alone. This overlay adds
+# the Rust **session engine** in front of it: the engine embeds the PWA, owns
+# the terminals a work item's session runs in, hosts the voice assistant, and
+# proxies `/api/vogt`, `/mcp` and `/ui-legacy` back to the core. It is the
+# supported, estate-neutral way to run the engine from a checkout — no
+# published engine image exists, so this overlay always builds one.
+#
+# It knows nothing about any particular deployment: no host paths, no tailnet,
+# no Infisical/Komodo/Cadastre, no maintainer hostnames. Every value an
+# operator must choose is a `${VAR}`; where one is genuinely required the
+# reference fails the deploy with a message rather than guessing. The estate's
+# own deployment layers its specifics in `deploy/estate.overlay.yml` instead —
+# this file is the base that overlay (and any other) builds on.
+#
+# Topology: the engine is the only surface an operator publishes (the core has
+# no port of its own once fronted); the two containers reach each other over
+# the Compose network by service name — `engine` → `vogt` on port 8000.
+
+services:
+  # ── vogt-core: the public image, now fronted by the engine ───────────────
+  vogt:
+    environment:
+      # The engine is the front door, so `connect` and `/connection-info`
+      # render against the identity the engine states per request (the
+      # `X-Vogt-*` headers it sends) rather than the core's own address.
+      VOGT_FRONTED: "true"
+      # One-deploy bootstrap (not a second deploy): the engine presents the
+      # core token on `/api/vogt`, and the core adopts the same operator-chosen
+      # secret here at `init` if it does not already hold it. Both halves
+      # reading one file is the whole mechanism. Leave the secret file empty and
+      # this is inert — the core then answers 401 until a token is minted by
+      # hand, which is the pre-bootstrap behaviour.
+      VOGT_BOOTSTRAP_CORE_TOKEN_FILE: /run/secrets/vogt_core_token
+      # Who the adopted token acts as, and how much it may do. Everything that
+      # can read the file runs as one identity, so this scope is the blast
+      # radius; narrow it if you do not need project writes.
+      VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR: "${VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR:-agent:engine}"
+      VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES: "${VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES:-read,work.write,project.write}"
+    secrets:
+      - vogt_core_token
+
+  # ── the session engine: built from source, the published surface ─────────
+  engine:
+    # No published image exists, so build one. The context is the repository
+    # root (the build reads `web/` and `src/`, not just `engine/`), exactly as
+    # `docs/DEPLOYMENT.md` §3.2 describes.
+    build:
+      context: ..
+      dockerfile: engine/Dockerfile
+      args:
+        # The published core, lifted whole into the engine image so one
+        # container carries both halves. Defaults to the same public image the
+        # base would run, so the embedded core matches it; pin a digest for a
+        # real deployment. The Dockerfile already carries a public default too.
+        CORE_IMAGE: "${VOGT_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt:v0.2.0}"
+    image: vogt-engine:local
+    restart: unless-stopped
+    # tini as PID 1 reaps the processes agent sessions leave behind.
+    init: true
+    depends_on:
+      - vogt
+
+    # The engine is the front door, and like the base it publishes to loopback
+    # unless told otherwise: `ENGINE_BIND` is the host interface, and defaults
+    # to `127.0.0.1` so the example will not put the engine on a network
+    # interface because nobody said to. Set it to a real address to expose it.
+    ports:
+      - "${ENGINE_BIND:-127.0.0.1}:${ENGINE_PORT:-8910}:8910"
+
+    environment:
+      # The engine's own listen socket, inside the container's namespace — all
+      # interfaces so the published port above can reach it. This is fixed, not
+      # an exposure decision: `ENGINE_BIND` in `.env` decides exposure, on the
+      # host side of the port mapping above.
+      ENGINE_BIND: "0.0.0.0:8910"
+      # The engine's own bearer token (at least 16 characters), required for
+      # every API and WebSocket call. Keep the value in `deploy/.env` (a file
+      # git ignores) rather than your shell; for stricter secret hygiene the
+      # engine can also read `token` from a mounted TOML config named by
+      # `ENGINE_CONFIG` — see `docs/ENGINE.md` §3.
+      ENGINE_TOKEN: "${ENGINE_TOKEN:?Set ENGINE_TOKEN in deploy/.env — the engine bearer token, at least 16 characters}"
+      # The address clients reach the front door at. Optional to start, but the
+      # engine cannot advertise an address it is not told, so set it once the
+      # engine is reachable at a stable URL.
+      ENGINE_PUBLIC_URL: "${ENGINE_PUBLIC_URL:-}"
+
+      # The core lives in the sibling container, not on loopback — this is what
+      # tells the engine to proxy to it rather than run a core of its own. The
+      # service name `vogt` resolves over the Compose network; the core listens
+      # on 8000 there.
+      VOGT_CORE_URL: "http://vogt:8000"
+      # The token the engine presents on `/api/vogt`; the core adopts the same
+      # file (see the bootstrap block above). Brokered as a file, never a bare
+      # value, so it stays out of every `docker inspect`.
+      VOGT_CORE_TOKEN_FILE: /run/secrets/vogt_core_token
+
+      # ── Voice assistant (optional) ──────────────────────────────────────
+      # Any OpenAI-compatible chat endpoint. All empty by default: with no key
+      # the assistant routes 404 and the PWA hides the tab. A key with no base
+      # URL is a startup error, not a silent default provider.
+      ENGINE_ASSISTANT_BASE_URL: "${ENGINE_ASSISTANT_BASE_URL:-}"
+      ENGINE_ASSISTANT_API_KEY: "${ENGINE_ASSISTANT_API_KEY:-}"
+      ENGINE_ASSISTANT_MODEL: "${ENGINE_ASSISTANT_MODEL:-}"
+      # Server-side speech (optional), configured independently of the chat
+      # profile. Empty base-URL lists mean off — no localhost fallbacks are
+      # assumed here, so a public build points at nothing until you name an
+      # OpenAI-compatible audio endpoint. The model/voice names are the generic
+      # OpenAI defaults, overridable from `.env`.
+      ENGINE_ASSISTANT_STT_BASE_URLS: "${ENGINE_ASSISTANT_STT_BASE_URLS:-}"
+      ENGINE_ASSISTANT_STT_API_KEY: "${ENGINE_ASSISTANT_STT_API_KEY:-}"
+      ENGINE_ASSISTANT_STT_MODEL: "${ENGINE_ASSISTANT_STT_MODEL:-whisper-1}"
+      ENGINE_ASSISTANT_TTS_BASE_URLS: "${ENGINE_ASSISTANT_TTS_BASE_URLS:-}"
+      ENGINE_ASSISTANT_TTS_API_KEY: "${ENGINE_ASSISTANT_TTS_API_KEY:-}"
+      ENGINE_ASSISTANT_TTS_MODEL: "${ENGINE_ASSISTANT_TTS_MODEL:-tts-1-hd}"
+      ENGINE_ASSISTANT_TTS_VOICE: "${ENGINE_ASSISTANT_TTS_VOICE:-nova}"
+
+    secrets:
+      - vogt_core_token
+
+    # A named volume for the pod's writable home (agent state, caches, session
+    # scratch). Named, not a host bind: Docker seeds a fresh named volume from
+    # the image, so the `sprooty` ownership the image built is preserved —
+    # binding a host directory here would arrive root-owned and break the pod.
+    # No host paths appear in this file by design.
+    volumes:
+      - engine-home:/home/sprooty
+
+    # `/readyz` is the aggregate. It reports the core's state but deliberately
+    # stays ready when the core is absent — restarting the engine would not
+    # revive a core and would kill every live terminal.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8910/readyz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  engine-home:
+
+secrets:
+  # The core token, shared by both halves (see the bootstrap block above).
+  # Create it beside this file before the first deploy:
+  #
+  #   openssl rand -hex 32 > deploy/vogt-core-token
+  #
+  # A relative path, so nothing here is tied to one host. Legitimately empty
+  # until you mint one — an empty file just leaves `/api/vogt` answering 401.
+  vogt_core_token:
+    file: ./vogt-core-token
