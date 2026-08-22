@@ -118,6 +118,12 @@ import {
 
 interface Props {
   onError?: (message: string) => void;
+  /**
+   * The shared accessible confirm (App's `confirmUser`). Used for the
+   * lens-overwrite decision so no `window.confirm` remains on this surface;
+   * optional so a bare mount still proceeds without a modal.
+   */
+  confirmAction?: (title: string, body?: string) => Promise<boolean>;
 }
 
 /** Grouping for swimlanes (FR-U13). */
@@ -759,6 +765,20 @@ const Board: Component<Props> = (props) => {
 
   const [filters, setFilters] = createSignal<Filters>(filtersFromQuery(searchParams));
   const [phone, setPhone] = createSignal(false);
+  // The phone state-pill row scrolls horizontally when the workflow has more
+  // states than fit; a right-edge fade signals there is more to scroll to, and
+  // is dropped once the reader reaches the end (#247).
+  let phonePillsRef: HTMLDivElement | undefined;
+  const [pillsClipped, setPillsClipped] = createSignal(false);
+  const measurePills = () => {
+    const el = phonePillsRef;
+    if (!el) {
+      setPillsClipped(false);
+      return;
+    }
+    const atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 1;
+    setPillsClipped(el.scrollWidth > el.clientWidth + 1 && !atEnd);
+  };
   const [expandedCards, setExpandedCards] = createSignal<Set<string>>(new Set());
   const [expandableCards, setExpandableCards] = createSignal<Set<string>>(new Set());
 
@@ -1909,14 +1929,18 @@ const Board: Component<Props> = (props) => {
 
   const [savedFilters, setSavedFilters] = createSignal<SavedFilter[]>(readSavedFilters());
 
-  const saveCurrent = (name: string) => {
+  const saveCurrent = async (name: string) => {
     // #229: a name already in use is an overwrite, and overwriting a saved view
-    // silently is how a reader loses one they meant to keep. Ask first, and
-    // leave the existing lens untouched if the answer is no.
+    // silently is how a reader loses one they meant to keep. Ask first, through
+    // the shared accessible confirm (never window.confirm), and leave the
+    // existing lens untouched if the answer is no.
     if (savedFilters().some((entry) => entry.name === name)) {
-      const replace = window.confirm(
-        `A saved lens named “${name}” already exists. Replace it?`,
-      );
+      const replace = props.confirmAction
+        ? await props.confirmAction(
+            `Replace the saved lens “${name}”?`,
+            "A saved lens with this name already exists. Replacing it discards the one stored now.",
+          )
+        : true;
       if (!replace) return;
     }
     // The poll interval is a refresh preference, not a filter, so it is left
@@ -2381,7 +2405,18 @@ const Board: Component<Props> = (props) => {
 
 
       <Show when={createOpen()}>
-        <form class="board-create" onSubmit={(event) => void submitCreate(event)}>
+        <form
+          class="board-create"
+          onSubmit={(event) => void submitCreate(event)}
+          onKeyDown={(event) => {
+            // Escape abandons the quick-create form, matching the shared
+            // dialogs' cancellation grammar.
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setCreateOpen(false);
+            }
+          }}
+        >
           <div class="board-create-grid">
             <label class="board-field board-field--wide">
               <span>Title</span>
@@ -2490,9 +2525,20 @@ const Board: Component<Props> = (props) => {
       >
         <Show when={phone() && !boardEmpty()}>
           <div
-            class="board-phone-states"
+            ref={(el) => {
+              phonePillsRef = el;
+              // Measure once the row and its pills are laid out.
+              queueMicrotask(measurePills);
+              // Re-measure when the pill set changes width.
+              createEffect(() => {
+                selectableColumns();
+                queueMicrotask(measurePills);
+              });
+            }}
+            class={`board-phone-states${pillsClipped() ? " board-phone-states--clipped" : ""}`}
             role="group"
             aria-label="Board workflow state"
+            onScroll={measurePills}
           >
             <For each={selectableColumns()}>
               {(column) => (

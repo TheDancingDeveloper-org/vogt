@@ -77,7 +77,7 @@ const EMPTY_DRAFT: TaskDraft = {
   vogtWorkItem: "",
   enabled: true,
   notifyOnStart: false,
-  notifyOnPhrase: "MYDEVENV2_NOTIFY:",
+  notifyOnPhrase: "VOGT_NOTIFY:",
   autoRetryOnRateLimit: true,
 };
 
@@ -854,7 +854,7 @@ const AgentTasks = (props: Props) => {
               <span>Notification Phrase</span>
               <input
                 type="text"
-                placeholder="MYDEVENV2_NOTIFY:"
+                placeholder="VOGT_NOTIFY:"
                 value={draft().notifyOnPhrase}
                 onInput={(e) =>
                   setDraft({ ...draft(), notifyOnPhrase: e.currentTarget.value })

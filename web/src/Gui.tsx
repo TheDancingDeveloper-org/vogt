@@ -188,6 +188,12 @@ const GuiTab: Component<Props> = (props) => {
           </div>
         }
       >
+        <div class="gui-stream-link meta">
+          Stream:{" "}
+          <a href={props.streamUrl ?? ""} target="_blank" rel="noreferrer">
+            {props.streamUrl}
+          </a>
+        </div>
         <iframe
           class="gui-frame"
           src={props.streamUrl ?? ""}

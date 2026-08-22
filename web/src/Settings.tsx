@@ -891,7 +891,7 @@ const Settings: Component<Props> = (props) => {
               <button type="button" onClick={storeCurrentProfile}>Save profile</button>
             </div>
             <Show when={profileMsg()}>
-              <div style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{profileMsg()}</div>
+              <div role="status" style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{profileMsg()}</div>
             </Show>
             <Show
               when={authProfiles().length > 0}
@@ -1218,7 +1218,7 @@ const Settings: Component<Props> = (props) => {
               </button>
             </div>
             <Show when={storageMsg()}>
-              <div style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{storageMsg()}</div>
+              <div role="status" style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{storageMsg()}</div>
             </Show>
             <div
               style={{
@@ -1507,7 +1507,7 @@ const Settings: Component<Props> = (props) => {
                 </div>
               </Show>
               <Show when={pushMsg()}>
-                <div style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{pushMsg()}</div>
+                <div role="status" style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{pushMsg()}</div>
               </Show>
             </Show>
           </div>
@@ -1561,7 +1561,7 @@ const Settings: Component<Props> = (props) => {
               </button>
             </div>
             <Show when={serverCleanupMsg()}>
-              <div style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{serverCleanupMsg()}</div>
+              <div role="status" style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{serverCleanupMsg()}</div>
             </Show>
           </div>
 
@@ -1691,6 +1691,7 @@ const Settings: Component<Props> = (props) => {
       <TemplateEditor
         open={templateEditorOpen()}
         onClose={() => setTemplateEditorOpen(false)}
+        confirmAction={confirmDestructive}
       />
     </Show>
   );

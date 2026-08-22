@@ -11,6 +11,10 @@ import {
 interface Props {
   open: boolean;
   onClose: () => void;
+  /** Shared accessible confirm (Settings' `confirmDestructive`). Guards Delete
+   *  so a preset is not removed on a single mis-click; optional so a bare mount
+   *  still proceeds. */
+  confirmAction?: (title: string, body?: string) => Promise<boolean>;
 }
 
 interface EnvPair {
@@ -122,7 +126,18 @@ const TemplateEditor: Component<Props> = (props) => {
     resetForm();
   };
 
-  const remove = (index: number) => {
+  const remove = async (index: number) => {
+    // Deleting a preset is irreversible (it is gone from this browser's store),
+    // so ask first through the shared accessible confirm rather than removing
+    // it on a single click (#247).
+    const template = templates()[index];
+    const ok = props.confirmAction
+      ? await props.confirmAction(
+          `Delete the preset “${template?.name ?? ""}”?`,
+          "This removes it from this browser. It cannot be undone.",
+        )
+      : true;
+    if (!ok) return;
     deleteCustomTemplate(index);
     refresh();
     if (editingIndex() === index) resetForm();
@@ -153,6 +168,10 @@ const TemplateEditor: Component<Props> = (props) => {
         labelledBy="template-editor-title"
         onClose={props.onClose}
         dialogClass="template-editor"
+        // While a preset is being edited, Escape would discard a half-typed
+        // form without a word. Disable it there so the only way out of the form
+        // is Cancel (deliberate); the list view keeps Escape as safe cancel.
+        closeOnEscape={editingIndex() === null}
       >
           <div class="template-editor-header">
             <h2 id="template-editor-title">Workspace Presets</h2>
@@ -160,6 +179,11 @@ const TemplateEditor: Component<Props> = (props) => {
               ×
             </button>
           </div>
+
+          <p class="template-editor-note">
+            Presets are stored in this browser — they are not synced across
+            devices or shared with the engine.
+          </p>
 
           <div class="template-editor-body">
             <Show
@@ -196,7 +220,7 @@ const TemplateEditor: Component<Props> = (props) => {
                             <button onClick={() => startCopy(index())}>Copy</button>
                             <button
                               class="danger"
-                              onClick={() => remove(index())}
+                              onClick={() => void remove(index())}
                             >
                               Delete
                             </button>

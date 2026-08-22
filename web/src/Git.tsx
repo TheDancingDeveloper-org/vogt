@@ -410,8 +410,15 @@ const GitTab: Component<Props> = (props) => {
     setDiffRefreshKey((value) => value + 1);
   };
 
-  const runGitOp = async (request: GitOpRequest): Promise<GitOpResponse | null> => {
-    setBusyAction(request.op);
+  // The busy key drives which control shows its spinner and disables. It is
+  // usually the git op, but Checkout and Create-branch are the *same* git op
+  // ("checkout" with/without --create), so they pass distinct keys to keep one
+  // from spinning the other's button (#247).
+  const runGitOp = async (
+    request: GitOpRequest,
+    busyKey: string = request.op,
+  ): Promise<GitOpResponse | null> => {
+    setBusyAction(busyKey);
     setActionError(null);
     setActionInfo(null);
     try {
@@ -579,12 +586,15 @@ const GitTab: Component<Props> = (props) => {
       setActionError("Branch name is required");
       return;
     }
-    const response = await runGitOp({
-      op: "checkout",
-      repo: props.repo,
-      branch,
-      create: true,
-    });
+    const response = await runGitOp(
+      {
+        op: "checkout",
+        repo: props.repo,
+        branch,
+        create: true,
+      },
+      "create-branch",
+    );
     if (!response) return;
     setNewBranch("");
     setBranchTarget(branch);
@@ -600,7 +610,7 @@ const GitTab: Component<Props> = (props) => {
   return (
     <div class="git-shell">
       <div class="git-toolbar">
-        <span class="git-repo">
+        <span class={`git-repo${status()?.repo || props.repo ? "" : " git-repo--placeholder"}`}>
           {status()?.repo || props.repo || "Choose a registered project"}
         </span>
         <Show when={props.repo}>
@@ -819,7 +829,7 @@ const GitTab: Component<Props> = (props) => {
                       onClick={() => void createBranch()}
                       disabled={notRepo() || busyAction() !== null || !newBranch().trim()}
                     >
-                      {busy("checkout") ? "Creating..." : "Create"}
+                      {busy("create-branch") ? "Creating..." : "Create"}
                     </button>
                   </div>
                 </div>

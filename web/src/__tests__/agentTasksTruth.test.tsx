@@ -129,6 +129,18 @@ describe("Agent Tasks read truth", () => {
   });
 });
 
+describe("#247 — the notify phrase is VOGT_NOTIFY", () => {
+  it("defaults a new task's notification phrase to VOGT_NOTIFY:", async () => {
+    vi.spyOn(api, "listAgentTasks").mockResolvedValue([]);
+    mountTasks();
+
+    await fireEvent.click(await screen.findByRole("button", { name: "New Task" }));
+    const phrase = screen.getByLabelText("Notification Phrase") as HTMLInputElement;
+    expect(phrase.value).toBe("VOGT_NOTIFY:");
+    expect(phrase.placeholder).toBe("VOGT_NOTIFY:");
+  });
+});
+
 describe("Agent Task draft ownership", () => {
   it("offers stay, discard, and save before changing task selection", async () => {
     let savedBeta = BETA;

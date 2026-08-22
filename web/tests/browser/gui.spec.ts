@@ -1996,12 +1996,19 @@ test("palette file commands open distinct real workflows and cancellation is ine
       { name: "an-identifiable-long-filename.tsx", path: "src/an-identifiable-long-filename.tsx" },
     ] : [] });
   });
+  // The engine reads only files that exist (missing paths 404). New File relies
+  // on that: creating over an occupied path is refused, so a create only lands
+  // when the read first 404s.
+  const existingFiles = new Set(["src/an-identifiable-long-filename.tsx"]);
   await page.route("**/api/files**", async (route) => {
     if (route.request().method() === "PUT") {
       createdPath = (route.request().postDataJSON() as { path: string }).path;
       return route.fulfill({ json: { ok: true, path: createdPath, bytes: 0 } });
     }
     const path = new URL(route.request().url()).searchParams.get("path") ?? "";
+    if (!existingFiles.has(path)) {
+      return route.fulfill({ status: 404, json: { error: { message: "not found" } } });
+    }
     return route.fulfill({ json: {
       path,
       size: 0,
@@ -2038,7 +2045,7 @@ test("palette file commands open distinct real workflows and cancellation is ine
   const chooser = page.getByRole("dialog", { name: "Open file" });
   await expect(chooser.getByLabel("Search workspace files")).toBeFocused();
   await chooser.getByLabel("Search workspace files").fill("identifiable");
-  const existing = chooser.getByRole("button", {
+  const existing = chooser.getByRole("option", {
     name: "an-identifiable-long-filename.tsx — src/an-identifiable-long-filename.tsx",
   });
   await expect(existing).toBeVisible();

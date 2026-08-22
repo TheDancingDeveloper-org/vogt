@@ -32,6 +32,8 @@ describe("file workflows", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("creates an empty file from distinct destination and filename fields", async () => {
+    // Nothing lives at the target path, so the create proceeds.
+    vi.spyOn(api, "readFile").mockRejectedValue(new Error("not found"));
     const writeFile = vi.spyOn(api, "writeFile").mockResolvedValue({
       ok: true,
       bytes: 0,
@@ -56,6 +58,50 @@ describe("file workflows", () => {
     expect(screen.queryByRole("dialog", { name: "New file" })).not.toBeInTheDocument();
   });
 
+  it("refuses to create over an existing file instead of silently overwriting it (#247)", async () => {
+    // The path already reads back, so the create must stop and say so, never
+    // replace the file that lives there.
+    const readFile = vi.spyOn(api, "readFile").mockResolvedValue({
+      path: "notes/release.md",
+      content: "keep me",
+    } as never);
+    const writeFile = vi.spyOn(api, "writeFile");
+    const view = workflow("new");
+
+    await fireEvent.input(screen.getByLabelText("Destination folder"), {
+      target: { value: "notes" },
+    });
+    await fireEvent.input(screen.getByLabelText("Filename"), {
+      target: { value: "release.md" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Create file" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "A file already exists at notes/release.md",
+    );
+    await waitFor(() => expect(readFile).toHaveBeenCalledWith("notes/release.md"));
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(view.onOpenFile).not.toHaveBeenCalled();
+  });
+
+  it("moves through and picks a result with the arrow keys and Enter (#247)", async () => {
+    vi.spyOn(api, "searchFiles").mockResolvedValue([
+      { name: "alpha.md", path: "notes/alpha.md" },
+      { name: "beta.md", path: "notes/beta.md" },
+    ]);
+    const view = workflow("open");
+
+    const search = screen.getByLabelText("Search workspace files");
+    await fireEvent.input(search, { target: { value: "md" } });
+    await screen.findByRole("option", { name: "alpha.md — notes/alpha.md" });
+
+    // ArrowDown moves the highlight to the second match; Enter opens it.
+    await fireEvent.keyDown(search, { key: "ArrowDown" });
+    await fireEvent.keyDown(search, { key: "Enter" });
+
+    expect(view.onOpenFile).toHaveBeenCalledWith("notes/beta.md");
+  });
+
   it("searches the workspace and opens the chosen result", async () => {
     const searchFiles = vi.spyOn(api, "searchFiles").mockResolvedValue([
       { name: "release.md", path: "notes/release.md" },
@@ -66,7 +112,7 @@ describe("file workflows", () => {
     await fireEvent.input(screen.getByLabelText("Search workspace files"), {
       target: { value: "release" },
     });
-    const result = await screen.findByRole("button", { name: "release.md — notes/release.md" });
+    const result = await screen.findByRole("option", { name: "release.md — notes/release.md" });
     expect(searchFiles).toHaveBeenCalledWith(
       "release",
       "",

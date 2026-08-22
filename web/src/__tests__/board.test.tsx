@@ -20,8 +20,11 @@ import {
 } from "./harness";
 
 /** The board at `/board`, which is the path its URL effect guards on. */
-function board(url = "/board") {
-  return mountAt("/board", url, () => <Board />);
+function board(
+  url = "/board",
+  confirmAction?: (title: string, body?: string) => Promise<boolean>,
+) {
+  return mountAt("/board", url, () => <Board confirmAction={confirmAction} />);
 }
 
 const REFUSAL =
@@ -415,6 +418,38 @@ describe("Stage 9 — the phone board is one workflow state at a time", () => {
       desktop();
     }
   });
+
+  it("fades the state-pill row's right edge when it overflows (#247)", async () => {
+    const desktop = onAPhone();
+    try {
+      fakeVogt(twoStates);
+      const { container } = board();
+      const pills = await waitFor(() => {
+        const el = container.querySelector<HTMLDivElement>(".board-phone-states");
+        expect(el).toBeTruthy();
+        return el!;
+      });
+
+      // jsdom reports no layout, so stand in a row wider than its viewport,
+      // scrolled to the start — the state the fade is a cue for.
+      Object.defineProperty(pills, "scrollWidth", { value: 600, configurable: true });
+      Object.defineProperty(pills, "clientWidth", { value: 200, configurable: true });
+      Object.defineProperty(pills, "scrollLeft", { value: 0, configurable: true });
+      fireEvent.scroll(pills);
+      await waitFor(() =>
+        expect(pills.classList.contains("board-phone-states--clipped")).toBe(true),
+      );
+
+      // Scrolled to the end, the cue is dropped.
+      Object.defineProperty(pills, "scrollLeft", { value: 400, configurable: true });
+      fireEvent.scroll(pills);
+      await waitFor(() =>
+        expect(pills.classList.contains("board-phone-states--clipped")).toBe(false),
+      );
+    } finally {
+      desktop();
+    }
+  });
 });
 
 describe("FR-U25 — a card with more to say expands where it stands", () => {
@@ -722,6 +757,22 @@ describe("FR-U22 — quick-create has a binding, now that there is one to bind",
 
     expect(container.querySelector(".board-create")).toBeNull();
   });
+
+  it("closes the quick-create form on Escape (#247)", async () => {
+    fakeVogt();
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    fireEvent.keyDown(card(container, "WI-1"), { key: "n" });
+    const form = await waitFor(() => {
+      const el = container.querySelector<HTMLFormElement>(".board-create");
+      expect(el).toBeTruthy();
+      return el!;
+    });
+
+    fireEvent.keyDown(form, { key: "Escape" });
+    await waitFor(() => expect(container.querySelector(".board-create")).toBeNull());
+  });
 });
 
 describe("FR-U11 — the filter set is the URL", () => {
@@ -1010,7 +1061,12 @@ describe("FR-U14 — a combined filter is nameable and recalled", () => {
 
   it("confirms before overwriting a lens whose name is already taken (#229)", async () => {
     fakeVogt();
-    const view = board();
+    // #247: the overwrite prompt is the shared accessible confirm, threaded in
+    // by the shell — never window.confirm. The board hands it the decision and
+    // honours the answer.
+    let answer = false;
+    const confirm = vi.fn(async () => answer);
+    const view = board("/board", confirm);
     await waitFor(() => expect(columnNames(view.container).length).toBeGreaterThan(0));
 
     pick(view.container, "Project", "beta");
@@ -1022,12 +1078,11 @@ describe("FR-U14 — a combined filter is nameable and recalled", () => {
 
     // A second save under the same name is an overwrite: it asks first, and a
     // "no" leaves the saved query exactly as it was.
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     pick(view.container, "Label", "infra");
     await waitFor(() => expect(queryOf(view.url()).get("label")).toBe("infra"));
     fireEvent.input(nameField(view.container), { target: { value: "mine" } });
     fireEvent.click(saveButton(view.container));
-    expect(confirm).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
 
     // Still one lens, and recalling it brings back the original set (no label).
     expect(view.container.querySelectorAll(".board-saved-recall")).toHaveLength(1);
@@ -1036,12 +1091,12 @@ describe("FR-U14 — a combined filter is nameable and recalled", () => {
     expect(queryOf(view.url()).get("project")).toBe("beta");
 
     // A "yes" replaces it in place.
-    confirm.mockReturnValue(true);
+    answer = true;
     pick(view.container, "Label", "infra");
     await waitFor(() => expect(queryOf(view.url()).get("label")).toBe("infra"));
     fireEvent.input(nameField(view.container), { target: { value: "mine" } });
     fireEvent.click(saveButton(view.container));
-    expect(confirm).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(2));
     expect(view.container.querySelectorAll(".board-saved-recall")).toHaveLength(1);
 
     const clear = [...view.container.querySelectorAll("button")].find(
@@ -1051,8 +1106,6 @@ describe("FR-U14 — a combined filter is nameable and recalled", () => {
     await waitFor(() => expect(queryOf(view.url()).get("label")).toBeNull());
     fireEvent.click(view.container.querySelector<HTMLButtonElement>(".board-saved-recall")!);
     await waitFor(() => expect(queryOf(view.url()).get("label")).toBe("infra"));
-
-    confirm.mockRestore();
   });
 
   it("keeps a forgotten lens recoverable for a short window (#229)", async () => {

@@ -230,3 +230,58 @@ describe("Git read truth", () => {
     expect(screen.queryByText("Not a Git repository")).not.toBeInTheDocument();
   });
 });
+
+describe("#247 — branch-control polish", () => {
+  it("gives Create-branch a busy key distinct from Checkout", async () => {
+    vi.mocked(api.gitBranch).mockResolvedValue({
+      current: "main",
+      all: ["main", "feature"],
+    });
+    // A create in flight that never settles, so both buttons can be inspected
+    // mid-operation.
+    let release!: () => void;
+    vi.spyOn(api, "gitOp").mockReturnValue(
+      new Promise(() => {
+        release = () => {};
+      }) as never,
+    );
+    void release;
+    const { container } = renderGit();
+    await waitFor(() =>
+      expect(
+        container.querySelector('input[placeholder="new branch"]'),
+      ).toBeTruthy(),
+    );
+
+    const newBranch = container.querySelector<HTMLInputElement>('input[placeholder="new branch"]')!;
+    await fireEvent.input(newBranch, { target: { value: "spike" } });
+    const createButton = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Create",
+    )!;
+    await fireEvent.click(createButton);
+
+    // The Create button reflects its own operation; the Checkout button, which
+    // runs the same git "checkout" op, does not borrow the spinner.
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll("button")].some((b) => b.textContent === "Creating..."),
+      ).toBe(true),
+    );
+    const checkoutButton = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Checkout" || b.textContent === "Switching...",
+    );
+    expect(checkoutButton?.textContent).toBe("Checkout");
+  });
+
+  it("styles the empty-repo breadcrumb as a kicker, not a monospace path strip", async () => {
+    vi.spyOn(vogtApi, "listProjects").mockResolvedValue({ projects: [], total: 0 });
+    vi.spyOn(api, "operationalStatus").mockResolvedValue({
+      storage: { workspace_root: "/workspace", state_dir: "/state" },
+    } as Awaited<ReturnType<typeof api.operationalStatus>>);
+    const { container } = renderGit("");
+
+    const breadcrumb = container.querySelector(".git-repo")!;
+    expect(breadcrumb.textContent).toBe("Choose a registered project");
+    expect(breadcrumb.classList.contains("git-repo--placeholder")).toBe(true);
+  });
+});

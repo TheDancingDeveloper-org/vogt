@@ -67,6 +67,7 @@ import {
   openHistoryTab,
   openTasksTab,
   openTerminalTab,
+  renameTab,
   replaceTabs,
   initialRoute,
   recentPlaceLabel,
@@ -110,6 +111,7 @@ import {
   activityLabel,
   sessionActivityAge,
   sessionStateWord,
+  sortSessionsByAttention,
 } from "./sessionRowModel";
 import { railSections, setRailSection } from "./railSections";
 import { setExpanded } from "./fileTreeState";
@@ -465,6 +467,19 @@ const App: Component = () => {
   const confirmUser = (title: string, body?: string): Promise<boolean> => {
     return new Promise((resolve) => setConfirmReq({ title, body, resolve }));
   };
+
+  // A PTY bell (BEL) lights the session's rail dot until the reader opens it.
+  // The set is transient — bells are attention, not durable state to persist.
+  const [belledSessions, setBelledSessions] = createSignal<Set<string>>(new Set());
+  const ringBell = (sessionId: string) =>
+    setBelledSessions((prev) => new Set(prev).add(sessionId));
+  const clearBell = (sessionId: string) =>
+    setBelledSessions((prev) => {
+      if (!prev.has(sessionId)) return prev;
+      const next = new Set(prev);
+      next.delete(sessionId);
+      return next;
+    });
 
   const [publicCfg, setPublicCfg] = createSignal<PublicConfig | null>(null);
   const [configReady, setConfigReady] = createSignal(false);
@@ -1313,9 +1328,14 @@ const App: Component = () => {
             </button>
             <div hidden={!railSections.running}>
             <For
-              each={sessionsStore.order
-                .map((id) => sessionsStore.sessions[id])
-                .filter((s): s is SessionSummary => Boolean(s))
+              each={sortSessionsByAttention(
+                sessionsStore.order
+                  .map((id) => sessionsStore.sessions[id])
+                  .filter((s): s is SessionSummary => Boolean(s)),
+              )
+                // Attention order is the shared spine (matches Sessions); a
+                // stable partition then floats bookmarks to the top without
+                // disturbing the attention order within each group.
                 .sort((a, b) => {
                   const set = new Set(bookmarks());
                   return (set.has(a.id) ? 0 : 1) - (set.has(b.id) ? 0 : 1);
@@ -1332,6 +1352,7 @@ const App: Component = () => {
                   class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""} ${s.activity === "waiting-for-input" ? "waiting" : ""}`}
                   onClick={() => {
                     setOpenMenuId(null);
+                    clearBell(s.id);
                     openTerminalTab(s.id, s.name);
                     navigate(`/t/${s.id}`);
                   }}
@@ -1340,6 +1361,7 @@ const App: Component = () => {
                     if (event.key !== "Enter" && event.key !== " ") return;
                     event.preventDefault();
                     setOpenMenuId(null);
+                    clearBell(s.id);
                     openTerminalTab(s.id, s.name);
                     navigate(`/t/${s.id}`);
                   }}
@@ -1351,7 +1373,7 @@ const App: Component = () => {
                   }}
                   title={`${s.name}\ncwd: ${s.cwd}`}
                 >
-                  <span class={`activity-dot ${activityClass(s)}`} title={activityLabel(s.activity, s.exit_code)} />
+                  <span class={`activity-dot ${activityClass(s)}${belledSessions().has(s.id) ? " bell" : ""}`} title={activityLabel(s.activity, s.exit_code)} />
                   <div class="session-row-body">
                     <span class="name">{s.name}</span>
                     <span class={`state${s.activity === "waiting-for-input" ? " state--waiting" : ""}`}>
@@ -1585,7 +1607,7 @@ const App: Component = () => {
             )}
           >
           <Show when={location.pathname === "/board"}>
-            <div class="stable-place"><Board onError={(msg) => showToast(msg, { kind: "error" })} /></div>
+            <div class="stable-place"><Board onError={(msg) => showToast(msg, { kind: "error" })} confirmAction={confirmUser} /></div>
           </Show>
           <Show when={location.pathname === "/backlog"}>
             <div class="stable-place"><Backlog onError={(msg) => showToast(msg, { kind: "error" })} /></div>
@@ -1710,6 +1732,8 @@ const App: Component = () => {
                         onRemoveExited={(session) =>
                           void onCloseSession(session)
                         }
+                        onTitle={(title) => renameTab(tab().id, title)}
+                        onBell={(sessionId) => ringBell(sessionId)}
                       />
                     )}
                   </Show>

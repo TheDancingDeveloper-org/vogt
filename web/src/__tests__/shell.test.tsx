@@ -233,6 +233,24 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     expect(tabLabels(container)).toEqual([]);
   });
 
+  it("orders the rail's Running sessions by attention, like Sessions (#247)", async () => {
+    // The rail now shares Sessions' attention spine (sortSessionsByAttention):
+    // waiting-for-input leads, then running, then idle — whatever order the
+    // engine listed them in.
+    const sessions = [
+      { id: "eng-idle", name: "idle-one", cwd: "/a", activity: "idle", exit_code: null },
+      { id: "eng-wait", name: "waiting-one", cwd: "/b", activity: "waiting-for-input", exit_code: null },
+      { id: "eng-run", name: "running-one", cwd: "/c", activity: "running", exit_code: null },
+    ];
+    const { container } = mountShell("/sessions", { sessions });
+
+    const railRows = () =>
+      container.querySelectorAll(".places-rail-session-area .session-row .name");
+    await waitFor(() => expect(railRows().length).toBe(3));
+    const names = [...railRows()].map((node) => node.textContent);
+    expect(names).toEqual(["waiting-one", "running-one", "idle-one"]);
+  });
+
   it("names a missing terminal and offers recovery without a phantom tab", async () => {
     const { container } = mountShell("/t/eng-gone", { sessions: [SESSION] });
 
