@@ -4960,6 +4960,95 @@ textarea {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* The rendered-Markdown body lays its own blocks out, so it must not inherit
+   the plain body's pre-wrap (which would show the newlines between blocks). */
+.wid-body.md-body {
+  white-space: normal;
+}
+.wid-body-raw {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+}
+.wid-body-toggle {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 1px 8px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.wid-body-toggle[aria-pressed="true"] {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+/* -- sanitising Markdown renderer (#222) ---------------------------------- */
+.md-body {
+  white-space: normal;
+  word-break: break-word;
+}
+.md-body :first-child {
+  margin-top: 0;
+}
+.md-body :last-child {
+  margin-bottom: 0;
+}
+.md-h {
+  margin: 12px 0 6px;
+  line-height: 1.3;
+  font-weight: 600;
+}
+.md-h1 { font-size: 1.3em; }
+.md-h2 { font-size: 1.2em; }
+.md-h3 { font-size: 1.1em; }
+.md-h4, .md-h5, .md-h6 { font-size: 1em; }
+.md-p {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+}
+.md-ul, .md-ol {
+  margin: 0 0 8px;
+  padding-left: 1.4em;
+}
+.md-li {
+  margin: 2px 0;
+}
+.md-task {
+  list-style: none;
+  margin-left: -1.3em;
+}
+.md-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  background: var(--bg-elev);
+  border: 1px solid var(--bd);
+  padding: 0.05em 0.35em;
+  border-radius: 4px;
+}
+.md-pre {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+}
+.md-pre .md-code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 0.85em;
+}
+.md-link {
+  color: var(--accent);
+}
+.md-link--blocked {
+  color: inherit;
+  text-decoration: underline dotted;
+  cursor: not-allowed;
+}
 .wid-hint {
   margin: 0;
   font-size: 12px;
@@ -6091,7 +6180,7 @@ textarea {
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
-  white-space: pre-wrap;
+  white-space: normal;
 }
 
 .board-card-expand {

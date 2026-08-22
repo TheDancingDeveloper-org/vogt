@@ -59,6 +59,9 @@ interface PanelErrorProps {
 
 const HISTORY_PAGE_SIZE = 200;
 const HISTORY_SEARCH_LIMIT = 100;
+/** How long the reader must pause before an output search reaches the server
+ *  (#225). One search per settled query, not one per keystroke. */
+const SEARCH_DEBOUNCE_MS = 250;
 
 const EMPTY_HISTORY_DRAFT: HistoryDraft = {
   selectedId: null,
@@ -142,6 +145,12 @@ const History: Component<Props> = (props) => {
   let outputSearchInput: HTMLInputElement | undefined;
   let routeEffectReady = false;
   let lastFocusedRoute = "";
+  // The output search is debounced (#225): these track whether the pending
+  // change is one the reader typed — which drops the selection and moves the
+  // URL — or a route-driven one that set both itself, and the last settled
+  // query already acted on so a re-run does not clear a selection twice.
+  let searchWasTyped = false;
+  let committedQuery: string | null = null;
 
   const [sessions, setSessions] = createSignal<HistorySessionMetadata[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = createSignal(false);
@@ -232,10 +241,14 @@ const History: Component<Props> = (props) => {
     if (!routeEffectReady) {
       routeEffectReady = true;
     } else if (route.hasState) {
+      // The route is authoritative and carries its own selection, so the
+      // debounced search effect must not treat this as typing and clear it.
+      searchWasTyped = false;
       setOutputQuery(route.query);
       setSelectedId(route.sessionId);
       setSelectedMatch(route.matchKey);
     } else {
+      searchWasTyped = false;
       setOutputQuery("");
       setSelectedId(null);
       setSelectedMatch(null);
@@ -490,9 +503,44 @@ const History: Component<Props> = (props) => {
     return `${loaded} archived sessions loaded; more may be available`;
   });
 
+  // The output search runs server-wide, so it is debounced (#225): a keystroke
+  // no longer fires a search, a 250ms pause does. `debouncedQuery` follows
+  // `outputQuery` a beat behind, and each new keystroke clears the pending
+  // timer — so a burst of typing settles to a single server call.
+  const [debouncedQuery, setDebouncedQuery] = createSignal(untrack(outputQuery));
   createEffect(() => {
-    const query = outputQuery().trim();
-    void untrack(() => loadSearch(query));
+    const query = outputQuery();
+    const handle = window.setTimeout(
+      () => setDebouncedQuery(query),
+      SEARCH_DEBOUNCE_MS,
+    );
+    onCleanup(() => window.clearTimeout(handle));
+  });
+
+  createEffect(() => {
+    const query = debouncedQuery().trim();
+    untrack(() => {
+      // Selection and the URL follow the *settled* query, not each keystroke:
+      // clearing the selected result and rewriting the address on every
+      // character made both flicker and buried the real query under a stack
+      // of history entries. Only a query the reader actually changed does
+      // this — a route-driven change (Back/Forward, a shared link) set the
+      // selection itself and must not be undone here.
+      if (searchWasTyped && query !== committedQuery) {
+        setSelectedId(null);
+        setSelectedMatch(null);
+        navigate(
+          historyUrl(
+            { query, sessionId: null, matchKey: null, focusSearch: true },
+            location.search,
+          ),
+          { replace: true },
+        );
+      }
+      committedQuery = query;
+      searchWasTyped = false;
+      void loadSearch(query);
+    });
   });
 
   createEffect(() => {
@@ -650,16 +698,11 @@ const History: Component<Props> = (props) => {
               placeholder="Needle inside scrollback"
               value={outputQuery()}
               onInput={(event) => {
-                const query = event.currentTarget.value;
-                setOutputQuery(query);
-                setSelectedId(null);
-                setSelectedMatch(null);
-                navigate(historyUrl({
-                  query,
-                  sessionId: null,
-                  matchKey: null,
-                  focusSearch: true,
-                }, location.search), { replace: true });
+                // A keystroke only updates the field; the debounced effect
+                // above runs the search, drops the selection and moves the
+                // URL once the query settles (#225).
+                searchWasTyped = true;
+                setOutputQuery(event.currentTarget.value);
               }}
             />
           </label>

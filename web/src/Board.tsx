@@ -95,6 +95,7 @@ import { useLocation, useNavigate, useSearchParams } from "@solidjs/router";
 import { ApiError } from "./api";
 import { openWorkItemTab } from "./tabs";
 import { ViewAgeBadge, createViewAge, honestyToneClass, onVogtLive } from "./viewAge";
+import { renderMarkdown } from "./markdown";
 import { MeasuredWindow } from "./measuredWindow";
 import SurfaceHeader from "./SurfaceHeader";
 import { ProgressiveFilters, SavedLenses } from "./ProgressiveFilters";
@@ -3128,7 +3129,9 @@ const Board: Component<Props> = (props) => {
                                                   {item.title}
                                                 </div>
                                                 <Show when={cardExpanded(item.ref) && item.body?.trim()}>
-                                                  <p class="board-card-body">{item.body}</p>
+                                                  <div class="board-card-body md-body">
+                                                    {renderMarkdown(item.body ?? "")}
+                                                  </div>
                                                 </Show>
                                               </div>
                                               <div class="board-card-meta">

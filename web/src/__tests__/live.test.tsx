@@ -163,9 +163,11 @@ describe("FR-U10 — every Vogt surface says how old it is", () => {
       <WorkItemDetail itemRef="WI-1" />
     ));
 
+    // The item page subscribes now (#223), so it reads "Live" rather than
+    // naming Refresh — the same honest badge the board and audit browser show.
     await waitFor(() =>
       expect(container.querySelector(".wid-age")?.textContent).toMatch(
-        /Updated \d+s ago/,
+        /Live — updated \d+s ago/,
       ),
     );
   });
@@ -288,6 +290,79 @@ describe("FR-U10 — the board reloads on what the front door announced", () => 
     expect(
       container.querySelector('.board-cell[data-state="in progress"] textarea'),
     ).toBeTruthy();
+  });
+});
+
+// -- clause one: the item page and the backlog (#223) -----------------------
+
+describe("FR-U10 — the item page reconciles on what the front door announced", () => {
+  function commentField(container: HTMLElement): HTMLTextAreaElement {
+    const label = [...container.querySelectorAll("label.wid-field")].find(
+      (node) => node.querySelector("span")?.textContent === "Comment",
+    );
+    return label!.querySelector("textarea")!;
+  }
+
+  it("re-reads the item and its sessions when vogt-core says something changed", async () => {
+    const vogt = fakeVogt();
+    mountAt("/w/WI-1", "/w/WI-1", () => <WorkItemDetail itemRef="WI-1" />);
+    await waitFor(() => expect(vogt.matching("GET /work/get")).toHaveLength(1));
+    await liveStream(vogt);
+
+    // The item page used to sit here forever; now a transition somebody else
+    // made reaches it, and its live-activity session badge with it.
+    vogt.stream.changed();
+    await waitFor(() =>
+      expect(vogt.matching("GET /work/get").length).toBeGreaterThan(1),
+    );
+    await waitFor(() =>
+      expect(vogt.matching("GET /sessions").length).toBeGreaterThan(1),
+    );
+  });
+
+  it("does not re-read under a comment somebody is typing", async () => {
+    const vogt = fakeVogt();
+    const { container } = mountAt("/w/WI-1", "/w/WI-1", () => (
+      <WorkItemDetail itemRef="WI-1" />
+    ));
+    await waitFor(() => expect(vogt.matching("GET /work/get")).toHaveLength(1));
+    await liveStream(vogt);
+
+    // A refetch here would swap the item — and the comment being written with
+    // it — out from under the reader.
+    fireEvent.input(commentField(container), {
+      target: { value: "half a thought, not yet posted" },
+    });
+    const asked = vogt.matching("GET /work/get").length;
+
+    vogt.stream.changed();
+    await settle();
+
+    expect(vogt.matching("GET /work/get")).toHaveLength(asked);
+    expect(commentField(container).value).toBe("half a thought, not yet posted");
+  });
+});
+
+describe("FR-U10 — the backlog reconciles on tab return but not on every nudge", () => {
+  it("reloads the ranked list when the tab comes back to the front", async () => {
+    const vogt = fakeVogt({
+      "GET /backlog": { body: { items: [rankedEntry()], freshness: freshness() } },
+    });
+    mountAt("/backlog", "/backlog", () => <Backlog />);
+    await waitFor(() => expect(vogt.matching("GET /backlog")).toHaveLength(1));
+    await liveStream(vogt);
+
+    // A stream nudge still does not re-rank the estate under the reader.
+    vogt.stream.changed();
+    await settle();
+    expect(vogt.matching("GET /backlog")).toHaveLength(1);
+
+    // But a tab left in the background and brought back is the moment its
+    // answer is furthest from current, so that one case reconciles.
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() =>
+      expect(vogt.matching("GET /backlog").length).toBeGreaterThan(1),
+    );
   });
 });
 

@@ -147,7 +147,8 @@ a target-state select — the workflow's own legal edges for that card.
   deliberately not built — `REQUIREMENTS.md` §3).
 - **Quick-create** raises an item without leaving the board.
 - Long cards expand and collapse in place so their full title and body remain
-  readable without leaving the bounded, measured Board.
+  readable without leaving the bounded, measured Board. An expanded body is
+  rendered from Markdown, the same safe renderer the item page uses.
 - The board is operable from the keyboard: focus an item, move it between
   columns, open its detail, quick-create. The full list of board keys lives in
   the `?` shortcut help rather than in a legend over the cards, so the first
@@ -189,6 +190,13 @@ and why), comments, typed relations rendered as links, labels, and the
 observed evidence collected against it — each with how fresh it is and how much
 it is trusted.
 
+The description and each comment are **rendered from Markdown** — headings,
+lists, links, inline and fenced code — so an item that came from a forge reads
+as it does there rather than as literal `#` and backticks. The renderer is
+strict: it builds the formatting itself and never runs HTML or a
+`javascript:`/`data:` link out of the text. A **Raw** toggle beside the
+description shows the Markdown source when you need to copy or check it.
+
 A claim backed by a **still-running** session is marked provisional rather than
 fresh. An observation whose payload does not carry the flag at all reads as
 `unverified`, not as blank: a blank says "no opinion" when the honest answer is
@@ -207,6 +215,14 @@ a button so the page leads with the item rather than its machinery.
 this item's brief — description, `why`, relations — written to a prompt file the
 agent is pointed at. The session is linked back: the item shows its live
 activity badge, and the terminal links back to the item.
+
+The page keeps itself current the way the board does: it **subscribes to the
+change stream**, so a transition or a new comment somebody else made — and the
+session's live-activity badge — arrive here without a manual refresh, and a tab
+brought back from the background reconciles on return. The age badge reads
+`Live` while it is listening. A refresh never lands on top of something you are
+writing: while an edit, a comment or a session name is part-typed, the page
+holds the current answer rather than swapping it out from under you.
 
 ### 2.4 Projects and the drift inbox
 
@@ -302,7 +318,8 @@ the server-reported total when that count is available. If no total is
 available, a full page says that more may exist until **Load more** reaches a
 short page. Metadata filters apply only to the pages already loaded; archived
 output search runs across the server's full archive (up to the displayed result
-limit). A failed archive, search, detail or replay read stays attached to that
+limit) and is debounced, so typing a needle settles to a single server search
+rather than one per keystroke. A failed archive, search, detail or replay read stays attached to that
 panel with **Retry**. Previously loaded content remains visible but is marked
 stale; an empty archive is shown only after a successful empty response.
 
