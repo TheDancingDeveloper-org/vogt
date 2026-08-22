@@ -100,17 +100,31 @@ class ForgeIssue:
 
 @dataclass(frozen=True)
 class ForgePull:
-    """One pull/merge request, normalized across the forges' two names for it."""
+    """One pull/merge request, normalized across the forges' two names for it.
+
+    `state` is `open` or `closed`; `merged` is the separate fact a closed PR
+    needs, because a merged PR and an abandoned one both read `closed` and only
+    one of them shipped. `head_ref` is the branch name (distinct from `head`,
+    the tip SHA) — the half the PR↔work-item edge reads (#284). `review_state`,
+    `mergeable` and `checks` are the reviewability rollups a forge exposes on a
+    single-PR read; `None` is "the forge did not say", never "false".
+    """
 
     number: int
     title: str
     state: str
     repo: str
     draft: bool = False
+    merged: bool = False
     author: str | None = None
     head: str | None = None
+    head_ref: str | None = None
     base: str | None = None
+    body: str | None = None
     labels: tuple[str, ...] = ()
+    review_state: str | None = None
+    mergeable: str | None = None
+    checks: str | None = None
     updated_at: str | None = None
     closed_at: str | None = None
     source_url: str | None = None

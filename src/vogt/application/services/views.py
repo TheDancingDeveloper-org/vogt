@@ -48,6 +48,7 @@ from vogt.core.observed import (
     OBSERVED_STATE,
     WORKLIKE_KINDS,
     Rankable,
+    implemented_targets,
     is_classified,
     is_worklike,
     priority_of,
@@ -499,6 +500,21 @@ def _gather(
                     )
                 outstanding.append(observation)
             observed = outstanding
+            # Backlog collapse (#284): a PR observed to *implement* a work item
+            # is that item's stream, not a sibling of it — listing both counts
+            # one piece of work twice. When the implemented target is itself a
+            # candidate (an observed issue, or an adopted subject), the PR
+            # collapses under it and drops out here. A PR whose target is not
+            # on the board still lists on its own, so nothing is silently lost.
+            present_subjects = {o.subject_key for o in observed} | set(adopted)
+            observed = [
+                observation
+                for observation in observed
+                if not (
+                    observation.kind == "forge.pull_request"
+                    and implemented_targets(observation) & present_subjects
+                )
+            ]
             candidates += _observed_candidates(
                 ctx, observed, projects=projects, adopted=adopted, refined=refined
             )

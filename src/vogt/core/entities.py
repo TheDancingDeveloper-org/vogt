@@ -35,7 +35,20 @@ WorkKind = Literal["feature", "bug", "chore", "question"]
 Priority = Literal["p0", "p1", "p2", "p3", "p4"]
 Effort = Literal["xs", "s", "m", "l", "xl"]
 Origin = Literal["created", "adopted", "observed"]
-RelationKind = Literal["depends_on", "relates_to", "duplicate_of", "parent_of"]
+#: The typed edges out of a work item. The first four are declared by hand
+#: (`work relate`). `implemented_by` is the exception: it is **observed only**
+#: (#284) — the forge sync reads it from a PR's closing keywords and branch
+#: name and it points at a PR subject, so `work relate` refuses it. Unlike
+#: `depends_on` it never blocks completion; it informs, it does not enforce.
+RelationKind = Literal[
+    "depends_on", "relates_to", "duplicate_of", "parent_of", "implemented_by"
+]
+
+#: Relation kinds a person may declare by hand. `implemented_by` is absent:
+#: it is a fact the forge reports, never one typed in (#284).
+DECLARABLE_RELATION_KINDS: frozenset[str] = frozenset(
+    {"depends_on", "relates_to", "duplicate_of", "parent_of"}
+)
 InitiativeState = Literal["open", "closed"]
 
 #: A reason is required on every audited write and may not be blank.

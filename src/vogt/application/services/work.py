@@ -45,6 +45,7 @@ from vogt.application.services import _resolve, upstream, writeback
 from vogt.application.services.sessions import list_sessions
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.entities import (
+    DECLARABLE_RELATION_KINDS,
     Actor,
     Comment,
     Project,
@@ -850,6 +851,15 @@ def relate_work(ctx: AppContext, params: RelateWorkParams) -> WorkResult:
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[WorkResult]:
         del actor
+        if params.kind not in DECLARABLE_RELATION_KINDS:
+            # `implemented_by` is observed, never declared (#284): the forge
+            # sync reads it from a PR's closing keywords and branch name. A
+            # hand-typed one would be a claim nobody could keep true.
+            raise InvalidRequest(
+                f"{params.kind} is an observed edge, not a declared one — it "
+                "is read from a pull request's closing keywords and branch "
+                "name, and cannot be set by hand"
+            )
         item = _declared_only(ctx, txn, params.ref)
         target = _declared_only(ctx, txn, params.target)
         if item.id == target.id:
