@@ -318,7 +318,11 @@ jobs:
       # Flutter and the dev/prod split used to be build args on the merged
       # image; they are the difference between the two published pod variants
       # now, so the split is made once, here.
-      variant: ${{ github.ref == 'refs/heads/dev' && 'full' || 'lean' }}
+      # `full` for the estate's own pods — dev *and* prod. Both run coding
+      # sessions, so both need the mobile SDK; `main` is integration and
+      # takes `lean`. Written out rather than shared with the build args
+      # below because a reusable workflow's `with:` cannot read `env`.
+      variant: ${{ (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod') && 'full' || 'lean' }}
     permissions:
       contents: read
       packages: write
@@ -434,9 +438,9 @@ jobs:
           build-args: |
             POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
-            INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
-            INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' }}
-            INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' }}
+            INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
+            INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
+            INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
           # Layer cache on the estate's local-registry (#184), its own tag so
           # the stack and core streams cannot evict each other, and per-ref so
           # dev (INSTALL_AI_CLIENTS=true, the `full` pod base) and main do not.
@@ -446,7 +450,7 @@ jobs:
       - name: the merged image runs both halves
         env:
           CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
-          DEV_IMAGE: ${{ github.ref == 'refs/heads/dev' }}
+          ESTATE_IMAGE: ${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
         run: |
           set -euo pipefail
           # The same lesson the core-only smoke test records: two releases
@@ -468,12 +472,12 @@ jobs:
           # (WI-17): it was in nobody's image and only in a persisted home, so
           # replacing the home volume took it away and, again, nothing was red.
           # A tool nothing executes is a tool nothing knows it has lost.
-          if [ "${DEV_IMAGE}" = "true" ]; then
+          if [ "${ESTATE_IMAGE}" = "true" ]; then
             for tool in claude codex flutter theclawbay; do
               docker run --rm --entrypoint "$tool" "$CANDIDATE" --version >/dev/null \
-                || { echo "the dev image is missing $tool" >&2; exit 1; }
+                || { echo "the estate image is missing $tool" >&2; exit 1; }
             done
-            echo "dev image carries the AI clients and the mobile SDK"
+            echo "estate image carries the AI clients and the mobile SDK"
           fi
 
       - uses: docker/build-push-action@v6
@@ -495,9 +499,9 @@ jobs:
           build-args: |
             POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
-            INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
-            INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' }}
-            INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' }}
+            INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
+            INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
+            INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
           provenance: true
           sbom: true
           # Same cache ref as the candidate: every layer is a hit, so the push

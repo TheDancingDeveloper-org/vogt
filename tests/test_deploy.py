@@ -211,22 +211,41 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
     part worth keeping.
     """
     text = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
-    on_dev = r"=\$\{\{ github\.ref == 'refs/heads/dev' \}\}"
+    # The estate's own pods are `dev` *and* `prod`: both run coding sessions,
+    # so both need the AI clients and the mobile SDK. `main` is integration and
+    # gets neither. This was `dev` alone until prod was stood up and came up
+    # without claude, codex, flutter or theclawbay — a pod that cannot run the
+    # thing the product exists to run.
+    estate = (
+        r"=\$\{\{ github\.ref == 'refs/heads/dev' "
+        r"\|\| github\.ref == 'refs/heads/prod' \}\}"
+    )
     # INSTALL_AI_CLIENTS is still a per-commit build arg on the merged image and
     # must reach both the candidate and the pushed build, or the image that is
     # smoke-tested is not the image that is published.
-    wired = re.findall("INSTALL_AI_CLIENTS" + on_dev, text)
+    wired = re.findall("INSTALL_AI_CLIENTS" + estate, text)
     assert len(wired) == 2, (
         "INSTALL_AI_CLIENTS must be passed to both the candidate and the "
-        f"pushed build of engine/Dockerfile; found {len(wired)}"
+        f"pushed build of engine/Dockerfile, for dev and prod; found {len(wired)}"
     )
+    for arg in ("INSTALL_CADASTRE_MCP", "INSTALL_THECLAWBAY"):
+        assert len(re.findall(arg + estate, text)) == 2, (
+            f"{arg} must follow the same estate rule as INSTALL_AI_CLIENTS; a "
+            "pod with the clients but not the integrations is a third shape "
+            "nobody chose"
+        )
     # Flutter is no longer a build arg of the merged image (#184): it is the
     # difference between the two published pod-base variants, selected once for
-    # the whole build. `dev` gets `full` (Flutter), everything else `lean`, so
-    # the dev image still carries the mobile SDK — proven by the loop below.
+    # the whole build. The estate refs get `full` (Flutter), `main` gets `lean`.
     assert (
-        "variant: ${{ github.ref == 'refs/heads/dev' && 'full' || 'lean' }}" in text
-    ), "the pod variant must be `full` on dev (Flutter) and `lean` elsewhere"
+        "variant: ${{ (github.ref == 'refs/heads/dev' || "
+        "github.ref == 'refs/heads/prod') && 'full' || 'lean' }}" in text
+    ), "the pod variant must be `full` for dev and prod, `lean` for main"
+    # The smoke loop must run on every ref that installed them, or the tools
+    # are proven on one estate pod and merely hoped for on the other.
+    assert "ESTATE_IMAGE: ${{ github.ref == 'refs/heads/dev' || " in text, (
+        "the AI-client smoke test must gate on the same estate rule"
+    )
     assert "INSTALL_FLUTTER" not in text, (
         "Flutter moved to the pod variant (#184); INSTALL_FLUTTER is no longer "
         "a build arg of the merged image"
