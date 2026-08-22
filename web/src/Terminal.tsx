@@ -31,6 +31,7 @@ import {
   formatReconnectStatus,
   ReconnectTracker,
 } from "./terminalReconnect";
+import { applyStickyMods } from "./terminalModifiers";
 
 export interface TerminalActions {
   /** Copy the current xterm selection to the system clipboard. Returns true on success. */
@@ -141,6 +142,14 @@ const TerminalView: Component<Props> = (props) => {
     { attempt: number; nextInSec: number } | null
   >(null);
   const [queuedBytes, setQueuedBytes] = createSignal(0);
+  // Touch copy chip (#236): on a coarse pointer there is no right-click and iOS
+  // Safari fires no contextmenu on a long-press, so a live selection surfaces a
+  // floating Copy chip instead. `runCopyChip` is wired to the real clipboard
+  // path once xterm is mounted.
+  const isCoarsePointer =
+    window.matchMedia?.("(pointer: coarse)").matches ?? false;
+  const [showCopyChip, setShowCopyChip] = createSignal(false);
+  let runCopyChip: () => void = () => {};
   let pasteResolve: ((v: string | null) => void) | null = null;
 
   const syncQueuedBytes = () => setQueuedBytes(pendingInputBytes);
@@ -262,8 +271,11 @@ const TerminalView: Component<Props> = (props) => {
   };
 
   const dispatchInput = (data: string | ArrayBuffer) => {
-    if (props.interceptInput?.(data)) return;
-    sendToPty(data);
+    // Sticky Ctrl/Alt from the phone modkey row lands here for soft-keyboard
+    // characters: `Ctrl` armed + `r` typed → `^R` (#236).
+    const next = applyStickyMods(data);
+    if (props.interceptInput?.(next)) return;
+    sendToPty(next);
   };
 
   const sendResize = () => {
@@ -605,6 +617,25 @@ const TerminalView: Component<Props> = (props) => {
     // Auto-copy on selection-end is nice on desktop but surprising on mobile
     // (long-press to select → release accidentally clobbers the clipboard).
     // We hold this back and rely on the explicit shortcuts / context menu.
+    //
+    // But a coarse pointer has neither: no right-click, and iOS Safari fires no
+    // contextmenu on a long-press. So on touch we surface an explicit Copy chip
+    // whenever there is a live selection — a tap copies, it does not auto-fire.
+    runCopyChip = () => {
+      setShowCopyChip(false);
+      void copySelection().then((success) => {
+        props.onNotify?.(
+          success ? "Copied to clipboard" : "Copy failed - check clipboard permissions",
+          success ? "info" : "error",
+        );
+      });
+      term?.clearSelection();
+    };
+    if (isCoarsePointer) {
+      term.onSelectionChange(() => {
+        setShowCopyChip((term?.getSelection() ?? "").length > 0);
+      });
+    }
 
     const runSearch = (dir: "next" | "prev", query: string) => {
       if (!search) return;
@@ -919,6 +950,20 @@ const TerminalView: Component<Props> = (props) => {
         </Show>
         <Show when={!reconnectView() && statusText()}>
           {(text) => <div class="terminal-status-overlay">{text()}</div>}
+        </Show>
+        <Show when={showCopyChip()}>
+          <button
+            type="button"
+            class="terminal-copy-chip"
+            onPointerDown={(event) => {
+              // Grab the tap before the terminal's own pointer handling can
+              // collapse the selection out from under us.
+              event.preventDefault();
+              runCopyChip();
+            }}
+          >
+            Copy
+          </button>
         </Show>
       </div>
       <Show when={showPasteModal()}>

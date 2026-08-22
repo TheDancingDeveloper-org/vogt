@@ -205,8 +205,18 @@ const TerminalWorkspace: Component<Props> = (props) => {
   // A−/A+ controls and any other pane that changed it.
   const [fontSize, setFontSize] = createSignal(readTerminalFontSize());
   const [themeName, setThemeNameSignal] = createSignal(getThemeName());
+  // Toolbar overflow (#236): on a phone, nine text buttons forced a hidden
+  // horizontal scroll strip. Below 768px the pane-management actions
+  // (Broadcast/Maximise/Split/Close) collapse into a single `···` menu.
+  const narrowQuery =
+    typeof window !== "undefined" && window.matchMedia
+      ? window.matchMedia("(max-width: 768px)")
+      : null;
+  const [isNarrow, setIsNarrow] = createSignal(narrowQuery?.matches ?? false);
+  const [overflowOpen, setOverflowOpen] = createSignal(false);
   let composerRef: HTMLTextAreaElement | undefined;
   let findInputRef: HTMLInputElement | undefined;
+  let overflowRef: HTMLDivElement | undefined;
 
   onMount(() => {
     const onFont = (event: Event) => {
@@ -217,11 +227,27 @@ const TerminalWorkspace: Component<Props> = (props) => {
       const next = (event as CustomEvent<{ name?: string }>).detail?.name;
       if (typeof next === "string") setThemeNameSignal(next);
     };
+    const onNarrow = (event: MediaQueryListEvent) => {
+      setIsNarrow(event.matches);
+      if (!event.matches) setOverflowOpen(false);
+    };
+    // Close the overflow menu on any tap outside it.
+    const onDocPointer = (event: PointerEvent) => {
+      if (!overflowOpen()) return;
+      const target = event.target as Node | null;
+      if (overflowRef && target && !overflowRef.contains(target)) {
+        setOverflowOpen(false);
+      }
+    };
     window.addEventListener(TERMINAL_FONT_SIZE_EVENT, onFont);
     window.addEventListener(TERMINAL_THEME_EVENT, onTheme);
+    narrowQuery?.addEventListener("change", onNarrow);
+    document.addEventListener("pointerdown", onDocPointer);
     onCleanup(() => {
       window.removeEventListener(TERMINAL_FONT_SIZE_EVENT, onFont);
       window.removeEventListener(TERMINAL_THEME_EVENT, onTheme);
+      narrowQuery?.removeEventListener("change", onNarrow);
+      document.removeEventListener("pointerdown", onDocPointer);
     });
   });
 
@@ -492,6 +518,73 @@ const TerminalWorkspace: Component<Props> = (props) => {
     }
   };
 
+  // The pane-management actions. Rendered inline on a wide toolbar and inside
+  // the `···` menu on a phone, so the button logic lives in exactly one place.
+  const overflowActions = () => (
+    <>
+      <button
+        class={broadcastEnabled() ? "active" : ""}
+        onClick={() => {
+          setBroadcast((value) => !value);
+          setOverflowOpen(false);
+        }}
+        title="Send keyboard, paste, composer, and shortcut input to every pane in this workspace"
+      >
+        {broadcastEnabled() ? "Broadcast on" : "Broadcast off"}
+      </button>
+      <Show when={panes().length > 1}>
+        <button
+          class={soloEnabled() ? "active" : ""}
+          onClick={() => {
+            setSoloed((value) => !value);
+            setOverflowOpen(false);
+          }}
+          title={
+            soloEnabled()
+              ? "Show every pane in this workspace again"
+              : "Maximise the active pane; the others keep running, hidden"
+          }
+        >
+          {soloEnabled() ? "Restore split" : "Maximise"}
+        </button>
+      </Show>
+      <button
+        onClick={() => {
+          setOverflowOpen(false);
+          void splitActive("row");
+        }}
+        disabled={busy() !== null}
+        title="Split right"
+      >
+        Split right
+      </button>
+      <button
+        onClick={() => {
+          setOverflowOpen(false);
+          void splitActive("column");
+        }}
+        disabled={busy() !== null}
+        title="Split down"
+      >
+        Split down
+      </button>
+      <button
+        onClick={() => {
+          setOverflowOpen(false);
+          void closeActivePane();
+        }}
+        disabled={!canCloseActivePane() || busy() !== null}
+        title={
+          activePane()?.sessionId === props.sessionId
+            ? "Root pane stays with this tab"
+            : "Kill and close active pane"
+        }
+      >
+        Close pane
+      </button>
+    </>
+  );
+
   return (
     <div class="terminal-workspace">
       <div class="terminal-workspace-toolbar">
@@ -554,51 +647,27 @@ const TerminalWorkspace: Component<Props> = (props) => {
         >
           Find
         </button>
-        <button
-          class={broadcastEnabled() ? "active" : ""}
-          onClick={() => setBroadcast((value) => !value)}
-          title="Send keyboard, paste, composer, and shortcut input to every pane in this workspace"
-        >
-          {broadcastEnabled() ? "Broadcast on" : "Broadcast off"}
-        </button>
-        <Show when={panes().length > 1}>
-          <button
-            class={soloEnabled() ? "active" : ""}
-            onClick={() => setSoloed((value) => !value)}
-            title={
-              soloEnabled()
-                ? "Show every pane in this workspace again"
-                : "Maximise the active pane; the others keep running, hidden"
-            }
-          >
-            {soloEnabled() ? "Restore split" : "Maximise"}
-          </button>
+        <Show when={!isNarrow()}>{overflowActions()}</Show>
+        <Show when={isNarrow()}>
+          <div class="terminal-toolbar-overflow" ref={overflowRef}>
+            <button
+              type="button"
+              class={`terminal-toolbar-overflow-toggle ${overflowOpen() ? "active" : ""}`}
+              aria-haspopup="menu"
+              aria-expanded={overflowOpen()}
+              aria-label="More terminal actions"
+              title="More actions"
+              onClick={() => setOverflowOpen((value) => !value)}
+            >
+              ···
+            </button>
+            <Show when={overflowOpen()}>
+              <div class="terminal-toolbar-overflow-menu" role="menu">
+                {overflowActions()}
+              </div>
+            </Show>
+          </div>
         </Show>
-        <button
-          onClick={() => void splitActive("row")}
-          disabled={busy() !== null}
-          title="Split right"
-        >
-          Split right
-        </button>
-        <button
-          onClick={() => void splitActive("column")}
-          disabled={busy() !== null}
-          title="Split down"
-        >
-          Split down
-        </button>
-        <button
-          onClick={() => void closeActivePane()}
-          disabled={!canCloseActivePane() || busy() !== null}
-          title={
-            activePane()?.sessionId === props.sessionId
-              ? "Root pane stays with this tab"
-              : "Kill and close active pane"
-          }
-        >
-          Close pane
-        </button>
       </div>
       <Show when={findOpen()}>
         <div class="terminal-find-bar" role="search">

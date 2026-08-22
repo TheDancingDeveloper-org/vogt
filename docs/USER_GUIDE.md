@@ -454,12 +454,17 @@ so UI changes ship without a new APK; only native plumbing needs one.
   **Settings** and **Sign out**. Every place and both account actions are two
   taps from any surface. The bar lifts above the soft keyboard rather than
   hiding under it.
-- **Modifier row** above the soft keyboard: `Esc`, `Tab`, sticky `Ctrl`,
-  arrows, `/ | ~`, `Enter`. Tap `Ctrl` then a letter to send `Ctrl+letter`.
+- **Modifier row** above the soft keyboard: `Esc`, `Tab`, sticky `Ctrl` and
+  `Alt`, arrows, `Home`/`End`/`PgUp`/`PgDn`, `/ | ~`, `Enter`. Tap `Ctrl` then a
+  letter **on the soft keyboard** to send `Ctrl+letter` (tap `Ctrl` then `r` for
+  `^R`); tap `Alt` then a letter for the `Esc`-prefixed sequence. An armed
+  `Ctrl`/`Alt` clears itself after about five seconds, or the moment you use it.
 - Use the terminal's labelled **A− / A+** controls for terminal-only font size;
   the size is remembered per device. Browser pinch/Ctrl+wheel zoom remains the
   normal whole-app zoom gesture.
-- **Copy/paste**: long-press to select, long-press empty space to paste.
+- **Copy/paste**: long-press to select — a floating **Copy** chip appears over
+  the selection; tap it to copy. To paste, use the modifier row's **Paste**
+  button (iOS Safari does not raise the desktop long-press-to-paste menu).
 - **Every control is a thumb's size.** On a phone, or on any touch screen, no
   button, tab, tick box or link in the navigation is smaller than 44 by 44
   pixels, and rows of them keep space between the targets rather than only
