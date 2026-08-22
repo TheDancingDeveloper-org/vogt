@@ -241,6 +241,15 @@ export const KEYBOARD_SHORTCUTS: readonly KeyboardShortcut[] = [
     // not require a particular Shift state so other layouts work too.
     binding: { key: "?", ctrl: false, meta: false, alt: false },
   },
+  {
+    id: "toggle-places-rail",
+    keys: ["Ctrl/Cmd", "B"],
+    description: "Show or hide the Places rail",
+    category: "Navigation",
+    context: "global",
+    contextLabel: "Anywhere",
+    binding: { key: "b", ctrlOrMeta: true, alt: false, shift: false },
+  },
 ] as const;
 
 function isEditableTarget(target: EventTarget | null): boolean {

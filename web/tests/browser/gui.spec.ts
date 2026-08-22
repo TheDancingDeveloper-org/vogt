@@ -975,6 +975,59 @@ test("Phone shell keeps labelled primary navigation and Go to reachability", asy
   await expect(page).toHaveURL(/#\/audit$/);
 });
 
+test("Phone More sheet reaches every remaining place plus Settings and Sign out", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The More sheet is the phone bottom bar's fifth slot");
+  await installFixtures(page, { assistant_enabled: true, gui_stream_available: true });
+  await page.goto("/#/sessions");
+
+  const nav = page.getByRole("navigation", { name: "Primary navigation" });
+  const more = nav.getByRole("button", { name: "More" });
+  await expect(more).toBeVisible();
+  // One tap opens the sheet.
+  await more.click();
+  const sheet = page.getByRole("dialog", { name: "More places and actions" });
+  await expect(sheet).toBeVisible();
+
+  // Every place the four-slot bar cannot reach is present, gated rows included.
+  for (const place of ["Projects", "Audit", "Git", "History", "Tasks", "GUI stream", "Assistant"]) {
+    await expect(sheet.getByRole("link", { name: place, exact: true })).toBeVisible();
+  }
+  // Settings and Sign out are reachable without a command-palette round trip.
+  await expect(sheet.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
+  await expect(sheet.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
+
+  await expect(sheet).toHaveScreenshot("phone-more-sheet.png");
+
+  // A second tap lands on the place: two taps from any surface reaches it.
+  await sheet.getByRole("link", { name: "Audit", exact: true }).click();
+  await expect(page).toHaveURL(/#\/audit$/);
+  await expect(sheet).toHaveCount(0);
+});
+
+test("Desktop Ctrl+B toggles the Places rail while palette and help stay bound", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "The rail is a desktop surface; the phone uses the More sheet");
+  await installFixtures(page);
+  await page.goto("/#/board");
+
+  const rail = page.locator(".places-rail");
+  await expect(rail).toBeVisible();
+
+  // Ctrl/Cmd+B hides the rail, and again shows it — the keyboard equivalent of
+  // the rail's own collapse/reopen controls.
+  await page.keyboard.press("ControlOrMeta+B");
+  await expect(rail).toBeHidden();
+  await expect(page.getByRole("button", { name: "Show the Places rail" })).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+B");
+  await expect(rail).toBeVisible();
+
+  // The new binding does not shadow the existing global shortcuts.
+  await page.keyboard.press("ControlOrMeta+K");
+  await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("?");
+  await expect(page.getByRole("dialog", { name: "Keyboard Shortcuts" })).toBeVisible();
+});
+
 test("Places counts expose live workload meaning without overflowing the phone bar", async ({ page }) => {
   const waitingSession = {
     ...liveSession,
