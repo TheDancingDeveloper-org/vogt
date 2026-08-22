@@ -746,6 +746,54 @@ test("Board progressive filters survive reload, history, and saved-lens recall",
   await expect(filters.getByText("Label: infra")).toBeVisible();
 });
 
+// #215: opening a work item unmounts the Board/Backlog surface. Browser Back
+// keeps the query, but the rail/palette/bottom-bar links were bare `#/board`,
+// so returning through them remounted the surface against an empty query and
+// dropped the filter set. The links now carry the last query the surface
+// wrote, so the filter survives a rail/bottom-bar return too.
+test("Board filters survive a return through the rail, not just browser Back", async ({ page }) => {
+  const nav = test.info().project.name === "phone" ? ".phone-bottom-nav" : ".places-nav";
+  await installFixtures(page);
+  await page.goto("/#/board?project=vogt");
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+  const filters = page.getByRole("group", { name: "Board filters" });
+  await expect(filters.getByText("Project: vogt")).toBeVisible();
+
+  // Open the item, which unmounts the Board (the surface mounts only while the
+  // path is exactly `/board`).
+  await page.locator(".board-card").filter({ hasText: "Measured board card" })
+    .locator(".board-card-title").click();
+  await expect(page).toHaveURL(/#\/w\/WI-7/);
+  await expect(page.locator(".vogt-surface.board")).toHaveCount(0);
+
+  // Return through the rail/bottom-bar link — not browser Back.
+  await page.locator(nav).getByRole("link", { name: /^Board/ }).click();
+
+  await expect(page).toHaveURL(/project=vogt/);
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+  await expect(filters.getByText("Project: vogt")).toBeVisible();
+});
+
+test("Backlog filters survive a return through the rail, not just browser Back", async ({ page }) => {
+  const nav = test.info().project.name === "phone" ? ".phone-bottom-nav" : ".places-nav";
+  await installFixtures(page);
+  await page.goto("/#/backlog?project=vogt");
+  await expect(page.getByRole("heading", { name: "Backlog" })).toBeVisible();
+  const filters = page.getByRole("group", { name: "Backlog filters" });
+  await expect(filters.getByText("Project: vogt")).toBeVisible();
+
+  // Open the item from its ref link, which unmounts the Backlog.
+  await page.locator(".vogt-backlog-link").first().click();
+  await expect(page).toHaveURL(/#\/w\/WI-7/);
+  await expect(page.locator(".vogt-surface.vogt-backlog")).toHaveCount(0);
+
+  await page.locator(nav).getByRole("link", { name: /^Backlog/ }).click();
+
+  await expect(page).toHaveURL(/project=vogt/);
+  await expect(page.getByRole("heading", { name: "Backlog" })).toBeVisible();
+  await expect(filters.getByText("Project: vogt")).toBeVisible();
+});
+
 test("Phone Board renders one URL-selected workflow state without widening the server filter", async ({ page }) => {
   test.skip(test.info().project.name !== "phone", "Phone state composition is a narrow-shell contract");
   const openItem = {

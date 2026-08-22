@@ -274,6 +274,28 @@ export function initialRoute(): string | null {
   return migratedInitialRoute;
 }
 
+function placePathname(path: string): string {
+  const q = path.indexOf("?");
+  return q >= 0 ? path.slice(0, q) : path;
+}
+
+/**
+ * The URL a rail/palette/bottom-bar link for a stable surface should point at.
+ *
+ * Opening a work item unmounts Board/Backlog; a bare `#/board` remounts them
+ * against an empty query, dropping the filter set the reader had applied
+ * (#215). Browser Back keeps the query, but the rail/palette/bottom-bar links
+ * do not. `rememberPlace` already records each surface's `path+search`, so the
+ * link carries the last query that surface wrote — falling back to the bare
+ * path when the surface has never been visited. Matching is by pathname, so a
+ * remembered `/board?kind=feature` is returned for a `/board` link, while a
+ * later bare `/board` (most recent, front of the list) wins over it.
+ */
+export function surfaceHref(places: RecentPlace[], path: string): string {
+  const match = places.find((place) => placePathname(place.path) === path);
+  return match ? match.path : path;
+}
+
 export function rememberPlace(path: string, label: string): void {
   if (!path || path === "/") return;
   const current = untrack(() => placesStore.places);

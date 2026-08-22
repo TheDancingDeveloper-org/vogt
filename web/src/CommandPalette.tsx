@@ -23,6 +23,8 @@ import {
   openEditorTab,
   openGuiTab,
   openTasksTab,
+  recentPlacesStore,
+  surfaceHref,
   tabsStore,
 } from "./tabs";
 import { getRecentFiles } from "./recentFiles";
@@ -861,7 +863,7 @@ const CommandPalette: Component<Props> = (props) => {
         description: "Work items by workflow state",
         icon: "",
         action: () => {
-          navigate("/board");
+          navigate(surfaceHref(recentPlacesStore.places, "/board"));
           props.onClose();
         },
         category: "Vogt",
@@ -872,7 +874,7 @@ const CommandPalette: Component<Props> = (props) => {
         description: "The ranked backlog and bugs, with the reason for the order",
         icon: "",
         action: () => {
-          navigate("/backlog");
+          navigate(surfaceHref(recentPlacesStore.places, "/backlog"));
           props.onClose();
         },
         category: "Vogt",
