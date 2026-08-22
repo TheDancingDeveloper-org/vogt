@@ -141,10 +141,13 @@ container: it optionally joins a VPN (`TAILSCALE_AUTH_KEY`), optionally starts
 a headless compositor for the GUI surface (`START_SWAY=1`), starts the Python
 core on loopback when `VOGT_CORE_URL` names a loopback address, then execs the
 engine as PID 1's child. With `VOGT_CORE_URL` unset the container runs the
-engine alone (FR-E9). `engine/deploy/docker-compose.yml` is a sample
-standalone compose file for that image; it carries values from the
-maintainer's own deployment and must be read as a template, not used as-is.
-[`DEPLOYMENT.md`](DEPLOYMENT.md) is the production guide.
+engine alone (FR-E9). `engine/deploy/docker-compose.yml` is a minimal sample
+for running a *prebuilt* merged image standalone; every deployment-specific
+value in it is a `${VAR}` placeholder with no baked address, so it is a
+template to fill in, not a file to use as-is. The supported public path is
+`deploy/engine.overlay.yml`, which builds the engine from source in front of
+the public core image and carries no host paths or secrets-manager assumptions
+at all. [`DEPLOYMENT.md`](DEPLOYMENT.md) is the production guide.
 
 The helper scripts the image installs under `/usr/local/bin/mydevenv2-*`:
 
@@ -156,7 +159,7 @@ The helper scripts the image installs under `/usr/local/bin/mydevenv2-*`:
 | `mydevenv2-rust-analyzer-mcp` | `deploy/rust-analyzer-mcp.sh` | starts `rust-analyzer-mcp` anchored to the nearest `Cargo.toml` | optional |
 | `mydevenv2-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
 | `codex` wrapper | `deploy/codex-full-access.sh` | runs Codex without its nested sandbox, because the pod is the isolation boundary | only with `INSTALL_AI_CLIENTS` |
-| `mydevenv2-agent-auth` | `deploy/agent-auth.sh` | brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`) | **optional, and coupled to the maintainer's secrets manager** — see §9 |
+| `mydevenv2-agent-auth` | `deploy/agent-auth.sh` | reference `ENGINE_AGENT_AUTH_HELPER`: brokers service credentials from Infisical into a session (`check`, `run -- <cmd>`, `shell`), driven entirely by an env manifest with no baked addresses or secret names | **optional and pluggable** — one example helper; see §9 |
 | `mydevenv2-cadastre-mcp` | `deploy/cadastre-mcp-auth.sh` | stdio bridge to a Cadastre MCP endpoint | only with `CADASTRE_MCP_ENABLED=1` |
 
 Nothing in the engine itself depends on `agent-auth`: with
@@ -1565,7 +1568,7 @@ service behind it is not there, and exactly which setting turns it on.
 | **GUI streaming** | the GUI tab's live stream of launched processes | `GUI_STREAM_URL` (+ `START_SWAY=1`, and `GUI_STREAM_VERIFIED=1` once an operator has watched it work) | `/readyz` reports `gui: disabled` and the GUI surface's affordances are withdrawn with a stated reason (FR-E10). |
 | **Agent CLIs** (`codex`, `claude`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build, or a user-managed install in the pod's home | Sessions are ordinary shells; the two "(protected)" templates cannot start. |
 | **Cadastre** (external MCP server) | an extra MCP server for agents in a session | `INSTALL_CADASTRE_MCP=true` at build + `CADASTRE_MCP_ENABLED=1` + `CADASTRE_MCP_URL` (§4) | Agents in a session cannot reach it; every other MCP server and all core function is unchanged. A separate product, never assumed present. |
-| **Agent service auth** | brokering third-party service credentials (GitHub and others) into a session from a secrets manager | `ENGINE_AUTO_AGENT_AUTH=1` + the `agent-auth.sh` helper's own secrets-manager settings (see its header) | Sessions run without those credentials pre-loaded; nothing in the engine depends on it. **The shipped helper is written against the maintainer's secrets manager and service list** — treat it as a template for your own, or leave it off. |
+| **Agent service auth** | brokering third-party service credentials (GitHub and others) into a session from a secrets manager | `ENGINE_AUTO_AGENT_AUTH=1` + `ENGINE_AGENT_AUTH_HELPER` naming a helper (the bundled Infisical example is auto-selected from a machine identity), configured through the env vars in `agent-auth.sh`'s header | Sessions run without those credentials pre-loaded; nothing in the engine depends on it. **The shipped helper is one pluggable example** — it bakes in no address, project or secret name and is driven by `ENGINE_AGENT_AUTH_SECRETS`/`_PROBES`; point the variable at your own, or leave it off. |
 
 Operator-local notes about a particular deployment belong in the git-ignored
 `docs/local/`, not here.

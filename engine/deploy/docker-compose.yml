@@ -1,107 +1,113 @@
-# MyDevEnv2 — Komodo stack
+# Engine pod — single-container sample compose (a template, not a live stack).
 #
-# Copy this file into the ops repo at `personal/mydevenv2/docker-compose.yml`,
-# then create the Komodo stack (see deploy/KOMODO.md). The CI pipeline
-# rewrites the image: line to pin the deployed SHA.
+# THE SUPPORTED PUBLIC PATH IS `deploy/engine.overlay.yml`. That overlay builds
+# the engine from source in front of the public core image and carries no host
+# paths, tailnet or secrets-manager assumptions — read `docs/DEPLOYMENT.md` §3.2.
+# This file is only a minimal example of running a *prebuilt* merged image
+# standalone; every deployment-specific value is a `${VAR}` placeholder with no
+# baked address, so a reader must fill them in rather than inherit anyone's
+# estate. The maintainer's own deployment lives in `deploy/estate.overlay.yml`.
 #
-# Bind-mount paths are absolute by design — Komodo clones the stack to a
-# fresh directory each deploy and `./relative` paths resolve to nothing.
+# Bind-mount host paths are absolute by design — a stack manager that clones the
+# stack to a fresh directory each deploy resolves `./relative` paths to nothing.
 
 services:
-  mydevenv2:
-    image: repo.indexarr.net/indexarr/mydevenv2:latest
-    container_name: mydevenv2
+  engine:
+    # A prebuilt merged image. There is no published engine image, so either
+    # point this at one you built (`docker build -f engine/Dockerfile .`) or use
+    # `deploy/engine.overlay.yml`, which builds from source for you.
+    image: "${ENGINE_IMAGE:?set ENGINE_IMAGE to a merged engine image you built, or use deploy/engine.overlay.yml}"
+    container_name: "${ENGINE_CONTAINER_NAME:-vogt-engine}"
     restart: unless-stopped
-    hostname: mydevenv2
+    hostname: "${ENGINE_CONTAINER_NAME:-vogt-engine}"
 
-    # `vogt-engine` execs as PID 1 (see entrypoint.sh). It only wait()s
-    # on the children it spawns directly (one-shot `git` calls, PTY session
-    # children); it has no SIGCHLD reaper for orphans reparented to PID 1.
-    # Terminal sessions running agents (Codex/Claude) fork lots of short-lived
-    # subprocesses (git, etc.) whose immediate parent can exit first, leaving
-    # an orphan that reparents to PID 1 and is never reaped — a permanent
-    # zombie that holds a PID slot. Docker's `init: true` inserts tini as the
-    # real PID 1, which reaps all of these, so vogt-engine never needs to.
+    # `vogt-engine` execs as PID 1 (see entrypoint.sh). It only wait()s on the
+    # children it spawns directly (one-shot `git` calls, PTY session children);
+    # it has no SIGCHLD reaper for orphans reparented to PID 1. Terminal
+    # sessions running agents fork short-lived subprocesses whose immediate
+    # parent can exit first, leaving an orphan that reparents to PID 1 and is
+    # never reaped. Docker's `init: true` inserts tini as the real PID 1, which
+    # reaps all of these, so vogt-engine never needs to.
     init: true
 
-    # Bridge networking + an explicit port. Tailscale runs in KERNEL mode
-    # inside the container (see entrypoint.sh) so an optional exit node can
-    # transparently route egress; that needs the TUN device + NET_ADMIN below.
-    # The pod becomes reachable at 100.x.x.x via Tailscale.
+    # The published port. Bind to a specific address (a tailnet/VPN address, or
+    # 127.0.0.1 behind a reverse proxy) rather than the wildcard.
     ports:
-      - "8910:8910"
+      - "${ENGINE_BIND_IP:-127.0.0.1}:${ENGINE_PORT:-8910}:8910"
 
-    # Kernel-mode Tailscale requirements. Without these the daemon falls back
-    # and the exit node silently no-ops. The host must expose /dev/net/tun
-    # (Node B does). LAN + tailnet stay direct; only public egress uses the
-    # exit node — so a down exit node degrades to direct, never a lockout.
+    # Kernel-mode Tailscale needs these; drop them if you do not run Tailscale
+    # inside the container. Without them tailscaled falls back and any exit node
+    # silently no-ops.
     cap_add:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
 
     volumes:
-      # The workspace. ALL development happens here.
-      - /mnt/2tnvme/docker/volumes/mydevenv2/workspace:/home/sprooty/Working
-      # Persist sprooty's home (caches, history, etc.) across pod rebuilds.
-      - /mnt/2tnvme/docker/volumes/mydevenv2/home:/home/sprooty
-      # Persist tailscaled state so we don't re-auth on every restart.
-      - /mnt/2tnvme/docker/volumes/mydevenv2/tailscale:/var/lib/tailscale
+      # The workspace. ALL development happens here. Left side is a host path
+      # you choose; right side is the in-image home and must not change.
+      - "${ENGINE_WORKSPACE_DIR:?set ENGINE_WORKSPACE_DIR to the host workspace directory}:/home/sprooty/Working"
+      # Persist the pod's home (caches, history, agent state) across rebuilds.
+      - "${ENGINE_HOME_DIR:?set ENGINE_HOME_DIR to the host home directory}:/home/sprooty"
+      # Persist tailscaled state so the pod does not re-auth on every restart.
+      - "${ENGINE_TAILSCALE_DIR:?set ENGINE_TAILSCALE_DIR to the host tailscale-state directory}:/var/lib/tailscale"
 
     environment:
-      # Server
-      MYDEVENV2_TOKEN: ${MYDEVENV2_TOKEN}
+      # Server. The engine bearer token, required (>=16 chars).
+      ENGINE_TOKEN: "${ENGINE_TOKEN:?the engine's primary bearer token, at least 16 characters}"
       # Optional scoped tokens. JSON array of objects:
       # [{"name":"readonly","token":"...","capabilities":[]}]
-      MYDEVENV2_EXTRA_TOKENS_JSON: ${MYDEVENV2_EXTRA_TOKENS_JSON:-}
-      # Per-token mutation rate limit for the primary token. Extra tokens can
-      # override their own limit inside MYDEVENV2_EXTRA_TOKENS_JSON.
-      MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE: ${MYDEVENV2_MUTATING_REQUEST_LIMIT_PER_MINUTE:-600}
-      MYDEVENV2_BIND: 0.0.0.0:8910
-      MYDEVENV2_SCROLLBACK_BYTES: ${MYDEVENV2_SCROLLBACK_BYTES:-4194304}
-      RUST_LOG: info
-      # Agent service auth. Default interactive sessions run through
-      # mydevenv2-agent-auth so Forgejo/Woodpecker/GitHub/Komodo credentials
-      # are available to shell-launched tools without persisting tokens.
-      INFISICAL_API_URL: http://100.92.54.45:8400
-      INFISICAL_CLIENT_ID: ${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID:?HOMELAB_MYDEVENV2_INFISICAL_CLIENT_ID is required for prod-mydevenv2 agent auth}
-      INFISICAL_CLIENT_SECRET: ${HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET:?HOMELAB_MYDEVENV2_INFISICAL_CLIENT_SECRET is required for prod-mydevenv2 agent auth}
-      MYDEVENV2_AGENT_AUTH_REQUIRED: "1"
-      MYDEVENV2_AUTO_AGENT_AUTH: "1"
-      # Private compatibility only; Vogt and the engine do not require it.
-      CADASTRE_MCP_ENABLED: "1"
-      # Tailscale auto-join. Issue a one-shot reusable key from the admin UI.
-      TAILSCALE_AUTH_KEY: ${HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY}
-      TAILSCALE_HOSTNAME: mydevenv2
-      # Keep tailnet DNS available for private service names used by native
-      # MCP/API clients. Override only when an equivalent resolver is present.
-      MYDEVENV2_TAILSCALE_ACCEPT_DNS: ${MYDEVENV2_TAILSCALE_ACCEPT_DNS:-1}
-      # Route all public egress via this exit node when explicitly set
-      # (kernel mode, see above). Blank by default: LAN + tailnet + accepted
-      # subnet routes stay direct, and public egress does too until opted in.
-      TAILSCALE_EXIT_NODE: ${MYDEVENV2_TAILSCALE_EXIT_NODE:-}
-      # Phase 5: set the verification bit only after the first two are wired
-      # and an operator has watched a launched process render in the stream.
-      START_SWAY: "0"
-      GUI_STREAM_URL: ""
-      GUI_STREAM_VERIFIED: "0"
-      # Phase 6: FCM service-account JSON (single-line). Empty disables FCM
+      ENGINE_EXTRA_TOKENS_JSON: "${ENGINE_EXTRA_TOKENS_JSON:-}"
+      ENGINE_MUTATING_REQUEST_LIMIT_PER_MINUTE: "${ENGINE_MUTATING_REQUEST_LIMIT_PER_MINUTE:-600}"
+      ENGINE_BIND: 0.0.0.0:8910
+      ENGINE_SCROLLBACK_BYTES: "${ENGINE_SCROLLBACK_BYTES:-4194304}"
+      RUST_LOG: "${RUST_LOG:-info}"
+
+      # ── Agent service auth (optional) ──────────────────────────────────────
+      # Point ENGINE_AGENT_AUTH_HELPER at a helper that brokers service
+      # credentials into sessions, or leave everything below unset and sessions
+      # run as plain shells. The bundled Infisical example
+      # (`mydevenv2-agent-auth`) is auto-selected when a machine identity is
+      # present; it is driven entirely by ENGINE_AGENT_AUTH_SECRETS (see the
+      # script header). No secrets-manager address is baked in.
+      INFISICAL_API_URL: "${INFISICAL_API_URL:-}"
+      INFISICAL_CLIENT_ID: "${INFISICAL_CLIENT_ID:-}"
+      INFISICAL_CLIENT_SECRET: "${INFISICAL_CLIENT_SECRET:-}"
+      ENGINE_AGENT_AUTH_REQUIRED: "${ENGINE_AGENT_AUTH_REQUIRED:-0}"
+      ENGINE_AUTO_AGENT_AUTH: "${ENGINE_AUTO_AGENT_AUTH:-0}"
+
+      # ── Cadastre (separate product, opt-in — NFR-O5) ───────────────────────
+      # Off unless you run a Cadastre bridge and name its endpoint.
+      CADASTRE_MCP_ENABLED: "${CADASTRE_MCP_ENABLED:-0}"
+      CADASTRE_MCP_URL: "${CADASTRE_MCP_URL:-}"
+
+      # ── Tailnet (optional) ─────────────────────────────────────────────────
+      # Set an auth key to auto-join; leave empty to run without Tailscale.
+      TAILSCALE_AUTH_KEY: "${TAILSCALE_AUTH_KEY:-}"
+      TAILSCALE_HOSTNAME: "${TAILSCALE_HOSTNAME:-vogt-engine}"
+      MYDEVENV2_TAILSCALE_ACCEPT_DNS: "${ENGINE_TAILSCALE_ACCEPT_DNS:-1}"
+      # Route public egress via this exit node when explicitly set. Blank by
+      # default: LAN + tailnet + accepted subnet routes stay direct.
+      TAILSCALE_EXIT_NODE: "${ENGINE_TAILSCALE_EXIT_NODE:-}"
+
+      # ── Optional surfaces, each of which degrades rather than fails ─────────
+      START_SWAY: "${START_SWAY:-0}"
+      GUI_STREAM_URL: "${GUI_STREAM_URL:-}"
+      # FCM service-account JSON (single-line). Empty disables the FCM
       # transport; web-push still works for any browser subscription.
-      MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON: ${MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON}
-      # Conversational assistant (docs/ASSISTANT.md). Empty key disables the
-      # feature entirely — routes 404 and the PWA hides the tab.
-      MYDEVENV2_ASSISTANT_API_KEY: ${MYDEVENV2_ASSISTANT_API_KEY:-}
-      MYDEVENV2_ASSISTANT_MODEL: ${MYDEVENV2_ASSISTANT_MODEL:-gpt-5.4-mini}
-      MYDEVENV2_ASSISTANT_BASE_URL: ${MYDEVENV2_ASSISTANT_BASE_URL:-https://api.theclawbay.com/v1}
-      # The cargo cache is on the host bind-mount; sccache hits Redis on Node B.
-      SCCACHE_REDIS: redis://100.92.54.45:6380
+      ENGINE_FCM_SERVICE_ACCOUNT_JSON: "${ENGINE_FCM_SERVICE_ACCOUNT_JSON:-}"
+      # Conversational assistant. Empty key disables it — routes 404 and the PWA
+      # hides the tab. A key with no base URL is a startup error, not a silent
+      # default provider.
+      ENGINE_ASSISTANT_API_KEY: "${ENGINE_ASSISTANT_API_KEY:-}"
+      ENGINE_ASSISTANT_MODEL: "${ENGINE_ASSISTANT_MODEL:-}"
+      ENGINE_ASSISTANT_BASE_URL: "${ENGINE_ASSISTANT_BASE_URL:-}"
+      # The cargo cache lives on the home bind mount; point sccache at a Redis
+      # you run, or leave it unset — an absent sccache costs build speed only.
+      SCCACHE_REDIS: "${SCCACHE_REDIS:-}"
 
-    # Host Docker access is intentionally NOT enabled in the base stack.
-    # Choose an explicit overlay in Komodo when you want host-daemon access.
-
-    # Sway/Selkies (Phase 5) will benefit from /dev/dri pass-through for GPU
-    # encode. Add it to the `devices:` list above when Phase 5 lands:
-    #   - /dev/dri:/dev/dri
+    # Host Docker access is intentionally NOT enabled here. Add an explicit
+    # docker-socket overlay when you want host-daemon access from a session.
 
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8910/readyz"]

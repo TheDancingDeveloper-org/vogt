@@ -126,29 +126,40 @@ if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
     fi
 fi
 
-# Agent CLIs are deliberately not installed at container startup. The image
-# carries neutral infrastructure tooling; optional agents can be installed by
-# the user. A dedicated Infisical machine identity enables on-demand service
-# auth through `mydevenv2-agent-auth` without exporting tokens to PID 1.
+# Agent CLIs are deliberately not installed at container startup; the image
+# carries neutral infrastructure tooling and optional agents can be added by
+# the user. Service credentials for agent commands are brokered on demand by a
+# pluggable *agent-auth helper*, so tokens never reach PID 1.
+#
+# `ENGINE_AGENT_AUTH_HELPER` names that helper. The image ships one reference
+# implementation, `mydevenv2-agent-auth` (Infisical), auto-selected when a
+# secrets-manager machine identity is present so a deployment need not name it
+# explicitly. With neither a helper nor an identity, agent auth is simply not
+# configured and is skipped — a clean clone booting with just a token gets a
+# working engine and plain shells.
+#
 # `ENGINE_AGENT_AUTH_REQUIRED` is the current name; `MYDEVENV2_AGENT_AUTH_REQUIRED`
 # is still accepted as a legacy alias for one release (#203).
 agent_auth_required="${ENGINE_AGENT_AUTH_REQUIRED:-${MYDEVENV2_AGENT_AUTH_REQUIRED:-0}}"
-if [[ -n "${INFISICAL_CLIENT_ID:-}" && -n "${INFISICAL_CLIENT_SECRET:-}" ]]; then
-    echo "agent service auth available via mydevenv2-agent-auth"
+agent_auth_helper="${ENGINE_AGENT_AUTH_HELPER:-}"
+if [[ -z "$agent_auth_helper" \
+      && -n "${INFISICAL_CLIENT_ID:-}" && -n "${INFISICAL_CLIENT_SECRET:-}" ]]; then
+    agent_auth_helper="mydevenv2-agent-auth"
+fi
+if [[ -n "$agent_auth_helper" ]]; then
+    echo "agent service auth available via ${agent_auth_helper##*/}"
     if [[ "$agent_auth_required" == "1" || "$agent_auth_required" == "true" ]]; then
         echo "validating required agent service auth"
-        if ! mydevenv2-agent-auth run -- true; then
+        if ! "$agent_auth_helper" run -- true; then
             echo "agent service auth validation failed" >&2
             exit 1
         fi
     fi
+elif [[ "$agent_auth_required" == "1" || "$agent_auth_required" == "true" ]]; then
+    echo "agent service auth required but no ENGINE_AGENT_AUTH_HELPER is configured" >&2
+    exit 1
 else
-    if [[ "$agent_auth_required" == "1" || "$agent_auth_required" == "true" ]]; then
-        echo "agent service auth required but Infisical machine identity is not configured" >&2
-        exit 1
-    else
-        echo "agent service auth unavailable: Infisical machine identity not configured" >&2
-    fi
+    echo "agent auth not configured; skipping"
 fi
 
 if [[ "${START_SWAY:-0}" == "1" ]]; then
@@ -282,7 +293,7 @@ if [[ -n "${VOGT_CORE_URL:-}" ]]; then
         # collector reports nothing about a tree nobody edits, which renders as
         # an empty estate rather than as "could not look". Say so loudly at
         # boot, because that is the only moment anyone is reading.
-        workspace_root="${HOME:-/home/sprooty}/Working"
+        workspace_root="${HOME:-}/Working"
         import_root="${VOGT_IMPORT_ROOT:-}"
         if [[ -n "$import_root" && "$import_root" != "$workspace_root"* ]]; then
             echo "vogt-core: WARNING VOGT_IMPORT_ROOT (${import_root}) is not" \

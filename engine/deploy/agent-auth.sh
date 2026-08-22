@@ -1,33 +1,52 @@
 #!/usr/bin/env bash
-# Load service credentials on demand from Infisical for agent commands.
-# The base container intentionally does not install or authenticate Codex/Claude.
+# Reference agent-auth helper: load service credentials on demand from a
+# secrets manager for agent commands, without persisting tokens to PID 1.
 #
-# ESTATE TOOLING — not part of the public Vogt product. This script brokers
-# *this estate's* service credentials (Infisical, Komodo, Woodpecker, Forgejo,
-# GitHub, Cadastre) into a session on demand. A public reader inherits it in the
-# engine image but has nothing for it to reach: the Infisical project IDs, the
-# default Cadastre MCP URL and the secret names below are all estate values.
-# Absent that estate a session simply runs without these credentials pre-loaded
-# — nothing in the core product depends on it. See ENGINE.md §9.
+# This is one *example* of an `ENGINE_AGENT_AUTH_HELPER`, not a required part
+# of Vogt. It is written against Infisical, and it is entirely data-driven: it
+# bakes in no address, project, secret name or service list. A deployment that
+# wants credential brokering points `ENGINE_AGENT_AUTH_HELPER` at this script
+# and describes its own secrets through the environment (below); a deployment
+# that does not simply leaves the helper unselected, and the entrypoint skips
+# it. A clean clone running the image with only a token needs none of this.
+#
+# What it reads from the environment when it is actually invoked (never at
+# import — a stranger sourcing this file to reuse `probe_mcp` gets no failure):
+#
+#   INFISICAL_API_URL              required — the secrets-manager API
+#   INFISICAL_CLIENT_ID/_SECRET    required — the machine identity
+#   ENGINE_INFISICAL_ENV           Infisical environment slug (default: prod)
+#   ENGINE_AGENT_AUTH_SECRETS      the secrets to load, one per line:
+#                                    VAR PROJECT_ID SECRET_NAME [optional]
+#                                  each fetched and exported as VAR; a missing
+#                                  required secret fails, naming the secret.
+#   ENGINE_AGENT_AUTH_GH_TOKEN_FROM  a VAR from the manifest to also export as
+#                                    GH_TOKEN (the git/gh default identity).
+#   ENGINE_AGENT_AUTH_PROBES       optional `check` probes, one per line:
+#                                    NAME URL TOKEN_VAR   (a bearer GET)
+#
+# Vogt and Cadastre are handled directly rather than through the manifest,
+# because their credential is brokered as a *file* and Cadastre is an explicit
+# opt-in (NFR-O5):
+#
+#   MYDEVENV2_VOGT_SECRET_NAME     the Vogt token secret for this instance
+#   MYDEVENV2_CADASTRE_SECRET_NAME the Cadastre token secret (opt-in only)
+#   ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID  the project holding those two secrets
+#   CADASTRE_MCP_ENABLED           "1" turns the Cadastre integration on
+#   CADASTRE_MCP_URL               the Cadastre MCP endpoint (no default)
 
 set -euo pipefail
 
-readonly DEFAULT_INFISICAL_API_URL="http://100.92.54.45:8400"
-readonly CICD_PROJECT_ID="6d6caff5-7aaf-42f8-a135-2455d7629af8"
-readonly INFRASTRUCTURE_PROJECT_ID="5b7e75de-e874-484d-9595-873acd6bfd07"
-readonly APPS_PROJECT_ID="76b1ebe1-3656-4cef-952c-30d5d489c6e7"
-readonly INFISICAL_ENV="prod"
-# Cadastre-scoped like the other Cadastre values in this file
-# (CADASTRE_MCP_URL, CADASTRE_HTTP_TOKEN), not prefixed with a product name.
+readonly INFISICAL_ENV="${ENGINE_INFISICAL_ENV:-prod}"
+# Cadastre is an explicit private-stack integration, not a prerequisite for an
+# authenticated shell or for Vogt. Only fetched when the stack opts in.
 readonly CADASTRE_MCP_ENABLED="${CADASTRE_MCP_ENABLED:-0}"
-readonly CADASTRE_SECRET_NAME="${MYDEVENV2_CADASTRE_SECRET_NAME:-HOMELAB_CADASTRE_HTTP_TOKEN}"
-readonly VOGT_SECRET_NAME="${MYDEVENV2_VOGT_SECRET_NAME:-HOMELAB_VOGT_AGENT_TOKEN}"
-# Estate address. A public operator sets CADASTRE_MCP_URL or leaves Cadastre off.
-readonly DEFAULT_CADASTRE_MCP_URL="https://winrarhost.tailc7d3c.ts.net:18092/mcp"
-readonly DEFAULT_CADASTRE_MCP_RESOLVE="${MYDEVENV2_CADASTRE_MCP_RESOLVE:-}"
-# The same default `vogt-mcp-auth.sh` uses, and for the reason it gives: in
-# the merged stack the engine is the only published port (NFR-D11) and this
-# runs inside that container, so loopback needs no DNS and no certificate. A
+readonly CADASTRE_SECRET_NAME="${MYDEVENV2_CADASTRE_SECRET_NAME:-}"
+readonly VOGT_SECRET_NAME="${MYDEVENV2_VOGT_SECRET_NAME:-}"
+readonly TOKEN_PROJECT_ID="${ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID:-}"
+# The front door on loopback, the same default `vogt-mcp-auth.sh` uses: in the
+# merged stack the engine is the only published port (NFR-D11) and this runs
+# inside that container, so loopback needs no DNS and no certificate. A
 # session's own `VOGT_URL` still wins where one is set.
 readonly DEFAULT_VOGT_URL="http://127.0.0.1:8910"
 AUTH_TMP_DIR=""
@@ -46,8 +65,8 @@ Usage:
   mydevenv2-agent-auth shell
 
 Commands:
-  check  Fetch credentials and validate Infisical, Forgejo, Woodpecker,
-         GitHub, Komodo, Cadastre MCP and Vogt MCP access.
+  check  Fetch credentials and validate secrets-manager access, any configured
+         service probes, and the Cadastre and Vogt MCP endpoints.
   run    Execute one command with service credentials on demand in memory.
   shell  Start a login shell with service credentials on demand in memory.
 EOF
@@ -63,10 +82,12 @@ require_command() {
 }
 
 require_identity() {
+    [[ -n "${INFISICAL_API_URL:-}" ]] || die \
+        "INFISICAL_API_URL is not set; the Infisical agent-auth helper needs the secrets-manager API URL"
     [[ -n "${INFISICAL_CLIENT_ID:-}" ]] || die \
-        "INFISICAL_CLIENT_ID is not configured; add the MyDevEnv2 machine identity to the Komodo stack"
+        "INFISICAL_CLIENT_ID is not set; the Infisical agent-auth helper needs a machine identity"
     [[ -n "${INFISICAL_CLIENT_SECRET:-}" ]] || die \
-        "INFISICAL_CLIENT_SECRET is not configured; add the MyDevEnv2 machine identity to the Komodo stack"
+        "INFISICAL_CLIENT_SECRET is not set; the Infisical agent-auth helper needs a machine identity"
 }
 
 probe_mcp() {
@@ -106,7 +127,7 @@ mint_access_token() {
     temp_home="$(mktemp -d)"
     if ! token="$(HOME="$temp_home" infisical login \
         --method universal-auth \
-        --domain "${INFISICAL_API_URL:-$DEFAULT_INFISICAL_API_URL}" \
+        --domain "${INFISICAL_API_URL:-}" \
         --client-id "$INFISICAL_CLIENT_ID" \
         --client-secret "$INFISICAL_CLIENT_SECRET" \
         --plain --silent)"; then
@@ -120,100 +141,94 @@ mint_access_token() {
 get_secret() {
     local access_token="$1" project_id="$2" secret_name="$3"
     infisical secrets get "$secret_name" \
-        --domain "${INFISICAL_API_URL:-$DEFAULT_INFISICAL_API_URL}" \
+        --domain "${INFISICAL_API_URL:-}" \
         --projectId "$project_id" \
         --env "$INFISICAL_ENV" \
         --token "$access_token" \
         --plain --silent
 }
 
-load_agent_environment() {
-    local access_token github_destination_token github_source_token
+# Load every secret named in ENGINE_AGENT_AUTH_SECRETS, export it under its
+# manifest variable, and optionally alias one of them to GH_TOKEN.
+#
+# Assign, check, then export — never `export VAR="$(...)"`. `export` is a
+# command with its own exit status, and it succeeds; under `set -e` a
+# `get_secret` that fails inside that substitution would leave the variable
+# empty and be swallowed, surfacing later as a 401 from whichever service is
+# asked first — a long way from the secret store that was actually
+# unavailable. `printf -v` assigns first, so the emptiness guard below is real.
+load_manifest_secrets() {
+    local access_token="$1"
+    local line var project name flag value
+    [[ -n "${ENGINE_AGENT_AUTH_SECRETS:-}" ]] || return 0
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        read -r var project name flag <<<"$line"
+        [[ -n "${var:-}" ]] || continue
+        [[ -n "${project:-}" && -n "${name:-}" ]] || die \
+            "malformed ENGINE_AGENT_AUTH_SECRETS entry (want 'VAR PROJECT_ID SECRET_NAME [optional]'): $line"
+        value="$(get_secret "$access_token" "$project" "$name" || true)"
+        if [[ -z "$value" && "${flag:-required}" != "optional" ]]; then
+            die "Infisical secret $name is missing or empty"
+        fi
+        printf -v "$var" '%s' "$value"
+        export "${var?}"
+        if [[ "$var" == "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" ]]; then
+            export GH_TOKEN="$value"
+        fi
+    done <<<"${ENGINE_AGENT_AUTH_SECRETS}"
+}
 
+load_agent_environment() {
     require_identity
     require_command infisical
+    local access_token
     access_token="$(mint_access_token)" || die "Infisical universal-auth login failed"
 
-    # Assigned, checked, then exported — never `export X="$(...)"`.
-    #
-    # `export` is a command with its own exit status, and it succeeds. Under
-    # `set -e` that status is the one tested, so a `get_secret` that fails
-    # inside the substitution does not stop the script: the variable is left
-    # empty and everything downstream runs with a credential that is the empty
-    # string. The failure then surfaces as a 401 from whichever service is
-    # asked first — a long way from the Infisical call that actually failed,
-    # and looking like a revoked token rather than an unavailable secret store.
-    #
-    # The two GitHub secrets below already did it this way. These five did
-    # not, and had no emptiness guard either.
-    GIT_AUTH_TOKEN="$(get_secret "$access_token" "$CICD_PROJECT_ID" GIT_AUTH_TOKEN || true)"
-    [[ -n "${GIT_AUTH_TOKEN}" ]] || die "Infisical secret GIT_AUTH_TOKEN is missing or empty"
-    export GIT_AUTH_TOKEN
-    FORGEJO_TOKEN="$(get_secret "$access_token" "$CICD_PROJECT_ID" FORGEJO_TOKEN || true)"
-    [[ -n "${FORGEJO_TOKEN}" ]] || die "Infisical secret FORGEJO_TOKEN is missing or empty"
-    export FORGEJO_TOKEN
-    WOODPECKER_TOKEN="$(get_secret "$access_token" "$INFRASTRUCTURE_PROJECT_ID" WOODPECKER_TOKEN || true)"
-    [[ -n "${WOODPECKER_TOKEN}" ]] || die "Infisical secret WOODPECKER_TOKEN is missing or empty"
-    export WOODPECKER_TOKEN
-    # GITHUB_PAT / GH_RELEASE_TOKEN are retired release-automation names whose
-    # values are revoked. They used to be exported here as GH_TOKEN, so every
-    # `gh` call in an auto-agent-auth shell failed with "Bad credentials" and
-    # agents concluded GitHub auth was unavailable. Clear anything inherited
-    # so a stale value cannot outlive this fix.
+    # Retired release-automation names whose values are revoked. If they are
+    # inherited they masquerade as a GitHub credential and every `gh` call
+    # fails with "Bad credentials"; clear them so a stale value cannot outlive
+    # a fresh login. GH_TOKEN is (re)set from the manifest alias below.
     unset GITHUB_PAT GH_RELEASE_TOKEN
-    github_destination_token="$(get_secret "$access_token" "$CICD_PROJECT_ID" GITHUB_DANCINGDEVELOPER_PAT 2>/dev/null || true)"
-    [[ -n "$github_destination_token" ]] || die \
-        "Infisical secret GITHUB_DANCINGDEVELOPER_PAT is missing or empty; refusing ambiguous GitHub credential fallback"
-    export GITHUB_DANCINGDEVELOPER_PAT="$github_destination_token"
-    # TheDancingDeveloper-org is the main org, so it owns the default GH_TOKEN.
-    export GH_TOKEN="$github_destination_token"
+    load_manifest_secrets "$access_token"
 
-    # AusAgentSmith-org is still live and holds its own distinct repo set
-    # (AiFw, lindirstat-rs, email-rs, fluent-gpui, ...), so the pod needs both
-    # identities. Source-org work runs as:
-    #   GH_TOKEN="$GITHUB_AUSAGENTSMITH_PAT" gh ...
-    github_source_token="$(get_secret "$access_token" "$CICD_PROJECT_ID" GITHUB_AUSAGENTSMITH_PAT 2>/dev/null || true)"
-    [[ -n "$github_source_token" ]] || die \
-        "Infisical secret GITHUB_AUSAGENTSMITH_PAT is missing or empty"
-    export GITHUB_AUSAGENTSMITH_PAT="$github_source_token"
-    HOMELAB_KOMODO_API_KEY="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_KEY || true)"
-    [[ -n "${HOMELAB_KOMODO_API_KEY}" ]] || die "Infisical secret HOMELAB_KOMODO_API_KEY is missing or empty"
-    export HOMELAB_KOMODO_API_KEY
-    HOMELAB_KOMODO_API_SECRET="$(get_secret "$access_token" "$APPS_PROJECT_ID" HOMELAB_KOMODO_API_SECRET || true)"
-    [[ -n "${HOMELAB_KOMODO_API_SECRET}" ]] || die "Infisical secret HOMELAB_KOMODO_API_SECRET is missing or empty"
-    export HOMELAB_KOMODO_API_SECRET
-    # Cadastre is an explicit private-stack integration, not a prerequisite
-    # for an authenticated shell or for Vogt. Only fetch its credential when
-    # that stack has opted in.
+    # Cadastre is an explicit private-stack integration. Only fetch its
+    # credential when that stack has opted in.
     if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
-        CADASTRE_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$CADASTRE_SECRET_NAME" || true)"
+        [[ -n "$CADASTRE_SECRET_NAME" ]] || die \
+            "CADASTRE_MCP_ENABLED=1 but MYDEVENV2_CADASTRE_SECRET_NAME names no secret"
+        [[ -n "$TOKEN_PROJECT_ID" ]] || die \
+            "CADASTRE_MCP_ENABLED=1 but ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID is not set"
+        CADASTRE_HTTP_TOKEN="$(get_secret "$access_token" "$TOKEN_PROJECT_ID" "$CADASTRE_SECRET_NAME" || true)"
         [[ -n "$CADASTRE_HTTP_TOKEN" ]] || die \
             "Infisical secret $CADASTRE_SECRET_NAME is missing or empty"
         export CADASTRE_HTTP_TOKEN
     else
-        unset CADASTRE_HTTP_TOKEN CADASTRE_HTTP_TOKEN_FILE
+        unset CADASTRE_HTTP_TOKEN CADASTRE_HTTP_TOKEN_FILE 2>/dev/null || true
     fi
-    # Vogt is the estate's backlog/project tracker, reached the same way for
-    # the same reasons. Absent secret is not fatal, unlike cadastre's: an
-    # instance may legitimately not be deployed yet, and agent auth must keep
-    # working for git/gh regardless.
+
+    # Vogt is the estate's backlog/project tracker, reached the same way. An
+    # absent token is not fatal, unlike Cadastre's: an instance may legitimately
+    # not be deployed yet, and agent auth must keep working for git/gh
+    # regardless.
     #
-    # Inside a coding session, do not: the session already holds a token Vogt
-    # minted for its own actor (FR-S10), and this helper is what launches the
-    # session's shell when MYDEVENV2_AUTO_AGENT_AUTH is on — which is the
-    # deployed configuration. Fetching here would replace that credential
-    # with the pod's before the agent ever ran, and nothing would look
-    # wrong: the writes still land, the audit log just says `agent:mydevenv2`
-    # for work that belongs to a session.
+    # Inside a coding session, do not fetch: the session already holds a token
+    # Vogt minted for its own actor (FR-S10), and this helper is what launches
+    # the session's shell when auto-agent-auth is on. Fetching here would
+    # replace that credential with the pod's before the agent ever ran, and
+    # nothing would look wrong — the writes still land, the audit log just
+    # attributes a session's work to the pod.
     if [[ -n "${VOGT_SESSION_ID:-}" && -n "${VOGT_HTTP_TOKEN:-}" ]]; then
         printf 'agent-auth: keeping the session token for %s\n' \
             "$VOGT_SESSION_ID" >&2
-    else
-        # Deliberately unguarded: absent is a supported state here — an
-        # instance may not be deployed yet — and `check` reports that as
+    elif [[ -n "$VOGT_SECRET_NAME" && -n "$TOKEN_PROJECT_ID" ]]; then
+        # Deliberately unguarded on emptiness: absent is a supported state —
+        # an instance may not be deployed yet — and `check` reports that as
         # `skip`, never as success and never as failure.
-        VOGT_HTTP_TOKEN="$(get_secret "$access_token" "$APPS_PROJECT_ID" "$VOGT_SECRET_NAME" || true)"
+        VOGT_HTTP_TOKEN="$(get_secret "$access_token" "$TOKEN_PROJECT_ID" "$VOGT_SECRET_NAME" || true)"
         export VOGT_HTTP_TOKEN
+    else
+        unset VOGT_HTTP_TOKEN 2>/dev/null || true
     fi
 
     umask 077
@@ -222,7 +237,7 @@ load_agent_environment() {
         printf '%s' "$CADASTRE_HTTP_TOKEN" >"$AUTH_TMP_DIR/cadastre-http-token"
         export CADASTRE_HTTP_TOKEN_FILE="$AUTH_TMP_DIR/cadastre-http-token"
     fi
-    if [[ -n "$VOGT_HTTP_TOKEN" ]]; then
+    if [[ -n "${VOGT_HTTP_TOKEN:-}" ]]; then
         printf '%s' "$VOGT_HTTP_TOKEN" >"$AUTH_TMP_DIR/vogt-http-token"
         export VOGT_TOKEN_FILE="$AUTH_TMP_DIR/vogt-http-token"
     fi
@@ -231,69 +246,61 @@ load_agent_environment() {
     # Cadastre only when it is enabled; gating the call itself would take
     # Vogt's own registrations with it whenever Cadastre is off — which is
     # every generic deployment, and the opposite of making an optional
-    # integration optional. (The variable's name is broader than Cadastre
-    # now; renaming it is tracked with the rest of the MYDEVENV2_* window.)
+    # integration optional.
     if [[ "${MYDEVENV2_AUTO_CADASTRE_MCP:-1}" == "1" ]]; then
         /usr/local/bin/mydevenv2-mcp-bootstrap
     fi
 
-    export INFISICAL_API_URL="${INFISICAL_API_URL:-$DEFAULT_INFISICAL_API_URL}"
     export GIT_ASKPASS=/usr/local/bin/mydevenv2-git-askpass
     export GIT_TERMINAL_PROMPT=0
 }
 
+# The service-probe list is configuration, not a baked-in estate service map.
+# Each line is `NAME URL TOKEN_VAR`: a bearer-authenticated GET that must
+# return 2xx. An empty/unset manifest runs no service probes — the MCP probes
+# below still run.
+run_configured_probes() {
+    local line name url token_var token
+    [[ -n "${ENGINE_AGENT_AUTH_PROBES:-}" ]] || return 0
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        read -r name url token_var <<<"$line"
+        [[ -n "${name:-}" ]] || continue
+        [[ -n "${url:-}" && -n "${token_var:-}" ]] || die \
+            "malformed ENGINE_AGENT_AUTH_PROBES entry (want 'NAME URL TOKEN_VAR'): $line"
+        token="${!token_var:-}"
+        if curl -fsS -H "Authorization: Bearer $token" "$url" >/dev/null; then
+            printf 'ok: %s (%s)\n' "$name" "$url"
+        else
+            die "$name probe failed at $url"
+        fi
+    done <<<"${ENGINE_AGENT_AUTH_PROBES}"
+}
+
 check_access() {
-    local response_file error_file gh_login mcp_url vogt_url vogt_mcp_url
+    local response_file error_file mcp_url vogt_url vogt_mcp_url
     local vogt_failure_hint
     local -a mcp_curl_args
     require_command curl
-    require_command git
-    require_command gh
     load_agent_environment
     response_file="$(mktemp)"
     error_file="$(mktemp)"
     # Defaulted expansions, because this trap fires at *script* exit — by
     # which point `check_access` has returned and its locals are gone. Under
-    # `set -u` the bare form aborted with "response_file: unbound variable"
-    # after every probe had reported ok, so a fully green check exited 1 and
-    # the temp files were never removed.
+    # `set -u` the bare form aborts with "unbound variable" after every probe
+    # has reported ok, so a fully green check would exit 1 and the temp files
+    # would never be removed.
     trap 'rm -f "${response_file:-}" "${error_file:-}"' EXIT
 
-    printf 'ok: Infisical universal auth\n'
-    curl -fsS -H "Authorization: token $FORGEJO_TOKEN" \
-        https://repo.indexarr.net/api/v1/user >"$response_file"
-    printf 'ok: Forgejo API\n'
-    git ls-remote https://repo.indexarr.net/indexarr/ops.git HEAD >/dev/null
-    printf 'ok: Forgejo git\n'
-    curl -fsS -H "Authorization: Bearer $WOODPECKER_TOKEN" \
-        https://ci.indexarr.net/api/user >"$response_file"
-    printf 'ok: Woodpecker API\n'
-    # GitHub logins are case-insensitive; the API returns canonical casing.
-    gh_login="$(gh api user --jq .login 2>/dev/null || true)"
-    [[ "${gh_login,,}" == "thedancingdeveloper" ]] || die \
-        "GitHub destination token is not authenticated as TheDancingDeveloper (got: ${gh_login:-<none>})"
-    [[ "$(gh api user/memberships/orgs/TheDancingDeveloper-org --jq '.state + ":" + .role')" == "active:admin" ]] || die \
-        "GitHub destination token is not an active TheDancingDeveloper-org admin"
-    printf 'ok: GitHub main org (TheDancingDeveloper-org admin)\n'
-    # Source org is validated with its own PAT from Infisical, not a local
-    # `gh auth login` session — pods have no gh hosts.yml, so a session-based
-    # check could never pass there.
-    gh_login="$(GH_TOKEN="$GITHUB_AUSAGENTSMITH_PAT" gh api user --jq .login 2>/dev/null || true)"
-    [[ "${gh_login,,}" == "ausagentsmith" ]] || die \
-        "GITHUB_AUSAGENTSMITH_PAT is not authenticated as AusAgentSmith (got: ${gh_login:-<none>})"
-    [[ "$(GH_TOKEN="$GITHUB_AUSAGENTSMITH_PAT" gh api user/memberships/orgs/AusAgentSmith-org --jq '.state + ":" + .role' 2>/dev/null)" == "active:admin" ]] || die \
-        "GITHUB_AUSAGENTSMITH_PAT is not an active AusAgentSmith-org admin"
-    printf 'ok: GitHub source org (AusAgentSmith-org admin)\n'
-    curl -fsS http://100.92.54.45:3011/read \
-        -H "X-Api-Key: $HOMELAB_KOMODO_API_KEY" \
-        -H "X-Api-Secret: $HOMELAB_KOMODO_API_SECRET" \
-        -H 'Content-Type: application/json' \
-        --data '{"type":"ListServers","params":{}}' >"$response_file"
-    printf 'ok: Komodo API\n'
+    printf 'ok: secrets-manager universal auth\n'
+    run_configured_probes
+
     if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
-        mcp_url="${CADASTRE_MCP_URL:-$DEFAULT_CADASTRE_MCP_URL}"
+        mcp_url="${CADASTRE_MCP_URL:-}"
+        [[ -n "$mcp_url" ]] || die \
+            "CADASTRE_MCP_ENABLED=1 but CADASTRE_MCP_URL is not set"
         mcp_curl_args=()
-        if [[ -n "${MYDEVENV2_CADASTRE_MCP_RESOLVE:-$DEFAULT_CADASTRE_MCP_RESOLVE}" ]]; then
+        if [[ -n "${MYDEVENV2_CADASTRE_MCP_RESOLVE:-}" ]]; then
             mcp_curl_args+=(--resolve "${MYDEVENV2_CADASTRE_MCP_RESOLVE}")
         fi
         probe_mcp "Cadastre MCP" "$mcp_url" "$CADASTRE_HTTP_TOKEN" \
@@ -304,44 +311,37 @@ check_access() {
     fi
 
     # Vogt, probed the same way Cadastre is — because until this existed, the
-    # check reported seven services green while Vogt was completely unusable
-    # from the pod (#30). Vogt appeared in the bootstrap's banner, which says
-    # registrations were *written*, and nowhere in the probes. The first
-    # evidence of the outage arrived later, from a client, as a rejected token
-    # naming VOGT_TOKEN_FILE — a file that was correct throughout (#29).
+    # check reported services green while Vogt was completely unusable from the
+    # pod (#30). It is the one place that can catch that class of failure: it
+    # runs in the pod holding the same credential a client will use, against
+    # the endpoint that client will use.
     #
-    # This is the one place that can catch that class of failure, because it
-    # is the only thing that runs in the pod holding the same credential a
-    # client will use, against the endpoint that client will use.
-    #
-    # An absent token is not a failure, for the reason `load_agent_environment`
-    # gives: an instance may legitimately not be deployed yet, and agent auth
-    # must keep working for git/gh regardless. So this reports three distinct
-    # states and never conflates them — configured and answering, not
-    # configured, or configured and refused.
+    # An absent token is not a failure: an instance may legitimately not be
+    # deployed yet, and agent auth must keep working for git/gh regardless. So
+    # this reports three distinct states and never conflates them — configured
+    # and answering, not configured, or configured and refused.
     #
     # `/mcp`, not `/api/vogt/*`: the front door forwards a client's *core*
-    # token there untouched and injects its own on the API prefix, so `/mcp`
-    # is the one surface this credential is the right kind of token for. It is
-    # also the surface every registered client uses.
+    # token there untouched and injects its own on the API prefix, so `/mcp` is
+    # the one surface this credential is the right kind of token for.
     vogt_url="${VOGT_URL:-$DEFAULT_VOGT_URL}"
     vogt_mcp_url="${vogt_url%/}/mcp"
     if [[ -z "${VOGT_HTTP_TOKEN:-}" ]]; then
         printf 'skip: Vogt MCP (no %s secret; no instance configured)\n' \
-            "$VOGT_SECRET_NAME"
+            "${VOGT_SECRET_NAME:-Vogt token}"
     else
         # The token is what a client presents; the file is where a client
-        # reads it from, and the rejection an agent eventually sees names
-        # that file. Absent means every client here is broken, so it is a
-        # named failure rather than the `skip` above, which means no instance.
+        # reads it from, and the rejection an agent eventually sees names that
+        # file. Absent means every client here is broken, so it is a named
+        # failure rather than the `skip` above, which means no instance.
         [[ -s "${VOGT_TOKEN_FILE:-}" ]] || die \
             "Vogt token loaded but VOGT_TOKEN_FILE (${VOGT_TOKEN_FILE:-<unset>}) is missing or empty; every registered client reads the credential from that file"
         # Named, because a Vogt token is minted by one instance and stored
-        # hashed there. A token from another instance is refused however
-        # fresh it is, and the message an agent sees points at the token file.
+        # hashed there. A token from another instance is refused however fresh
+        # it is, and the message an agent sees points at the token file.
         vogt_failure_hint=" — if the token is current, check it was issued by *this* instance; tokens are not shared between Vogt instances"
         probe_mcp "Vogt MCP" "$vogt_mcp_url" "$VOGT_HTTP_TOKEN" \
-            "$VOGT_SECRET_NAME" "$response_file" "$error_file" \
+            "${VOGT_SECRET_NAME:-Vogt token}" "$response_file" "$error_file" \
             "$vogt_failure_hint"
     fi
 }

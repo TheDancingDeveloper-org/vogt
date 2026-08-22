@@ -5,7 +5,9 @@
 # Registration stores only the endpoint and wrapper command; no bearer value.
 set -euo pipefail
 
-readonly CADASTRE_URL="${CADASTRE_MCP_URL:-https://winrarhost.tailc7d3c.ts.net:18092/mcp}"
+# Cadastre is opt-in and has no built-in endpoint: the operator sets
+# CADASTRE_MCP_URL, or the registration below is skipped.
+readonly CADASTRE_URL="${CADASTRE_MCP_URL:-}"
 readonly CADASTRE_WRAPPER="/usr/local/bin/mydevenv2-cadastre-mcp"
 readonly CADASTRE_SRC="${MYDEVENV2_CADASTRE_SRC:-$HOME/Working/Active/cadastre}"
 readonly CADASTRE_MCP_ENABLED="${CADASTRE_MCP_ENABLED:-0}"
@@ -21,9 +23,9 @@ readonly CADASTRE_MCP_ENABLED="${CADASTRE_MCP_ENABLED:-0}"
 #   3. The front door on loopback. In the merged stack the engine is the only
 #      published port (NFR-D11) and the agent runs in this container, so
 #      loopback needs no DNS and no certificate — and it cannot go on naming
-#      a deployment after that deployment is retired, which is what the
-#      previous default did: `winrarhost:18094` is the core-only stack this
-#      product replaces, and `DEPLOYMENT.md` §9.5 turns it off.
+#      a deployment after that deployment is retired, which is what a default
+#      pointing at a specific host would do. The loopback front door belongs to
+#      whatever deployment this session is part of.
 _vogt_endpoint="${VOGT_MCP_URL:-}"
 if [[ -z "$_vogt_endpoint" && -n "${VOGT_URL:-}" ]]; then
     _vogt_endpoint="${VOGT_URL%/}/mcp"
@@ -167,11 +169,13 @@ install_opencode() {
         -- "$CADASTRE_WRAPPER" >/dev/null
 }
 
-if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
+if [[ "$CADASTRE_MCP_ENABLED" == "1" && -n "$CADASTRE_URL" ]]; then
     install_bridge
     install_codex
     install_claude
     install_opencode
+elif [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
+    printf 'mcp-bootstrap: CADASTRE_MCP_ENABLED=1 but CADASTRE_MCP_URL is not set; skipping Cadastre registration\n' >&2
 fi
 
 # Vogt registrations are best-effort in the same way: a failure here must not
@@ -195,7 +199,7 @@ install_vogt_opencode
 # Everything an operator wants to see is still shown: an interactive shell
 # prints stderr too. The only reader that notices the difference is the one
 # that must.
-if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
+if [[ "$CADASTRE_MCP_ENABLED" == "1" && -n "$CADASTRE_URL" ]]; then
     printf 'mcp-bootstrap: Vogt and optional Cadastre MCP client registrations written; endpoints were not probed — run `mydevenv2-agent-auth check` for that\n' >&2
 else
     printf 'mcp-bootstrap: Vogt MCP client registrations written; endpoint was not probed — run `mydevenv2-agent-auth check` for that\n' >&2

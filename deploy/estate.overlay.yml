@@ -191,8 +191,29 @@ services:
       MYDEVENV2_AGENT_AUTH_REQUIRED: "1"
       MYDEVENV2_AUTO_AGENT_AUTH: "1"
       MYDEVENV2_VOGT_SECRET_NAME: "${MYDEVENV2_VOGT_SECRET_NAME:-HOMELAB_VOGT_AGENT_TOKEN}"
-      # Cadastre is a separate product and an explicit opt-in (NFR-O5).
+      # The estate's own secret map for the reference Infisical agent-auth
+      # helper. `agent-auth.sh` bakes in none of this now — the manifest is what
+      # tells it which Infisical secrets to load, from which project, and under
+      # which environment variable. One entry per line: VAR PROJECT_ID
+      # SECRET_NAME [optional]. (Project ids: CICD, INFRASTRUCTURE, APPS.)
+      ENGINE_AGENT_AUTH_SECRETS: |
+        GIT_AUTH_TOKEN 6d6caff5-7aaf-42f8-a135-2455d7629af8 GIT_AUTH_TOKEN
+        FORGEJO_TOKEN 6d6caff5-7aaf-42f8-a135-2455d7629af8 FORGEJO_TOKEN
+        WOODPECKER_TOKEN 5b7e75de-e874-484d-9595-873acd6bfd07 WOODPECKER_TOKEN
+        GITHUB_DANCINGDEVELOPER_PAT 6d6caff5-7aaf-42f8-a135-2455d7629af8 GITHUB_DANCINGDEVELOPER_PAT
+        GITHUB_AUSAGENTSMITH_PAT 6d6caff5-7aaf-42f8-a135-2455d7629af8 GITHUB_AUSAGENTSMITH_PAT
+        HOMELAB_KOMODO_API_KEY 76b1ebe1-3656-4cef-952c-30d5d489c6e7 HOMELAB_KOMODO_API_KEY
+        HOMELAB_KOMODO_API_SECRET 76b1ebe1-3656-4cef-952c-30d5d489c6e7 HOMELAB_KOMODO_API_SECRET
+      # The destination-org PAT is also the default `gh`/git identity.
+      ENGINE_AGENT_AUTH_GH_TOKEN_FROM: GITHUB_DANCINGDEVELOPER_PAT
+      # Where the Vogt and Cadastre token secrets live (the APPS project).
+      ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID: 76b1ebe1-3656-4cef-952c-30d5d489c6e7
+      # Cadastre is a separate product and an explicit opt-in (NFR-O5). The
+      # endpoint and its token secret used to be baked into agent-auth.sh /
+      # mcp-bootstrap.sh; they are the estate's values, so they live here now.
       CADASTRE_MCP_ENABLED: "1"
+      CADASTRE_MCP_URL: "${CADASTRE_MCP_URL:-https://winrarhost.tailc7d3c.ts.net:18092/mcp}"
+      MYDEVENV2_CADASTRE_SECRET_NAME: "${MYDEVENV2_CADASTRE_SECRET_NAME:-HOMELAB_CADASTRE_HTTP_TOKEN}"
 
       # Tailnet.
       TAILSCALE_AUTH_KEY: "${HOMELAB_MYDEVENV2_TAILSCALE_AUTH_KEY:-}"

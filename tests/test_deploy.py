@@ -925,6 +925,12 @@ def test_nothing_but_protocol_reaches_a_wrappers_stdout(
         # keeps the bootstrap from trying to pip-install anything.
         "MYDEVENV2_CADASTRE_SRC": str(tmp_path / "absent"),
         "MYDEVENV2_VOGT_SRC": str(tmp_path / "absent"),
+        # The Cadastre endpoint has no baked default any more (#205): the
+        # wrapper skips cleanly without it, so name a dummy so this test
+        # exercises the *configured* path it is about. Left registration off
+        # (CADASTRE_MCP_ENABLED unset) so the bootstrap stays Vogt-only, as
+        # before.
+        "CADASTRE_MCP_URL": "https://cadastre.invalid/mcp",
     }
     completed = subprocess.run(
         [str(script)],
@@ -1673,3 +1679,136 @@ def test_the_public_image_is_relocatable() -> None:
     assert "UV_PYTHON_INSTALL_DIR=/opt/vogt/python" in text
     assert "UV_PYTHON=3.13" in text, "pin the interpreter; unset means newest"
     assert "COPY --from=build --chown=root:root /opt/vogt /opt/vogt" in text
+
+
+# ── The shipped engine scripts carry no estate, and agent-auth/MCP are optional
+#    (#205) ───────────────────────────────────────────────────────────────────
+#
+# The engine image installs these scripts and the sample compose verbatim, so a
+# public reader who pulls the image inherits them. None of it may name the
+# maintainer's own estate — its hosts, its host paths, or its Infisical secret
+# names — and none of it may *require* the maintainer's services to boot: a
+# stranger running the image with just a token must get a working engine, and
+# the agent-auth / MCP brokering must skip cleanly when it is not configured.
+
+ENGINE_DEPLOY = REPO_ROOT / "engine" / "deploy"
+ENGINE_SAMPLE_COMPOSE = ENGINE_DEPLOY / "docker-compose.yml"
+CADASTRE_MCP_WRAPPER_205 = ENGINE_DEPLOY / "cadastre-mcp-auth.sh"
+
+#: Substrings that only exist in the maintainer's deployment. A shipped script
+#: (or the sample compose) containing one has leaked the estate into the image.
+#: `/home/sprooty` is excluded as a bare path — it is the image's own home and
+#: appears as a mount *target* — so only its literal-default form is a marker.
+ESTATE_MARKERS = (
+    "100.92",
+    "winrarhost",
+    "indexarr",
+    "theclawbay",
+    "/mnt/2tnvme",
+    "HOMELAB_",
+    "GITHUB_AUSAGENTSMITH_PAT",
+)
+
+
+def _shipped_engine_artifacts() -> list[Path]:
+    return [*sorted(ENGINE_DEPLOY.glob("*.sh")), ENGINE_SAMPLE_COMPOSE]
+
+
+@needs_engine
+def test_no_shipped_engine_script_names_the_estate() -> None:
+    """The image ships these to every reader; the estate stays out of them.
+
+    Comments included, deliberately: a hostname in a comment is still a
+    hostname a public reader is handed, and the open-source pass is about what
+    the artefact carries, not only what it executes.
+    """
+    offenders: list[str] = []
+    for path in _shipped_engine_artifacts():
+        text = path.read_text(encoding="utf-8")
+        for marker in ESTATE_MARKERS:
+            if marker in text:
+                offenders.append(f"{path.name}: {marker!r}")
+        if ":-/home/sprooty" in text:
+            offenders.append(f"{path.name}: '/home/sprooty' literal default")
+    assert not offenders, (
+        "shipped engine scripts must carry no estate address, host path or "
+        f"secret name (#205): {offenders}"
+    )
+
+
+@needs_engine
+def test_the_entrypoint_skips_agent_auth_when_it_is_not_configured() -> None:
+    """A clean clone with just a token must boot, plain shells and all (#205).
+
+    Agent auth is a pluggable helper (`ENGINE_AGENT_AUTH_HELPER`): named or
+    auto-selected from a secrets-manager identity when present, and otherwise
+    absent — a stated, skipped state, never a fatal one.
+    """
+    body = _without_comments(ENTRYPOINT.read_text(encoding="utf-8"))
+    assert "ENGINE_AGENT_AUTH_HELPER" in body, (
+        "the entrypoint selects the agent-auth helper through "
+        "ENGINE_AGENT_AUTH_HELPER, not a hard-coded command"
+    )
+    assert "agent auth not configured; skipping" in body, (
+        "with no helper and no identity the entrypoint must skip agent auth "
+        "cleanly, so the engine still starts and serves"
+    )
+    # The bundled Infisical helper is still auto-selected when an identity is
+    # present, so a deployment that only sets INFISICAL_* keeps working.
+    assert "mydevenv2-agent-auth" in body, (
+        "the reference Infisical helper stays the auto-selected default when a "
+        "machine identity is configured"
+    )
+
+
+@needs_engine
+def test_agent_auth_requires_its_endpoints_rather_than_defaulting() -> None:
+    """No baked estate address: the helper fails naming the missing variable.
+
+    And it does so only when actually invoked — sourcing the file to reuse
+    `probe_mcp` must not fail — which the shared-probe test above already
+    exercises by sourcing it with nothing set.
+    """
+    body = _without_comments(AGENT_AUTH.read_text(encoding="utf-8"))
+    assert "INFISICAL_API_URL is not set" in body, (
+        "the secrets-manager API URL is required, not defaulted to an estate "
+        "address"
+    )
+    assert "CADASTRE_MCP_URL is not set" in body, (
+        "the Cadastre endpoint is required when the integration is enabled, "
+        "not defaulted to the maintainer's bridge"
+    )
+    # The secret set and the service-probe list are configuration now, not a
+    # baked-in estate map.
+    assert "ENGINE_AGENT_AUTH_SECRETS" in body, (
+        "which secrets to load is driven by an env manifest, not hard-coded "
+        "secret names"
+    )
+    assert "ENGINE_AGENT_AUTH_PROBES" in body, (
+        "the service-probe list is configurable via an env var (#205)"
+    )
+    # The optional integrations still report skip rather than fail.
+    assert "skip: Cadastre MCP" in body and "skip: Vogt MCP" in body
+
+
+@needs_engine
+def test_the_cadastre_wrapper_skips_cleanly_without_an_endpoint() -> None:
+    """A wrapper with no CADASTRE_MCP_URL is a no-op, not a crash (#205)."""
+    body = _without_comments(CADASTRE_MCP_WRAPPER_205.read_text(encoding="utf-8"))
+    assert 'if [[ -z "${CADASTRE_MCP_URL:-}" ]]' in body, (
+        "the wrapper guards on the endpoint being configured"
+    )
+    assert "exit 0" in body, "an unconfigured Cadastre wrapper exits cleanly"
+
+
+@needs_engine
+def test_the_bootstrap_skips_cadastre_without_an_endpoint() -> None:
+    """CADASTRE_MCP_ENABLED with no URL registers nothing, and says so."""
+    body = _without_comments(MCP_BOOTSTRAP.read_text(encoding="utf-8"))
+    assert 'CADASTRE_MCP_URL:-' in body, (
+        "the bootstrap has no baked Cadastre endpoint; it reads one or skips"
+    )
+    assert "skipping Cadastre registration" in body, (
+        "enabled-but-unconfigured Cadastre is a reported skip, not a default "
+        "endpoint"
+    )
