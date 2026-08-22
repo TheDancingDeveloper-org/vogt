@@ -158,7 +158,7 @@ describe("the server-side speech pipeline", () => {
     const { container } = render(() => <Assistant onError={(m) => errors.push(m)} />);
     await settle();
 
-    const input = container.querySelector('input[type="text"]') as HTMLInputElement;
+    const input = container.querySelector('.assistant-input') as HTMLTextAreaElement;
     fireEvent.input(input, { target: { value: "show me the backlog" } });
     const form = container.querySelector("form") as HTMLFormElement;
     fireEvent.submit(form);
@@ -181,7 +181,7 @@ describe("the server-side speech pipeline", () => {
     await settle();
 
     expect(container.querySelector('[data-testid="mic"]')).toBeNull();
-    expect(container.querySelector('input[type="text"]')).toBeTruthy();
+    expect(container.querySelector('.assistant-input')).toBeTruthy();
     expect(errors).toEqual([]);
   });
 

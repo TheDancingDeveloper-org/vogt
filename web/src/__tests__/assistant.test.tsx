@@ -210,7 +210,7 @@ function captureSpeech(): { spoken: () => string[]; cancels: () => number } {
 
 /** Say something, and let the engine answer it. */
 async function say(container: HTMLElement, text: string): Promise<void> {
-  const input = container.querySelector<HTMLInputElement>('input[type="text"]')!;
+  const input = container.querySelector<HTMLTextAreaElement>(".assistant-input")!;
   fireEvent.input(input, { target: { value: text } });
   fireEvent.submit(container.querySelector("form")!);
   await settle();

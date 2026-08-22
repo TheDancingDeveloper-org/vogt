@@ -724,11 +724,19 @@ export const api = {
   // `profile` names which configured backend runs this turn (FR-T9). Omitted
   // means the deployment's default, which is what every caller sent before
   // profiles existed.
-  assistantMessage: (text: string, profile?: string) =>
-    req<AssistantReply>("POST", "/api/assistant/message", {
-      text,
-      ...(profile ? { profile } : {}),
-    }),
+  // `signal` lets the composer cancel a slow turn (the Stop button): aborting
+  // the fetch tears the request down cleanly, and the engine treats the
+  // dropped connection as a benign cancellation rather than a failure.
+  assistantMessage: (text: string, profile?: string, signal?: AbortSignal) =>
+    req<AssistantReply>(
+      "POST",
+      "/api/assistant/message",
+      {
+        text,
+        ...(profile ? { profile } : {}),
+      },
+      signal,
+    ),
   assistantAction: (id: string, approve: boolean) =>
     req<AssistantReply>("POST", `/api/assistant/actions/${id}`, { approve }),
   assistantReplaceReason: (id: string, reason: string) =>

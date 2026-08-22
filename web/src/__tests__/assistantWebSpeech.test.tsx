@@ -131,7 +131,7 @@ describe("the desktop microphone (Web Speech)", () => {
     await settle();
 
     expect(container.querySelector('[data-testid="mic"]')).toBeNull();
-    expect(container.querySelector('input[type="text"]')).toBeTruthy();
+    expect(container.querySelector('.assistant-input')).toBeTruthy();
     expect(errors).toEqual([]);
   });
 });

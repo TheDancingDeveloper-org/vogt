@@ -913,7 +913,22 @@ impl AssistantRuntime {
                 Err(e) => {
                     // Surface backend failures as a spoken-friendly reply and
                     // keep the conversation usable.
-                    tracing::warn!("assistant backend error: {e}");
+                    //
+                    // Level by kind (#242 / #269): a backend that *answered*
+                    // with an error status is an operator-actionable
+                    // misconfiguration and stays a warning. A transport failure
+                    // — a timed-out or torn-down connection — is transient and
+                    // logged at debug, so a flaky or cancelled turn does not
+                    // read as an incident. (A client that presses Stop aborts
+                    // the request; that drops this handler's future outright, so
+                    // it never reaches here at all — cancellation is silent by
+                    // construction, and this branch is only the turns that did
+                    // run and could not get an answer.)
+                    if e.to_string().contains("assistant backend HTTP") {
+                        tracing::warn!("assistant backend error: {e}");
+                    } else {
+                        tracing::debug!("assistant backend request did not complete: {e}");
+                    }
                     self.log_event(
                         &actor,
                         LogEvent::BackendError {

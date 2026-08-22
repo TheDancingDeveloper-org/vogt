@@ -1673,6 +1673,7 @@ const App: Component = () => {
                     <Assistant
                       pendingHosted
                       onError={(msg) => showToast(msg, { kind: "error" })}
+                      confirmAction={confirmUser}
                     />
                   </Show>
                   <Show when={t.kind === "tasks"}>
