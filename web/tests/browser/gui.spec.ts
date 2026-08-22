@@ -168,6 +168,11 @@ async function installFixtures(
   let sessionDeletes = 0;
   await page.addInitScript(() => {
     localStorage.setItem("mydevenv2.token", "browser-test-token");
+    // Pin the shell to Vogt Dark so the default rendering under test stays
+    // deterministic — the existing baselines were taken in the dark palette,
+    // and the theme system (#299) must not shift them. Per-theme tests below
+    // register their own init script after this one to override it.
+    localStorage.setItem("vogt.appTheme.v1", "dark");
   });
   await page.route("**/api/status**", async (route) => route.fulfill({ json: {
     version: "test",
@@ -4426,3 +4431,133 @@ test("An empty Board offers one panel with a next action, not four dead cells", 
   await empty.getByRole("button", { name: "Quick create" }).click();
   await expect(page.getByRole("textbox", { name: "Title" }).first()).toBeVisible();
 });
+
+// ---------------------------------------------------------------------------
+// Selectable app themes (#299): Vogt Dark, Dim, Light and High contrast are
+// token sets on <html data-theme>. These tests pin each theme, prove it is
+// applied, snapshot the primary surfaces per theme at both sizes, assert the
+// no-flash pre-paint attribute, and check WCAG contrast for the light themes.
+// ---------------------------------------------------------------------------
+
+const APP_THEME_IDS = ["dark", "dim", "light", "hc-dark", "hc-light"] as const;
+
+const THEME_SURFACES = [
+  { name: "board", goto: "/#/board?project=vogt", ready: ".board-scroll, .board-empty" },
+  { name: "backlog", goto: "/#/backlog?project=vogt", ready: ".vogt-backlog-listwrap, .vogt-backlog-empty" },
+  { name: "workitem", goto: "/#/w/WI-7", ready: ".wid-facts" },
+  { name: "sessions", goto: "/#/sessions", ready: ".sessions-place-body" },
+] as const;
+
+// Register the theme selection as an init script so index.html's pre-paint
+// script reads it — added AFTER installFixtures so it overrides the dark pin.
+async function pinAppTheme(page: Page, themeId: string) {
+  await page.addInitScript((id) => {
+    localStorage.setItem("vogt.appTheme.v1", id as string);
+  }, themeId);
+}
+
+// The two sizes the issue names: 1440x900 on desktop, 390x844 on phone.
+async function useThemeViewport(page: Page) {
+  if (test.info().project.name === "desktop") {
+    await page.setViewportSize({ width: 1440, height: 900 });
+  } else {
+    await page.setViewportSize({ width: 390, height: 844 });
+  }
+}
+
+for (const themeId of APP_THEME_IDS) {
+  for (const surface of THEME_SURFACES) {
+    test(`app theme ${themeId}: ${surface.name} renders and matches its baseline`, async ({ page }) => {
+      await installFixtures(page, {}, [liveSession]);
+      await pinAppTheme(page, themeId);
+      await useThemeViewport(page);
+      await page.goto(surface.goto);
+      await expect(page.locator(surface.ready).first()).toBeVisible();
+      expect(
+        await page.evaluate(() => document.documentElement.getAttribute("data-theme")),
+      ).toBe(themeId);
+      await expect(page).toHaveScreenshot(`theme-${themeId}-${surface.name}.png`, {
+        fullPage: true,
+        animations: "disabled",
+        // Relative-age pills tick, so masking them is what keeps the shot stable.
+        mask: [page.locator(".vogt-age")],
+      });
+    });
+  }
+}
+
+// No flash of the wrong palette: index.html's inline script must set
+// `data-theme` synchronously, before the first paint. We capture the attribute
+// inside the first animation frame (which fires before the first repaint); if
+// it is already the stored theme, it was set before paint — not by a later
+// module. The capture script is registered before the theme pin, but rAF
+// resolves after parsing, by which point the inline head script has run.
+test("app theme is applied before first paint (no flash)", async ({ page }) => {
+  await installFixtures(page);
+  await page.addInitScript(() => {
+    (window as unknown as { __themeAtFirstFrame?: string | null }).__themeAtFirstFrame = "unset";
+    requestAnimationFrame(() => {
+      (window as unknown as { __themeAtFirstFrame?: string | null }).__themeAtFirstFrame =
+        document.documentElement.getAttribute("data-theme");
+    });
+  });
+  await pinAppTheme(page, "light");
+  await page.goto("/#/board?project=vogt");
+  await expect(page.locator(".board-scroll, .board-empty").first()).toBeVisible();
+  const themeAtFirstFrame = await page.evaluate(
+    () => (window as unknown as { __themeAtFirstFrame?: string | null }).__themeAtFirstFrame,
+  );
+  expect(themeAtFirstFrame).toBe("light");
+});
+
+// WCAG contrast for the light themes and high contrast (#299 test gate). The
+// palette is what the surfaces read, so we measure the tokens directly: a
+// hand-rolled relative-luminance ratio, no new dependency. Body text must
+// clear 4.5:1; state/accent (large/chip) text must clear 3:1.
+for (const themeId of ["light", "hc-light", "hc-dark"] as const) {
+  test(`app theme ${themeId}: palette clears WCAG AA contrast`, async ({ page }) => {
+    await installFixtures(page);
+    await pinAppTheme(page, themeId);
+    await page.goto("/#/board?project=vogt");
+    await expect(page.locator(".board-scroll, .board-empty").first()).toBeVisible();
+
+    const ratios = await page.evaluate(() => {
+      const cs = getComputedStyle(document.documentElement);
+      const tok = (n: string) => cs.getPropertyValue(n).trim();
+      const hex = (c: string) => {
+        let h = c.replace("#", "");
+        if (h.length === 3) h = h.split("").map((x) => x + x).join("");
+        return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
+      };
+      const lum = ({ r, g, b }: { r: number; g: number; b: number }) => {
+        const f = (v: number) => {
+          const s = v / 255;
+          return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+      };
+      const ratio = (a: string, b: string) => {
+        const la = lum(hex(a)), lb = lum(hex(b));
+        const hi = Math.max(la, lb), lo = Math.min(la, lb);
+        return (hi + 0.05) / (lo + 0.05);
+      };
+      return {
+        fgOnBg: ratio(tok("--fg"), tok("--bg")),
+        mutedOnBg: ratio(tok("--fg-muted"), tok("--bg")),
+        accentOnBg: ratio(tok("--accent"), tok("--bg")),
+        dangerOnBg: ratio(tok("--danger"), tok("--bg")),
+        doneOnBg: ratio(tok("--activity-done"), tok("--bg")),
+        onAccentOnAccent: ratio(tok("--on-accent"), tok("--accent")),
+      };
+    });
+
+    // Body text.
+    expect(ratios.fgOnBg, "--fg on --bg").toBeGreaterThanOrEqual(4.5);
+    expect(ratios.mutedOnBg, "--fg-muted on --bg").toBeGreaterThanOrEqual(4.5);
+    // Large / chip / state text and the ink on accent controls.
+    expect(ratios.accentOnBg, "--accent on --bg").toBeGreaterThanOrEqual(3);
+    expect(ratios.dangerOnBg, "--danger on --bg").toBeGreaterThanOrEqual(3);
+    expect(ratios.doneOnBg, "--activity-done on --bg").toBeGreaterThanOrEqual(3);
+    expect(ratios.onAccentOnAccent, "--on-accent on --accent").toBeGreaterThanOrEqual(3);
+  });
+}

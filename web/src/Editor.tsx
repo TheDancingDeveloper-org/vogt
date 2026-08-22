@@ -3,6 +3,8 @@ import { api, ApiError } from "./api";
 import {
   languageFor,
   loadMonaco,
+  monacoThemeForApp,
+  syncMonacoTheme,
   type StandaloneEditor,
   type TextModel,
 } from "./monaco";
@@ -174,9 +176,10 @@ const Editor: Component<Props> = (props) => {
         model = null;
         return;
       }
+      syncMonacoTheme(monaco);
       editor = monaco.editor.create(mountedHost, {
         model,
-        theme: "vs-dark",
+        theme: monacoThemeForApp(),
         automaticLayout: false,
         fontFamily:
           '"JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace, monospace',
@@ -263,7 +266,7 @@ const Editor: Component<Props> = (props) => {
           <Show when={status() === "loading"}>loading…</Show>
           <Show when={status() === "saving"}>saving…</Show>
           <Show when={status() === "error"}>
-            <span style={{ color: "#ff7b72" }}>{error()}</span>
+            <span style={{ color: "var(--danger)" }}>{error()}</span>
           </Show>
           <Show when={status() === "ready" && savedAt()}>
             <span style={{ color: "var(--fg-muted)" }}>

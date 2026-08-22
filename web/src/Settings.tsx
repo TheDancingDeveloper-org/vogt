@@ -17,6 +17,13 @@ import TemplateEditor from "./TemplateEditor";
 import Dialog from "./Dialog";
 import { THEMES, getThemeName, setThemeName } from "./terminalThemes";
 import {
+  APP_THEMES,
+  APP_THEME_ORDER,
+  SYSTEM_SELECTION,
+  getAppThemeSelection,
+  setAppTheme,
+} from "./appThemes";
+import {
   clearWorkspaceLayouts,
   listWorkspaceLayouts,
   trimWorkspaceLayouts,
@@ -169,6 +176,7 @@ const Settings: Component<Props> = (props) => {
   const [pushQuietEnd, setPushQuietEnd] = createSignal("07:00");
   const [templateEditorOpen, setTemplateEditorOpen] = createSignal(false);
   const [terminalTheme, setTerminalTheme] = createSignal(getThemeName());
+  const [appTheme, setAppThemeSel] = createSignal(getAppThemeSelection());
   const [workspaceLayouts, setWorkspaceLayouts] = createSignal<SavedWorkspaceLayout[]>(
     listWorkspaceLayouts(),
   );
@@ -351,6 +359,7 @@ const Settings: Component<Props> = (props) => {
     setAuthCheck("idle");
     setAuthCheckMsg(null);
     setL(getLayoutMode());
+    setAppThemeSel(getAppThemeSelection());
     setTerminalTheme(getThemeName());
     setStoragePrefsState(getStoragePrefs());
     setStorageMsg(null);
@@ -862,9 +871,9 @@ const Settings: Component<Props> = (props) => {
                 style={{
                   "font-size": "12px",
                   color: authCheck() === "valid"
-                    ? "#3fb950"
+                    ? "var(--activity-done)"
                     : authCheck() === "invalid"
-                      ? "#ff7b72"
+                      ? "var(--danger)"
                       : "var(--fg-muted)",
                 }}
               >
@@ -999,6 +1008,40 @@ const Settings: Component<Props> = (props) => {
           </section>
 
           <section id="settings-section-theme" class="settings-section">
+          <div style={{ display: "flex", "flex-direction": "column", gap: "6px", "margin-bottom": "16px" }}>
+            <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
+              App Theme{" "}
+              <span style={{ color: "var(--fg-muted)", "font-weight": 400, "font-size": "12px" }}>
+                (applies immediately)
+              </span>
+            </div>
+            <select
+              aria-label="App theme"
+              value={appTheme()}
+              onChange={(e) => {
+                const sel = e.currentTarget.value;
+                setAppThemeSel(sel);
+                setAppTheme(sel);
+                // The terminal follows the shell unless the reader pinned one,
+                // so reflect any newly-derived preset in its picker.
+                setTerminalTheme(getThemeName());
+              }}
+              style={{
+                padding: "6px 8px",
+                background: "var(--bg)",
+                border: "1px solid var(--bd)",
+                "border-radius": "4px",
+                color: "var(--fg)",
+                "font-size": "13px",
+              }}
+            >
+              <option value={SYSTEM_SELECTION}>System (follow device)</option>
+              <For each={[...APP_THEME_ORDER]}>
+                {(id) => <option value={id}>{APP_THEMES[id]!.label}</option>}
+              </For>
+            </select>
+          </div>
+
           <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
               Terminal Theme{" "}
@@ -1304,12 +1347,12 @@ const Settings: Component<Props> = (props) => {
                 </button>
               </div>
               <Show when={pushPerm() === "denied" && !pushOn()}>
-                <div role="status" style={{ "font-size": "12px", color: "#ff7b72" }}>
+                <div role="status" style={{ "font-size": "12px", color: "var(--danger)" }}>
                   Notifications are blocked — allow in site settings, then reload.
                 </div>
               </Show>
               <Show when={pushServerDropped()}>
-                <div role="status" style={{ "font-size": "12px", color: "#d29922" }}>
+                <div role="status" style={{ "font-size": "12px", color: "var(--activity-warning)" }}>
                   The server no longer lists this device's subscription.
                   {" "}Re-enable to start receiving again.
                 </div>
@@ -1580,7 +1623,7 @@ const Settings: Component<Props> = (props) => {
               <button onClick={() => void refreshBrowserStorage()}>Refresh storage</button>
             </div>
             <Show when={opsError()}>
-              <div style={{ "font-size": "11px", color: "#ff7b72" }}>{opsError()}</div>
+              <div style={{ "font-size": "11px", color: "var(--danger)" }}>{opsError()}</div>
             </Show>
             <Show when={opsStatus()}>
               {(status) => (

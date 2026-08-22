@@ -73,10 +73,21 @@ Settings stores device-local **named auth profiles**, so you can keep a
 read-only token and an interactive one side by side and switch between them
 rather than leaving an admin token in a browser.
 
+Settings → **Theme** carries two pickers. **App Theme** recolours the whole
+shell and takes effect immediately: choose **System** to follow your device's
+light/dark setting, or pin one of **Vogt Dark** (the default), **Vogt Dim** (a
+softer, warm-grey dark), **Vogt Light**, or **High contrast** in a dark or
+light variant. The choice is remembered in this browser and applied before the
+first paint, so the app never flashes the wrong colours on load. Below it, the
+**Terminal Theme** picker sets the terminal palette; leave it and the terminal
+follows the app theme, or pick one to pin it. Monaco (the file editor and diff
+views) and the PWA's browser-chrome colour follow the app theme too.
+
 The dialog scrolls its own body between a sticky section list and a sticky
 **Cancel / Save** footer, so the footer stays reachable on a laptop and a
 phone alike, and a header **×** closes it from the top. The Save button says
-what it will do: a terminal-theme change **applies immediately**; a layout-mode
+what it will do: an app- or terminal-theme change **applies immediately**; a
+layout-mode
 change is marked **(requires reload)** and the button reads *Save & reload*;
 changing the token or base reads *Validate, save & reload*; a preferences-only
 change reads *Save preferences*. You can save a preferences or layout change

@@ -3,6 +3,7 @@ import { HashRouter, Route } from "@solidjs/router";
 import App from "./App";
 import { APP_ROUTES } from "./routes";
 import { registerServiceWorker } from "./push";
+import { applyAppTheme, initAppThemeSystemWatch } from "./appThemes";
 import "./styles.css";
 
 function installVisualViewportSizing() {
@@ -60,6 +61,11 @@ function installNativeInsetsFallback() {
 // Register the SW eagerly so push subscriptions can be created from the
 // Settings modal without waiting for first-paint.
 void registerServiceWorker();
+// The inline script in index.html has already set `data-theme` before paint;
+// re-apply here to sync the `theme-color` meta and adopt any legacy selection,
+// then follow the OS while the reader is on "System" (#299).
+applyAppTheme();
+initAppThemeSystemWatch();
 installVisualViewportSizing();
 installNativeInsetsFallback();
 

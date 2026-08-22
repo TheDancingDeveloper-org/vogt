@@ -19,6 +19,8 @@ import {
 import {
   languageFor,
   loadMonaco,
+  monacoThemeForApp,
+  syncMonacoTheme,
   type DiffEditor,
   type MonacoNamespace,
   type TextModel,
@@ -144,8 +146,9 @@ const DiffView: Component<{
     if (editor) return editor;
     monaco ??= await loadMonaco();
     if (disposed) return null;
+    syncMonacoTheme(monaco);
     editor = monaco.editor.createDiffEditor(mountedHost, {
-      theme: "vs-dark",
+      theme: monacoThemeForApp(),
       readOnly: true,
       renderSideBySide: shouldRenderSideBySide(mountedHost.clientWidth),
       automaticLayout: false,

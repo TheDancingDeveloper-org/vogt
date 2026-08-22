@@ -962,7 +962,7 @@ export default function Assistant(props: AssistantProps) {
           {(action) => (
             <div
               style={{
-                border: "1px solid #d29922",
+                border: "1px solid var(--activity-warning)",
                 "border-radius": "10px",
                 padding: "10px 12px",
                 display: "flex",
@@ -1121,7 +1121,7 @@ export default function Assistant(props: AssistantProps) {
               // start: on a phone the gesture that opens the microphone is
               // the same one that scrolls the transcript.
               "touch-action": "none",
-              ...(listening() ? { background: "#da3633", color: "#fff" } : {}),
+              ...(listening() ? { background: "var(--danger-strong)", color: "var(--on-emphasis)" } : {}),
             }}
             onPointerDown={(e) => {
               // Capture, so releasing off the button still ends the take. A

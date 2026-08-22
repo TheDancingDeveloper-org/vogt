@@ -1,4 +1,5 @@
 type MonacoNs = typeof import("monaco-editor");
+import { activeMonacoTheme, APP_THEME_CHANGE_EVENT } from "./appThemes";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
@@ -44,6 +45,27 @@ export function loadMonaco(): Promise<MonacoNs> {
     })();
   }
   return monacoP;
+}
+
+let monacoThemeBound = false;
+
+/** The built-in Monaco theme that matches the active shell theme (#299). */
+export function monacoThemeForApp(): string {
+  return activeMonacoTheme();
+}
+
+/**
+ * Apply the app-matched Monaco theme now and, once per session, keep it in sync
+ * with the shell theme. Monaco's theme is global to all editors, so a single
+ * listener covers every mounted editor and diff view.
+ */
+export function syncMonacoTheme(monaco: MonacoNs): void {
+  monaco.editor.setTheme(activeMonacoTheme());
+  if (monacoThemeBound || typeof window === "undefined") return;
+  monacoThemeBound = true;
+  window.addEventListener(APP_THEME_CHANGE_EVENT, () => {
+    monaco.editor.setTheme(activeMonacoTheme());
+  });
 }
 
 export function languageFor(path: string): string {

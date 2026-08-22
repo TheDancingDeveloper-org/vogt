@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../monaco", () => ({
   languageFor: () => "typescript",
+  monacoThemeForApp: () => "vs-dark",
+  syncMonacoTheme: () => {},
   loadMonaco: async () => ({
     editor: {
       createDiffEditor: () => ({

@@ -601,7 +601,7 @@ const FileTree: Component<Props> = (props) => {
         />
       </div>
       <Show when={tree.error}>
-        <div style={{ padding: "8px 10px", color: "#ff7b72", "font-size": "12px" }}>
+        <div style={{ padding: "8px 10px", color: "var(--danger)", "font-size": "12px" }}>
           {String(tree.error)}
         </div>
       </Show>

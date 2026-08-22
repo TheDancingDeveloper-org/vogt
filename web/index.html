@@ -3,6 +3,36 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover" />
+    <!-- Set the shell theme BEFORE first paint so the app never flashes the
+         wrong palette (#299). Mirrors the resolution in src/appThemes.ts: read
+         the stored selection (or a legacy key once), and map "system"/unset to
+         the OS preference. Kept tiny and dependency-free on purpose. -->
+    <script>
+      (function () {
+        try {
+          var THEMES = { dark: 1, dim: 1, light: 1, "hc-dark": 1, "hc-light": 1 };
+          var sel = null;
+          try {
+            sel = localStorage.getItem("vogt.appTheme.v1")
+              || localStorage.getItem("mydevenv2.appTheme.v1");
+          } catch (e) { /* storage blocked */ }
+          var theme;
+          if (sel && THEMES[sel]) {
+            theme = sel;
+          } else {
+            var dark = true;
+            try {
+              dark = !window.matchMedia
+                || window.matchMedia("(prefers-color-scheme: dark)").matches;
+            } catch (e) { /* matchMedia blocked */ }
+            theme = dark ? "dark" : "light";
+          }
+          document.documentElement.setAttribute("data-theme", theme);
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
     <meta name="theme-color" content="#0d1117" />
     <meta name="description" content="AI-native product development environment for projects, work, and coding sessions." />
     <title>Vogt</title>
