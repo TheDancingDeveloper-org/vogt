@@ -8,6 +8,8 @@ vi.mock("../monaco", () => {
   const state = { value: "" };
   return {
     languageFor: () => "plaintext",
+    monacoThemeForApp: () => "vs-dark",
+    syncMonacoTheme: () => {},
     loadMonaco: async () => ({
       KeyMod: { CtrlCmd: 2048 },
       KeyCode: { KeyS: 49 },

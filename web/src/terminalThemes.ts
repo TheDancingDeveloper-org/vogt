@@ -1,5 +1,7 @@
 // Terminal color theme presets. Each theme is an xterm ITheme-compatible object.
 
+import { activeTerminalPreset } from "./appThemes";
+
 export interface TerminalTheme {
   background: string;
   foreground: string;
@@ -112,10 +114,43 @@ export const THEMES: Record<string, TerminalTheme> = {
     brightCyan: "#56b6c2",
     brightWhite: "#ffffff",
   },
+  "GitHub Light": {
+    background: "#ffffff",
+    foreground: "#24292f",
+    cursor: "#0969da",
+    selectionBackground: "#0969da33",
+    black: "#24292f",
+    red: "#cf222e",
+    green: "#116329",
+    yellow: "#4d2d00",
+    blue: "#0969da",
+    magenta: "#8250df",
+    cyan: "#1b7c83",
+    white: "#6e7781",
+    brightBlack: "#57606a",
+    brightRed: "#a40e26",
+    brightGreen: "#1a7f37",
+    brightYellow: "#633c01",
+    brightBlue: "#218bff",
+    brightMagenta: "#a475f9",
+    brightCyan: "#3192aa",
+    brightWhite: "#8c959f",
+  },
 };
 
 const THEME_KEY = "mydevenv2.terminalTheme.v1";
 const THEME_EVENT = "mydevenv2:terminal-theme";
+
+/** Has the reader pinned a terminal theme of their own? If so it wins over the
+ *  app theme's default preset. */
+export function hasExplicitTerminalTheme(): boolean {
+  try {
+    const stored = localStorage.getItem(THEME_KEY);
+    return Boolean(stored && THEMES[stored]);
+  } catch {
+    return false;
+  }
+}
 
 export function getThemeName(): string {
   try {
@@ -124,7 +159,10 @@ export function getThemeName(): string {
   } catch {
     /* localStorage unavailable */
   }
-  return "GitHub Dark";
+  // No explicit choice: follow the shell theme's matching preset (#299), and
+  // fall back to the historic default if that preset is somehow unknown.
+  const coupled = activeTerminalPreset();
+  return THEMES[coupled] ? coupled : "GitHub Dark";
 }
 
 export function getTheme(): TerminalTheme {
