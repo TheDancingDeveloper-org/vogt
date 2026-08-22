@@ -149,7 +149,10 @@ a target-state select — the workflow's own legal edges for that card.
 - Long cards expand and collapse in place so their full title and body remain
   readable without leaving the bounded, measured Board.
 - The board is operable from the keyboard: focus an item, move it between
-  columns, open its detail, quick-create.
+  columns, open its detail, quick-create. The full list of board keys lives in
+  the `?` shortcut help rather than in a legend over the cards, so the first
+  screen belongs to the work. A card is a button — a single click of its body,
+  Enter, or Space opens it.
 
 **Every write asks for a reason, and will not submit without one.** That is not
 a form-validation quirk; it is the product's rule (FR-W1). The reason is what
@@ -408,6 +411,10 @@ so UI changes ship without a new APK; only native plumbing needs one.
 | `j` / `k` | Inbox: focus the next / previous entry |
 | `e` / `s` / `r` | Inbox: archive / snooze / resolve the focused entry |
 | `?` | Open shortcut help outside text fields, editors and terminals |
+| Board: `←`/`→`, `↑`/`↓` | Move focus across columns and within one (a card focused) |
+| Board: `Shift`+`←`/`→` | Propose a move (the same reason prompt as a drop) |
+| Board: `Enter` / `Space` / click | Open the focused card |
+| Board: `n` | Quick-create a work item |
 
 Desktop Places and the phone bottom bar share live workload counts. A numeric
 zero means the corresponding canonical read completed and found none; an

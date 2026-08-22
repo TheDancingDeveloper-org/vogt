@@ -731,6 +731,20 @@ interface Refusal {
   message: string;
 }
 
+/**
+ * A move Vogt accepted, said where the reader is working (#229). Like a
+ * refusal it names the cell it belongs in — the one the composer stood in —
+ * so the "moved" note lands there rather than in a banner over the board: for
+ * a drag/keyboard move that is the target column, and for a touch pick it is
+ * the card's own column, which is the one a phone still has on screen.
+ */
+interface Ack {
+  ref: string;
+  column: string;
+  laneKey: string;
+  message: string;
+}
+
 const PRIORITY_ORDER = (priority: string): number => {
   const match = /^p(\d)$/.exec(priority);
   return match ? Number.parseInt(match[1]!, 10) : 9;
@@ -848,7 +862,7 @@ const Board: Component<Props> = (props) => {
   const [laneHint, setLaneHint] = createSignal<string | null>(null);
   const [pending, setPending] = createSignal<PendingMove | null>(null);
   const [refusal, setRefusal] = createSignal<Refusal | null>(null);
-  const [ack, setAck] = createSignal<string | null>(null);
+  const [ack, setAck] = createSignal<Ack | null>(null);
   /** The card that just came back from a refusal, so the rollback is seen and
    *  not merely true (FR-U12: "roll the item back visibly"). */
   const [bounced, setBounced] = createSignal<string | null>(null);
@@ -1597,9 +1611,16 @@ const Board: Component<Props> = (props) => {
       setStickyReason(reason);
       if (updated) applyItem(updated);
       else void loadItems(true);
-      setAck(`${move.ref} moved to ${humanState(move.to)}.`);
+      setAck({
+        ref: move.ref,
+        // A touch pick never left the card's column, so the note stays there;
+        // a drag/keyboard move draws it in the column the card arrived in.
+        column: move.pick ? move.from : move.to,
+        laneKey: move.laneKey,
+        message: `${move.ref} moved to ${humanState(move.to)}.`,
+      });
       window.setTimeout(() => {
-        if (ack()?.startsWith(move.ref)) setAck(null);
+        if (ack()?.ref === move.ref) setAck(null);
       }, 6000);
     } catch (e) {
       // FR-U12: the server's answer is the answer. The optimistic position is
@@ -1744,20 +1765,28 @@ const Board: Component<Props> = (props) => {
     window.setTimeout(() => document.getElementById(cardDomId(ref))?.focus(), 0);
   };
 
-  const onCardKeyDown = (event: KeyboardEvent, item: WorkItem, lane: Lane) => {
-    // A control inside the card owns its own keys: Enter on "Show more" has to
-    // expand the card in place, not open the item the card is standing on.
+  /** True when an event started on a control the card wraps — the ref link,
+   *  Move…, Show more — rather than on the card surface itself. Those controls
+   *  own their own click and keys, so opening the item has to stand aside for
+   *  them (FR-U22, #229's card-body open). */
+  const fromCardControl = (event: Event): boolean => {
     const from = event.target as HTMLElement | null;
-    if (
+    return Boolean(
       from &&
-      from !== event.currentTarget &&
-      from.closest("button, a, input, select, textarea")
-    ) {
-      return;
-    }
+        from !== event.currentTarget &&
+        from.closest("button, a, input, select, textarea"),
+    );
+  };
+
+  const onCardKeyDown = (event: KeyboardEvent, item: WorkItem, lane: Lane) => {
+    // A control inside the card owns its own keys: Enter or Space on "Show
+    // more" has to expand the card in place, not open the item it stands on.
+    if (fromCardControl(event)) return;
     const shown = columns();
     const index = shown.findIndex((one) => one.state === displayState(item));
-    if (event.key === "Enter") {
+    // #229: the card is a button, so it opens on Enter *and* Space — the two
+    // keys a button is operated by — not Enter alone.
+    if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
       event.preventDefault();
       openDetail(item.ref);
       return;
@@ -1867,6 +1896,15 @@ const Board: Component<Props> = (props) => {
   const [savedFilters, setSavedFilters] = createSignal<SavedFilter[]>(readSavedFilters());
 
   const saveCurrent = (name: string) => {
+    // #229: a name already in use is an overwrite, and overwriting a saved view
+    // silently is how a reader loses one they meant to keep. Ask first, and
+    // leave the existing lens untouched if the answer is no.
+    if (savedFilters().some((entry) => entry.name === name)) {
+      const replace = window.confirm(
+        `A saved lens named “${name}” already exists. Replace it?`,
+      );
+      if (!replace) return;
+    }
     // The poll interval is a refresh preference, not a filter, so it is left
     // out of what gets saved and left alone on recall: a named view should
     // not change how often the reader's board refreshes.
@@ -1893,9 +1931,37 @@ const Board: Component<Props> = (props) => {
     });
   };
 
+  // #229: Forget was immediate and unrecoverable. It still removes the lens at
+  // once — the row has to reflect the choice — but the removed entry is held
+  // for a short window so a mistaken Forget can be put straight back.
+  const [forgotten, setForgotten] = createSignal<SavedFilter | null>(null);
+  let forgetTimer: ReturnType<typeof setTimeout> | undefined;
+
   const forgetSaved = (name: string) => {
+    const entry = savedFilters().find((one) => one.name === name);
     setSavedFilters(writeSavedFilters(savedFilters().filter((one) => one.name !== name)));
+    if (!entry) return;
+    setForgotten(entry);
+    if (forgetTimer) clearTimeout(forgetTimer);
+    forgetTimer = setTimeout(() => setForgotten(null), 6000);
   };
+
+  const undoForget = () => {
+    const entry = forgotten();
+    if (!entry) return;
+    if (forgetTimer) clearTimeout(forgetTimer);
+    setForgotten(null);
+    setSavedFilters(
+      writeSavedFilters([
+        entry,
+        ...savedFilters().filter((one) => one.name !== entry.name),
+      ]),
+    );
+  };
+
+  onCleanup(() => {
+    if (forgetTimer) clearTimeout(forgetTimer);
+  });
 
   const describeSaved = (entry: SavedFilter) =>
     describeFilters(filtersFromQuery(queryFromSearch(entry.query)));
@@ -1913,12 +1979,35 @@ const Board: Component<Props> = (props) => {
     );
   });
 
+  // #229: "hide finished columns" is a state filter set to exactly the board's
+  // non-finished columns. Read back as a raw `State: open, in_progress, review`
+  // chip it is unrecognisable; when the set is precisely that, name the intent.
+  const finishedHidden = createMemo(() => {
+    const states = filters().states;
+    if (states.length === 0) return false;
+    const finished = finishedStates();
+    const columns = allColumns();
+    if (finished.size === 0 || !columns.some((column) => finished.has(column.state))) {
+      return false;
+    }
+    const open = columns
+      .filter((column) => !finished.has(column.state))
+      .map((column) => column.state);
+    const shown = new Set(states);
+    return open.length === shown.size && open.every((state) => shown.has(state));
+  });
+
   const activeFilterChips = createMemo(() => {
     const active = filters();
     const chips: { key: string; label: string }[] = [];
     if (active.project) chips.push({ key: "project", label: `Project: ${active.project}` });
     if (active.kinds.length) chips.push({ key: "kind", label: `Type: ${active.kinds.join(", ")}` });
-    if (active.states.length) chips.push({ key: "state", label: `State: ${active.states.join(", ")}` });
+    if (active.states.length) {
+      chips.push({
+        key: "state",
+        label: finishedHidden() ? "Finished hidden" : `State: ${active.states.join(", ")}`,
+      });
+    }
     if (active.label) chips.push({ key: "label", label: `Label: ${active.label}` });
     if (active.initiative) chips.push({ key: "initiative", label: `Initiative: ${active.initiative}` });
     if (active.assignee) chips.push({ key: "assignee", label: `Assignee: ${active.assignee}` });
@@ -2005,17 +2094,6 @@ const Board: Component<Props> = (props) => {
             Quick create
           </button>
         )}
-        detail={(
-          <details class="surface-header-disclosure">
-            <summary>How this view stays current</summary>
-            <p class="board-note">
-              Columns come from <code>workflow.list</code>; a drag is a{" "}
-              <code>work.transition</code> and Vogt decides it. Changes arrive on
-              the event stream and the poll below is the floor under it, so a
-              dropped stream cannot look current indefinitely.
-            </p>
-          </details>
-        )}
       />
 
       <Show when={outage()}>
@@ -2038,10 +2116,6 @@ const Board: Component<Props> = (props) => {
             <span>{message()}</span>
           </div>
         )}
-      </Show>
-
-      <Show when={ack()}>
-        {(message) => <div class="board-banner board-banner--ok">{message()}</div>}
       </Show>
 
       <Show when={scopeUnlinked()}>
@@ -2103,6 +2177,18 @@ const Board: Component<Props> = (props) => {
             onSave={saveCurrent}
             onRecall={recallSaved}
             onForget={forgetSaved}
+            undo={(
+              <Show when={forgotten()}>
+                {(entry) => (
+                  <span class="board-lens-undo" role="status">
+                    <span>Forgot “{entry().name}”</span>
+                    <button type="button" onClick={undoForget}>
+                      Undo
+                    </button>
+                  </span>
+                )}
+              </Show>
+            )}
             note={(
               <>
                 saved lenses are kept in this browser · the URL above carries the
@@ -2352,13 +2438,6 @@ const Board: Component<Props> = (props) => {
         </form>
       </Show>
 
-      <p class="board-keys">
-        Keyboard: <kbd>Tab</kbd> to a card · <kbd>←</kbd> <kbd>→</kbd> across
-        columns · <kbd>↑</kbd> <kbd>↓</kbd> within one · <kbd>Shift</kbd>+
-        <kbd>←</kbd>/<kbd>→</kbd> proposes a move (same reason prompt as a drop)
-        · <kbd>Enter</kbd> opens the item · <kbd>n</kbd> raises one.
-      </p>
-
       <Show
         when={columns().length > 0}
         fallback={
@@ -2420,7 +2499,7 @@ const Board: Component<Props> = (props) => {
                       {collapsedColumn(column.state) ? "»" : "«"}
                     </button>
                     <span class="board-colhead-name">{humanState(column.state)}</span>
-                    <span class="board-wip" title="Work in progress: loaded items in this column">
+                    <span class="board-wip" title="Total work items Vogt reports in this column, not only the ones loaded so far">
                       {columnCount(column.state)}
                     </span>
                     <Show when={!collapsedColumn(column.state) && !column.known}>
@@ -2567,6 +2646,14 @@ const Board: Component<Props> = (props) => {
                             const current = refusal();
                             return current &&
                               current.to === column.state &&
+                              current.laneKey === lane.key
+                              ? current
+                              : null;
+                          });
+                          const acked = createMemo(() => {
+                            const current = ack();
+                            return current &&
+                              current.column === column.state &&
                               current.laneKey === lane.key
                               ? current
                               : null;
@@ -2809,6 +2896,23 @@ const Board: Component<Props> = (props) => {
                                   )}
                                 </Show>
 
+                                <Show when={acked()}>
+                                  {(current) => (
+                                    <div class="board-ack" role="status">
+                                      <span>{current().message}</span>
+                                      <button
+                                        type="button"
+                                        class="board-ack-close"
+                                        onClick={() => setAck(null)}
+                                        title="Dismiss"
+                                        aria-label="Dismiss"
+                                      >
+                                        ×
+                                      </button>
+                                    </div>
+                                  )}
+                                </Show>
+
                                 <div
                                   class="board-cell-cards"
                                   ref={(node) => {
@@ -2940,6 +3044,17 @@ const Board: Component<Props> = (props) => {
                                               onKeyDown={(event) =>
                                                 onCardKeyDown(event, item, lane)
                                               }
+                                              onClick={(event) => {
+                                                // #229: a single click of the
+                                                // card body opens the item, the
+                                                // way its role="button" says it
+                                                // should. Clicks on the ref
+                                                // link, Move…, Show more and the
+                                                // like are theirs to handle — a
+                                                // drag never fires a click.
+                                                if (fromCardControl(event)) return;
+                                                openDetail(item.ref);
+                                              }}
                                               onDblClick={() => openDetail(item.ref)}
                                             >
                                               <div class="board-card-top">
