@@ -104,6 +104,9 @@ known-local-folder = ["tests"]
 # JSON and TOML boundaries: a parsed document is `Any` and pretending
 # otherwise would be a cast, not a type.
 "src/vogt/adapters/github/client.py" = ["ANN401"]
+# The fixture-reset script speaks raw GitHub JSON, which is `Any` at the
+# boundary — the same reason the client above carries this ignore.
+"scripts/fixture_reset.py" = ["ANN401"]
 "src/vogt/adapters/forge/forgejo.py" = ["ANN401"]
 "src/vogt/adapters/github/collectors.py" = ["ANN401"]
 "src/vogt/collectors/dep_refs.py" = ["ANN401"]
@@ -123,6 +126,9 @@ addopts = [
   "--cov=vogt",
   "--cov-report=term-missing",
   "--cov-fail-under=80",
+]
+markers = [
+  "live_forge: exercises the real GitHub forge adapter against the TheDancingDeveloper-org/vogt-fixture repository. Opt-in: SKIPPED unless selected with `-m live_forge` and a token is present. See docs/FORGE_FIXTURE.md.",
 ]
 
 [tool.coverage.run]
