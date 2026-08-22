@@ -214,6 +214,31 @@ class SequentialIds:
         return f"{prefix}_{self._counts[prefix]:04d}"
 
 
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Keep `live_forge` tests out of the ordinary run.
+
+    They talk to a real GitHub repository, so they must never fire in the
+    default suite or CI: they run only when a person selects them explicitly
+    with `-m live_forge`. When they are *not* selected, every such item is
+    marked skipped here; when they are, the test's own guard skips it further
+    if no token or repo is configured. The result is that a plain
+    ``uv run pytest`` neither runs nor fails them — it skips them — while
+    ``pytest -m live_forge`` with credentials exercises the real adapter.
+    """
+    markexpr = str(config.getoption("markexpr") or "")
+    if "live_forge" in markexpr:
+        return
+    skip = pytest.mark.skip(
+        reason="live_forge is opt-in: run with `-m live_forge` and a token "
+        "(see docs/FORGE_FIXTURE.md)"
+    )
+    for item in items:
+        if item.get_closest_marker("live_forge") is not None:
+            item.add_marker(skip)
+
+
 @pytest.fixture
 def data_dir(tmp_path: Path) -> Path:
     return tmp_path / "instance"
