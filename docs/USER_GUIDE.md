@@ -127,10 +127,15 @@ Columns come from `workflow.list`, so a workflow change reshapes the board
 without a client release. A drag is a `work.transition`: the card moves
 immediately, and if the server refuses the move the card goes back and Vogt's
 own sentence appears in the column the drop landed in. The client never keeps a
-state the server refused.
+state the server refused. On a touch device, where there is nothing to drag,
+each card carries a **Move…** control that opens the same reason composer with
+a target-state select — the workflow's own legal edges for that card.
 
 - **Swimlanes** by project or initiative; per-column WIP counts; lanes and
-  columns collapse, and the layout is remembered per device.
+  columns collapse, and the layout is remembered per device. A lane is a
+  grouping, not a move target: dropping a card into another lane of its own
+  column changes nothing and says so, because changing an item's project or
+  initiative is a different write — open the item to do it.
 - **On a phone**, a labelled state row shows one workflow state at a time;
   the selected state is in the URL and every state keeps its exact count.
 - **Filters** by project, state, type, label, initiative and actor are added

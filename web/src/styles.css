@@ -5809,6 +5809,36 @@ textarea {
   font-size: 11px;
 }
 
+/* #214: the touch move control. A fine pointer can drag a card and reads the
+   Shift+Arrow hint, so it never sees this; a coarse pointer has neither, so
+   the control is its only way to move a card and is revealed for it below. */
+.board-card-move {
+  display: none;
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--bd-strong);
+  border-radius: 10px;
+  color: var(--accent);
+  background: transparent;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.board-card-move:disabled {
+  color: var(--fg-muted);
+  border-color: var(--bd);
+  cursor: default;
+}
+
+@media (pointer: coarse) {
+  .board-card-move {
+    display: inline-flex;
+    align-items: center;
+    /* A comfortable tap target on the state it labels. */
+    min-height: 28px;
+  }
+}
+
 .board-card-meta {
   display: flex;
   flex-wrap: nowrap;
@@ -5896,6 +5926,22 @@ textarea {
 .board-composer textarea {
   width: 100%;
   resize: vertical;
+  font-size: 12px;
+}
+
+/* #214: the target-state picker the touch composer carries, since a tap never
+   named a column the way a drop does. */
+.board-composer-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.board-composer-state select {
+  flex: 1;
+  min-height: 28px;
   font-size: 12px;
 }
 

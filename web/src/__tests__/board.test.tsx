@@ -1303,3 +1303,173 @@ describe("FR-U13 — lanes and columns collapse, and the layout is this client's
     ).toEqual([]);
   });
 });
+
+// -- #214: a card can be moved without a drag ------------------------------
+//
+// Drag and Shift+Arrow are the only ways to move a card, and a coarse pointer
+// has neither. The "Move…" control opens the *same* composer the drag does —
+// `beginMove`/`commitMove`, unchanged — with a state select standing in for
+// the drop cell a tap never lands on. These assert that path end to end: the
+// control opens the composer, the select offers the workflow's listed edges,
+// and the chosen one is what `work.transition` is asked to make.
+
+describe("#214 — the Move… control opens the drag's own composer", () => {
+  /** The touch move control on a card. Present in the DOM on every pointer;
+   *  CSS reveals it only on coarse ones, which jsdom does not evaluate. */
+  function moveControl(container: HTMLElement, ref: string): HTMLButtonElement {
+    const button = card(container, ref).querySelector<HTMLButtonElement>(".board-card-move");
+    if (!button) throw new Error(`no Move control on ${ref}`);
+    return button;
+  }
+
+  /** The composer a pick opens, which is drawn in the card's *own* cell. */
+  function pickComposer(container: HTMLElement, state: string): HTMLFormElement {
+    const form = cell(container, state).querySelector<HTMLFormElement>(".board-composer");
+    if (!form) throw new Error(`no composer open in ${state}`);
+    return form;
+  }
+
+  it("moves a card to a chosen state with no drag gesture at all", async () => {
+    const vogt = fakeVogt({
+      "POST /work/transition": {
+        body: { item: workItem({ state: "wont_do", updated_at: "2026-08-03T00:00:00Z" }) },
+      },
+    });
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    // The card is in `open`, and the composer opens in that same cell — the one
+    // a phone can see — not in a target column a coarse pointer cannot reach.
+    fireEvent.click(moveControl(container, "WI-1"));
+    const composer = await waitFor(() => pickComposer(container, "open"));
+    expect(cell(container, "open").contains(card(container, "WI-1"))).toBe(true);
+
+    // The select offers exactly the workflow's listed edges from `open`
+    // (feature: in_progress, wont_do) — never the current state, never an
+    // edge the machine does not list.
+    const select = composer.querySelector<HTMLSelectElement>(".board-composer-state select")!;
+    const options = [...select.options].map((option) => option.value);
+    expect(options).toEqual(["in_progress", "wont_do"]);
+    expect(options).not.toContain("open");
+    expect(options).not.toContain("done");
+
+    // Pick the second edge, give the reason the write requires, confirm.
+    fireEvent.change(select, { target: { value: "wont_do" } });
+    const textarea = composer.querySelector("textarea")!;
+    fireEvent.input(textarea, { target: { value: "closing it from my phone" } });
+    const submit = composer.querySelector<HTMLButtonElement>("button[type=submit]")!;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+
+    // One transition, to the state the select named — the same endpoint and
+    // body a drag would have produced.
+    await waitFor(() => expect(vogt.matching("POST /work/transition")).toHaveLength(1));
+    expect(vogt.matching("POST /work/transition")[0]?.body).toEqual({
+      ref: "WI-1",
+      to_state: "wont_do",
+      reason: "closing it from my phone",
+    });
+    await waitFor(() =>
+      expect(container.textContent).toContain("WI-1 moved to wont do."),
+    );
+    // And the card is where the server put it.
+    expect(cell(container, "wont do").contains(card(container, "WI-1"))).toBe(true);
+  });
+
+  it("defaults the target to the first listed edge and can be abandoned", async () => {
+    const vogt = fakeVogt();
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    fireEvent.click(moveControl(container, "WI-1"));
+    const composer = await waitFor(() => pickComposer(container, "open"));
+    const select = composer.querySelector<HTMLSelectElement>(".board-composer-state select")!;
+    // The first listed edge, chosen for the reader who does not touch the
+    // select — the head reads `open → in progress`.
+    expect(select.value).toBe("in_progress");
+    expect(composer.textContent).toContain("in progress");
+
+    // Escape puts the card back and writes nothing, exactly as the drag's
+    // composer does.
+    fireEvent.keyDown(composer.querySelector("textarea")!, { key: "Escape" });
+    await waitFor(() => expect(cell(container, "open").querySelector(".board-composer")).toBeNull());
+    expect(vogt.matching("POST /work/transition")).toHaveLength(0);
+  });
+
+  it("offers no Move control on a card whose state has no listed edge", async () => {
+    fakeVogt({
+      "GET /work": {
+        body: { items: [workItem({ ref: "WI-1", state: "done" })], total: 1 },
+      },
+    });
+    const { container } = board();
+    await waitFor(() => card(container, "WI-1"));
+
+    // `done` leads nowhere in the feature machine, so the control has nothing
+    // to open and says so by refusing the tap.
+    expect(
+      card(container, "WI-1").querySelector<HTMLButtonElement>(".board-card-move")?.disabled,
+    ).toBe(true);
+  });
+});
+
+// -- #216: a same-column, other-lane drop is explained, not swallowed ------
+//
+// A lane is a grouping, not a target: dropping a card into another lane of its
+// own column changes only the swimlane, which a drag cannot do. `beginMove`
+// refuses a same-state move, so the drop used to do nothing without a word —
+// while the cell had lit up as a target during the drag. These assert both
+// halves of the fix: the cell is never lit, and the reason is left on screen.
+
+describe("#216 — dropping into another lane of the same column", () => {
+  function laneCell(container: HTMLElement, lane: string, state: string): HTMLElement {
+    const row = laneHead(container, lane).nextElementSibling;
+    const found = row?.querySelector<HTMLElement>(`.board-cell[data-state="${state}"]`);
+    if (!found) throw new Error(`no ${state} cell in lane ${lane}`);
+    return found;
+  }
+
+  it("does not light a same-state cell as a drop target, and explains the no-op", async () => {
+    const vogt = fakeVogt(LANED);
+    const { container } = board("/board?lanes=project");
+    await waitFor(() => expect(laneLabels(container)).toContain("Alpha"));
+
+    // WI-1 is `open` in Alpha. Beta's own `open` cell differs from the source
+    // only by lane.
+    const betaOpen = laneCell(container, "Beta", "open");
+    fireEvent.dragStart(card(container, "WI-1"));
+
+    // (b) During the drag it is not offered as a target — no `dropping`.
+    fireEvent.dragOver(betaOpen);
+    expect(betaOpen.classList.contains("dropping")).toBe(false);
+    // (a) But it says why a drop here would do nothing.
+    expect(betaOpen.textContent).toContain(
+      "Lanes group cards; to change the project/initiative open the item",
+    );
+
+    // The drop is a no-op with the explanation still on screen — no composer,
+    // and nothing written.
+    fireEvent.drop(betaOpen);
+    expect(betaOpen.querySelector(".board-composer")).toBeNull();
+    expect(vogt.matching("POST /work/transition")).toHaveLength(0);
+    expect(betaOpen.textContent).toContain(
+      "Lanes group cards; to change the project/initiative open the item",
+    );
+    // The card did not move: it is still open in Alpha.
+    expect(cardsInLane(container, "Alpha")).toContain("WI-1");
+  });
+
+  it("still lights a cell whose state actually differs, in any lane", async () => {
+    fakeVogt(LANED);
+    const { container } = board("/board?lanes=project");
+    await waitFor(() => expect(laneLabels(container)).toContain("Beta"));
+
+    // Beta's `in progress` cell is a real target for WI-1 (open → in_progress),
+    // in a different lane — the lane is not what stops a move, the state is.
+    const betaProgress = laneCell(container, "Beta", "in progress");
+    fireEvent.dragStart(card(container, "WI-1"));
+    fireEvent.dragOver(betaProgress);
+    expect(betaProgress.classList.contains("dropping")).toBe(true);
+    expect(betaProgress.textContent).not.toContain("Lanes group cards");
+  });
+});
