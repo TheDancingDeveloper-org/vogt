@@ -168,6 +168,13 @@ describe("FR-U21 — the session controls stop, and say the engine's own reason"
     await waitFor(() => expect(sessions.textContent).toContain(NO_ENGINE));
     expect(sessions.textContent).toContain("The engine could not be asked");
 
+    // #224: the start form is collapsed. Opening it is what reveals the
+    // blocked reason and the disabled controls the rest of this test is about.
+    fireEvent.click(
+      sessions.querySelector<HTMLButtonElement>(".wid-start-open")!,
+    );
+    await waitFor(() => expect(sessions.querySelector(".wid-start form")).toBeTruthy());
+
     const blocked = [...sessions.querySelectorAll(".wid-blocked")].map(
       (node) => node.textContent ?? "",
     );

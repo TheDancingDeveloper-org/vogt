@@ -4928,6 +4928,16 @@ textarea {
   border-color: var(--accent);
 }
 
+/* Move to (FR-U4): the transition control under the rail. It is a `ReasonForm`
+   like every other write here, so it inherits `.wid-form`; this only gives it
+   the breathing room that separates it from the rail it moves the item along. */
+.wid-move-to {
+  margin-top: 10px;
+}
+.wid-move-select {
+  min-width: 12ch;
+}
+
 /* The item's own state history (FR-U5). Ordered and read top-down, so it is
    an `<ol>` with a rule down the left: the shape says "these happened in this
    order" before a word of it is read. The creation is marked apart because it

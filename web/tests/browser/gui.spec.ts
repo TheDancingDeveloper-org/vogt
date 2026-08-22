@@ -69,6 +69,8 @@ interface PlaceMetricFixtures {
   workflows?: Record<string, unknown>[];
   /** The project registry, so a test can seed more than one swimlane. */
   projects?: { slug: string; name: string; root_path?: string }[];
+  /** The actor roster the item editor's assignee picker offers. */
+  actors?: { identity_ref: string; display_name: string }[];
 }
 
 async function installFixtures(
@@ -92,6 +94,7 @@ async function installFixtures(
   let inboxCalls = 0;
   const boardRequests: Record<string, unknown>[] = [];
   const transitionRequests: Record<string, unknown>[] = [];
+  const updateRequests: Record<string, unknown>[] = [];
   const sessionInputs: { id: string; text: string; submit: boolean }[] = [];
   const sessions = [...initialSessions];
   let createdSessions = 0;
@@ -221,6 +224,24 @@ async function installFixtures(
         item: { ...source, ref: body.ref, state: body.to_state, updated_at: "2026-08-17T11:00:00Z" },
       } });
     }
+    if (url.pathname.endsWith("/work/update")) {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      updateRequests.push(body);
+      const source = (metrics.boardItems ?? boardItems).find((item) => item.ref === body.ref) ?? boardItems[0];
+      // Echo back the item with the edited fields applied, the way work.update
+      // answers: the detail page keeps the server's version, not what was typed.
+      return route.fulfill({ json: {
+        item: {
+          ...source,
+          ref: body.ref,
+          title: body.title ?? source.title,
+          priority: body.priority ?? source.priority,
+          updated_at: "2026-08-17T11:00:00Z",
+        },
+        comments: [],
+        sessions: [],
+      } });
+    }
     if (url.pathname.endsWith("/board/list")) {
       if (metrics.boardTotal === null) return route.fulfill({ status: 503, body: "work unavailable" });
       const body = request.postDataJSON() as {
@@ -328,7 +349,7 @@ async function installFixtures(
     }
     if (url.pathname.endsWith("/labels")) return route.fulfill({ json: { labels: [] } });
     if (url.pathname.endsWith("/initiatives")) return route.fulfill({ json: { initiatives: [] } });
-    if (url.pathname.endsWith("/actors")) return route.fulfill({ json: { actors: [] } });
+    if (url.pathname.endsWith("/actors")) return route.fulfill({ json: { actors: metrics.actors ?? [] } });
     if (url.pathname.endsWith("/vogt/observations")) {
       return route.fulfill({ json: { observations: [], total: 0 } });
     }
@@ -337,7 +358,7 @@ async function installFixtures(
     }
     return route.fulfill({ json: {} });
   });
-  return { inboxCalls: () => inboxCalls, boardRequests, transitionRequests, sessions, sessionInputs };
+  return { inboxCalls: () => inboxCalls, boardRequests, transitionRequests, updateRequests, sessions, sessionInputs };
 }
 
 test("History palette results restore the selected session, query and match", async ({ page }) => {
@@ -2863,4 +2884,86 @@ test("History explains an empty archive when live sessions are still running", a
 
   await expect(page.getByText("No archived sessions.", { exact: false })).toBeVisible();
   await expect(page.getByText(/session is currently running/)).toBeVisible();
+});
+
+// -- #213 / #224: editing and moving a work item from its own page ----------
+//
+// The detail page carries the three per-item forms the palette routes to it
+// for (`USER_GUIDE.md` §4): transition (Move to), comment, and start session.
+// #213 added the first; these prove it fires the transition and the rail
+// follows the server's answer, on the desk and the phone alike, since a phone
+// has no drag and the detail page is where it moves a card at all.
+
+test("Work item state is changed from the detail page via Move to", async ({ page }) => {
+  const fixture = await installFixtures(page);
+  await page.goto("/#/w/WI-7");
+  await expect(page.locator(".wid-view")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Measured board card" })).toBeVisible();
+
+  // The rail says the item is open.
+  const rail = page.locator(".wid-rail");
+  await expect(rail.locator(".wid-rail-state.is-current")).toHaveText("open");
+
+  // Move to → reason → confirm, the same optimistic transition a drag commits.
+  const move = page.locator(".wid-move-to");
+  await expect(move).toBeVisible();
+  await move.getByLabel("Move to").selectOption("done");
+  await move.locator('input[type="text"]').fill("closing it from the detail page");
+  await move.getByRole("button", { name: "Move", exact: true }).click();
+
+  // Exactly that transition was requested — ref, target, and the typed reason.
+  await expect.poll(() => fixture.transitionRequests).toEqual([
+    { ref: "WI-7", to_state: "done", reason: "closing it from the detail page" },
+  ]);
+  // And the rail follows the server's answer rather than what was typed.
+  await expect(rail.locator(".wid-rail-state.is-current")).toHaveText("done");
+});
+
+test("The item editor's assignee picker is keyboard-operable", async ({ page }) => {
+  await installFixtures(page, {}, [], undefined, {
+    actors: [
+      { identity_ref: "local:ana", display_name: "Ana" },
+      { identity_ref: "local:bo", display_name: "Bo" },
+    ],
+  });
+  await page.goto("/#/w/WI-7");
+  await expect(page.locator(".wid-view")).toBeVisible();
+
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  const picker = page.getByLabel("Assignee");
+  await expect(picker).toBeVisible();
+  // It offers "nobody" and the two actors, and starts on the item's assignee.
+  await expect(picker.locator("option")).toHaveText([
+    "nobody",
+    "Ana (local:ana)",
+    "Bo (local:bo)",
+  ]);
+
+  // Focus it from nothing but the keyboard, and change the selection with the
+  // arrow keys — no pointer touches it.
+  await picker.focus();
+  await expect(picker).toBeFocused();
+  await picker.press("ArrowDown");
+  await expect(picker).toHaveValue("local:ana");
+  await picker.press("ArrowDown");
+  await expect(picker).toHaveValue("local:bo");
+});
+
+test("The item page leads with comments and keeps the session form collapsed", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/w/WI-7");
+  await expect(page.locator(".wid-view")).toBeVisible();
+
+  // Comments is the panel immediately after Description in the main column.
+  const texts = await page.locator(".wid-main .wid-panel h3").allTextContents();
+  const description = texts.indexOf("Description");
+  expect(description).toBeGreaterThanOrEqual(0);
+  expect(texts[description + 1]).toBe("Comments");
+
+  // Start a session is collapsed by default: the opener is on the page, the
+  // form is not, and clicking the opener reveals it.
+  await expect(page.locator(".wid-start-open")).toBeVisible();
+  await expect(page.locator(".wid-start form")).toHaveCount(0);
+  await page.locator(".wid-start-open").click();
+  await expect(page.locator(".wid-start form")).toBeVisible();
 });
