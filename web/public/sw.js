@@ -105,6 +105,61 @@ self.addEventListener("push", (event) => {
   event.waitUntil(self.registration.showNotification(title, opts));
 });
 
+// The browser can rotate or expire a push subscription without the tab ever
+// coming to the foreground — a re-keyed VAPID pair, a pushed-out expiry. When
+// that happens the old endpoint stops delivering silently. Resubscribe and
+// re-register the fresh subscription so this device keeps receiving, without
+// waiting for the user to reopen Settings.
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const b64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(b64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    (async () => {
+      try {
+        let sub = event.newSubscription || null;
+        if (!sub) {
+          let applicationServerKey =
+            event.oldSubscription?.options?.applicationServerKey || null;
+          if (!applicationServerKey) {
+            const res = await fetch("/api/push/public-key");
+            if (res.ok) {
+              const { vapid_public_key } = await res.json();
+              if (vapid_public_key) {
+                applicationServerKey = urlBase64ToUint8Array(vapid_public_key);
+              }
+            }
+          }
+          sub = await self.registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: applicationServerKey || undefined,
+          });
+        }
+        const json = sub.toJSON();
+        await fetch("/api/push/subscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: "web-push",
+            endpoint: json.endpoint,
+            p256dh: json.keys?.p256dh,
+            auth: json.keys?.auth,
+          }),
+        });
+      } catch {
+        // Best effort: the next foreground refresh reconciles against the
+        // server list and offers Re-enable if this failed.
+      }
+    })(),
+  );
+});
+
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const url = event.notification.data?.url || "/";

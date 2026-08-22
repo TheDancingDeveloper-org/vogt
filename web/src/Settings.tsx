@@ -26,13 +26,20 @@ import {
 import {
   currentPushEnabled,
   currentPushSubscriptionId,
+  defaultDeviceLabel,
   isPushAvailable,
   pushPermission,
   pushSelfTest,
+  pushSupportReason,
   subscribePushNotifications,
   unsubscribePushNotifications,
   type PushPermissionState,
 } from "./push";
+import {
+  reconcilePush,
+  saveButtonLabel,
+  saveDisabled,
+} from "./settingsModel";
 import {
   clearAuthProfiles,
   deleteAuthProfile,
@@ -62,7 +69,25 @@ interface Props {
   onSaveWorkspaceLayout?: () => Promise<boolean | void>;
   onRestoreWorkspaceLayout?: (layoutId: string) => Promise<boolean | void>;
   onDeleteWorkspaceLayout?: (layoutId: string) => Promise<boolean | void>;
+  /**
+   * Confirm a destructive action before it runs. Threaded in from the shell's
+   * `confirmUser`, the same modal that guards deleting a layout. Optional so a
+   * bare mount (a test, a future embed) still functions, defaulting to "yes".
+   */
+  confirmAction?: (title: string, body?: string) => Promise<boolean>;
 }
+
+const SETTINGS_SECTIONS = [
+  { id: "connection", label: "Connection" },
+  { id: "layout", label: "Layout" },
+  { id: "theme", label: "Theme" },
+  { id: "presets", label: "Presets" },
+  { id: "workspace-layouts", label: "Layouts" },
+  { id: "storage", label: "Storage" },
+  { id: "push", label: "Push" },
+  { id: "server-cleanup", label: "Server" },
+  { id: "ops", label: "Operations" },
+] as const;
 
 // Must agree with `PushPreferences::default()` in the engine's `push.rs`,
 // which is where FR-M2's "and for nothing else by default" is actually kept.
@@ -137,6 +162,7 @@ const Settings: Component<Props> = (props) => {
   const [pushMsg, setPushMsg] = createSignal<string | null>(null);
   const [pushSubscriptions, setPushSubscriptions] = createSignal<PushSubscriptionEntry[]>([]);
   const [currentPushSubId, setCurrentPushSubId] = createSignal<string | null>(null);
+  const [pushServerDropped, setPushServerDropped] = createSignal(false);
   const [pushPrefs, setPushPrefs] = createSignal<PushPreferences>(defaultPushPreferences());
   const [pushLabel, setPushLabel] = createSignal("");
   const [pushQuietStart, setPushQuietStart] = createSignal("22:00");
@@ -233,16 +259,22 @@ const Settings: Component<Props> = (props) => {
 
   const refreshPushState = async () => {
     setPushPerm(await pushPermission());
-    setPushOn(await currentPushEnabled());
+    const enabled = await currentPushEnabled();
+    setPushOn(enabled);
     const currentId = await currentPushSubscriptionId();
     setCurrentPushSubId(currentId);
     if (!getToken()) {
       setPushSubscriptions([]);
+      setPushServerDropped(false);
       return;
     }
     try {
       const subs = await api.listPushSubscriptions();
       setPushSubscriptions(subs);
+      // Compare this device's live subscription against the server's list: if
+      // the browser still believes it is subscribed but the server dropped the
+      // row, offer to re-register rather than silently receiving nothing.
+      setPushServerDropped(reconcilePush(currentId, subs, enabled).offerReEnable);
       const current = (currentId ? subs.find((sub) => sub.id === currentId) : null) ?? null;
       if (current) {
         setPushPrefs(current.prefs);
@@ -258,6 +290,7 @@ const Settings: Component<Props> = (props) => {
       }
     } catch {
       setPushSubscriptions([]);
+      setPushServerDropped(false);
     }
   };
 
@@ -410,7 +443,13 @@ const Settings: Component<Props> = (props) => {
     const baseChanged = newBase !== getBase();
     const layoutChanged = newLayout !== getLayoutMode();
 
-    if (!(await validateAuth(newTok, newBase))) return;
+    // Only revalidate when the credential actually moved. A preferences-only
+    // save (layout, retention limits) must not require a round-trip — and a
+    // same-origin deployment with a blank-but-unchanged token could never
+    // save at all while validation was mandatory.
+    if ((tokChanged || baseChanged) && !(await validateAuth(newTok, newBase))) {
+      return;
+    }
 
     setToken(newTok);
     setBase(newBase);
@@ -427,7 +466,36 @@ const Settings: Component<Props> = (props) => {
     }
   };
 
-  const clearAuth = () => {
+  // Destructive actions were one-click. Route them through the shell's
+  // confirmation modal (the same one that guards deleting a layout); a bare
+  // mount with no `confirmAction` still proceeds.
+  const confirmDestructive = (title: string, body?: string): Promise<boolean> =>
+    props.confirmAction ? props.confirmAction(title, body) : Promise.resolve(true);
+
+  // What differs from what is persisted — drives the Save button's label and
+  // whether a reload is coming.
+  const dirtyFlags = () => ({
+    token: token().trim() !== getToken(),
+    base: normalizeBaseValue(base()) !== getBase(),
+    layout: layoutMode() !== getLayoutMode(),
+    storage: JSON.stringify(storagePrefs()) !== JSON.stringify(getStoragePrefs()),
+  });
+
+  const scrollToSection = (id: string) => {
+    document
+      .getElementById(`settings-section-${id}`)
+      ?.scrollIntoView({ block: "start", behavior: "smooth" });
+  };
+
+  const clearAuth = async () => {
+    if (
+      !(await confirmDestructive(
+        "Sign out of Vogt?",
+        "Clears the saved token and base URL from this browser and returns to the login screen.",
+      ))
+    ) {
+      return;
+    }
     // Handing the credential back is the same session-level fact as having it
     // refused, so it travels the same way (#195): `signOut` clears both token
     // and base and publishes the rejection, and the shell returns to the
@@ -461,7 +529,15 @@ const Settings: Component<Props> = (props) => {
     setStorageMsg("Applied local retention limits.");
   };
 
-  const clearManagedBrowserData = () => {
+  const clearManagedBrowserData = async () => {
+    if (
+      !(await confirmDestructive(
+        "Clear managed browser data?",
+        "Removes stored profiles, layouts, recent files, bookmarks, and history pins from this browser. Server data is untouched.",
+      ))
+    ) {
+      return;
+    }
     clearAuthProfiles();
     clearWorkspaceLayouts();
     clearRecentFiles();
@@ -475,6 +551,14 @@ const Settings: Component<Props> = (props) => {
   };
 
   const cleanupArchivedHistory = async () => {
+    if (
+      !(await confirmDestructive(
+        "Purge archived history?",
+        `Permanently removes archived session history older than ${Math.max(0, Math.round(historyRetentionDays()))} day(s) from the server.`,
+      ))
+    ) {
+      return;
+    }
     setServerCleanupBusy(true);
     setServerCleanupMsg(null);
     try {
@@ -492,6 +576,14 @@ const Settings: Component<Props> = (props) => {
   };
 
   const cleanupTaskPromptArtifacts = async () => {
+    if (
+      !(await confirmDestructive(
+        "Remove task prompt artifacts?",
+        `Permanently deletes scheduled-task prompt and context files from the server, keeping the latest ${Math.max(0, Math.round(taskPromptKeepRuns()))} run(s).`,
+      ))
+    ) {
+      return;
+    }
     setServerCleanupBusy(true);
     setServerCleanupMsg(null);
     try {
@@ -548,7 +640,15 @@ const Settings: Component<Props> = (props) => {
     location.reload();
   };
 
-  const removeProfile = (id: string, name: string) => {
+  const removeProfile = async (id: string, name: string) => {
+    if (
+      !(await confirmDestructive(
+        "Delete this profile?",
+        `Removes the saved auth profile "${name}" from this browser.`,
+      ))
+    ) {
+      return;
+    }
     deleteAuthProfile(id);
     refreshAuthProfiles();
     setProfileMsg(`Deleted profile "${name}"`);
@@ -562,13 +662,30 @@ const Settings: Component<Props> = (props) => {
         await unsubscribePushNotifications();
         setPushMsg("Notifications turned off.");
       } else {
-        const label = navigator.userAgent.slice(0, 60);
+        const label = pushLabel().trim() || defaultDeviceLabel();
         const r = await subscribePushNotifications(label);
         setPushMsg(`Subscribed (id ${r.id.slice(0, 12)}…)`);
       }
       await refreshPushState();
     } catch (e) {
       setPushMsg(`Push: ${(e as Error).message}`);
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  // The browser still holds a live subscription but the server dropped it;
+  // re-POST it so this device starts receiving again.
+  const reEnablePush = async () => {
+    setPushBusy(true);
+    setPushMsg(null);
+    try {
+      const label = pushLabel().trim() || defaultDeviceLabel();
+      const r = await subscribePushNotifications(label);
+      setPushMsg(`Re-registered with the server (id ${r.id.slice(0, 12)}…)`);
+      await refreshPushState();
+    } catch (e) {
+      setPushMsg(`Re-enable failed: ${(e as Error).message}`);
     } finally {
       setPushBusy(false);
     }
@@ -655,30 +772,54 @@ const Settings: Component<Props> = (props) => {
 
   return (
     <Show when={props.open}>
-      <Dialog title="Settings" onClose={props.onClose}>
+      <Dialog label="Settings" dialogClass="modal settings-modal" onClose={props.onClose}>
+        <div class="settings-modal-top">
+          <div class="settings-modal-header">
+            <h2 class="settings-modal-title">Settings</h2>
+            <button
+              type="button"
+              class="settings-modal-close"
+              aria-label="Close settings"
+              onClick={props.onClose}
+            >
+              ×
+            </button>
+          </div>
+          <nav class="settings-modal-nav" aria-label="Settings sections">
+            <For each={SETTINGS_SECTIONS}>
+              {(section) => (
+                <button type="button" onClick={() => scrollToSection(section.id)}>
+                  {section.label}
+                </button>
+              )}
+            </For>
+          </nav>
+        </div>
+        <div class="settings-modal-body">
+          <section id="settings-section-connection" class="settings-section">
           <label>
             Bearer token
-            <input
-              type={showToken() ? "text" : "password"}
-              value={token()}
-              onInput={(e) => {
-                setT(e.currentTarget.value);
-                setAuthCheck("idle");
-                setAuthCheckMsg("Token changed; validate before saving.");
-              }}
-              autocomplete="off"
-              spellcheck={false}
-            />
-            <label
-              style={{ display: "flex", "align-items": "center", gap: "6px", "margin-top": "6px" }}
-            >
+            <div class="settings-token-row">
               <input
-                type="checkbox"
-                checked={showToken()}
-                onChange={(e) => setShowToken(e.currentTarget.checked)}
+                type={showToken() ? "text" : "password"}
+                value={token()}
+                onInput={(e) => {
+                  setT(e.currentTarget.value);
+                  setAuthCheck("idle");
+                  setAuthCheckMsg("Token changed; validate before saving.");
+                }}
+                autocomplete="off"
+                spellcheck={false}
               />
-              Show token
-            </label>
+              <label class="settings-show-token">
+                <input
+                  type="checkbox"
+                  checked={showToken()}
+                  onChange={(e) => setShowToken(e.currentTarget.checked)}
+                />
+                Show token
+              </label>
+            </div>
             <div
               style={{
                 "font-size": "11px",
@@ -815,17 +956,21 @@ const Settings: Component<Props> = (props) => {
             </Show>
           </div>
           <div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
-            <button type="button" onClick={clearAuth}>Sign out &amp; clear saved auth</button>
+            <button type="button" onClick={() => void clearAuth()}>Sign out &amp; clear saved auth</button>
           </div>
+          </section>
 
-          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
-
+          <section id="settings-section-layout" class="settings-section">
           <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
-              Layout Mode
+              Layout Mode{" "}
+              <span style={{ color: "var(--fg-muted)", "font-weight": 400, "font-size": "12px" }}>
+                (requires reload)
+              </span>
             </div>
             <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
               Choose between tabbed mode (default) or IDE mode with persistent file tree.
+              Switching reloads the app.
             </div>
             <div style={{ display: "flex", gap: "8px" }}>
               <label style={{ display: "flex", "align-items": "center", gap: "6px", cursor: "pointer" }}>
@@ -851,11 +996,15 @@ const Settings: Component<Props> = (props) => {
             </div>
           </div>
 
-          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+          </section>
 
+          <section id="settings-section-theme" class="settings-section">
           <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
-              Terminal Theme
+              Terminal Theme{" "}
+              <span style={{ color: "var(--fg-muted)", "font-weight": 400, "font-size": "12px" }}>
+                (applies immediately)
+              </span>
             </div>
             <select
               value={terminalTheme()}
@@ -879,8 +1028,9 @@ const Settings: Component<Props> = (props) => {
             </select>
           </div>
 
-          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+          </section>
 
+          <section id="settings-section-presets" class="settings-section">
           <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
               Workspace Presets
@@ -893,8 +1043,9 @@ const Settings: Component<Props> = (props) => {
             </button>
           </div>
 
-          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+          </section>
 
+          <section id="settings-section-workspace-layouts" class="settings-section">
           <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
               Saved Workspace Layouts
@@ -955,8 +1106,9 @@ const Settings: Component<Props> = (props) => {
             </Show>
           </div>
 
-          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+          </section>
 
+          <section id="settings-section-storage" class="settings-section">
           <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
               Retention & storage
@@ -1089,8 +1241,9 @@ const Settings: Component<Props> = (props) => {
             </div>
           </div>
 
-          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+          </section>
 
+          <section id="settings-section-push" class="settings-section">
           <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
               Push notifications
@@ -1099,7 +1252,16 @@ const Settings: Component<Props> = (props) => {
               when={isPushAvailable()}
               fallback={
                 <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
-                  Not supported in this browser.
+                  <Show
+                    when={pushSupportReason() === "ios-home-screen"}
+                    fallback={<span>Not supported in this browser.</span>}
+                  >
+                    <span>
+                      To receive push on iOS, open the Share menu and choose
+                      {" "}<strong>Add to Home Screen</strong>, then open Vogt
+                      from that icon and enable push here.
+                    </span>
+                  </Show>
                 </div>
               }
             >
@@ -1108,9 +1270,17 @@ const Settings: Component<Props> = (props) => {
                 (permission: <code>{pushPerm()}</code>).
               </div>
               <div style={{ display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
-                <button onClick={togglePush} disabled={pushBusy()}>
+                <button
+                  onClick={togglePush}
+                  disabled={pushBusy() || (pushPerm() === "denied" && !pushOn())}
+                >
                   {pushOn() ? "Disable" : "Enable"} push
                 </button>
+                <Show when={pushServerDropped()}>
+                  <button onClick={() => void reEnablePush()} disabled={pushBusy()}>
+                    Re-enable
+                  </button>
+                </Show>
                 <button
                   onClick={testPush}
                   disabled={pushBusy() || !pushOn()}
@@ -1133,6 +1303,17 @@ const Settings: Component<Props> = (props) => {
                   Flush digests
                 </button>
               </div>
+              <Show when={pushPerm() === "denied" && !pushOn()}>
+                <div role="status" style={{ "font-size": "12px", color: "#ff7b72" }}>
+                  Notifications are blocked — allow in site settings, then reload.
+                </div>
+              </Show>
+              <Show when={pushServerDropped()}>
+                <div role="status" style={{ "font-size": "12px", color: "#d29922" }}>
+                  The server no longer lists this device's subscription.
+                  {" "}Re-enable to start receiving again.
+                </div>
+              </Show>
               <Show when={pushOn()}>
                 <div
                   style={{
@@ -1331,8 +1512,9 @@ const Settings: Component<Props> = (props) => {
             </Show>
           </div>
 
-          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+          </section>
 
+          <section id="settings-section-server-cleanup" class="settings-section">
           <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
               Server retention cleanup
@@ -1383,8 +1565,9 @@ const Settings: Component<Props> = (props) => {
             </Show>
           </div>
 
-          <hr style={{ "border-color": "var(--bd)", "border-style": "solid", margin: "4px 0" }} />
+          </section>
 
+          <section id="settings-section-ops" class="settings-section">
           <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
             <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
               Operational visibility
@@ -1487,16 +1670,23 @@ const Settings: Component<Props> = (props) => {
               )}
             </Show>
           </div>
+          </section>
+        </div>
 
-          <div class="modal-actions">
-            <button onClick={props.onClose}>Cancel</button>
-            <button
-              onClick={() => void save()}
-              disabled={authCheck() === "checking" || !token().trim()}
-            >
-              Validate, save & reload
-            </button>
-          </div>
+        <div class="settings-modal-footer">
+          <button type="button" onClick={props.onClose}>Cancel</button>
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={saveDisabled({
+              checking: authCheck() === "checking",
+              tokenBlank: !token().trim(),
+              tokenChanged: token().trim() !== getToken(),
+            })}
+          >
+            {saveButtonLabel(dirtyFlags())}
+          </button>
+        </div>
       </Dialog>
       <TemplateEditor
         open={templateEditorOpen()}

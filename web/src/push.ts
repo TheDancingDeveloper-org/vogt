@@ -88,6 +88,73 @@ export function isPushAvailable(): boolean {
   return isNativePlatform() || isPushSupported();
 }
 
+/**
+ * iOS (and iPadOS 13+, which reports itself as a Mac) grants the Push API only
+ * to a PWA that has been installed to the Home Screen. Detecting the device
+ * lets Settings say "Add to Home Screen" instead of a dead-end "Not supported".
+ */
+export function isIOS(): boolean {
+  const ua = navigator.userAgent || "";
+  const iOSUA = /iPad|iPhone|iPod/.test(ua);
+  const iPadOS =
+    navigator.platform === "MacIntel" && (navigator.maxTouchPoints ?? 0) > 1;
+  return iOSUA || iPadOS;
+}
+
+/** True when the PWA is running in an installed / standalone display mode. */
+export function isStandalonePwa(): boolean {
+  const legacyStandalone = (navigator as unknown as { standalone?: boolean })
+    .standalone;
+  const displayStandalone = Boolean(
+    window.matchMedia?.("(display-mode: standalone)")?.matches,
+  );
+  return displayStandalone || Boolean(legacyStandalone);
+}
+
+export type PushSupportReason = "supported" | "ios-home-screen" | "unsupported";
+
+/**
+ * Why push is (un)available, so the UI can distinguish "this browser can never"
+ * from "install this to the Home Screen and it can".
+ */
+export function pushSupportReason(): PushSupportReason {
+  if (isNativePlatform() || isPushSupported()) return "supported";
+  if (isIOS() && !isStandalonePwa()) return "ios-home-screen";
+  return "unsupported";
+}
+
+/**
+ * A human-readable device label derived from the platform — "Chrome · Android"
+ * rather than a 60-character slice of the raw user-agent string, which read as
+ * gibberish in the subscribed-devices list.
+ */
+export function defaultDeviceLabel(): string {
+  const ua = navigator.userAgent || "";
+  const browser = /Edg\//.test(ua)
+    ? "Edge"
+    : /OPR\/|Opera/.test(ua)
+      ? "Opera"
+      : /Firefox\//.test(ua)
+        ? "Firefox"
+        : /Chrome\//.test(ua)
+          ? "Chrome"
+          : /Safari\//.test(ua)
+            ? "Safari"
+            : "Browser";
+  const os = /Android/.test(ua)
+    ? "Android"
+    : /iPhone|iPad|iPod/.test(ua)
+      ? "iOS"
+      : /Windows/.test(ua)
+        ? "Windows"
+        : /Mac OS X|Macintosh/.test(ua)
+          ? "macOS"
+          : /Linux/.test(ua)
+            ? "Linux"
+            : "device";
+  return `${browser} · ${os}`;
+}
+
 async function getRegistration(): Promise<ServiceWorkerRegistration | null> {
   if (!("serviceWorker" in navigator)) return null;
   const reg = await navigator.serviceWorker.ready.catch(() => null);

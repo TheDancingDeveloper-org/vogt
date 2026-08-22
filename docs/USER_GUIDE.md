@@ -67,6 +67,19 @@ Settings stores device-local **named auth profiles**, so you can keep a
 read-only token and an interactive one side by side and switch between them
 rather than leaving an admin token in a browser.
 
+The dialog scrolls its own body between a sticky section list and a sticky
+**Cancel / Save** footer, so the footer stays reachable on a laptop and a
+phone alike, and a header **×** closes it from the top. The Save button says
+what it will do: a terminal-theme change **applies immediately**; a layout-mode
+change is marked **(requires reload)** and the button reads *Save & reload*;
+changing the token or base reads *Validate, save & reload*; a preferences-only
+change reads *Save preferences*. You can save a preferences or layout change
+**without touching the token field** — a blank-but-unchanged token is a valid
+"keep the current credential", so a same-origin deployment that needs no token
+can still change its settings. Destructive actions — signing out, clearing
+managed browser data, deleting a saved profile, and the server retention
+purges — each ask for confirmation first rather than acting on one click.
+
 ## 2. The surfaces
 
 Board, Backlog, Inbox, and Sessions share one working-header order: the
@@ -434,6 +447,16 @@ so UI changes ship without a new APK; only native plumbing needs one.
   default: a session entering `waiting-for-input` or `errored`, new drift, and
   the agent-task notify hook. `idle_stall` and `agent_task_started` exist and
   default off. Quiet hours digest instead of sending.
+- **The push panel tells you the truth about state.** When the browser has
+  **blocked** notifications, Enable is disabled and the panel says to allow
+  them in site settings and reload — it does not offer a button that cannot
+  work. On **iOS**, where the Push API is granted only to an installed PWA, the
+  panel points you to **Add to Home Screen** rather than a dead-end "not
+  supported". If the server has dropped this device's subscription while the
+  browser still holds one, a **Re-enable** button re-registers it. The device
+  label defaults to a readable platform name (for example *Chrome · Android*),
+  and a subscription that rotates while the app is closed is re-registered by
+  the service worker without reopening Settings.
 - **A session waiting for input becomes a card**, above the roster, showing
   the prompt it is actually waiting on. **Send y + Enter** and **Send Ctrl-C**
   send those keystrokes to that session's terminal — they are terminal input,
