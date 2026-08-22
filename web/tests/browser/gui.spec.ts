@@ -128,6 +128,8 @@ interface PlaceMetricFixtures {
   actors?: { identity_ref: string; display_name: string }[];
   /** The Markdown body `/work/get` returns for WI-7, for the renderer (#222). */
   workBody?: string;
+  /** The server's push subscription list, for Settings push reconciliation. */
+  pushSubscriptions?: Record<string, unknown>[];
 }
 
 async function installFixtures(
@@ -248,6 +250,24 @@ async function installFixtures(
     return route.fulfill({ json: tree });
   });
   await page.route("**/api/tasks**", async (route) => route.fulfill({ json: [] }));
+  // Push endpoints: Settings polls these on open. Answer them deterministically
+  // so opening Settings never reaches a live backend. `pushSubscriptions` lets
+  // a test model the server having dropped this device's subscription.
+  await page.route("**/api/push/list", async (route) =>
+    route.fulfill({ json: metrics.pushSubscriptions ?? [] }),
+  );
+  await page.route("**/api/push/public-key", async (route) =>
+    route.fulfill({ json: { vapid_public_key: "", fcm_enabled: false } }),
+  );
+  await page.route("**/api/push/subscribe", async (route) =>
+    route.fulfill({ json: { id: "browser-sub" } }),
+  );
+  await page.route("**/api/push/unsubscribe", async (route) =>
+    route.fulfill({ json: { ok: true } }),
+  );
+  await page.route("**/api/push/test", async (route) =>
+    route.fulfill({ json: { ok: 0, fail: 0, queued: 0 } }),
+  );
   // Agent-task fixtures: only wired when a caller hands over tasks, so the
   // routes never shadow tests that stub `/api/agent-tasks` themselves.
   const agentTaskUpdates: Record<string, unknown>[] = [];
@@ -1598,6 +1618,108 @@ test("Dialog focus is contained and restored, and feedback matches its live regi
   await expect(error.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(
     error.getByRole("button", { name: "Dismiss Session creation failed" }),
+  ).toBeVisible();
+});
+
+// Settings is reachable from the desktop rail directly and from the phone
+// bottom bar's More sheet. Open it the way the current project's user would.
+async function openSettings(page: Page): Promise<void> {
+  if (test.info().project.name === "phone") {
+    await page
+      .getByRole("navigation", { name: "Primary navigation" })
+      .getByRole("button", { name: "More" })
+      .click();
+    const sheet = page.getByRole("dialog", { name: "More places and actions" });
+    await sheet.getByRole("button", { name: "Settings", exact: true }).click();
+  } else {
+    await page.getByRole("button", { name: "Settings" }).click();
+  }
+}
+
+test("Settings keeps its Save/Cancel footer on screen at desktop and phone sizes", async ({ page }) => {
+  // #243: the footer must stay reachable, not scroll off the bottom of a long
+  // dialog. Asserted at 1440×900 on desktop and at the phone's own viewport.
+  if (test.info().project.name === "desktop") {
+    await page.setViewportSize({ width: 1440, height: 900 });
+  }
+  await installFixtures(page);
+  await page.goto("/#/sessions");
+  await openSettings(page);
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await expect(settings).toBeVisible();
+
+  const footer = settings.locator(".settings-modal-footer");
+  const cancel = footer.getByRole("button", { name: "Cancel" });
+  const save = footer.getByRole("button", { name: /^Save/ });
+  await expect(cancel).toBeInViewport();
+  await expect(save).toBeInViewport();
+
+  // Scroll the body to its very end; a sticky footer stays put.
+  await settings
+    .getByRole("button", { name: "Refresh runtime" })
+    .scrollIntoViewIfNeeded();
+  await expect(cancel).toBeInViewport();
+  await expect(save).toBeInViewport();
+});
+
+test("Settings confirms every destructive action before it runs", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Destructive-confirm plumbing is asserted on desktop");
+  // Seed a saved auth profile so the Delete-profile path exists.
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      "mydevenv2.authProfiles.v1",
+      JSON.stringify([
+        { id: "p1", name: "Read only", token: "ro-token", base: "", updated_at: "2026-08-22T00:00:00Z" },
+      ]),
+    );
+  });
+  await installFixtures(page);
+  await page.goto("/#/sessions");
+  await page.getByRole("button", { name: "Settings" }).click();
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await expect(settings).toBeVisible();
+
+  const cases = [
+    { button: "Sign out & clear saved auth", title: "Sign out of Vogt?" },
+    { button: "Clear managed browser data", title: "Clear managed browser data?" },
+    { button: "Clean archived history", title: "Purge archived history?" },
+    { button: "Delete", title: "Delete this profile?" },
+  ];
+  for (const one of cases) {
+    await settings.getByRole("button", { name: one.button, exact: true }).scrollIntoViewIfNeeded();
+    await settings.getByRole("button", { name: one.button, exact: true }).click();
+    const confirm = page.getByRole("dialog", { name: one.title });
+    await expect(confirm).toBeVisible();
+    await expect(confirm.getByRole("button", { name: "Confirm" })).toBeVisible();
+    // Cancelling leaves the destructive action undone and Settings still open.
+    await confirm.getByRole("button", { name: "Cancel" }).click();
+    await expect(confirm).toHaveCount(0);
+    await expect(settings).toBeVisible();
+  }
+});
+
+test("Settings shows the blocked push state and disables Enable when permission is denied", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Push controls are asserted on the desktop route");
+  // Force a denied Notification permission while keeping ServiceWorker and
+  // PushManager present, so the push section renders its blocked state rather
+  // than the unsupported fallback.
+  await page.addInitScript(() => {
+    const stub = function Notification() {} as unknown as { permission: string; requestPermission: () => Promise<string> };
+    Object.defineProperty(stub, "permission", { get: () => "denied", configurable: true });
+    stub.requestPermission = () => Promise.resolve("denied");
+    Object.defineProperty(window, "Notification", { value: stub, configurable: true, writable: true });
+  });
+  await installFixtures(page);
+  await page.goto("/#/sessions");
+  await page.getByRole("button", { name: "Settings" }).click();
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await expect(settings).toBeVisible();
+
+  const enable = settings.getByRole("button", { name: "Enable push" });
+  await enable.scrollIntoViewIfNeeded();
+  await expect(enable).toBeDisabled();
+  await expect(
+    settings.getByText("blocked — allow in site settings, then reload"),
   ).toBeVisible();
 });
 

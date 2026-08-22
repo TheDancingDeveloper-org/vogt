@@ -1732,6 +1732,7 @@ const App: Component = () => {
         onSaveWorkspaceLayout={() => onSaveWorkspaceLayout()}
         onRestoreWorkspaceLayout={(layoutId) => onRestoreWorkspaceLayout(layoutId)}
         onDeleteWorkspaceLayout={(layoutId) => onDeleteWorkspaceLayout(layoutId)}
+        confirmAction={confirmUser}
       />
       </Show>
 
