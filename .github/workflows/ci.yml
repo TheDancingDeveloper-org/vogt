@@ -22,9 +22,12 @@ on:
   # once for `pull_request` — which is what buries the small self-hosted pool.
   #
   # `dev` is here because NFR-D12 makes it a real environment: it builds the
-  # `:dev` images a dev stack runs, so it has to be gated like main.
+  # `:dev` images a dev stack runs, so it has to be gated like main. `prod` is
+  # here for the same reason and one more: it is the ref the Android shell is
+  # built from, and `VOGT_ANDROID_SERVER_URL` names the front door that APK
+  # wraps — so an APK for production can only come from a run on this branch.
   push:
-    branches: [main, dev]
+    branches: [main, dev, prod]
   pull_request:
   # The Woodpecker pipeline had `event: manual`; this is its equivalent.
   workflow_dispatch:
