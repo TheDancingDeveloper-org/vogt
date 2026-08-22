@@ -504,6 +504,13 @@ from source, not published.
   Session**), the tool strip becomes one scrolling row, and the connection
   line moves behind **View controls** — so the terminal keeps at least 40% of
   the screen instead of being pushed off the bottom.
+- **The editor gives the code the width.** The Files sidebar is an overlay
+  drawer that starts collapsed, so the editor gets the whole screen rather than
+  a sliver beside a fixed column; **>** slides the drawer in over the editor and
+  tapping the shaded area behind it (or **<**) closes it again. The split
+  divider resizes on a touch drag, and a Git diff renders inline — one column,
+  changes marked in place — instead of the side-by-side view that only fits a
+  desktop's width.
 - **The bottom bar reaches four places** — Sessions, Inbox, Board, Backlog —
   and a fifth **More** slot opens a sheet with the rest (Projects, Audit, Git,
   History, Tasks, and GUI stream and Assistant where those are enabled) plus

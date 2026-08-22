@@ -71,6 +71,14 @@ const EditorWorkspace: Component<Props> = (props) => {
   return (
     <div class="editor-workspace">
       <Show when={!sidebarCollapsed()}>
+        {/* On a phone the sidebar is an overlay drawer (#240): this backdrop sits
+            behind it and dismisses it on tap. It is CSS-hidden above 768px, where
+            the sidebar is an inline column and needs no scrim. */}
+        <div
+          class="editor-sidebar-backdrop"
+          onClick={() => setSidebarCollapsed(true)}
+          aria-hidden="true"
+        />
         <aside class="editor-sidebar">
           <div class="editor-sidebar-header">
             <span class="editor-sidebar-title">Files</span>
