@@ -27,6 +27,9 @@ export interface ResizablePane {
   beginResize: (event: PointerEvent) => void;
   /** The keyboard equivalent of a drag — clamped and persisted the same way. */
   setWidth: (next: number) => void;
+  /** Back to the shipped default width — the escape hatch for a rail dragged
+   *  to a width the reader now regrets (double-click / Home on the handle). */
+  reset: () => void;
   dragging: () => boolean;
 }
 
@@ -126,6 +129,11 @@ export function createResizablePane(options: ResizablePaneOptions): ResizablePan
     persistWidth(clamped);
   };
 
+  // The default is already inside [min, max] by construction, but clamp it the
+  // same way a drag would rather than trust that — a caller is free to pass a
+  // default this build no longer allows.
+  const reset = () => setWidth(options.defaultWidth);
+
   return {
     width,
     collapsed,
@@ -133,6 +141,7 @@ export function createResizablePane(options: ResizablePaneOptions): ResizablePan
     toggle: () => setCollapsed(!collapsed()),
     beginResize,
     setWidth,
+    reset,
     dragging,
   };
 }

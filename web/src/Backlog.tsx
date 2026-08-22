@@ -120,6 +120,26 @@ const URL_KEYS = [
 
 type ViewName = "backlog" | "bugs";
 
+/** The Board's refresh cadences, offered here too (#228) so a ranked view left
+ *  open can keep itself current rather than only saying how stale it is. `0`
+ *  is paused, and is the default: re-ranking the estate under a reader's
+ *  cursor is opt-in, but the badge's honesty about the age is not. */
+const POLL_CHOICES = [10, 20, 60, 0] as const;
+const POLL_STORAGE_KEY = "mydevenv2.backlog.poll.v1";
+
+function readPoll(): number {
+  try {
+    const raw = localStorage.getItem(POLL_STORAGE_KEY);
+    const parsed = raw === null ? NaN : Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && (POLL_CHOICES as readonly number[]).includes(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // localStorage unavailable — the paused default still works.
+  }
+  return 0;
+}
+
 /** The six filters FR-U14 names, plus the view they apply to. */
 interface Filter {
   view: ViewName;
@@ -503,6 +523,32 @@ const Backlog: Component<Props> = (props) => {
   const [reloadKey, setReloadKey] = createSignal(0);
   const refresh = () => setReloadKey((value) => value + 1);
 
+  // The refresh cadence, a per-device preference like the Board's (#228). It
+  // is not a filter, so it lives outside the URL and the saved lenses: a
+  // shared link or a recalled lens should not change how often the reader's
+  // backlog refreshes.
+  const [poll, setPoll] = createSignal<number>(readPoll());
+  const setPollSeconds = (seconds: number) => {
+    setPoll(seconds);
+    try {
+      localStorage.setItem(POLL_STORAGE_KEY, String(seconds));
+    } catch {
+      /* private mode / quota — the session still polls, just does not remember */
+    }
+  };
+
+  createEffect(() => {
+    const seconds = poll();
+    if (seconds <= 0) return;
+    const timer = window.setInterval(() => {
+      // A hidden tab is not a view anybody is being misled by, and it
+      // reconciles the moment it comes back to the front.
+      if (typeof document !== "undefined" && document.hidden) return;
+      refresh();
+    }, seconds * 1000);
+    onCleanup(() => window.clearInterval(timer));
+  });
+
   // -- URL ↔ state (FR-U11) -------------------------------------------------
 
   // One effect, both directions, with the ambiguity resolved by remembering
@@ -607,10 +653,16 @@ const Backlog: Component<Props> = (props) => {
 
   const viewAge = createViewAge(() => {
     const failure = outage();
+    const seconds = poll();
     return {
       loadedAt: loadedAt(),
       outage: failure?.unavailable ? failure.message : null,
       failed: Boolean(failure),
+      // Off (the default) is a view with no poll, which FR-U10 renders as
+      // "press Refresh" when it goes stale — the ranked views are a sweep
+      // product and re-ranking under the cursor is opt-in. Only a chosen
+      // cadence turns the badge into a polling one.
+      poll: seconds > 0 ? seconds : undefined,
     };
   });
 
@@ -1497,8 +1549,25 @@ const Backlog: Component<Props> = (props) => {
                 )}
               </For>
             </div>
+            <label class="vogt-backlog-field vogt-backlog-field--tight">
+              <span>Refresh</span>
+              <select
+                value={String(poll())}
+                onInput={(event) =>
+                  setPollSeconds(Number.parseInt(event.currentTarget.value, 10))
+                }
+              >
+                <For each={POLL_CHOICES}>
+                  {(seconds) => (
+                    <option value={String(seconds)}>
+                      {seconds === 0 ? "Off" : `Every ${seconds}s`}
+                    </option>
+                  )}
+                </For>
+              </select>
+            </label>
             <button type="button" onClick={refresh} disabled={ranked.loading}>
-              {ranked.loading ? "Loading…" : "Refresh"}
+              {ranked.loading ? "Loading…" : "Refresh now"}
             </button>
           </>
         )}
@@ -1857,13 +1926,34 @@ const Backlog: Component<Props> = (props) => {
             <Show
               when={visible().length}
               fallback={
-                <p class="vogt-backlog-empty">
-                  {ranked.loading
-                    ? "Loading the ranked view…"
-                    : entries().length
-                      ? "Nothing on this page is in the selected states."
-                      : "Nothing is ranked here. The freshness line above says whether anything has looked."}
-                </p>
+                <div class="vogt-backlog-empty">
+                  <Show
+                    when={!ranked.loading && !entries().length}
+                    fallback={
+                      <p>
+                        {ranked.loading
+                          ? "Loading the ranked view…"
+                          : "Nothing on this page is in the selected states."}
+                      </p>
+                    }
+                  >
+                    {/* An empty ranking that offers a way forward (#246): it
+                        names the collector freshness so "nothing ranked" and
+                        "nothing has looked" stop reading alike, then offers the
+                        one write that changes it. */}
+                    <p>Nothing is ranked here.</p>
+                    <p class={`vogt-backlog-empty-freshness ${freshness().status}`}>
+                      {freshness().text}
+                    </p>
+                    <button
+                      type="button"
+                      class="vogt-backlog-empty-action"
+                      onClick={openQuickCreate}
+                    >
+                      Quick create
+                    </button>
+                  </Show>
+                </div>
               }
             >
               <div style={{ height: `${measured.totalHeight()}px`, position: "relative" }}>

@@ -155,9 +155,53 @@ function placeLabel(raw: Record<string, unknown>, path: string): string {
   return path === "/g" ? "Git" : path.slice(1) || "Vogt";
 }
 
-function addPlace(places: RecentPlace[], path: string, label: string) {
-  if (places.some((place) => place.path === path)) return;
+/**
+ * The surface a place belongs to, i.e. its path with any query stripped.
+ *
+ * A surface is one place however its filters vary: `/board?project=a` and
+ * `/board?project=b` are two views of the Board, not two places. Recents
+ * dedupe on this so filter and query variants of one surface stop stacking
+ * repeated, identically-labelled chips (#245).
+ */
+export function placePath(pathWithQuery: string): string {
+  const query = pathWithQuery.indexOf("?");
+  return query === -1 ? pathWithQuery : pathWithQuery.slice(0, query);
+}
+
+/**
+ * Add a recent place, deduped by its surface path. The newest visit wins: its
+ * search and label replace any earlier entry for the same surface, so a chip
+ * always points at the last filter the reader had on that surface rather than
+ * the first, and the list never carries two chips that read the same.
+ */
+export function addPlace(places: RecentPlace[], path: string, label: string): void {
+  const surface = placePath(path);
+  const existing = places.findIndex((place) => placePath(place.path) === surface);
+  if (existing !== -1) places.splice(existing, 1);
   places.push({ path, label });
+}
+
+/**
+ * The label a Recent-places chip carries for a full `path?search` place.
+ *
+ * A terminal route (`/t/:id`) is named by its live session rather than the
+ * opaque id in its URL, so a chip reads "my build" and not "/t/s2" (#245).
+ * The id is the fallback when the roster does not (yet) hold that session —
+ * which is honest about a deep link opened before the sessions list arrived.
+ */
+export function recentPlaceLabel(
+  pathWithQuery: string,
+  knownLabels: Record<string, string>,
+  sessionName: (id: string) => string | null | undefined,
+): string {
+  const path = placePath(pathWithQuery);
+  if (path.startsWith("/t/")) {
+    const id = decodeURIComponent(path.slice(3));
+    return sessionName(id) || id;
+  }
+  if (knownLabels[path]) return knownLabels[path];
+  if (path.startsWith("/w/")) return decodeURIComponent(path.slice(3));
+  return path === "/g" ? "Git" : path.slice(1) || "Vogt";
 }
 
 /**
@@ -298,10 +342,13 @@ export function surfaceHref(places: RecentPlace[], path: string): string {
 
 export function rememberPlace(path: string, label: string): void {
   if (!path || path === "/") return;
+  const surface = placePath(path);
   const current = untrack(() => placesStore.places);
+  // Deduped by surface, not by exact URL: two visits to the Board under
+  // different filters are the same place, and the latest one keeps its search.
   const next = [
     { path, label },
-    ...current.filter((place) => place.path !== path),
+    ...current.filter((place) => placePath(place.path) !== surface),
   ].slice(0, 12);
   setPlacesStore("places", next);
   try {

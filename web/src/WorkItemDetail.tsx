@@ -60,7 +60,14 @@ import {
   type WorkDetail,
   type WorkItem,
 } from "./vogtApi";
-import { ViewAgeBadge, createLoadStamp, createViewAge, onVogtLive } from "./viewAge";
+import SurfaceHeader from "./SurfaceHeader";
+import {
+  ViewAgeBadge,
+  createLoadStamp,
+  createViewAge,
+  honestyToneClass,
+  onVogtLive,
+} from "./viewAge";
 import { renderMarkdown } from "./markdown";
 import { actorName as resolveActorName, projectName as resolveProjectName } from "./refNames";
 import { looksLikeYesNo, tailOf } from "./terminalTail";
@@ -1513,18 +1520,41 @@ const WorkItemDetail: Component<Props> = (props) => {
 
   return (
     <div class="vogt-surface wid-view">
-      <header class="wid-header">
-        <div class="wid-heading">
-          <span class="wid-ref">{props.itemRef}</span>
-          <h2>{item()?.title ?? (work.loading ? "Loading…" : props.itemRef)}</h2>
-        </div>
-        <div class="wid-header-actions">
-          <span
-            class={`wid-trust wid-trust--${trustLabel(item()?.trust_state)}`}
-            title={`trust: ${trustLabel(item()?.trust_state)}`}
-          >
-            {trustLabel(item()?.trust_state)}
-          </span>
+      <SurfaceHeader
+        class="wid-header"
+        label="Work item header"
+        title={(
+          <div class="wid-heading">
+            <span class="wid-ref">{props.itemRef}</span>
+            <h2>{item()?.title ?? (work.loading ? "Loading…" : props.itemRef)}</h2>
+          </div>
+        )}
+        honestyClass={honestyToneClass(viewAge().tone)}
+        honesty={(
+          <div class="wid-honesty" aria-live="polite">
+            <strong>
+              <ViewAgeBadge
+                age={viewAge()}
+                class="wid-age"
+                title="How long ago this page last got an answer from Vogt — not how old the evidence behind the ranking is, which the evidence panel says for itself"
+              />
+            </strong>
+          </div>
+        )}
+        controls={(
+          <>
+            <span
+              class={`wid-trust wid-trust--${trustLabel(item()?.trust_state)}`}
+              title={`trust: ${trustLabel(item()?.trust_state)}`}
+            >
+              {trustLabel(item()?.trust_state)}
+            </span>
+            <button type="button" onClick={refreshAll}>
+              Refresh
+            </button>
+          </>
+        )}
+        action={(
           <button
             type="button"
             class="wid-edit-open"
@@ -1537,16 +1567,8 @@ const WorkItemDetail: Component<Props> = (props) => {
           >
             {editing() ? "Cancel edit" : "Edit"}
           </button>
-          <ViewAgeBadge
-            age={viewAge()}
-            class="wid-age"
-            title="How long ago this page last got an answer from Vogt — not how old the evidence behind the ranking is, which the evidence panel says for itself"
-          />
-          <button type="button" onClick={refreshAll}>
-            Refresh
-          </button>
-        </div>
-      </header>
+        )}
+      />
 
       <Show when={outage()}>
         {(message) => (
