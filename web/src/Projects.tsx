@@ -62,6 +62,10 @@ import {
 } from "./vogtApi";
 import { openWorkItemTab } from "./tabs";
 import { ViewAgeBadge, createLoadStamp, createViewAge, onVogtLive } from "./viewAge";
+import {
+  filterAndSortProjects,
+  type ProjectSort,
+} from "./projectRegistry";
 
 interface Props {
   onError?: (message: string) => void;
@@ -929,6 +933,9 @@ const Projects: Component<Props> = (props) => {
     setNote(null);
   };
 
+  /** The current project's slug, URL-encoded for a `?project=` cross-link. */
+  const projectQuery = () => encodeURIComponent(place().project);
+
   // -- the estate list ------------------------------------------------------
 
   const [projects, { refetch: refetchProjects }] = createResource(
@@ -941,6 +948,16 @@ const Projects: Component<Props> = (props) => {
     if (!(result && result.ok)) return [];
     return result.value.projects as unknown as Record<string, unknown>[];
   });
+
+  // The registry is a place to find a project, so it filters and sorts (#227).
+  // Both are client-side: `project.list` already returns every registered
+  // project, so this is presentation, not another query.
+  const [projectSearch, setProjectSearch] = createSignal("");
+  const [projectSort, setProjectSort] = createSignal<ProjectSort>("name");
+
+  const shownProjectRows = createMemo(() =>
+    filterAndSortProjects(projectRows(), projectSearch(), projectSort()),
+  );
 
   const projectOutage = createMemo(() => {
     const result = projects();
@@ -1427,17 +1444,55 @@ const Projects: Component<Props> = (props) => {
           </Show>
           <Show when={!projectOutage()}>
             <p class="vogt-projects-muted">
-              {projectRows().length} registered project(s). Every one was registered
-              explicitly — Vogt discovers nothing.
+              <Show
+                when={projectSearch().trim()}
+                fallback={
+                  <>
+                    {projectRows().length} registered project(s). Every one was
+                    registered explicitly — Vogt discovers nothing.
+                  </>
+                }
+              >
+                {shownProjectRows().length} of {projectRows().length} registered
+                project(s) match “{projectSearch().trim()}”.
+              </Show>
             </p>
+            <Show when={projectRows().length > 0}>
+              <div class="vogt-projects-listtools">
+                <input
+                  type="search"
+                  class="vogt-projects-search"
+                  placeholder="Filter by name or slug"
+                  aria-label="Filter projects"
+                  value={projectSearch()}
+                  onInput={(event) => setProjectSearch(event.currentTarget.value)}
+                />
+                <label class="vogt-projects-sort">
+                  <span>Sort</span>
+                  <select
+                    aria-label="Sort projects"
+                    value={projectSort()}
+                    onInput={(event) =>
+                      setProjectSort(event.currentTarget.value as ProjectSort)
+                    }
+                  >
+                    <option value="name">Name</option>
+                    <option value="lifecycle">Lifecycle</option>
+                    <option value="trust">Trust</option>
+                  </select>
+                </label>
+              </div>
+            </Show>
             <div class="vogt-projects-grid">
               <For
-                each={projectRows()}
+                each={shownProjectRows()}
                 fallback={
                   <p class="vogt-projects-empty">
                     {projects.loading
                       ? "Asking Vogt for the estate…"
-                      : "No projects are registered. The import form registers one."}
+                      : projectSearch().trim()
+                        ? "No registered project matches that filter."
+                        : "No projects are registered. The import form registers one."}
                   </p>
                 }
               >
@@ -1530,11 +1585,29 @@ const Projects: Component<Props> = (props) => {
                       <dl class="vogt-projects-kv">
                         <div>
                           <dt>Open work</dt>
-                          <dd>{readNumber(data(), "open_work") ?? "not reported"}</dd>
+                          <dd>
+                            <Show
+                              when={readNumber(data(), "open_work") !== null}
+                              fallback={<>not reported</>}
+                            >
+                              <a href={`#/board?project=${projectQuery()}`}>
+                                {readNumber(data(), "open_work")}
+                              </a>
+                            </Show>
+                          </dd>
                         </div>
                         <div>
                           <dt>Open bugs</dt>
-                          <dd>{readNumber(data(), "open_bugs") ?? "not reported"}</dd>
+                          <dd>
+                            <Show
+                              when={readNumber(data(), "open_bugs") !== null}
+                              fallback={<>not reported</>}
+                            >
+                              <a href={`#/backlog?view=bugs&project=${projectQuery()}`}>
+                                {readNumber(data(), "open_bugs")}
+                              </a>
+                            </Show>
+                          </dd>
                         </div>
                         <div>
                           <dt>By state</dt>
@@ -1545,9 +1618,12 @@ const Projects: Component<Props> = (props) => {
                             >
                               <For each={readCounts(data(), "by_state")}>
                                 {([name, count]) => (
-                                  <span class="vogt-projects-tag">
+                                  <a
+                                    class="vogt-projects-tag"
+                                    href={`#/board?project=${projectQuery()}&state=${encodeURIComponent(name)}`}
+                                  >
                                     {name}: {count}
-                                  </span>
+                                  </a>
                                 )}
                               </For>
                             </Show>
@@ -1568,6 +1644,14 @@ const Projects: Component<Props> = (props) => {
                                 )}
                               </For>
                             </Show>
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Audit</dt>
+                          <dd>
+                            <a href={`#/audit?project=${projectQuery()}`}>
+                              Every write to this project
+                            </a>
                           </dd>
                         </div>
                       </dl>

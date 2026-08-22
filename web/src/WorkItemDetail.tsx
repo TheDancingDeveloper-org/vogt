@@ -43,6 +43,7 @@ import {
   listAudit,
   listEvents,
   listObservations,
+  listProjects,
   listSessions,
   listWorkflows,
   startSession,
@@ -61,6 +62,7 @@ import {
 } from "./vogtApi";
 import { ViewAgeBadge, createLoadStamp, createViewAge, onVogtLive } from "./viewAge";
 import { renderMarkdown } from "./markdown";
+import { actorName as resolveActorName, projectName as resolveProjectName } from "./refNames";
 import { looksLikeYesNo, tailOf } from "./terminalTail";
 
 interface Props {
@@ -889,6 +891,18 @@ const WorkItemDetail: Component<Props> = (props) => {
     },
   );
 
+  // The registry, read for the same reason: the item names a project by slug,
+  // and the fact chip should read the project's name (FR-U7).
+  const [projects] = createResource(() => attempt(() => listProjects({ limit: 200 })));
+
+  const projectRows = createMemo(() => {
+    const loaded = projects();
+    return loaded && loaded.ok ? loaded.value.projects : [];
+  });
+
+  const assigneeName = (ref: string) => resolveActorName(actorOptions(), ref);
+  const projectLabel = (slug: string) => resolveProjectName(projectRows(), slug);
+
   // -- this item's state history (FR-U5) ------------------------------------
   //
   // Keyed on the item's *id*, not its ref: both feeds are keyed by entity id,
@@ -1562,10 +1576,30 @@ const WorkItemDetail: Component<Props> = (props) => {
                 {(effort) => <span class="wid-chip">effort {effort()}</span>}
               </Show>
               <span class="wid-chip">
-                project: {current().project_slug ?? "unassigned"}
+                project:{" "}
+                <Show
+                  when={current().project_slug}
+                  fallback={<>unassigned</>}
+                >
+                  {(slug) => (
+                    <a
+                      class="wid-chip-link"
+                      href={`#/projects?p=${encodeURIComponent(slug())}`}
+                      title={slug()}
+                    >
+                      {projectLabel(slug())}
+                    </a>
+                  )}
+                </Show>
               </span>
-              <span class="wid-chip">
-                assignee: {current().assignee_identity_ref ?? "nobody"}
+              <span
+                class="wid-chip"
+                title={current().assignee_identity_ref ?? undefined}
+              >
+                assignee:{" "}
+                {current().assignee_identity_ref
+                  ? assigneeName(current().assignee_identity_ref ?? "")
+                  : "nobody"}
               </span>
               <span class="wid-chip">origin: {current().origin ?? "created"}</span>
               <span class="wid-chip">updated {formatWhen(current().updated_at)}</span>

@@ -99,6 +99,7 @@ import { renderMarkdown } from "./markdown";
 import { MeasuredWindow } from "./measuredWindow";
 import SurfaceHeader from "./SurfaceHeader";
 import { ProgressiveFilters, SavedLenses } from "./ProgressiveFilters";
+import { actorName as resolveActorName, projectName as resolveProjectName } from "./refNames";
 import {
   VogtUnavailable,
   createWork,
@@ -1326,8 +1327,9 @@ const Board: Component<Props> = (props) => {
 
   const finishedStates = createMemo(() => finishedStatesFor(activeWorkflows()));
 
-  const projectName = (slug: string) =>
-    projects().find((one) => one.slug === slug)?.name ?? slug;
+  const projectName = (slug: string) => resolveProjectName(projects(), slug);
+
+  const assigneeName = (ref: string) => resolveActorName(actors(), ref);
 
   const initiativeLabel = (id: string) => {
     const found = initiatives().find((one) => one.id === id);
@@ -2000,8 +2002,13 @@ const Board: Component<Props> = (props) => {
 
   const activeFilterChips = createMemo(() => {
     const active = filters();
-    const chips: { key: string; label: string }[] = [];
-    if (active.project) chips.push({ key: "project", label: `Project: ${active.project}` });
+    const chips: { key: string; label: string; title?: string }[] = [];
+    if (active.project)
+      chips.push({
+        key: "project",
+        label: `Project: ${projectName(active.project)}`,
+        title: active.project,
+      });
     if (active.kinds.length) chips.push({ key: "kind", label: `Type: ${active.kinds.join(", ")}` });
     if (active.states.length) {
       chips.push({
@@ -2011,7 +2018,12 @@ const Board: Component<Props> = (props) => {
     }
     if (active.label) chips.push({ key: "label", label: `Label: ${active.label}` });
     if (active.initiative) chips.push({ key: "initiative", label: `Initiative: ${active.initiative}` });
-    if (active.assignee) chips.push({ key: "assignee", label: `Assignee: ${active.assignee}` });
+    if (active.assignee)
+      chips.push({
+        key: "assignee",
+        label: `Assignee: ${assigneeName(active.assignee)}`,
+        title: active.assignee,
+      });
     if (active.lanes !== "none") chips.push({ key: "lanes", label: `Swimlanes: ${active.lanes}` });
     return chips;
   });
@@ -2266,20 +2278,29 @@ const Board: Component<Props> = (props) => {
 
         <label class="board-field">
           <span>Assignee</span>
-          <select
-            value={optionValue(
-              filters().assignee,
-              actors().map((one) => one.identity_ref),
-            )}
-            onInput={(event) => patch({ assignee: event.currentTarget.value })}
-          >
-            <option value="">Anyone</option>
+          {/* The selection is carried on the options, not the `<select value>`
+              prop: the actor list loads after the first paint, and when a
+              pasted `?assignee=` option is swapped from its raw-ref fallback to
+              the loaded (named) option, a `value`-bound select would reset to
+              "Anyone". `selected` re-applies per option, so the choice
+              survives the swap. */}
+          <select onInput={(event) => patch({ assignee: event.currentTarget.value })}>
+            <option value="" selected={!filters().assignee}>
+              Anyone
+            </option>
             <Show when={filters().assignee && !actors().some((one) => one.identity_ref === filters().assignee)}>
-              <option value={filters().assignee}>{filters().assignee}</option>
+              <option value={filters().assignee} selected>
+                {assigneeName(filters().assignee)}
+              </option>
             </Show>
             <For each={actors()}>
               {(actor) => (
-                <option value={actor.identity_ref}>{actor.display_name}</option>
+                <option
+                  value={actor.identity_ref}
+                  selected={actor.identity_ref === filters().assignee}
+                >
+                  {actor.display_name}
+                </option>
               )}
             </For>
           </select>
@@ -3136,10 +3157,19 @@ const Board: Component<Props> = (props) => {
                                               </div>
                                               <div class="board-card-meta">
                                                 <Show when={filters().lanes !== "project" && item.project_slug}>
-                                                  <span>{item.project_slug}</span>
+                                                  <a
+                                                    class="board-card-project"
+                                                    href={`#/projects?p=${encodeURIComponent(item.project_slug ?? "")}`}
+                                                    title={item.project_slug ?? ""}
+                                                    onClick={(event) => event.stopPropagation()}
+                                                  >
+                                                    {projectName(item.project_slug ?? "")}
+                                                  </a>
                                                 </Show>
                                                 <Show when={item.assignee_identity_ref}>
-                                                  <span>{item.assignee_identity_ref}</span>
+                                                  <span title={item.assignee_identity_ref ?? ""}>
+                                                    {assigneeName(item.assignee_identity_ref ?? "")}
+                                                  </span>
                                                 </Show>
                                                 <Show when={item.effort}>
                                                   <span>{item.effort}</span>

@@ -21,6 +21,8 @@ export interface FilterChip {
   /** What `onRemove` is told; the surface decides what clearing it means. */
   key: string;
   label: string;
+  /** The raw ref behind a resolved label, kept on the chip's `title`. */
+  title?: string;
 }
 
 interface FiltersProps {
@@ -88,7 +90,7 @@ export function ProgressiveFilters(props: FiltersProps): JSX.Element {
             <For each={props.chips}>
               {(chip) => (
                 <span class={`vogt-filter-chip ${props.prefix}-filter-chip`}>
-                  <span>{chip.label}</span>
+                  <span title={chip.title}>{chip.label}</span>
                   <button
                     type="button"
                     aria-label={`Remove filter ${chip.label}`}
