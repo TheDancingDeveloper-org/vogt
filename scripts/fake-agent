@@ -1,0 +1,15 @@
+#!/bin/sh
+# fake-agent — a deterministic stand-in for the agent CLI an agent-task run
+# drives in a PTY (#296). The engine spawns argv[0] directly and delivers the
+# prompt as a file named in the environment, so this POSIX entry only has to
+# find a Python interpreter and hand the real work to the core beside it,
+# passing argv and the environment through untouched.
+#
+# See scripts/fake-agent.README.md for the invocation shape it matches and the
+# scenarios it plays.
+set -eu
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PY=${FAKE_AGENT_PYTHON:-python3}
+
+exec "$PY" "$here/fake_agent_core.py" "$@"

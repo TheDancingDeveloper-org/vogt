@@ -10,7 +10,7 @@ use std::{
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use vogt_engine_contract::SessionDetail;
-use vogt_engine_server::{app::router, Config};
+use vogt_engine_server::{app::router, config::SessionTemplate, Config};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use time::OffsetDateTime;
@@ -38,7 +38,12 @@ fn test_config() -> Config {
         allowed_origins: vec![],
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
-        session_templates: vec![],
+        // The synthetic agent CLI is registered as a session preset in the
+        // *test* config — never the production defaults — so agent-task
+        // scenarios can be driven without a real `claude`/`codex` in a PTY
+        // (#296). A run selects it by taking the preset's command, exactly as
+        // it would a real agent template.
+        session_templates: vec![fake_agent_template()],
         assistant_api_key: None,
         assistant_base_url: "https://api.theclawbay.com/v1".into(),
         assistant_model: "gpt-5.4-mini".into(),
@@ -91,6 +96,62 @@ fn auth_for(token: &str) -> reqwest::header::HeaderMap {
         format!("Bearer {token}").parse().unwrap(),
     );
     h
+}
+
+/// Absolute path to `scripts/fake-agent`, the synthetic agent CLI stand-in
+/// (#296). Resolved from the crate manifest so the test does not care what the
+/// working directory is when it runs.
+fn fake_agent_path() -> String {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/fake-agent")
+        .canonicalize()
+        .expect("scripts/fake-agent must exist next to the engine")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The fake-agent registered as a session preset, the way a deployment
+/// registers a real agent CLI (`Claude Code (protected)` and friends). A task
+/// run then reaches it through the preset's `command`.
+fn fake_agent_template() -> SessionTemplate {
+    SessionTemplate {
+        name: "Fake Agent (test)".to_string(),
+        description: "Deterministic synthetic agent CLI for agent-task tests (#296)".to_string(),
+        command: Some(vec![fake_agent_path()]),
+        cwd: None,
+        env: vec![],
+        default_name: Some("fake-agent-{timestamp}".to_string()),
+        match_repo_names: vec![],
+        match_path_prefixes: vec![],
+        tags: vec!["agent".to_string(), "test".to_string()],
+    }
+}
+
+/// The command a run uses to invoke the fake-agent preset with a scenario.
+fn fake_agent_command(scenario: &str) -> Vec<String> {
+    vec![fake_agent_path(), scenario.to_string()]
+}
+
+/// Poll a task until its latest run leaves `running`, or time out.
+async fn wait_for_run_finish(client: &reqwest::Client, base: &str, task_id: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let detail: Value = client
+                .get(format!("{base}/api/agent-tasks/{task_id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if detail["runs"][0]["status"] != "running" {
+                break detail;
+            }
+        }
+    })
+    .await
+    .expect("the run should reach a terminal status")
 }
 
 #[tokio::test]
@@ -663,6 +724,218 @@ async fn an_unbound_task_names_no_vogt_subject() {
         .unwrap();
     let prompt_text = std::fs::read_to_string(run["prompt_file"].as_str().unwrap()).unwrap();
     assert!(!prompt_text.contains("Vogt subject"));
+}
+
+/// #296: the fake-agent is registered as a session preset, so a client can
+/// discover it the same way it discovers the real agent templates.
+#[tokio::test]
+async fn fake_agent_is_registered_as_a_session_preset() {
+    let (base, _h) = boot().await;
+    let cfg: Value = reqwest::get(format!("{base}/api/config"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let templates = cfg["session_templates"]
+        .as_array()
+        .expect("config advertises session templates");
+    assert!(
+        templates.iter().any(|t| t["name"] == "Fake Agent (test)"),
+        "the synthetic agent preset should be listed: {templates:?}"
+    );
+}
+
+/// #296 edit+commit, driven all the way through the engine's agent-task path.
+///
+/// The run's working tree is a real git repo; the fake-agent edits a file and
+/// commits it with the checkpoint trailers, and the trailer carrying the run
+/// id must equal the run the engine actually started. This is the seam the
+/// future git story (#283-#285) needs: a checkpoint a run made, traceable back
+/// to that run, produced without a real agent CLI.
+#[tokio::test]
+async fn fake_agent_edit_commit_scenario_leaves_a_trailered_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    // A committable repo with an identity, so the commit does not depend on the
+    // CI user's git config.
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "seed@vogt.invalid"],
+        vec!["config", "user.name", "seed"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "fake edit+commit",
+            "prompt": "Make a checkpoint.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("edit+commit"),
+            "cwd": repo.to_string_lossy(),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap().to_string();
+
+    let run: Value = client
+        .post(format!("{base}/api/agent-tasks/{task_id}/run"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let run_id = run["id"].as_str().unwrap().to_string();
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    assert_eq!(detail["runs"][0]["status"], "completed");
+
+    // The engine set MYDEVENV2_AGENT_TASK_RUN_ID for the run; the fake-agent
+    // wrote it into a `Vogt-Run` trailer on the commit it made.
+    let trailer = std::process::Command::new("git")
+        .args(["log", "-1", "--pretty=%(trailers:key=Vogt-Run,valueonly)"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let trailer = String::from_utf8_lossy(&trailer.stdout).trim().to_string();
+    assert_eq!(
+        trailer, run_id,
+        "the checkpoint commit should carry the engine's run id as a trailer"
+    );
+}
+
+/// #296 findings, driven through the engine's phrase watcher.
+///
+/// The fake-agent prints a `VOGT_NOTIFY:` line; the engine records the text
+/// after it as a durable finding on the run (FR-E7). No push service, no real
+/// agent — just the parse-and-record path #291 will build on.
+#[tokio::test]
+async fn fake_agent_findings_scenario_is_recorded_on_the_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "fake findings",
+            "prompt": "Report something.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("findings"),
+            "env": [["FAKE_AGENT_NOTIFY_TEXT", "the price dropped"]],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap().to_string();
+
+    client
+        .post(format!("{base}/api/agent-tasks/{task_id}/run"))
+        .send()
+        .await
+        .unwrap();
+
+    let detail = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let detail: Value = client
+                .get(format!("{base}/api/agent-tasks/{task_id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if detail["runs"][0]["findings"]
+                .as_array()
+                .is_some_and(|f| !f.is_empty())
+            {
+                break detail;
+            }
+        }
+    })
+    .await
+    .expect("the VOGT_NOTIFY line should have produced a finding");
+
+    let finding = &detail["runs"][0]["findings"][0];
+    assert_eq!(finding["text"], "the price dropped");
+    assert_eq!(finding["source"], "notify-phrase");
+}
+
+/// #296 outcome: a chosen non-zero exit is surfaced as an errored run.
+#[tokio::test]
+async fn fake_agent_outcome_scenario_surfaces_the_exit_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "fake outcome",
+            "prompt": "Exit non-zero.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("outcome"),
+            "env": [["FAKE_AGENT_EXIT_CODE", "7"]],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap().to_string();
+
+    client
+        .post(format!("{base}/api/agent-tasks/{task_id}/run"))
+        .send()
+        .await
+        .unwrap();
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    assert_eq!(detail["runs"][0]["status"], "errored");
+    assert_eq!(detail["runs"][0]["exit_code"], 7);
+    assert_eq!(detail["runs"][0]["summary"], "Exited with status 7");
 }
 
 #[tokio::test]
