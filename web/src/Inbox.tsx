@@ -13,9 +13,22 @@ import {
   type InboxListResult,
   type InboxSourceCoverage,
 } from "./vogtApi";
-import { onVogtChanged } from "./store";
+import {
+  ViewAgeBadge,
+  createLoadStamp,
+  createViewAge,
+  honestyToneClass,
+  onVogtLive,
+} from "./viewAge";
 import Dialog from "./Dialog";
 import SurfaceHeader from "./SurfaceHeader";
+
+/** A datetime-local value (no timezone) for `now + days`. */
+function localDatetimeIn(days: number): string {
+  const next = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+  next.setMinutes(next.getMinutes() - next.getTimezoneOffset());
+  return next.toISOString().slice(0, 16);
+}
 
 interface Props {
   onError?: (message: string) => void;
@@ -82,6 +95,9 @@ interface EntryProps {
   phone: boolean;
   onSelect: (entry: InboxEntry) => void;
   onOpen: (entry: InboxEntry) => void;
+  /** Report whether this entry currently holds an unsaved composer open, so a
+   *  live re-read never swaps the rows out from under a half-typed reason. */
+  onComposerChange: (key: string, open: boolean) => void;
   onTriage: (
     entry: InboxEntry,
     action: "archive" | "snooze" | "restore",
@@ -102,11 +118,31 @@ const Entry: Component<EntryProps> = (props) => {
   const [reason, setReason] = createSignal("");
   const [refusal, setRefusal] = createSignal<string | null>(null);
   const [sheetOpen, setSheetOpen] = createSignal(false);
-  const [until, setUntil] = createSignal((() => {
-    const next = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    next.setMinutes(next.getMinutes() - next.getTimezoneOffset());
-    return next.toISOString().slice(0, 16);
-  })());
+  const [until, setUntil] = createSignal(localDatetimeIn(1));
+
+  // A composer or an open action sheet is an unsaved edit: while either is
+  // open this entry is a reason not to re-read the list under it. The parent
+  // guards its live subscription on the sum of these across every entry.
+  createEffect(() => {
+    props.onComposerChange(props.entry.entry_key, composing() !== null || sheetOpen());
+  });
+  onCleanup(() => props.onComposerChange(props.entry.entry_key, false));
+
+  // Evidence is dense, so it is folded away except where a reader is most
+  // likely to want it open already: the entry they have selected, and a drift
+  // entry that carries a change it is proposing they accept or reject.
+  const hasProposedDrift = () =>
+    Boolean(props.entry.proposed_change) &&
+    (props.entry.action?.kind === "drift" || props.entry.source === "drift");
+  const evidenceOpen = () => props.selected || hasProposedDrift();
+
+  // "Open entry" navigates in-app; with neither a work item nor a session
+  // behind it there is nowhere to go, so the button says so rather than
+  // pretending it does nothing on purpose.
+  const canOpen = () => Boolean(props.entry.work_item_ref || props.entry.session_id);
+
+  const setSnoozePreset = (days: number) => setUntil(localDatetimeIn(days));
+
   const begin = (action: EntryAction) => {
     setComposing(action);
     setRefusal(null);
@@ -183,15 +219,17 @@ const Entry: Component<EntryProps> = (props) => {
         </div>
         <p class="inbox-entry-summary">{props.entry.summary ?? "No summary was provided by the server."}</p>
         <Show when={props.entry.evidence_snapshot || props.entry.proposed_change}>
-          <section class="inbox-evidence" aria-label="Drift evidence">
-            <strong>Evidence before action</strong>
-            <Show when={props.entry.evidence_snapshot}>
-              {(evidence) => <pre>{JSON.stringify(evidence(), null, 2)}</pre>}
-            </Show>
-            <Show when={props.entry.proposed_change}>
-              {(change) => <pre>Proposed change: {JSON.stringify(change(), null, 2)}</pre>}
-            </Show>
-          </section>
+          <details class="inbox-evidence" open={evidenceOpen()}>
+            <summary>Evidence</summary>
+            <section aria-label="Drift evidence">
+              <Show when={props.entry.evidence_snapshot}>
+                {(evidence) => <pre>{JSON.stringify(evidence(), null, 2)}</pre>}
+              </Show>
+              <Show when={props.entry.proposed_change}>
+                {(change) => <pre>Proposed change: {JSON.stringify(change(), null, 2)}</pre>}
+              </Show>
+            </section>
+          </details>
         </Show>
         <div class="inbox-entry-meta">
           <span>Occurred {age(props.entry.occurred_at)}</span>
@@ -203,13 +241,29 @@ const Entry: Component<EntryProps> = (props) => {
           <span>State: {props.entry.triage_state}</span>
         </div>
         <div class="inbox-entry-actions">
-          <button type="button" class="inbox-open" onClick={() => props.onOpen(props.entry)}>
+          <button
+            type="button"
+            class="inbox-open"
+            disabled={!canOpen()}
+            title={canOpen() ? undefined : "Nothing to open in-app: this entry has no linked work item or session."}
+            onClick={() => props.onOpen(props.entry)}
+          >
             Open entry
           </button>
+          <Show when={props.entry.source_url}>
+            {(href) => (
+              <a
+                class="inbox-open-source"
+                href={href()}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Open on {props.entry.source}
+              </a>
+            )}
+          </Show>
           <Show when={!props.phone}>
             <Show when={props.entry.triage_state === "active"}>
-              <button type="button" disabled={props.busy} onClick={() => begin("archive")}>Archive…</button>
-              <button type="button" disabled={props.busy} onClick={() => begin("snooze")}>Snooze…</button>
               <Show when={props.entry.action?.kind === "observation"}>
                 <button type="button" disabled={props.busy} onClick={() => begin("adopt")}>Adopt as work item…</button>
                 <button type="button" disabled={props.busy} onClick={() => begin("suppress")}>Suppress source…</button>
@@ -218,9 +272,17 @@ const Entry: Component<EntryProps> = (props) => {
                 <button type="button" disabled={props.busy} onClick={() => begin("accept")}>Accept proposed change…</button>
                 <button type="button" disabled={props.busy} onClick={() => begin("reject")}>Reject proposed change…</button>
               </Show>
+              {/* The routine triage lives in a quieter, compact second row so the
+                  entry reads first and acts second. */}
+              <div class="inbox-entry-actions-secondary">
+                <button type="button" disabled={props.busy} onClick={() => begin("archive")}>Archive…</button>
+                <button type="button" disabled={props.busy} onClick={() => begin("snooze")}>Snooze…</button>
+              </div>
             </Show>
             <Show when={props.entry.triage_state !== "active"}>
-              <button type="button" disabled={props.busy} onClick={() => begin("restore")}>Restore…</button>
+              <div class="inbox-entry-actions-secondary">
+                <button type="button" disabled={props.busy} onClick={() => begin("restore")}>Restore…</button>
+              </div>
             </Show>
           </Show>
           <Show when={props.phone}>
@@ -259,6 +321,10 @@ const Entry: Component<EntryProps> = (props) => {
                   <span>Snooze until</span>
                   <input type="datetime-local" value={until()} onInput={(event) => setUntil(event.currentTarget.value)} />
                 </label>
+                <div class="inbox-snooze-presets" role="group" aria-label="Snooze presets">
+                  <button type="button" disabled={props.busy} onClick={() => setSnoozePreset(1)}>Tomorrow</button>
+                  <button type="button" disabled={props.busy} onClick={() => setSnoozePreset(7)}>Next week</button>
+                </div>
               </Show>
               <div class="inbox-entry-composer-actions">
                 <button type="submit" disabled={props.busy || !reason().trim()}>
@@ -356,6 +422,33 @@ const Inbox: Component<Props> = (props) => {
   const [batchBusy, setBatchBusy] = createSignal(false);
   const [focusedIndex, setFocusedIndex] = createSignal(0);
   const [phone, setPhone] = createSignal(false);
+  // How many pages the reader has loaded, so a live re-read reconciles what is
+  // on screen rather than collapsing a paged view back to its first page.
+  const [pages, setPages] = createSignal(1);
+  // The entries whose composer or action sheet is open right now. A live
+  // re-read is held while any is, so it never throws away a half-typed reason.
+  const [composerKeys, setComposerKeys] = createSignal<Set<string>>(new Set<string>());
+  const anyComposerOpen = () => composerKeys().size > 0;
+  const onComposerChange = (key: string, open: boolean) => {
+    setComposerKeys((current) => {
+      if (open === current.has(key)) return current;
+      const next = new Set(current);
+      if (open) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  };
+
+  // How old this view is, in the shared badge every Vogt surface now wears.
+  // The stamp only moves on an answer we believe (FR-U10), and the Inbox
+  // listens on the stream, so it is a live view that must still say when it
+  // last actually heard back.
+  const loadedAt = createLoadStamp(result);
+  const freshness = createViewAge(() => ({
+    loadedAt: loadedAt(),
+    failed: Boolean(failure()),
+    live: true,
+  }));
 
   const seenKey = "mydevenv2.inbox.seen.v1";
   const readSeen = () => {
@@ -376,24 +469,98 @@ const Inbox: Component<Props> = (props) => {
     try { localStorage.setItem(seenKey, JSON.stringify([...next])); } catch { /* presentation state is best effort */ }
   };
 
-  const load = async (nextCursor: string | null = null) => {
+  const fetchPage = (pageCursor: string | null) => {
+    const query = new URLSearchParams(location.search);
+    const selectedSource = query.get("source") ?? source();
+    return listInbox({
+      limit: 50,
+      cursor: pageCursor ?? undefined,
+      sources: selectedSource || undefined,
+      project: query.get("project") ?? undefined,
+      work_item: query.get("work_item") ?? undefined,
+    });
+  };
+
+  const handleFailure = (error: unknown) => {
+    setFailure(error instanceof Error ? error : new Error(String(error)));
+    setResult(null);
+    setPages(1);
+    setCursor(null);
+    if (!(error instanceof VogtUnavailable)) props.onError?.(String(error));
+  };
+
+  /** A fresh read of the first page: the URL-changed and retry path, which is
+   *  allowed to replace what is on screen because the reader asked it to. */
+  const load = async () => {
     setLoading(true);
     setFailure(null);
     try {
-      const query = new URLSearchParams(location.search);
-      const selectedSource = query.get("source") ?? source();
-      const next = await listInbox({
-        limit: 50,
-        cursor: nextCursor ?? undefined,
-        sources: selectedSource || undefined,
-        project: query.get("project") ?? undefined,
-        work_item: query.get("work_item") ?? undefined,
-      });
-      setResult(nextCursor ? { ...next, entries: [...(result()?.entries ?? []), ...next.entries] } : next);
+      const next = await fetchPage(null);
+      setResult(next);
       setCursor(next.next_cursor ?? null);
+      setPages(1);
     } catch (error) {
-      setFailure(error instanceof Error ? error : new Error(String(error)));
-      setResult(null);
+      handleFailure(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** Deepen the view by one page, appending rather than replacing. */
+  const loadMore = async () => {
+    const at = cursor();
+    if (!at || loading()) return;
+    setLoading(true);
+    try {
+      const next = await fetchPage(at);
+      setResult((current) =>
+        current ? { ...next, entries: [...current.entries, ...next.entries] } : next,
+      );
+      setCursor(next.next_cursor ?? null);
+      setPages((n) => n + 1);
+    } catch (error) {
+      handleFailure(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** Reuse the previous object for an entry whose content is unchanged, so a
+   *  live re-read keeps its `<For>` identity — and the composing/selection
+   *  signals that hang off that identity — while a changed entry re-renders. */
+  const mergeEntries = (prev: InboxEntry[], next: InboxEntry[]): InboxEntry[] => {
+    const byKey = new Map(prev.map((entry) => [entry.entry_key, entry] as const));
+    return next.map((entry) => {
+      const old = byKey.get(entry.entry_key);
+      return old && JSON.stringify(old) === JSON.stringify(entry) ? old : entry;
+    });
+  };
+
+  /** Re-read every page currently loaded and merge by `entry_key`. Preserves
+   *  the paged depth, keeps unchanged rows' identity, and — unlike `load` —
+   *  never wipes the answer on a failed background read (FR-U10). This is the
+   *  live path and the after-a-write path both. */
+  const reload = async () => {
+    if (loading()) return;
+    const depth = pages();
+    setLoading(true);
+    try {
+      const firstPage = await fetchPage(null);
+      let collected = [...firstPage.entries];
+      let at = firstPage.next_cursor ?? null;
+      for (let read = 1; read < depth && at; read += 1) {
+        const page = await fetchPage(at);
+        collected = [...collected, ...page.entries];
+        at = page.next_cursor ?? null;
+      }
+      setResult((current) => ({
+        ...firstPage,
+        entries: mergeEntries(current?.entries ?? [], collected),
+        next_cursor: at,
+      }));
+      setCursor(at);
+      setFailure(null);
+    } catch (error) {
       if (!(error instanceof VogtUnavailable)) props.onError?.(String(error));
     } finally {
       setLoading(false);
@@ -412,9 +579,21 @@ const Inbox: Component<Props> = (props) => {
     readSeen();
     void load();
   });
-  onCleanup(onVogtChanged(() => { if (!loading()) void load(); }));
+  // Live, like the board: re-read on what the front door announced, but not
+  // under a reason somebody is composing, and not while a batch decision is
+  // half-made. A hidden tab is skipped and reconciled on return — that is
+  // `onVogtLive`'s own second half.
+  onVogtLive(() => void reload(), {
+    when: () => !anyComposerOpen() && batchAction() === null,
+  });
 
   const entries = () => result()?.entries ?? [];
+  const hasReadEntries = () =>
+    entries().some((entry) => seen().has(entry.entry_key) && entry.triage_state === "active");
+  // The batch bar earns its sticky place when there is something to batch: a
+  // selection, a decision half-made, or read entries the reader could sweep.
+  const batchable = () =>
+    Boolean(result()) && (selected().size > 0 || batchAction() !== null || hasReadEntries());
   const toggleSelected = (entry: InboxEntry) => {
     setSelected((current) => {
       const next = new Set(current);
@@ -447,7 +626,7 @@ const Inbox: Component<Props> = (props) => {
         setBatchAction(null);
       }
       if (failed.length) props.onError?.(`${failed.length} Inbox archive(s) were refused; the selection was retained.`);
-      await load();
+      await reload();
     } finally {
       setBatchBusy(false);
     }
@@ -538,7 +717,7 @@ const Inbox: Component<Props> = (props) => {
       if (action === "archive") await archiveInbox(entry.entry_key, reason);
       else if (action === "restore") await restoreInbox(entry.entry_key, reason);
       else if (until) await snoozeInbox(entry.entry_key, until, reason);
-      await load();
+      await reload();
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
@@ -564,7 +743,7 @@ const Inbox: Component<Props> = (props) => {
       else if (entry.action?.kind === "drift" && entry.action.drift_id) {
         await resolveInboxDrift(entry.action.drift_id, kind === "accept" ? "accepted" : "rejected", reason);
       }
-      await load();
+      await reload();
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
@@ -578,28 +757,28 @@ const Inbox: Component<Props> = (props) => {
       <SurfaceHeader
         class="inbox-header"
         label="Inbox header"
-        title={(
-          <>
-          <p class="place-kicker">Work</p>
-          <h1>Inbox</h1>
-          </>
-        )}
+        title={<h1>Inbox</h1>}
         honestyClass={
           failure()
             ? "surface-header-honesty--outage"
             : result()
-              ? "surface-header-honesty--fresh"
+              ? honestyToneClass(freshness().tone)
               : "surface-header-honesty--never"
         }
         honesty={(
           <p class="inbox-header-honesty" aria-live="polite">
-            {failure()
-              ? "Inbox unavailable — no normalized attention answer was read."
-              : loading() && !result()
-                ? "Loading Inbox — no answer yet."
-                : result()
-                  ? <><strong>Response {age(result()!.snapshot_at)}</strong>; source coverage remains attached below.</>
-                  : "No Inbox answer has been read yet."}
+            <Show
+              when={!failure()}
+              fallback="Inbox unavailable — no normalized attention answer was read."
+            >
+              <Show
+                when={result()}
+                fallback={loading() ? "Loading Inbox — no answer yet." : "No Inbox answer has been read yet."}
+              >
+                <strong><ViewAgeBadge age={freshness()} class="inbox-age" /></strong>
+                {" "}· source coverage remains attached below.
+              </Show>
+            </Show>
           </p>
         )}
         controls={(
@@ -648,27 +827,15 @@ const Inbox: Component<Props> = (props) => {
       <Show when={!failure() && result() && result()!.entries.length === 0}>
         <p class="inbox-empty">No normalized entries were returned. Open coverage and provenance below: a covered-empty source is different from a source that was not collected.</p>
       </Show>
-      <div class="inbox-list" aria-label="Attention stream" aria-live="polite">
-        <For each={entries()}>
-          {(entry, index) => <Entry entry={entry} seen={seen().has(entry.entry_key)} selected={selected().has(entry.entry_key)} busy={triaging() === entry.entry_key} phone={phone()} onSelect={toggleSelected} onOpen={(value) => { setFocusedIndex(index()); openEntry(value); }} onTriage={triage} onAction={action} />}
-        </For>
-      </div>
-      <Show when={result()?.next_cursor}>
-        <button type="button" class="inbox-load-more" disabled={loading()} onClick={() => void load(cursor())}>
-          {loading() ? "Loading…" : "Load more"}
-        </button>
-      </Show>
-      <Show when={result()}>
-        {(answer) => (
-          <details class="inbox-support" open={answer().entries.length === 0}>
-            <summary>Coverage and provenance</summary>
-            <Coverage result={answer()} />
-          </details>
-        )}
-      </Show>
-      <details class="inbox-support" open={selected().size > 0 || batchAction() !== null}>
-        <summary>Batch operations · {selected().size} selected</summary>
-        <div class="inbox-batch" aria-label="Batch Inbox actions">
+      {/* Batch decisions ride at the top and stay put: with a selection made,
+          the bar the reader is acting through follows the list down rather
+          than sitting buried under it. */}
+      <Show when={batchable()}>
+        <div
+          class="inbox-batch inbox-batch-bar"
+          classList={{ "inbox-batch-bar--selected": selected().size > 0 }}
+          aria-label="Batch Inbox actions"
+        >
           <span>{selected().size} selected</span>
           <button
             type="button"
@@ -679,7 +846,7 @@ const Inbox: Component<Props> = (props) => {
           </button>
           <button
             type="button"
-            disabled={batchBusy() || !entries().some((entry) => seen().has(entry.entry_key) && entry.triage_state === "active")}
+            disabled={batchBusy() || !hasReadEntries()}
             onClick={() => setBatchAction("read")}
           >
             Archive read…
@@ -709,7 +876,29 @@ const Inbox: Component<Props> = (props) => {
             </form>
           </Show>
         </div>
-      </details>
+      </Show>
+      <p class="board-keys inbox-keys" aria-hidden="true">
+        Keyboard: <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>e</kbd> archive ·{" "}
+        <kbd>s</kbd> snooze · <kbd>r</kbd> resolve
+      </p>
+      <div class="inbox-list" aria-label="Attention stream" aria-live="polite">
+        <For each={entries()}>
+          {(entry, index) => <Entry entry={entry} seen={seen().has(entry.entry_key)} selected={selected().has(entry.entry_key)} busy={triaging() === entry.entry_key} phone={phone()} onSelect={toggleSelected} onOpen={(value) => { setFocusedIndex(index()); openEntry(value); }} onComposerChange={onComposerChange} onTriage={triage} onAction={action} />}
+        </For>
+      </div>
+      <Show when={result()?.next_cursor}>
+        <button type="button" class="inbox-load-more" disabled={loading()} onClick={() => void loadMore()}>
+          {loading() ? "Loading…" : "Load more"}
+        </button>
+      </Show>
+      <Show when={result()}>
+        {(answer) => (
+          <details class="inbox-support" open={answer().entries.length === 0}>
+            <summary>Coverage and provenance</summary>
+            <Coverage result={answer()} />
+          </details>
+        )}
+      </Show>
     </section>
   );
 };

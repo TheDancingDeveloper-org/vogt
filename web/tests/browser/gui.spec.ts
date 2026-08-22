@@ -19,8 +19,63 @@ const inboxEntry = {
   proposed_change: { state: "done" },
 };
 
+// A source-linked entry: a GitHub review request that deep-links out to the
+// forge, with nothing in-app behind it. It carries no evidence, so its own
+// disclosure stays folded — part of what keeps the list dense.
+const sourceUrlEntry = {
+  ...inboxEntry,
+  entry_key: "github:pr-42",
+  source: "github",
+  kind: "review_requested",
+  title: "Review requested on pull request 42",
+  summary: "A teammate asked for your review on the estate front door.",
+  source_subject_key: "github:pr-42",
+  source_url: "https://github.example/org/repo/pull/42",
+  work_item_ref: null,
+  session_id: null,
+  action: { kind: "observation" },
+  evidence_snapshot: null,
+  proposed_change: null,
+};
+
+// An entry with neither a work item nor a session behind it and no source
+// link either: there is nowhere for "Open entry" to go.
+const orphanEntry = {
+  ...inboxEntry,
+  entry_key: "ci:build-99",
+  source: "ci",
+  kind: "pipeline_failed",
+  title: "Pipeline failed on main",
+  summary: "The build step exited non-zero.",
+  source_subject_key: "ci:build-99",
+  source_url: null,
+  work_item_ref: null,
+  session_id: null,
+  action: { kind: "observation" },
+  evidence_snapshot: null,
+  proposed_change: null,
+};
+
+// A session-backed entry, so "Open entry" has an in-app destination on at
+// least one non-drift row too.
+const sessionEntry = {
+  ...inboxEntry,
+  entry_key: "agent:session-7",
+  source: "agent",
+  kind: "session_waiting",
+  title: "Agent session is waiting for input",
+  summary: "A session paused for a decision.",
+  source_subject_key: "agent:session-7",
+  source_url: null,
+  work_item_ref: null,
+  session_id: "eng-session-7",
+  action: { kind: "session" },
+  evidence_snapshot: null,
+  proposed_change: null,
+};
+
 const inboxResult = () => ({
-  entries: [inboxEntry],
+  entries: [inboxEntry, sourceUrlEntry, orphanEntry, sessionEntry],
   snapshot_at: "2026-08-17T10:01:00Z",
   high_water: { github: null, drift: "2026-08-17T10:00:00Z", ci: null, agent: null },
   coverage: {
@@ -813,7 +868,7 @@ test("Phone Inbox uses source pills and a focus-safe bottom action sheet", async
   const closedTitleWidth = (await entryTitle.boundingBox())!.width;
   const closedSummaryWidth = (await entrySummary.boundingBox())!.width;
 
-  const trigger = page.getByRole("button", { name: "Inbox actions" });
+  const trigger = page.getByRole("button", { name: "Inbox actions" }).first();
   await trigger.click();
   const sheet = page.getByRole("dialog", { name: `Actions for ${inboxEntry.title}` });
   await expect(sheet).toBeVisible();
@@ -877,14 +932,13 @@ test("Inbox puts its first answer before progressive support at every shell widt
     const geometry = await page.locator(".inbox-surface").evaluate((surface) => {
       const entry = surface.querySelector<HTMLElement>(".inbox-entry")!;
       const coverage = surface.querySelector<HTMLElement>(".inbox-support")!;
-      const batch = surface.querySelectorAll<HTMLElement>(".inbox-support")[1]!;
       return {
         entryTop: entry.getBoundingClientRect().top,
         entryBottom: entry.getBoundingClientRect().bottom,
         viewportHeight: document.documentElement.clientHeight,
+        // The attention answer leads; coverage and provenance stay below it.
         ordered: Boolean(
-          entry.compareDocumentPosition(coverage) & Node.DOCUMENT_POSITION_FOLLOWING
-          && coverage.compareDocumentPosition(batch) & Node.DOCUMENT_POSITION_FOLLOWING
+          entry.compareDocumentPosition(coverage) & Node.DOCUMENT_POSITION_FOLLOWING,
         ),
         overflow: surface.scrollWidth - surface.clientWidth,
       };
@@ -894,6 +948,66 @@ test("Inbox puts its first answer before progressive support at every shell widt
     expect(geometry.entryBottom).toBeLessThanOrEqual(geometry.viewportHeight);
     expect(geometry.overflow).toBeLessThanOrEqual(1);
   }
+});
+
+test("Inbox is dense, keeps the Source select on screen, links out and sticks its batch bar", async ({ page }) => {
+  test.skip(test.info().project.name === "phone", "Desktop density and the Source select live on the desktop shell");
+  await installFixtures(page);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/#/inbox");
+
+  const entries = page.locator(".inbox-entry");
+  await expect(entries).toHaveCount(4);
+
+  // Density (#220): with every evidence disclosure collapsed, four entries
+  // fit within one screen. Force the drift entry's auto-opened evidence shut
+  // to measure the collapsed layout the requirement is about.
+  await page.locator(".inbox-list").evaluate((list) => {
+    list
+      .querySelectorAll("details.inbox-evidence[open]")
+      .forEach((node) => node.removeAttribute("open"));
+  });
+  const bottoms = await entries.evaluateAll((nodes) =>
+    nodes.map((node) => node.getBoundingClientRect().bottom),
+  );
+  expect(Math.max(...bottoms)).toBeLessThanOrEqual(page.viewportSize()!.height);
+
+  // The Source select keeps a right gutter rather than clipping at the edge.
+  const selectBox = (await page.locator(".inbox-filter select").boundingBox())!;
+  expect(selectBox.x + selectBox.width).toBeLessThan(page.viewportSize()!.width);
+
+  // The source-linked entry offers an out-to-source deep link…
+  const link = page.getByRole("link", { name: /Open on github/ });
+  await expect(link).toBeVisible();
+  await expect(link).toHaveAttribute("target", "_blank");
+  await expect(link).toHaveAttribute("href", "https://github.example/org/repo/pull/42");
+
+  // …and the entry with nothing in-app behind it disables Open entry.
+  const orphan = page.locator('[data-entry-key="ci:build-99"]');
+  await expect(orphan.getByRole("button", { name: "Open entry" })).toBeDisabled();
+
+  // Selecting an entry raises a batch bar stuck to the top of the list.
+  await page.getByLabel(`Select ${inboxEntry.title}`).check();
+  const bar = page.locator(".inbox-batch-bar");
+  await expect(bar).toBeVisible();
+  expect(await bar.evaluate((element) => getComputedStyle(element).position)).toBe("sticky");
+  const barBox = (await bar.boundingBox())!;
+  const listBox = (await page.locator(".inbox-list").boundingBox())!;
+  expect(barBox.y).toBeLessThan(listBox.y);
+});
+
+test("Phone Inbox shows a denser, collapsed-evidence list", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The phone screenshot belongs to the phone project");
+  await installFixtures(page);
+  await page.goto("/#/inbox");
+  await expect(page.locator(".inbox-entry")).toHaveCount(4);
+  // Collapse the auto-opened drift evidence so the shot is of the dense list.
+  await page.locator(".inbox-list").evaluate((list) => {
+    list
+      .querySelectorAll("details.inbox-evidence[open]")
+      .forEach((node) => node.removeAttribute("open"));
+  });
+  await expect(page.locator(".inbox-list")).toHaveScreenshot("inbox-dense-list-phone.png");
 });
 
 test("primary surface headers keep their shared order and geometry across zoom", async ({ page }) => {

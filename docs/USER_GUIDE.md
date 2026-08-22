@@ -405,6 +405,8 @@ so UI changes ship without a new APK; only native plumbing needs one.
 | `Ctrl/Cmd+F` / `H` / `G` | Find / replace / go to line |
 | `Alt+↑/↓` | Move line |
 | `Ctrl/Cmd+D` | Add cursor at next match |
+| `j` / `k` | Inbox: focus the next / previous entry |
+| `e` / `s` / `r` | Inbox: archive / snooze / resolve the focused entry |
 | `?` | Open shortcut help outside text fields, editors and terminals |
 
 Desktop Places and the phone bottom bar share live workload counts. A numeric
