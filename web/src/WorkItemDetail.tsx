@@ -59,7 +59,8 @@ import {
   type WorkDetail,
   type WorkItem,
 } from "./vogtApi";
-import { ViewAgeBadge, createLoadStamp, createViewAge } from "./viewAge";
+import { ViewAgeBadge, createLoadStamp, createViewAge, onVogtLive } from "./viewAge";
+import { renderMarkdown } from "./markdown";
 import { looksLikeYesNo, tailOf } from "./terminalTail";
 
 interface Props {
@@ -957,14 +958,16 @@ const WorkItemDetail: Component<Props> = (props) => {
   // The fifth surface, and the one where a stale read is quietest: an item
   // page shows a *single* item's state, so there is nothing on it that looks
   // wrong when it is an hour out of date. It reports its own age like the
-  // rest now, and names the Refresh beside it, because that is what makes it
-  // current — the page does not poll and does not subscribe.
+  // rest, and now subscribes to the stream (see `onVogtLive` below) so a
+  // transition somebody else made arrives here rather than waiting for a
+  // Refresh — which is why the badge reads "Live" rather than naming Refresh.
   const loadedAt = createLoadStamp(work, (loaded) => loaded.ok);
 
   const viewAge = createViewAge(() => ({
     loadedAt: loadedAt(),
     outage: outage(),
     failed: Boolean(failure()),
+    live: true,
   }));
 
   const sessionList = createMemo<SessionSummary[]>(() => {
@@ -1279,6 +1282,8 @@ const WorkItemDetail: Component<Props> = (props) => {
   const [template, setTemplate] = createSignal("");
   const [sessionName, setSessionName] = createSignal("");
   const [stopping, setStopping] = createSignal<string | null>(null);
+  /** Show the item body as its Markdown source rather than rendered (#222). */
+  const [bodyRaw, setBodyRaw] = createSignal(false);
 
   // -- the inline editor's own state ---------------------------------------
 
@@ -1310,6 +1315,24 @@ const WorkItemDetail: Component<Props> = (props) => {
     setRolledBack(null);
     setEditing(true);
   };
+
+  // -- live reconcile (FR-U10, #223) ---------------------------------------
+  //
+  // The item page used to neither poll nor subscribe, so a transition
+  // somebody else made never reached it and its "live activity" session
+  // badge stayed frozen at whatever the last Refresh saw. It subscribes now,
+  // with the board's guard: a nudge (or a tab returning to the front)
+  // re-reads the item, its sessions and the evidence behind it, but never
+  // while the reader is mid-write — a refetch that swapped the item under an
+  // open editor, a half-typed comment or a session being named would throw
+  // that composing away.
+  const composing = () =>
+    editing() ||
+    commentBody().trim().length > 0 ||
+    sessionName().trim().length > 0 ||
+    template().trim().length > 0;
+
+  onVogtLive(() => refreshAll(), { when: () => !composing() });
 
   const editChanged = () => {
     const current = serverItem();
@@ -1662,12 +1685,36 @@ const WorkItemDetail: Component<Props> = (props) => {
             <div class="wid-columns">
               <div class="wid-main">
                 <section class="wid-panel">
-                  <h3>Description</h3>
+                  <div class="wid-panel-head">
+                    <h3>Description</h3>
+                    <Show when={current().body?.trim()}>
+                      <button
+                        type="button"
+                        class="wid-body-toggle"
+                        aria-pressed={bodyRaw()}
+                        title={
+                          bodyRaw()
+                            ? "Show the description rendered from its Markdown"
+                            : "Show the description's Markdown source"
+                        }
+                        onClick={() => setBodyRaw((raw) => !raw)}
+                      >
+                        {bodyRaw() ? "Rendered" : "Raw"}
+                      </button>
+                    </Show>
+                  </div>
                   <Show
                     when={current().body?.trim()}
                     fallback={<p class="wid-absent">No description was written.</p>}
                   >
-                    {(body) => <p class="wid-body">{body()}</p>}
+                    {(body) => (
+                      <Show
+                        when={!bodyRaw()}
+                        fallback={<pre class="wid-body wid-body-raw">{body()}</pre>}
+                      >
+                        <div class="wid-body md-body">{renderMarkdown(body())}</div>
+                      </Show>
+                    )}
                   </Show>
                 </section>
 
@@ -1695,7 +1742,9 @@ const WorkItemDetail: Component<Props> = (props) => {
                               <span>{comment.actor_display_name ?? "unattributed"}</span>
                               <span>{formatWhen(comment.created_at)}</span>
                             </div>
-                            <p class="wid-body">{comment.body}</p>
+                            <div class="wid-body md-body">
+                              {renderMarkdown(comment.body)}
+                            </div>
                           </li>
                         )}
                       </For>

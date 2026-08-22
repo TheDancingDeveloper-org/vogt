@@ -58,7 +58,13 @@ import {
   type RankedView,
 } from "./vogtApi";
 import { openWorkItemTab } from "./tabs";
-import { ViewAgeBadge, createLoadStamp, createViewAge, honestyToneClass } from "./viewAge";
+import {
+  ViewAgeBadge,
+  createLoadStamp,
+  createViewAge,
+  honestyToneClass,
+  onVogtLive,
+} from "./viewAge";
 import { MeasuredWindow } from "./measuredWindow";
 import SurfaceHeader from "./SurfaceHeader";
 import { ProgressiveFilters, SavedLenses } from "./ProgressiveFilters";
@@ -881,6 +887,22 @@ const Backlog: Component<Props> = (props) => {
   const [rowAct, setRowAct] = createSignal<{ ref: string; kind: RowActKind } | null>(null);
   const [rowReason, setRowReason] = createSignal("");
   const [rowRunning, setRowRunning] = createSignal(false);
+
+  // -- reconcile on tab return (FR-U10, #223) ------------------------------
+  //
+  // The ranked view is a sweep product, so it is deliberately *not* re-ranked
+  // on every stream nudge — a list re-ordering itself under a reader's cursor
+  // on someone else's transition is the thing the age badge exists to make
+  // unnecessary (see the badge note above, and `live.test.tsx`). But a tab
+  // left in the background and brought back is the moment its answer is
+  // furthest from current, so that one case reconciles: `onNudge: false`
+  // keeps the stream from touching the list while `onVisible` (the default)
+  // reloads it on return — and never while a create or a row action is
+  // mid-reason.
+  onVogtLive(() => refresh(), {
+    when: () => !createOpen() && rowAct() === null,
+    onNudge: false,
+  });
 
   const beginRowAct = (ref: string, kind: RowActKind) => {
     setRowAct({ ref, kind });

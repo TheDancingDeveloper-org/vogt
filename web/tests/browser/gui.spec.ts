@@ -126,6 +126,8 @@ interface PlaceMetricFixtures {
   projects?: { slug: string; name: string; root_path?: string }[];
   /** The actor roster the item editor's assignee picker offers. */
   actors?: { identity_ref: string; display_name: string }[];
+  /** The Markdown body `/work/get` returns for WI-7, for the renderer (#222). */
+  workBody?: string;
 }
 
 async function installFixtures(
@@ -381,7 +383,7 @@ async function installFixtures(
       return route.fulfill({ json: {
         item: {
           id: "01JWORKITEM", ref: "WI-7", kind: "feature", title: "Measured board card",
-          body: "", state: "open", priority: "normal", project_slug: "vogt",
+          body: metrics.workBody ?? "", state: "open", priority: "normal", project_slug: "vogt",
           initiative_id: null, origin: "declared", trust_state: "verified",
           assignee_identity_ref: null, labels: [], relations: [],
           created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-17T10:00:00Z",
@@ -3170,4 +3172,52 @@ test("The item page leads with comments and keeps the session form collapsed", a
   await expect(page.locator(".wid-start form")).toHaveCount(0);
   await page.locator(".wid-start-open").click();
   await expect(page.locator(".wid-start form")).toBeVisible();
+});
+
+// -- #222: the item body is rendered Markdown, with a raw escape hatch -------
+//
+// With the forge pivot the body is GitHub-flavoured Markdown, so a heading,
+// a list and a fenced block must become real nodes rather than arriving as
+// literal `#`, `-` and backticks — and the reader can still see the source.
+
+test("The item body renders Markdown, and the raw toggle shows its source", async ({ page }) => {
+  const body = [
+    "# Heading one",
+    "",
+    "A paragraph before the list.",
+    "",
+    "- first item",
+    "- second item",
+    "",
+    "```ts",
+    "const answer = 42;",
+    "```",
+  ].join("\n");
+  await installFixtures(page, {}, [], undefined, { workBody: body });
+  await page.goto("/#/w/WI-7");
+  await expect(page.locator(".wid-view")).toBeVisible();
+
+  const description = page.locator(".wid-main .wid-panel", { hasText: "Description" });
+  const rendered = description.locator(".md-body");
+
+  // A real heading, a real list and a real fenced code block — not literals.
+  await expect(rendered.locator("h1")).toHaveText("Heading one");
+  await expect(rendered.locator("ul > li")).toHaveText(["first item", "second item"]);
+  await expect(rendered.locator("pre code")).toHaveText("const answer = 42;");
+
+  // None of the Markdown punctuation survives as text in the rendered view.
+  const renderedText = (await rendered.innerText()).trim();
+  expect(renderedText).not.toContain("# Heading");
+  expect(renderedText).not.toContain("- first");
+  expect(renderedText).not.toContain("```");
+
+  // The raw toggle swaps to the Markdown source, verbatim.
+  await description.getByRole("button", { name: "Raw" }).click();
+  const raw = description.locator(".wid-body-raw");
+  await expect(raw).toBeVisible();
+  await expect(raw).toContainText("# Heading one");
+  await expect(raw).toContainText("```ts");
+  // And back again.
+  await description.getByRole("button", { name: "Rendered" }).click();
+  await expect(description.locator(".md-body h1")).toHaveText("Heading one");
 });

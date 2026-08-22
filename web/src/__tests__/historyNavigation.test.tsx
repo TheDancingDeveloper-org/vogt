@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fireEvent, waitFor } from "@solidjs/testing-library";
 
 import History from "../History";
@@ -101,5 +101,71 @@ describe("History result navigation", () => {
     await waitFor(() => expect(view.container.querySelector(".history-match-panel")).not.toBeNull());
     expect(view.url()).toBe(staleUrl);
     expect(view.container.querySelector('[data-history-match][aria-current="true"]')).toBeNull();
+  });
+});
+
+// The output search reaches the full archive, so it is debounced (#225): a
+// burst of typing must settle to a single server call, not one per keystroke.
+describe("History output search debounce", () => {
+  function searchCalls(vogt: ReturnType<typeof historyFixture>) {
+    return vogt.engineCalls.filter((call) => call.path === "/api/history/search");
+  }
+
+  it("makes one server search per settled query, not one per keystroke", async () => {
+    vi.useFakeTimers();
+    try {
+      const vogt = historyFixture();
+      const view = mountAt("/history", "/history", () => <History />);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const input = view.container.querySelector<HTMLInputElement>(
+        'input[placeholder="Needle inside scrollback"]',
+      )!;
+
+      // Six keystrokes, each well inside the 250ms window, so every one but
+      // the last is superseded before its timer can fire.
+      for (const value of ["n", "ne", "nee", "need", "needl", "needle"]) {
+        fireEvent.input(input, { target: { value } });
+        await vi.advanceTimersByTimeAsync(50);
+      }
+
+      // Nothing has reached the server yet — the query has not settled.
+      expect(searchCalls(vogt)).toHaveLength(0);
+
+      // Let the last keystroke settle.
+      await vi.advanceTimersByTimeAsync(300);
+
+      const calls = searchCalls(vogt);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.query.get("q")).toBe("needle");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("runs one more search only once a further query settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const vogt = historyFixture();
+      const view = mountAt("/history", "/history", () => <History />);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const input = view.container.querySelector<HTMLInputElement>(
+        'input[placeholder="Needle inside scrollback"]',
+      )!;
+
+      fireEvent.input(input, { target: { value: "needle" } });
+      await vi.advanceTimersByTimeAsync(300);
+      expect(searchCalls(vogt)).toHaveLength(1);
+
+      fireEvent.input(input, { target: { value: "haystack" } });
+      await vi.advanceTimersByTimeAsync(300);
+
+      const calls = searchCalls(vogt);
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.query.get("q")).toBe("haystack");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

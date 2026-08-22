@@ -226,6 +226,11 @@ export interface LiveOptions {
   when?: () => boolean;
   /** Also reconcile when the tab comes back to the front. Default `true`. */
   onVisible?: boolean;
+  /** Re-read on a stream nudge. Default `true`. A ranked view sets this
+   *  `false`: it does not re-rank the estate under the reader on every
+   *  announced change, but a tab returning from the background is still the
+   *  moment its answer is furthest from current, so `onVisible` stays on. */
+  onNudge?: boolean;
 }
 
 /**
@@ -243,11 +248,13 @@ export function onVogtLive(handler: () => void, options: LiveOptions = {}): void
     return options.when ? options.when() : true;
   };
   onMount(() => {
-    const stop = onVogtChanged(() => {
-      if (!allowed()) return;
-      handler();
-    });
-    onCleanup(stop);
+    if (options.onNudge !== false) {
+      const stop = onVogtChanged(() => {
+        if (!allowed()) return;
+        handler();
+      });
+      onCleanup(stop);
+    }
 
     if (options.onVisible === false || typeof document === "undefined") return;
     // A hidden tab skips the nudges above, so coming back is the moment its
