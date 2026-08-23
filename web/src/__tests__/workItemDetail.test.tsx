@@ -266,6 +266,86 @@ describe("FR-U5 — one item, one page, and everything about it on it", () => {
   });
 });
 
+// -- #283: branches, declared and observed, kept separate -------------------
+//
+// The core keeps declared branches (what a Vogt-started session said it would
+// use) apart from observed ones (what a sweep found), so a disagreement reads
+// as drift rather than being merged away (FR-O2). The panel's job is to keep
+// them apart *on screen*: the source badge says which side a branch came from,
+// a branch on one side only is marked drift, and an observed branch says when
+// it was last active — "active 2h ago" — from the age the core derived.
+
+describe("#283 — the item's branches, declared and observed", () => {
+  const BRANCHES = [
+    {
+      name: "wi-1",
+      source: "both",
+      drift: false,
+      ahead: 1,
+      behind: 0,
+      default_branch: "main",
+      last_commit_age_seconds: 7200,
+    },
+    {
+      name: "feature/WI-1-extra",
+      source: "observed",
+      drift: true,
+      ahead: 3,
+      behind: 1,
+      default_branch: "main",
+      last_commit_age_seconds: 300,
+    },
+    { name: "wi-2", source: "declared", drift: true },
+  ];
+
+  it("shows each bound branch, where it came from, and when it was last active", async () => {
+    fakeVogt({
+      "GET /work/get": {
+        body: { item: workItem(), comments: [], sessions: [], branches: BRANCHES },
+      },
+    });
+    const { container } = detail();
+
+    const panel = await waitFor(() => panelNamed(container, "Branches"));
+    const names = [...panel.querySelectorAll(".wid-branch-name")].map(
+      (node) => node.textContent,
+    );
+    expect(names).toEqual(["wi-1", "feature/WI-1-extra", "wi-2"]);
+
+    // Agreement: last active two hours ago, badged `both`, and not drift.
+    const both = panel.querySelector<HTMLElement>('[data-testid="branch-wi-1"]')!;
+    expect(both.textContent).toContain("active 2h ago");
+    expect(both.querySelector(".wid-branch-source--both")).toBeTruthy();
+    expect(both.querySelector(".wid-branch-drift")).toBeNull();
+
+    // Observed but never declared: drift, with its own recent activity shown.
+    const extra = panel.querySelector<HTMLElement>(
+      '[data-testid="branch-feature/WI-1-extra"]',
+    )!;
+    expect(extra.querySelector(".wid-branch-drift")).toBeTruthy();
+    expect(extra.textContent).toContain("active 5m ago");
+
+    // Declared but never observed: drift, and it says so rather than inventing
+    // an activity it has no observation for.
+    const declared = panel.querySelector<HTMLElement>('[data-testid="branch-wi-2"]')!;
+    expect(declared.querySelector(".wid-branch-drift")).toBeTruthy();
+    expect(declared.textContent).toContain("declared, not yet observed");
+  });
+
+  it("shows no Branches panel when none is declared or observed", async () => {
+    // The default fixture carries no branches; an empty panel under a heading
+    // would read as "no branch is being worked on", which is a claim.
+    fakeVogt();
+    const { container } = detail();
+
+    await waitFor(() => panelNamed(container, "Comments"));
+    const headings = [...container.querySelectorAll(".wid-panel h3")].map(
+      (node) => node.textContent,
+    );
+    expect(headings).not.toContain("Branches");
+  });
+});
+
 // -- FR-U5's "state history" ------------------------------------------------
 //
 // §6.2 recorded this as the one clause of FR-U5 the page did not answer: the

@@ -42,6 +42,7 @@ from vogt.application.models import (
     WorkResult,
 )
 from vogt.application.services import _resolve, upstream, writeback
+from vogt.application.services.branches import branch_views_for
 from vogt.application.services.sessions import list_sessions
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.entities import (
@@ -400,12 +401,19 @@ def get_work(ctx: AppContext, params: GetWorkParams) -> WorkResult:
             if params.comment_limit and native
             else []
         )
+        # Where this item is worked on in git (#283): declared branches from
+        # the overlay joined to the observed ones, kept separate so a
+        # disagreement reads as drift. Computed for upstream items too, which
+        # have no native sessions but can still carry a `gh-<n>` branch.
+        branches = branch_views_for(ctx, view, item)
     sessions = (
         list_sessions(ctx, ListSessionsParams(work_item=item.ref)).sessions
         if native
         else []
     )
-    return WorkResult(item=item, comments=comments, sessions=sessions)
+    return WorkResult(
+        item=item, comments=comments, sessions=sessions, branches=branches
+    )
 
 
 def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:

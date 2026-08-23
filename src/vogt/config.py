@@ -45,6 +45,8 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+from vogt.core.branches import DEFAULT_BRANCH_PATTERNS, DEFAULT_BRANCH_TEMPLATE
+
 ENV_PREFIX = "VOGT_"
 CONFIG_FILE_ENV = "VOGT_CONFIG_FILE"
 
@@ -273,6 +275,34 @@ class VogtConfig(BaseSettings):
             "File types the marker collector reads. Configuration rather "
             "than a hard-coded list, because which extensions hold source "
             "is an estate's business, not Vogt's (FR-W11)."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    branch_binding_patterns: tuple[str, ...] = Field(
+        default=DEFAULT_BRANCH_PATTERNS,
+        description=(
+            "Regular expressions that recognise which work item a git branch "
+            "belongs to (#283). A branch whose name matches one is that item's "
+            "branch: the default set reads `wi-7/…` and `feature/WI-7-…` (the "
+            "vogt work-item number, via a `n` capture group) and `gh-264-…` "
+            "(a linked project's forge issue number, via a `forge` group). "
+            "The `git-local` collector applies these to every branch it "
+            "observes and records the match; widening the set is how an estate "
+            "teaches Vogt its own branch conventions. Reported, never enforced: "
+            "matching a branch never creates, renames or deletes one (FR-B4)."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    branch_binding_template: str = Field(
+        default=DEFAULT_BRANCH_TEMPLATE,
+        description=(
+            "The branch a session started from Vogt for a work item declares "
+            "it will use (#283), formatted with a single `{number}` field: "
+            "`WI-7` becomes `wi-7`. This is the *declared* half of the branch "
+            "binding, recorded on the item's overlay and kept separate from "
+            "what a sweep observes — an upstream item always declares the "
+            "forge form `gh-<number>` regardless of this template, because "
+            "that is the shape its own default project recognises."
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )

@@ -18,10 +18,12 @@ from vogt.collectors.base import (
     Finding,
     finding,
 )
+from vogt.core.branches import match_branch
 from vogt.core.entities import Project
 
 KIND_CHECKOUT = "git.checkout"
 KIND_TAG = "git.tag"
+KIND_BRANCH = "git.branch"
 
 #: Long enough for a slow filesystem, short enough that a hung git does not
 #: hold a sweep open. A timeout is a partial sweep, not a crash.
@@ -29,7 +31,7 @@ GIT_TIMEOUT_SECONDS = 20
 
 
 class GitLocalCollector:
-    """Branch, dirty state, head revision, and tags."""
+    """Branch, dirty state, head revision, tags, and per-branch bindings."""
 
     @property
     def name(self) -> str:
@@ -40,7 +42,6 @@ class GitLocalCollector:
         return False
 
     def collect(self, ctx: CollectorContext, project: Project) -> Iterable[Finding]:
-        del ctx
         root = Path(project.root_path).expanduser()
         if not (root / ".git").exists():
             yield finding(
@@ -86,6 +87,13 @@ class GitLocalCollector:
                 project=project,
                 payload={"tag": describe, "source": "git describe"},
             )
+
+        # Where work is in git, reported never driven (#283, FR-B4): one
+        # finding per local branch, carrying which work item its name binds to
+        # by the configured pattern. Declared branches (the overlay) and these
+        # observed ones are compared elsewhere and disagree as drift (FR-O2);
+        # this half only says what the checkout has.
+        yield from _branch_findings(ctx, project, root)
 
 
 def git_output(root: Path, *args: str, required: bool = False) -> str:
@@ -136,6 +144,98 @@ def git_output(root: Path, *args: str, required: bool = False) -> str:
             raise CollectorError(msg)
         return ""
     return completed.stdout.strip()
+
+
+def _default_branch(root: Path, names: list[str]) -> str | None:
+    """The branch ahead/behind is measured against, best effort.
+
+    `origin/HEAD` names it when the remote does; otherwise a checkout that has
+    never spoken to a remote falls back to whichever of the conventional names
+    it actually carries. `None` when neither can be established — in which case
+    ahead/behind is reported absent rather than measured against a guess.
+    """
+    head = git_output(root, "rev-parse", "--abbrev-ref", "origin/HEAD")
+    if head.startswith("origin/"):
+        candidate = head[len("origin/") :]
+        if candidate:
+            return candidate
+    for name in ("main", "master", "trunk"):
+        if name in names:
+            return name
+    return None
+
+
+def _ahead_behind(root: Path, default: str, name: str) -> tuple[int | None, int | None]:
+    """How far `name` is ahead of and behind `default`.
+
+    `git rev-list --left-right --count default...name` counts the two sides of
+    the symmetric difference: left is commits on `default` the branch has not
+    got (behind), right is commits on the branch `default` has not got (ahead).
+    An unreadable answer is absent, not zero — the same rule the rest of this
+    module keeps about a count that would otherwise read as a claim.
+    """
+    if name == default:
+        return 0, 0
+    counts = git_output(
+        root, "rev-list", "--left-right", "--count", f"{default}...{name}"
+    )
+    parts = counts.split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None, None
+    behind, ahead = int(parts[0]), int(parts[1])
+    return ahead, behind
+
+
+def _branch_findings(
+    ctx: CollectorContext, project: Project, root: Path
+) -> Iterable[Finding]:
+    """One finding per local branch, with the work item its name binds to.
+
+    Deliberately records `last_commit_at` rather than an age: a timestamp is
+    stable, so re-observing an unchanged branch writes nothing (NFR-S2), and
+    the surface derives "active 2h ago" from it at read time. `work_item_ref`
+    and `forge_number` are the pattern match — a vogt ref resolves here, a
+    forge number is left for the application layer to resolve against the
+    linked project, the same store boundary every other collector keeps.
+    """
+    listing = git_output(
+        root,
+        "for-each-ref",
+        "--format=%(refname:short)%09%(objectname)%09%(committerdate:iso-strict)",
+        "refs/heads",
+    )
+    if not listing:
+        return
+    rows: list[tuple[str, str, str]] = []
+    for line in listing.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3:
+            rows.append((parts[0], parts[1], parts[2]))
+    names = [name for name, _sha, _date in rows]
+    default = _default_branch(root, names)
+    patterns = tuple(ctx.config.branch_binding_patterns)
+
+    for name, sha, committed in rows:
+        ahead, behind = (
+            (None, None) if default is None else _ahead_behind(root, default, name)
+        )
+        match = match_branch(name, patterns)
+        yield finding(
+            kind=KIND_BRANCH,
+            subject_key=f"git-branch:{project.slug}:{name}",
+            project=project,
+            payload={
+                "project": project.slug,
+                "name": name,
+                "tip": sha,
+                "default_branch": default,
+                "ahead": ahead,
+                "behind": behind,
+                "last_commit_at": committed or None,
+                "work_item_ref": None if match is None else match.work_ref,
+                "forge_number": None if match is None else match.forge_number,
+            },
+        )
 
 
 def tracked_names(root: Path) -> frozenset[str] | None:

@@ -1612,14 +1612,15 @@ class SqliteWriteTxn(SqliteReadView):
         self._conn.execute(
             "INSERT INTO work_overlay (subject_key, project_id, rank, "
             "workflow_state, priority, effort, assignee_actor_id, "
-            "initiative_id, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "initiative_id, branches, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(subject_key) DO UPDATE SET "
             "project_id = excluded.project_id, rank = excluded.rank, "
             "workflow_state = excluded.workflow_state, "
             "priority = excluded.priority, effort = excluded.effort, "
             "assignee_actor_id = excluded.assignee_actor_id, "
             "initiative_id = excluded.initiative_id, "
+            "branches = excluded.branches, "
             "updated_at = excluded.updated_at",
             (
                 overlay.subject_key,
@@ -1630,6 +1631,7 @@ class SqliteWriteTxn(SqliteReadView):
                 overlay.effort,
                 overlay.assignee_actor_id,
                 overlay.initiative_id,
+                json.dumps(list(overlay.branches)),
                 to_iso(overlay.created_at),
                 to_iso(overlay.updated_at),
             ),
@@ -1815,6 +1817,7 @@ def _row_to_overlay(row: sqlite3.Row) -> WorkOverlay:
             "effort": row["effort"],
             "assignee_actor_id": row["assignee_actor_id"],
             "initiative_id": row["initiative_id"],
+            "branches": json.loads(row["branches"]) if row["branches"] else [],
             "created_at": from_iso(str(row["created_at"])),
             "updated_at": from_iso(str(row["updated_at"])),
         }

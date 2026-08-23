@@ -164,7 +164,7 @@ package identity is no longer needed to build the internal graph.
 | `work_item_labels` | tag assignments | `work_item_id, label_id` |
 | `work_links` | link to observed forge objects | `work_item_id, forge_kind(issue\|pr), repo, number, relation(completion\|reference), created_at` |
 | `comments` | collaboration | `id, work_item_id, actor_id, body, created_at` |
-| `work_overlay` | *(0013, FR-B7)* the vogt-local half of an upstream-truth item on a **linked** project, keyed by the forge subject, not a `wrk_*` id | `subject_key(pk), project_id, rank, workflow_state, priority, effort, assignee_actor_id, initiative_id, created_at, updated_at` |
+| `work_overlay` | *(0013, FR-B7)* the vogt-local half of an upstream-truth item on a **linked** project, keyed by the forge subject, not a `wrk_*` id | `subject_key(pk), project_id, rank, workflow_state, priority, effort, assignee_actor_id, initiative_id, branches(json, 0015), created_at, updated_at` |
 | `workflow_defs` | state machine per work-item kind | `kind, definition(json)` |
 | `writeback_actions` | *(M5)* one row per attempted forge write (FR-B2) | `id, at, actor_id, work_item_id, project_id, policy, action(create\|comment\|label\|close\|reopen), outcome(attempted\|succeeded\|failed\|skipped), detail` |
 
@@ -192,6 +192,16 @@ write-through nothing lands here, because the provider call runs before the
 declared transaction opens (decision 9); `rank` is schema for the vogt-local
 ordering with no operation writing it yet. The 0013 migration is new-DDL
 only: the deployed cutover starts from a fresh declared store, by decision.
+
+*Added at 0015 (#283)*: `branches` is a JSON array of the branch names a
+session started *from Vogt* declared it would work the item on — the declared
+half of the branch binding (#287, FR-B4). It is additive and forward-only:
+recording a name never touches git. The *observed* half — what a `git-local`
+sweep actually finds — stays in the evidence store as `git.branch`
+observations and is never folded in here, so the two can be compared and a
+disagreement surfaced as drift (FR-O2) rather than one overwriting the other.
+The column is keyed the same way the row is — by the work-item ref, which is
+`WI-7` for a native item and the forge subject for an upstream one.
 
 *Added at 0014 (#183, FR-B9)*: `work_items.superseded_by` — the retire
 marker for native items migrated upstream on `forge.link`/`forge.publish`.

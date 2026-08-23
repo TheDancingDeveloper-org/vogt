@@ -296,6 +296,21 @@ this item's brief — description, `why`, relations — written to a prompt file
 agent is pointed at. The session is linked back: the item shows its live
 activity badge, and the terminal links back to the item.
 
+**Branches** the item is worked on appear in their own panel — but only when
+there is one, so an empty panel never reads as "nothing is being worked on". A
+branch belongs to an item when its name carries the item's reference:
+`wi-7/…`, `feature/WI-7-…`, or, on a forge-linked project, `gh-264-…` for
+issue #264. The convention is a configurable pattern
+(`branch_binding_patterns`); the branch a session started *from Vogt* declares
+it will use comes from `branch_binding_template` (default `wi-7`). Each row
+says where it came from — **declared** (a session said it would use it),
+**observed** (a sweep found it in the checkout), or **both** — and an observed
+branch says when it was last active ("active 2h ago") and how far it has
+diverged from the default branch. A branch on one side only is marked **drift**:
+Vogt *reports* where work is in git and never drives it, so declared and
+observed are shown side by side rather than merged, and a disagreement between
+them is surfaced rather than silently reconciled.
+
 The page keeps itself current the way the board does: it **subscribes to the
 change stream**, so a transition or a new comment somebody else made — and the
 session's live-activity badge — arrive here without a manual refresh, and a tab

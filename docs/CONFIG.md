@@ -26,6 +26,8 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `contract_version` | `VOGT_CONTRACT_VERSION` | string | `v1` | behaviour |
 | `marker_promotion_patterns` | `VOGT_MARKER_PROMOTION_PATTERNS` | list of strings | `TODO(vogt)`, `FIXME(vogt)` | behaviour |
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
+| `branch_binding_patterns` | `VOGT_BRANCH_BINDING_PATTERNS` | list of strings | `(?i)\bwi-?(?P<n>\d+)\b`, `(?i)\bgh-(?P<forge>\d+)\b` | behaviour |
+| `branch_binding_template` | `VOGT_BRANCH_BINDING_TEMPLATE` | string | `wi-{number}` | behaviour |
 | `retention_days` | `VOGT_RETENTION_DAYS` | integer | `180` | behaviour |
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `forge_account_key_file` | `VOGT_FORGE_ACCOUNT_KEY_FILE` | path, optional | *(no default — must be set)* | behaviour |
@@ -102,6 +104,14 @@ Source markers containing one of these enter backlog and bug views (FR-W11). Eve
 ### `marker_file_extensions`
 
 File types the marker collector reads. Configuration rather than a hard-coded list, because which extensions hold source is an estate's business, not Vogt's (FR-W11).
+
+### `branch_binding_patterns`
+
+Regular expressions that recognise which work item a git branch belongs to (#283). A branch whose name matches one is that item's branch: the default set reads `wi-7/…` and `feature/WI-7-…` (the vogt work-item number, via a `n` capture group) and `gh-264-…` (a linked project's forge issue number, via a `forge` group). The `git-local` collector applies these to every branch it observes and records the match; widening the set is how an estate teaches Vogt its own branch conventions. Reported, never enforced: matching a branch never creates, renames or deletes one (FR-B4).
+
+### `branch_binding_template`
+
+The branch a session started from Vogt for a work item declares it will use (#283), formatted with a single `{number}` field: `WI-7` becomes `wi-7`. This is the *declared* half of the branch binding, recorded on the item's overlay and kept separate from what a sweep observes — an upstream item always declares the forge form `gh-<number>` regardless of this template, because that is the shape its own default project recognises.
 
 ### `retention_days`
 
