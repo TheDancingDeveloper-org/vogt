@@ -1190,6 +1190,78 @@ async fn every_probe_reaches_the_core_rather_than_the_pwa() {
     }
 }
 
+/// The first-run install surface (#292): open, forwarded untouched.
+///
+/// A browser that holds no token yet is exactly the caller these routes exist
+/// for, so they sit outside the bearer gate; the core self-gates (its
+/// bootstrap answers only while its token store is empty). The door must
+/// neither demand a front-door token nor inject the deployment's core
+/// pairing — a bootstrap attributed to the shared pairing would put the
+/// wrong name on the first operator.
+#[tokio::test]
+async fn the_install_surface_needs_no_token_and_is_not_given_one() {
+    let (base, log) = front_door().await;
+    let client = reqwest::Client::new();
+
+    let status = client
+        .get(format!("{base}/api/install/status"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status.status(), 200);
+
+    let bootstrap = client
+        .post(format!("{base}/api/install/bootstrap"))
+        .json(&json!({"display_name": "Ada"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bootstrap.status(), 200);
+
+    let seen = proxied(&log);
+    let status_seen = seen
+        .iter()
+        .find(|s| s.path == "/api/install/status")
+        .expect("the status probe reached the core");
+    assert_eq!(
+        status_seen.authorization, None,
+        "the install surface was handed a credential it never asked for"
+    );
+    let bootstrap_seen = seen
+        .iter()
+        .find(|s| s.path == "/api/install/bootstrap")
+        .expect("the bootstrap reached the core");
+    assert_eq!(bootstrap_seen.method, "POST");
+    assert_eq!(
+        bootstrap_seen.authorization, None,
+        "the bootstrap must not be attributed to the deployment's shared pairing"
+    );
+}
+
+/// A later wizard step may present the caller's own core token; like `/mcp`,
+/// it must reach the core exactly as sent.
+#[tokio::test]
+async fn the_install_surface_forwards_the_callers_own_credential() {
+    let (base, log) = front_door().await;
+    let response = reqwest::Client::new()
+        .get(format!("{base}/api/install/status"))
+        .header("authorization", "Bearer a-core-token-the-caller-holds")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let seen = proxied(&log)
+        .into_iter()
+        .find(|s| s.path == "/api/install/status")
+        .expect("the request reached the core");
+    assert_eq!(
+        seen.authorization.as_deref(),
+        Some("Bearer a-core-token-the-caller-holds"),
+        "the caller's own credential must survive the hop untouched"
+    );
+}
+
 /// A probe carries no credential, and must not acquire one on the way.
 #[tokio::test]
 async fn a_probe_needs_no_token_and_is_not_given_one() {

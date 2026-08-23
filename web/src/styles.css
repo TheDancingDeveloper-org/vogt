@@ -386,6 +386,124 @@ body {
   font-size: 11px;
 }
 
+/* First-run wizard (#292). Shares the login gate's shell; only what the
+   wizard adds is styled here. */
+.setup-card {
+  width: min(100%, 520px);
+}
+
+.setup-steps {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: setup-step;
+}
+
+.setup-step {
+  counter-increment: setup-step;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.setup-step::before {
+  content: counter(setup-step);
+  font-weight: 700;
+}
+
+.setup-step--active {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.setup-step--done {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.setup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.setup-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.setup-form input[type="text"] {
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 10px;
+}
+
+.setup-link {
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.setup-link:hover {
+  background: transparent;
+}
+
+.setup-secret {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.setup-secret code {
+  flex: 1;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  user-select: all;
+}
+
+.setup-secret button {
+  flex: none;
+  min-height: 32px;
+}
+
+.setup-equivalents summary {
+  color: var(--fg-muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.setup-equivalents .login-copy {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.setup-snippet {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre;
+}
+
 button {
   font: inherit;
   color: inherit;

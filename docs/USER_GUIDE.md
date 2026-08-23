@@ -43,6 +43,16 @@ This section is about the PWA, which the engine serves. If you do not have the
 stack running yet, [`GETTING_STARTED.md`](GETTING_STARTED.md) brings it up, and
 [`ENGINE.md`](ENGINE.md) §3 covers the engine's own configuration.
 
+**First run.** A brand-new instance — one whose core holds no tokens at all —
+greets you with a setup wizard instead of the sign-in gate: name yourself and
+it mints your first token, shows it exactly once alongside the CLI and MCP
+equivalents, and offers to sign you straight in. That door closes itself the
+moment any token exists (`GETTING_STARTED.md` covers the mechanism and the
+headless equivalent). If your deployment's front door uses its own token
+namespace (`ENGINE.md` §3), the wizard says so and hands you to the ordinary
+sign-in below; the minted token remains your credential for the CLI, REST and
+MCP surfaces.
+
 1. Open your instance's address in a browser. The engine serves the GUI at
    `/` and proxies the core's API behind it, so work surfaces and terminals
    share one origin.

@@ -1092,6 +1092,7 @@ is the implementation and argues the decisions.
 |---|---|---|
 | `/api/vogt`, `/api/vogt/*` | `/api/*` | front-door token, core token injected |
 | `/mcp`, `/mcp/*` | `/mcp` | the client's own core token, forwarded untouched |
+| `GET /api/install/status`, `POST /api/install/bootstrap` | the same paths | none — forwarded untouched, the core self-gates (#292) |
 
 Each family is three routes rather than two because a wildcard segment needs at
 least one character: `/api/vogt/` matches neither `/api/vogt` nor
@@ -1114,6 +1115,15 @@ The engine's `vogt-write` gate is about which front-door holders may reach the
 write plane at all. It is not a substitute for the core's own rules: a reason on
 every write, and the scopes carried by the injected token, are still enforced
 there.
+
+**`/api/install/*` — the first-run wizard's two routes (#292).** Outside the
+bearer gate, because a browser that holds no token yet is exactly the caller
+they exist for. The core is the sole authority: its bootstrap answers only
+while its token store holds no tokens at all and refuses with `install_closed`
+afterwards, so the door adds no gate of its own. Nothing is injected — a
+bootstrap attributed to the deployment's shared pairing would put the wrong
+name on the first operator — and the caller's own `Authorization`, if any,
+survives the hop untouched, exactly as on `/mcp`.
 
 **`/mcp` — any method.** Deliberately outside the bearer gate. The credential
 on an MCP request is already a *core* token, minted by `vogt token issue` and
