@@ -139,6 +139,10 @@ interface PlaceMetricFixtures {
   installMode?: boolean;
   /** Start signed out — the wizard and the login gate only appear then. */
   noToken?: boolean;
+  /** What `forge.account_status` reports on the setup steps (#292). */
+  forgeAccounts?: Record<string, unknown>[];
+  /** What the setup repo picker lists (#292). */
+  forgeRepos?: Record<string, unknown>[];
 }
 
 async function installFixtures(
@@ -182,6 +186,10 @@ async function installFixtures(
   // only when it starts signed out — so the wizard's presence is a fixture
   // decision, never an accidental 404.
   const bootstrapRequests: Record<string, unknown>[] = [];
+  const linkRequests: Record<string, unknown>[] = [];
+  const registerRequests: Record<string, unknown>[] = [];
+  const importRequests: Record<string, unknown>[] = [];
+  const sweepRequests: Record<string, unknown>[] = [];
   await page.route("**/api/install/status", async (route) =>
     route.fulfill({ json: { install_mode: metrics.installMode ?? false } }),
   );
@@ -527,11 +535,73 @@ async function installFixtures(
       } });
     }
     if (url.pathname.endsWith("/projects")) {
+      if (request.method() === "POST") {
+        // project.register (#292): echo the registration back as a project.
+        const body = request.postDataJSON() as { name?: string; root_path?: string };
+        registerRequests.push(body as Record<string, unknown>);
+        const slug = String(body.name ?? "project")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "");
+        return route.fulfill({ json: { project: { slug, name: body.name ?? slug } } });
+      }
       if (metrics.projectsTotal === null) return route.fulfill({ status: 503, body: "projects unavailable" });
       const projects = metrics.projects ?? [{ slug: "vogt", name: "Vogt", root_path: "/workspace/vogt" }];
       return route.fulfill({ json: {
       projects,
       total: metrics.projectsTotal,
+      } });
+    }
+    // The setup steps (#292): forge account linking, the repo picker, the
+    // first import, and the sweep + coverage that follow it.
+    if (url.pathname.endsWith("/forge/accounts")) {
+      if (request.method() === "POST") {
+        const body = request.postDataJSON() as Record<string, unknown>;
+        linkRequests.push(body);
+        return route.fulfill({ json: {
+          host: "github.com", login: "ada", scopes: "repo", linked: true,
+        } });
+      }
+      return route.fulfill({ json: { accounts: metrics.forgeAccounts ?? [] } });
+    }
+    if (url.pathname.endsWith("/forge/repos")) {
+      return route.fulfill({ json: {
+        repos: metrics.forgeRepos ?? [
+          {
+            owner: "ada", name: "engine", default_branch: "main",
+            visibility: "private", url: "https://github.com/ada/engine",
+            already_registered: false,
+          },
+        ],
+        login: "ada",
+        detail: null,
+      } });
+    }
+    if (url.pathname.endsWith("/projects/import")) {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      importRequests.push(body);
+      return route.fulfill({ json: {
+        project: { slug: "engine", name: "engine" },
+        remote: String(body.repo ?? ""),
+        root_path: "/imports/engine",
+        cloned: true,
+      } });
+    }
+    if (url.pathname.endsWith("/sweep")) {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      sweepRequests.push(body);
+      return route.fulfill({ json: {
+        scope: "project:engine", projects: 1, subjects: 12, dep_refs: 3, reports: [],
+      } });
+    }
+    if (url.pathname.endsWith("/coverage")) {
+      return route.fulfill({ json: {
+        collectors: [
+          { collector: "git_local", status: "current", last_swept_at: null, age_seconds: 0, projects: 1 },
+          { collector: "markers", status: "current", last_swept_at: null, age_seconds: 0, projects: 1 },
+        ],
+        swept_project_ids: ["prj-1"],
+        unswept_project_ids: [],
       } });
     }
     if (url.pathname.endsWith("/vogt/events")) {
@@ -581,6 +651,10 @@ async function installFixtures(
     createdSessions: () => createdSessions,
     sessionDeletes: () => sessionDeletes,
     bootstrapRequests,
+    linkRequests,
+    registerRequests,
+    importRequests,
+    sweepRequests,
     boardRequests,
     transitionRequests,
     updateRequests,
@@ -731,16 +805,86 @@ test("First run: the wizard claims the instance, shows the secret once, and sign
   await page.getByText("Use it from a terminal or an agent").click();
   await expect(page.getByText("vogt-mcp-remote")).toBeVisible();
 
-  // Continue hands the minted secret to the ordinary sign-in path, and the
-  // shell comes up authenticated with it stored where a pasted token lives.
+  // Continue hands the minted secret to the ordinary sign-in path: the shell
+  // comes up authenticated with it stored where a pasted token lives, and the
+  // pending flag lands the fresh operator on the remaining setup steps.
   await page.getByRole("button", { name: "Continue to Vogt" }).click();
-  const shellHeading = test.info().project.name === "phone" ? "Sessions" : "Board";
+  await expect(page).toHaveURL(/#\/setup$/);
   await expect(
-    page.getByRole("heading", { name: shellHeading, exact: true }),
+    page.getByRole("heading", { name: "Setup", exact: true }),
   ).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem("vogt.token"))).toBe(
     "vogt_browser-test-first-run-secret",
   );
+});
+
+// The setup steps at #/setup (#292 increment 3): forge link and first
+// project, each with a visible pass/fail carrying the server's own words,
+// then the first sweep and the coverage it earns. Verified at 1440×900 and,
+// via the phone project, 390×844.
+test("Setup steps: link the forge, import the first project, sweep, and see coverage", async ({ page }) => {
+  if (test.info().project.name === "desktop") {
+    await page.setViewportSize({ width: 1440, height: 900 });
+  } else {
+    await page.setViewportSize({ width: 390, height: 844 });
+  }
+  const fixtures = await installFixtures(page);
+  await page.goto("/#/setup");
+
+  await expect(page.getByRole("heading", { name: "Setup" })).toBeVisible();
+  await expect(page.getByRole("list", { name: "Setup steps" })).toContainText("Identity");
+
+  // Forge: paste a PAT with a typed reason, and the step reports as whom.
+  await page.getByLabel("Personal Access Token").fill("ghp_wizard");
+  await page
+    .getByLabel("Forge step")
+    .getByLabel("Reason (audited)")
+    .fill("first-run: my own attribution");
+  await page.getByRole("button", { name: "Link account" }).click();
+  await expect(page.getByText("Linked as ada — token scopes: repo.")).toBeVisible();
+  expect(fixtures.linkRequests).toEqual([
+    { token: "ghp_wizard", reason: "first-run: my own attribution" },
+  ]);
+
+  // First project: pick a repository and import it, reason attached.
+  await page.getByRole("button", { name: "Browse my repositories" }).click();
+  await page.getByRole("radio").first().check();
+  await page
+    .getByLabel("First project step")
+    .getByLabel("Reason (audited)")
+    .first()
+    .fill("first project for this instance");
+  await page.getByRole("button", { name: "Import it" }).click();
+  await expect(page.getByText(/Imported engine/)).toBeVisible();
+  expect(fixtures.importRequests[0]).toMatchObject({
+    repo: "https://github.com/ada/engine",
+    reason: "first project for this instance",
+  });
+
+  // The first sweep, its numbers, and the coverage table behind them.
+  await page
+    .getByLabel("First project step")
+    .getByLabel("Reason (audited)")
+    .last()
+    .fill("baseline evidence");
+  await page.getByRole("button", { name: "Run the first sweep" }).click();
+  await expect(page.getByText(/Swept 1 project/)).toBeVisible();
+  await expect(page.getByRole("table", { name: "Collector coverage" })).toContainText("git_local");
+  expect(fixtures.sweepRequests[0]).toMatchObject({
+    project: "engine",
+    reason: "baseline evidence",
+  });
+
+  // The surface never overflows horizontally, at either shape.
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+  );
+  expect(overflow, "the setup surface must not overflow horizontally").toBe(false);
+
+  // Finishing lands on Projects with the pending flag cleared.
+  await page.getByRole("button", { name: "Finish setup" }).click();
+  await expect(page).toHaveURL(/#\/projects$/);
+  expect(await page.evaluate(() => localStorage.getItem("vogt.setup.pending"))).toBeNull();
 });
 
 test("First run: a closed install mode means the ordinary sign-in gate", async ({ page }) => {

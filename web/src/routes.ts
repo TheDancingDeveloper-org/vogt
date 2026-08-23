@@ -27,6 +27,7 @@ export const APP_ROUTES = [
   "/inbox",
   "/projects",
   "/audit",
+  "/setup",
   "/settings",
   "/w/:ref",
   "/assistant",

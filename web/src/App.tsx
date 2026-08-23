@@ -82,7 +82,7 @@ import { terminalWorkspaceHandle } from "./paneComposeBus";
 import type { SessionSummary } from "./api";
 import { getToken, setBase, setToken } from "./api";
 import SetupWizard from "./SetupWizard";
-import { fetchInstallStatus } from "./installApi";
+import { SETUP_PENDING_KEY, fetchInstallStatus } from "./installApi";
 import {
   deleteWorkspaceLayout,
   getWorkspaceLayout,
@@ -146,6 +146,7 @@ const GitTab = lazy(() => import("./Git"));
 const GuiTab = lazy(() => import("./Gui"));
 const Projects = lazy(() => import("./Projects"));
 const WorkItemDetail = lazy(() => import("./WorkItemDetail"));
+const SetupSteps = lazy(() => import("./SetupSteps"));
 const History = lazy(() => import("./History"));
 const KeyboardShortcuts = lazy(() => import("./KeyboardShortcuts"));
 const Settings = lazy(() => import("./Settings"));
@@ -636,6 +637,13 @@ const App: Component = () => {
     setAuthError(null);
     setAuthState("authenticated");
     void placeMetrics.refresh();
+    // A fresh operator arriving from the identity wizard (#292): the URL
+    // effect resolved "/" to a default surface before there was a session,
+    // so the handoff to the remaining setup steps happens here, at the
+    // moment the first sign-in lands.
+    if (localStorage.getItem(SETUP_PENDING_KEY) === "1") {
+      navigate("/setup", { replace: true });
+    }
   };
 
   onCleanup(() => {
@@ -695,6 +703,13 @@ const App: Component = () => {
       setSettingsOpen(false);
     }
     if (path === "/") {
+      // A fresh operator arriving from the identity wizard (#292) is taken
+      // to the remaining setup steps before any default surface; the flag is
+      // cleared when they finish or leave setup by navigating elsewhere.
+      if (localStorage.getItem(SETUP_PENDING_KEY) === "1") {
+        navigate("/setup", { replace: true });
+        return;
+      }
       const narrow = window.matchMedia("(max-width: 768px)").matches ||
         (navigator.maxTouchPoints > 0 && window.innerWidth < 1024);
       navigate(initialRoute() ?? (narrow ? "/sessions" : "/board"), { replace: true });
@@ -751,6 +766,7 @@ const App: Component = () => {
         "/inbox": "Inbox",
         "/projects": "Projects",
         "/audit": "Audit",
+        "/setup": "Setup",
         "/sessions": "Sessions",
         "/g": "Git",
         "/history": "History",
@@ -1651,6 +1667,11 @@ const App: Component = () => {
                 itemRef={decodeURIComponent(params.ref ?? "")}
                 onError={(msg) => showToast(msg, { kind: "error" })}
               />
+            </div>
+          </Show>
+          <Show when={location.pathname === "/setup"}>
+            <div class="stable-place">
+              <SetupSteps onError={(msg) => showToast(msg, { kind: "error" })} />
             </div>
           </Show>
           <Show when={routeProblem()} keyed>

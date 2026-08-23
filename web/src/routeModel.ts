@@ -21,6 +21,9 @@ export type RouteOutcome =
   | { kind: "place"; place: PrimaryPlace }
   | { kind: "tool"; place: "sessions"; tool: SessionTool }
   | { kind: "work-item"; place: "board" }
+  /** The first-run setup steps (#292): forge link, first project. Filed
+   *  under Projects because that surface owns both concerns afterwards. */
+  | { kind: "setup"; place: "projects" }
   | { kind: "settings"; place: PrimaryPlace; tool?: SessionTool }
   | {
       kind: "loading" | "unavailable" | "not-found";
@@ -64,6 +67,7 @@ export function describeRoute(
     };
   }
   if (pathname.startsWith("/w/")) return { kind: "work-item", place: "board" };
+  if (pathname === "/setup") return { kind: "setup", place: "projects" };
   if (pathname.startsWith("/e/")) {
     return { kind: "tool", place: "sessions", tool: "editor" };
   }
@@ -200,6 +204,8 @@ export function documentTitleForRoute(
     }
     case "settings":
       return productDocumentTitle("Settings");
+    case "setup":
+      return productDocumentTitle("Setup");
     case "loading":
     case "unavailable":
     case "not-found":

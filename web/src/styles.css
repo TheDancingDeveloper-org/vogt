@@ -504,6 +504,168 @@ body {
   white-space: pre;
 }
 
+/* The setup steps surface, `#/setup` (#292 increment 3). */
+.vogt-setup {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.vogt-setup-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  max-width: 760px;
+}
+
+.vogt-setup-panel {
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vogt-setup-panel h2 {
+  margin: 0;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vogt-setup-panel h3 {
+  margin: 8px 0 0;
+  font-size: 14px;
+}
+
+.vogt-setup-panel p {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.vogt-setup-state {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--bd);
+  color: var(--fg-muted);
+}
+
+.vogt-setup-state--passed {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.vogt-setup-state--failed {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.vogt-setup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vogt-setup-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.vogt-setup-form input[type="text"],
+.vogt-setup-form input[type="password"] {
+  min-height: 38px;
+  padding: 8px 10px;
+}
+
+.vogt-setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.vogt-setup-actions span {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.vogt-setup-actions button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.vogt-setup-pass {
+  color: var(--success);
+  font-size: 13px;
+}
+
+.vogt-setup-fail {
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.vogt-setup-repos {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.vogt-setup-repo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.vogt-setup-repo em {
+  color: var(--fg-muted);
+  font-style: normal;
+  font-size: 12px;
+}
+
+.vogt-setup-coverage-wrap {
+  overflow-x: auto;
+}
+
+.vogt-setup-coverage {
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 320px;
+}
+
+.vogt-setup-coverage th,
+.vogt-setup-coverage td {
+  text-align: left;
+  padding: 6px 12px 6px 0;
+  border-bottom: 1px solid var(--bd);
+}
+
+.vogt-setup-finish {
+  padding-bottom: 24px;
+}
+
 button {
   font: inherit;
   color: inherit;
