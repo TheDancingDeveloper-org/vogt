@@ -1,11 +1,15 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use vogt_engine_server::{config, serve_forever};
 use tracing_subscriber::EnvFilter;
+use vogt_engine_server::{config, serve_forever};
 
 #[derive(Debug, Parser)]
-#[command(name = "vogt-engine", version, about = "Vogt engine — the front-door server")]
+#[command(
+    name = "vogt-engine",
+    version,
+    about = "Vogt engine — the front-door server"
+)]
 struct Cli {
     /// Path to a TOML config file. Optional; env vars and CLI flags override.
     /// Env: `ENGINE_CONFIG` (legacy `MYDEVENV2_CONFIG` still accepted).

@@ -9,12 +9,12 @@ use std::{
 
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
-use vogt_engine_contract::{ServerEvent, SessionDetail};
-use vogt_engine_server::{app::router, app::AppState, config::SessionTemplate, Config};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use time::OffsetDateTime;
 use tokio_tungstenite::tungstenite::Message;
+use vogt_engine_contract::{ServerEvent, SessionDetail};
+use vogt_engine_server::{app::router, app::AppState, config::SessionTemplate, Config};
 
 const TEST_TOKEN: &str = "test-token-1234567890abcdef";
 
@@ -82,9 +82,7 @@ async fn boot_with_config(cfg: Config) -> (String, tokio::task::JoinHandle<()>) 
 /// event bus — the same bus `vogt_core::spawn_event_follower` republishes
 /// vogt-core's events onto — and drive the agent-task trigger watcher (#290)
 /// with synthetic core events, without needing a real vogt-core beside it.
-async fn boot_with_state(
-    cfg: Config,
-) -> (String, Arc<AppState>, tokio::task::JoinHandle<()>) {
+async fn boot_with_state(cfg: Config) -> (String, Arc<AppState>, tokio::task::JoinHandle<()>) {
     let (router, state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -97,13 +95,7 @@ async fn boot_with_state(
 
 /// A synthetic vogt-core event on the engine bus, the shape the follower
 /// publishes (#290) — used to drive the trigger watcher in tests.
-fn publish_core_event(
-    state: &AppState,
-    kind: &str,
-    entity_id: &str,
-    seq: i64,
-    summary: Value,
-) {
+fn publish_core_event(state: &AppState, kind: &str, entity_id: &str, seq: i64, summary: Value) {
     state.bus.publish(ServerEvent::VogtChanged {
         kind: kind.to_string(),
         entity_kind: "work_item".to_string(),
@@ -1147,11 +1139,21 @@ async fn drift_observation_and_forge_events_each_start_a_run() {
         let task_id = created["id"].as_str().unwrap().to_string();
 
         seq += 1;
-        publish_core_event(&state, case.event_kind, case.entity_id, seq, case.summary.clone());
+        publish_core_event(
+            &state,
+            case.event_kind,
+            case.entity_id,
+            seq,
+            case.summary.clone(),
+        );
 
         let detail = wait_for_run_count(&client, &base, &task_id, 1).await;
         let run = &detail["runs"][0];
-        assert_eq!(run["trigger"], "event", "{} should be event-triggered", case.name);
+        assert_eq!(
+            run["trigger"], "event",
+            "{} should be event-triggered",
+            case.name
+        );
         assert_eq!(run["trigger_detail"]["event_kind"], case.event_kind);
         assert_eq!(run["trigger_detail"]["description"], case.expect_desc);
     }
@@ -4511,7 +4513,10 @@ async fn a_gate_whose_session_dies_fails_closed_to_blocked() {
         .json()
         .await
         .unwrap();
-    let session_id = detail["runs"][0]["session_id"].as_str().unwrap().to_string();
+    let session_id = detail["runs"][0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     client
         .post(format!("{base}/api/sessions/{session_id}/kill"))

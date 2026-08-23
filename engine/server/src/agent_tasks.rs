@@ -851,7 +851,9 @@ impl AgentTaskRegistry {
                         summary,
                         ..
                     }) => {
-                        registry.dispatch_core_event(&kind, &entity_id, seq, &summary).await;
+                        registry
+                            .dispatch_core_event(&kind, &entity_id, seq, &summary)
+                            .await;
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -1618,7 +1620,12 @@ impl AgentTaskRegistry {
             let tasks = self.tasks.lock();
             let mut found = None;
             for task in tasks.iter() {
-                if let Some(run) = task.runs.iter().rev().find(|run| run.session_id == session_id) {
+                if let Some(run) = task
+                    .runs
+                    .iter()
+                    .rev()
+                    .find(|run| run.session_id == session_id)
+                {
                     if run.status != AgentTaskRunStatus::Running {
                         return Ok(());
                     }
@@ -1838,7 +1845,8 @@ impl AgentTaskRegistry {
         reason: Option<String>,
     ) -> Result<GateRecord> {
         let (run_id, control) = self.live_run(task_id)?;
-        let record = self.resolve_gate_answer(run_id, gate_id, option_index, &actor, false, reason)?;
+        let record =
+            self.resolve_gate_answer(run_id, gate_id, option_index, &actor, false, reason)?;
         control.notify.notify_one();
         Ok(record)
     }
@@ -1848,7 +1856,10 @@ impl AgentTaskRegistry {
     fn live_run(&self, task_id: Uuid) -> Result<(Uuid, Arc<RunControl>)> {
         let run_ids: Vec<Uuid> = {
             let tasks = self.tasks.lock();
-            let task = tasks.iter().find(|t| t.id == task_id).ok_or(ApiError::NotFound)?;
+            let task = tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .ok_or(ApiError::NotFound)?;
             task.runs.iter().rev().map(|run| run.id).collect()
         };
         let controls = self.runs.lock();
@@ -1859,7 +1870,9 @@ impl AgentTaskRegistry {
                 }
             }
         }
-        Err(ApiError::Conflict("task has no run in flight to steer".into()))
+        Err(ApiError::Conflict(
+            "task has no run in flight to steer".into(),
+        ))
     }
 
     /// Record a gate answer (human or the audited bypass) and emit the event.
@@ -1890,14 +1903,15 @@ impl AgentTaskRegistry {
                 .iter_mut()
                 .find(|g| g.id == gate_id)
                 .ok_or(ApiError::NotFound)?;
-            gate.answer(option_index, actor, auto, now).map_err(|e| match e {
-                gates::GateError::AlreadyResolved => {
-                    ApiError::Conflict("gate is already resolved".into())
-                }
-                gates::GateError::UnknownOption => {
-                    ApiError::BadRequest("no such gate option".into())
-                }
-            })?;
+            gate.answer(option_index, actor, auto, now)
+                .map_err(|e| match e {
+                    gates::GateError::AlreadyResolved => {
+                        ApiError::Conflict("gate is already resolved".into())
+                    }
+                    gates::GateError::UnknownOption => {
+                        ApiError::BadRequest("no such gate option".into())
+                    }
+                })?;
             let record = gate.clone();
             task.updated_at = now;
             (task_id, session_id, record)
@@ -1993,7 +2007,11 @@ impl AgentTaskRegistry {
             .position(|r| r.id == run_id)
             .expect("task_with_run_mut found the run");
         let session_id = task.runs[run_idx].session_id;
-        let Some(gate) = task.runs[run_idx].gates.iter_mut().find(|g| g.id == gate_id) else {
+        let Some(gate) = task.runs[run_idx]
+            .gates
+            .iter_mut()
+            .find(|g| g.id == gate_id)
+        else {
             return;
         };
         if !gate.block(reason, now) {
@@ -2052,10 +2070,12 @@ impl AgentTaskRegistry {
     fn emit_steered(&self, run_id: Uuid, item: &SteerItem) {
         let (task_id, session_id) = {
             let tasks = self.tasks.lock();
-            match tasks
-                .iter()
-                .find_map(|t| t.runs.iter().find(|r| r.id == run_id).map(|r| (t.id, r.session_id)))
-            {
+            match tasks.iter().find_map(|t| {
+                t.runs
+                    .iter()
+                    .find(|r| r.id == run_id)
+                    .map(|r| (t.id, r.session_id))
+            }) {
                 Some(pair) => pair,
                 None => return,
             }
@@ -2331,9 +2351,13 @@ pub async fn steer(
     Json(req): Json<SteerReq>,
 ) -> Result<Json<serde_json::Value>> {
     let actor = clean_optional(req.actor).unwrap_or_else(|| "operator".to_string());
-    state
-        .agent_tasks
-        .steer(id, req.text, req.interrupt, actor, clean_optional(req.reason))?;
+    state.agent_tasks.steer(
+        id,
+        req.text,
+        req.interrupt,
+        actor,
+        clean_optional(req.reason),
+    )?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2354,10 +2378,13 @@ pub async fn answer_gate(
     Json(req): Json<GateAnswerReq>,
 ) -> Result<Json<GateRecord>> {
     let actor = clean_optional(req.actor).unwrap_or_else(|| "operator".to_string());
-    let record =
-        state
-            .agent_tasks
-            .answer_gate(id, gate_id, req.option, actor, clean_optional(req.reason))?;
+    let record = state.agent_tasks.answer_gate(
+        id,
+        gate_id,
+        req.option,
+        actor,
+        clean_optional(req.reason),
+    )?;
     Ok(Json(record))
 }
 
@@ -2656,7 +2683,9 @@ fn spec_matches(
                     return None;
                 }
             }
-            let what = field("summary").or_else(|| field("kind")).unwrap_or(entity_id);
+            let what = field("summary")
+                .or_else(|| field("kind"))
+                .unwrap_or(entity_id);
             Some(TriggerFire {
                 trigger_kind: spec.kind_str(),
                 bind_work_item: None,
@@ -3395,7 +3424,9 @@ fn parse_cost(scrollback: &str) -> Option<RunCost> {
                 .get("total_usd")
                 .or_else(|| value.get("usd"))
                 .and_then(serde_json::Value::as_f64),
-            input_tokens: value.get("input_tokens").and_then(serde_json::Value::as_u64),
+            input_tokens: value
+                .get("input_tokens")
+                .and_then(serde_json::Value::as_u64),
             output_tokens: value
                 .get("output_tokens")
                 .and_then(serde_json::Value::as_u64),
@@ -3447,7 +3478,9 @@ fn validate_at(
 
     if let Some(allowed) = obj.get("enum").and_then(|e| e.as_array()) {
         if !allowed.iter().any(|a| a == instance) {
-            return Err(format!("{path}: value is not one of the permitted enum values"));
+            return Err(format!(
+                "{path}: value is not one of the permitted enum values"
+            ));
         }
     }
 
@@ -3782,7 +3815,10 @@ mod tests {
         // A gate that failed closed outranks everything, even a clean exit.
         assert_eq!(resolve_outcome(0, true, Some(true), false), Blocked);
         // A schema miss outranks a skip and the exit code.
-        assert_eq!(resolve_outcome(1, false, Some(false), true), PartiallySucceeded);
+        assert_eq!(
+            resolve_outcome(1, false, Some(false), true),
+            PartiallySucceeded
+        );
         // A self-declared skip on a clean exit.
         assert_eq!(resolve_outcome(0, false, None, true), Skipped);
         // A passing schema does not, by itself, change a clean exit.
@@ -3864,8 +3900,7 @@ mod tests {
 
     #[test]
     fn a_fenced_block_is_taken_out_of_the_buffer_leaving_the_rest() {
-        let mut buf =
-            "chatter\n```json\n{\"ok\": true}\n```\ntrailing".to_string();
+        let mut buf = "chatter\n```json\n{\"ok\": true}\n```\ntrailing".to_string();
         let block = take_fenced_block(&mut buf).expect("a complete block is present");
         assert_eq!(block.trim(), "{\"ok\": true}");
         // The opening chatter and the block are consumed; the trailing text
@@ -3900,8 +3935,7 @@ mod tests {
         assert_eq!(fire.description, "WI-7 entered ready");
 
         // A different destination state does not match.
-        let (kind, id, other) =
-            work_transitioned(serde_json::json!({"ref": "WI-7", "to": "done"}));
+        let (kind, id, other) = work_transitioned(serde_json::json!({"ref": "WI-7", "to": "done"}));
         assert!(spec_matches(&spec, &kind, &id, &other).is_none());
     }
 

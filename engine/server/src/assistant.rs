@@ -1384,7 +1384,13 @@ impl AssistantRuntime {
             .get("reason")
             .and_then(Value::as_str)
             .map(str::to_string);
-        agent_tasks.steer(task_id, text.clone(), interrupt, "assistant".to_string(), reason)?;
+        agent_tasks.steer(
+            task_id,
+            text.clone(),
+            interrupt,
+            "assistant".to_string(),
+            reason,
+        )?;
         tool_trace.push(format!("steered agent task {task_id}"));
         Ok(format!(
             "Queued steering for task {task_id}; it will reach the run at its next prompt boundary{}.",
