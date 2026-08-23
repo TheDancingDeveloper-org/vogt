@@ -1,8 +1,9 @@
 """The REST surface, generated from the operation registry.
 
 Routes are not written here — they are derived, one per registered operation,
-which is what makes "nothing is GUI-only" (FR-A1) structurally true rather
-than a review convention. The GUI at M6 consumes exactly this surface.
+which is what makes "nothing is client-only" (FR-A1) structurally true rather
+than a review convention. Every front end — the PWA the engine ships, the CLI,
+an MCP client — consumes exactly this surface.
 
 Each endpoint is built with a real signature (`params: TheModel`), so FastAPI
 documents request bodies and query parameters, validates repeated query
@@ -10,9 +11,9 @@ values into lists, and emits a complete OpenAPI document (FR-A4) — rather
 than the registry having to describe itself twice.
 
 `serve` and the health endpoints (FR-A7) arrive with the service stage at M4;
-this adapter is the application it will serve. The GUI (M6) is mounted on the
-same application as static files — it adds no route that answers a question,
-which is why "nothing is GUI-only" stays structurally true.
+this adapter is the application it will serve. The core serves the API and
+nothing else: the product's front end is the Solid PWA, which the engine
+serves from `web/`, so "nothing is client-only" stays structurally true.
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ from pydantic import BaseModel
 from starlette.types import Lifespan
 
 from vogt import __version__
-from vogt.adapters.http.gui import mount_gui
 from vogt.application.context import AppContext, build_context
 from vogt.application.identity import identity_from_headers
 from vogt.application.services.auth import Authenticated, authorize
@@ -51,7 +51,6 @@ def build_app(
     context_factory: ContextFactory | None = None,
     authorize_request: RequestResolver | None = None,
     writes_enabled: bool = True,
-    gui: bool = True,
     lifespan: Lifespan[Any] | None = None,
 ) -> FastAPI:
     """Build the FastAPI application for one instance.
@@ -126,11 +125,6 @@ def build_app(
                 }
             },
         )
-
-    # Last, so the GUI mount cannot shadow an operation route: every route is
-    # already registered by the time `/ui` and `/` are added.
-    if gui:
-        mount_gui(app)
 
     return app
 

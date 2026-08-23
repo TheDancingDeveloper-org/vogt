@@ -22,7 +22,6 @@ body:
         - CLI
         - REST API
         - MCP
-        - GUI (legacy, /ui)
         - PWA (/, session engine)
         - Mobile shell
         - Docs

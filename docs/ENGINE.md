@@ -1083,7 +1083,7 @@ absent feature does not read as absent.
 
 ### The Vogt front door
 
-Three route families proxy to vogt-core, the Python half of the merged product.
+Two route families proxy to vogt-core, the Python half of the merged product.
 It runs beside the engine on loopback and is never published, so everything a
 client asks of it arrives here first (NFR-D11). `engine/server/src/vogt_core.rs`
 is the implementation and argues the decisions.
@@ -1092,7 +1092,6 @@ is the implementation and argues the decisions.
 |---|---|---|
 | `/api/vogt`, `/api/vogt/*` | `/api/*` | front-door token, core token injected |
 | `/mcp`, `/mcp/*` | `/mcp` | the client's own core token, forwarded untouched |
-| `/ui-legacy`, `/ui-legacy/*` | `/ui/*` | none — static assets, as at the core |
 
 Each family is three routes rather than two because a wildcard segment needs at
 least one character: `/api/vogt/` matches neither `/api/vogt` nor
@@ -1126,14 +1125,7 @@ are long-lived SSE, so there is no overall request timeout on the hop — only a
 two-second connect timeout, which is what protects against a core that is not
 listening.
 
-**`/ui-legacy/*` — GET.** The vanilla GUI, served from here so that "the merged
-product publishes one port" has no exception written into it (FR-U9). No token:
-static files need none at the core either, and there has to be a page on which
-to enter one. `/ui-legacy` permanently redirects to `/ui-legacy/` — not
-cosmetic, because `index.html` links its stylesheet and module relatively and a
-browser resolves those against the directory of the current document.
-
-With no core configured, every route in all three families answers `503`; a
+With no core configured, every route in both families answers `503`; a
 core that is configured but does not answer is `502`. Both bodies are
 `{"error": {"message": "<reason>"}}` with `X-Vogt-Front-Door: engine`, so an
 operator reading a failure in a browser console knows which half of the product
@@ -1153,7 +1145,7 @@ is already the authority.
 
 `GET /` and `GET /{*path}` serve the Solid bundle compiled into the binary,
 with an SPA-style fallback to `index.html` for unknown paths. The catch-all is
-merged last so `/healthz`, `/api/*`, `/mcp` and `/ui-legacy` keep priority — a
+merged last so `/healthz`, `/api/*` and `/mcp` keep priority — a
 new route added *after* it would be shadowed by it and answer with the
 application shell, which looks like a client-side routing bug rather than a
 server one.
@@ -1162,7 +1154,7 @@ Ordering alone was not enough, because it only protects paths that are
 *registered*. `/api` is a list of routes rather than a subtree, so anything not
 on the list — `/api/openapi.json`, a typo — was claimed by the SPA fallback and
 answered `200 text/html` (#34). Every machine namespace is now owned to its
-leaves: `/mcp` and `/ui-legacy` by their proxy routes, `/api` by a last-resort
+leaves: `/mcp` by its proxy routes, `/api` by a last-resort
 `/api/{*path}` that answers `404 {"error": "not found"}` in the engine's
 ordinary error shape. It is outside the bearer gate — a path that does not
 exist does not exist for any credential — and static routes and `/api/vogt/*`

@@ -66,8 +66,8 @@ client of the core, never the reverse.
   into the Rust binary at compile time (`engine/server/src/assets.rs` embeds
   `../../web/dist/`), so a `cargo build` without a fresh `pnpm build` ships a
   stale frontend — the single most common way to "fix" a UI bug and see
-  nothing change. `src/vogt/gui/static/` is the older buildless GUI and stays
-  until the Solid surfaces reach parity.
+  nothing change. The older buildless `/ui` GUI that the core once served has
+  been retired (#272); the Solid PWA is the product's only GUI now.
 - `mobile/` — the Capacitor 8 Android shell. Its WebView loads a deployed PWA
   directly, so UI changes ship without an APK rebuild; only native plumbing
   (plugins, manifest, FCM) needs one.

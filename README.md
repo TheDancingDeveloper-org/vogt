@@ -3,42 +3,44 @@
 Vogt is a self-hosted product development environment for teams and the
 agents that work with them. It combines project registration, work items,
 ranked backlogs, repository observations, drift proposals, audit history, and
-an HTTP API in one small Python application backed by SQLite.
+an HTTP API, all backed by SQLite.
 
-The core is deliberately useful without a forge, an AI provider, a session
-engine, or MCP. Plain folders and local Git repositories are first-class;
-GitHub and agent integrations add capability when you opt in.
+The product is a two-container stack: a small Python **core** that owns the
+data and serves the API, and a Rust **engine** that fronts it — serving the
+Solid PWA at `/`, owning the terminal sessions a work item runs in, and
+proxying the core's API back through one published port. The core is also
+useful on its own over the CLI, REST, and MCP, and reports missing
+integrations honestly rather than failing startup; plain folders and local Git
+repositories are first-class, and GitHub and agent integrations add capability
+when you opt in.
 
 ## Run it
 
-The supported public delivery is the Python core image,
-`ghcr.io/thedancingdeveloper-org/vogt`. Either path below gives you a
-persistent data volume, a health check, and the GUI at `/ui`. Core-only,
-`/ui` is the legacy vanilla GUI; the full PWA ships with the optional session
-engine overlay instead (`docs/ENGINE.md`), where the legacy GUI moves to
-`/ui-legacy`.
-
-**Published image.** `deploy/vogt.compose.yml` is the base Compose file and
-pulls the published image; `deploy/.env.example` holds the few values a host
-has to state (public URL, port, bind address, image tag):
+The stack is two Compose files layered together: the base
+(`deploy/vogt.compose.yml`) runs the published core image,
+`ghcr.io/thedancingdeveloper-org/vogt`, and the engine overlay
+(`deploy/engine.overlay.yml`) adds the Rust engine in front of it. No engine
+image is published, so the overlay always builds one from this checkout.
 
 ```console
 git clone https://github.com/TheDancingDeveloper-org/vogt.git
 cd vogt
-cp deploy/.env.example deploy/.env     # set VOGT_PUBLIC_URL, VOGT_IMAGE
-docker compose -f deploy/vogt.compose.yml up -d --wait
+cp deploy/.env.example deploy/.env     # set VOGT_PUBLIC_URL, the engine block
+docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d
 curl http://localhost:8080/health/ready
 ```
 
-`--wait` blocks until the healthcheck reports healthy — `vogt init` and the
-health check's `start_period` (20s) both take a moment, so curling
-immediately after a bare `up -d` can hit connection-refused.
+Once it is up, open the published URL in a browser: the engine serves the PWA
+at `/`, and [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) is the tour of it. The
+health check's `start_period` and the engine build both take a moment, so add
+`--wait` to block until the stack reports healthy.
 
-**From source.** Add the one-service build overlay and the same base builds
-the image from this checkout instead of pulling it:
+**Core alone.** The base runs the core on its own, without the engine — a
+supported deployment for CLI, REST, and MCP use with no browser front end:
 
 ```console
-docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d
+cp deploy/.env.example deploy/.env     # set VOGT_PUBLIC_URL, VOGT_IMAGE
+docker compose -f deploy/vogt.compose.yml up -d --wait
 ```
 
 Or skip containers altogether — the core is a plain Python 3.11+ package:
@@ -54,7 +56,7 @@ The base-plus-overlay pairing is the whole customisation model in miniature:
 the base is never edited, and every deployment states only its difference from
 it. The full walkthrough — first project, tokens, backup, upgrades — is in
 [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md); production concerns
-(reverse proxy, TLS, backups, pinning, the optional engine) are in
+(reverse proxy, TLS, backups, pinning, the engine) are in
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ## Dependencies and optional integrations
@@ -76,8 +78,8 @@ TOML file named by `VOGT_CONFIG_FILE`; the generated reference is
 ## What is included
 
 - A Python 3.11+ package and `vogt` CLI.
-- A single FastAPI listener for the REST API, GUI, health endpoints, and
-  optional Vogt MCP transport.
+- A single FastAPI listener for the REST API, health endpoints, and optional
+  Vogt MCP transport.
 - SQLite storage with migrations, audit rows, event history, and backups.
 - Project registration and import, local Git/source/dependency collectors,
   contract checks, observed-first backlog views, and drift proposals.
@@ -86,9 +88,9 @@ TOML file named by `VOGT_CONFIG_FILE`; the generated reference is
 - An optional GitHub adapter. Without a GitHub token, the core remains fully
   functional and reports that forge observations were not collected.
 
-The operation registry is the authority for the CLI, REST, and MCP surfaces.
-Adding or removing a capability happens in the application and registry
-layers, not in a GUI-only route.
+The operation registry is the authority for the CLI, REST, and MCP surfaces,
+and for the PWA that consumes them. Adding or removing a capability happens in
+the application and registry layers, not in a client-only route.
 
 ## Principles
 
@@ -108,19 +110,20 @@ form, with the reasoning, is in [`docs/DESIGN.md`](docs/DESIGN.md).
 5. **Every answer carries provenance and freshness.** "Verified 4 minutes ago
    from GitHub" and "declared 3 weeks ago, never confirmed" are different
    answers.
-6. **Transport parity.** CLI, REST, MCP, and GUI are thin adapters over one
-   operation registry, with tests asserting they agree.
+6. **Transport parity.** CLI, REST, and MCP are thin adapters over one
+   operation registry, with tests asserting they agree; the PWA is a client of
+   that same REST surface and adds no capability of its own.
 
 ## Customisation
 
 Vogt is meant to be customised heavily, and
 [`docs/CUSTOMISATION.md`](docs/CUSTOMISATION.md) names the supported extension
 points: configuration, Compose overlays, image extension, running behind your
-own front door, and the optional integrations above. The Rust session engine
-and Capacitor mobile shell (`engine/`, `web/`, `mobile/`) are the largest
-worked example of those extension points; they are not prerequisites for the
-Python core. See [`opensource.md`](opensource.md) for the public/private
-boundary and compatibility policy.
+own front door, and the optional integrations above. The Rust engine and
+Capacitor mobile shell (`engine/`, `web/`, `mobile/`) are the largest worked
+example of those extension points; the engine is the stack's front half, and
+the mobile shell wraps its PWA. See [`opensource.md`](opensource.md) for the
+public/private boundary and compatibility policy.
 
 ## Development
 
@@ -150,13 +153,13 @@ workflow and [`docs/CONFIG.md`](docs/CONFIG.md) for every setting.
   make the first project visible.
 - [Deployment](docs/DEPLOYMENT.md) — production: images, Compose, environment,
   reverse proxy, backups, upgrades, the optional engine.
-- [User guide](docs/USER_GUIDE.md) — daily use of the CLI, GUI, REST, and
+- [User guide](docs/USER_GUIDE.md) — daily use of the PWA, CLI, REST, and
   optional agent surfaces.
 - [Configuration reference](docs/CONFIG.md) — generated schema reference.
 - [Customisation](docs/CUSTOMISATION.md) — the supported extension points,
   and how to run a heavily customised deployment without forking.
-- [Engine](docs/ENGINE.md) — the optional Rust session engine and PWA: what it
-  owns, how to build and run it, its wire contract, the assistant.
+- [Engine](docs/ENGINE.md) — the Rust engine and PWA, the stack's front half:
+  what it owns, how to build and run it, its wire contract, the assistant.
 - [Design outline](docs/DESIGN.md) — architecture and domain decisions.
 - [Contributing](docs/CONTRIBUTING.md) — workflow and checks.
 - [Public boundary and compatibility](opensource.md) — what is supported,

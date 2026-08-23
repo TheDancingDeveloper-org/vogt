@@ -161,7 +161,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         // Logged at info, not warn: an engine with no core is a supported
         // deployment, not a misconfiguration (FR-E9).
         None => {
-            tracing::info!("no vogt-core configured; /api/vogt, /mcp and /ui-legacy will refuse")
+            tracing::info!("no vogt-core configured; /api/vogt and /mcp will refuse")
         }
     }
 
@@ -319,13 +319,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             auth::require_bearer,
         ));
 
-    // MCP and the legacy GUI are deliberately outside that gate.
+    // MCP and the probes are deliberately outside that gate.
     //
     // `/mcp` carries a *core* token minted by `vogt token issue` and bound to
     // an actor; the core validates it, and re-checking it against the
     // engine's unrelated token list would refuse every legitimate agent.
-    // `/ui-legacy` is static files, which need no token at the core either —
-    // there has to be a page on which to enter one.
     // The probes come first because the catch-all below would otherwise
     // answer them with index.html at 200 — which is what it did (#24, FR-A7).
     // Built from `PROBE_PATHS` so the router and the requirement cannot drift.
@@ -336,17 +334,14 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     let vogt_open_routes = vogt_open_routes
         .route("/mcp", any(vogt_core::mcp))
         .route("/mcp/", any(vogt_core::mcp))
-        .route("/mcp/{*path}", any(vogt_core::mcp))
-        .route("/ui-legacy", get(vogt_core::legacy_gui_root))
-        .route("/ui-legacy/", get(vogt_core::legacy_gui))
-        .route("/ui-legacy/{*path}", get(vogt_core::legacy_gui));
+        .route("/mcp/{*path}", any(vogt_core::mcp));
 
     // WS handles its own auth so query-param tokens work (browsers can't set
     // Authorization on a WebSocket handshake).
     let ws_routes = Router::new().route("/api/sessions/{id}/attach", get(ws::attach));
 
-    // The `/api` namespace, owned to its leaves (#34). `/mcp` and `/ui-legacy`
-    // already are, by the proxy routes above; `/api` was not, because it is a
+    // The `/api` namespace, owned to its leaves (#34). `/mcp` already is, by
+    // the proxy routes above; `/api` was not, because it is a
     // list of individual routes rather than a subtree, and every path that was
     // not on that list fell through to the SPA fallback and came back as
     // `200 text/html`. A caller probing for `/api/openapi.json` read that as

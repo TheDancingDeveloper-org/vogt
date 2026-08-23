@@ -995,7 +995,6 @@ export interface PublicConfig {
     configured: boolean;
     api_prefix?: string;
     mcp_prefix?: string;
-    legacy_gui_prefix?: string;
   };
   assistant_model?: string | null;
   /**

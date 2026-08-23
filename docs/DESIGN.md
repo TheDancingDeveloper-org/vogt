@@ -37,7 +37,7 @@ One tool that answers, for a single repo or across every project:
 > What is the state of this work, how fresh is that answer, what should be
 > done next, and is the project itself healthy?
 
-— answerable identically by a human in a GUI, a script over REST, or an AI
+— answerable identically by a human in the PWA, a script over REST, or an AI
 agent over MCP.
 
 ### 1.1 Forge-optional core (hard requirement)

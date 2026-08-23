@@ -96,7 +96,6 @@ async fn core_handler(
             })),
         )
             .into_response(),
-        "/ui/" => (AxumStatus::OK, "<title>Vogt</title>").into_response(),
         _ => (AxumStatus::OK, Json(json!({"seen": uri.path()}))).into_response(),
     }
 }
@@ -552,57 +551,17 @@ async fn mcp_works_with_no_core_token_configured_at_all() {
     );
 }
 
-// -- /ui-legacy: the vanilla GUI keeps serving (FR-U9) ----------------------
-
-#[tokio::test]
-async fn the_legacy_gui_is_served_from_the_front_door() {
-    let (base, log) = front_door().await;
-    let res = client()
-        .get(format!("{base}/ui-legacy/"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    assert!(res.text().await.unwrap().contains("<title>Vogt</title>"));
-
-    let seen = log.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(seen.path, "/ui/");
-    assert!(
-        seen.authorization.is_none(),
-        "static assets carry no token — there has to be a page on which to enter one"
-    );
-}
-
-#[tokio::test]
-async fn the_legacy_gui_redirects_to_its_directory() {
-    let (base, _log) = front_door().await;
-    let res = client()
-        .get(format!("{base}/ui-legacy"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::PERMANENT_REDIRECT);
-    assert_eq!(
-        res.headers()[reqwest::header::LOCATION],
-        "/ui-legacy/",
-        "index.html links its assets relatively, so the page has to be served \
-         from a path a browser will resolve them against"
-    );
-}
+// -- a trailing slash still reaches the core --------------------------------
 
 /// A wildcard segment matches at least one character, so every prefix needs
 /// its bare form, its trailing-slash form *and* its wildcard form. Missing
-/// the middle one sent `/ui-legacy/` to the PWA's catch-all, which answered
+/// the middle one sent `/api/vogt/` to the PWA's catch-all, which answered
 /// 404 with the engine's own "web bundle not present" placeholder — a
 /// convincing wrong answer, and the reason this test enumerates the shapes.
 #[tokio::test]
 async fn a_trailing_slash_still_reaches_the_core() {
     let (base, log) = front_door().await;
-    for (front, upstream) in [
-        ("/api/vogt/", "/api/"),
-        ("/mcp/", "/mcp/"),
-        ("/ui-legacy/", "/ui/"),
-    ] {
+    for (front, upstream) in [("/api/vogt/", "/api/"), ("/mcp/", "/mcp/")] {
         let res = client()
             .get(format!("{base}{front}"))
             .headers(bearer(TEST_TOKEN))
@@ -622,23 +581,12 @@ async fn a_trailing_slash_still_reaches_the_core() {
     }
 }
 
-#[tokio::test]
-async fn a_legacy_gui_asset_keeps_its_path() {
-    let (base, log) = front_door().await;
-    client()
-        .get(format!("{base}/ui-legacy/app.js"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(log.lock().unwrap().last().unwrap().path, "/ui/app.js");
-}
-
 // -- an absent core costs Vogt features, never sessions (FR-E9, FR-U21) -----
 
 #[tokio::test]
 async fn with_no_core_configured_the_vogt_routes_refuse_with_a_reason() {
     let base = boot(base_config()).await;
-    for path in ["/api/vogt/status", "/mcp", "/ui-legacy"] {
+    for path in ["/api/vogt/status", "/mcp"] {
         let res = client()
             .get(format!("{base}{path}"))
             .headers(bearer(TEST_TOKEN))
@@ -767,7 +715,6 @@ async fn the_public_config_says_whether_a_core_is_configured() {
     let body: Value = res.json().await.unwrap();
     assert_eq!(body["vogt"]["configured"], true);
     assert_eq!(body["vogt"]["api_prefix"], "/api/vogt");
-    assert_eq!(body["vogt"]["legacy_gui_prefix"], "/ui-legacy");
     assert!(
         !body.to_string().contains(CORE_TOKEN),
         "this endpoint is unauthenticated; presence only, never a credential"

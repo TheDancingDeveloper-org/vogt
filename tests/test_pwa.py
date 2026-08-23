@@ -1,11 +1,11 @@
-"""The Solid PWA, held to the rule the legacy GUI has kept since M6 (FR-U8).
+"""The Solid PWA, held to the parity rule that has stood since M6 (FR-U8).
 
 `REQUIREMENTS.md` FR-U8: the PWA shall consume only public APIs, and every URL
 in the shipped bundle shall resolve against the operation registry *and* the
 engine's API contract.
 
 Both halves are checked here, and both are checked against *source*, not
-intent — the same reasoning `test_gui.py` gives at length. The engine half
+intent — every path a front end names is a path the code serves. The engine half
 resolves against `app.rs`'s route table *and* against the wire contract in
 `docs/ENGINE.md` §5, and they are not the same check. The router is the
 stronger one: it is what answers requests, and a check against the description
@@ -50,9 +50,9 @@ pytestmark = pytest.mark.skipif(
 def source(path: Path) -> str:
     """A TypeScript file with its comments removed.
 
-    Same precaution as the legacy GUI's checker: a comment explaining a rule
-    contains the words the rule forbids, and this file's own module comment
-    names `/api/vogt/...` while forbidding unregistered paths.
+    A comment explaining a rule contains the words the rule forbids, and this
+    file's own module comment names `/api/vogt/...` while forbidding
+    unregistered paths.
     """
     text = re.sub(r"/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.S)
     kept: list[str] = []
@@ -189,7 +189,7 @@ def documented_routes() -> set[str]:
     """
     text = ENGINE_CONTRACT_DOC.read_text("utf-8")
     declared = re.findall(
-        r"`(?:[A-Z]+ )?(/(?:api|healthz|readyz|mcp|ui-legacy)[^`\s?]*)", text
+        r"`(?:[A-Z]+ )?(/(?:api|healthz|readyz|mcp)[^`\s?]*)", text
     )
     assert declared, "no routes found in the engine's wire contract (ENGINE.md \u00a75)"
     return {normalise(route) for route in declared}
@@ -313,99 +313,6 @@ def test_the_api_prefix_matches_what_the_front_door_strips() -> None:
     """`/api/vogt/backlog` reaches the core's `/api/backlog`, not `/backlog`."""
     assert API_PREFIX == "/api"
     assert f"{API_PREFIX}/vogt" == FRONT_DOOR_PREFIX
-
-
-# -- FR-U9: the legacy GUI leaves when the PWA has caught up ---------------
-
-LEGACY_APP_JS = REPO_ROOT / "src" / "vogt" / "gui" / "static" / "app.js"
-
-#: Operations the vanilla GUI exposes that no PWA surface renders.
-#:
-#: **Empty as of M11**, which is FR-U9's condition for retiring the legacy
-#: GUI. It stays an exact set rather than a `<=` so it fails in both
-#: directions: an operation dropping out of the PWA fails here, and so does a
-#: view added to the wrong front end.
-LEGACY_ONLY: set[str] = set()
-
-
-def legacy_routes() -> set[str]:
-    block = re.search(
-        r"const ROUTES = \{(.*?)\n\};", LEGACY_APP_JS.read_text("utf-8"), re.S
-    )
-    assert block, "the legacy GUI's route table was not found"
-    return set(re.findall(r'"?([a-z][a-z._]*)"?:\s*"/api/', block.group(1)))
-
-
-def surfaces() -> str:
-    """Every Vogt surface's source, concatenated.
-
-    The surfaces are the components the shell mounts; `vogtApi.ts` itself is
-    excluded deliberately, because a binding nothing calls is the thing this
-    check exists to catch.
-    """
-    names = ("Board", "Backlog", "WorkItemDetail", "Projects", "AuditBrowser")
-    return "\n".join(
-        source(WEB_SRC / f"{name}.tsx")
-        for name in names
-        if (WEB_SRC / f"{name}.tsx").is_file()
-    )
-
-
-def rendered_operations() -> set[str]:
-    """The operations some surface actually calls.
-
-    Read through the binding names `vogtApi.ts` exports for them, since a
-    surface calls `listDrift()`, not `"drift.list"`. The map is written out
-    rather than derived: a derivation would have to guess, and a wrong guess
-    here silently reports parity.
-    """
-    bindings = {
-        "status": ("status",),
-        "project.list": ("listProjects",),
-        "project.brief": ("projectBrief",),
-        "project.import": ("importProject",),
-        "backlog": ("backlog",),
-        "bugs": ("bugs",),
-        "drift.list": ("listDrift",),
-        "drift.resolve": ("resolveDrift",),
-        "deps": ("deps",),
-        "compliance": ("compliance",),
-        "audit.list": ("listAudit",),
-        "notifications": ("notifications", "listNotifications"),
-    }
-    text = surfaces()
-    return {
-        operation
-        for operation, names in bindings.items()
-        if any(re.search(rf"\b{name}\s*\(", text) for name in names)
-    }
-
-
-def test_the_pwa_renders_everything_the_legacy_gui_did() -> None:
-    gaps = legacy_routes() - rendered_operations()
-    assert gaps == LEGACY_ONLY, (
-        f"the PWA no longer renders {sorted(gaps)}, which the legacy GUI does. "
-        "FR-U9's parity condition is met at M11 and this asserts it stays met."
-    )
-
-
-def test_the_legacy_gui_is_still_here_and_says_why() -> None:
-    """Parity of operations is met; parity of *interactions* is not proven.
-
-    FR-U9 permits removing the vanilla GUI once every operation it exposed is
-    reachable in the PWA, and the check above says that day has come. It has
-    not been removed, deliberately: none of the five Solid surfaces has been
-    rendered in a browser — this environment has none — so what is proven is
-    that they call the right operations, not that a person can use them.
-    Deleting the working front end on that evidence would be trading a
-    verified surface for an unverified one.
-
-    This test is the reminder, and removing it is part of the act it is
-    waiting for: run the M11 demo in a browser, then delete `src/vogt/gui/`,
-    the `/ui-legacy` routes, and both of these tests together.
-    """
-    assert LEGACY_APP_JS.is_file()
-    assert (WEB_SRC / "Board.tsx").is_file()
 
 
 # -- FR-U16: the palette reaches writes, and never performs one ------------

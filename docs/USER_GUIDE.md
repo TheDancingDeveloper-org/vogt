@@ -8,11 +8,12 @@ operation registry, so anything this guide describes on one surface exists on
 the others too (§8).
 
 The web GUI, terminals, editor, git panel, scheduled agent tasks and the voice
-assistant are served by the **session engine**, an optional Rust component
-built from source (`engine/`, `web/`; see [`ENGINE.md`](ENGINE.md)). A
-deployment that runs only the Python core still has everything in §2.1–2.4,
-§7 and §8 over CLI, REST and MCP; the engine adds §1, §2.5–2.7, §3 and §4.
-Install, configuration and the published Docker image are covered in
+assistant are served by the **engine**, the Rust front half of the stack
+(`engine/`, `web/`; see [`ENGINE.md`](ENGINE.md)). Running the core on its own
+— without the engine — still gives you everything in §2.1–2.4, §7 and §8 over
+CLI, REST and MCP; the engine adds §1, §2.5–2.7, §3 and §4, and the browser
+experience they live in. Install, configuration and the published Docker image
+are covered in
 [`GETTING_STARTED.md`](GETTING_STARTED.md) and [`DEPLOYMENT.md`](DEPLOYMENT.md);
 every environment variable is listed in [`CONFIG.md`](CONFIG.md).
 
@@ -38,9 +39,9 @@ still outstanding and `ROADMAP.md` says so.
 
 ## 1. Getting in
 
-This section assumes an instance that runs the session engine, which serves
-the GUI. If you do not have one yet, [`GETTING_STARTED.md`](GETTING_STARTED.md)
-builds a core-only instance and [`ENGINE.md`](ENGINE.md) §3 adds the engine.
+This section is about the PWA, which the engine serves. If you do not have the
+stack running yet, [`GETTING_STARTED.md`](GETTING_STARTED.md) brings it up, and
+[`ENGINE.md`](ENGINE.md) §3 covers the engine's own configuration.
 
 1. Open your instance's address in a browser. The engine serves the GUI at
    `/` and proxies the core's API behind it, so work surfaces and terminals

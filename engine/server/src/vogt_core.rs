@@ -8,7 +8,6 @@
 //! |---|---|---|
 //! | `/api/vogt/*` | `/api/*` | front-door token, core token injected |
 //! | `/mcp` | `/mcp` | the client's own core token, forwarded untouched |
-//! | `/ui-legacy/*` | `/ui/*` | none — static assets, as at the core |
 //! | `/version`, `/connection-info`, `/health/{ready,live}` | the same | none — these are the probes (FR-A7) |
 //!
 //! Three decisions a future reader will ask about:
@@ -42,7 +41,7 @@ use axum::{
     body::Body,
     extract::{Request, State},
     http::{header, HeaderName, HeaderValue, StatusCode, Uri},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
     Json,
 };
 use serde_json::json;
@@ -57,11 +56,9 @@ use crate::observability::{RequestId, REQUEST_ID_HEADER};
 /// strings, and so a change to one is a change to both.
 pub const API_PREFIX: &str = "/api/vogt";
 pub const MCP_PREFIX: &str = "/mcp";
-pub const LEGACY_GUI_PREFIX: &str = "/ui-legacy";
 
 /// The core's own prefixes, which the ones above map onto.
 const CORE_API_PREFIX: &str = "/api";
-const CORE_GUI_PREFIX: &str = "/ui";
 const CORE_READY_PATH: &str = "/health/ready";
 
 /// Vogt's unauthenticated probes (FR-A7). Served here, at the same paths, by
@@ -244,7 +241,7 @@ impl VogtCore {
     ///
     /// `inject` is the core token to present as this request's credential, or
     /// `None` to hand the core whatever the caller sent — which is what `/mcp`
-    /// and the legacy GUI want and what `/api/vogt` must never do.
+    /// and the probes want and what `/api/vogt` must never do.
     async fn forward(
         &self,
         upstream_path: &str,
@@ -419,9 +416,8 @@ pub async fn mcp(State(state): State<Arc<AppState>>, request: Request) -> Respon
 /// never answered by a fallback. It broke `vogt-mcp-remote` at launch and made
 /// a healthy `/mcp` look like a dead server.
 ///
-/// Unauthenticated, like `/mcp` and `/ui-legacy` and for the plainer reason:
-/// a probe that needs a token is not a probe, and a compose healthcheck calls
-/// one.
+/// Unauthenticated, like `/mcp` and for the plainer reason: a probe that needs
+/// a token is not a probe, and a compose healthcheck calls one.
 ///
 /// `/connection-info` is not synthesised here. The core renders it — and
 /// `connect` with it — against the identity `forward` states on every request,
@@ -433,34 +429,6 @@ pub async fn probe(State(state): State<Arc<AppState>>, request: Request) -> Resp
     };
     let path = request.uri().path().to_string();
     core.forward(&path, None, request).await
-}
-
-/// `/ui-legacy/*` → the core's `/ui/*` (FR-U9).
-///
-/// The vanilla GUI keeps serving until the PWA reaches parity with it, and it
-/// serves from here so that "the merged product publishes one port" has no
-/// exception written into it. The bundle notices the prefix and asks
-/// `/api/vogt` instead of `/api`; see `app.js`.
-pub async fn legacy_gui(State(state): State<Arc<AppState>>, request: Request) -> Response {
-    let Some(core) = state.vogt_core.as_ref() else {
-        return not_configured();
-    };
-    let path = map_prefix(request.uri(), LEGACY_GUI_PREFIX, CORE_GUI_PREFIX);
-    core.forward(&path, None, request).await
-}
-
-/// `/ui-legacy` → `/ui-legacy/`, the same redirect the core does at `/ui`.
-///
-/// Not cosmetic. `index.html` links its stylesheet and module relatively, and
-/// a browser resolves those against the *directory* of the current document:
-/// served at `/ui-legacy`, `app.js` would be looked for at `/app.js`, which
-/// out here is the PWA's catch-all. Serving the page only under a path that
-/// ends in a slash is what makes the relative links land.
-pub async fn legacy_gui_root(State(state): State<Arc<AppState>>) -> Response {
-    if state.vogt_core.is_none() {
-        return not_configured();
-    }
-    Redirect::permanent(&format!("{LEGACY_GUI_PREFIX}/")).into_response()
 }
 
 fn map_prefix(uri: &Uri, from: &str, to: &str) -> String {
@@ -503,7 +471,6 @@ pub fn public_status(state: &AppState) -> serde_json::Value {
         "configured": state.vogt_core.is_some(),
         "api_prefix": API_PREFIX,
         "mcp_prefix": MCP_PREFIX,
-        "legacy_gui_prefix": LEGACY_GUI_PREFIX,
     })
 }
 

@@ -21,13 +21,14 @@ everything on one port:
 
 ```
 vogt serve
-  ├── /            redirect to /ui/
-  ├── /ui/...      GUI (static assets; every answer comes from /api)
   ├── /api/...     REST (FastAPI; OpenAPI at /openapi.json, UI at /docs)
   ├── /mcp         MCP streamable HTTP transport
   ├── /health/live, /health/ready, /version
   └── collector scheduler (in-process background sweeps)
 ```
+
+The core serves the API and nothing else — no browser front end of its own.
+The Solid PWA is served by the engine (below), which fronts the core.
 
 Any port that serves MCP also serves plain HTTP health and version, so
 `curl`, Compose health checks and uptime monitors work without an MCP client.
@@ -279,7 +280,7 @@ file under the same name without the prefix ([`ENGINE.md`](ENGINE.md) §3).
 | Integration | Purpose | Optional | When absent | Configured by |
 |---|---|---|---|---|
 | **Engine token and bind** | The engine's own bearer token (≥16 chars) and listen address | token required | The engine refuses to start | `--token`, `--bind` (default `127.0.0.1:8910`) and `--config` flags, or `ENGINE_TOKEN` / `ENGINE_BIND` / `ENGINE_CONFIG` in the environment (legacy `MYDEVENV2_TOKEN` / `MYDEVENV2_BIND` / `MYDEVENV2_CONFIG` still accepted with a deprecation warning), or the config file. Scoped extra tokens: `ENGINE_EXTRA_TOKENS_JSON`; write-rate cap: `ENGINE_MUTATING_REQUEST_LIMIT_PER_MINUTE` |
-| **The core behind it** | Proxies `/api/vogt`, `/mcp` and `/ui-legacy` to a core, injecting the core token for `/api/vogt` | yes | The engine runs alone; `/readyz` reports the core's state and stays ready (an absent core must not cost running terminals); Vogt routes answer 503 naming the reason | `VOGT_CORE_URL` (loopback → the entrypoint also *runs* the core there; anything else → proxy only), `VOGT_CORE_TOKEN_FILE` (preferred) or `VOGT_CORE_TOKEN`, `ENGINE_PUBLIC_URL`, `VOGT_IMPORT_ROOT`, `VOGT_ENGINE_STATE_DIR` |
+| **The core behind it** | Proxies `/api/vogt` and `/mcp` to a core, injecting the core token for `/api/vogt` | yes | The engine runs alone; `/readyz` reports the core's state and stays ready (an absent core must not cost running terminals); Vogt routes answer 503 naming the reason | `VOGT_CORE_URL` (loopback → the entrypoint also *runs* the core there; anything else → proxy only), `VOGT_CORE_TOKEN_FILE` (preferred) or `VOGT_CORE_TOKEN`, `ENGINE_PUBLIC_URL`, `VOGT_IMPORT_ROOT`, `VOGT_ENGINE_STATE_DIR` |
 | **Voice assistant provider** | The chat model behind the assistant tab and spoken requests | yes | The assistant routes answer 404 and the PWA hides the tab | `ENGINE_ASSISTANT_API_KEY`, `ENGINE_ASSISTANT_BASE_URL`, `ENGINE_ASSISTANT_MODEL` — any **OpenAI-compatible chat endpoint**. A key with no base URL is a startup error, not a silent default provider. Tuning: `ENGINE_ASSISTANT_MAX_TOOL_CALLS`, `ENGINE_ASSISTANT_REASONING_EFFORT`, `ENGINE_ASSISTANT_LOG_RETENTION_DAYS`; several providers at once: `ENGINE_ASSISTANT_PROFILES_JSON`, `ENGINE_ASSISTANT_DEFAULT_PROFILE` |
 | **Speech-to-text** | Server-side transcription for voice input | yes | Voice input is unavailable; text chat unaffected | `ENGINE_ASSISTANT_STT_BASE_URLS` (comma-separated, ordered fallback — empty means off), `ENGINE_ASSISTANT_STT_API_KEY`, `ENGINE_ASSISTANT_STT_MODEL` (default `whisper-1`); OpenAI-compatible audio endpoint, need not be the chat provider |
 | **Text-to-speech** | Spoken replies | yes | Replies are text only | `ENGINE_ASSISTANT_TTS_BASE_URLS`, `ENGINE_ASSISTANT_TTS_API_KEY`, `ENGINE_ASSISTANT_TTS_MODEL` (default `tts-1-hd`), `ENGINE_ASSISTANT_TTS_VOICE` (default `nova`), `ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS` |
