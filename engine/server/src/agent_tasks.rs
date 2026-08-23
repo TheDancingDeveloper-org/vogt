@@ -44,6 +44,32 @@ const LEGACY_NOTIFY_PHRASE: &str = "MYDEVENV2_NOTIFY:";
 /// implied so that a second one arriving has to say it is a second one.
 const FINDING_SOURCE_NOTIFY_PHRASE: &str = "notify-phrase";
 
+/// The sentinel a run prints to declare itself a deliberate no-op (#291). A run
+/// that prints this and exits cleanly is `skipped`, not `succeeded` — the
+/// difference between "there was nothing to do" and "I did it", which a `why`
+/// input reading these conclusions must be able to tell apart.
+const SKIP_SENTINEL: &str = "VOGT_SKIP:";
+
+/// The prefix a run prints to report what it cost (#291): the remainder is
+/// either a JSON object (`{"total_usd":0.4,"input_tokens":1200}`) or a bare
+/// dollar amount (`$0.40`). Absent output means an unknown cost, recorded as
+/// `null`.
+const COST_SENTINEL: &str = "VOGT_COST:";
+
+/// Git's empty-tree object, the base a diff is measured from when a run's
+/// workspace had no commit yet — the "everything this run added" case for a
+/// fresh repo.
+const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// The default re-prompt budget for `output_schema` validation (#291): enough
+/// to give a CLI a couple of chances to fix its findings, few enough that a
+/// CLI that cannot produce the shape is not driven forever.
+const DEFAULT_OUTPUT_SCHEMA_MAX_RETRIES: u32 = 2;
+
+fn default_output_schema_max_retries() -> u32 {
+    DEFAULT_OUTPUT_SCHEMA_MAX_RETRIES
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTask {
     pub id: Uuid,
@@ -89,6 +115,30 @@ pub struct AgentTask {
     /// gate with no `approve` option still fails closed under it.
     #[serde(default)]
     pub auto_approve: bool,
+    /// An optional JSON Schema the run's findings block must satisfy (#291).
+    /// When set, the engine reads the findings the CLI writes — a fenced
+    /// ```json block in its output, or the file named by `output_file` — and
+    /// validates them; a mismatch re-prompts the CLI up to
+    /// `output_schema_max_retries` times before the run is recorded
+    /// `partially-succeeded`. When unset, findings stay free-text (the notify
+    /// phrase, today's behaviour) and nothing is validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+    /// Where the findings block lives, when it is a file rather than a fenced
+    /// block in the CLI's output. A path relative to the run's workspace. Only
+    /// consulted when `output_schema` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_file: Option<String>,
+    /// How many times a run may be re-prompted to fix its findings before it is
+    /// recorded `partially-succeeded` (#291). Only meaningful with
+    /// `output_schema`. Defaults to [`DEFAULT_OUTPUT_SCHEMA_MAX_RETRIES`].
+    #[serde(default = "default_output_schema_max_retries")]
+    pub output_schema_max_retries: u32,
+    /// The branch this task's runs are bound to and work on (#283). Names the
+    /// branch the conclusion's final sha and diff stats are read from; when
+    /// unset the engine uses whatever branch is checked out in the workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     #[serde(default)]
     pub notify_on_start: bool,
     #[serde(default = "default_notify_phrase")]
@@ -163,6 +213,33 @@ pub struct AgentTaskRun {
     /// stopped for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<GateRecord>,
+    /// The typed verdict, once the run has one (#291). `None` while running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<AgentTaskRunOutcome>,
+    /// The durable conclusion record (#291), written the moment the run ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conclusion: Option<AgentTaskRunConclusion>,
+    /// How many times the CLI was re-prompted to fix its findings against the
+    /// task's `output_schema` (#291). 0 when no schema was set or it validated
+    /// first try.
+    #[serde(default)]
+    pub retries: u32,
+    /// Whether the findings validated against the task's `output_schema`:
+    /// `Some(true)` passed, `Some(false)` failed after the re-prompt budget,
+    /// `None` when no schema was required. Drives the `partially-succeeded`
+    /// verdict without the completion path re-parsing the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_ok: Option<bool>,
+    /// The branch checked out in the run's workspace when it started, or the
+    /// task's declared `branch` (#283/#291). The bound branch the conclusion
+    /// reports against. `None` when the workspace is not a git repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The branch tip when the run started — the base the conclusion's diff
+    /// stats measure against. `None` when the workspace had no commit yet (a
+    /// fresh repo), in which case the diff is measured from the empty tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
 }
 
 /// One thing a run reported about itself.
@@ -197,6 +274,103 @@ fn default_run_status() -> AgentTaskRunStatus {
     AgentTaskRunStatus::Running
 }
 
+/// The typed verdict of a finished run (#291), a strict superset of the
+/// exit-code story the `status` field kept before it.
+///
+/// * `Succeeded` — a clean exit with nothing that downgrades it.
+/// * `Failed` — a non-zero exit that is not one of the more specific verdicts.
+/// * `PartiallySucceeded` — the run's findings never validated against the
+///   task's `output_schema` after the re-prompt budget was spent.
+/// * `Skipped` — the run declared itself a no-op by printing the skip sentinel.
+/// * `Blocked` — the run stopped at a #289 approval gate that failed closed;
+///   the fail-closed guarantee is what makes this distinct from `Failed`.
+///
+/// The variants are ordered by the precedence [`resolve_outcome`] applies:
+/// a blocked gate outranks a schema miss, which outranks a self-declared skip,
+/// which outranks the bare exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentTaskRunOutcome {
+    Succeeded,
+    Failed,
+    PartiallySucceeded,
+    Skipped,
+    Blocked,
+}
+
+impl AgentTaskRunOutcome {
+    /// The kebab-case wire token, e.g. `partially-succeeded`. Named so the SSE
+    /// event and the API agree on one spelling without a second serializer.
+    fn as_str(self) -> &'static str {
+        match self {
+            AgentTaskRunOutcome::Succeeded => "succeeded",
+            AgentTaskRunOutcome::Failed => "failed",
+            AgentTaskRunOutcome::PartiallySucceeded => "partially-succeeded",
+            AgentTaskRunOutcome::Skipped => "skipped",
+            AgentTaskRunOutcome::Blocked => "blocked",
+        }
+    }
+}
+
+/// Files/insertions/deletions a run left on its bound branch, `git diff
+/// --numstat` reduced to three numbers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffStat {
+    pub files: u32,
+    pub insertions: u64,
+    pub deletions: u64,
+}
+
+/// What a run cost, parsed from a `VOGT_COST:` line the CLI printed. Every
+/// field is optional because different CLIs report different subsets — a run
+/// that reported only a dollar amount has `total_usd` and nothing else, and a
+/// run that reported nothing has no [`RunCost`] at all (the conclusion's `cost`
+/// is `None`, i.e. `null`, not a zeroed record that would read as "free").
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunCost {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+}
+
+/// The durable record a run leaves behind (#291): the one place a reader, a
+/// sweep, or a future `why` input can find what a run actually did, instead of
+/// an exit code and a scrollback that a restart may have dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTaskRunConclusion {
+    #[serde(with = "time::serde::rfc3339")]
+    pub started: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub finished: OffsetDateTime,
+    pub duration_ms: u64,
+    pub outcome: AgentTaskRunOutcome,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub retries: u32,
+    /// The bound branch the run worked on (#283's subject, seen from the
+    /// engine as the branch checked out in the run's workspace, or the task's
+    /// declared `branch`). `None` when the workspace is not a git repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The branch tip when the run finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_sha: Option<String>,
+    /// The branch point captured when the run started, the base the diff stats
+    /// are measured against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diffstat: Option<DiffStat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RunCost>,
+    #[serde(default)]
+    pub findings: Vec<AgentTaskFinding>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AgentTaskCreate {
     pub name: String,
@@ -219,6 +393,14 @@ pub struct AgentTaskCreate {
     pub gates: Option<Vec<GateSpec>>,
     #[serde(default)]
     pub auto_approve: Option<bool>,
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    pub output_file: Option<String>,
+    #[serde(default)]
+    pub output_schema_max_retries: Option<u32>,
+    #[serde(default)]
+    pub branch: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
@@ -253,6 +435,14 @@ pub struct AgentTaskUpdate {
     pub gates: Option<Vec<GateSpec>>,
     #[serde(default)]
     pub auto_approve: Option<bool>,
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    pub output_file: Option<String>,
+    #[serde(default)]
+    pub output_schema_max_retries: Option<u32>,
+    #[serde(default)]
+    pub branch: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
@@ -445,6 +635,12 @@ impl AgentTaskRegistry {
             vogt_work_item: clean_optional(req.vogt_work_item),
             gates,
             auto_approve: req.auto_approve.unwrap_or(false),
+            output_schema: clean_output_schema(req.output_schema),
+            output_file: clean_optional(req.output_file),
+            output_schema_max_retries: req
+                .output_schema_max_retries
+                .unwrap_or(DEFAULT_OUTPUT_SCHEMA_MAX_RETRIES),
+            branch: clean_optional(req.branch),
             notify_on_start: req.notify_on_start.unwrap_or(false),
             notify_on_phrase: clean_notify_phrase(req.notify_on_phrase),
             auto_retry_on_rate_limit: req.auto_retry_on_rate_limit.unwrap_or(true),
@@ -503,6 +699,18 @@ impl AgentTaskRegistry {
         }
         if let Some(auto_approve) = req.auto_approve {
             task.auto_approve = auto_approve;
+        }
+        if req.output_schema.is_some() {
+            task.output_schema = clean_output_schema(req.output_schema);
+        }
+        if req.output_file.is_some() {
+            task.output_file = clean_optional(req.output_file);
+        }
+        if let Some(retries) = req.output_schema_max_retries {
+            task.output_schema_max_retries = retries;
+        }
+        if req.branch.is_some() {
+            task.branch = clean_optional(req.branch);
         }
         if let Some(enabled) = req.enabled {
             task.status = if enabled {
@@ -812,6 +1020,14 @@ impl AgentTaskRegistry {
             scrollback_bytes: None,
         })?;
 
+        // Capture the run's starting git position in its own workspace, so the
+        // conclusion can report the final sha of the bound branch and the diff
+        // stats against where the run began (#283/#291). A workspace that is
+        // not a repo yields `None` for both, and the conclusion simply omits
+        // the git half — the feature degrades to "no git story here" rather
+        // than failing the run.
+        let (start_branch, start_sha) = git_run_start(&session.cwd, task.branch.as_deref());
+
         let run = AgentTaskRun {
             id: run_id,
             task_id: task.id,
@@ -827,6 +1043,12 @@ impl AgentTaskRegistry {
             summary: None,
             findings: vec![],
             gates: vec![],
+            outcome: None,
+            conclusion: None,
+            retries: 0,
+            schema_ok: None,
+            branch: start_branch,
+            base_sha: start_sha,
         };
 
         {
@@ -914,6 +1136,22 @@ impl AgentTaskRegistry {
             task.auto_approve,
         );
 
+        // When the task declares an `output_schema`, a watcher validates the
+        // findings block the CLI writes and re-prompts it on a mismatch (#291).
+        // Spawned only for schema tasks — a task with no schema keeps today's
+        // free-text findings and this watcher never exists.
+        if let Some(schema) = task.output_schema.clone() {
+            spawn_schema_watcher(
+                Arc::clone(self),
+                Arc::clone(&session),
+                run.id,
+                schema,
+                task.output_schema_max_retries,
+                task.output_file.clone(),
+                session.subscribe(),
+            );
+        }
+
         Ok(Some(run))
     }
 
@@ -953,41 +1191,165 @@ impl AgentTaskRegistry {
             return Ok(());
         };
         let completed_at = OffsetDateTime::now_utc();
-        let mut tasks = self.tasks.lock();
-        let mut changed = false;
 
-        for task in tasks.iter_mut() {
-            if let Some(run) = task
-                .runs
-                .iter_mut()
-                .rev()
-                .find(|run| run.session_id == session_id)
-            {
-                if run.status != AgentTaskRunStatus::Running {
-                    return Ok(());
-                }
-                run.exit_code = Some(code);
-                run.completed_at = Some(completed_at);
-                run.status = if code == 0 {
-                    AgentTaskRunStatus::Completed
-                } else {
-                    AgentTaskRunStatus::Errored
-                };
-                run.summary = Some(if code == 0 {
-                    "Exited successfully".to_string()
-                } else {
-                    format!("Exited with status {code}")
-                });
-                task.updated_at = completed_at;
-                changed = true;
-                break;
-            }
+        // Phase 1: find the still-running run for this session and copy out what
+        // the conclusion needs, under the lock but without doing any slow work
+        // while holding it.
+        struct RunSnapshot {
+            task_id: Uuid,
+            run_id: Uuid,
+            started_at: OffsetDateTime,
+            base_sha: Option<String>,
+            branch: Option<String>,
+            blocked: bool,
+            schema_ok: Option<bool>,
+            retries: u32,
+            findings: Vec<AgentTaskFinding>,
         }
+        let snapshot = {
+            let tasks = self.tasks.lock();
+            let mut found = None;
+            for task in tasks.iter() {
+                if let Some(run) = task.runs.iter().rev().find(|run| run.session_id == session_id) {
+                    if run.status != AgentTaskRunStatus::Running {
+                        return Ok(());
+                    }
+                    found = Some(RunSnapshot {
+                        task_id: task.id,
+                        run_id: run.id,
+                        started_at: run.started_at,
+                        base_sha: run.base_sha.clone(),
+                        branch: run.branch.clone(),
+                        blocked: run
+                            .gates
+                            .iter()
+                            .any(|g| matches!(g.state, GateState::Blocked { .. })),
+                        schema_ok: run.schema_ok,
+                        retries: run.retries,
+                        findings: run.findings.clone(),
+                    });
+                    break;
+                }
+            }
+            match found {
+                Some(s) => s,
+                None => return Ok(()),
+            }
+        };
 
-        if changed {
+        // Phase 2: the slow half — read the session's scrollback and shell out
+        // to git — with no lock held.
+        let session = self.sessions.get(session_id).ok();
+        let scrollback = session
+            .as_ref()
+            .map(|s| {
+                let (bytes, _) = s.snapshot();
+                String::from_utf8_lossy(&strip_ansi(&bytes)).into_owned()
+            })
+            .unwrap_or_default();
+        let cwd = session.as_ref().map(|s| s.cwd.clone());
+
+        let skipped = scrollback.contains(SKIP_SENTINEL);
+        let cost = parse_cost(&scrollback);
+        let outcome = resolve_outcome(code, snapshot.blocked, snapshot.schema_ok, skipped);
+
+        let (final_sha, diffstat) = match cwd.as_deref() {
+            Some(cwd) => {
+                let final_sha = git_final_sha(cwd, snapshot.branch.as_deref());
+                let diffstat = final_sha
+                    .as_deref()
+                    .and_then(|head| git_diff_stats(cwd, snapshot.base_sha.as_deref(), head));
+                (final_sha, diffstat)
+            }
+            None => (None, None),
+        };
+
+        let duration_ms = (completed_at - snapshot.started_at)
+            .whole_milliseconds()
+            .max(0) as u64;
+
+        let conclusion = AgentTaskRunConclusion {
+            started: snapshot.started_at,
+            finished: completed_at,
+            duration_ms,
+            outcome,
+            exit_code: Some(code),
+            retries: snapshot.retries,
+            branch: snapshot.branch.clone(),
+            final_sha: final_sha.clone(),
+            base_sha: snapshot.base_sha.clone(),
+            diffstat,
+            cost: cost.clone(),
+            findings: snapshot.findings,
+        };
+
+        // Phase 3: write the verdict back, re-checking the run is still the one
+        // we snapshotted and still running (a concurrent path could have
+        // resolved it while git ran).
+        {
+            let mut tasks = self.tasks.lock();
+            let Some(task) = tasks.iter_mut().find(|t| t.id == snapshot.task_id) else {
+                return Ok(());
+            };
+            let Some(run) = task.runs.iter_mut().find(|r| r.id == snapshot.run_id) else {
+                return Ok(());
+            };
+            if run.status != AgentTaskRunStatus::Running {
+                return Ok(());
+            }
+            run.exit_code = Some(code);
+            run.completed_at = Some(completed_at);
+            run.status = if code == 0 {
+                AgentTaskRunStatus::Completed
+            } else {
+                AgentTaskRunStatus::Errored
+            };
+            run.summary = Some(outcome_summary(outcome, code));
+            run.outcome = Some(outcome);
+            run.conclusion = Some(conclusion);
+            task.updated_at = completed_at;
             self.save_locked(&tasks)?;
         }
+
+        // Phase 4: announce the conclusion on the stream, additive to the
+        // `session.killed` a client already sees for the same run.
+        self.bus.publish(ServerEvent::TaskRunConcluded {
+            task_id: snapshot.task_id,
+            run_id: snapshot.run_id,
+            session_id,
+            outcome: outcome.as_str().to_string(),
+            exit_code: Some(code),
+            duration_ms,
+            retries: snapshot.retries,
+            branch: snapshot.branch,
+            final_sha,
+            files_changed: diffstat.map(|d| d.files),
+            insertions: diffstat.map(|d| d.insertions),
+            deletions: diffstat.map(|d| d.deletions),
+            cost_usd: cost.and_then(|c| c.total_usd),
+        });
         Ok(())
+    }
+
+    /// Record the result of validating a run's findings against its
+    /// `output_schema` (#291): how many re-prompts it took and whether it ever
+    /// passed. Written by the schema watcher before the run ends, so the
+    /// completion path reads the verdict rather than re-parsing the stream. A
+    /// run the registry no longer has is not an error — the same tolerance the
+    /// finding recorder keeps.
+    fn record_schema_result(&self, run_id: Uuid, retries: u32, ok: bool) {
+        let now = OffsetDateTime::now_utc();
+        let mut tasks = self.tasks.lock();
+        let Some(task) = task_with_run_mut(&mut tasks, run_id) else {
+            return;
+        };
+        let Some(run) = task.runs.iter_mut().find(|r| r.id == run_id) else {
+            return;
+        };
+        run.retries = retries;
+        run.schema_ok = Some(ok);
+        task.updated_at = now;
+        let _ = self.save_locked(&tasks);
     }
 
     /// Record something a run reported about itself (FR-E7).
@@ -1789,6 +2151,14 @@ fn clean_gates(gates: Option<Vec<GateSpec>>) -> Result<Vec<GateSpec>> {
     Ok(gates)
 }
 
+/// Normalise a task's `output_schema`: a JSON `null` (or an omitted field)
+/// means "no schema", the same as unset. Anything else is stored verbatim and
+/// validated against at run time — the engine does not police that it is itself
+/// a well-formed JSON Schema, only that findings match whatever it says.
+fn clean_output_schema(value: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    value.filter(|v| !v.is_null())
+}
+
 fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|s| s.trim().to_string())
@@ -2263,6 +2633,390 @@ fn spawn_retry_watcher(
     });
 }
 
+// --- outcomes, conclusion, and schema validation (#291) --------------------
+
+/// Resolve a run's typed outcome from everything known at completion, applying
+/// the precedence documented on [`AgentTaskRunOutcome`]: a blocked gate first,
+/// then a schema miss, then a self-declared skip, then the bare exit code.
+fn resolve_outcome(
+    exit_code: i32,
+    blocked: bool,
+    schema_ok: Option<bool>,
+    skipped: bool,
+) -> AgentTaskRunOutcome {
+    if blocked {
+        AgentTaskRunOutcome::Blocked
+    } else if schema_ok == Some(false) {
+        AgentTaskRunOutcome::PartiallySucceeded
+    } else if skipped {
+        AgentTaskRunOutcome::Skipped
+    } else if exit_code == 0 {
+        AgentTaskRunOutcome::Succeeded
+    } else {
+        AgentTaskRunOutcome::Failed
+    }
+}
+
+/// The human-readable one-liner stored on `run.summary`, phrased by outcome so
+/// a reader sees *why* it ended, not only the exit code. The `succeeded` and
+/// `failed` wordings are kept verbatim from before #291 so existing clients and
+/// tests reading `summary` are undisturbed.
+fn outcome_summary(outcome: AgentTaskRunOutcome, code: i32) -> String {
+    match outcome {
+        AgentTaskRunOutcome::Succeeded => "Exited successfully".to_string(),
+        AgentTaskRunOutcome::Failed => format!("Exited with status {code}"),
+        AgentTaskRunOutcome::Blocked => "Blocked at an approval gate".to_string(),
+        AgentTaskRunOutcome::PartiallySucceeded => {
+            "Findings did not match the output schema".to_string()
+        }
+        AgentTaskRunOutcome::Skipped => "Skipped: nothing to do".to_string(),
+    }
+}
+
+/// Run `git` in `cwd` and return trimmed stdout on success, or `None` for a
+/// non-repo, a missing git, or any non-zero status. Blocking, but only a
+/// handful of fast calls per completed run.
+fn git_capture(cwd: &str, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// The run's starting git position: the branch it is on (or the task's declared
+/// branch) and the sha it starts from. Both `None` when the workspace is not a
+/// repo; the sha alone is `None` for a fresh repo with no commit yet, which the
+/// diff later measures from the empty tree.
+fn git_run_start(cwd: &str, declared_branch: Option<&str>) -> (Option<String>, Option<String>) {
+    if git_capture(cwd, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
+        return (None, None);
+    }
+    let branch = declared_branch
+        .map(str::to_string)
+        .or_else(|| git_capture(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]));
+    let sha = git_capture(cwd, &["rev-parse", "HEAD"]);
+    (branch, sha)
+}
+
+/// The tip sha of the bound branch at completion: the declared branch if named
+/// and resolvable, else `HEAD`.
+fn git_final_sha(cwd: &str, branch: Option<&str>) -> Option<String> {
+    if let Some(branch) = branch {
+        if let Some(sha) = git_capture(cwd, &["rev-parse", "--verify", "--quiet", branch]) {
+            return Some(sha);
+        }
+    }
+    git_capture(cwd, &["rev-parse", "--verify", "--quiet", "HEAD"])
+}
+
+/// Diff stats for what the run left on its branch: `git diff --numstat` from the
+/// run's starting sha (or the empty tree, for a repo that had no commit) to the
+/// final sha, reduced to files/insertions/deletions.
+fn git_diff_stats(cwd: &str, base: Option<&str>, head: &str) -> Option<DiffStat> {
+    let base = base.unwrap_or(EMPTY_TREE_SHA);
+    let numstat = git_capture(cwd, &["diff", "--numstat", &format!("{base}..{head}")])?;
+    Some(parse_numstat(&numstat))
+}
+
+/// Reduce `git diff --numstat` output to three numbers. A binary file's counts
+/// read as `-\t-`; it still counts as a changed file, with no line deltas.
+fn parse_numstat(numstat: &str) -> DiffStat {
+    let mut stat = DiffStat::default();
+    for line in numstat.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut cols = line.split('\t');
+        let ins = cols.next().unwrap_or("-");
+        let del = cols.next().unwrap_or("-");
+        if cols.next().is_none() {
+            continue;
+        }
+        stat.files += 1;
+        stat.insertions += ins.parse::<u64>().unwrap_or(0);
+        stat.deletions += del.parse::<u64>().unwrap_or(0);
+    }
+    stat
+}
+
+/// Parse the last `VOGT_COST:` line a run printed. The remainder is either a
+/// JSON object or a bare dollar amount; anything unparseable yields `None`,
+/// which the conclusion records as an unknown (`null`) cost.
+fn parse_cost(scrollback: &str) -> Option<RunCost> {
+    let rest = scrollback
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix(COST_SENTINEL))
+        .map(str::trim)?;
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(rest) {
+        let cost = RunCost {
+            total_usd: value
+                .get("total_usd")
+                .or_else(|| value.get("usd"))
+                .and_then(serde_json::Value::as_f64),
+            input_tokens: value.get("input_tokens").and_then(serde_json::Value::as_u64),
+            output_tokens: value
+                .get("output_tokens")
+                .and_then(serde_json::Value::as_u64),
+        };
+        if cost.total_usd.is_some() || cost.input_tokens.is_some() || cost.output_tokens.is_some() {
+            return Some(cost);
+        }
+    }
+    // A bare amount, tolerating a leading `$`.
+    let amount = rest.trim_start_matches('$').trim();
+    amount.parse::<f64>().ok().map(|usd| RunCost {
+        total_usd: Some(usd),
+        ..RunCost::default()
+    })
+}
+
+/// Validate a JSON `instance` against a pragmatic subset of JSON Schema — the
+/// keywords a task author actually reaches for on a findings block: `type`,
+/// `required`, `properties`, `items`, `enum`, and the common numeric/length
+/// bounds. Returns the first violation as a human-readable path + reason,
+/// which is exactly what the re-prompt hands back to the CLI.
+///
+/// It is deliberately not a complete validator (no `$ref`, `allOf`, patterns):
+/// the engine ships no schema crate, and the whole-of-JSON-Schema surface is
+/// not what a findings contract needs. An unknown keyword is ignored, so a
+/// schema using one is under-enforced rather than rejected.
+fn validate_json_schema(
+    schema: &serde_json::Value,
+    instance: &serde_json::Value,
+) -> std::result::Result<(), String> {
+    validate_at(schema, instance, "$")
+}
+
+fn validate_at(
+    schema: &serde_json::Value,
+    instance: &serde_json::Value,
+    path: &str,
+) -> std::result::Result<(), String> {
+    let Some(obj) = schema.as_object() else {
+        // A non-object schema (e.g. `true`) imposes nothing.
+        return Ok(());
+    };
+
+    if let Some(ty) = obj.get("type").and_then(|t| t.as_str()) {
+        if !json_type_matches(ty, instance) {
+            return Err(format!("{path}: expected type {ty}"));
+        }
+    }
+
+    if let Some(allowed) = obj.get("enum").and_then(|e| e.as_array()) {
+        if !allowed.iter().any(|a| a == instance) {
+            return Err(format!("{path}: value is not one of the permitted enum values"));
+        }
+    }
+
+    if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
+        if let Some(map) = instance.as_object() {
+            for (key, subschema) in props {
+                if let Some(child) = map.get(key) {
+                    validate_at(subschema, child, &format!("{path}.{key}"))?;
+                }
+            }
+        }
+    }
+
+    if let Some(required) = obj.get("required").and_then(|r| r.as_array()) {
+        if let Some(map) = instance.as_object() {
+            for key in required.iter().filter_map(|k| k.as_str()) {
+                if !map.contains_key(key) {
+                    return Err(format!("{path}: missing required property '{key}'"));
+                }
+            }
+        }
+    }
+
+    if let Some(items) = obj.get("items") {
+        if let Some(arr) = instance.as_array() {
+            for (i, elem) in arr.iter().enumerate() {
+                validate_at(items, elem, &format!("{path}[{i}]"))?;
+            }
+        }
+    }
+
+    if let (Some(min), Some(n)) = (
+        obj.get("minimum").and_then(|m| m.as_f64()),
+        instance.as_f64(),
+    ) {
+        if n < min {
+            return Err(format!("{path}: {n} is below minimum {min}"));
+        }
+    }
+    if let (Some(max), Some(n)) = (
+        obj.get("maximum").and_then(|m| m.as_f64()),
+        instance.as_f64(),
+    ) {
+        if n > max {
+            return Err(format!("{path}: {n} is above maximum {max}"));
+        }
+    }
+    if let (Some(min), Some(s)) = (
+        obj.get("minLength").and_then(|m| m.as_u64()),
+        instance.as_str(),
+    ) {
+        if (s.chars().count() as u64) < min {
+            return Err(format!("{path}: string shorter than minLength {min}"));
+        }
+    }
+    if let (Some(min), Some(arr)) = (
+        obj.get("minItems").and_then(|m| m.as_u64()),
+        instance.as_array(),
+    ) {
+        if (arr.len() as u64) < min {
+            return Err(format!("{path}: fewer than minItems {min}"));
+        }
+    }
+
+    Ok(())
+}
+
+fn json_type_matches(ty: &str, instance: &serde_json::Value) -> bool {
+    match ty {
+        "object" => instance.is_object(),
+        "array" => instance.is_array(),
+        "string" => instance.is_string(),
+        "boolean" => instance.is_boolean(),
+        "null" => instance.is_null(),
+        "number" => instance.is_number(),
+        // An integer is a number with no fractional part; JSON has no separate
+        // integer type, so this accepts `2` and rejects `2.5`.
+        "integer" => instance.is_i64() || instance.is_u64(),
+        _ => true,
+    }
+}
+
+/// Take the first complete fenced code block out of `buf`, returning its inner
+/// text and consuming everything up to and including its closing fence. The
+/// opening fence line (```` ```json ````) is skipped whole, so the returned text
+/// is the block body. `None` when no complete block is present yet.
+fn take_fenced_block(buf: &mut String) -> Option<String> {
+    let open = buf.find("```")?;
+    // Skip to the end of the opening fence's line, so a language tag on it
+    // (```json) is not part of the body.
+    let line_end = buf[open + 3..].find('\n').map(|i| open + 3 + i + 1)?;
+    let rest = &buf[line_end..];
+    let close_rel = rest.find("```")?;
+    let inner = rest[..close_rel].to_string();
+    let consumed = line_end + close_rel + 3;
+    buf.replace_range(..consumed, "");
+    Some(inner)
+}
+
+/// Validate a run's findings against its `output_schema`, re-prompting the CLI
+/// on a mismatch up to `max_retries` times before recording the run
+/// `partially-succeeded` (#291).
+///
+/// The findings block is the first complete fenced block the run prints (or,
+/// when `output_file` is set, that file read at each block boundary). On a
+/// match the verdict is recorded and the watcher steps aside — the run finishes
+/// on its own. On a mismatch with budget left, a correction line is written
+/// into the PTY and the next block awaited. When the budget is spent the
+/// verdict is recorded failed and the session killed, so a run that cannot
+/// produce the shape ends rather than hangs.
+fn spawn_schema_watcher(
+    registry: Arc<AgentTaskRegistry>,
+    session: Arc<Session>,
+    run_id: Uuid,
+    schema: serde_json::Value,
+    max_retries: u32,
+    output_file: Option<String>,
+    mut rx: tokio::sync::broadcast::Receiver<crate::pty::OutputChunk>,
+) {
+    tokio::spawn(async move {
+        let mut buf = String::new();
+        // Failures so far; also the count of re-prompts spent, recorded as the
+        // run's `retries`.
+        let mut retries: u32 = 0;
+        loop {
+            let chunk =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+                    Ok(Ok(chunk)) => chunk,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        // The run ended without ever producing a valid block —
+                        // a schema task that reported nothing is a partial
+                        // success, not a clean one.
+                        registry.record_schema_result(run_id, retries, false);
+                        break;
+                    }
+                    Err(_) if session.exit_code().is_some() => {
+                        registry.record_schema_result(run_id, retries, false);
+                        break;
+                    }
+                    Err(_) => continue,
+                };
+            let stripped = strip_ansi(&chunk.data);
+            buf.push_str(&String::from_utf8_lossy(&stripped));
+            if buf.len() > 65_536 {
+                let keep_from = buf.len().saturating_sub(32_768);
+                buf.drain(..keep_from);
+            }
+
+            let Some(block) = take_fenced_block(&mut buf) else {
+                continue;
+            };
+            // The file, when configured, is the source of truth; the fenced
+            // block is only the signal that the run has produced its findings.
+            let candidate = match output_file.as_deref() {
+                Some(rel) => read_output_file(&session.cwd, rel).unwrap_or(block),
+                None => block,
+            };
+            let parsed = serde_json::from_str::<serde_json::Value>(candidate.trim());
+            let verdict = match &parsed {
+                Ok(value) => validate_json_schema(&schema, value),
+                Err(e) => Err(format!("findings were not valid JSON: {e}")),
+            };
+            match verdict {
+                Ok(()) => {
+                    registry.record_schema_result(run_id, retries, true);
+                    break;
+                }
+                Err(reason) => {
+                    if retries >= max_retries {
+                        registry.record_schema_result(run_id, retries, false);
+                        let _ = session.kill();
+                        break;
+                    }
+                    retries += 1;
+                    // Deliberately free of any code-fence markers: this line is
+                    // echoed back onto the PTY, and a fence in it would be
+                    // mistaken for the start of the very findings block we are
+                    // asking for. The instruction to fence the JSON lives in the
+                    // task prompt, not here.
+                    let msg = format!(
+                        "Your findings did not match output_schema ({reason}). \
+                         Please output a corrected JSON findings block."
+                    );
+                    deliver_line(&session, &msg);
+                }
+            }
+        }
+    });
+}
+
+/// Read a run's findings file, relative to its workspace. `None` when it is
+/// missing or unreadable, in which case the fenced block stands in.
+fn read_output_file(cwd: &str, rel: &str) -> Option<String> {
+    let path = Path::new(cwd).join(rel);
+    std::fs::read_to_string(path).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2299,6 +3053,10 @@ mod tests {
             vogt_work_item: work_item.map(str::to_string),
             gates: vec![],
             auto_approve: false,
+            output_schema: None,
+            output_file: None,
+            output_schema_max_retries: DEFAULT_OUTPUT_SCHEMA_MAX_RETRIES,
+            branch: None,
             notify_on_start: false,
             notify_on_phrase: None,
             auto_retry_on_rate_limit: false,
@@ -2378,6 +3136,128 @@ mod tests {
         assert_eq!(
             clean_optional(Some(" vogt ".into())).as_deref(),
             Some("vogt")
+        );
+    }
+
+    // --- #291: outcomes, conclusion inputs, schema validation ---------------
+
+    #[test]
+    fn outcome_precedence_is_blocked_then_schema_then_skip_then_exit() {
+        use AgentTaskRunOutcome::*;
+        // A clean exit with nothing to downgrade it.
+        assert_eq!(resolve_outcome(0, false, None, false), Succeeded);
+        // A non-zero exit with nothing more specific.
+        assert_eq!(resolve_outcome(7, false, None, false), Failed);
+        // A gate that failed closed outranks everything, even a clean exit.
+        assert_eq!(resolve_outcome(0, true, Some(true), false), Blocked);
+        // A schema miss outranks a skip and the exit code.
+        assert_eq!(resolve_outcome(1, false, Some(false), true), PartiallySucceeded);
+        // A self-declared skip on a clean exit.
+        assert_eq!(resolve_outcome(0, false, None, true), Skipped);
+        // A passing schema does not, by itself, change a clean exit.
+        assert_eq!(resolve_outcome(0, false, Some(true), false), Succeeded);
+    }
+
+    #[test]
+    fn the_outcome_wire_tokens_are_kebab_case() {
+        assert_eq!(AgentTaskRunOutcome::Succeeded.as_str(), "succeeded");
+        assert_eq!(AgentTaskRunOutcome::Failed.as_str(), "failed");
+        assert_eq!(
+            AgentTaskRunOutcome::PartiallySucceeded.as_str(),
+            "partially-succeeded"
+        );
+        assert_eq!(AgentTaskRunOutcome::Skipped.as_str(), "skipped");
+        assert_eq!(AgentTaskRunOutcome::Blocked.as_str(), "blocked");
+        // The serde spelling matches the hand-written token.
+        let json = serde_json::to_string(&AgentTaskRunOutcome::PartiallySucceeded).unwrap();
+        assert_eq!(json, "\"partially-succeeded\"");
+    }
+
+    #[test]
+    fn numstat_sums_lines_and_counts_binary_as_a_changed_file() {
+        let stat = parse_numstat("3\t1\tsrc/a.rs\n10\t0\tsrc/b.rs\n-\t-\timg.png\n");
+        assert_eq!(stat.files, 3);
+        assert_eq!(stat.insertions, 13);
+        assert_eq!(stat.deletions, 1);
+        // Empty diff is three zeroes, not an error.
+        assert_eq!(parse_numstat(""), DiffStat::default());
+    }
+
+    #[test]
+    fn cost_parses_json_and_bare_dollar_amounts_else_none() {
+        let json = parse_cost("noise\nVOGT_COST: {\"total_usd\": 0.42, \"input_tokens\": 1200}\n")
+            .expect("a JSON cost line parses");
+        assert_eq!(json.total_usd, Some(0.42));
+        assert_eq!(json.input_tokens, Some(1200));
+
+        let bare = parse_cost("VOGT_COST: $1.50").expect("a bare dollar amount parses");
+        assert_eq!(bare.total_usd, Some(1.50));
+
+        // The last cost line wins, and a run that reported nothing has no cost.
+        let last = parse_cost("VOGT_COST: $1\nVOGT_COST: $2").unwrap();
+        assert_eq!(last.total_usd, Some(2.0));
+        assert!(parse_cost("no cost here").is_none());
+    }
+
+    #[test]
+    fn schema_validation_accepts_a_match_and_names_the_first_miss() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["summary", "risk"],
+            "properties": {
+                "summary": { "type": "string", "minLength": 1 },
+                "risk": { "type": "string", "enum": ["low", "medium", "high"] }
+            }
+        });
+        let ok = serde_json::json!({ "summary": "all clear", "risk": "low" });
+        assert!(validate_json_schema(&schema, &ok).is_ok());
+
+        // Missing required property.
+        let missing = serde_json::json!({ "summary": "hm" });
+        assert!(validate_json_schema(&schema, &missing)
+            .unwrap_err()
+            .contains("risk"));
+
+        // Wrong enum value.
+        let bad_enum = serde_json::json!({ "summary": "hm", "risk": "critical" });
+        assert!(validate_json_schema(&schema, &bad_enum)
+            .unwrap_err()
+            .contains("enum"));
+
+        // Wrong type.
+        let bad_type = serde_json::json!({ "summary": 3, "risk": "low" });
+        assert!(validate_json_schema(&schema, &bad_type)
+            .unwrap_err()
+            .contains("type"));
+    }
+
+    #[test]
+    fn a_fenced_block_is_taken_out_of_the_buffer_leaving_the_rest() {
+        let mut buf =
+            "chatter\n```json\n{\"ok\": true}\n```\ntrailing".to_string();
+        let block = take_fenced_block(&mut buf).expect("a complete block is present");
+        assert_eq!(block.trim(), "{\"ok\": true}");
+        // The opening chatter and the block are consumed; the trailing text
+        // remains for the next block.
+        assert_eq!(buf, "\ntrailing");
+        // An incomplete block (no closing fence) is not yet takeable.
+        let mut partial = "```json\n{\"ok\": true}".to_string();
+        assert!(take_fenced_block(&mut partial).is_none());
+    }
+
+    #[test]
+    fn outcome_summary_is_phrased_by_verdict_and_keeps_the_old_wording() {
+        assert_eq!(
+            outcome_summary(AgentTaskRunOutcome::Succeeded, 0),
+            "Exited successfully"
+        );
+        assert_eq!(
+            outcome_summary(AgentTaskRunOutcome::Failed, 7),
+            "Exited with status 7"
+        );
+        assert_eq!(
+            outcome_summary(AgentTaskRunOutcome::Blocked, 137),
+            "Blocked at an approval gate"
         );
     }
 }

@@ -246,6 +246,48 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// An agent-task run reached a terminal state and its conclusion was
+    /// recorded (#291). `outcome` is the typed verdict — `succeeded`, `failed`,
+    /// `partially-succeeded`, `skipped`, or `blocked` (a run stopped at a #289
+    /// gate). The remaining fields are the durable conclusion a client renders
+    /// without re-reading the whole run: how long it ran, what it exited with,
+    /// how many schema re-prompts it took, the final sha of the bound branch
+    /// and what it changed there, and the parsed cost when the CLI reported
+    /// usage. Additive to the stream — a client that does not know this event
+    /// still reads `session.killed` for the same run.
+    ///
+    /// Spelled `task.run.concluded` explicitly, the dotted name clients filter
+    /// on, matching the other `task.*` events above.
+    #[serde(rename = "task.run.concluded")]
+    TaskRunConcluded {
+        task_id: Uuid,
+        run_id: Uuid,
+        session_id: Uuid,
+        /// `succeeded` | `failed` | `partially-succeeded` | `skipped` | `blocked`.
+        outcome: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        duration_ms: u64,
+        /// Schema re-prompts spent before the findings validated (or the run
+        /// was given up on); 0 when no `output_schema` was set.
+        #[serde(default)]
+        retries: u32,
+        /// The bound branch the run worked on, when its workspace is a repo.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// Tip sha of the bound branch at the moment the run finished.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_sha: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files_changed: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        insertions: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deletions: Option<u64>,
+        /// Parsed cost in USD when the CLI reported usage, else absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

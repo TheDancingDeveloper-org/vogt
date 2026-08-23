@@ -34,6 +34,10 @@ scenarios compose from one vocabulary:
   idle      print an idle prompt and wait for a steer line on stdin
   outcome   exit with the chosen code
   stall     sleep, to exercise the stall / idle-stall timeout
+  skip      print a `VOGT_SKIP:` line so the run concludes `skipped` (#291)
+  cost      print a `VOGT_COST:` line so the conclusion records a cost (#291)
+  schema    print a fenced ```json findings block, re-prompted until it passes
+            the task's `output_schema` (#291)
 
 `edit+commit` is therefore "edit then commit"; `findings+outcome` is "report
 then exit". With no scenario the default is `outcome` (a clean exit 0).
@@ -65,6 +69,12 @@ ENV_VOGT_WORK_ITEM = "VOGT_WORK_ITEM"
 # matches (#203). A scenario prints whichever phrase the caller asked for.
 DEFAULT_NOTIFY_PHRASE = "VOGT_NOTIFY:"
 
+# The sentinels the engine's conclusion path reads (#291): a run that prints
+# SKIP_SENTINEL and exits cleanly concludes `skipped`, and the text after
+# COST_SENTINEL (JSON or a bare dollar amount) is parsed into the run's cost.
+SKIP_SENTINEL = "VOGT_SKIP:"
+COST_SENTINEL = "VOGT_COST:"
+
 # Checkpoint trailers the `commit` step writes. There is no engine-side reader
 # for these yet — the git story (#283-#285) is future work — so this is the
 # format that work can standardise on: two git trailers naming the task and run
@@ -72,7 +82,17 @@ DEFAULT_NOTIFY_PHRASE = "VOGT_NOTIFY:"
 TRAILER_TASK = "Vogt-Task"
 TRAILER_RUN = "Vogt-Run"
 
-KNOWN_STEPS = ("edit", "commit", "findings", "idle", "outcome", "stall")
+KNOWN_STEPS = (
+    "edit",
+    "commit",
+    "findings",
+    "idle",
+    "outcome",
+    "stall",
+    "skip",
+    "cost",
+    "schema",
+)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -280,6 +300,71 @@ def step_outcome() -> None:
     raise SystemExit(code)
 
 
+def step_skip() -> None:
+    """Declare the run a deliberate no-op (#291).
+
+    Prints the skip sentinel and returns; a `skip` scenario with no `outcome`
+    step falls through to the clean exit 0 in `main`, which is exactly the
+    "there was nothing to do" shape the engine concludes as `skipped`.
+    """
+    reason = _env("FAKE_AGENT_SKIP_REASON", "nothing to do")
+    _emit(f"{SKIP_SENTINEL} {reason}")
+
+
+def step_cost() -> None:
+    """Report what the run cost (#291).
+
+    The payload defaults to a small JSON object; a caller can override it with a
+    bare dollar amount (`$0.40`) to exercise the other parse path.
+    """
+    payload = _env(
+        "FAKE_AGENT_COST",
+        '{"total_usd": 0.42, "input_tokens": 1200, "output_tokens": 340}',
+    )
+    _emit(f"{COST_SENTINEL} {payload}")
+
+
+def step_schema() -> None:
+    """Print a fenced ```json findings block, re-prompted until it passes (#291).
+
+    The engine's schema watcher reads the block, validates it against the task's
+    `output_schema`, and — on a mismatch with budget left — writes a correction
+    line into the PTY. This step waits for that line on stdin after each *wrong*
+    block, then prints the next one; on the attempt named by
+    `FAKE_AGENT_SCHEMA_PASS_ON` (default 1, "pass first try") it prints a *good*
+    block and exits 0. When the engine gives up instead of re-prompting, it kills
+    the session and this readline never returns — which is the point.
+    """
+    pass_on = int(_env("FAKE_AGENT_SCHEMA_PASS_ON", "1"))
+    delay = float(_env("FAKE_AGENT_SCHEMA_DELAY", "0.3"))
+    good = _env(
+        "FAKE_AGENT_SCHEMA_GOOD",
+        '{"summary": "did the thing", "risk": "low"}',
+    )
+    bad = _env("FAKE_AGENT_SCHEMA_BAD", '{"summary": "did the thing"}')
+
+    # The watcher subscribes just after the session spawns; a first block
+    # printed before then would be missed, the same race the findings step opts
+    # out of with a short delay.
+    if delay > 0:
+        time.sleep(delay)
+
+    attempt = 1
+    while True:
+        payload = good if attempt >= pass_on else bad
+        _emit("```json")
+        _emit(payload)
+        _emit("```")
+        if attempt >= pass_on:
+            raise SystemExit(0)
+        # A wrong block: wait for the engine's correction before trying again.
+        line = sys.stdin.readline()
+        if not line:
+            # No re-prompt arrived (eof); stop cleanly rather than spin.
+            raise SystemExit(0)
+        attempt += 1
+
+
 STEP_FUNCS = {
     "edit": step_edit,
     "commit": step_commit,
@@ -287,6 +372,9 @@ STEP_FUNCS = {
     "idle": step_idle,
     "stall": step_stall,
     "outcome": step_outcome,
+    "skip": step_skip,
+    "cost": step_cost,
+    "schema": step_schema,
 }
 
 
@@ -315,9 +403,17 @@ def _print_contract() -> None:
             "FAKE_AGENT_COMMIT_MESSAGE": "chore: fake-agent checkpoint",
             "FAKE_AGENT_STALL_SECONDS": "3600",
             "FAKE_AGENT_IDLE_PROMPT": "fake-agent idle> ",
+            "FAKE_AGENT_SKIP_REASON": "nothing to do",
+            "FAKE_AGENT_COST": '{"total_usd": 0.42, ...}',
+            "FAKE_AGENT_SCHEMA_PASS_ON": "1",
+            "FAKE_AGENT_SCHEMA_DELAY": "0.3",
+            "FAKE_AGENT_SCHEMA_GOOD": "a findings block that passes the schema",
+            "FAKE_AGENT_SCHEMA_BAD": "a findings block that fails the schema",
         },
         "commit_trailers": [TRAILER_TASK, TRAILER_RUN],
         "notify_phrase_default": DEFAULT_NOTIFY_PHRASE,
+        "skip_sentinel": SKIP_SENTINEL,
+        "cost_sentinel": COST_SENTINEL,
     }
     _emit(json.dumps(contract, indent=2))
 

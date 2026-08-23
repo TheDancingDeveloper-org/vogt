@@ -667,7 +667,9 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
   trio — `task.gate.opened` (`{task_id, run_id, session_id, gate_id, question,
   options}`), `task.gate.answered` (`{…, gate_id, option?, outcome, actor,
   reason?}` where `outcome` is `approved` or `blocked`), and `task.steered`
-  (`{…, actor, interrupt, reason?}`) — each tagged by `type`.
+  (`{…, actor, interrupt, reason?}`) — plus `task.run.concluded` (`{…, outcome,
+  exit_code?, duration_ms, retries, branch?, final_sha?, files_changed?,
+  insertions?, deletions?, cost_usd?}`, #291), each tagged by `type`.
 - `GET /api/status` -> `OperationalStatus` — version, session count, push
   subscription count, live GUI process count, whether the GUI stream and FCM
   are configured, and nested `history`, `agent_tasks`, `auth_broker` and
@@ -888,6 +890,49 @@ option still fails closed under it. The events `task.gate.opened`,
 `task.gate.answered` (with `outcome` `approved`/`blocked`) and `task.steered`
 report gate and steer activity on the event stream (see Events and status
 above). See §7 for the fail-closed rule and the `--auto-approve` bypass.
+
+**Typed outcomes and the conclusion record (#291).** When a run ends the engine
+records a typed `outcome` on it — one of `succeeded`, `failed`,
+`partially-succeeded`, `skipped`, or `blocked` — resolved by a fixed
+precedence: a run that stopped at a gate that failed closed is `blocked`; one
+whose findings never matched its `output_schema` is `partially-succeeded`; one
+that printed the skip sentinel `VOGT_SKIP:` and exited cleanly is `skipped`;
+otherwise a zero exit is `succeeded` and a non-zero exit is `failed`. The older
+`status` (`completed`/`errored`) stays, derived from the exit code as before, so
+existing clients are undisturbed.
+
+Alongside it the run carries a durable `conclusion`: `{started, finished,
+duration_ms, outcome, exit_code, retries, branch?, final_sha?, base_sha?,
+diffstat?, cost?, findings}`. The git half is computed in the run's workspace —
+`branch` is the branch checked out there (or the task's declared `branch`),
+`final_sha` its tip when the run finished, and `diffstat` (`{files, insertions,
+deletions}`) is `git diff --numstat` from the sha the run started at (the empty
+tree for a fresh repo) to that tip. `cost` (`{total_usd?, input_tokens?,
+output_tokens?}`) is parsed from a `VOGT_COST:` line the CLI printed — a JSON
+object or a bare dollar amount — and is `null` when the CLI reported nothing. A
+workspace that is not a git repo simply omits the git fields. The conclusion is
+announced on the event stream as `task.run.concluded` (`{task_id, run_id,
+session_id, outcome, exit_code, duration_ms, retries, branch?, final_sha?,
+files_changed?, insertions?, deletions?, cost_usd?}`), additive to the
+`session.killed` a client already sees for the same run.
+
+**Schema-validated findings (#291).** A task may set an `output_schema` (a JSON
+Schema) and, optionally, an `output_file` and an `output_schema_max_retries`
+(default 2). With a schema set, the engine reads the findings block the CLI
+writes — the first fenced ` ```json ` block in its output, or the file named by
+`output_file` — and validates it against the schema (a pragmatic subset:
+`type`, `required`, `properties`, `items`, `enum`, and the common numeric and
+length bounds). On a mismatch it writes a correction line back into the PTY and
+awaits the next block, up to the retry budget; when the budget is spent the run
+is recorded `partially-succeeded` with `schema_ok: false` and `retries` set to
+the re-prompts spent. A run that validates first try has `schema_ok: true` and
+`retries: 0`. With no `output_schema` set, findings stay free-text (the notify
+phrase) and nothing is validated — today's behaviour.
+
+> A run's conclusion is the seam Vogt's `why` scoring (#285) will read for a
+> "last task run succeeded/failed 2h ago" input. That wiring is core-Python and
+> not yet connected to the engine; the conclusion is exposed on the run and the
+> stream so #285 can pick it up without a cross-process link here.
 
 `GET /api/status` reports the same artifacts as counts and bytes, so an
 operator can see whether a cleanup is worth running before running one.
