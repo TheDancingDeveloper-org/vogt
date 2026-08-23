@@ -1,5 +1,6 @@
 package com.sprooty.mydevenv2;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -7,6 +8,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
@@ -15,6 +17,7 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 
 /**
  * A foreground service held ONLY for the duration of an explicitly active voice
@@ -94,12 +97,32 @@ public class VoiceConversationService extends Service {
         Log.i(TAG, "voice conversation started (elapsedRealtime=" + startedAtElapsed + "ms)");
 
         Notification notification = buildNotification();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                | ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
-            startForeground(NOTIFICATION_ID, notification, type);
-        } else {
-            startForeground(NOTIFICATION_ID, notification);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // This service does NOT itself open the mic (see the class doc):
+                // the WebView does, while foregrounded. So request DATA_SYNC to
+                // keep the process alive, and add the MICROPHONE type ONLY when
+                // RECORD_AUDIO is actually granted — Android 14+ throws
+                // SecurityException if a microphone-typed foreground service is
+                // started without it, which previously crashed the whole app the
+                // moment spoken replies were toggled on before any mic grant.
+                int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                        == PackageManager.PERMISSION_GRANTED) {
+                    type |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+                }
+                startForeground(NOTIFICATION_ID, notification, type);
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+        } catch (Exception e) {
+            // A foreground service that cannot start (a missing permission, a
+            // background-start restriction) must never take the app down with
+            // it: the conversation still works while the app is foregrounded, it
+            // just will not survive screen-off (FR-M6, degraded).
+            Log.w(TAG, "voice foreground service could not start; continuing without it", e);
+            stopSelf();
+            return;
         }
         acquireWakeLock();
     }
