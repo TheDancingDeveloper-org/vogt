@@ -9,8 +9,8 @@ use std::{
 
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
-use vogt_engine_contract::SessionDetail;
-use vogt_engine_server::{app::router, config::SessionTemplate, Config};
+use vogt_engine_contract::{ServerEvent, SessionDetail};
+use vogt_engine_server::{app::router, app::AppState, config::SessionTemplate, Config};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use time::OffsetDateTime;
@@ -74,15 +74,70 @@ async fn boot() -> (String, tokio::task::JoinHandle<()>) {
 }
 
 async fn boot_with_config(cfg: Config) -> (String, tokio::task::JoinHandle<()>) {
-    let (router, _state) = router(cfg).await;
+    let (base, _state, handle) = boot_with_state(cfg).await;
+    (base, handle)
+}
+
+/// Boot and keep the `AppState`, so a test can publish onto the engine's own
+/// event bus — the same bus `vogt_core::spawn_event_follower` republishes
+/// vogt-core's events onto — and drive the agent-task trigger watcher (#290)
+/// with synthetic core events, without needing a real vogt-core beside it.
+async fn boot_with_state(
+    cfg: Config,
+) -> (String, Arc<AppState>, tokio::task::JoinHandle<()>) {
+    let (router, state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    // Tiny grace period so the listener is definitely accepting.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    (format!("http://{addr}"), handle)
+    (format!("http://{addr}"), state, handle)
+}
+
+/// A synthetic vogt-core event on the engine bus, the shape the follower
+/// publishes (#290) — used to drive the trigger watcher in tests.
+fn publish_core_event(
+    state: &AppState,
+    kind: &str,
+    entity_id: &str,
+    seq: i64,
+    summary: Value,
+) {
+    state.bus.publish(ServerEvent::VogtChanged {
+        kind: kind.to_string(),
+        entity_kind: "work_item".to_string(),
+        entity_id: entity_id.to_string(),
+        seq,
+        summary,
+    });
+}
+
+/// Poll a task until its run list has at least `n` runs, or time out.
+async fn wait_for_run_count(
+    client: &reqwest::Client,
+    base: &str,
+    task_id: &str,
+    n: usize,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let detail: Value = client
+                .get(format!("{base}/api/agent-tasks/{task_id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if detail["runs"].as_array().map(|r| r.len()).unwrap_or(0) >= n {
+                break detail;
+            }
+        }
+    })
+    .await
+    .expect("the task should reach the expected run count")
 }
 
 fn auth() -> reqwest::header::HeaderMap {
@@ -936,6 +991,321 @@ async fn fake_agent_outcome_scenario_surfaces_the_exit_code() {
     assert_eq!(detail["runs"][0]["status"], "errored");
     assert_eq!(detail["runs"][0]["exit_code"], 7);
     assert_eq!(detail["runs"][0]["summary"], "Exited with status 7");
+}
+
+/// #290: a `work.transitioned` core event starts a bound, audited run.
+///
+/// The engine subscribes to its own bus — the one the core-event follower
+/// feeds — matches the enabled `work-transition` trigger, and starts a NORMAL
+/// run. The run is bound to the item that transitioned (its `VOGT_WORK_ITEM`
+/// reaches the child and its prompt names it), and its audit names the trigger
+/// and the event that fired it, so a `why` could say "ran because WI-7 entered
+/// ready at seq 4102".
+#[tokio::test]
+async fn a_work_transition_event_starts_a_bound_and_audited_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "ready-watcher",
+            "prompt": "A work item reached ready.",
+            "schedule": { "kind": "manual" },
+            "command": ["/bin/sh", "-lc",
+                "sleep 0.2; printf 'bound=%s\\n' \"$VOGT_WORK_ITEM\""],
+            "triggers": [
+                { "enabled": true, "kind": "work-transition", "to_state": "ready" }
+            ],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap().to_string();
+    // The trigger round-trips on the task.
+    assert_eq!(created["triggers"][0]["kind"], "work-transition");
+    assert_eq!(created["triggers"][0]["to_state"], "ready");
+    assert_eq!(created["concurrency"], 1);
+
+    // A transition to a *different* state does not fire the trigger.
+    publish_core_event(
+        &state,
+        "work.transitioned",
+        "wi_9",
+        4100,
+        json!({"ref": "WI-9", "from": "open", "to": "in_progress"}),
+    );
+    // The matching transition does.
+    publish_core_event(
+        &state,
+        "work.transitioned",
+        "wi_7",
+        4102,
+        json!({"ref": "WI-7", "from": "review", "to": "ready"}),
+    );
+
+    let detail = wait_for_run_count(&client, &base, &task_id, 1).await;
+    // Only the matching event started a run.
+    assert_eq!(detail["runs"].as_array().unwrap().len(), 1);
+    let run = &detail["runs"][0];
+    assert_eq!(run["trigger"], "event");
+    // The audit names the trigger and the exact event that fired it.
+    assert_eq!(run["trigger_detail"]["trigger_kind"], "work-transition");
+    assert_eq!(run["trigger_detail"]["event_kind"], "work.transitioned");
+    assert_eq!(run["trigger_detail"]["event_id"], "wi_7");
+    assert_eq!(run["trigger_detail"]["event_seq"], 4102);
+    assert_eq!(run["trigger_detail"]["description"], "WI-7 entered ready");
+
+    // The run is bound to the item that transitioned: its prompt names it.
+    let prompt = std::fs::read_to_string(run["prompt_file"].as_str().unwrap()).unwrap();
+    assert!(
+        prompt.contains("Vogt subject: WI-7"),
+        "the triggered run must be bound to the item that fired it: {prompt}"
+    );
+}
+
+/// #290: drift, observation, and forge-PR-check events each start the right
+/// run, driven by synthetic core events.
+#[tokio::test]
+async fn drift_observation_and_forge_events_each_start_a_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // Each case: the trigger to arm, the event that should fire it, and the
+    // audit description the run should carry.
+    struct Case {
+        name: &'static str,
+        trigger: Value,
+        event_kind: &'static str,
+        entity_id: &'static str,
+        summary: Value,
+        expect_desc: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "drift-watcher",
+            trigger: json!({"enabled": true, "kind": "drift-proposed", "project": "vogt"}),
+            event_kind: "drift.raised",
+            entity_id: "d_1",
+            summary: json!({"kind": "coupling", "summary": "x leaks into y", "project": "vogt"}),
+            expect_desc: "drift raised: x leaks into y",
+        },
+        Case {
+            name: "issue-watcher",
+            trigger: json!({"enabled": true, "kind": "observation-new", "observation_kind": "forge.issue"}),
+            event_kind: "observation.new",
+            entity_id: "obs_1",
+            summary: json!({"kind": "forge.issue", "project": "vogt", "subject": "#42"}),
+            expect_desc: "new forge.issue: #42",
+        },
+        Case {
+            name: "checks-watcher",
+            trigger: json!({"enabled": true, "kind": "forge-pr-checks", "status": "red"}),
+            event_kind: "forge.pr.checks",
+            entity_id: "pr_12",
+            summary: json!({"status": "red", "work_item": "WI-7", "pr": "#12"}),
+            expect_desc: "PR #12 checks red",
+        },
+    ];
+
+    let mut seq = 5000;
+    for case in cases {
+        let created: Value = client
+            .post(format!("{base}/api/agent-tasks"))
+            .json(&json!({
+                "name": case.name,
+                "prompt": "React.",
+                "schedule": { "kind": "manual" },
+                "command": ["/bin/sh", "-lc", "true"],
+                "triggers": [case.trigger],
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let task_id = created["id"].as_str().unwrap().to_string();
+
+        seq += 1;
+        publish_core_event(&state, case.event_kind, case.entity_id, seq, case.summary.clone());
+
+        let detail = wait_for_run_count(&client, &base, &task_id, 1).await;
+        let run = &detail["runs"][0];
+        assert_eq!(run["trigger"], "event", "{} should be event-triggered", case.name);
+        assert_eq!(run["trigger_detail"]["event_kind"], case.event_kind);
+        assert_eq!(run["trigger_detail"]["description"], case.expect_desc);
+    }
+}
+
+/// #290: the per-task concurrency cap holds, and a fire it cannot honour is
+/// dropped rather than retried (no storm).
+#[tokio::test]
+async fn the_concurrency_cap_holds_and_a_blocked_fire_does_not_storm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // A task capped at one run, whose run sleeps long enough to still be in
+    // flight when the second event arrives.
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "capped",
+            "prompt": "Only one at a time.",
+            "schedule": { "kind": "manual" },
+            "concurrency": 1,
+            "command": ["/bin/sh", "-lc", "sleep 3"],
+            "triggers": [
+                { "enabled": true, "kind": "work-transition", "to_state": "ready" }
+            ],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap().to_string();
+
+    // First fire starts a run.
+    publish_core_event(
+        &state,
+        "work.transitioned",
+        "wi_7",
+        6001,
+        json!({"ref": "WI-7", "to": "ready"}),
+    );
+    let detail = wait_for_run_count(&client, &base, &task_id, 1).await;
+    assert_eq!(detail["runs"][0]["status"], "running");
+
+    // Second fire while the first run is still in flight: the cap is full, so
+    // it is dropped, not queued and not retried.
+    publish_core_event(
+        &state,
+        "work.transitioned",
+        "wi_8",
+        6002,
+        json!({"ref": "WI-8", "to": "ready"}),
+    );
+
+    // Give the watcher ample time to (not) start a second run.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let detail: Value = client
+        .get(format!("{base}/api/agent-tasks/{task_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        detail["runs"].as_array().unwrap().len(),
+        1,
+        "the capped task must not start an overlapping run, and must not spin: {:?}",
+        detail["runs"]
+    );
+    assert_eq!(detail["run_count"], 1);
+}
+
+/// #290: an `api` fire is refused unless the task has an `api` trigger armed,
+/// and records `api` when it is.
+#[tokio::test]
+async fn an_api_fire_needs_an_api_trigger_and_records_api() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // No api trigger yet: a programmatic fire is refused.
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "api-task",
+            "prompt": "Fire me from a script.",
+            "schedule": { "kind": "manual" },
+            "command": ["/bin/sh", "-lc", "true"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap().to_string();
+
+    let refused = client
+        .post(format!("{base}/api/agent-tasks/{task_id}/run?trigger=api"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+
+    // Arm an api trigger, then the fire records `api`.
+    client
+        .patch(format!("{base}/api/agent-tasks/{task_id}"))
+        .json(&json!({ "triggers": [{ "enabled": true, "kind": "api" }] }))
+        .send()
+        .await
+        .unwrap();
+
+    let run: Value = client
+        .post(format!("{base}/api/agent-tasks/{task_id}/run?trigger=api"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(run["trigger"], "api");
+    assert_eq!(run["trigger_detail"]["trigger_kind"], "api");
+
+    // Let the api run's session exit so the (concurrency-capped) task is free
+    // to run again — otherwise the manual fire below would race it and 409.
+    wait_for_run_finish(&client, &base, &task_id).await;
+
+    // A plain human Run Now on the same task still records `manual`.
+    let manual: Value = client
+        .post(format!("{base}/api/agent-tasks/{task_id}/run"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(manual["trigger"], "manual");
 }
 
 #[tokio::test]

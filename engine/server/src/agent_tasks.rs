@@ -76,6 +76,18 @@ pub struct AgentTask {
     pub name: String,
     pub prompt: String,
     pub schedule: AgentTaskSchedule,
+    /// Event triggers this task listens on (#290), each independently enabled.
+    /// Additive to the schedule: a task may fire on the clock and on core-state
+    /// events at once. Empty for a task that only runs manually or on a
+    /// schedule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<AgentTaskTrigger>,
+    /// How many runs of this task may be in flight at once (#290). A trigger
+    /// (or the scheduler) that would exceed this waits — it logs and drops the
+    /// fire rather than starting an overlapping run — so a burst of events
+    /// cannot spawn a storm of PTYs against one workspace. Defaults to one.
+    #[serde(default = "default_task_concurrency")]
+    pub concurrency: u32,
     pub status: AgentTaskStatus,
     #[serde(default)]
     pub command: Option<Vec<String>>,
@@ -178,6 +190,129 @@ pub enum AgentTaskStatus {
     Paused,
 }
 
+/// The default per-task concurrency cap (#290): a task runs one run at a time
+/// unless it says otherwise. One is the safe default — a trigger that fires
+/// twice while a run is in flight does not start a second overlapping run and
+/// spawn two PTYs against the same workspace.
+const DEFAULT_TASK_CONCURRENCY: u32 = 1;
+
+fn default_task_concurrency() -> u32 {
+    DEFAULT_TASK_CONCURRENCY
+}
+
+/// One event trigger a task listens on (#290).
+///
+/// Independent of the `schedule`: a task may fire on the clock, on demand, and
+/// on any number of core-state events at once. Each trigger is separately
+/// enabled — a disabled trigger keeps its filter so toggling it back on does
+/// not lose the configuration — and each *firing* creates a normal run, with
+/// the trigger recorded on it so #291's conclusion path is unchanged and a
+/// reader can see why the run happened.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskTrigger {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub spec: TriggerSpec,
+}
+
+/// A PR's aggregate check status a [`TriggerSpec::ForgePrChecks`] fires on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForgeCheckStatus {
+    /// Either terminal status — green or red.
+    #[default]
+    Any,
+    Green,
+    Red,
+}
+
+/// The five trigger kinds (#290), tagged by `kind` so the wire spelling is the
+/// dotted-free kebab a client filters on (`work-transition`, `observation-new`,
+/// `drift-proposed`, `forge-pr-checks`, `api`).
+///
+/// A note on what the engine can actually match, because a filter that looks
+/// right and matches nothing is the failure this whole area guards against.
+/// The engine has no view of Vogt's registry — it matches against the fields
+/// the core event *carries on the feed*, and nothing else. `work-transition`
+/// and `drift-proposed` ride core events that fire today; the engine reads
+/// their `summary` (`to`, `ref`, and — via the additive core enrichment #290
+/// landed — `project`, `kind`, `labels`). `observation-new` and
+/// `forge-pr-checks` are matched here against the event shape the core will
+/// emit for them; until the core bridges its observed store onto the feed they
+/// fire only from a synthetic event, which is exactly what the tests drive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum TriggerSpec {
+    /// A work item entered `to_state`. Optional filters narrow it to a project
+    /// slug, an item kind, a label, or one specific item ref. The matched
+    /// item's ref is bound to the run automatically (its `vogt_work_item`), so
+    /// what the run reports files against the item that triggered it.
+    WorkTransition {
+        to_state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// One specific item ref (e.g. `WI-7`); when set only that item's
+        /// transitions fire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        work_item: Option<String>,
+    },
+    /// A new observed subject of `observation_kind` (e.g. `forge.issue`,
+    /// `forge.pull_request`, `marker`) appeared, optionally scoped to a
+    /// project.
+    ObservationNew {
+        observation_kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
+    /// A drift proposal was raised for a project (optionally scoped).
+    DriftProposed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
+    /// A PR linked to a work item (#284) reached a terminal check status. When
+    /// `work_item` is set only that item's PR fires; the item is bound to the
+    /// run.
+    ForgePrChecks {
+        #[serde(default)]
+        status: ForgeCheckStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        work_item: Option<String>,
+    },
+    /// An explicit programmatic fire. It carries no filter and never matches a
+    /// core event — it is armed so a run started through the API records `api`
+    /// rather than `manual`, and so the trigger list can say "this task is
+    /// driven by API" beside the event triggers.
+    Api,
+}
+
+impl TriggerSpec {
+    /// The kebab-case trigger kind — the audit token and the wire spelling.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            TriggerSpec::WorkTransition { .. } => "work-transition",
+            TriggerSpec::ObservationNew { .. } => "observation-new",
+            TriggerSpec::DriftProposed { .. } => "drift-proposed",
+            TriggerSpec::ForgePrChecks { .. } => "forge-pr-checks",
+            TriggerSpec::Api => "api",
+        }
+    }
+}
+
+/// What a matched trigger decided about a run (#290): which trigger fired, the
+/// item to bind the run to (when the event named one), and a human line for the
+/// audit so `why` can say "task ran because WI-7 entered ready".
+#[derive(Debug, Clone, PartialEq)]
+struct TriggerFire {
+    trigger_kind: &'static str,
+    bind_work_item: Option<String>,
+    description: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTaskRun {
     pub id: Uuid,
@@ -185,6 +320,10 @@ pub struct AgentTaskRun {
     #[serde(with = "time::serde::rfc3339")]
     pub started_at: OffsetDateTime,
     pub trigger: AgentTaskRunTrigger,
+    /// Why this run started, when it was a trigger (#290): the trigger kind and
+    /// the core event that fired it. `None` for a manual or scheduled run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_detail: Option<RunTriggerDetail>,
     pub session_id: Uuid,
     pub session_name: String,
     pub prompt_file: String,
@@ -255,11 +394,39 @@ pub struct AgentTaskFinding {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentTaskRunTrigger {
     Manual,
     Scheduled,
+    /// A core-state event trigger fired the run (#290). Which trigger and which
+    /// event are on the run's `trigger_detail`.
+    Event,
+    /// An explicit programmatic fire through the API (#290).
+    Api,
+}
+
+/// The audit of why a run started (#290): which trigger fired it and, when a
+/// core event did, that event's kind, entity, and sequence. This is what lets a
+/// `why` reading a run say "task ran because WI-7 entered ready at seq 4102"
+/// instead of only "a run happened". Absent (`None`) for a manual or scheduled
+/// run, which has no originating trigger beyond its own name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunTriggerDetail {
+    /// The trigger kind, kebab: `work-transition`, `observation-new`,
+    /// `drift-proposed`, `forge-pr-checks`, or `api`.
+    pub trigger_kind: String,
+    /// The core event kind that fired it, when a core event did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_kind: Option<String>,
+    /// The core entity the event was about, when there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    /// The core event's sequence number, when there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_seq: Option<i64>,
+    /// A one-line human account: `WI-7 entered ready`.
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -378,6 +545,10 @@ pub struct AgentTaskCreate {
     #[serde(default)]
     pub schedule: Option<AgentTaskSchedule>,
     #[serde(default)]
+    pub triggers: Option<Vec<AgentTaskTrigger>>,
+    #[serde(default)]
+    pub concurrency: Option<u32>,
+    #[serde(default)]
     pub command: Option<Vec<String>>,
     #[serde(default)]
     pub cwd: Option<String>,
@@ -419,6 +590,10 @@ pub struct AgentTaskUpdate {
     pub prompt: Option<String>,
     #[serde(default)]
     pub schedule: Option<AgentTaskSchedule>,
+    #[serde(default)]
+    pub triggers: Option<Vec<AgentTaskTrigger>>,
+    #[serde(default)]
+    pub concurrency: Option<u32>,
     #[serde(default)]
     pub command: Option<Vec<String>>,
     #[serde(default)]
@@ -497,6 +672,68 @@ struct PromptArtifactRemovalTally {
     context_files: u64,
     session_prompts: u64,
     bytes: u64,
+}
+
+/// Why a run is being started, and what it should be bound to (#290).
+///
+/// One value carries everything the start path needs that is not the task
+/// itself: the trigger to record, the audit detail naming the core event that
+/// fired it (`None` for manual/scheduled), and an optional item ref to bind
+/// this one run to. A manual Run Now and a `work.transition` fire reach
+/// [`AgentTaskRegistry::start_run`] the same way, differing only in this.
+struct RunOrigin {
+    trigger: AgentTaskRunTrigger,
+    detail: Option<RunTriggerDetail>,
+    bind_work_item: Option<String>,
+}
+
+impl RunOrigin {
+    fn manual() -> Self {
+        Self {
+            trigger: AgentTaskRunTrigger::Manual,
+            detail: None,
+            bind_work_item: None,
+        }
+    }
+
+    fn scheduled() -> Self {
+        Self {
+            trigger: AgentTaskRunTrigger::Scheduled,
+            detail: None,
+            bind_work_item: None,
+        }
+    }
+
+    fn api() -> Self {
+        Self {
+            trigger: AgentTaskRunTrigger::Api,
+            detail: Some(RunTriggerDetail {
+                trigger_kind: "api".to_string(),
+                event_kind: None,
+                event_id: None,
+                event_seq: None,
+                description: "started via API".to_string(),
+            }),
+            bind_work_item: None,
+        }
+    }
+
+    /// A run fired by a matched core event: the trigger fire says which trigger
+    /// matched and what to bind, and the event itself names the kind, entity,
+    /// and sequence the audit records.
+    fn event(fire: TriggerFire, event_kind: &str, event_id: &str, event_seq: i64) -> Self {
+        Self {
+            trigger: AgentTaskRunTrigger::Event,
+            detail: Some(RunTriggerDetail {
+                trigger_kind: fire.trigger_kind.to_string(),
+                event_kind: Some(event_kind.to_string()),
+                event_id: (!event_id.is_empty()).then(|| event_id.to_string()),
+                event_seq: Some(event_seq),
+                description: fire.description,
+            }),
+            bind_work_item: fire.bind_work_item,
+        }
+    }
 }
 
 /// The live controls for one in-flight run (#289): the handle its steer and
@@ -589,6 +826,92 @@ impl AgentTaskRegistry {
         });
     }
 
+    /// Subscribe to the engine's event bus and start runs from matching core
+    /// events (#290).
+    ///
+    /// This is the subscription the feature turns on, and it is a subscription
+    /// rather than a poll: the front door already follows vogt-core's event
+    /// cursor once, in one place, and republishes each change onto this bus as
+    /// `VogtChanged` (`vogt_core::spawn_event_follower`, FR-U10). This watcher
+    /// reads that bus exactly as `spawn_run_watcher` above reads it for session
+    /// deaths — no second cursor, no second poller, no core credential of its
+    /// own. It inherits the follower's properties: silent when no core is
+    /// configured, and starting from the core's current head so a boot replays
+    /// nothing.
+    pub fn spawn_trigger_watcher(self: &Arc<Self>, bus: EventBus) {
+        let registry = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut rx = bus.subscribe();
+            loop {
+                match rx.recv().await {
+                    Ok(ServerEvent::VogtChanged {
+                        kind,
+                        entity_id,
+                        seq,
+                        summary,
+                        ..
+                    }) => {
+                        registry.dispatch_core_event(&kind, &entity_id, seq, &summary).await;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        // A burst outran this consumer. What was lost is trigger
+                        // fires, and the no-storm rule already accepts a missed
+                        // fire (a paused engine misses them too); losing a few
+                        // under a burst is the same trade, not a reason to stop.
+                        tracing::warn!(skipped, "agent task trigger watcher lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    /// Match one core event against every active task's enabled triggers and
+    /// start a run for each task that matched (#290).
+    ///
+    /// Events are handled one at a time — the watcher awaits each start before
+    /// the next event — so this is where the no-storm and concurrency rules
+    /// bite: a task already at its cap has its fire logged and dropped by
+    /// `start_run`, never requeued. A single event fires a given task at most
+    /// once, even if two of its triggers would match, so one transition cannot
+    /// multiply into several runs of the same task.
+    async fn dispatch_core_event(
+        self: &Arc<Self>,
+        kind: &str,
+        entity_id: &str,
+        seq: i64,
+        summary: &serde_json::Value,
+    ) {
+        let fires: Vec<(Uuid, TriggerFire)> = {
+            let tasks = self.tasks.lock();
+            let mut fires = Vec::new();
+            let mut fired: HashSet<Uuid> = HashSet::new();
+            for task in tasks.iter().filter(|t| t.status == AgentTaskStatus::Active) {
+                for trigger in task.triggers.iter().filter(|t| t.enabled) {
+                    if let Some(fire) = spec_matches(&trigger.spec, kind, entity_id, summary) {
+                        if fired.insert(task.id) {
+                            fires.push((task.id, fire));
+                        }
+                        break;
+                    }
+                }
+            }
+            fires
+        };
+
+        for (task_id, fire) in fires {
+            let origin = RunOrigin::event(fire, kind, entity_id, seq);
+            if let Err(e) = self.start_run(task_id, origin).await {
+                tracing::warn!(
+                    task = %task_id,
+                    error = %e,
+                    "agent-task trigger run failed to start"
+                );
+            }
+        }
+    }
+
     pub fn list(&self) -> Vec<AgentTask> {
         let mut out = self.tasks.lock().clone();
         out.sort_by_key(|t| t.created_at);
@@ -609,6 +932,8 @@ impl AgentTaskRegistry {
         let prompt = clean_required("prompt", req.prompt)?;
         let schedule = req.schedule.unwrap_or(AgentTaskSchedule::Manual);
         validate_schedule(&schedule)?;
+        let triggers = clean_triggers(req.triggers)?;
+        let concurrency = clean_concurrency(req.concurrency);
         let gates = clean_gates(req.gates)?;
         let now = OffsetDateTime::now_utc();
         let status = if req.enabled == Some(false) {
@@ -626,6 +951,8 @@ impl AgentTaskRegistry {
             name,
             prompt,
             schedule,
+            triggers,
+            concurrency,
             status,
             command: clean_command(req.command),
             cwd: clean_optional(req.cwd),
@@ -672,6 +999,12 @@ impl AgentTaskRegistry {
         if let Some(schedule) = req.schedule {
             validate_schedule(&schedule)?;
             task.schedule = schedule;
+        }
+        if let Some(triggers) = req.triggers {
+            task.triggers = clean_triggers(Some(triggers))?;
+        }
+        if let Some(concurrency) = req.concurrency {
+            task.concurrency = clean_concurrency(Some(concurrency));
         }
         if req.command.is_some() {
             task.command = clean_command(req.command);
@@ -899,7 +1232,27 @@ impl AgentTaskRegistry {
     }
 
     pub async fn run_now(self: &Arc<Self>, id: Uuid) -> Result<AgentTaskRun> {
-        self.start_run(id, AgentTaskRunTrigger::Manual)
+        self.start_run(id, RunOrigin::manual())
+            .await?
+            .ok_or_else(|| ApiError::Conflict("task did not start".into()))
+    }
+
+    /// Run a task now, recording it as an explicit `api` fire (#290) rather than
+    /// a human's `manual` Run Now. The task must have an `api` trigger armed —
+    /// programmatic firing is opt-in, so a task nobody meant to be driven this
+    /// way is refused by name rather than run.
+    pub async fn run_via_api(self: &Arc<Self>, id: Uuid) -> Result<AgentTaskRun> {
+        let task = self.get(id)?;
+        if !task
+            .triggers
+            .iter()
+            .any(|t| t.enabled && matches!(t.spec, TriggerSpec::Api))
+        {
+            return Err(ApiError::Conflict(
+                "task has no enabled 'api' trigger; add one to allow programmatic runs".into(),
+            ));
+        }
+        self.start_run(id, RunOrigin::api())
             .await?
             .ok_or_else(|| ApiError::Conflict("task did not start".into()))
     }
@@ -915,7 +1268,7 @@ impl AgentTaskRegistry {
             .collect();
 
         for id in due {
-            if let Err(e) = self.start_run(id, AgentTaskRunTrigger::Scheduled).await {
+            if let Err(e) = self.start_run(id, RunOrigin::scheduled()).await {
                 tracing::warn!(task = %id, error = %e, "scheduled agent task failed to start");
                 let _ = self.advance_next_run(id);
             }
@@ -925,43 +1278,79 @@ impl AgentTaskRegistry {
     async fn start_run(
         self: &Arc<Self>,
         id: Uuid,
-        trigger: AgentTaskRunTrigger,
+        origin: RunOrigin,
     ) -> Result<Option<AgentTaskRun>> {
         {
             let mut executing = self.executing.lock();
             if !executing.insert(id) {
-                if matches!(trigger, AgentTaskRunTrigger::Scheduled) {
-                    let _ = self.advance_next_run(id);
-                    return Ok(None);
-                }
-                return Err(ApiError::Conflict("task is already starting".into()));
+                return self.defer_or_conflict(id, origin.trigger, "task is already starting");
             }
         }
 
-        let result = self.start_run_inner(id, trigger).await;
+        let result = self.start_run_inner(id, origin).await;
         self.executing.lock().remove(&id);
         result
+    }
+
+    /// What a start that cannot proceed *now* does, by trigger (#290). A
+    /// scheduled fire re-arms its next tick; an event fire logs and drops — the
+    /// no-storm rule, a fire that cannot start does not spin retrying; a manual
+    /// or api fire is a 409 the caller sees. None of these retry.
+    fn defer_or_conflict(
+        &self,
+        id: Uuid,
+        trigger: AgentTaskRunTrigger,
+        reason: &str,
+    ) -> Result<Option<AgentTaskRun>> {
+        match trigger {
+            AgentTaskRunTrigger::Scheduled => {
+                let _ = self.advance_next_run(id);
+                Ok(None)
+            }
+            AgentTaskRunTrigger::Event => {
+                tracing::info!(
+                    task = %id,
+                    reason,
+                    "agent-task trigger fired but could not start now; dropped without retry"
+                );
+                Ok(None)
+            }
+            AgentTaskRunTrigger::Manual | AgentTaskRunTrigger::Api => {
+                Err(ApiError::Conflict(reason.to_string()))
+            }
+        }
     }
 
     async fn start_run_inner(
         self: &Arc<Self>,
         id: Uuid,
-        trigger: AgentTaskRunTrigger,
+        origin: RunOrigin,
     ) -> Result<Option<AgentTaskRun>> {
-        let task = self.get(id)?;
+        let trigger = origin.trigger;
+        let mut task = self.get(id)?;
+        // An event or scheduled fire on a paused task is a no-op, not an error:
+        // the trigger stays armed for when the task is resumed.
         if task.status != AgentTaskStatus::Active
-            && matches!(trigger, AgentTaskRunTrigger::Scheduled)
+            && matches!(
+                trigger,
+                AgentTaskRunTrigger::Scheduled | AgentTaskRunTrigger::Event
+            )
         {
             return Ok(None);
         }
-        if self.has_running_session(&task) {
-            if matches!(trigger, AgentTaskRunTrigger::Scheduled) {
-                self.advance_next_run(id)?;
-                return Ok(None);
-            }
-            return Err(ApiError::Conflict(
-                "latest task session is still running".into(),
-            ));
+        // The per-task concurrency cap (#290). Counting live sessions, not the
+        // `executing` guard above, so a cap of two genuinely allows two runs in
+        // flight while a cap of one preserves the old one-at-a-time behaviour.
+        let cap = task.concurrency.max(1) as usize;
+        if self.running_run_count(&task) >= cap {
+            return self.defer_or_conflict(id, trigger, "task is at its concurrency cap");
+        }
+        // A trigger fire binds the run to the item the event named (#290), for
+        // this run only — the persisted task binding is untouched. This is what
+        // makes "run, bound to that item" true: the run's VOGT_WORK_ITEM and its
+        // prompt name the item that triggered it.
+        if let Some(work_item) = origin.bind_work_item.clone() {
+            task.vogt_work_item = Some(work_item);
         }
 
         let run_id = Uuid::new_v4();
@@ -1033,6 +1422,7 @@ impl AgentTaskRegistry {
             task_id: task.id,
             started_at: now,
             trigger,
+            trigger_detail: origin.detail.clone(),
             session_id: session.id,
             session_name,
             prompt_file: prompt_file_display,
@@ -1069,6 +1459,22 @@ impl AgentTaskRegistry {
                 task.runs.drain(0..extra);
             }
             self.save_locked(&tasks)?;
+        }
+
+        // Announce a triggered run on the stream the moment its session exists
+        // (#290), so a client — and `why` — can see the run and the trigger
+        // that caused it without waiting for the conclusion. Manual and
+        // scheduled runs carry no originating event and emit nothing here.
+        if let Some(detail) = origin.detail.as_ref() {
+            self.bus.publish(ServerEvent::TaskRunTriggered {
+                task_id: task.id,
+                run_id: run.id,
+                session_id: session.id,
+                trigger_kind: detail.trigger_kind.clone(),
+                event_kind: detail.event_kind.clone(),
+                event_id: detail.event_id.clone(),
+                event_seq: detail.event_seq,
+            });
         }
 
         if task.notify_on_start {
@@ -1155,12 +1561,14 @@ impl AgentTaskRegistry {
         Ok(Some(run))
     }
 
-    fn has_running_session(&self, task: &AgentTask) -> bool {
+    /// How many of a task's runs still have a live session — the number the
+    /// concurrency cap (#290) is compared against.
+    fn running_run_count(&self, task: &AgentTask) -> usize {
         task.runs
             .iter()
-            .rev()
             .filter_map(|run| self.sessions.get(run.session_id).ok())
-            .any(|session| session.exit_code().is_none())
+            .filter(|session| session.exit_code().is_none())
+            .count()
     }
 
     fn set_enabled(&self, id: Uuid, enabled: bool) -> Result<AgentTask> {
@@ -1826,6 +2234,8 @@ impl std::fmt::Display for AgentTaskRunTrigger {
         match self {
             AgentTaskRunTrigger::Manual => f.write_str("manual"),
             AgentTaskRunTrigger::Scheduled => f.write_str("scheduled"),
+            AgentTaskRunTrigger::Event => f.write_str("event"),
+            AgentTaskRunTrigger::Api => f.write_str("api"),
         }
     }
 }
@@ -1878,11 +2288,27 @@ pub async fn resume(
     Ok(Json(state.agent_tasks.resume(id)?))
 }
 
+/// Query for `POST /api/agent-tasks/:id/run`. `trigger=api` records the run as
+/// an explicit programmatic fire (#290) — allowed only when the task has an
+/// `api` trigger armed. Omitted (or anything else) is the human Run Now, which
+/// records `manual` and needs no trigger.
+#[derive(Debug, Default, Deserialize)]
+pub struct RunNowQuery {
+    #[serde(default)]
+    pub trigger: Option<String>,
+}
+
 pub async fn run_now(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<Uuid>,
+    axum::extract::Query(query): axum::extract::Query<RunNowQuery>,
 ) -> Result<Json<AgentTaskRun>> {
-    Ok(Json(state.agent_tasks.run_now(id).await?))
+    let run = if query.trigger.as_deref() == Some("api") {
+        state.agent_tasks.run_via_api(id).await?
+    } else {
+        state.agent_tasks.run_now(id).await?
+    };
+    Ok(Json(run))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2136,6 +2562,209 @@ fn task_with_run_mut(tasks: &mut [AgentTask], run_id: Uuid) -> Option<&mut Agent
     tasks
         .iter_mut()
         .find(|t| t.runs.iter().any(|r| r.id == run_id))
+}
+
+/// Match one enabled trigger against a core event (#290).
+///
+/// Pure by design: it reads only the event's own `kind`, `entity_id`, and
+/// `summary`, never the registry — the engine has no view of Vogt's registry,
+/// so a filter it cannot satisfy from the event is one it must not pretend to.
+/// Returns the [`TriggerFire`] when the event matches, `None` otherwise. The
+/// [`TriggerSpec::Api`] arm never matches an event; it is fired only through the
+/// API path.
+fn spec_matches(
+    spec: &TriggerSpec,
+    kind: &str,
+    entity_id: &str,
+    summary: &serde_json::Value,
+) -> Option<TriggerFire> {
+    let field = |name: &str| summary.get(name).and_then(|v| v.as_str());
+    match spec {
+        TriggerSpec::WorkTransition {
+            to_state,
+            project,
+            item_kind,
+            label,
+            work_item,
+        } => {
+            if kind != "work.transitioned" {
+                return None;
+            }
+            if field("to") != Some(to_state.as_str()) {
+                return None;
+            }
+            let event_ref = field("ref");
+            if let Some(want) = work_item {
+                if event_ref != Some(want.as_str()) {
+                    return None;
+                }
+            }
+            if let Some(want) = project {
+                if field("project") != Some(want.as_str()) {
+                    return None;
+                }
+            }
+            if let Some(want) = item_kind {
+                if field("kind") != Some(want.as_str()) {
+                    return None;
+                }
+            }
+            if let Some(want) = label {
+                let has = summary
+                    .get("labels")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|arr| arr.iter().any(|l| l.as_str() == Some(want.as_str())));
+                if !has {
+                    return None;
+                }
+            }
+            let subject = event_ref.unwrap_or(entity_id);
+            Some(TriggerFire {
+                trigger_kind: spec.kind_str(),
+                bind_work_item: event_ref.map(str::to_string),
+                description: format!("{subject} entered {to_state}"),
+            })
+        }
+        TriggerSpec::ObservationNew {
+            observation_kind,
+            project,
+        } => {
+            if kind != "observation.new" {
+                return None;
+            }
+            if field("kind") != Some(observation_kind.as_str()) {
+                return None;
+            }
+            if let Some(want) = project {
+                if field("project") != Some(want.as_str()) {
+                    return None;
+                }
+            }
+            let subject = field("subject").unwrap_or(entity_id);
+            Some(TriggerFire {
+                trigger_kind: spec.kind_str(),
+                bind_work_item: None,
+                description: format!("new {observation_kind}: {subject}"),
+            })
+        }
+        TriggerSpec::DriftProposed { project } => {
+            if kind != "drift.raised" {
+                return None;
+            }
+            if let Some(want) = project {
+                if field("project") != Some(want.as_str()) {
+                    return None;
+                }
+            }
+            let what = field("summary").or_else(|| field("kind")).unwrap_or(entity_id);
+            Some(TriggerFire {
+                trigger_kind: spec.kind_str(),
+                bind_work_item: None,
+                description: format!("drift raised: {what}"),
+            })
+        }
+        TriggerSpec::ForgePrChecks { status, work_item } => {
+            if kind != "forge.pr.checks" {
+                return None;
+            }
+            let event_status = field("status")?;
+            let status_ok = match status {
+                ForgeCheckStatus::Any => matches!(event_status, "green" | "red"),
+                ForgeCheckStatus::Green => event_status == "green",
+                ForgeCheckStatus::Red => event_status == "red",
+            };
+            if !status_ok {
+                return None;
+            }
+            let event_item = field("work_item");
+            if let Some(want) = work_item {
+                if event_item != Some(want.as_str()) {
+                    return None;
+                }
+            }
+            let pr = field("pr").or(event_item).unwrap_or(entity_id);
+            Some(TriggerFire {
+                trigger_kind: spec.kind_str(),
+                bind_work_item: event_item.map(str::to_string),
+                description: format!("PR {pr} checks {event_status}"),
+            })
+        }
+        TriggerSpec::Api => None,
+    }
+}
+
+/// The concurrency cap a task is stored with, clamped to a sane band: at least
+/// one (zero would mean a task that can never run), and a ceiling so a typo
+/// cannot ask for a thousand simultaneous PTYs.
+fn clean_concurrency(value: Option<u32>) -> u32 {
+    value
+        .map(|c| c.clamp(1, 20))
+        .unwrap_or(DEFAULT_TASK_CONCURRENCY)
+}
+
+/// Validate and normalise a task's declared triggers (#290): trim the string
+/// fields, drop blanks to `None`, and reject a trigger whose required field is
+/// empty — a `work-transition` with no `to_state` matches nothing and is a
+/// configuration mistake, caught at write time rather than at fire time.
+fn clean_triggers(triggers: Option<Vec<AgentTaskTrigger>>) -> Result<Vec<AgentTaskTrigger>> {
+    let Some(triggers) = triggers else {
+        return Ok(vec![]);
+    };
+    let mut out = Vec::with_capacity(triggers.len());
+    for mut trigger in triggers {
+        validate_trigger_spec(&mut trigger.spec)?;
+        out.push(trigger);
+    }
+    Ok(out)
+}
+
+fn validate_trigger_spec(spec: &mut TriggerSpec) -> Result<()> {
+    match spec {
+        TriggerSpec::WorkTransition {
+            to_state,
+            project,
+            item_kind,
+            label,
+            work_item,
+        } => {
+            *to_state = to_state.trim().to_string();
+            if to_state.is_empty() {
+                return Err(ApiError::BadRequest(
+                    "work-transition trigger needs a to_state".into(),
+                ));
+            }
+            trim_opt(project);
+            trim_opt(item_kind);
+            trim_opt(label);
+            trim_opt(work_item);
+        }
+        TriggerSpec::ObservationNew {
+            observation_kind,
+            project,
+        } => {
+            *observation_kind = observation_kind.trim().to_string();
+            if observation_kind.is_empty() {
+                return Err(ApiError::BadRequest(
+                    "observation-new trigger needs an observation_kind".into(),
+                ));
+            }
+            trim_opt(project);
+        }
+        TriggerSpec::DriftProposed { project } => trim_opt(project),
+        TriggerSpec::ForgePrChecks { work_item, .. } => trim_opt(work_item),
+        TriggerSpec::Api => {}
+    }
+    Ok(())
+}
+
+/// Trim an optional string in place, folding a now-empty value to `None` — the
+/// same rule `clean_optional` applies, so a GUI's empty filter field is no
+/// filter rather than a filter on the empty string.
+fn trim_opt(value: &mut Option<String>) {
+    if let Some(inner) = value {
+        let trimmed = inner.trim().to_string();
+        *value = (!trimmed.is_empty()).then_some(trimmed);
+    }
 }
 
 /// Validate and normalise a task's declared gates. A gate a client could not
@@ -3044,6 +3673,8 @@ mod tests {
             name: "Nightly".into(),
             prompt: "Look".into(),
             schedule: AgentTaskSchedule::Manual,
+            triggers: vec![],
+            concurrency: DEFAULT_TASK_CONCURRENCY,
             status: AgentTaskStatus::Active,
             command: None,
             cwd: None,
@@ -3243,6 +3874,234 @@ mod tests {
         // An incomplete block (no closing fence) is not yet takeable.
         let mut partial = "```json\n{\"ok\": true}".to_string();
         assert!(take_fenced_block(&mut partial).is_none());
+    }
+
+    // --- #290: event triggers, matching, validation, audit -----------------
+
+    fn work_transitioned(summary: serde_json::Value) -> (String, String, serde_json::Value) {
+        ("work.transitioned".into(), "wi_1".into(), summary)
+    }
+
+    #[test]
+    fn work_transition_matches_the_state_and_binds_the_item_ref() {
+        let spec = TriggerSpec::WorkTransition {
+            to_state: "ready".into(),
+            project: None,
+            item_kind: None,
+            label: None,
+            work_item: None,
+        };
+        let (kind, id, summary) =
+            work_transitioned(serde_json::json!({"ref": "WI-7", "from": "review", "to": "ready"}));
+        let fire = spec_matches(&spec, &kind, &id, &summary).expect("the state matches");
+        assert_eq!(fire.trigger_kind, "work-transition");
+        // The run is bound to the item that transitioned, by its ref.
+        assert_eq!(fire.bind_work_item.as_deref(), Some("WI-7"));
+        assert_eq!(fire.description, "WI-7 entered ready");
+
+        // A different destination state does not match.
+        let (kind, id, other) =
+            work_transitioned(serde_json::json!({"ref": "WI-7", "to": "done"}));
+        assert!(spec_matches(&spec, &kind, &id, &other).is_none());
+    }
+
+    #[test]
+    fn work_transition_project_kind_and_label_filters_narrow_the_match() {
+        let spec = TriggerSpec::WorkTransition {
+            to_state: "ready".into(),
+            project: Some("vogt".into()),
+            item_kind: Some("bug".into()),
+            label: Some("urgent".into()),
+            work_item: None,
+        };
+        let (kind, id, ok) = work_transitioned(serde_json::json!({
+            "ref": "WI-7", "to": "ready",
+            "project": "vogt", "kind": "bug", "labels": ["urgent", "backend"],
+        }));
+        assert!(spec_matches(&spec, &kind, &id, &ok).is_some());
+
+        // Wrong project, wrong kind, and a missing label each fail the match.
+        for bad in [
+            serde_json::json!({"ref":"WI-7","to":"ready","project":"other","kind":"bug","labels":["urgent"]}),
+            serde_json::json!({"ref":"WI-7","to":"ready","project":"vogt","kind":"feature","labels":["urgent"]}),
+            serde_json::json!({"ref":"WI-7","to":"ready","project":"vogt","kind":"bug","labels":["backend"]}),
+        ] {
+            assert!(spec_matches(&spec, &kind, &id, &bad).is_none());
+        }
+    }
+
+    #[test]
+    fn work_transition_scoped_to_one_item_ignores_the_others() {
+        let spec = TriggerSpec::WorkTransition {
+            to_state: "ready".into(),
+            project: None,
+            item_kind: None,
+            label: None,
+            work_item: Some("WI-7".into()),
+        };
+        let (kind, id, mine) = work_transitioned(serde_json::json!({"ref": "WI-7", "to": "ready"}));
+        assert!(spec_matches(&spec, &kind, &id, &mine).is_some());
+        let (kind, id, theirs) =
+            work_transitioned(serde_json::json!({"ref": "WI-9", "to": "ready"}));
+        assert!(spec_matches(&spec, &kind, &id, &theirs).is_none());
+    }
+
+    #[test]
+    fn observation_new_matches_kind_and_optional_project() {
+        let spec = TriggerSpec::ObservationNew {
+            observation_kind: "forge.issue".into(),
+            project: Some("vogt".into()),
+        };
+        let ok = serde_json::json!({"kind": "forge.issue", "project": "vogt", "subject": "#42"});
+        let fire = spec_matches(&spec, "observation.new", "obs_1", &ok).expect("kind and project");
+        assert_eq!(fire.trigger_kind, "observation-new");
+        assert!(fire.bind_work_item.is_none());
+        assert_eq!(fire.description, "new forge.issue: #42");
+
+        // A PR is a different observation kind, and a different project is out.
+        assert!(spec_matches(
+            &spec,
+            "observation.new",
+            "obs_1",
+            &serde_json::json!({"kind": "forge.pull_request", "project": "vogt"}),
+        )
+        .is_none());
+        assert!(spec_matches(
+            &spec,
+            "observation.new",
+            "obs_1",
+            &serde_json::json!({"kind": "forge.issue", "project": "other"}),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn drift_proposed_matches_drift_raised_and_scopes_by_project() {
+        let any = TriggerSpec::DriftProposed { project: None };
+        let raised = serde_json::json!({"kind": "coupling", "summary": "vogt depends on x", "project": "vogt"});
+        assert!(spec_matches(&any, "drift.raised", "d_1", &raised).is_some());
+        // The core spells it `drift.raised`, never `drift.proposed`.
+        assert!(spec_matches(&any, "drift.proposed", "d_1", &raised).is_none());
+
+        let scoped = TriggerSpec::DriftProposed {
+            project: Some("vogt".into()),
+        };
+        assert!(spec_matches(&scoped, "drift.raised", "d_1", &raised).is_some());
+        assert!(spec_matches(
+            &scoped,
+            "drift.raised",
+            "d_1",
+            &serde_json::json!({"kind": "coupling", "project": "other"}),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn forge_pr_checks_matches_status_and_binds_the_linked_item() {
+        let red = TriggerSpec::ForgePrChecks {
+            status: ForgeCheckStatus::Red,
+            work_item: None,
+        };
+        let event = serde_json::json!({"status": "red", "work_item": "WI-7", "pr": "#12"});
+        let fire = spec_matches(&red, "forge.pr.checks", "pr_12", &event).expect("red matches red");
+        assert_eq!(fire.trigger_kind, "forge-pr-checks");
+        assert_eq!(fire.bind_work_item.as_deref(), Some("WI-7"));
+        assert_eq!(fire.description, "PR #12 checks red");
+
+        // A green event does not fire a red trigger; `Any` fires on either.
+        let green = serde_json::json!({"status": "green", "work_item": "WI-7"});
+        assert!(spec_matches(&red, "forge.pr.checks", "pr_12", &green).is_none());
+        let any = TriggerSpec::ForgePrChecks {
+            status: ForgeCheckStatus::Any,
+            work_item: Some("WI-7".into()),
+        };
+        assert!(spec_matches(&any, "forge.pr.checks", "pr_12", &green).is_some());
+        // Scoped to WI-7, a PR linked to WI-9 is ignored.
+        assert!(spec_matches(
+            &any,
+            "forge.pr.checks",
+            "pr_12",
+            &serde_json::json!({"status": "green", "work_item": "WI-9"}),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn an_api_trigger_never_matches_a_core_event() {
+        for kind in ["work.transitioned", "drift.raised", "observation.new"] {
+            assert!(spec_matches(&TriggerSpec::Api, kind, "x", &serde_json::json!({})).is_none());
+        }
+    }
+
+    #[test]
+    fn concurrency_is_clamped_to_a_sane_band() {
+        assert_eq!(clean_concurrency(None), 1);
+        assert_eq!(clean_concurrency(Some(0)), 1);
+        assert_eq!(clean_concurrency(Some(3)), 3);
+        assert_eq!(clean_concurrency(Some(1000)), 20);
+    }
+
+    #[test]
+    fn clean_triggers_trims_filters_and_rejects_an_empty_required_field() {
+        let cleaned = clean_triggers(Some(vec![AgentTaskTrigger {
+            enabled: true,
+            spec: TriggerSpec::WorkTransition {
+                to_state: " ready ".into(),
+                project: Some("  ".into()),
+                item_kind: None,
+                label: Some(" urgent ".into()),
+                work_item: None,
+            },
+        }]))
+        .expect("a valid trigger");
+        match &cleaned[0].spec {
+            TriggerSpec::WorkTransition {
+                to_state,
+                project,
+                label,
+                ..
+            } => {
+                assert_eq!(to_state, "ready");
+                // A blank filter is no filter, not a filter on the empty string.
+                assert!(project.is_none());
+                assert_eq!(label.as_deref(), Some("urgent"));
+            }
+            other => panic!("wrong spec: {other:?}"),
+        }
+
+        // A work-transition with no destination state matches nothing and is
+        // refused at write time.
+        assert!(clean_triggers(Some(vec![AgentTaskTrigger {
+            enabled: true,
+            spec: TriggerSpec::WorkTransition {
+                to_state: "  ".into(),
+                project: None,
+                item_kind: None,
+                label: None,
+                work_item: None,
+            },
+        }]))
+        .is_err());
+    }
+
+    #[test]
+    fn a_run_origin_from_an_event_names_the_trigger_and_the_event_id() {
+        // The audit guarantee: a triggered run records which trigger fired and
+        // which event caused it, so `why` can explain the run.
+        let fire = TriggerFire {
+            trigger_kind: "work-transition",
+            bind_work_item: Some("WI-7".into()),
+            description: "WI-7 entered ready".into(),
+        };
+        let origin = RunOrigin::event(fire, "work.transitioned", "wi_7", 4102);
+        assert_eq!(origin.trigger, AgentTaskRunTrigger::Event);
+        assert_eq!(origin.bind_work_item.as_deref(), Some("WI-7"));
+        let detail = origin.detail.expect("an event origin carries a detail");
+        assert_eq!(detail.trigger_kind, "work-transition");
+        assert_eq!(detail.event_kind.as_deref(), Some("work.transitioned"));
+        assert_eq!(detail.event_id.as_deref(), Some("wi_7"));
+        assert_eq!(detail.event_seq, Some(4102));
+        assert_eq!(detail.description, "WI-7 entered ready");
     }
 
     #[test]

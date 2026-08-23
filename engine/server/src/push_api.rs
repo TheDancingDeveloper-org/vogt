@@ -391,6 +391,7 @@ mod tests {
             entity_kind: "drift_proposal".into(),
             entity_id: "d-1".into(),
             seq: 1,
+            summary: serde_json::Value::Null,
         }
     }
 

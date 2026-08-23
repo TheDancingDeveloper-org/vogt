@@ -777,7 +777,11 @@ def _transition_native(ctx: AppContext, params: TransitionWorkParams) -> WorkRes
             entity_id=item.id,
             payload=updated.model_dump(mode="json"),
             event_kind=WORK_TRANSITIONED_EVENT,
-            summary={"ref": item.ref, "from": item.state, "to": params.to_state},
+            summary=_transition_summary(
+                item,
+                params.to_state,
+                (proj := _project_of(txn, item)) and proj.slug,
+            ),
         )
 
     return audited_write(
@@ -843,7 +847,7 @@ def _transition_upstream(
             entity_id=item.ref,
             payload=updated.model_dump(mode="json"),
             event_kind=WORK_TRANSITIONED_EVENT,
-            summary={"ref": item.ref, "from": item.state, "to": params.to_state},
+            summary=_transition_summary(item, params.to_state, project.slug),
         )
 
     return audited_write(
@@ -1069,6 +1073,30 @@ def _comment_upstream(
 def _project_of(txn: WriteTxn, item: WorkItem) -> Project | None:
     """The project a work item belongs to, if any."""
     return None if item.project_id is None else txn.project_by_id(item.project_id)
+
+
+def _transition_summary(
+    item: WorkItem, to_state: str, project_slug: str | None
+) -> dict[str, object]:
+    """The `work.transitioned` event summary (#290).
+
+    Carries the item `kind`, its `labels`, and its `project` slug in addition to
+    the ref and the from/to states, so a downstream consumer — the engine's
+    agent-task trigger, which has no view of this registry — can filter a
+    transition by project, kind, or label from the event alone. Additive: the
+    ref/from/to a reader relied on before are untouched, and `project` is
+    omitted for an item that belongs to none rather than sent as null.
+    """
+    summary: dict[str, object] = {
+        "ref": item.ref,
+        "from": item.state,
+        "to": to_state,
+        "kind": item.kind,
+        "labels": list(item.labels),
+    }
+    if project_slug is not None:
+        summary["project"] = project_slug
+    return summary
 
 
 def _linked_subject(txn: WriteTxn, item: WorkItem) -> str | None:

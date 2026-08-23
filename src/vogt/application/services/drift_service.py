@@ -336,13 +336,30 @@ def _raise_proposal(
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[DriftProposal]:
         txn.insert_drift(proposal)
+        # `project` is additive (#290): it lets the engine's agent-task trigger
+        # scope a `drift-proposed` fire to one project from the event alone.
+        # The proposal carries a `project_id`, not always a slug, so resolve the
+        # slug here — a slug is what a person types and what the engine matches.
+        # Omitted, not null, for a proposal that names no project. The
+        # `kind`/`summary` a reader relied on are untouched.
+        project = (
+            txn.project_by_id(proposal.project_id)
+            if proposal.project_id is not None
+            else None
+        )
+        summary: dict[str, object] = {
+            "kind": proposal.kind,
+            "summary": proposal.summary,
+        }
+        if project is not None:
+            summary["project"] = project.slug
         return WriteOutcome(
             result=proposal,
             entity_kind="drift_proposal",
             entity_id=proposal.id,
             payload=proposal.model_dump(mode="json"),
             event_kind=DRIFT_RAISED_EVENT,
-            summary={"kind": proposal.kind, "summary": proposal.summary},
+            summary=summary,
         )
 
     return audited_write(ctx, operation="drift.detect", reason=reason, body=body)

@@ -26,6 +26,7 @@ import pytest
 from vogt.application.context import AppContext
 from vogt.application.models import (
     CommentParams,
+    CreateLabelParams,
     CreateWorkParams,
     ListAuditParams,
     ListEventsParams,
@@ -36,6 +37,7 @@ from vogt.application.models import (
 )
 from vogt.application.services import (
     comment_work,
+    create_label,
     create_work,
     list_audit,
     list_events,
@@ -47,7 +49,7 @@ from vogt.application.services import (
 from vogt.core.entities import AuditRecord
 from vogt.errors import NotFound
 
-from tests.conftest import native_comment, native_work_item
+from tests.conftest import mark_linked, native_comment, native_work_item
 
 WHY = "a test said so"
 
@@ -495,6 +497,39 @@ def test_an_items_events_carry_the_states_it_moved_between(
     assert all(e.audit_id for e in moves), (
         "and each names the audit row that says why, so the two halves join"
     )
+
+
+def test_a_transition_event_carries_project_kind_and_labels(
+    instance: AppContext,
+) -> None:
+    # #290: the engine's agent-task trigger filters a transition by project,
+    # kind, and label with no view of this registry, so the transitioned event
+    # carries them beside the states it moved between. Additive — `ref`, `from`,
+    # and `to` are unchanged.
+    slug = _project(instance, "triggers")
+    mark_linked(instance, slug)
+    for label in ("urgent", "backend"):
+        create_label(instance, CreateLabelParams(name=label, reason=WHY))
+    ref = native_work_item(
+        instance,
+        kind="bug",
+        title="Trigger fodder",
+        project=slug,
+        labels=("urgent", "backend"),
+    ).ref
+    transition_work(
+        instance, TransitionWorkParams(ref=ref, to_state="in_progress", reason=WHY)
+    )
+
+    events = list_events(
+        instance, ListEventsParams(entity_id=_item_id(instance, ref))
+    ).events
+    moved = next(e for e in events if e.kind == "work.transitioned")
+    assert moved.summary["ref"] == ref
+    assert moved.summary["to"] == "in_progress"
+    assert moved.summary["kind"] == "bug"
+    assert moved.summary["project"] == slug
+    assert sorted(moved.summary["labels"]) == ["backend", "urgent"]
 
 
 def test_an_items_history_excludes_every_other_items(instance: AppContext) -> None:

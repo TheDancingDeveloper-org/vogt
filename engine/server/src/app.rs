@@ -202,6 +202,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     push_api::spawn_vogt_drift_watcher(Arc::clone(&state));
     state.agent_tasks.spawn_scheduler();
     state.agent_tasks.spawn_run_watcher(state.bus.clone());
+    // Background task: subscribe to the same bus and start runs from matching
+    // core-state events (#290). The follower above is what puts vogt-core's
+    // events on this bus; this watcher turns the ones a task listens for into
+    // runs, bound and audited, capped per task and without a retry storm.
+    state.agent_tasks.spawn_trigger_watcher(state.bus.clone());
     // Background task: enforce the assistant log's retention horizon on a
     // schedule (FR-T14), so the horizon is a configured maximum rather than
     // whatever the last caller passed — the failure mode r18 named in the
