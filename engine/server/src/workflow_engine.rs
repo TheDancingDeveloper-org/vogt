@@ -14,9 +14,13 @@
 //! This module is the **seam plus the Fabro client**, fully unit/integration
 //! tested against a *fake* HTTP server whose responses match the documented
 //! Fabro contract below. The estate has no running Fabro instance, so live
-//! end-to-end validation is deliberately **deferred to increment 2**. SSE event
-//! mirroring, gate bridging (#289) and checkpoint-branch collection (#283/#284)
-//! also land in increment 2 — this increment tracks a run by polling.
+//! end-to-end validation is deliberately **deferred**. Increment 1 tracked a
+//! run purely by polling; **increment 2 (this slice)** adds SSE event
+//! mirroring: [`WorkflowProvider::stream_events`] subscribes to the engine's
+//! live event stream, yields typed [`ProviderEvent`]s, and drives a run to its
+//! terminal conclusion the moment the stream reports one — falling back to the
+//! poller when the stream is absent or breaks. Gate bridging (#289) and
+//! checkpoint-branch collection (#283/#284) remain deferred to a later slice.
 //!
 //! ## ASSUMED Fabro REST contract
 //!
@@ -44,13 +48,33 @@
 //!     }?
 //!   }
 //!   ```
+//! * **stream run events** — `GET {base}/api/runs/{id}/events`
+//!   with `Accept: text/event-stream`. A `text/event-stream` (SSE) response
+//!   whose `data:` lines carry a JSON envelope. The exact envelope schema is
+//!   **not specified** by `FABRO_COMPARISON.md` (it records only "one event
+//!   envelope everywhere (SSE, NDJSON, export)"), so the shape below is a
+//!   **PROVISIONAL envelope, unverified against a live Fabro** — a live smoke
+//!   test in a later slice may rename these fields. See [`SseEnvelope`].
+//!   ```json
+//!   {
+//!     "type": "<event kind>",          // e.g. "node.started", "run.completed"
+//!     "message": "<human text>?",
+//!     "node_id": "<step/node id>?",
+//!     "state": "running" | "succeeded" | "failed"
+//!            | "partially_succeeded" | "skipped",   // present on a terminal event
+//!     "ts_ms": <u64>?                    // event time, Unix epoch milliseconds
+//!   }
+//!   ```
 //!
 //! A `Bearer` token is sent when configured. Connection/timeout failures map to
 //! [`WorkflowEngineError::Unreachable`] — the "engine is absent" case, which the
 //! caller treats as non-fatal (the run is recorded errored, never a panic).
 
 use std::future::Future;
+use std::pin::Pin;
 
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_tasks::{AgentTaskRunConclusion, AgentTaskRunOutcome, DiffStat, RunCost};
@@ -153,6 +177,41 @@ pub struct ProviderRunStatus {
     pub conclusion: Option<ProviderConclusion>,
 }
 
+/// One event mirrored off the engine's live SSE stream (#293, increment 2).
+///
+/// A run's progress made observable without waiting for the poll interval: each
+/// record the engine streams is parsed into one of these. `kind` is the event's
+/// name (the SSE `event:` field, or the envelope's `type`); `message` and
+/// `step_id` carry the human text and the node the event is about when present;
+/// `at` is the event's own timestamp when the envelope carried one. When the
+/// event signals the run has *ended*, `terminal_state` is the mapped
+/// [`ProviderRunState`] — the tracker uses that to record the conclusion the
+/// instant the stream reports it, instead of on the next poll.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderEvent {
+    /// The event's kind/name, e.g. `node.started`, `run.completed`. Falls back
+    /// to `"message"` when neither the SSE `event:` field nor an envelope
+    /// `type` was present.
+    pub kind: String,
+    /// A human-readable line for the event, when the envelope carried one.
+    pub message: Option<String>,
+    /// The step/node the event is about, when the envelope named one.
+    pub step_id: Option<String>,
+    /// The event's own timestamp, when the envelope carried one.
+    pub at: Option<OffsetDateTime>,
+    /// The mapped terminal state, present only on an event that signals the run
+    /// has ended. `None` for an in-flight progress event.
+    pub terminal_state: Option<ProviderRunState>,
+}
+
+/// A live stream of a run's [`ProviderEvent`]s. Boxed (rather than an
+/// `impl Stream` associated type) so the trait method's return type is a plain
+/// concrete type — the crate has no `async_trait`, and a nested `impl Trait`
+/// inside a future's `Output` is not expressible. `Send` so the tracker can own
+/// it inside a `tokio::spawn`.
+pub type ProviderEventStream =
+    Pin<Box<dyn Stream<Item = Result<ProviderEvent, WorkflowEngineError>> + Send>>;
+
 /// The seam: create a run, then poll it to a terminal state. Implemented per
 /// engine; [`FabroProvider`] is the only implementation this increment ships.
 ///
@@ -174,6 +233,20 @@ pub trait WorkflowProvider {
         &self,
         run_id: &str,
     ) -> impl Future<Output = Result<ProviderRunStatus, WorkflowEngineError>> + Send;
+
+    /// Subscribe to a run's live event stream (#293, increment 2), yielding
+    /// typed [`ProviderEvent`]s until the engine ends the stream. The future
+    /// resolves once the subscription is established (headers received); the
+    /// returned stream then yields events as they arrive.
+    ///
+    /// Absence is the caller's concern, not this method's: an unreachable engine
+    /// or a non-success status is an `Err` here, and a stream that breaks mid-way
+    /// yields an `Err` item — in both cases the caller degrades to polling rather
+    /// than failing the run.
+    fn stream_events(
+        &self,
+        run_id: &str,
+    ) -> impl Future<Output = Result<ProviderEventStream, WorkflowEngineError>> + Send;
 }
 
 /// The Fabro provider — a thin REST client for the assumed contract documented
@@ -285,6 +358,34 @@ struct PollDiff {
     deletions: u64,
 }
 
+/// The **provisional** JSON envelope carried on a Fabro SSE `data:` line (see
+/// the module doc). Every field is optional and tolerant: a record that fails to
+/// parse as this shape does not panic — it degrades to a bare progress event
+/// carrying the raw `data` as its message (see [`parse_sse_record`]). The field
+/// names here are a reasonable guess coded to a documented-but-unverified
+/// contract, exactly as increment 1 coded the REST shapes; a live smoke test may
+/// move them.
+#[derive(Deserialize, Default)]
+struct SseEnvelope {
+    /// The event kind/name, when the envelope names one (else the SSE `event:`
+    /// field is used, else `"message"`).
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    /// The node/step the event is about. Accepts `node_id` primarily; a `step_id`
+    /// alias is tolerated for either spelling the live engine settles on.
+    #[serde(default, alias = "step_id")]
+    node_id: Option<String>,
+    /// Present on a terminal event; parsed through [`parse_state`], and only a
+    /// state that is actually terminal marks the event terminal.
+    #[serde(default)]
+    state: Option<String>,
+    /// The event time as Unix epoch milliseconds, when present.
+    #[serde(default)]
+    ts_ms: Option<i64>,
+}
+
 /// Parse the wire state token into a [`ProviderRunState`]. An unknown token is
 /// a `Config` error rather than a silent default — a state Vogt cannot map is a
 /// contract mismatch to surface in increment 2, not a run to guess about.
@@ -299,6 +400,179 @@ fn parse_state(raw: &str) -> Result<ProviderRunState, WorkflowEngineError> {
             "unknown workflow-engine run state {other:?}"
         ))),
     }
+}
+
+/// Build a [`ProviderEvent`] from one dispatched SSE record — its `event:` name
+/// (if any) and its joined `data:` payload.
+///
+/// The `data` is parsed as the provisional [`SseEnvelope`]; when that fails (a
+/// keep-alive comment, a non-JSON line, a shape we did not anticipate) the event
+/// degrades to a bare progress event whose message is the raw data, rather than
+/// panicking or dropping the record — the malformed-stream contract. An
+/// envelope `state` that parses to a *terminal* state marks the event terminal;
+/// a non-terminal or unknown state leaves `terminal_state` `None`.
+fn parse_sse_record(event_name: Option<&str>, data: &str) -> ProviderEvent {
+    let trimmed = data.trim();
+    let envelope: Option<SseEnvelope> = if trimmed.is_empty() {
+        None
+    } else {
+        serde_json::from_str(trimmed).ok()
+    };
+    match envelope {
+        Some(env) => {
+            let kind = env
+                .kind
+                .or_else(|| event_name.map(str::to_string))
+                .unwrap_or_else(|| "message".to_string());
+            let terminal_state = env
+                .state
+                .as_deref()
+                .and_then(|s| parse_state(s).ok())
+                .filter(|s| s.is_terminal());
+            let at = env.ts_ms.and_then(|ms| {
+                OffsetDateTime::from_unix_timestamp_nanos((ms as i128) * 1_000_000).ok()
+            });
+            ProviderEvent {
+                kind,
+                message: env.message,
+                step_id: env.node_id,
+                at,
+                terminal_state,
+            }
+        }
+        None => ProviderEvent {
+            kind: event_name.unwrap_or("message").to_string(),
+            message: (!trimmed.is_empty()).then(|| trimmed.to_string()),
+            step_id: None,
+            at: None,
+            terminal_state: None,
+        },
+    }
+}
+
+/// Turn a stream of raw response-body chunks into a stream of
+/// [`ProviderEvent`]s by parsing `text/event-stream` **manually** — no
+/// SSE-client crate is pulled in (the module deliberately stays on the crate's
+/// existing deps).
+///
+/// A canonical line-oriented SSE parser: bytes are accumulated, split into lines
+/// on `\n` (a trailing `\r` stripped), and each line updates the event being
+/// built (`event:` sets the name, `data:` appends a payload line, a `:` line is
+/// a comment, other fields are ignored). A **blank line dispatches** the
+/// accumulated event; a record with no fields dispatches nothing. When the body
+/// ends, any final unterminated line and any half-built event are flushed. A
+/// transport error becomes an `Err` item and ends the stream — the tracker then
+/// degrades to polling.
+fn sse_event_stream(
+    body: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
+) -> impl Stream<Item = Result<ProviderEvent, WorkflowEngineError>> + Send {
+    struct SseState {
+        body: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
+        /// Bytes read but not yet split into a whole line.
+        line_buf: Vec<u8>,
+        /// Fields of the event currently being built.
+        event_name: Option<String>,
+        data_lines: Vec<String>,
+        have_fields: bool,
+        /// Events parsed out of the last chunk but not yet yielded.
+        pending: std::collections::VecDeque<ProviderEvent>,
+        /// The body stream has ended; only the queue drains after this.
+        done: bool,
+    }
+
+    // Consume one whole line, updating the in-progress event; on a blank line,
+    // dispatch it into `pending`.
+    fn feed_line(st: &mut SseState, line: &str) {
+        if line.is_empty() {
+            if st.have_fields {
+                let data = st.data_lines.join("\n");
+                let ev = parse_sse_record(st.event_name.as_deref(), &data);
+                st.pending.push_back(ev);
+            }
+            st.event_name = None;
+            st.data_lines.clear();
+            st.have_fields = false;
+            return;
+        }
+        if line.starts_with(':') {
+            // An SSE comment / keep-alive — ignored.
+            return;
+        }
+        let (field, value) = match line.split_once(':') {
+            // Per the SSE spec a single leading space after the colon is stripped.
+            Some((f, v)) => (f, v.strip_prefix(' ').unwrap_or(v)),
+            None => (line, ""),
+        };
+        match field {
+            "event" => {
+                st.event_name = Some(value.to_string());
+                st.have_fields = true;
+            }
+            "data" => {
+                st.data_lines.push(value.to_string());
+                st.have_fields = true;
+            }
+            // `id`, `retry`, and any unknown field carry nothing this seam uses.
+            _ => {}
+        }
+    }
+
+    // Split whole lines (terminated by `\n`) out of the buffer, feeding each.
+    fn drain_lines(st: &mut SseState) {
+        while let Some(pos) = st.line_buf.iter().position(|&b| b == b'\n') {
+            let mut line: Vec<u8> = st.line_buf.drain(..=pos).collect();
+            line.pop(); // drop the '\n'
+            if line.last() == Some(&b'\r') {
+                line.pop(); // drop a CR from a CRLF terminator
+            }
+            let line = String::from_utf8_lossy(&line).into_owned();
+            feed_line(st, &line);
+        }
+    }
+
+    let state = SseState {
+        body,
+        line_buf: Vec::new(),
+        event_name: None,
+        data_lines: Vec::new(),
+        have_fields: false,
+        pending: std::collections::VecDeque::new(),
+        done: false,
+    };
+
+    futures_util::stream::try_unfold(state, |mut st| async move {
+        loop {
+            if let Some(ev) = st.pending.pop_front() {
+                return Ok(Some((ev, st)));
+            }
+            if st.done {
+                return Ok(None);
+            }
+            match st.body.next().await {
+                Some(Ok(chunk)) => {
+                    st.line_buf.extend_from_slice(&chunk);
+                    drain_lines(&mut st);
+                }
+                Some(Err(e)) => return Err(classify_reqwest(&e)),
+                None => {
+                    // Flush a final unterminated line, then any half-built event.
+                    if !st.line_buf.is_empty() {
+                        let line: Vec<u8> = std::mem::take(&mut st.line_buf);
+                        let line = String::from_utf8_lossy(&line).into_owned();
+                        let line = line.strip_suffix('\r').unwrap_or(&line).to_string();
+                        feed_line(&mut st, &line);
+                    }
+                    if st.have_fields {
+                        let data = st.data_lines.join("\n");
+                        let ev = parse_sse_record(st.event_name.as_deref(), &data);
+                        st.pending.push_back(ev);
+                        st.have_fields = false;
+                    }
+                    st.done = true;
+                }
+            }
+        }
+    })
 }
 
 impl WorkflowProvider for FabroProvider {
@@ -363,6 +637,32 @@ impl WorkflowProvider for FabroProvider {
         });
         Ok(ProviderRunStatus { state, conclusion })
     }
+
+    async fn stream_events(
+        &self,
+        run_id: &str,
+    ) -> Result<ProviderEventStream, WorkflowEngineError> {
+        let url = format!("{}/api/runs/{run_id}/events", self.base_url);
+        let resp = self
+            .auth(self.client.get(&url))
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .send()
+            .await
+            .map_err(|e| classify_reqwest(&e))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(WorkflowEngineError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        // Box the body stream so it is `Unpin` (needed to `.next()` it inside the
+        // parser's state) and hand it to the manual SSE parser.
+        let body: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>> =
+            Box::pin(resp.bytes_stream());
+        Ok(Box::pin(sse_event_stream(body)))
+    }
 }
 
 /// Map a terminal provider state and its conclusion onto Vogt's own
@@ -418,6 +718,7 @@ pub fn map_conclusion(
 mod tests {
     use super::*;
     use axum::{
+        body::Body,
         extract::Path,
         routing::{get, post},
         Json, Router,
@@ -585,5 +886,154 @@ mod tests {
         let wire = serde_json::to_value(&minimal).unwrap();
         assert!(wire.get("token_file").is_none());
         assert!(wire.get("repo_ref").is_none());
+    }
+
+    /// Spin up a fake Fabro whose `/api/runs/{id}/events` streams `sse_body`
+    /// back as `text/event-stream`, in small chunks so the parser is exercised
+    /// across record and line boundaries. Returns the bound address.
+    async fn fake_fabro_events(sse_body: &'static str) -> SocketAddr {
+        let app = Router::new().route(
+            "/api/runs/{id}/events",
+            get(move |Path(_id): Path<String>| async move {
+                let chunks: Vec<std::result::Result<bytes::Bytes, std::io::Error>> = sse_body
+                    .as_bytes()
+                    .chunks(16)
+                    .map(|c| Ok(bytes::Bytes::copy_from_slice(c)))
+                    .collect();
+                let stream = futures_util::stream::iter(chunks);
+                axum::response::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
+    async fn collect_events(mut stream: ProviderEventStream) -> Vec<ProviderEvent> {
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            out.push(item.expect("event item ok"));
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn sse_stream_yields_progress_then_a_terminal_event() {
+        // Two progress events, then a terminal `run.completed` carrying a
+        // `succeeded` state. Blank lines delimit the records; the body is fed in
+        // 16-byte chunks so records span chunk boundaries.
+        let body = "event: node.started\n\
+data: {\"type\":\"node.started\",\"message\":\"cloning repo\",\"node_id\":\"n1\",\"ts_ms\":1000}\n\
+\n\
+event: node.completed\n\
+data: {\"message\":\"tests passed\",\"node_id\":\"n2\"}\n\
+\n\
+event: run.completed\n\
+data: {\"type\":\"run.completed\",\"state\":\"succeeded\",\"message\":\"all done\",\"ts_ms\":2000}\n\
+\n";
+        let addr = fake_fabro_events(body).await;
+        let base = format!("http://{addr}");
+        let provider = FabroProvider::with_client(&base, "nightly", None, short_client());
+
+        let stream = provider.stream_events("run-1").await.expect("subscribe ok");
+        let events = collect_events(stream).await;
+
+        assert_eq!(events.len(), 3, "one event per SSE record");
+
+        assert_eq!(events[0].kind, "node.started");
+        assert_eq!(events[0].message.as_deref(), Some("cloning repo"));
+        assert_eq!(events[0].step_id.as_deref(), Some("n1"));
+        assert_eq!(
+            events[0].at,
+            Some(OffsetDateTime::from_unix_timestamp(1).unwrap())
+        );
+        assert!(events[0].terminal_state.is_none());
+
+        // No envelope `type`: the SSE `event:` name is used as the kind.
+        assert_eq!(events[1].kind, "node.completed");
+        assert_eq!(events[1].step_id.as_deref(), Some("n2"));
+        assert!(events[1].terminal_state.is_none());
+
+        // The terminal event carries the mapped state.
+        let terminal = &events[2];
+        assert_eq!(terminal.kind, "run.completed");
+        assert_eq!(terminal.terminal_state, Some(ProviderRunState::Succeeded));
+        assert!(terminal.terminal_state.unwrap().is_terminal());
+
+        // …and that terminal state maps through the existing conclusion path.
+        let started = OffsetDateTime::UNIX_EPOCH;
+        let (outcome, _) = map_conclusion(
+            terminal.terminal_state.unwrap(),
+            None,
+            started,
+            started + time::Duration::seconds(1),
+        );
+        assert_eq!(outcome, AgentTaskRunOutcome::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn a_terminal_failed_event_maps_to_failed() {
+        let body = "event: run.completed\n\
+data: {\"state\":\"failed\",\"message\":\"boom\"}\n\
+\n";
+        let addr = fake_fabro_events(body).await;
+        let base = format!("http://{addr}");
+        let provider = FabroProvider::with_client(&base, "nightly", None, short_client());
+
+        let events = collect_events(provider.stream_events("run-1").await.unwrap()).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].terminal_state, Some(ProviderRunState::Failed));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_or_aborted_stream_degrades_without_panicking() {
+        // A keep-alive comment (ignored), a non-JSON data line (degrades to a
+        // bare message), and a final record that is truncated mid-JSON with no
+        // trailing blank line (flushed on stream end, degrades). None of this
+        // may panic; the parser yields what it can.
+        let body = ": keep-alive\n\
+\n\
+data: not json at all\n\
+\n\
+event: weird\n\
+data: {\"broken\": ";
+        let addr = fake_fabro_events(body).await;
+        let base = format!("http://{addr}");
+        let provider = FabroProvider::with_client(&base, "nightly", None, short_client());
+
+        let events = collect_events(provider.stream_events("run-1").await.unwrap()).await;
+        // The comment dispatches nothing; the two data records both survive.
+        assert_eq!(events.len(), 2);
+
+        assert_eq!(events[0].kind, "message");
+        assert_eq!(events[0].message.as_deref(), Some("not json at all"));
+        assert!(events[0].terminal_state.is_none());
+
+        // The truncated JSON falls back to the SSE event name and raw payload —
+        // no terminal state is inferred from an unparseable record.
+        assert_eq!(events[1].kind, "weird");
+        assert!(events[1].message.is_some());
+        assert!(events[1].terminal_state.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_events_on_a_dead_port_is_unreachable() {
+        let provider =
+            FabroProvider::with_client("http://127.0.0.1:1", "nightly", None, short_client());
+        // The Ok variant is a boxed stream (not `Debug`), so match rather than
+        // `expect_err`.
+        match provider.stream_events("run-1").await {
+            Ok(_) => panic!("dead port must not yield a stream"),
+            Err(err) => assert!(
+                matches!(err, WorkflowEngineError::Unreachable(_)),
+                "expected Unreachable, got {err:?}"
+            ),
+        }
     }
 }

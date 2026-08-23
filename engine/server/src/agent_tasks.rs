@@ -26,8 +26,11 @@ use crate::{
     pty::{Session, SessionSpec},
     push::{NotificationKind, PushManager},
     sessions::SessionRegistry,
-    workflow_engine::{map_conclusion, FabroProvider, WorkflowEngineConfig, WorkflowProvider},
+    workflow_engine::{
+        map_conclusion, FabroProvider, ProviderRunState, WorkflowEngineConfig, WorkflowProvider,
+    },
 };
+use futures_util::StreamExt;
 
 const TASKS_FILE: &str = "agent-tasks.json";
 /// The prefix a run prints to ask for a push notification (FR-E7). Renamed to
@@ -1668,11 +1671,12 @@ impl AgentTaskRegistry {
                     None => format!("workflow engine run {}", provider_run.run_id),
                 });
                 self.record_workflow_run(id, trigger, &origin.detail, &run, now)?;
-                // TODO(#293 increment-2): mirror the engine's SSE event stream
-                // onto this run instead of polling; bridge #289 gates onto the
-                // engine's own gates; collect the #283/#284 checkpoint branches
-                // the engine produces (`fabro/run/*`) as run observations.
-                spawn_workflow_poller(
+                // Track the run off its live SSE event stream (#293 inc-2),
+                // degrading to the poller when the stream is absent or breaks.
+                // DEFERRED to a later slice: bridging #289 gates onto the
+                // engine's own gates, and collecting the #283/#284 checkpoint
+                // branches the engine produces (`fabro/run/*`) as observations.
+                spawn_workflow_tracker(
                     Arc::clone(self),
                     provider,
                     provider_run.run_id,
@@ -3141,6 +3145,11 @@ const WORKFLOW_POLL_MAX_ERRORS: u32 = 5;
 /// recorded errored, so a run the engine never finishes does not stay `running`
 /// in Vogt indefinitely.
 const WORKFLOW_POLL_DEADLINE: Duration = Duration::hours(6);
+/// How long the SSE tracker waits for the next event before giving up on the
+/// stream and degrading to polling (#293 inc-2). A live stream sends progress or
+/// keep-alives well inside this; a stream that has gone quiet is treated as
+/// broken rather than blocking the run's tracking indefinitely.
+const WORKFLOW_SSE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Read the workflow engine's bearer token from `path`, following the
 /// token-from-file pattern in `config.rs` (`read_token_path`). `None` when no
@@ -3191,14 +3200,20 @@ fn workflow_outcome_summary(
     }
 }
 
-/// Poll a workflow run to a terminal state and record its conclusion (#293).
+/// Track a workflow run off its live SSE event stream, degrading to polling
+/// (#293, increment 2).
 ///
-/// Spawned once per workflow run. It polls on a fixed interval until the engine
-/// reports a terminal state (mapped to a conclusion), a persistent poll failure
-/// exhausts the error budget, or the deadline passes — every exit but the happy
-/// one records the run errored with a written reason. Absence is non-fatal:
-/// nothing here panics or touches the scheduler.
-fn spawn_workflow_poller(
+/// Spawned once per workflow run. It first subscribes to the engine's event
+/// stream ([`WorkflowProvider::stream_events`]): each event is mirrored onto the
+/// engine's log for observability, and the moment one signals a terminal state
+/// the run is concluded via [`finalize_workflow_run`]. When the stream is absent
+/// (unreachable engine, non-success status), breaks mid-way, goes idle past
+/// [`WORKFLOW_SSE_IDLE_TIMEOUT`], or ends without a terminal event, it falls
+/// back to [`poll_workflow_to_terminal`] — the original increment-1 behaviour.
+///
+/// Absence is non-fatal throughout: nothing here panics or touches the
+/// scheduler; a broken or missing stream simply becomes a polled run.
+fn spawn_workflow_tracker(
     registry: Arc<AgentTaskRegistry>,
     provider: FabroProvider,
     provider_run_id: String,
@@ -3208,56 +3223,204 @@ fn spawn_workflow_poller(
     started: OffsetDateTime,
 ) {
     tokio::spawn(async move {
-        let mut consecutive_errors = 0u32;
-        loop {
-            tokio::time::sleep(WORKFLOW_POLL_INTERVAL).await;
-
-            if OffsetDateTime::now_utc() - started > WORKFLOW_POLL_DEADLINE {
-                registry.record_workflow_errored(
-                    task_id,
-                    run_id,
-                    session_id,
-                    started,
-                    OffsetDateTime::now_utc(),
-                    "workflow engine run did not reach a terminal state before the deadline",
-                );
-                return;
-            }
-
-            match provider.poll(&provider_run_id).await {
-                Ok(status) => {
-                    consecutive_errors = 0;
-                    if status.state.is_terminal() {
-                        let finished = OffsetDateTime::now_utc();
-                        let provider_summary =
-                            status.conclusion.as_ref().and_then(|c| c.summary.clone());
-                        let (outcome, conclusion) =
-                            map_conclusion(status.state, status.conclusion, started, finished);
-                        let summary = provider_summary
-                            .unwrap_or_else(|| workflow_outcome_summary(outcome, &conclusion));
-                        registry.record_workflow_conclusion(
-                            task_id, run_id, session_id, outcome, conclusion, summary,
+        match provider.stream_events(&provider_run_id).await {
+            Ok(mut stream) => loop {
+                // Honour the overall deadline even while the stream is open, so a
+                // run the engine never finishes cannot stay `running` forever.
+                if OffsetDateTime::now_utc() - started > WORKFLOW_POLL_DEADLINE {
+                    registry.record_workflow_errored(
+                        task_id,
+                        run_id,
+                        session_id,
+                        started,
+                        OffsetDateTime::now_utc(),
+                        "workflow engine run did not reach a terminal state before the deadline",
+                    );
+                    return;
+                }
+                match tokio::time::timeout(WORKFLOW_SSE_IDLE_TIMEOUT, stream.next()).await {
+                    Ok(Some(Ok(event))) => {
+                        // Mirror the progress line onto the engine's log — the
+                        // observability surface a workflow run has, since it owns
+                        // no PTY whose output would otherwise carry progress.
+                        tracing::info!(
+                            target: "workflow_engine",
+                            run = %run_id,
+                            provider_run = %provider_run_id,
+                            kind = %event.kind,
+                            step = event.step_id.as_deref().unwrap_or("-"),
+                            message = event.message.as_deref().unwrap_or(""),
+                            "workflow run event",
                         );
-                        return;
+                        if let Some(state) = event.terminal_state {
+                            finalize_workflow_run(
+                                &registry,
+                                &provider,
+                                &provider_run_id,
+                                task_id,
+                                run_id,
+                                session_id,
+                                started,
+                                state,
+                                event.message,
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                    Ok(Some(Err(err))) => {
+                        tracing::warn!(
+                            target: "workflow_engine",
+                            run = %run_id,
+                            error = %err,
+                            "workflow event stream errored; falling back to polling",
+                        );
+                        break;
+                    }
+                    Ok(None) => {
+                        tracing::info!(
+                            target: "workflow_engine",
+                            run = %run_id,
+                            "workflow event stream ended without a terminal event; polling",
+                        );
+                        break;
+                    }
+                    Err(_elapsed) => {
+                        tracing::info!(
+                            target: "workflow_engine",
+                            run = %run_id,
+                            "workflow event stream idle; falling back to polling",
+                        );
+                        break;
                     }
                 }
-                Err(err) => {
-                    consecutive_errors += 1;
-                    if consecutive_errors >= WORKFLOW_POLL_MAX_ERRORS {
-                        registry.record_workflow_errored(
-                            task_id,
-                            run_id,
-                            session_id,
-                            started,
-                            OffsetDateTime::now_utc(),
-                            &format!("workflow engine poll failed {consecutive_errors}x: {err}"),
-                        );
-                        return;
-                    }
+            },
+            Err(err) => {
+                tracing::info!(
+                    target: "workflow_engine",
+                    run = %run_id,
+                    error = %err,
+                    "workflow event stream unavailable; tracking by polling",
+                );
+            }
+        }
+        // Fallback: track the run to terminal by polling (increment-1 path).
+        poll_workflow_to_terminal(
+            registry,
+            provider,
+            provider_run_id,
+            task_id,
+            run_id,
+            session_id,
+            started,
+        )
+        .await;
+    });
+}
+
+/// Conclude a run whose live stream reported a terminal state (#293 inc-2). The
+/// provisional SSE envelope carries the terminal *state* but not the full
+/// conclusion (diff, final sha, cost), so one confirming poll enriches it; if
+/// that poll fails or is no longer terminal, the stream's own state is recorded
+/// with an empty conclusion. Either way the run is concluded — never left
+/// running on the strength of a stream event alone.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_workflow_run(
+    registry: &Arc<AgentTaskRegistry>,
+    provider: &FabroProvider,
+    provider_run_id: &str,
+    task_id: Uuid,
+    run_id: Uuid,
+    session_id: Uuid,
+    started: OffsetDateTime,
+    state: ProviderRunState,
+    event_message: Option<String>,
+) {
+    let finished = OffsetDateTime::now_utc();
+    let (outcome, conclusion, provider_summary) = match provider.poll(provider_run_id).await {
+        Ok(status) if status.state.is_terminal() => {
+            let summary = status.conclusion.as_ref().and_then(|c| c.summary.clone());
+            let (outcome, conclusion) =
+                map_conclusion(status.state, status.conclusion, started, finished);
+            (outcome, conclusion, summary)
+        }
+        _ => {
+            let (outcome, conclusion) = map_conclusion(state, None, started, finished);
+            (outcome, conclusion, None)
+        }
+    };
+    let summary = provider_summary
+        .or(event_message)
+        .unwrap_or_else(|| workflow_outcome_summary(outcome, &conclusion));
+    registry.record_workflow_conclusion(task_id, run_id, session_id, outcome, conclusion, summary);
+}
+
+/// Poll a workflow run to a terminal state and record its conclusion (#293).
+///
+/// The increment-1 tracking mechanism, now the fallback [`spawn_workflow_tracker`]
+/// degrades to. It polls on a fixed interval until the engine reports a terminal
+/// state (mapped to a conclusion), a persistent poll failure exhausts the error
+/// budget, or the deadline passes — every exit but the happy one records the run
+/// errored with a written reason. Absence is non-fatal: nothing here panics or
+/// touches the scheduler.
+async fn poll_workflow_to_terminal(
+    registry: Arc<AgentTaskRegistry>,
+    provider: FabroProvider,
+    provider_run_id: String,
+    task_id: Uuid,
+    run_id: Uuid,
+    session_id: Uuid,
+    started: OffsetDateTime,
+) {
+    let mut consecutive_errors = 0u32;
+    loop {
+        tokio::time::sleep(WORKFLOW_POLL_INTERVAL).await;
+
+        if OffsetDateTime::now_utc() - started > WORKFLOW_POLL_DEADLINE {
+            registry.record_workflow_errored(
+                task_id,
+                run_id,
+                session_id,
+                started,
+                OffsetDateTime::now_utc(),
+                "workflow engine run did not reach a terminal state before the deadline",
+            );
+            return;
+        }
+
+        match provider.poll(&provider_run_id).await {
+            Ok(status) => {
+                consecutive_errors = 0;
+                if status.state.is_terminal() {
+                    let finished = OffsetDateTime::now_utc();
+                    let provider_summary =
+                        status.conclusion.as_ref().and_then(|c| c.summary.clone());
+                    let (outcome, conclusion) =
+                        map_conclusion(status.state, status.conclusion, started, finished);
+                    let summary = provider_summary
+                        .unwrap_or_else(|| workflow_outcome_summary(outcome, &conclusion));
+                    registry.record_workflow_conclusion(
+                        task_id, run_id, session_id, outcome, conclusion, summary,
+                    );
+                    return;
+                }
+            }
+            Err(err) => {
+                consecutive_errors += 1;
+                if consecutive_errors >= WORKFLOW_POLL_MAX_ERRORS {
+                    registry.record_workflow_errored(
+                        task_id,
+                        run_id,
+                        session_id,
+                        started,
+                        OffsetDateTime::now_utc(),
+                        &format!("workflow engine poll failed {consecutive_errors}x: {err}"),
+                    );
+                    return;
                 }
             }
         }
-    });
+    }
 }
 
 fn clean_optional(value: Option<String>) -> Option<String> {
