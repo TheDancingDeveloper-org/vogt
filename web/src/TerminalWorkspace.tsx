@@ -47,7 +47,7 @@ interface Props {
   onNotify?: (message: string, kind?: "info" | "error") => void;
 }
 
-const STORAGE_KEY = "mydevenv2.terminalLayouts.v1";
+const STORAGE_KEY = "vogt.terminalLayouts.v1";
 
 function readSavedLayouts(): Record<string, SavedTerminalLayout> {
   try {

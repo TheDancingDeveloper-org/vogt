@@ -1,6 +1,6 @@
 // Pane arrangement preference storage. Product places are routes; this only
 // controls how the remaining editor panes arrange themselves.
-const LAYOUT_MODE_KEY = "mydevenv2.layoutMode.v1";
+const LAYOUT_MODE_KEY = "vogt.layoutMode.v1";
 
 export type LayoutMode = "tabbed" | "ide";
 
@@ -23,5 +23,5 @@ export function setLayoutMode(mode: LayoutMode) {
 }
 
 /** Places keep the old tab snapshot around for one release while migrating. */
-export const PLACES_STATE_KEY = "mydevenv2.places.v1";
-export const PLACES_MIGRATION_KEY = "mydevenv2.places.migrated.v1";
+export const PLACES_STATE_KEY = "vogt.places.v1";
+export const PLACES_MIGRATION_KEY = "vogt.places.migrated.v1";

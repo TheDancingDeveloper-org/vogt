@@ -210,7 +210,7 @@ const History: Component<Props> = (props) => {
 
   onMount(() => {
     const onStorage = (event: StorageEvent) => {
-      if (event.key === null || event.key === "mydevenv2.historyPins.v1") {
+      if (event.key === null || event.key === "vogt.historyPins.v1") {
         refreshPins();
       }
     };

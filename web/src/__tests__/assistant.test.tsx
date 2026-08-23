@@ -187,7 +187,7 @@ describe("the assistant's microphone", () => {
 // A speaker is the worst instrument for the last one, because what is being
 // checked is the absence of a sentence.
 
-const TTS_KEY = "mydevenv2.assistant.tts";
+const TTS_KEY = "vogt.assistant.tts";
 
 function captureSpeech(): { spoken: () => string[]; cancels: () => number } {
   const spoken: string[] = [];

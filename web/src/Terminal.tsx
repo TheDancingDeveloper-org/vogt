@@ -564,7 +564,7 @@ const TerminalView: Component<Props> = (props) => {
     viewportHandler = () => scheduleFit();
     window.addEventListener("resize", viewportHandler);
     window.addEventListener("orientationchange", viewportHandler);
-    window.addEventListener("mydevenv2:viewport-resize", viewportHandler);
+    window.addEventListener("vogt:viewport-resize", viewportHandler);
 
     fontSizeHandler = (event: Event) => {
       const fontSize = (event as CustomEvent<{ fontSize?: number }>).detail
@@ -739,7 +739,7 @@ const TerminalView: Component<Props> = (props) => {
     if (viewportHandler) {
       window.removeEventListener("resize", viewportHandler);
       window.removeEventListener("orientationchange", viewportHandler);
-      window.removeEventListener("mydevenv2:viewport-resize", viewportHandler);
+      window.removeEventListener("vogt:viewport-resize", viewportHandler);
       viewportHandler = null;
     }
     if (fontSizeHandler) {

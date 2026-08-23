@@ -357,7 +357,7 @@ const Inbox: Component<Props> = (props) => {
   const [focusedIndex, setFocusedIndex] = createSignal(0);
   const [phone, setPhone] = createSignal(false);
 
-  const seenKey = "mydevenv2.inbox.seen.v1";
+  const seenKey = "vogt.inbox.seen.v1";
   const readSeen = () => {
     try {
       const parsed = JSON.parse(localStorage.getItem(seenKey) ?? "[]") as unknown;

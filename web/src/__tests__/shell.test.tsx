@@ -144,7 +144,7 @@ function tabLabels(container: HTMLElement): string[] {
 }
 
 beforeEach(() => {
-  localStorage.removeItem("mydevenv2.rail.sections.v1");
+  localStorage.removeItem("vogt.rail.sections.v1");
   // `tabs.ts` holds its store in module state, so a tab opened by the last
   // test is still open in this one — and every assertion here is about which
   // tabs a URL produced.
@@ -316,13 +316,13 @@ describe("shared live steering", () => {
   });
 
   it("persists a collapsed Files section and keeps the running count in its toggle", async () => {
-    localStorage.removeItem("mydevenv2.rail.sections.v1");
+    localStorage.removeItem("vogt.rail.sections.v1");
     const { container } = mountShell("/sessions", { sessions: [SESSION] });
     await waitFor(() => expect(container.querySelector(".places-section-toggle")).toBeTruthy());
     const files = [...container.querySelectorAll<HTMLButtonElement>(".places-section-toggle")].find((button) => button.textContent?.includes("Files"));
     expect(files?.getAttribute("aria-expanded")).toBe("false");
     files?.click();
-    expect(JSON.parse(localStorage.getItem("mydevenv2.rail.sections.v1") ?? "{}").files).toBe(true);
+    expect(JSON.parse(localStorage.getItem("vogt.rail.sections.v1") ?? "{}").files).toBe(true);
   });
 
   it("keeps the last session values stale when a refresh goes offline", async () => {

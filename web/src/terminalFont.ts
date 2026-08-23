@@ -1,8 +1,8 @@
 export const DEFAULT_TERMINAL_FONT_SIZE = 13;
 export const MIN_TERMINAL_FONT_SIZE = 9;
 export const MAX_TERMINAL_FONT_SIZE = 24;
-export const TERMINAL_FONT_SIZE_STORAGE_KEY = "mydevenv2.terminalFontSize.v1";
-export const TERMINAL_FONT_SIZE_EVENT = "mydevenv2:terminal-font-size";
+export const TERMINAL_FONT_SIZE_STORAGE_KEY = "vogt.terminalFontSize.v1";
+export const TERMINAL_FONT_SIZE_EVENT = "vogt:terminal-font-size";
 
 export function clampTerminalFontSize(value: number): number {
   return Math.min(MAX_TERMINAL_FONT_SIZE, Math.max(MIN_TERMINAL_FONT_SIZE, value));

@@ -91,7 +91,7 @@ async function installFixtures(
   const sessions = [...initialSessions];
   let createdSessions = 0;
   await page.addInitScript(() => {
-    localStorage.setItem("mydevenv2.token", "browser-test-token");
+    localStorage.setItem("vogt.token", "browser-test-token");
   });
   await page.route("**/api/status**", async (route) => route.fulfill({ json: {
     version: "test",
@@ -1119,7 +1119,7 @@ test("Phone editor keeps the compact Files hierarchy and progressive controls us
   test.skip(test.info().project.name !== "phone", "Phone geometry is validated in the phone browser project");
   await installFixtures(page);
   await page.addInitScript(() => {
-    localStorage.setItem("mydevenv2.layoutMode.v1", "ide");
+    localStorage.setItem("vogt.layoutMode.v1", "ide");
   });
   await page.route("**/api/files**", async (route) => route.fulfill({ json: {
     path: "src/an-identifiable-long-filename.tsx",
@@ -1512,11 +1512,11 @@ test("terminal leaves browser zoom gestures alone and offers explicit font contr
     })),
   );
   expect(cancelled).toBe(false);
-  expect(await page.evaluate(() => localStorage.getItem("mydevenv2.terminalFontSize.v1")))
+  expect(await page.evaluate(() => localStorage.getItem("vogt.terminalFontSize.v1")))
     .toBeNull();
 
   await page.getByRole("button", { name: "Increase terminal font size" }).click();
-  expect(await page.evaluate(() => localStorage.getItem("mydevenv2.terminalFontSize.v1")))
+  expect(await page.evaluate(() => localStorage.getItem("vogt.terminalFontSize.v1")))
     .toBe("14");
 
   for (const zoom of ["80%", "100%", "125%", "150%", "200%"] as const) {

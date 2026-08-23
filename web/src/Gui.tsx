@@ -13,7 +13,7 @@ interface SavedGuiLauncher {
   command: string;
 }
 
-const GUI_LAUNCHERS_KEY = "mydevenv2.guiLaunchers";
+const GUI_LAUNCHERS_KEY = "vogt.guiLaunchers";
 
 function readSavedLaunchers(): SavedGuiLauncher[] {
   try {

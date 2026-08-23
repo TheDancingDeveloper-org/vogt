@@ -100,8 +100,8 @@ export async function currentSubscription(): Promise<PushSubscription | null> {
   return reg.pushManager.getSubscription();
 }
 
-const WEB_SUB_ID_KEY = "mydevenv2.push.webSubId";
-const NATIVE_SUB_ID_KEY = "mydevenv2.push.nativeSubId";
+const WEB_SUB_ID_KEY = "vogt.push.webSubId";
+const NATIVE_SUB_ID_KEY = "vogt.push.nativeSubId";
 
 export async function currentPushEnabled(): Promise<boolean> {
   if (isNativePlatform()) {

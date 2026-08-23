@@ -34,7 +34,7 @@ import {
   stopVoiceService,
 } from "./voiceService";
 
-const TTS_PREF_KEY = "mydevenv2.assistant.tts";
+const TTS_PREF_KEY = "vogt.assistant.tts";
 
 // The Web Speech recognizer, read defensively. TypeScript's DOM lib does not
 // declare the vendor-prefixed `webkitSpeechRecognition`, and Firefox ships

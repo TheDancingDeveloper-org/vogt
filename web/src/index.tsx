@@ -3,6 +3,7 @@ import { HashRouter, Route } from "@solidjs/router";
 import App from "./App";
 import { APP_ROUTES } from "./routes";
 import { registerServiceWorker } from "./push";
+import { migrateStorageKeys } from "./storageMigration";
 import "./styles.css";
 
 function installVisualViewportSizing() {
@@ -21,7 +22,7 @@ function installVisualViewportSizing() {
       "--keyboard-inset",
       `${keyboardInset}px`,
     );
-    window.dispatchEvent(new CustomEvent("mydevenv2:viewport-resize"));
+    window.dispatchEvent(new CustomEvent("vogt:viewport-resize"));
   };
 
   apply();
@@ -54,11 +55,19 @@ function installNativeInsetsFallback() {
   };
 
   apply();
+  window.addEventListener("vogt:native-insets", apply);
+  // The Android shell (MainActivity.java) still dispatches the historic
+  // `mydevenv2:native-insets` name; keep listening for it so the shipped app
+  // keeps working until its native half is renamed under the human-gated #265.
   window.addEventListener("mydevenv2:native-insets", apply);
 }
 
 // Register the SW eagerly so push subscriptions can be created from the
 // Settings modal without waiting for first-paint.
+// Rename historic `mydevenv2.*` storage keys to `vogt.*` before anything reads
+// a preference (#271). One-shot and cheap after the first load.
+migrateStorageKeys();
+
 void registerServiceWorker();
 installVisualViewportSizing();
 installNativeInsetsFallback();

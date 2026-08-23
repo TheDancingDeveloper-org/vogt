@@ -33,7 +33,10 @@ export interface LegacyMigrationResult {
   initialRoute: string | null;
 }
 
-const STORAGE_KEY = "mydevenv2.tabs.v2";
+const STORAGE_KEY = "vogt.tabs.v2";
+// Legacy read-only key: still holds real user data written by older builds and
+// is migrated into `STORAGE_KEY` below. It KEEPS its historic `mydevenv2.*`
+// name on purpose — renaming it would orphan that on-disk data. (#271)
 const LEGACY_STORAGE_KEY = "mydevenv2.tabs.v1";
 
 function cloneTab(tab: Tab): Tab {

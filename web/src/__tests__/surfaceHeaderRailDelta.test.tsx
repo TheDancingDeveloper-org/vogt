@@ -187,7 +187,7 @@ describe("B3 — Running, Recent places and Files collapse, state persists", () 
 
     fireEvent.click(filesToggle());
     await waitFor(() => expect(filesToggle().getAttribute("aria-expanded")).toBe("true"));
-    expect(JSON.parse(localStorage.getItem("mydevenv2.rail.sections.v1")!).files).toBe(true);
+    expect(JSON.parse(localStorage.getItem("vogt.rail.sections.v1")!).files).toBe(true);
   });
 
   it("keeps the Running count reachable by its existing aria-label once it is a toggle", async () => {

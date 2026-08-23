@@ -70,7 +70,7 @@ interface Props {
 // -- constants --------------------------------------------------------------
 
 /** Saved filters are per-client state in v2 (`REQUIREMENTS.md` §3, FR-U14). */
-const SAVED_FILTERS_KEY = "mydevenv2.vogtSavedFilters.v1";
+const SAVED_FILTERS_KEY = "vogt.vogtSavedFilters.v1";
 
 /** Enough that a runaway list cannot be saved into a full storage quota. */
 const MAX_SAVED_FILTERS = 40;

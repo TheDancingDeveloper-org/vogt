@@ -8522,7 +8522,7 @@ textarea {
       typography; this is the button form of it. Keep the existing
       `.places-section-label--counted` markup (and its .place-count) INSIDE the
       button so shell.test.tsx's aria-label lookups still resolve. State lives
-      in localStorage `mydevenv2.rail.sections.v1`; Files defaults collapsed. */
+      in localStorage `vogt.rail.sections.v1`; Files defaults collapsed. */
 .places-section-toggle {
   display: flex;
   align-items: center;
