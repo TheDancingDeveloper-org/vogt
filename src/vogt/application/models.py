@@ -1819,6 +1819,44 @@ class RevokeTokenParams(Params):
     reason: Reason
 
 
+class InstallStatusResult(Result):
+    """Whether this instance is still in first-run install mode (#292)."""
+
+    install_mode: bool = Field(
+        description=(
+            "True while the token store holds no tokens at all — the state "
+            "in which the unauthenticated bootstrap will answer. The first "
+            "token, however issued, turns this false for good."
+        )
+    )
+
+
+class InstallBootstrapParams(Params):
+    display_name: Name = Field(
+        description="The first operator's name, e.g. 'Ada Lovelace'."
+    )
+    identity_ref: Name | None = Field(
+        default=None,
+        description=(
+            "Stable identity for the actor. Derived as human:<slug> from "
+            "the display name when omitted."
+        ),
+    )
+    token_name: Name = Field(
+        default="first-run browser token",
+        description="What the issued token is for.",
+    )
+
+
+class InstallBootstrapResult(Result):
+    actor: Actor
+    token: Token
+    secret: str = Field(
+        description="Shown once. Not stored, not recoverable — rotate if lost."
+    )
+    warning: str
+
+
 class AuthDecisionListParams(Params):
     decision: Literal["allow", "deny"] | None = Field(
         default=None, description="Filter to allows or denials."

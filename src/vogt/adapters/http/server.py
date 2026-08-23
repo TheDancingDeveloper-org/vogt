@@ -25,6 +25,7 @@ from vogt import __version__
 from vogt.adapters.http.access_log import AccessLogSettings, RequestLogMiddleware
 from vogt.adapters.http.app import API_PREFIX, build_app
 from vogt.adapters.http.health import ServerInfo, add_health_routes
+from vogt.adapters.http.install import add_install_routes
 from vogt.adapters.http.scheduler import CollectorSchedule
 from vogt.adapters.mcp.http import MCP_PATH, add_mcp_route
 from vogt.application.context import AppContext, build_context
@@ -188,6 +189,10 @@ def build_server(
         api_prefix=API_PREFIX,
         mcp_path=MCP_PATH,
     )
+    # First-run install mode (#292): unauthenticated, self-closing, and
+    # mounted like the probes because a browser with no token yet must be
+    # able to reach it.
+    add_install_routes(app, context_factory=context)
     add_mcp_route(app, registry=active_registry, resolve=resolve, path=MCP_PATH)
     # Outermost, so the line it writes covers everything inside it — routing,
     # authentication, the error handlers, and the requests that never reach a

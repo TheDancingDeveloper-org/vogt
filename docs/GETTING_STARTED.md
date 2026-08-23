@@ -166,6 +166,29 @@ VOGT_PUBLIC_URL=http://127.0.0.1:8000 \
 start with authentication enabled (the default), initialise the instance,
 and issue a scoped token from a trusted local process.
 
+**First run (install mode).** A freshly initialised instance holds no tokens
+at all, and while that is true the server is in *install mode*: `GET
+/api/install/status` answers `{"install_mode": true}` and an unauthenticated
+`POST /api/install/bootstrap` names the first operator and returns the first
+token. This is what the browser first-run wizard rides, and it doubles as the
+headless bootstrap for scripted installs:
+
+```console
+curl -s http://localhost:8080/api/install/bootstrap \
+  -H 'Content-Type: application/json' \
+  -d '{"display_name": "Ada Lovelace"}'
+```
+
+The answer carries the secret exactly once and an `admin`-scoped token bound
+to the actor it just created (`human:ada-lovelace`); the write is audited to
+that actor. The moment any token exists — this one, or one issued any other
+way — install mode closes itself and the bootstrap refuses with
+`install_closed`. Revoking every token does not reopen it: a lockout is fixed
+from a trusted local process, below. The self-closing door is safe because
+the port publishes on loopback by default (`VOGT_BIND_IP` falls back to
+`127.0.0.1`); publish it to a real interface only after the first token
+exists.
+
 **Local (`uv run`).** The token is bound to the OS user running the command:
 
 ```console

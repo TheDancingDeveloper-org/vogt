@@ -53,6 +53,17 @@ class InvalidRequest(VogtError):
     http_status = 400
 
 
+class InstallClosed(Conflict):
+    """The first-run bootstrap was called after a token already existed.
+
+    Install mode (#292) is active exactly while the token store holds no
+    rows at all; the first token — however it was issued — closes it for
+    good, and this is the refusal the closed door answers with.
+    """
+
+    code = "install_closed"
+
+
 class InvalidCursor(InvalidRequest):
     """A paging cursor does not belong to the requested Inbox query."""
 

@@ -589,6 +589,16 @@ REST/CLI/GUI are peers over the same operations.
   honest limitation: scopes are instance-wide in v1, so an agent with
   `work.write` can write to every project (per-project scopes are deferred),
   and in the loopback topology there is no authentication at all.
+- **Install mode is the one unauthenticated write, and it closes itself**
+  (#292). While the token store holds no rows at all, `POST
+  /api/install/bootstrap` — mounted beside the health probes, not generated
+  from the registry — names the first operator and mints the first `admin`
+  token, audited to the actor it creates; any existing token, revoked ones
+  included, makes it refuse with `install_closed`, and nothing reopens it.
+  Acceptable because the published port defaults to loopback
+  (`VOGT_BIND_IP=127.0.0.1`), so during setup the endpoint's reach is the
+  same as the loopback surface's. Hardening (a boot code, a loopback-only
+  check) is a deliberate follow-up slot in the HTTP adapter, not v1.
 - **Both allow and deny decisions are audited** — into `auth_decisions`
   (`SCHEMA.md` §2.1), separately from the declared-write audit, because a
   denial changes nothing and so has no entity or revision to hang from.
