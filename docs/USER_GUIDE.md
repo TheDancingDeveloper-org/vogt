@@ -882,3 +882,59 @@ The only optional integration on the core side is **GitHub** collection and
 write-back, enabled by `VOGT_GITHUB_TOKEN_FILE`; absent means "GitHub was not
 collected", never "no GitHub subjects". Vogt does not require or contact any
 other external service. `CONFIG.md` has the variables.
+
+## 9. Publishing an initiative to the forge
+
+An initiative is a cross-project epic that lives in Vogt. That keeps it simple,
+but it also makes it invisible to anyone who only has the forge open. `initiative
+publish` closes that gap without giving up the simplicity: for each forge-linked
+project the initiative spans, it creates — or, on a later run, re-adopts — **one
+tracking issue** that carries a checkbox task list of the initiative's member
+work items.
+
+```console
+$ uv run vogt initiative publish --slug platform-epic --reason "make the epic visible"
+```
+
+The tracking issue is labelled `initiative:<slug>` and its body looks like this,
+one line per member — `- [ ] #<issue> <title>`, checked when the member is done
+or won't-do:
+
+```markdown
+<!-- vogt:initiative:start -->
+<!-- vogt:initiative:platform-epic -->
+
+The platform epic.
+
+### Work items
+
+- [x] #41 Land the provider seam
+- [ ] #52 Wire the collectors
+<!-- vogt:initiative:end -->
+```
+
+Four rules make this safe to run again and again:
+
+- **It only ever touches the managed region.** Anything you write in the issue
+  *outside* the two `<!-- vogt:initiative:… -->` markers is yours and is preserved
+  on every re-render — Vogt rewrites the block between the markers and copies the
+  rest of the body through untouched. Adding or removing a member (with `work
+  update --initiative`) re-renders the list in place.
+- **It adopts, it does not duplicate.** The hidden marker in the body is how a
+  second `publish` recognises the issue it already opened. You can even paste the
+  two markers into an existing issue to hand it to Vogt.
+- **It never closes the tracking issue.** Closing is somebody's call. When the
+  initiative itself is closed, publishing *proposes* closing each tracking issue
+  as a **drift proposal** you resolve by hand — Vogt does not write the close.
+- **A tick upstream is drift, not a fight.** The tracking issue is observed like
+  any other issue, so if a person ticks a box on the forge while the member is
+  still open in Vogt (or the other way round), the next sweep surfaces the
+  disagreement as `initiative_checkbox_drift` in the drift inbox — neither side is
+  silently overwritten. The next re-render would restore the box; accepting or
+  rejecting the proposal is how you decide which register is right.
+
+A cross-project initiative gets one tracking issue per repo, each linking the
+others. Publishing writes to the forge, so a project needs `forge writeback`
+set to `full` and a linked repository first (`forge link`); a repo the
+initiative touches that is not linked is reported as skipped, with the reason,
+rather than dropped silently.

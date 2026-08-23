@@ -323,6 +323,82 @@ def _forge_findings(ctx: AppContext) -> list[DriftFinding]:
     return findings
 
 
+def _initiative_findings(ctx: AppContext) -> list[DriftFinding]:
+    """A tracking-issue checkbox ticked upstream out of step with its member (#286).
+
+    The projection renders the boxes from workflow state; a human ticking one
+    on the forge is an edit inside Vogt's managed region, and the next
+    re-render would restore it. Surfacing the disagreement as drift is what
+    keeps that from being a silent overwrite: the tick is observed
+    (the tracking issue is an ordinary issue), and here its state is compared
+    against what the member's workflow state says the box should be.
+    """
+    from vogt.application.services import upstream
+    from vogt.core.drift import initiative_checkbox_drift
+    from vogt.core.initiative_projection import body_has_marker, parse_checkbox_states
+
+    with ctx.declared.read() as view:
+        initiatives = view.list_initiatives(limit=10_000, offset=0)
+        if not initiatives:
+            return []
+        # (initiative_id, project_id) -> {forge_number: is_terminal}. Read the
+        # upstream-truth way: on a linked project the members are the observed
+        # issues joined to the overlay, so `list_work_items` (declared rows
+        # only) would see none of them.
+        expected: dict[tuple[str, str], dict[int, bool]] = {}
+        member_refs: dict[tuple[str, str, int], str] = {}
+        for project in upstream.linked_projects(view, None):
+            items = upstream.upstream_items(
+                ctx, view, project, include_closed=True, limit=10_000
+            )
+            for item in items:
+                number = _forge_number(item.ref)
+                if item.initiative_id is None or number is None:
+                    continue
+                key = (item.initiative_id, project.id)
+                expected.setdefault(key, {})[number] = item.state in TERMINAL_STATES
+                member_refs[(item.initiative_id, project.id, number)] = item.ref
+
+    by_slug = {ini.slug: ini for ini in initiatives}
+    findings: list[DriftFinding] = []
+    for obs in ctx.observed.latest(kinds=(KIND_ISSUE,), limit=10_000):
+        body = obs.payload.get("body")
+        if not isinstance(body, str) or not body or obs.project_id is None:
+            continue
+        for slug, ini in by_slug.items():
+            if not body_has_marker(body, slug):
+                continue
+            member_state = expected.get((ini.id, obs.project_id), {})
+            for number, checked in parse_checkbox_states(body).items():
+                if number not in member_state or checked == member_state[number]:
+                    continue
+                findings.append(
+                    initiative_checkbox_drift(
+                        initiative_id=ini.id,
+                        initiative_slug=ini.slug,
+                        project_id=obs.project_id,
+                        subject_key=obs.subject_key,
+                        number=number,
+                        work_ref=member_refs[(ini.id, obs.project_id, number)],
+                        upstream_checked=checked,
+                        expected_checked=member_state[number],
+                        evidence=_snapshot(obs),
+                        evidence_observation_id=obs.id,
+                    )
+                )
+    return findings
+
+
+def _forge_number(ref: str) -> int | None:
+    """The trailing `#<n>` of a subject key, the member's forge issue number.
+
+    Every provider keys an object by number (D5), so the numeric tail is the
+    scheme itself — the same read `native_migration` uses — not a guess about
+    one forge's spelling."""
+    tail = ref.rpartition("#")[2]
+    return int(tail) if tail.isdigit() else None
+
+
 def _raise_proposal(
     ctx: AppContext, proposal: DriftProposal, *, reason: str
 ) -> DriftProposal:
@@ -484,7 +560,12 @@ def detect_drift(ctx: AppContext, params: DriftDetectParams) -> DriftDetectResul
         )
         raise InvalidRequest(msg)
 
-    findings = _version_findings(ctx) + _dependency_findings(ctx) + _forge_findings(ctx)
+    findings = (
+        _version_findings(ctx)
+        + _dependency_findings(ctx)
+        + _forge_findings(ctx)
+        + _initiative_findings(ctx)
+    )
     raised: list[DriftProposal] = []
     auto_accepted: list[str] = []
 

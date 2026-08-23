@@ -83,6 +83,11 @@ SCRIPT: list[tuple[str, StepParams]] = [
         {"title": "Parity Initiative", "weight": 40, "reason": WHY},
     ),
     ("initiative.list", {}),
+    # Project the initiative onto its forge tracking issues (#286). At this
+    # point the initiative spans no forge-linked project, so the projection is
+    # a deterministic no-op — zero forge calls, an empty `tracking_issues` — and
+    # what parity checks is that the same receipt arrives on all three surfaces.
+    ("initiative.publish", {"slug": "parity-initiative", "reason": WHY}),
     (
         "project.register",
         {

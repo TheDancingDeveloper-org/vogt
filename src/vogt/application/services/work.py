@@ -514,10 +514,11 @@ def update_work(ctx: AppContext, params: UpdateWorkParams) -> WorkResult:
         project = (
             None if item.project_id is None else view.project_by_id(item.project_id)
         )
+    before_initiative = item.initiative_id
     if not native:
         assert project is not None  # an upstream item always has its project
-        return _update_upstream(ctx, params, item, project)
-    if (
+        result = _update_upstream(ctx, params, item, project)
+    elif (
         project is not None
         and not upstream.is_linked(project)
         and (params.add_labels or params.remove_labels)
@@ -525,7 +526,33 @@ def update_work(ctx: AppContext, params: UpdateWorkParams) -> WorkResult:
         # Label writes are shared vocabulary with the forge (decision 10);
         # everything else on a native item stays a local edit.
         raise _refuse_unlinked(project, "work.update with labels")
-    return _update_native(ctx, params)
+    else:
+        result = _update_native(ctx, params)
+    _reproject_membership(ctx, params, before_initiative, result.item.initiative_id)
+    return result
+
+
+def _reproject_membership(
+    ctx: AppContext,
+    params: UpdateWorkParams,
+    before: str | None,
+    after: str | None,
+) -> None:
+    """Re-render the task list of any initiative this update joined or left (#286).
+
+    Adopt-only and best-effort — a membership change re-renders the tracking
+    issues that already exist, and never opens one. It runs after the declared
+    write has committed, in the write-through-after-commit shape the migration
+    uses, so a projection that could not be refreshed does not unwind the local
+    edit that was the point of the call.
+    """
+    if before == after:
+        return
+    from vogt.application.services.initiative_publish import reproject_initiative
+
+    for initiative_id in (before, after):
+        if initiative_id is not None:
+            reproject_initiative(ctx, initiative_id, reason=params.reason)
 
 
 def _update_native(ctx: AppContext, params: UpdateWorkParams) -> WorkResult:

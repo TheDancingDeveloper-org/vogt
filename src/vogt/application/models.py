@@ -972,6 +972,47 @@ class InitiativeListResult(Result):
     initiatives: list[Initiative]
 
 
+class PublishInitiativeParams(Params):
+    """Project an initiative onto a forge tracking issue per linked repo (#286).
+
+    Additive and forward-only: for each forge-linked project the initiative
+    spans, Vogt creates or adopts one tracking issue labelled
+    ``initiative:<slug>`` and re-renders its managed task list. Nothing is ever
+    closed or deleted — a closed initiative *proposes* its tracking issues be
+    closed (drift), it never writes the close.
+    """
+
+    slug: str = Field(description="Initiative slug to publish.")
+    reason: Reason
+
+
+class InitiativeTrackingIssue(Result):
+    """One repo's tracking issue, after a publish (#286)."""
+
+    project_slug: str
+    repo_url: str | None = None
+    number: int | None = Field(
+        default=None, description="The tracking issue number upstream."
+    )
+    source_url: str | None = None
+    action: Literal["created", "adopted", "skipped"] = "skipped"
+    members: int = Field(default=0, description="Member work items listed.")
+    detail: str | None = None
+    close_proposed: bool = Field(
+        default=False,
+        description="Whether closing the initiative proposed closing this "
+        "tracking issue (never an automatic upstream close).",
+    )
+
+
+class PublishInitiativeResult(Result):
+    """What `initiative.publish` did, one row per repo the initiative spans."""
+
+    slug: str
+    state: InitiativeState
+    tracking_issues: list[InitiativeTrackingIssue] = []
+
+
 class CreateActorParams(Params):
     identity_ref: Name = Field(
         description="Stable identity, e.g. agent:claude-code or local:sprooty."

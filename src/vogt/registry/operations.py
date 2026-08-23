@@ -116,6 +116,8 @@ from vogt.application.models import (
     ProjectResult,
     PruneParams,
     PruneResult,
+    PublishInitiativeParams,
+    PublishInitiativeResult,
     RegisterProjectParams,
     RelateWorkParams,
     RestoreParams,
@@ -487,6 +489,25 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.list_initiatives,
             route=HttpRoute("GET", "/initiatives"),
             cli=CliBinding(("initiative", "list")),
+        ),
+        # Project an initiative onto a forge tracking issue per linked repo
+        # (#286): additive, forward-only, and never a close. The scope is
+        # `writeback` for the same FR-S11 arming rationale as the other verbs
+        # that speak upstream — it creates and edits issues under the resolved
+        # credential and nothing else.
+        Operation(
+            name="initiative.publish",
+            summary="Create or adopt one forge tracking issue per linked repo "
+            "the initiative spans, each carrying a managed checkbox task list "
+            "of its member work items. Additive and forward-only; a closed "
+            "initiative proposes closing its tracking issues, never writes it.",
+            scope="writeback",
+            mutating=True,
+            params_model=PublishInitiativeParams,
+            result_model=PublishInitiativeResult,
+            handler=services.publish_initiative,
+            route=HttpRoute("POST", "/initiatives/publish"),
+            cli=CliBinding(("initiative", "publish")),
         ),
         Operation(
             name="actor.create",
