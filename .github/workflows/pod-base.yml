@@ -110,7 +110,7 @@ concurrency:
 jobs:
   plan:
     name: which variants
-    runs-on: [self-hosted, node-b, linux, x64]
+    runs-on: [self-hosted]
     outputs:
       variants: ${{ steps.plan.outputs.variants }}
     steps:
@@ -137,7 +137,7 @@ jobs:
     name: ${{ matrix.variant }}
     needs: plan
     # `docker`/`publish` is advertised only by the Docker-in-Docker workers.
-    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+    runs-on: [self-hosted, docker, publish]
     permissions:
       contents: read
       packages: write
