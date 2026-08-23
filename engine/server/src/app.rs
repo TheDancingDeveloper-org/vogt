@@ -453,6 +453,14 @@ fn build_cors(origins: &[String]) -> CorsLayer {
     }
 }
 
+pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
+    let bind = cfg.bind;
+    let (router, _state) = router(cfg).await;
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    tracing::info!(addr = %bind, "vogt-engine listening");
+    axum::serve(listener, router).await
+}
+
 #[cfg(test)]
 mod tests {
     /// The install routes above are literals so the PWA's source-scan test
@@ -468,12 +476,4 @@ mod tests {
             );
         }
     }
-}
-
-pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
-    let bind = cfg.bind;
-    let (router, _state) = router(cfg).await;
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    tracing::info!(addr = %bind, "vogt-engine listening");
-    axum::serve(listener, router).await
 }
