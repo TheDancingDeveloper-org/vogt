@@ -71,8 +71,11 @@ permissions:
 jobs:
   changes:
     name: classify changes
-    # NFR-C4: every job names a self-hosted runner. `runs-on: ubuntu-latest`
-    # is prohibited estate-wide, and dynamic `runs-on` expressions with it.
+    # NFR-C4: every job names a self-hosted runner. This project's CI runs on
+    # the maintainer's self-hosted runners; if you fork this repo, change
+    # `runs-on:` to a GitHub-hosted runner (e.g. `ubuntu-latest`) locally —
+    # do NOT commit that change upstream. Dynamic `runs-on` expressions are
+    # avoided the same way, everywhere in this workflow set.
     #
     # `self-hosted` alone, since 2026-08-19. The old selector also named
     # `node-b`, `linux` and `x64`: the last two are advertised by every runner
@@ -222,8 +225,8 @@ jobs:
       # in `docs.yml`, which triggers on `docs/**` and `**/*.md` — so a commit
       # that adds a field to `src/vogt/config.py` and nothing else ran this
       # job, where the check was absent, and landed with the generated files
-      # stale. Recorded as a gate failure in `REQUIREMENTS.md` §5.4: NFR-Q4
-      # says CI fails on drift, and for code-only changes it did not.
+      # stale. A recorded gate failure: NFR-Q4 says CI fails on drift, and
+      # for code-only changes it did not.
       - name: generated config docs are not stale
         run: |
           set -euo pipefail
@@ -310,7 +313,7 @@ jobs:
         working-directory: web
         run: pnpm typecheck
 
-      # The PWA's own tests (`REQUIREMENTS.md` §6): the five Vogt surfaces
+      # The PWA's own tests (`docs/ENGINE.md` §3.4): the five Vogt surfaces
       # mounted in jsdom against a fake front door, asserting the interaction
       # contract that no amount of reading the source can see — an optimistic
       # move reconciling against the server's answer, a refusal rolling back

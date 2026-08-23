@@ -10,8 +10,8 @@ name: build
 # NFR-C3 originally said a push to main shall never publish an image, and the
 # effect was that every fix needed a version bump to become deployable: three
 # of them in one afternoon, none marking a release. The requirement was
-# revised (see `REQUIREMENTS.md`) once the two acts were told apart. What it
-# was protecting is intact:
+# revised (see `docs/ROADMAP.md` "Revision r5 — a build is not a release")
+# once the two acts were told apart. What it was protecting is intact:
 #
 #   * merging still cannot cut a release — no semver tag, no `latest`, no
 #     wheel, and nothing here writes a GitHub Release
@@ -530,7 +530,7 @@ jobs:
             echo "    image: ${STACK_IMAGE}@${DIGEST}"
             echo '```'
             echo
-            echo "See \`docs/DEPLOYMENT.md\` §9 before the first deploy: the"
+            echo "See \`docs/DEPLOYMENT.md\` §6 before the first deploy: the"
             echo "smoke test above proves the halves start, not that the front"
             echo "door reaches a core."
           } >> "$GITHUB_STEP_SUMMARY"

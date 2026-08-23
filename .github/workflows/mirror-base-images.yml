@@ -10,18 +10,18 @@ name: mirror base images
 # 2026-08-15 and again on 2026-08-14, with nothing wrong in the repository.
 #
 # Authenticating is *not* the fix, and that was established by measurement
-# rather than by argument. The credential available here is estate-wide, so
-# its 200/hour is shared with every other project's CI, while this
-# repository's own per-IP allowance was almost untouched:
+# rather than by argument. The credential available here is shared across
+# every other CI job that also uses it, so its 200/hour is split between
+# them, while this repository's own per-IP allowance was almost untouched:
 #
 #     AUTHENTICATED (sprooty):   HTTP 429  x-ratelimit-limit: 200;w=3600
 #     ANONYMOUS (runner egress): HTTP 200  x-ratelimit-limit: 100;w=3600
 #                                          x-ratelimit-remaining: 99
 #
 # Logging in trades a bucket this repository mostly controls for one it
-# shares with everything else, and which is empty exactly when the estate is
-# busy — which is when builds happen. See `build.yml` for why the login has
-# been removed rather than left inert.
+# shares with everything else, and which is empty exactly when that shared
+# usage is busy — which is when builds happen. See `build.yml` for why the
+# login has been removed rather than left inert.
 #
 # So the private engine bases are mirrored into GHCR, where this project
 # already publishes, is already authenticated, and has no such limit. The
