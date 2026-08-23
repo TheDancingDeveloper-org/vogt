@@ -271,9 +271,7 @@ def _pull_view(
     )
 
 
-def _drift_provenance(
-    code: str, pull: WorkItemPullRequestView | None
-) -> str | None:
+def _drift_provenance(code: str, pull: WorkItemPullRequestView | None) -> str | None:
     """Where a drift finding was read from, for a reader to check it against."""
     if code == "active_branch_done_item":
         return "local checkout (git-local sweep)"

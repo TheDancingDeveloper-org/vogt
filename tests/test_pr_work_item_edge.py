@@ -80,9 +80,7 @@ def test_a_closing_keyword_in_the_title_is_read_and_marked_as_such() -> None:
 
 
 def test_a_cross_repo_closing_reference_keeps_its_owner_and_repo() -> None:
-    edges = parse_edges(
-        title="", body="Closes octocat/hello-world#42", branch=None
-    )
+    edges = parse_edges(title="", body="Closes octocat/hello-world#42", branch=None)
     assert len(edges) == 1
     assert edges[0].owner == "octocat"
     assert edges[0].repo == "hello-world"

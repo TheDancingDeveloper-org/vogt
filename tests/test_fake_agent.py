@@ -176,16 +176,12 @@ def test_stall_sleeps_then_returns() -> None:
 def test_stall_can_actually_hang_past_a_deadline() -> None:
     # The stall scenario really does block; a tight timeout must expire.
     with pytest.raises(subprocess.TimeoutExpired):
-        run_fake_agent(
-            "stall", env={"FAKE_AGENT_STALL_SECONDS": "30"}, timeout=0.5
-        )
+        run_fake_agent("stall", env={"FAKE_AGENT_STALL_SECONDS": "30"}, timeout=0.5)
 
 
 def test_scenario_from_prompt_marker(tmp_path: Path) -> None:
     prompt = tmp_path / "prompt.md"
-    prompt.write_text(
-        "# Task\n\nFAKE_AGENT_SCENARIO: outcome\n", encoding="utf-8"
-    )
+    prompt.write_text("# Task\n\nFAKE_AGENT_SCENARIO: outcome\n", encoding="utf-8")
     result = run_fake_agent(
         None,
         env={

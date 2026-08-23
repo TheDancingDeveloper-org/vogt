@@ -188,9 +188,7 @@ def documented_routes() -> set[str]:
     document got wrong is not something a path check can see.
     """
     text = ENGINE_CONTRACT_DOC.read_text("utf-8")
-    declared = re.findall(
-        r"`(?:[A-Z]+ )?(/(?:api|healthz|readyz|mcp)[^`\s?]*)", text
-    )
+    declared = re.findall(r"`(?:[A-Z]+ )?(/(?:api|healthz|readyz|mcp)[^`\s?]*)", text)
     assert declared, "no routes found in the engine's wire contract (ENGINE.md \u00a75)"
     return {normalise(route) for route in declared}
 

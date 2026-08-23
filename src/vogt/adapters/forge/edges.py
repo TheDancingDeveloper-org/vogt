@@ -79,9 +79,7 @@ def _closing_edges(text: str, provenance: str) -> list[ParsedEdge]:
     return edges
 
 
-def _branch_edge(
-    branch: str | None, pattern: re.Pattern[str]
-) -> list[ParsedEdge]:
+def _branch_edge(branch: str | None, pattern: re.Pattern[str]) -> list[ParsedEdge]:
     if not branch:
         return []
     match = pattern.search(branch)
