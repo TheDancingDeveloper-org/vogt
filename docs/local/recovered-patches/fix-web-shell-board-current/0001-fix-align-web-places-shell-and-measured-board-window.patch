@@ -1,0 +1,3220 @@
+From 8595fb97d0141009a08e97ba3a752320bbc09c48 Mon Sep 17 00:00:00 2001
+From: dancingdeveloper
+ <306930456+thedancingdeveloper@users.noreply.github.com>
+Date: Mon, 17 Aug 2026 07:58:10 +0000
+Subject: [PATCH] fix: align web places shell and measured board window
+
+---
+ web/src/App.tsx                          | 548 +++++------------------
+ web/src/Board.tsx                        | 153 ++++---
+ web/src/CommandPalette.tsx               | 100 ++---
+ web/src/FileTree.tsx                     |   4 +-
+ web/src/Inbox.tsx                        | 203 +++++++++
+ web/src/Sessions.tsx                     |  56 +++
+ web/src/__tests__/boardScale.test.tsx    | 112 +++--
+ web/src/__tests__/measuredWindow.test.ts |  56 +++
+ web/src/__tests__/shell.test.tsx         | 116 ++---
+ web/src/layout.ts                        |   3 +-
+ web/src/measuredWindow.ts                | 147 ++++++
+ web/src/routes.ts                        |  10 +-
+ web/src/styles.css                       | 446 ++++++------------
+ web/src/tabs.ts                          |  80 +---
+ web/src/vogtApi.ts                       |  62 +++
+ 15 files changed, 1055 insertions(+), 1041 deletions(-)
+ create mode 100644 web/src/Inbox.tsx
+ create mode 100644 web/src/Sessions.tsx
+ create mode 100644 web/src/__tests__/measuredWindow.test.ts
+ create mode 100644 web/src/measuredWindow.ts
+
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index 80e4f8a..7e73738 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -18,6 +18,8 @@ import Assistant from "./Assistant";
+ import AuditBrowser from "./AuditBrowser";
+ import Backlog from "./Backlog";
+ import Board from "./Board";
++import Inbox from "./Inbox";
++import Sessions from "./Sessions";
+ import GitTab from "./Git";
+ import GuiTab from "./Gui";
+ import Projects from "./Projects";
+@@ -58,10 +60,6 @@ import {
+   closeTab,
+   focusTab,
+   openAssistantTab,
+-  openBacklogTab,
+-  openBoardTab,
+-  openAuditTab,
+-  openProjectsTab,
+   openEditorTab,
+   openGitTab,
+   openGuiTab,
+@@ -82,35 +80,6 @@ import {
+   saveWorkspaceLayout,
+ } from "./workspaceLayouts";
+ 
+-// The glyph on a tab, by kind. A record rather than the ternary chain this
+-// replaced, which had grown past the point of being read and had no arm for
+-// any of the five Vogt kinds — so board, backlog, projects, audit and work
+-// item tabs drew bare while the drawer buttons that opened them had icons.
+-// That is worst at phone width, where the tab strip is a sheet of labels and
+-// the glyph is most of what tells one entry from another at a glance. The
+-// glyphs match the drawer's, deliberately: the same surface should not be two
+-// different pictures depending on which control you reached it from.
+-//
+-// Typed against `Tab["kind"]` so a new kind that forgets its glyph is a
+-// compile error rather than a blank space nobody notices.
+-const TAB_GLYPHS: Record<Tab["kind"], string> = {
+-  // Terminal tabs carry an activity dot instead, rendered just above; History
+-  // is the one kind whose glyph is baked into its label in `tabs.ts`, so a
+-  // glyph here would draw it twice.
+-  terminal: "",
+-  history: "",
+-  editor: "📄 ",
+-  git: "⎇ ",
+-  gui: "🖥 ",
+-  tasks: "≡ ",
+-  assistant: "🎙 ",
+-  board: "▦ ",
+-  backlog: "☰ ",
+-  projects: "▤ ",
+-  audit: "⧉ ",
+-  workitem: "◈ ",
+-};
+-
+ interface LoginScreenProps {
+   initialToken: string;
+   initialBase: string;
+@@ -262,12 +231,6 @@ function activityLabel(s: ActivityState, exit: number | null): string {
+   }
+ }
+ 
+-function tabActivityClass(tab: Tab): string | null {
+-  if (tab.kind !== "terminal") return null;
+-  const s = sessionsStore.sessions[tab.sessionId];
+-  return s ? activityClass(s) : "idle";
+-}
+-
+ /**
+  * Where each tab was last seen, including its query string.
+  *
+@@ -290,10 +253,6 @@ function pathFor(tab: Tab): string {
+   if (tab.kind === "git") return `/g/${encodeURIComponent(tab.repo)}`;
+   if (tab.kind === "gui") return "/gui";
+   if (tab.kind === "history") return "/history";
+-  if (tab.kind === "board") return "/board";
+-  if (tab.kind === "backlog") return "/backlog";
+-  if (tab.kind === "projects") return "/projects";
+-  if (tab.kind === "audit") return "/audit";
+   if (tab.kind === "workitem") return `/w/${encodeURIComponent(tab.ref)}`;
+   if (tab.kind === "assistant") return "/assistant";
+   return "/tasks";
+@@ -303,8 +262,6 @@ const App: Component = () => {
+   const navigate = useNavigate();
+   const params = useParams<{ id?: string; path?: string; ref?: string }>();
+   const location = useLocation();
+-  const [drawerOpen, setDrawerOpen] = createSignal(false);
+-  const [mobileTabsOpen, setMobileTabsOpen] = createSignal(false);
+   const [settingsOpen, setSettingsOpen] = createSignal(false);
+   const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
+   const [templateSelectorOpen, setTemplateSelectorOpen] = createSignal(false);
+@@ -384,13 +341,13 @@ const App: Component = () => {
+   const [authState, setAuthState] = createSignal<"checking" | "unauthenticated" | "authenticated">("checking");
+   const [authError, setAuthError] = createSignal<string | null>(null);
+   const layoutMode = getLayoutMode();
+-  const activeTab = () => tabsStore.tabs.find((tab) => tab.id === tabsStore.active) ?? null;
+ 
+   // Check if we're in IDE mode
+   const isIDEMode = layoutMode === "ide";
+   const activeKind = () =>
+     tabsStore.tabs.find((tab) => tab.id === tabsStore.active)?.kind ?? null;
+-  const editorWorkspaceActive = () => isIDEMode && activeKind() === "editor";
++  const editorWorkspaceActive = () =>
++    isIDEMode && activeKind() === "editor" && location.pathname.startsWith("/e/");
+ 
+   onMount(() => {
+     const unsubscribeAuthState = subscribeAuthState(() => {
+@@ -429,60 +386,6 @@ const App: Component = () => {
+     })();
+   });
+ 
+-  // -- the drawer's width ---------------------------------------------------
+-  //
+-  // Per client and persisted, which is the same rule the board's layout
+-  // follows (FR-U13): a width is a property of the screen somebody is sitting
+-  // at, not of the estate. Clamped because a drawer dragged to nothing cannot
+-  // be dragged back — the grip goes with it.
+-
+-  const DRAWER_WIDTH_KEY = "mydevenv2.drawerWidth";
+-  const DRAWER_MIN = 180;
+-  const DRAWER_MAX = 640;
+-
+-  const clampWidth = (value: number) =>
+-    Math.min(DRAWER_MAX, Math.max(DRAWER_MIN, Math.round(value)));
+-
+-  const storedWidth = () => {
+-    const raw = Number(localStorage.getItem(DRAWER_WIDTH_KEY));
+-    return Number.isFinite(raw) && raw > 0 ? clampWidth(raw) : 260;
+-  };
+-
+-  const [drawerWidth, setDrawerWidthSignal] = createSignal(storedWidth());
+-
+-  const setDrawerWidth = (value: number) => {
+-    const width = clampWidth(value);
+-    setDrawerWidthSignal(width);
+-    localStorage.setItem(DRAWER_WIDTH_KEY, String(width));
+-  };
+-
+-  createEffect(() => {
+-    document.documentElement.style.setProperty(
+-      "--drawer-width",
+-      `${drawerWidth()}px`,
+-    );
+-  });
+-
+-  const beginResize = (event: PointerEvent) => {
+-    event.preventDefault();
+-    const grip = event.currentTarget as HTMLElement;
+-    // Capture, so a fast drag that leaves the 6px grip keeps resizing rather
+-    // than stopping wherever the pointer happened to exit.
+-    grip.setPointerCapture(event.pointerId);
+-    const startX = event.clientX;
+-    const startWidth = drawerWidth();
+-    const onMove = (move: PointerEvent) =>
+-      setDrawerWidth(startWidth + (move.clientX - startX));
+-    const onUp = () => {
+-      grip.removeEventListener("pointermove", onMove);
+-      grip.removeEventListener("pointerup", onUp);
+-      grip.removeEventListener("pointercancel", onUp);
+-    };
+-    grip.addEventListener("pointermove", onMove);
+-    grip.addEventListener("pointerup", onUp);
+-    grip.addEventListener("pointercancel", onUp);
+-  };
+-
+   const authenticate = async (token: string, base: string) => {
+     await validateCredentials(token, base);
+     setToken(token);
+@@ -507,11 +410,18 @@ const App: Component = () => {
+     if (location.pathname === pathFor(active)) lastUrlByTab.set(active.id, here);
+   });
+ 
+-  // URL → tabs syncing. createEffect (not createMemo) — we want side effects,
++  // URL syncing. createEffect (not createMemo) — we want side effects,
+   // not a memoised value.
+   createEffect(() => {
+     const path = location.pathname;
+-    if (path.startsWith("/t/") && params.id) {
++    if (path === "/") {
++      const narrow = window.matchMedia("(max-width: 768px)").matches ||
++        (navigator.maxTouchPoints > 0 && window.innerWidth < 1024);
++      navigate(narrow ? "/sessions" : "/board", { replace: true });
++    } else if (path === "/sessions") {
++      // Sessions is a stable place; its panes are opened by the explicit tool
++      // routes below and are never represented as a product tab.
++    } else if (path.startsWith("/t/") && params.id) {
+       const sess = sessionsStore.sessions[params.id];
+       // Don't auto-create phantoms for ids the server doesn't know about.
+       if (!sess && sessionsStore.ready) return;
+@@ -530,20 +440,14 @@ const App: Component = () => {
+     } else if (path === "/tasks") {
+       openTasksTab();
+     } else if (path === "/assistant" || path.startsWith("/assistant/")) {
+-      // The same condition the drawer button carries. Without it a hand-typed
++      // The same condition the rail carries. Without it a hand-typed
+       // `#/assistant` opened a tab against routes that answer 404 when no key
+       // is configured — FR-T6 says the assistant does not exist unless it is
+       // provisioned, and a tab that opens and then fails is a worse answer
+       // than no tab.
+       if (publicCfg()?.assistant_enabled) openAssistantTab();
+-    } else if (path === "/board") {
+-      openBoardTab();
+-    } else if (path === "/backlog") {
+-      openBacklogTab();
+-    } else if (path === "/projects") {
+-      openProjectsTab();
+-    } else if (path === "/audit") {
+-      openAuditTab();
++    } else if (path === "/settings") {
++      setSettingsOpen(true);
+     } else if (path.startsWith("/w/") && params.ref) {
+       // Unlike a terminal id, a work item ref is not checked against a store
+       // first: the item lives in vogt-core, which this shell does not read,
+@@ -617,7 +521,6 @@ const App: Component = () => {
+       );
+       openTerminalTab(s.id, s.name);
+       navigate(`/t/${s.id}`, { replace: false });
+-      setDrawerOpen(false);
+     } catch (e) {
+       showToast(`create failed: ${(e as Error).message}`, { kind: "error" });
+     }
+@@ -639,7 +542,6 @@ const App: Component = () => {
+       );
+       openTerminalTab(s.id, s.name);
+       navigate(`/t/${s.id}`, { replace: false });
+-      setDrawerOpen(false);
+       setTemplateSelectorContext(null);
+     } catch (e) {
+       showToast(`create failed: ${(e as Error).message}`, { kind: "error" });
+@@ -670,7 +572,6 @@ const App: Component = () => {
+       }
+       openTerminalTab(dup.id, dup.name);
+       navigate(`/t/${dup.id}`);
+-      setDrawerOpen(false);
+     } catch (e) {
+       showToast(`duplicate failed: ${(e as Error).message}`, { kind: "error" });
+     }
+@@ -724,7 +625,6 @@ const App: Component = () => {
+     senders.clear();
+     actions.clear();
+     replaceTabs({ tabs, active });
+-    setDrawerOpen(false);
+     setSettingsOpen(false);
+     setCommandPaletteOpen(false);
+     setLayoutMode(layout.layout_mode);
+@@ -772,15 +672,6 @@ const App: Component = () => {
+       (location.pathname === "/tasks" && tabId === "tasks") ||
+       ((location.pathname === "/assistant" || location.pathname.startsWith("/assistant/")) &&
+         tabId === "assistant") ||
+-      // The five Vogt surfaces were missing from this list, so closing the
+-      // tab you were looking at left the URL pointing at a route with no tab
+-      // behind it and the main area fell through to the empty state. It shows
+-      // up worst on a phone, where the tab sheet is the only way to move
+-      // between tabs and closing one is the common gesture.
+-      (location.pathname === "/board" && tabId === "board") ||
+-      (location.pathname === "/backlog" && tabId === "backlog") ||
+-      (location.pathname === "/projects" && tabId === "projects") ||
+-      (location.pathname === "/audit" && tabId === "audit") ||
+       (location.pathname.startsWith("/w/") &&
+         `workitem:${decodeURIComponent(params.ref ?? "")}` === tabId);
+ 
+@@ -903,171 +794,51 @@ const App: Component = () => {
+         </Show>
+       }>
+       <div class="app">
+-        <Show when={drawerOpen()}>
+-          <div
+-            class="drawer-scrim"
+-            onPointerDown={() => setDrawerOpen(false)}
+-          />
+-        </Show>
+-        <Show when={mobileTabsOpen()}>
+-          <div
+-            class="drawer-scrim"
+-            onPointerDown={() => setMobileTabsOpen(false)}
+-          />
+-        </Show>
+-
+-        <aside class={`drawer ${drawerOpen() ? "open" : ""}`}>
+-          {/* Drag to resize, and reachable from the keyboard: a panel whose
+-              width can only be changed with a pointer is one a keyboard user
+-              cannot widen when its contents do not fit. */}
+-          <button
+-            type="button"
+-            class="drawer-resizer"
+-            aria-label="Resize the panel"
+-            title="Drag to resize"
+-            onPointerDown={beginResize}
+-            onKeyDown={(event) => {
+-              const step = event.shiftKey ? 48 : 16;
+-              if (event.key === "ArrowLeft") {
+-                event.preventDefault();
+-                setDrawerWidth(drawerWidth() - step);
+-              } else if (event.key === "ArrowRight") {
+-                event.preventDefault();
+-                setDrawerWidth(drawerWidth() + step);
+-              }
+-            }}
+-          />
+-          <div class="drawer-header">
+-            <span>MyDevEnv2</span>
+-            <span style={{ color: isConnected() ? "#7ee787" : "#ff7b72" }}>
+-              {isConnected() ? "●" : "○"}
+-            </span>
+-          </div>
+-          <div class="drawer-actions">
+-            <button onClick={() => onCreate()}>+ Session</button>
+-            <button
+-              onClick={() => {
+-                openGitTab("");
+-                navigate("/g/");
+-                setDrawerOpen(false);
+-              }}
+-              title="Open git tab for workspace root"
+-            >
+-              ⎇ Git
+-            </button>
+-            <button
+-              onClick={() => {
+-                openTasksTab();
+-                navigate("/tasks");
+-                setDrawerOpen(false);
+-              }}
+-              title="Open recurring agent tasks"
+-            >
+-              Tasks
+-            </button>
+-            {/*
+-              The Vogt surfaces. Shown only when this front door has a core
+-              behind it — `/api/config` says so without anyone having to
+-              authenticate or provoke a 503 — because a tab that opens and
+-              then reports an outage is a worse answer than no tab (FR-U21).
+-            */}
++        <aside class="places-rail" aria-label="Places">
++          <div class="places-brand">Vogt</div>
++          <button type="button" class="rail-go-to" onClick={() => setCommandPaletteOpen(true)}>Go to…</button>
++          <nav class="places-nav">
++            <div class="places-group">
++              <span class="places-group-label">Work</span>
++              <a class={location.pathname === "/board" ? "active" : ""} href="#/board">Board</a>
++              <a class={location.pathname === "/backlog" ? "active" : ""} href="#/backlog">Backlog</a>
++              <a class={location.pathname === "/inbox" ? "active" : ""} href="#/inbox">Inbox</a>
++            </div>
+             <Show when={publicCfg()?.vogt?.configured}>
+-              <button
+-                onClick={() => {
+-                  openBoardTab();
+-                  navigate("/board");
+-                  setDrawerOpen(false);
+-                }}
+-                title="Work items by workflow state"
+-              >
+-                ▦ Board
+-              </button>
+-              <button
+-                onClick={() => {
+-                  openBacklogTab();
+-                  navigate("/backlog");
+-                  setDrawerOpen(false);
+-                }}
+-                title="The ranked backlog and bugs, with the reason for the ranking"
+-              >
+-                ☰ Backlog
+-              </button>
+-              <button
+-                onClick={() => {
+-                  openProjectsTab();
+-                  navigate("/projects");
+-                  setDrawerOpen(false);
+-                }}
+-                title="Per-project state, compliance and the drift inbox"
+-              >
+-                ▤ Projects
+-              </button>
+-              <button
+-                onClick={() => {
+-                  openAuditTab();
+-                  navigate("/audit");
+-                  setDrawerOpen(false);
+-                }}
+-                title="Who wrote what, and the reason they gave"
+-              >
+-                ⧉ Audit
+-              </button>
+-            </Show>
+-            <Show when={publicCfg()?.assistant_enabled}>
+-              <button
+-                onClick={() => {
+-                  openAssistantTab();
+-                  navigate("/assistant");
+-                  setDrawerOpen(false);
+-                }}
+-                title="Talk to the assistant about your sessions"
+-              >
+-                🎙 Assistant
+-              </button>
++              <div class="places-group">
++                <span class="places-group-label">Estate</span>
++                <a class={location.pathname === "/projects" ? "active" : ""} href="#/projects">Projects</a>
++                <a class={location.pathname === "/audit" ? "active" : ""} href="#/audit">Audit</a>
++              </div>
+             </Show>
+-            <button
+-              onClick={() => {
+-                openGuiTab();
+-                navigate("/gui");
+-                setDrawerOpen(false);
+-              }}
+-              title="Open the GUI stream tab"
+-            >
+-              🖥 GUI
+-            </button>
+-            <button onClick={() => setSettingsOpen(true)} title="Settings">
+-              ⚙
+-            </button>
+-          </div>
+-          <Show when={sessionsError()}>
+-            <div style={{ padding: "8px 10px", color: "#ff7b72", "font-size": "12px" }}>
+-              {sessionsError()}
++            <div class="places-group">
++              <span class="places-group-label">Machine</span>
++              <a class={location.pathname.startsWith("/sessions") || location.pathname.startsWith("/t/") ? "active" : ""} href="#/sessions">Sessions</a>
++              <a href="#/g">Git</a>
++              <a href="#/history">History</a>
++              <a href="#/tasks">Tasks</a>
++              <a href="#/gui">GUI stream</a>
++              <Show when={publicCfg()?.assistant_enabled}><a href="#/assistant">Assistant</a></Show>
+             </div>
+-          </Show>
+-          <div class="session-list">
++          </nav>
++          <div class="places-rail-session-area">
++            <div class="places-section-label">Running</div>
+             <For
+               each={sessionsStore.order
+                 .map((id) => sessionsStore.sessions[id])
+                 .filter((s): s is SessionSummary => Boolean(s))
+                 .sort((a, b) => {
+-                  // Bookmarked sessions float to the top. `bookmarks()` is read
+-                  // here so this re-sorts reactively when a bookmark toggles.
+                   const set = new Set(bookmarks());
+-                  const aB = set.has(a.id) ? 0 : 1;
+-                  const bB = set.has(b.id) ? 0 : 1;
+-                  return aB - bB;
++                  return (set.has(a.id) ? 0 : 1) - (set.has(b.id) ? 0 : 1);
+                 })}
+               fallback={<div class="empty">No sessions yet.</div>}
+             >
+               {(s) => (
+                 <div
+-                  class={`session-row ${
+-                    tabsStore.active === `term:${s.id}` ? "active" : ""
+-                  }`}
++                  class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""}`}
+                   onClick={() => {
+                     openTerminalTab(s.id, s.name);
+                     navigate(`/t/${s.id}`);
+-                    setDrawerOpen(false);
+                   }}
+                   onContextMenu={(e) => {
+                     e.preventDefault();
+@@ -1075,138 +846,56 @@ const App: Component = () => {
+                   }}
+                   title={`${s.name}\ncwd: ${s.cwd}`}
+                 >
+-                  <span
+-                    class={`activity-dot ${activityClass(s)}`}
+-                    title={activityLabel(s.activity, s.exit_code)}
+-                  />
+-                  <span
+-                    class={`continuity-dot ${continuityBadge(s).cls}`}
+-                    title={continuityBadge(s).title}
+-                  >
++                  <span class={`activity-dot ${activityClass(s)}`} title={activityLabel(s.activity, s.exit_code)} />
++                  <span class={`continuity-dot ${continuityBadge(s).cls}`} title={continuityBadge(s).title}>
+                     {continuityBadge(s).glyph}
+                   </span>
+                   <div class="session-row-body">
+                     <span class="name">{s.name}</span>
+-                    <Show when={s.cwd}>
+-                      <span class="cwd">{s.cwd}</span>
+-                    </Show>
++                    <Show when={s.cwd}><span class="cwd">{s.cwd}</span></Show>
+                   </div>
+-                  <span
++                  <button
++                    type="button"
+                     class="row-btn"
+                     title={isBookmarked(s.id) ? "Remove bookmark" : "Bookmark"}
+                     onClick={(e) => {
+                       e.stopPropagation();
+                       toggleBookmark(s.id);
+                     }}
+-                  >
+-                    {isBookmarked(s.id) ? "★" : "☆"}
+-                  </span>
+-                  <span
++                  >{isBookmarked(s.id) ? "★" : "☆"}</button>
++                  <button
++                    type="button"
+                     class="row-btn"
+                     title="Duplicate (same cwd)"
+                     onClick={(e) => {
+                       e.stopPropagation();
+                       void onDuplicateSession(s);
+                     }}
+-                  >
+-                    ⧉
+-                  </span>
+-                  <span
++                  >⧉</button>
++                  <button
++                    type="button"
+                     class="close"
+                     title="Kill & remove"
+                     onClick={(e) => {
+                       e.stopPropagation();
+                       void onCloseSession(s);
+                     }}
+-                  >
+-                    ×
+-                  </span>
++                  >×</button>
+                 </div>
+               )}
+             </For>
+           </div>
+           <FileTree
+-            onOpen={() => setDrawerOpen(false)}
++            onOpen={() => navigate("/sessions")}
+             promptPath={promptUser}
+-            onCreatePresetHere={(path) => {
+-              void onCreate(path);
+-            }}
++            onCreatePresetHere={(path) => { void onCreate(path); }}
+             onError={(message) => showToast(message, { kind: "error" })}
+           />
++          <div class="places-rail-footer">
++            <button type="button" onClick={() => navigate("/settings")}>Settings</button>
++            <span class="rail-connection">{isConnected() ? "Connected" : "Offline"}</span>
++          </div>
+         </aside>
+-
+-        <div class="tab-strip">
+-          <button
+-            class="menu-btn"
+-            onClick={() => setDrawerOpen((v) => !v)}
+-            aria-label="Toggle drawer"
+-          >
+-            ☰
+-          </button>
+-          <button
+-            class="menu-btn"
+-            onClick={() => void onCreate()}
+-            title="New terminal (Ctrl+Shift+T)"
+-            aria-label="New terminal"
+-          >
+-            +
+-          </button>
+-          <button
+-            class="menu-btn"
+-            onClick={() => setMobileTabsOpen(true)}
+-            title="Show open tabs"
+-            aria-label="Show open tabs"
+-          >
+-            {tabsStore.tabs.length}
+-          </button>
+-          <For each={tabsStore.tabs}>
+-            {(t) => (
+-              <div
+-                class={`tab ${tabsStore.active === t.id ? "active" : ""}`}
+-                onAuxClick={(e) => {
+-                  // Middle-click closes the tab (browser/editor convention).
+-                  if (e.button === 1) {
+-                    e.preventDefault();
+-                    void requestCloseTab(t.id);
+-                  }
+-                }}
+-                title={t.label}
+-              >
+-                <button
+-                  type="button"
+-                  class="tab-main"
+-                  onClick={() => {
+-                    focusTab(t.id);
+-                    navigate(urlForTab(t));
+-                  }}
+-                >
+-                  <Show when={t.kind === "terminal"}>
+-                    <span class={`activity-dot ${tabActivityClass(t) ?? "idle"}`} />
+-                  </Show>
+-                  <span class="label">
+-                    {TAB_GLYPHS[t.kind] ?? ""}
+-                    {t.label}
+-                  </span>
+-                  <Show when={t.kind === "editor" && t.dirty}>
+-                    <span class="dirty-dot" title="unsaved changes" />
+-                  </Show>
+-                </button>
+-                <button
+-                  type="button"
+-                  class="close"
+-                  aria-label={`Close ${t.label}`}
+-                  onClick={(e) => {
+-                    e.stopPropagation();
+-                    void requestCloseTab(t.id);
+-                  }}
+-                >
+-                  ×
+-                </button>
+-              </div>
+-            )}
+-          </For>
+-        </div>
+-
+         <main class="main">
+           <Show when={!isConnected() && getToken()}>
+             <div class="connection-banner">
+@@ -1226,9 +915,33 @@ const App: Component = () => {
+               onNotify={(message, kind) => showToast(message, { kind })}
+             />
+           </Show>
++          <Show when={location.pathname === "/sessions"}>
++            <div class="stable-place"><Sessions /></div>
++          </Show>
++          <Show when={location.pathname === "/board"}>
++            <div class="stable-place"><Board onError={(msg) => showToast(msg, { kind: "error" })} /></div>
++          </Show>
++          <Show when={location.pathname === "/backlog"}>
++            <div class="stable-place"><Backlog onError={(msg) => showToast(msg, { kind: "error" })} /></div>
++          </Show>
++          <Show when={location.pathname === "/inbox"}>
++            <div class="stable-place"><Inbox onError={(msg) => showToast(msg, { kind: "error" })} /></div>
++          </Show>
++          <Show when={location.pathname === "/projects"}>
++            <div class="stable-place"><Projects onError={(msg) => showToast(msg, { kind: "error" })} /></div>
++          </Show>
++          <Show when={location.pathname === "/audit"}>
++            <div class="stable-place"><AuditBrowser onError={(msg) => showToast(msg, { kind: "error" })} /></div>
++          </Show>
+           <div
+             class="tab-view"
+-            style={{ display: editorWorkspaceActive() ? "none" : "flex" }}
++            style={{
++              display:
++                editorWorkspaceActive() ||
++                ["/sessions", "/board", "/backlog", "/inbox", "/projects", "/audit"].includes(location.pathname)
++                  ? "none"
++                  : "flex",
++            }}
+           >
+             <For each={tabsStore.tabs}>
+               {(t) => (
+@@ -1313,14 +1026,6 @@ const App: Component = () => {
+                       onError={(msg) => showToast(msg, { kind: "error" })}
+                     />
+                   </Show>
+-                  <Show when={t.kind === "board"}>
+-                    <Board onError={(msg) => showToast(msg, { kind: "error" })} />
+-                  </Show>
+-                  <Show when={t.kind === "backlog"}>
+-                    <Backlog
+-                      onError={(msg) => showToast(msg, { kind: "error" })}
+-                    />
+-                  </Show>
+                   <Show when={t.kind === "workitem" && t}>
+                     {(tab) => (
+                       <WorkItemDetail
+@@ -1331,16 +1036,6 @@ const App: Component = () => {
+                       />
+                     )}
+                   </Show>
+-                  <Show when={t.kind === "projects"}>
+-                    <Projects
+-                      onError={(msg) => showToast(msg, { kind: "error" })}
+-                    />
+-                  </Show>
+-                  <Show when={t.kind === "audit"}>
+-                    <AuditBrowser
+-                      onError={(msg) => showToast(msg, { kind: "error" })}
+-                    />
+-                  </Show>
+                   <Show when={t.kind === "tasks"}>
+                     <AgentTasks
+                       onError={(msg) => showToast(msg, { kind: "error" })}
+@@ -1355,12 +1050,12 @@ const App: Component = () => {
+             </For>
+             <Show when={tabsStore.tabs.length === 0}>
+               <div class="empty">
+-                <div>Open a file from the drawer or create a session.</div>
++                <div>Open a file from the rail or create a session.</div>
+                 <button onClick={() => void onCreate()}>+ New session</button>
+               </div>
+             </Show>
+           </div>
+-          <Show when={activeKind() === "terminal"}>
++          <Show when={activeKind() === "terminal" && location.pathname.startsWith("/t/")}>
+             <ModKeyRow
+               send={(d) => activeSend(d)}
+               onCopy={() => void activeCopy()}
+@@ -1372,62 +1067,19 @@ const App: Component = () => {
+         </main>
+       </div>
+ 
+-      <Show when={mobileTabsOpen()}>
+-        <div class="mobile-tabs-sheet">
+-          <div class="mobile-tabs-header">
+-            <div>
+-              <strong>Open tabs</strong>
+-              <div class="mobile-tabs-meta">
+-                {tabsStore.tabs.length} total
+-                <Show when={activeTab()}>
+-                  {(tab) => <span> • active: {tab().label}</span>}
+-                </Show>
+-              </div>
+-            </div>
+-            <button type="button" onClick={() => setMobileTabsOpen(false)}>
+-              Close
+-            </button>
+-          </div>
+-          <div class="mobile-tabs-list">
+-            <For each={tabsStore.tabs}>
+-              {(tab) => (
+-                <div
+-                  class={`mobile-tab-row ${tabsStore.active === tab.id ? "active" : ""}`}
+-                >
+-                  <button
+-                    type="button"
+-                    class="mobile-tab-main"
+-                    onClick={() => {
+-                      focusTab(tab.id);
+-                      navigate(urlForTab(tab));
+-                      setMobileTabsOpen(false);
+-                    }}
+-                  >
+-                    <span class="mobile-tab-title">
+-                      <Show when={tab.kind === "terminal"}>
+-                        <span class={`activity-dot ${tabActivityClass(tab) ?? "idle"}`} />
+-                      </Show>
+-                      {tab.label}
+-                    </span>
+-                    <span class="mobile-tab-kind">{tab.kind}</span>
+-                  </button>
+-                  <button
+-                    type="button"
+-                    class="mobile-tab-close"
+-                    onClick={() => void requestCloseTab(tab.id)}
+-                  >
+-                    ×
+-                  </button>
+-                </div>
+-              )}
+-            </For>
+-          </div>
+-        </div>
+-      </Show>
++      <nav class="phone-bottom-nav" aria-label="Primary navigation">
++        <a href="#/sessions" class={location.pathname.startsWith("/sessions") || location.pathname.startsWith("/t/") ? "active" : ""}>Sessions</a>
++        <a href="#/inbox" class={location.pathname === "/inbox" ? "active" : ""}>Inbox</a>
++        <a href="#/board" class={location.pathname === "/board" ? "active" : ""}>Board</a>
++        <a href="#/backlog" class={location.pathname === "/backlog" ? "active" : ""}>Backlog</a>
++      </nav>
+ 
+       <Settings
+         open={settingsOpen()}
+-        onClose={() => setSettingsOpen(false)}
++        onClose={() => {
++          setSettingsOpen(false);
++          if (location.pathname === "/settings") navigate("/sessions");
++        }}
+         onSaveWorkspaceLayout={() => onSaveWorkspaceLayout()}
+         onRestoreWorkspaceLayout={(layoutId) => onRestoreWorkspaceLayout(layoutId)}
+         onDeleteWorkspaceLayout={(layoutId) => onDeleteWorkspaceLayout(layoutId)}
+@@ -1530,7 +1182,7 @@ const App: Component = () => {
+         open={commandPaletteOpen()}
+         onClose={() => setCommandPaletteOpen(false)}
+         onCreateSession={() => void onCreate()}
+-        onOpenFile={() => setDrawerOpen(true)}
++        onOpenFile={() => navigate("/sessions")}
+         onOpenSettings={() => setSettingsOpen(true)}
+         onShowShortcuts={() => setShortcutsOpen(true)}
+         onError={(message) => showToast(message, { kind: "error" })}
+diff --git a/web/src/Board.tsx b/web/src/Board.tsx
+index 9f5628b..c082daf 100644
+--- a/web/src/Board.tsx
++++ b/web/src/Board.tsx
+@@ -62,8 +62,8 @@
+ //     agreed to show it. So the cell now *windows* — the same mechanism
+ //     `Backlog.tsx` uses and for the same reason, because a second idea of
+ //     what virtualization means on one product is two things to keep true:
+-//     a fixed card height pinned by `styles.css`, a `ResizeObserver` on the
+-//     cell's own scroller, and a slice of the list with overscan either
++//     a measured card height, a `ResizeObserver` on the cell's own scroller,
++//     and a slice of the list with overscan either
+ //     side. Everything the filter matched is reachable, in the order it
+ //     matched; only what is on screen is in the DOM.
+ //
+@@ -95,6 +95,7 @@ import { useLocation, useNavigate, useSearchParams } from "@solidjs/router";
+ import { ApiError } from "./api";
+ import { openWorkItemTab } from "./tabs";
+ import { ViewAgeBadge, createViewAge, onVogtLive } from "./viewAge";
++import { MeasuredWindow } from "./measuredWindow";
+ import {
+   VogtUnavailable,
+   createWork,
+@@ -117,29 +118,14 @@ interface Props {
+ /** Grouping for swimlanes (FR-U13). */
+ type LaneMode = "none" | "project" | "initiative";
+ 
+-/** One page of `work.list`; the server caps this at 500. */
++/** One bounded page of `work.list`; the server caps this at 500. */
+ const PAGE_SIZE = 500;
+ 
+-/** How much of a filter the board will pull before it admits truncation. */
++/** Safety ceiling for the compatibility path while `board.list` is absent. */
+ const MAX_ITEMS = 2000;
+ 
+-/**
+- * Card height in px, and the gap under it. Windowing needs them fixed; the
+- * CSS pins them too.
+- *
+- * `--board-card-h` and `--board-card-gap` in `styles.css` must match these,
+- * exactly as `--vogt-row-h` must match `Backlog.tsx`'s `ROW_HEIGHT`: the
+- * window's arithmetic is the only thing holding the scroll offset and the
+- * drawn cards in agreement, and it has no way to notice if the stylesheet
+- * disagrees with it.
+- */
+-const CARD_HEIGHT = 116;
+-const CARD_GAP = 8;
+-
+-/** What one card costs a column, top to top. Exported because it is the one
+- *  number a test can use to check that the scrollbar is as long as the whole
+- *  column rather than as long as the window. */
+-export const CARD_SLOT = CARD_HEIGHT + CARD_GAP;
++/** Layout-free seed only; measured cards replace it as soon as they render. */
++export const CARD_ESTIMATE = 112;
+ 
+ /**
+  * Below this many cards a cell draws whole.
+@@ -153,12 +139,10 @@ export const CARD_SLOT = CARD_HEIGHT + CARD_GAP;
+  */
+ const VIRTUALIZE_ABOVE = 60;
+ 
+-/** Cards drawn beyond each edge of the cell, so a fast scroll is not blank. */
+-const OVERSCAN = 6;
+-
+-/** The window's height when nothing has measured the cell yet — a screenful
+- *  of cards, and the only thing a layout-free environment can assume. */
+-const FALLBACK_CARDS = 8;
++/** Pixel overscan, not a number of rows. */
++const OVERSCAN_PX = 320;
++const DEFAULT_VIEWPORT_PX = 480;
++const CARD_SPACING_PX = 8;
+ 
+ const POLL_CHOICES = [10, 20, 60, 0] as const;
+ const DEFAULT_POLL_SECONDS = 20;
+@@ -2044,28 +2028,28 @@ const Board: Component<Props> = (props) => {
+                           const mine = cellKey(lane.key, column.state);
+                           const cards = createMemo(() => cellItems(lane, column.state));
+ 
+-                          // -- windowing (NFR-S5) -------------------------
+-                          //
+-                          // `Backlog.tsx`'s mechanism, on a cell instead of
+-                          // a page: a fixed card height, a `ResizeObserver`
+-                          // on the cell's own scroller, and a slice with
+-                          // overscan either side. The observer rather than a
+-                          // window listener for the reason the backlog gives
+-                          // — a board in an unselected tab is `display:none`
+-                          // with a height of zero, and comes back without a
+-                          // resize event ever firing.
+-
+-                          // Seeded from `cellScroll`, and that is the whole
+-                          // reason `cellScroll` exists — see it for why a
+-                          // cell cannot keep its own offset.
++                          // -- measured windowing (NFR-S5 / FR-U25) --------
++                          // The estimate is only the layout-free seed. Each
++                          // rendered card reports its content height back to
++                          // the keyed prefix index, so expansion and width
++                          // changes alter the runway without clipping a card.
+                           const [scrollTop, setScrollTop] = createSignal(
+                             cellScroll.get(mine) ?? 0,
+                           );
+                           const [viewport, setViewport] = createSignal(0);
++                          const measured = new MeasuredWindow(CARD_ESTIMATE + CARD_SPACING_PX);
++                          const [measurementVersion, setMeasurementVersion] = createSignal(0);
++                          const totalHeight = createMemo(() => {
++                            measurementVersion();
++                            return measured.totalHeight();
++                          });
++                          createEffect(() => {
++                            if (measured.setKeys(cards().map((item) => item.ref))) {
++                              setMeasurementVersion((version) => version + 1);
++                            }
++                          });
+ 
+-                          const windowed = createMemo(
+-                            () => cards().length > VIRTUALIZE_ABOVE,
+-                          );
++                          const windowed = createMemo(() => cards().length > VIRTUALIZE_ABOVE);
+ 
+                           /** Where the focused card sits in *this* cell, or
+                            *  -1. A `Map` read, so every cell on the board can
+@@ -2078,17 +2062,18 @@ const Board: Component<Props> = (props) => {
+                           });
+ 
+                           const slice = createMemo(() => {
++                            measurementVersion();
+                             const all = cards();
+-                            if (!windowed()) return { start: 0, end: all.length };
+-                            const height = viewport() || CARD_SLOT * FALLBACK_CARDS;
+-                            const count =
+-                              Math.ceil(height / CARD_SLOT) + OVERSCAN * 2;
+-                            const last = Math.max(0, all.length - count);
+-                            let start = Math.min(
+-                              last,
+-                              Math.max(0, Math.floor(scrollTop() / CARD_SLOT) - OVERSCAN),
++                            if (!windowed()) {
++                              return { start: 0, end: all.length, top: 0 };
++                            }
++                            const range = measured.range(
++                              scrollTop(),
++                              viewport() || DEFAULT_VIEWPORT_PX,
++                              OVERSCAN_PX,
+                             );
+-                            let end = Math.min(all.length, start + count);
++                            let start = range.start;
++                            let end = range.end;
+                             // FR-U22 through a windowed column: an element
+                             // that is not rendered cannot take focus, so the
+                             // card the keyboard is moving to is always in the
+@@ -2097,10 +2082,13 @@ const Board: Component<Props> = (props) => {
+                             // scrolled it into view.
+                             const at = focusHere();
+                             if (at >= 0 && (at < start || at >= end)) {
+-                              start = Math.max(0, Math.min(at - OVERSCAN, last));
+-                              end = Math.min(all.length, start + count);
++                              start = Math.max(0, at - 4);
++                              end = Math.min(
++                                all.length,
++                                Math.max(start + 1, measured.range(measured.offsetOf(at), viewport() || DEFAULT_VIEWPORT_PX, OVERSCAN_PX).end),
++                              );
+                             }
+-                            return { start, end };
++                            return { start, end, top: measured.offsetOf(start) };
+                           });
+ 
+                           const windowCards = createMemo(() => {
+@@ -2289,9 +2277,10 @@ const Board: Component<Props> = (props) => {
+                                 <div
+                                   class="board-cell-cards"
+                                   ref={(node) => {
+-                                    const observer = new ResizeObserver(() =>
+-                                      setViewport(node.clientHeight),
+-                                    );
++                                    const observer = new ResizeObserver((entries) => {
++                                      const height = entries[0]?.contentRect.height ?? node.clientHeight;
++                                      if (height > 0) setViewport(height);
++                                    });
+                                     observer.observe(node);
+                                     queueMicrotask(() => {
+                                       // A rebuilt cell is a fresh element at
+@@ -2319,12 +2308,12 @@ const Board: Component<Props> = (props) => {
+                                   <div
+                                     class="board-cell-run"
+                                     style={{
+-                                      height: `${cards().length * CARD_SLOT}px`,
++                                      height: `${totalHeight()}px`,
+                                     }}
+                                   >
+                                     <div
+                                       class="board-cell-window"
+-                                      style={{ top: `${slice().start * CARD_SLOT}px` }}
++                                      style={{ top: `${slice().top}px` }}
+                                     >
+                                       <For each={windowCards()}>
+                                         {(item) => {
+@@ -2339,6 +2328,48 @@ const Board: Component<Props> = (props) => {
+                                               }${focusedRef() === item.ref ? " board-card--focused" : ""}${
+                                                 bounced() === item.ref ? " board-card--bounced" : ""
+                                               }`}
++                                              ref={(node) => {
++                                                const observer = new ResizeObserver((entries) => {
++                                                  const entry = entries[0];
++                                                  const box = entry?.borderBoxSize;
++                                                  const borderHeight = Array.isArray(box)
++                                                    ? box[0]?.blockSize
++                                                    : box && typeof box === "object" && "blockSize" in box
++                                                      ? box.blockSize
++                                                      : undefined;
++                                                  const cardHeight =
++                                                    borderHeight ?? entry?.contentRect.height ?? node.getBoundingClientRect().height;
++                                                  if (cardHeight <= 0) return;
++                                                  const change = measured.measure(
++                                                    item.ref,
++                                                    cardHeight + CARD_SPACING_PX,
++                                                  );
++                                                  if (change) {
++                                                    setMeasurementVersion((version) => version + 1);
++                                                    if (change.top < scrollTop()) {
++                                                      const next = scrollTop() + change.delta;
++                                                      cellScroll.set(mine, next);
++                                                      setScrollTop(next);
++                                                      queueMicrotask(() => {
++                                                        const scroller = node.closest<HTMLElement>(".board-cell-cards");
++                                                        if (scroller) scroller.scrollTop = next;
++                                                      });
++                                                    }
++                                                  }
++                                                });
++                                                observer.observe(node);
++                                                queueMicrotask(() => {
++                                                  const cardHeight = node.getBoundingClientRect().height;
++                                                  if (cardHeight > 0) {
++                                                    const change = measured.measure(
++                                                      item.ref,
++                                                      cardHeight + CARD_SPACING_PX,
++                                                    );
++                                                    if (change) setMeasurementVersion((version) => version + 1);
++                                                  }
++                                                });
++                                                onCleanup(() => observer.disconnect());
++                                              }}
+                                               role="button"
+                                               tabindex={0}
+                                               draggable={!writesDisabled() && !pending()}
+diff --git a/web/src/CommandPalette.tsx b/web/src/CommandPalette.tsx
+index 2fbbb29..2fb7cae 100644
+--- a/web/src/CommandPalette.tsx
++++ b/web/src/CommandPalette.tsx
+@@ -16,11 +16,7 @@ import {
+ } from "./vogtApi";
+ import {
+   focusTab,
+-  openAuditTab,
+-  openBacklogTab,
+-  openBoardTab,
+   openGitTab,
+-  openProjectsTab,
+   openTerminalTab,
+   openWorkItemTab,
+   openHistoryTab,
+@@ -359,7 +355,7 @@ const CommandPalette: Component<Props> = (props) => {
+           id: `project-terminal-${project.cwd || "root"}`,
+           label: `Open terminal in ${project.displayName}`,
+           description: location,
+-          icon: "💻",
++          icon: ">_",
+           action: () => launchWorkspaceCommand(`shell-${project.displayName}`, "bash", project.cwd),
+           category: "Project Actions",
+         });
+@@ -368,7 +364,7 @@ const CommandPalette: Component<Props> = (props) => {
+           id: `project-git-${project.cwd || "root"}`,
+           label: `Open git status for ${project.displayName}`,
+           description: location,
+-          icon: "⎇",
++          icon: "git",
+           action: () => {
+             openGitTab(project.cwd);
+             navigate(project.cwd ? `/g/${encodeURIComponent(project.cwd)}` : "/g/");
+@@ -382,7 +378,7 @@ const CommandPalette: Component<Props> = (props) => {
+             id: `project-${project.cwd || "root"}-${project.packageManager}-${script}`,
+             label: `Run ${project.packageManager} ${script}`,
+             description: `${project.displayName} • ${location}`,
+-            icon: "▶",
++            icon: "run",
+             action: () =>
+               launchWorkspaceCommand(
+                 `${project.displayName}-${script}`,
+@@ -401,7 +397,7 @@ const CommandPalette: Component<Props> = (props) => {
+               id: `project-${project.cwd || "root"}-cargo-test`,
+               label: "Run cargo test",
+               description: `${project.displayName} • ${location}`,
+-              icon: "🦀",
++              icon: "Rs",
+               action: () =>
+                 launchWorkspaceCommand(
+                   `${project.displayName}-cargo-test`,
+@@ -414,7 +410,7 @@ const CommandPalette: Component<Props> = (props) => {
+               id: `project-${project.cwd || "root"}-cargo-clippy`,
+               label: "Run cargo clippy",
+               description: `${project.displayName} • ${location}`,
+-              icon: "🦀",
++              icon: "Rs",
+               action: () =>
+                 launchWorkspaceCommand(
+                   `${project.displayName}-cargo-clippy`,
+@@ -432,7 +428,7 @@ const CommandPalette: Component<Props> = (props) => {
+               id: `project-${project.cwd || "root"}-pytest`,
+               label: "Run pytest",
+               description: `${project.displayName} • ${location}`,
+-              icon: "🐍",
++              icon: "Py",
+               action: () =>
+                 launchWorkspaceCommand(`${project.displayName}-pytest`, "pytest", project.cwd),
+               category: "Project Actions",
+@@ -441,7 +437,7 @@ const CommandPalette: Component<Props> = (props) => {
+               id: `project-${project.cwd || "root"}-ruff`,
+               label: "Run ruff check",
+               description: `${project.displayName} • ${location}`,
+-              icon: "🐍",
++              icon: "Py",
+               action: () =>
+                 launchWorkspaceCommand(
+                   `${project.displayName}-ruff`,
+@@ -458,7 +454,7 @@ const CommandPalette: Component<Props> = (props) => {
+             id: `project-${project.cwd || "root"}-just`,
+             label: "Run just",
+             description: `${project.displayName} • ${location}`,
+-            icon: "▶",
++            icon: "run",
+             action: () => launchWorkspaceCommand(`${project.displayName}-just`, "just", project.cwd),
+             category: "Project Actions",
+           });
+@@ -469,7 +465,7 @@ const CommandPalette: Component<Props> = (props) => {
+             id: `project-${project.cwd || "root"}-make`,
+             label: "Run make",
+             description: `${project.displayName} • ${location}`,
+-            icon: "▶",
++            icon: "run",
+             action: () => launchWorkspaceCommand(`${project.displayName}-make`, "make", project.cwd),
+             category: "Project Actions",
+           });
+@@ -568,7 +564,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: `history-${i}`,
+       label: r.session_name,
+       description: r.match_snippet.replace(/<\/?mark>/g, ""),
+-      icon: "🔍",
++      icon: "?",
+       action: () => {
+         openHistoryTab();
+         navigate("/history");
+@@ -583,7 +579,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: `file-${i}`,
+       label: file.name,
+       description: file.path,
+-      icon: "📄",
++      icon: "file",
+       action: () => {
+         openEditorTab(file.path);
+         navigate(`/e/${encodeURIComponent(file.path)}`);
+@@ -601,7 +597,7 @@ const CommandPalette: Component<Props> = (props) => {
+           id: "symbol-no-editor",
+           label: "Open a file to search symbols",
+           description: "Symbol search works against the active editor tab",
+-          icon: "@",
++          icon: "sym",
+           action: () => undefined,
+           category: "Current File Symbols",
+         },
+@@ -614,7 +610,7 @@ const CommandPalette: Component<Props> = (props) => {
+           id: "symbol-message",
+           label: symbolMessage()!,
+           description: active.path,
+-          icon: "@",
++          icon: "sym",
+           action: () => undefined,
+           category: "Current File Symbols",
+         },
+@@ -631,7 +627,7 @@ const CommandPalette: Component<Props> = (props) => {
+       ]
+         .filter(Boolean)
+         .join(" • "),
+-      icon: "@",
++      icon: "sym",
+       action: () => {
+         focusTab(active.id);
+         navigate(`/e/${encodeURIComponent(active.path)}`);
+@@ -657,9 +653,8 @@ const CommandPalette: Component<Props> = (props) => {
+         id: "vogt-board",
+         label: "Open Board",
+         description: "Work items by workflow state",
+-        icon: "▦",
++        icon: "",
+         action: () => {
+-          openBoardTab();
+           navigate("/board");
+           props.onClose();
+         },
+@@ -669,9 +664,8 @@ const CommandPalette: Component<Props> = (props) => {
+         id: "vogt-backlog",
+         label: "Open Backlog",
+         description: "The ranked backlog and bugs, with the reason for the order",
+-        icon: "☰",
++        icon: "",
+         action: () => {
+-          openBacklogTab();
+           navigate("/backlog");
+           props.onClose();
+         },
+@@ -681,9 +675,8 @@ const CommandPalette: Component<Props> = (props) => {
+         id: "vogt-projects",
+         label: "Open Projects",
+         description: "Per-project state, compliance and the drift inbox",
+-        icon: "▤",
++        icon: "",
+         action: () => {
+-          openProjectsTab();
+           navigate("/projects");
+           props.onClose();
+         },
+@@ -693,9 +686,8 @@ const CommandPalette: Component<Props> = (props) => {
+         id: "vogt-audit",
+         label: "Open Audit",
+         description: "Who wrote what, and the reason they gave",
+-        icon: "⧉",
++        icon: "",
+         action: () => {
+-          openAuditTab();
+           navigate("/audit");
+           props.onClose();
+         },
+@@ -719,9 +711,8 @@ const CommandPalette: Component<Props> = (props) => {
+         id: "vogt-new-work",
+         label: "New Work Item...",
+         description: "Opens the backlog's quick-create, which collects a reason",
+-        icon: "✚",
++        icon: "+",
+         action: () => {
+-          openBacklogTab();
+           navigate("/backlog?create=1");
+           props.onClose();
+         },
+@@ -733,9 +724,8 @@ const CommandPalette: Component<Props> = (props) => {
+         description:
+           "Opens the drift inbox, where each proposal shows both sides and " +
+           "takes a typed reason",
+-        icon: "⚖",
++        icon: "drift",
+         action: () => {
+-          openProjectsTab();
+           navigate("/projects?view=drift");
+           props.onClose();
+         },
+@@ -745,9 +735,8 @@ const CommandPalette: Component<Props> = (props) => {
+         id: "vogt-import-project",
+         label: "Import a Project...",
+         description: "Opens the import form, which collects a reason",
+-        icon: "⇤",
++        icon: "import",
+         action: () => {
+-          openProjectsTab();
+           navigate("/projects?view=import");
+           props.onClose();
+         },
+@@ -757,7 +746,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: "new-session",
+       label: "New Terminal Session",
+       description: "Create a new shell session",
+-      icon: "🖥",
++      icon: ">_",
+       action: () => {
+         props.onClose();
+         props.onCreateSession?.();
+@@ -768,7 +757,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: "new-file",
+       label: "New File",
+       description: "Create a new file in the workspace",
+-      icon: "📄",
++      icon: "file",
+       action: () => {
+         props.onClose();
+         props.onOpenFile?.();
+@@ -779,7 +768,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: "open-file",
+       label: "Open File...",
+       description: "Browse and open a file from workspace",
+-      icon: "📁",
++      icon: "dir",
+       action: () => {
+         props.onClose();
+         // This would trigger file tree focus or file picker
+@@ -791,7 +780,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: "git-status",
+       label: "Git Status",
+       description: "Open git status view for workspace root",
+-      icon: "⎇",
++      icon: "git",
+       action: () => {
+         openGitTab("");
+         navigate("/g/");
+@@ -803,7 +792,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: "search-history",
+       label: "Search History",
+       description: "Search through session history",
+-      icon: "🔍",
++      icon: "?",
+       action: () => {
+         openHistoryTab();
+         navigate("/history");
+@@ -815,7 +804,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: "open-tasks",
+       label: "Open Agent Tasks",
+       description: "Inspect and run recurring agent tasks",
+-      icon: "≡",
++      icon: "tasks",
+       action: () => {
+         openTasksTab();
+         navigate("/tasks");
+@@ -827,7 +816,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: "open-gui",
+       label: "Open GUI Stream",
+       description: "Open the GUI stream tab",
+-      icon: "🖥",
++      icon: ">_",
+       action: () => {
+         openGuiTab();
+         navigate("/gui");
+@@ -839,7 +828,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: "open-settings",
+       label: "Open Settings",
+       description: "Configure token, layout, templates, notifications",
+-      icon: "⚙",
++      icon: "set",
+       action: () => {
+         props.onOpenSettings?.();
+         props.onClose();
+@@ -850,7 +839,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: "show-shortcuts",
+       label: "Keyboard Shortcuts",
+       description: "View all keyboard shortcuts",
+-      icon: "⌨",
++      icon: "key",
+       action: () => {
+         props.onShowShortcuts?.();
+         props.onClose();
+@@ -864,7 +853,7 @@ const CommandPalette: Component<Props> = (props) => {
+         id: "save-workspace-layout",
+         label: "Save Workspace Layout",
+         description: "Capture the current tabs and layout mode in this browser",
+-        icon: "◫",
++        icon: "layout",
+         action: async () => {
+           props.onClose();
+           await props.onSaveWorkspaceLayout?.();
+@@ -891,16 +880,16 @@ const CommandPalette: Component<Props> = (props) => {
+               : `Switch to ${tab.kind} tab`,
+       icon:
+         tab.kind === "editor"
+-          ? "📄"
++          ? "file"
+           : tab.kind === "git"
+-            ? "⎇"
++            ? "git"
+             : tab.kind === "gui"
+-              ? "🖥"
++              ? ">_"
+               : tab.kind === "history"
+-                ? "📜"
++                ? "hist"
+                 : tab.kind === "tasks"
+-                  ? "≡"
+-                  : "💻",
++                  ? "tasks"
++                  : ">_",
+       action: () => {
+         if (tab.kind === "terminal") {
+           openTerminalTab(tab.sessionId, tab.label);
+@@ -933,7 +922,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: `layout-${layout.id}`,
+       label: `Restore ${layout.name}`,
+       description: workspaceLayoutSummary(layout),
+-      icon: "◫",
++      icon: "layout",
+       action: async () => {
+         props.onClose();
+         await props.onRestoreWorkspaceLayout?.(layout.id);
+@@ -950,7 +939,7 @@ const CommandPalette: Component<Props> = (props) => {
+         id: `session-${s.id}`,
+         label: s.name,
+         description: `Jump to session • ${s.cwd}`,
+-        icon: "💻",
++        icon: ">_",
+         action: () => {
+           openTerminalTab(s.id, s.name);
+           navigate(`/t/${s.id}`);
+@@ -967,7 +956,7 @@ const CommandPalette: Component<Props> = (props) => {
+         id: `recent-${i}`,
+         label: f.path.split("/").pop() || f.path,
+         description: f.path,
+-        icon: "📄",
++        icon: "file",
+         action: () => {
+           openEditorTab(f.path);
+           navigate(`/e/${encodeURIComponent(f.path)}`);
+@@ -982,7 +971,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: `template-${index}`,
+       label: `Launch ${template.name}`,
+       description: template.description || "Create a session from this preset",
+-      icon: "◇",
++      icon: "preset",
+       action: async () => {
+         await props.onLaunchTemplate?.(template);
+         props.onClose();
+@@ -996,7 +985,7 @@ const CommandPalette: Component<Props> = (props) => {
+       id: `task-${task.id}`,
+       label: `Run ${task.name}`,
+       description: `${task.status} • ${task.run_count} runs • ${task.schedule.kind}`,
+-      icon: task.status === "active" ? "▶" : "⏸",
++      icon: task.status === "active" ? "run" : "paused",
+       action: async () => {
+         try {
+           const run = await api.runAgentTask(task.id);
+@@ -1023,9 +1012,8 @@ const CommandPalette: Component<Props> = (props) => {
+         id: `vogt-project-${project.slug}`,
+         label: `Open project ${project.name}`,
+         description: project.slug,
+-        icon: "▤",
++        icon: "project",
+         action: () => {
+-          openProjectsTab();
+           navigate(`/projects?p=${encodeURIComponent(project.slug)}`);
+           props.onClose();
+         },
+@@ -1037,7 +1025,7 @@ const CommandPalette: Component<Props> = (props) => {
+         description: [item.kind, item.state, item.project_slug]
+           .filter(Boolean)
+           .join(" · "),
+-        icon: "✦",
++        icon: "work",
+         action: () => {
+           openWorkItemTab(item.ref);
+           navigate(`/w/${encodeURIComponent(item.ref)}`);
+diff --git a/web/src/FileTree.tsx b/web/src/FileTree.tsx
+index 3a09ee1..f897313 100644
+--- a/web/src/FileTree.tsx
++++ b/web/src/FileTree.tsx
+@@ -412,9 +412,9 @@ const FileTree: Component<Props> = (props) => {
+           onInput={(e) => setSearchQuery(e.currentTarget.value)}
+         />
+       </div>
+-      <div class="drawer-header">
++      <div class="places-section-header">
+         <span>Files</span>
+-        <span class="drawer-header-actions">
++        <span class="places-section-header-actions">
+           <button
+             style={{ "font-size": "11px", padding: "2px 6px" }}
+             onClick={() => void newFile()}
+diff --git a/web/src/Inbox.tsx b/web/src/Inbox.tsx
+new file mode 100644
+index 0000000..2210b02
+--- /dev/null
++++ b/web/src/Inbox.tsx
+@@ -0,0 +1,203 @@
++import { Component, For, Show, createEffect, createSignal, onCleanup } from "solid-js";
++import { useLocation, useNavigate } from "@solidjs/router";
++import {
++  InboxContractUnavailable,
++  VogtUnavailable,
++  listInbox,
++  type InboxEntry,
++  type InboxListResult,
++  type InboxSourceCoverage,
++} from "./vogtApi";
++import { onVogtChanged } from "./store";
++
++interface Props {
++  onError?: (message: string) => void;
++}
++
++const SOURCES = ["github", "drift", "ci", "agent"] as const;
++
++function age(value: string | null | undefined): string {
++  if (!value) return "age unavailable";
++  const seconds = Math.max(0, Math.round((Date.now() - Date.parse(value)) / 1000));
++  if (seconds < 60) return `${seconds}s ago`;
++  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
++  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
++  return `${Math.floor(seconds / 86400)}d ago`;
++}
++
++function coverageCopy(source: string, entry: InboxSourceCoverage | undefined): string {
++  if (!entry) return "Not collected: this source is not present in the Inbox response.";
++  if (entry.status === "unconfigured" || entry.status === "unswept") {
++    return `Not collected: ${entry.detail ?? `${source} has no current coverage.`}`;
++  }
++  if (entry.status === "failed") return `Collection failed: ${entry.detail ?? "the source did not answer."}`;
++  if (entry.count === 0) return "Nothing needs attention in the covered source.";
++  return `${entry.count} attention item(s), coverage ${age(entry.observed_at)}`;
++}
++
++const Coverage: Component<{ result: InboxListResult }> = (props) => (
++  <section class="inbox-coverage" aria-label="Inbox source coverage">
++    <h2>Coverage and provenance</h2>
++    <p class="inbox-scope">
++      {props.result.instance_scope ?? "Inbox is scoped to this Vogt instance."}
++    </p>
++    <div class="inbox-coverage-grid">
++      <For each={SOURCES}>
++        {(source) => {
++          const item = () => props.result.coverage[source];
++          return (
++            <div class={`inbox-coverage-item inbox-coverage-${item()?.status ?? "missing"}`}>
++              <strong>{source}</strong>
++              <span>{coverageCopy(source, item())}</span>
++            </div>
++          );
++        }}
++      </For>
++      <div class="inbox-coverage-item inbox-coverage-agent">
++        <strong>engine</strong>
++        <span>{props.result.engine_available === false ? "Not available: live session attention cannot be read." : "Live session coverage is reported by the server."}</span>
++      </div>
++    </div>
++    <p class="inbox-view-age">Inbox response: {age(props.result.snapshot_at)}</p>
++  </section>
++);
++
++const Entry: Component<{ entry: InboxEntry; seen: boolean; onOpen: (entry: InboxEntry) => void }> = (props) => (
++  <article class={`inbox-entry ${props.seen ? "inbox-entry-seen" : "inbox-entry-unseen"}`}>
++    <div class="inbox-entry-mark" aria-label={props.seen ? "Seen" : "Unread"} />
++    <div class="inbox-entry-body">
++      <div class="inbox-entry-heading">
++        <span class="inbox-source">{props.entry.source}</span>
++        <h2>{props.entry.title}</h2>
++      </div>
++      <p class="inbox-entry-summary">{props.entry.summary ?? "No summary was provided by the server."}</p>
++      <div class="inbox-entry-meta">
++        <span>Occurred {age(props.entry.occurred_at)}</span>
++        <Show when={props.entry.observed_at}><span>Observed {age(props.entry.observed_at)}</span></Show>
++        <Show when={props.entry.project_slug}><span>Project: {props.entry.project_slug}</span></Show>
++        <Show when={props.entry.work_item_ref}><span>Work item: {props.entry.work_item_ref}</span></Show>
++        <span>Source: {props.entry.source_subject ?? "server-normalized entry"}</span>
++        <Show when={props.entry.trust_state}><span>Trust: {props.entry.trust_state}</span></Show>
++      </div>
++      <button type="button" class="inbox-open" onClick={() => props.onOpen(props.entry)}>
++        Open entry
++      </button>
++    </div>
++  </article>
++);
++
++const Inbox: Component<Props> = (props) => {
++  const navigate = useNavigate();
++  const location = useLocation();
++  const [result, setResult] = createSignal<InboxListResult | null>(null);
++  const [failure, setFailure] = createSignal<Error | null>(null);
++  const [loading, setLoading] = createSignal(false);
++  const [cursor, setCursor] = createSignal<string | null>(null);
++  const [seen, setSeen] = createSignal<Set<string>>(new Set<string>());
++  const [source, setSource] = createSignal("");
++
++  const seenKey = "mydevenv2.inbox.seen.v1";
++  const readSeen = () => {
++    try {
++      const parsed = JSON.parse(localStorage.getItem(seenKey) ?? "[]") as unknown;
++      if (Array.isArray(parsed)) {
++        const keys = parsed.filter((key): key is string => typeof key === "string");
++        setSeen(new Set<string>(keys));
++      }
++    } catch {
++      setSeen(new Set<string>());
++    }
++  };
++  const writeSeen = (key: string) => {
++    const next = new Set<string>(seen());
++    next.add(key);
++    setSeen(next);
++    try { localStorage.setItem(seenKey, JSON.stringify([...next])); } catch { /* presentation state is best effort */ }
++  };
++
++  const load = async (nextCursor: string | null = null) => {
++    setLoading(true);
++    setFailure(null);
++    try {
++      const next = await listInbox({
++        limit: 50,
++        cursor: nextCursor ?? undefined,
++        sources: source() || undefined,
++        project: new URLSearchParams(location.search).get("project") ?? undefined,
++        work_item: new URLSearchParams(location.search).get("work_item") ?? undefined,
++      });
++      setResult(nextCursor ? { ...next, entries: [...(result()?.entries ?? []), ...next.entries] } : next);
++      setCursor(next.next_cursor ?? null);
++    } catch (error) {
++      setFailure(error instanceof Error ? error : new Error(String(error)));
++      setResult(null);
++      if (!(error instanceof VogtUnavailable) && !(error instanceof InboxContractUnavailable)) props.onError?.(String(error));
++    } finally {
++      setLoading(false);
++    }
++  };
++
++  const applySource = (next: string) => {
++    setSource(next);
++    navigate(next ? `/inbox?source=${encodeURIComponent(next)}` : "/inbox", { replace: true });
++  };
++
++  createEffect(() => {
++    location.pathname;
++    location.search;
++    readSeen();
++    void load();
++  });
++  onCleanup(onVogtChanged(() => { if (!loading()) void load(); }));
++
++  const openEntry = (entry: InboxEntry) => {
++    writeSeen(entry.entry_key);
++    if (entry.work_item_ref) navigate(`/w/${encodeURIComponent(entry.work_item_ref)}`);
++    else if (entry.session_id) navigate(`/t/${encodeURIComponent(entry.session_id)}`);
++  };
++
++  return (
++    <section class="vogt-surface inbox inbox-surface" aria-label="Inbox">
++      <header class="place-header">
++        <div>
++          <p class="place-kicker">Work</p>
++          <h1>Inbox</h1>
++          <p>One server-ordered attention view. Provenance and coverage stay attached to every answer.</p>
++        </div>
++        <label class="inbox-filter">
++          <span>Source</span>
++          <select value={source()} onChange={(event) => applySource(event.currentTarget.value)}>
++            <option value="">All sources</option>
++            <For each={SOURCES}>{(value) => <option value={value}>{value}</option>}</For>
++          </select>
++        </label>
++      </header>
++      <Show when={result()}>{(answer) => <Coverage result={answer()} />}</Show>
++      <Show when={failure()}>
++        {(error) => (
++          <div class="inbox-outage" role="alert">
++            <h2>Inbox is unavailable</h2>
++            <p>{error() instanceof VogtUnavailable ? error().message : `The normalized Inbox contract could not be read: ${error().message}`}</p>
++            <p>Nothing is shown because no normalized attention rows were read. This surface does not merge legacy notification, drift, or event reads.</p>
++            <button type="button" onClick={() => void load()}>Retry Inbox</button>
++          </div>
++        )}
++      </Show>
++      <Show when={!failure() && result() && result()!.entries.length === 0}>
++        <p class="inbox-empty">No normalized entries were returned. Check the coverage cards above: a covered-empty source is different from a source that was not collected.</p>
++      </Show>
++      <div class="inbox-list" aria-live="polite">
++        <For each={result()?.entries ?? []}>
++          {(entry) => <Entry entry={entry} seen={seen().has(entry.entry_key)} onOpen={openEntry} />}
++        </For>
++      </div>
++      <Show when={result()?.next_cursor}>
++        <button type="button" class="inbox-load-more" disabled={loading()} onClick={() => void load(cursor())}>
++          {loading() ? "Loading…" : "Load more"}
++        </button>
++      </Show>
++    </section>
++  );
++};
++
++export default Inbox;
+diff --git a/web/src/Sessions.tsx b/web/src/Sessions.tsx
+new file mode 100644
+index 0000000..b562e56
+--- /dev/null
++++ b/web/src/Sessions.tsx
+@@ -0,0 +1,56 @@
++import { Component, For, Show } from "solid-js";
++import { useNavigate } from "@solidjs/router";
++import { sessionsStore, sessionsError, isConnected } from "./store";
++import type { SessionSummary } from "./api";
++
++function activityLabel(session: SessionSummary): string {
++  if (session.exit_code !== null) return session.exit_code === 0 ? "exited" : "errored";
++  return session.activity === "waiting-for-input" ? "waiting for input" : session.activity;
++}
++
++const Sessions: Component = () => {
++  const navigate = useNavigate();
++  const sessions = () => sessionsStore.order.map((id) => sessionsStore.sessions[id]).filter((session): session is SessionSummary => Boolean(session));
++  return (
++    <section class="sessions-place" aria-label="Sessions">
++      <header class="place-header">
++        <div>
++          <p class="place-kicker">Machine</p>
++          <h1>Sessions</h1>
++          <p>Terminal panes and machine tools live here. Select a session to attach.</p>
++        </div>
++        <span class={`connection-state ${isConnected() ? "connected" : "disconnected"}`}>
++          {isConnected() ? "Connected" : "Engine unavailable"}
++        </span>
++      </header>
++      <Show when={sessionsError()}>
++        {(message) => <p class="sessions-outage" role="alert">Sessions could not be read: {message()}</p>}
++      </Show>
++      <Show when={sessions().length > 0} fallback={<p class="sessions-empty">No live sessions are available.</p>}>
++        <div class="sessions-place-list">
++          <For each={sessions()}>
++            {(session) => (
++              <button type="button" class="session-place-row" onClick={() => navigate(`/t/${session.id}`)}>
++                <span class={`activity-dot ${session.exit_code !== null ? (session.exit_code === 0 ? "done" : "errored") : session.activity}`} aria-hidden="true" />
++                <span class="session-place-main">
++                  <strong>{session.name}</strong>
++                  <small>{session.cwd}</small>
++                </span>
++                <span class="session-place-status">{activityLabel(session)}</span>
++              </button>
++            )}
++          </For>
++        </div>
++      </Show>
++      <nav class="sessions-tools" aria-label="Session tools">
++        <span>Tools</span>
++        <button type="button" onClick={() => navigate("/g")}>Git</button>
++        <button type="button" onClick={() => navigate("/history")}>History</button>
++        <button type="button" onClick={() => navigate("/tasks")}>Tasks</button>
++        <button type="button" onClick={() => navigate("/gui")}>GUI stream</button>
++      </nav>
++    </section>
++  );
++};
++
++export default Sessions;
+diff --git a/web/src/__tests__/boardScale.test.tsx b/web/src/__tests__/boardScale.test.tsx
+index b13ce06..1be4f9e 100644
+--- a/web/src/__tests__/boardScale.test.tsx
++++ b/web/src/__tests__/boardScale.test.tsx
+@@ -28,7 +28,7 @@
+ 
+ import { describe, expect, it, vi } from "vitest";
+ import { fireEvent, waitFor } from "@solidjs/testing-library";
+-import Board, { CARD_SLOT, cellKey, projectBoard, type Lane } from "../Board";
++import Board, { CARD_ESTIMATE, cellKey, projectBoard, type Lane } from "../Board";
+ import type { WorkItem } from "../vogtApi";
+ import { fakeVogt, mountAt, refusal, settle, workItem } from "./harness";
+ 
+@@ -70,28 +70,30 @@ function column(count: number, over: (at: number) => Record<string, unknown> = (
+ /**
+  * A `ResizeObserver` the test can fire, and a height to fire it with.
+  *
+- * The surface measures its cells rather than assuming a height, and jsdom
+- * has neither layout nor a real observer — the one in `setup.ts` is a stub
+- * that never calls anybody back, because a surface that crashed on a missing
+- * `ResizeObserver` would fail every assertion for the wrong reason. So the
+- * measurement is supplied here: the height is defined on the observed
+- * elements and the callback the surface handed over is called, which is
+- * exactly the sequence a real observer produces.
++ * The surface measures its cells rather than assuming a height. This helper
++ * supplies the content-box entry a real observer would provide while keeping
++ * jsdom's layout-free behavior explicit.
+  *
+  * Must be installed before the board mounts; the observer is created when the
+  * cell's scroller is.
+  */
+ function measuredCells(): (height: number) => void {
+-  const watched: { node: Element; fire: () => void }[] = [];
++  const watched: { node: Element; fire: (height: number) => void }[] = [];
+   vi.stubGlobal(
+     "ResizeObserver",
+     class {
+-      readonly #callback: () => void;
+-      constructor(callback: () => void) {
++      readonly #callback: ResizeObserverCallback;
++      constructor(callback: ResizeObserverCallback) {
+         this.#callback = callback;
+       }
+       observe(node: Element): void {
+-        watched.push({ node, fire: () => this.#callback() });
++        watched.push({
++          node,
++          fire: (height) => this.#callback(
++            [{ target: node, contentRect: { height } } as ResizeObserverEntry],
++            this as unknown as ResizeObserver,
++          ),
++        });
+       }
+       unobserve(): void {}
+       disconnect(): void {}
+@@ -99,15 +101,48 @@ function measuredCells(): (height: number) => void {
+   );
+   return (height: number) => {
+     for (const one of watched) {
+-      Object.defineProperty(one.node, "clientHeight", {
+-        value: height,
+-        configurable: true,
+-      });
+-      one.fire();
++      if (one.node.classList.contains("board-cell-cards")) {
++        Object.defineProperty(one.node, "clientHeight", {
++          value: height,
++          configurable: true,
++        });
++        one.fire(height);
++      }
+     }
+   };
+ }
+ 
++/** Fire a content-size change for a rendered card. */
++function measuredCards(): (ref: string, height: number) => void {
++  const watched: { node: Element; callback: ResizeObserverCallback }[] = [];
++  vi.stubGlobal(
++    "ResizeObserver",
++    class {
++      readonly #callback: ResizeObserverCallback;
++      constructor(callback: ResizeObserverCallback) {
++        this.#callback = callback;
++      }
++      observe(node: Element): void {
++        watched.push({ node, callback: this.#callback });
++      }
++      unobserve(): void {}
++      disconnect(): void {}
++    },
++  );
++  return (ref: string, height: number) => {
++    const one = watched.find((entry) => entry.node.id === `board-card-${ref}`);
++    if (!one) throw new Error(`card ${ref} is not rendered`);
++    one.callback(
++      [{
++        target: one.node,
++        contentRect: { height },
++        borderBoxSize: [{ blockSize: height }],
++      } as unknown as ResizeObserverEntry],
++      {} as ResizeObserver,
++    );
++  };
++}
++
+ /**
+  * Scroll a cell's list.
+  *
+@@ -115,9 +150,8 @@ function measuredCells(): (height: number) => void {
+  * produced by scrolling it — nothing here can make the scroller 600px tall
+  * and an assignment to `scrollTop` on a box-less element does not stick. The
+  * event the surface listens for is then dispatched, which is exactly what a
+- * real scroll delivers. What this cannot check is that the browser's own
+- * scrolling lines up with the window's arithmetic; that is what pinning the
+- * card height in `styles.css` is for, and it needs a browser.
++ * real scroll delivers. The measured prefix-sum tests cover the arithmetic
++ * that keeps browser scroll anchoring aligned with the rendered cards.
+  */
+ function scrollCell(container: HTMLElement, state: string, offset: number): void {
+   const scroller = cell(container, state).querySelector<HTMLElement>(
+@@ -192,7 +226,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
+       const assumed = drawnRefs(container, "open").length;
+ 
+       // A cell thirty cards tall.
+-      resize(30 * CARD_SLOT);
++      resize(30 * (CARD_ESTIMATE + 8));
+       await waitFor(() =>
+         expect(drawnRefs(container, "open").length).toBeGreaterThan(assumed),
+       );
+@@ -215,7 +249,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
+     const { container } = board();
+ 
+     await waitFor(() => expect(drawnRefs(container, "open").length).toBeGreaterThan(0));
+-    scrollCell(container, "open", 200 * CARD_SLOT);
++    scrollCell(container, "open", 200 * (CARD_ESTIMATE + 8));
+     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-200"));
+ 
+     // A load is a new set of item objects and a new set of lanes, and `For`
+@@ -234,6 +268,32 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
+     expect(drawnRefs(container, "open")).not.toContain("WI-0");
+   });
+ 
++  it("anchors scroll when a rendered card above the viewport grows", async () => {
++    const resizeCard = measuredCards();
++    try {
++      const total = 400;
++      fakeVogt({
++        "GET /workflows": { body: { workflows: [chain("feature", ["open", "done"])] } },
++        "GET /work": { body: { items: column(total), total } },
++      });
++      const { container } = board();
++
++      await waitFor(() => expect(drawnRefs(container, "open").length).toBeGreaterThan(0));
++      scrollCell(container, "open", 200 * (CARD_ESTIMATE + 8));
++      await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-200"));
++      const scroller = cell(container, "open").querySelector<HTMLElement>(".board-cell-cards")!;
++      const before = scroller.scrollTop;
++
++      // WI-198 is in the overscan slice immediately above the viewport. Its
++      // growth must move the scroll offset by the same delta or the reader's
++      // focused card would jump while ResizeObserver catches up.
++      resizeCard("WI-198", 212);
++      await waitFor(() => expect(scroller.scrollTop).toBe(before + 100));
++    } finally {
++      vi.unstubAllGlobals();
++    }
++  });
++
+   it("puts a windowed column back to the top when the filter changes", async () => {
+     const total = 400;
+     fakeVogt({
+@@ -243,7 +303,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
+     const { container } = board();
+ 
+     await waitFor(() => expect(drawnRefs(container, "open").length).toBeGreaterThan(0));
+-    scrollCell(container, "open", 200 * CARD_SLOT);
++    scrollCell(container, "open", 200 * (CARD_ESTIMATE + 8));
+     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-200"));
+ 
+     const label = [...container.querySelectorAll<HTMLElement>(".board-field")].find(
+@@ -275,7 +335,7 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
+     // And the scroll runway is the length of the column, so the scrollbar is
+     // the length of the column.
+     const run = cell(container, "open").querySelector<HTMLElement>(".board-cell-run");
+-    expect(run?.style.height).toBe(`${total * CARD_SLOT}px`);
++    expect(run?.style.height).toBe(`${total * (CARD_ESTIMATE + 8)}px`);
+   });
+ 
+   it("reaches the last card the filter matched, which the cap never could", async () => {
+@@ -291,10 +351,10 @@ describe("NFR-S5 — a long column windows rather than truncating", () => {
+ 
+     // Under the cap, WI-60 onwards were not reachable at all: the instruction
+     // was to narrow the filter until the board agreed to show them.
+-    scrollCell(container, "open", 200 * CARD_SLOT);
++    scrollCell(container, "open", 200 * (CARD_ESTIMATE + 8));
+     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-200"));
+ 
+-    scrollCell(container, "open", total * CARD_SLOT);
++    scrollCell(container, "open", total * (CARD_ESTIMATE + 8));
+     await waitFor(() => expect(drawnRefs(container, "open")).toContain("WI-399"));
+     expect(drawnRefs(container, "open")).not.toContain("WI-0");
+   });
+diff --git a/web/src/__tests__/measuredWindow.test.ts b/web/src/__tests__/measuredWindow.test.ts
+new file mode 100644
+index 0000000..9287512
+--- /dev/null
++++ b/web/src/__tests__/measuredWindow.test.ts
+@@ -0,0 +1,56 @@
++import { describe, expect, it } from "vitest";
++import { MeasuredWindow } from "../measuredWindow";
++
++describe("MeasuredWindow", () => {
++  it("uses its estimate until content reports a size", () => {
++    const windowed = new MeasuredWindow(120);
++    windowed.setKeys(["a", "b", "c"]);
++
++    expect(windowed.totalHeight()).toBe(360);
++    expect(windowed.range(0, 120, 0)).toEqual({
++      start: 0,
++      end: 1,
++      top: 0,
++      total: 360,
++    });
++  });
++
++  it("updates prefix offsets and total height from a measured card", () => {
++    const windowed = new MeasuredWindow(120);
++    windowed.setKeys(["a", "b", "c"]);
++
++    expect(windowed.measure("b", 200)).toEqual({
++      index: 1,
++      top: 120,
++      delta: 80,
++    });
++    expect(windowed.offsetOf(2)).toBe(320);
++    expect(windowed.totalHeight()).toBe(440);
++    expect(windowed.measure("b", 200)).toBeNull();
++  });
++
++  it("retains measurements by key when a window's list is refreshed", () => {
++    const windowed = new MeasuredWindow(100);
++    windowed.setKeys(["a", "b", "c"]);
++    windowed.measure("b", 180);
++    windowed.setKeys(["c", "b", "d"]);
++
++    expect(windowed.offsetOf(1)).toBe(100);
++    expect(windowed.offsetOf(2)).toBe(280);
++    expect(windowed.totalHeight()).toBe(380);
++  });
++
++  it("finds the visible interval with variable heights", () => {
++    const windowed = new MeasuredWindow(100);
++    windowed.setKeys(["a", "b", "c", "d"]);
++    windowed.measure("a", 80);
++    windowed.measure("b", 180);
++
++    expect(windowed.range(90, 100, 0)).toEqual({
++      start: 1,
++      end: 2,
++      top: 80,
++      total: 460,
++    });
++  });
++});
+diff --git a/web/src/__tests__/shell.test.tsx b/web/src/__tests__/shell.test.tsx
+index a5cfc68..3108eca 100644
+--- a/web/src/__tests__/shell.test.tsx
++++ b/web/src/__tests__/shell.test.tsx
+@@ -2,7 +2,7 @@
+ //
+ // Every other file here mounts one surface at one URL, which settles what a
+ // surface does with the URL it is handed and says nothing about how it came
+-// to be handed one. `App.tsx`'s URL→tabs effect is the half in between — the
++// to be handed one. `App.tsx`'s URL effect is the half in between — the
+ // half M11 found broken for *every* surface, and the half §6.2a records as
+ // "mounted by nothing". So this file mounts the shell, behind the same route
+ // table `index.tsx` routes with, and asserts the property FR-U11 actually
+@@ -24,7 +24,7 @@
+ 
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+ import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
+-import { fireEvent, render, waitFor } from "@solidjs/testing-library";
++import { render, waitFor } from "@solidjs/testing-library";
+ 
+ import App from "../App";
+ import { APP_ROUTES } from "../routes";
+@@ -69,8 +69,8 @@ interface ShellOptions {
+  *
+  * The engine stubs are the shell's own boot, not the requirement: a token the
+  * front door accepts (`/api/status`), the public config every gate reads, the
+- * session list the drawer and the terminal links resolve against, and the
+- * file tree in the drawer. Left unstubbed they answer 404 — which is a real
++ * session list the places rail and the terminal links resolve against, and the
++ * file tree in the rail. Left unstubbed they answer 404 — which is a real
+  * state and one `absentStates.test.tsx` is about, and not the state a test of
+  * "does this link open this surface" wants to be in.
+  */
+@@ -107,7 +107,7 @@ function mountShell(url: string, options: ShellOptions = {}): Shell {
+ }
+ 
+ /**
+- * The pane the reader is actually looking at.
++ * The place or pane the reader is actually looking at.
+  *
+  * Every open tab stays mounted — that is how a terminal survives a tab switch
+  * — and all but the active one are `display: none`. A test that queried the
+@@ -115,6 +115,8 @@ function mountShell(url: string, options: ShellOptions = {}): Shell {
+  * exact failure "the link opened the wrong tab" produces.
+  */
+ function shown(container: HTMLElement): HTMLElement | null {
++  const place = container.querySelector<HTMLElement>(".stable-place");
++  if (place) return place;
+   const panes = [...container.querySelectorAll<HTMLElement>(".tab-view > div")];
+   return panes.find((pane) => pane.style.display === "flex") ?? null;
+ }
+@@ -129,20 +131,13 @@ async function surface(container: HTMLElement, selector: string): Promise<HTMLEl
+   });
+ }
+ 
+-/** The labels in the tab strip, in order. */
++/** Stable places deliberately have no top-level tab strip. */
+ function tabLabels(container: HTMLElement): string[] {
+   return [...container.querySelectorAll(".tab-strip .tab .label")].map(
+     (node) => node.textContent ?? "",
+   );
+ }
+ 
+-/** The drawer buttons, by their visible text. */
+-function drawerButtons(container: HTMLElement): string[] {
+-  return [...container.querySelectorAll(".drawer-actions button")].map(
+-    (node) => node.textContent ?? "",
+-  );
+-}
+-
+ beforeEach(() => {
+   // `tabs.ts` holds its store in module state, so a tab opened by the last
+   // test is still open in this one — and every assertion here is about which
+@@ -161,14 +156,31 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
+     const { container } = mountShell("/board");
+ 
+     await surface(container, ".vogt-surface.board");
+-    expect(tabLabels(container)).toEqual(["▦ Board"]);
++    expect(tabLabels(container)).toEqual([]);
++    expect(container.querySelector(".tab-strip")).toBeNull();
++    expect(
++      [...container.querySelectorAll<HTMLElement>(".places-nav a")].map(
++        (link) => [link.textContent, link.getAttribute("href")],
++      ),
++    ).toEqual([
++      ["Board", "#/board"],
++      ["Backlog", "#/backlog"],
++      ["Inbox", "#/inbox"],
++      ["Projects", "#/projects"],
++      ["Audit", "#/audit"],
++      ["Sessions", "#/sessions"],
++      ["Git", "#/g"],
++      ["History", "#/history"],
++      ["Tasks", "#/tasks"],
++      ["GUI stream", "#/gui"],
++    ]);
+   });
+ 
+   it("opens the ranked backlog", async () => {
+     const { container } = mountShell("/backlog");
+ 
+     await surface(container, ".vogt-surface.vogt-backlog");
+-    expect(tabLabels(container)).toEqual(["☰ Backlog"]);
++    expect(tabLabels(container)).toEqual([]);
+   });
+ 
+   it("opens the project page on the project the link names", async () => {
+@@ -194,7 +206,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
+       ),
+     );
+     expect(vogt.matching("GET /work/get")[0]?.query.get("ref")).toBe("WI-1");
+-    expect(tabLabels(container)).toEqual(["◈ WI-1"]);
++    expect(tabLabels(container)).toEqual([]);
+   });
+ 
+   it("opens an audit query, narrowed to what the link carried", async () => {
+@@ -213,7 +225,7 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
+     const { container } = mountShell("/t/eng-1", { sessions: [SESSION] });
+ 
+     await surface(container, ".terminal-host");
+-    expect(tabLabels(container)).toEqual(["alpha-build"]);
++    expect(tabLabels(container)).toEqual([]);
+   });
+ 
+   it("opens no phantom terminal for a session the server does not know", async () => {
+@@ -222,32 +234,30 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
+     // to a PTY that does not exist, is a worse one.
+     const { container } = mountShell("/t/eng-gone", { sessions: [SESSION] });
+ 
+-    await waitFor(() => expect(container.querySelector(".session-list")).toBeTruthy());
++    await waitFor(() => expect(container.querySelector(".places-rail-session-area")).toBeTruthy());
+     await settle();
+     expect(tabLabels(container)).toEqual([]);
+     expect(container.querySelector(".terminal-host")).toBeNull();
+   });
+ 
+-  it("opens nothing at the root, which names no surface", async () => {
++  it("redirects the root to the desktop default place", async () => {
+     const { container } = mountShell("/");
+ 
+-    await waitFor(() => expect(container.querySelector(".drawer")).toBeTruthy());
+-    await settle();
++    await surface(container, ".vogt-surface.board");
+     expect(tabLabels(container)).toEqual([]);
+-    expect(container.querySelector(".vogt-surface")).toBeNull();
+   });
+ 
+-  it("follows a second link into a second surface, without closing the first", async () => {
+-    // The effect runs on every URL, not once at boot: a link followed from a
+-    // chat message while the app is already open is the common case, and a
+-    // boot-only effect would leave the reader staring at the previous tab.
++  it("follows a second link into a second stable place", async () => {
++    // The effect runs on every URL, not once at boot. Stable places replace
++    // one another in the main area and never accumulate closable tabs.
+     const { container, go } = mountShell("/board");
+     await surface(container, ".vogt-surface.board");
+ 
+     go("/backlog");
+ 
+     await surface(container, ".vogt-surface.vogt-backlog");
+-    expect(tabLabels(container)).toEqual(["▦ Board", "☰ Backlog"]);
++    expect(tabLabels(container)).toEqual([]);
++    expect(container.querySelector(".tab-strip")).toBeNull();
+   });
+ });
+ 
+@@ -265,10 +275,9 @@ describe("FR-T6 — the assistant is not there to be reached when it is not prov
+     // Wait for the config to have arrived, so this is an assertion about a
+     // resolved gate and not about a race the shell would lose later.
+     await waitFor(() =>
+-      expect(drawerButtons(container)).toContain("▦ Board"),
++      expect(container.querySelector(".places-rail")).toBeTruthy(),
+     );
+     await settle();
+-    expect(drawerButtons(container)).not.toContain("🎙 Assistant");
+     expect(tabLabels(container)).toEqual([]);
+     expect(container.textContent).not.toContain("Ask about your terminal sessions");
+   });
+@@ -285,52 +294,7 @@ describe("FR-T6 — the assistant is not there to be reached when it is not prov
+         "Ask about your terminal sessions",
+       ),
+     );
+-    expect(drawerButtons(container)).toContain("🎙 Assistant");
+-    expect(tabLabels(container)).toEqual(["🎙 Assistant"]);
+-  });
+-});
+-
+-
+-describe("the drawer's width is the reader's, and persists", () => {
+-  it("offers a resizer that a keyboard can reach and use", async () => {
+-    // A panel resizable only by pointer is one a keyboard user cannot widen
+-    // when its contents do not fit — which is precisely the state this
+-    // control was added to escape.
+-    const { container } = mountShell("/board");
+-    await settle();
+-    const grip = container.querySelector<HTMLElement>(".drawer-resizer")!;
+-    expect(grip).toBeTruthy();
+-    expect(grip.getAttribute("aria-label")).toBeTruthy();
+-
+-    fireEvent.keyDown(grip, { key: "ArrowRight" });
+-    await settle();
+-    expect(document.documentElement.style.getPropertyValue("--drawer-width")).toBe(
+-      "276px",
+-    );
+-    expect(localStorage.getItem("mydevenv2.drawerWidth")).toBe("276");
+-  });
+-
+-  it("will not let the panel be dragged away to nothing", async () => {
+-    // The grip lives on the panel's own edge, so a drawer squeezed to zero
+-    // takes the handle with it and cannot be brought back.
+-    const { container } = mountShell("/board");
+-    await settle();
+-    const grip = container.querySelector<HTMLElement>(".drawer-resizer")!;
+-    for (let i = 0; i < 30; i += 1) {
+-      fireEvent.keyDown(grip, { key: "ArrowLeft", shiftKey: true });
+-    }
+-    await settle();
+-    expect(document.documentElement.style.getPropertyValue("--drawer-width")).toBe(
+-      "180px",
+-    );
+-  });
+-
+-  it("restores the width it was left at", async () => {
+-    localStorage.setItem("mydevenv2.drawerWidth", "420");
+-    mountShell("/board");
+-    await settle();
+-    expect(document.documentElement.style.getPropertyValue("--drawer-width")).toBe(
+-      "420px",
+-    );
++    expect(container.querySelector(".tab-strip")).toBeNull();
++    expect(tabLabels(container)).toEqual([]);
+   });
+ });
+diff --git a/web/src/layout.ts b/web/src/layout.ts
+index 0e8f3e5..0e86a40 100644
+--- a/web/src/layout.ts
++++ b/web/src/layout.ts
+@@ -1,4 +1,5 @@
+-// Layout mode preference storage
++// Pane arrangement preference storage. Product places are routes; this only
++// controls how the remaining editor panes arrange themselves.
+ const LAYOUT_MODE_KEY = "mydevenv2.layoutMode.v1";
+ 
+ export type LayoutMode = "tabbed" | "ide";
+diff --git a/web/src/measuredWindow.ts b/web/src/measuredWindow.ts
+new file mode 100644
+index 0000000..bb628cb
+--- /dev/null
++++ b/web/src/measuredWindow.ts
+@@ -0,0 +1,147 @@
++/**
++ * A keyed, content-sized virtual window.
++ *
++ * Heights start as an estimate because a layout-free renderer cannot measure
++ * content. Rendered items report their real border-box height through a
++ * ResizeObserver; the indexed prefix sums then keep the spacer and visible
++ * range aligned with the content rather than with a CSS row contract.
++ */
++
++interface Fenwick {
++  values: number[];
++  add(index: number, delta: number): void;
++  sum(endExclusive: number): number;
++  lowerBound(offset: number): number;
++}
++function fenwick(size: number, initial: number): Fenwick {
++  const values = Array<number>(size + 1).fill(0);
++  const tree: Fenwick = {
++    values,
++    add(index, delta) {
++      for (let cursor = index + 1; cursor < values.length; cursor += cursor & -cursor) {
++        values[cursor] = (values[cursor] ?? 0) + delta;
++      }
++    },
++    sum(endExclusive) {
++      let total = 0;
++      for (let cursor = Math.min(endExclusive, size); cursor > 0; cursor -= cursor & -cursor) {
++        total += values[cursor] ?? 0;
++      }
++      return total;
++    },
++    lowerBound(offset) {
++      // Return the item whose interval contains `offset`. An offset at the
++      // exact end belongs to the last item, which is useful at scrollBottom.
++      if (size === 0) return 0;
++      const target = Math.max(0, Math.min(offset, tree.sum(size) - Number.EPSILON));
++      let index = 0;
++      let accumulated = 0;
++      let step = 1;
++      while (step < values.length) step <<= 1;
++      for (; step !== 0; step >>= 1) {
++        const next = index + step;
++        const candidate = accumulated + (values[next] ?? 0);
++        if (next < values.length && candidate <= target) {
++          index = next;
++          accumulated = candidate;
++        }
++      }
++      return Math.min(size - 1, index);
++    },
++  };
++  for (let index = 0; index < size; index += 1) tree.add(index, initial);
++  return tree;
++}
++
++export interface WindowRange {
++  start: number;
++  end: number;
++  top: number;
++  total: number;
++}
++
++export interface MeasurementChange {
++  index: number;
++  top: number;
++  delta: number;
++}
++
++export class MeasuredWindow {
++  private keys: string[] = [];
++  private known = new Map<string, number>();
++  private tree = fenwick(0, 0);
++  private estimate: number;
++
++  constructor(estimate: number) {
++    this.estimate = Math.max(1, estimate);
++  }
++
++  setKeys(keys: readonly string[]): boolean {
++    const next = [...keys];
++    const changed =
++      next.length !== this.keys.length || next.some((key, index) => key !== this.keys[index]);
++    if (!changed) return false;
++    const previous = this.known;
++    this.keys = next;
++    this.known = new Map(next.flatMap((key) => {
++      const height = previous.get(key);
++      return height === undefined ? [] : [[key, height] as const];
++    }));
++    this.tree = fenwick(next.length, this.estimate);
++    for (const [index, key] of next.entries()) {
++      const measured = this.known.get(key);
++      if (measured !== undefined) this.tree.add(index, measured - this.estimate);
++    }
++    return true;
++  }
++
++  measure(key: string, height: number): MeasurementChange | null {
++    const index = this.keys.indexOf(key);
++    if (index < 0 || !Number.isFinite(height) || height <= 0) return null;
++    const next = Math.max(1, height);
++    const previous = this.known.get(key) ?? this.estimate;
++    if (Math.abs(previous - next) < 0.5) return null;
++    const top = this.offsetOf(index);
++    this.known.set(key, next);
++    this.tree.add(index, next - previous);
++    return { index, top, delta: next - previous };
++  }
++
++  offsetOf(index: number): number {
++    return this.tree.sum(Math.max(0, Math.min(index, this.keys.length)));
++  }
++
++  totalHeight(): number {
++    return this.tree.sum(this.keys.length);
++  }
++
++  range(scrollTop: number, viewport: number, overscanPixels: number): WindowRange {
++    const total = this.totalHeight();
++    if (!this.keys.length) return { start: 0, end: 0, top: 0, total: 0 };
++    const overscan = Math.max(0, overscanPixels);
++    const firstOffset = Math.max(0, scrollTop - overscan);
++    const lastOffset = Math.min(total, scrollTop + Math.max(0, viewport) + overscan);
++    const start = this.tree.lowerBound(firstOffset);
++    // A value exactly on an item boundary belongs to the next interval. A
++    // machine epsilon is not enough once the offset has been rounded (for
++    // example, 120 - Number.EPSILON is still 120), so step back by a tiny
++    // pixel-sized amount for the exclusive end boundary.
++    const endOffset = Math.max(
++      0,
++      lastOffset - Math.max(1e-7, Math.abs(lastOffset) * Number.EPSILON * 4),
++    );
++    const end = Math.min(
++      this.keys.length,
++      this.tree.lowerBound(endOffset) + 1,
++    );
++    return { start, end: Math.max(start, end), top: this.offsetOf(start), total };
++  }
++
++  keyAt(index: number): string | undefined {
++    return this.keys[index];
++  }
++
++  indexOf(key: string): number {
++    return this.keys.indexOf(key);
++  }
++}
+diff --git a/web/src/routes.ts b/web/src/routes.ts
+index 880d3ba..cb57e6e 100644
+--- a/web/src/routes.ts
++++ b/web/src/routes.ts
+@@ -9,12 +9,12 @@
+ // copied into a test would pass for a route that had been deleted from the
+ // product.
+ //
+-// A path added here reaches the app only if `App.tsx`'s URL→tabs effect has
+-// an arm for it; the two are deliberately separate, because the router
+-// deciding a URL exists and the shell deciding what to open for it are
+-// different failures with different symptoms.
++// A path added here reaches the app only if `App.tsx`'s URL effect has an arm
++// for it; the two are deliberately separate, because the router deciding a
++// URL exists and the shell deciding what to show are different failures.
+ export const APP_ROUTES = [
+   "/",
++  "/sessions",
+   "/t/:id",
+   "/e/*path",
+   "/g",
+@@ -24,8 +24,10 @@ export const APP_ROUTES = [
+   "/tasks",
+   "/board",
+   "/backlog",
++  "/inbox",
+   "/projects",
+   "/audit",
++  "/settings",
+   "/w/:ref",
+   "/assistant",
+   "/assistant/*path",
+diff --git a/web/src/styles.css b/web/src/styles.css
+index 1ec43a1..68b3e96 100644
+--- a/web/src/styles.css
++++ b/web/src/styles.css
+@@ -15,8 +15,6 @@
+   --activity-waiting: #f85149;
+   --activity-errored: #ff7b72;
+   --activity-done: #3fb950;
+-  --drawer-width: 260px;
+-  --tab-height: 36px;
+   --modkey-height: 44px;
+   --safe-top: max(env(safe-area-inset-top, 0px), var(--native-safe-top, 0px));
+   --safe-right: max(env(safe-area-inset-right, 0px), var(--native-safe-right, 0px));
+@@ -234,93 +232,119 @@ textarea {
+ 
+ .app {
+   display: grid;
+-  grid-template-rows: var(--tab-height) 1fr;
+-  grid-template-columns: var(--drawer-width) 1fr;
++  grid-template-columns: 248px 1fr;
+   grid-template-areas:
+-    "drawer tabs"
+-    "drawer main";
++    "places main";
+   width: 100%;
+   height: 100%;
+   min-height: 0;
+   overflow: hidden;
+ }
+ 
+-@media (max-width: 768px) {
+-  /* The drawer is a fixed overlay below this width, not a grid column, so
+-     there is no column to resize and the grip would only be something to
+-     catch a thumb on. */
+-  .drawer-resizer {
+-    display: none;
+-  }
+-
+-  .app {
+-    grid-template-columns: 1fr;
+-    grid-template-areas:
+-      "tabs"
+-      "main";
+-  }
+-  .drawer {
+-    position: fixed;
+-    inset: 0 auto 0 0;
+-    width: 80%;
+-    max-width: 320px;
+-    z-index: 20;
+-    transform: translateX(-100%);
+-    transition: transform 0.18s ease-out;
+-    padding-top: var(--safe-top);
+-    padding-bottom: var(--safe-bottom);
+-    padding-left: var(--safe-left);
+-  }
+-  .drawer.open {
+-    transform: translateX(0);
+-  }
+-  .drawer-scrim {
+-    position: fixed;
+-    inset: 0;
+-    background: rgba(0, 0, 0, 0.4);
+-    z-index: 19;
+-  }
+-}
+-
+-.drawer {
+-  grid-area: drawer;
++/* Stable product places. Surfaces are routes, not closable tabs. */
++.places-rail {
++  grid-area: places;
++  display: flex;
++  flex-direction: column;
++  min-height: 0;
++  padding: 14px 10px;
++  gap: 14px;
+   background: var(--bg-elev);
+   border-right: 1px solid var(--bd);
++}
++.places-brand {
++  padding: 2px 8px;
++  color: var(--fg);
++  font-weight: 700;
++  letter-spacing: 0.04em;
++}
++.rail-go-to,
++.places-rail-footer button {
++  width: 100%;
++  text-align: left;
++}
++.places-nav {
++  flex: 0 0 auto;
++  max-height: 38%;
++  overflow-y: auto;
++}
++.places-rail-session-area {
++  min-height: 0;
++  overflow-y: auto;
++  padding-top: 2px;
++}
++.places-section-label {
++  padding: 0 8px 4px;
++  color: var(--fg-muted);
++  font-size: 10px;
++  font-weight: 700;
++  letter-spacing: 0.08em;
++  text-transform: uppercase;
++}
++.places-group {
++  display: flex;
++  flex-direction: column;
++  gap: 2px;
++  margin-bottom: 16px;
++}
++.places-group-label {
++  padding: 0 8px 4px;
++  color: var(--fg-muted);
++  font-size: 10px;
++  font-weight: 700;
++  letter-spacing: 0.08em;
++  text-transform: uppercase;
++}
++.places-group a,
++.places-rail-footer button {
++  display: block;
++  padding: 7px 8px;
++  color: var(--fg-muted);
++  border-radius: 5px;
++  text-decoration: none;
++  font-size: 13px;
++}
++.places-group a:hover,
++.places-group a.active,
++.places-rail-footer button:hover {
++  color: var(--fg);
++  background: rgba(88, 166, 255, 0.12);
++}
++.places-rail-footer {
+   display: flex;
+   flex-direction: column;
++  gap: 6px;
++  padding-top: 10px;
++  border-top: 1px solid var(--bd);
++}
++.rail-connection {
++  padding: 0 8px;
++  color: var(--fg-muted);
++  font-size: 11px;
++}
++.stable-place {
++  display: flex;
++  flex: 1;
+   min-height: 0;
+-  overflow: hidden;
+-  /* For the resizer, which sits on the panel's own right edge. */
+-  position: relative;
++  min-width: 0;
++  flex-direction: column;
+ }
+ 
+-/* Drag to set the panel's width. The width is a custom property on `.app`,
+-   so the grid column follows it without a reflow of anything else, and the
+-   chosen value is per client (FR-U13's rule for layout) rather than a
+-   setting anybody else inherits. */
+-.drawer-resizer {
+-  position: absolute;
+-  top: 0;
+-  right: 0;
+-  width: 6px;
+-  height: 100%;
+-  cursor: col-resize;
+-  /* Above the panel's content so a drag never lands on a button underneath,
+-     and transparent so it does not read as a second border. */
+-  z-index: 2;
+-  background: transparent;
+-  border: 0;
+-  padding: 0;
++@media (max-width: 768px) {
++  .app {
++    grid-template-columns: 1fr;
++    grid-template-areas: "main";
++  }
++  .places-rail {
++    display: none;
++  }
+ }
+ 
+-.drawer-resizer:hover,
+-.drawer-resizer:focus-visible {
+-  background: var(--accent, #2f81f7);
+-  opacity: 0.45;
+-  outline: none;
++.phone-bottom-nav {
++  display: none;
+ }
+ 
+-.drawer-header {
++.places-section-header {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+@@ -332,26 +356,12 @@ textarea {
+   letter-spacing: 0.04em;
+   color: var(--fg-muted);
+ }
+-.drawer-header-actions {
++.places-section-header-actions {
+   display: inline-flex;
+   align-items: center;
+   gap: 4px;
+ }
+ 
+-.drawer-actions {
+-  display: flex;
+-  /* Wraps, because the row grew past the panel and the overflow was
+-     unreachable rather than ugly: `.drawer` is `overflow: hidden`, so the
+-     buttons past 260px — Backlog, Projects, Audit, Assistant, GUI and the
+-     settings gear — were clipped, invisible and unclickable. That is every
+-     Vogt surface the merge added, so the merged product's own tabs could not
+-     be opened from the GUI at the default width. */
+-  flex-wrap: wrap;
+-  gap: 4px;
+-  padding: 8px 10px;
+-  border-bottom: 1px solid var(--bd);
+-}
+-
+ .session-list {
+   flex: 1;
+   overflow-y: auto;
+@@ -434,40 +444,40 @@ textarea {
+   }
+ }
+ 
+-.tab-strip {
+-  grid-area: tabs;
+-  display: flex;
+-  align-items: stretch;
+-  background: var(--bg-elev);
+-  border-bottom: 1px solid var(--bd);
+-  overflow-x: auto;
+-  overflow-y: hidden;
+-  scrollbar-width: thin;
+-}
+-
+-.tab-strip .menu-btn {
+-  display: none;
+-  flex: 0 0 auto;
+-  align-items: center;
+-  justify-content: center;
+-  width: 40px;
+-  border: 0;
+-  border-right: 1px solid var(--bd);
+-  border-radius: 0;
+-  font-size: 16px;
+-}
+-
+ @media (max-width: 768px) {
+-  .tab-strip .menu-btn {
+-    display: inline-flex;
+-  }
+   .connection-banner {
+     padding-right: max(12px, var(--safe-right));
+   }
+-  .mobile-tabs-sheet {
+-    display: flex;
+-    flex-direction: column;
+-    padding-bottom: var(--safe-bottom);
++
++  .phone-bottom-nav {
++    position: fixed;
++    right: 0;
++    bottom: 0;
++    left: 0;
++    z-index: 18;
++    display: grid;
++    grid-template-columns: repeat(4, 1fr);
++    gap: 2px;
++    padding: 6px 8px calc(6px + var(--safe-bottom));
++    background: color-mix(in srgb, var(--bg-elev) 94%, transparent);
++    border-top: 1px solid var(--bd);
++    backdrop-filter: blur(10px);
++  }
++  .phone-bottom-nav a {
++    padding: 8px 4px;
++    color: var(--fg-muted);
++    border-radius: 5px;
++    text-align: center;
++    text-decoration: none;
++    font-size: 12px;
++  }
++  .phone-bottom-nav a.active,
++  .phone-bottom-nav a:focus-visible {
++    color: var(--fg);
++    background: rgba(88, 166, 255, 0.16);
++  }
++  .main {
++    padding-bottom: calc(58px + var(--safe-bottom));
+   }
+ }
+ 
+@@ -497,164 +507,6 @@ textarea {
+   color: var(--fg-muted);
+ }
+ 
+-.mobile-tabs-sheet {
+-  position: fixed;
+-  right: 0;
+-  bottom: 0;
+-  left: 0;
+-  z-index: 24;
+-  display: none;
+-  max-height: min(70vh, 560px);
+-  background: var(--bg-elev);
+-  border-top: 1px solid var(--bd-strong);
+-  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45);
+-}
+-
+-.mobile-tabs-header {
+-  display: flex;
+-  align-items: flex-start;
+-  justify-content: space-between;
+-  gap: 12px;
+-  padding: 12px;
+-  border-bottom: 1px solid var(--bd);
+-}
+-
+-.mobile-tabs-meta {
+-  margin-top: 4px;
+-  font-size: 11px;
+-  color: var(--fg-muted);
+-}
+-
+-.mobile-tabs-list {
+-  display: flex;
+-  flex-direction: column;
+-  overflow-y: auto;
+-  max-height: calc(min(70vh, 560px) - 60px);
+-}
+-
+-.mobile-tab-row {
+-  display: flex;
+-  align-items: stretch;
+-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+-}
+-
+-.mobile-tab-row.active {
+-  background: rgba(88, 166, 255, 0.08);
+-}
+-
+-.mobile-tab-main,
+-.mobile-tab-close {
+-  border: 0;
+-  border-radius: 0;
+-  background: transparent;
+-}
+-
+-.mobile-tab-main {
+-  flex: 1 1 auto;
+-  display: flex;
+-  align-items: center;
+-  justify-content: space-between;
+-  gap: 12px;
+-  min-width: 0;
+-  padding: 12px;
+-  text-align: left;
+-}
+-
+-.mobile-tab-title {
+-  display: inline-flex;
+-  align-items: center;
+-  gap: 8px;
+-  min-width: 0;
+-  overflow: hidden;
+-  text-overflow: ellipsis;
+-  white-space: nowrap;
+-}
+-
+-.mobile-tab-kind {
+-  flex: 0 0 auto;
+-  font-size: 11px;
+-  text-transform: uppercase;
+-  color: var(--fg-muted);
+-}
+-
+-.mobile-tab-close {
+-  flex: 0 0 48px;
+-  display: inline-flex;
+-  align-items: center;
+-  justify-content: center;
+-  color: var(--fg-muted);
+-}
+-
+-.tab {
+-  display: inline-flex;
+-  align-items: center;
+-  gap: 6px;
+-  padding: 0 4px 0 10px;
+-  background: var(--bg-tab);
+-  border: 0;
+-  border-right: 1px solid var(--bd);
+-  border-radius: 0;
+-  color: var(--fg-muted);
+-  min-width: 90px;
+-  max-width: 220px;
+-  white-space: nowrap;
+-  font-size: 13px;
+-  flex: 0 0 auto;
+-}
+-.tab:hover {
+-  background: rgba(255, 255, 255, 0.04);
+-}
+-.tab.active {
+-  background: var(--bg-tab-active);
+-  color: var(--fg);
+-  border-bottom: 2px solid var(--accent);
+-}
+-.tab-main {
+-  flex: 1 1 auto;
+-  min-width: 0;
+-  display: inline-flex;
+-  align-items: center;
+-  gap: 6px;
+-  height: 100%;
+-  padding: 0;
+-  background: transparent;
+-  border: 0;
+-  color: inherit;
+-  cursor: pointer;
+-  font: inherit;
+-}
+-.tab .label {
+-  min-width: 0;
+-  overflow: hidden;
+-  text-overflow: ellipsis;
+-}
+-.tab .close {
+-  display: inline-flex;
+-  width: 22px;
+-  height: 22px;
+-  align-items: center;
+-  justify-content: center;
+-  border-radius: 3px;
+-  font-size: 14px;
+-  background: transparent;
+-  border: 0;
+-  color: inherit;
+-  cursor: pointer;
+-  opacity: 0.7;
+-  touch-action: manipulation;
+-}
+-.tab .close:hover {
+-  background: rgba(255, 255, 255, 0.1);
+-  opacity: 1;
+-}
+-@media (pointer: coarse) {
+-  .tab .close {
+-    width: 28px;
+-    height: 28px;
+-    font-size: 16px;
+-  }
+-}
+-
+ .activity-dot {
+   width: 8px;
+   height: 8px;
+@@ -1242,16 +1094,6 @@ textarea {
+   min-width: 0;
+ }
+ 
+-/* Dirty indicator on tab */
+-.tab .dirty-dot {
+-  display: inline-block;
+-  width: 6px;
+-  height: 6px;
+-  margin-left: 2px;
+-  background: var(--accent);
+-  border-radius: 50%;
+-}
+-
+ /* Git tab */
+ .git-shell {
+   display: flex;
+@@ -3964,15 +3806,6 @@ textarea {
+    server published — the stylesheet does not know how many columns there are,
+    which is the point. */
+ .vogt-surface.board {
+-  /* NFR-S5. `--board-card-h` and `--board-card-gap` must match `CARD_HEIGHT`
+-     and `CARD_GAP` in `Board.tsx`, exactly as `--vogt-row-h` must match the
+-     backlog's `ROW_HEIGHT`: a windowed column computes which cards to draw
+-     and where to put them from those two numbers, and has no way to notice
+-     that this file disagrees. A card is therefore a tile — two lines of
+-     title and no more — which is the price of showing every card the filter
+-     matched instead of the first sixty of them. */
+-  --board-card-h: 116px;
+-  --board-card-gap: 8px;
+   /* How tall a column gets before it scrolls inside itself rather than
+      making the whole board taller. Viewport-relative so a big screen shows
+      more of a column, capped so a swimlane board is still several lanes of
+@@ -4509,17 +4342,15 @@ textarea {
+   right: 0;
+ }
+ 
+-/* A card is a fixed-height tile, because the window's arithmetic needs it to
+-   be — see `--board-card-h` above. Overflow is hidden rather than left to
+-   spill: a card that grew past its slot would draw over the one below it and
+-   the scroll offset would stop matching what is on screen. */
++/* Card geometry is content-sized. The measured window owns offsets and uses
++   the estimate only until each rendered card reports its actual box. */
+ .board-card {
+   display: flex;
+   flex-direction: column;
+   gap: 6px;
+-  height: var(--board-card-h);
+-  margin-bottom: var(--board-card-gap);
+-  overflow: hidden;
++  min-height: 0;
++  margin-bottom: 8px;
++  overflow: visible;
+   padding: 8px 10px;
+   border: 1px solid var(--bd);
+   border-radius: 6px;
+@@ -4582,21 +4413,19 @@ textarea {
+   color: var(--fg-muted);
+ }
+ 
+-/* Two lines, and the height of two lines whether or not the title fills
+-   them, so every card is the same height and the tile below it is where the
+-   window says it is. The whole title is on the item, one click away. */
++/* Long titles stay readable within the card; the card itself remains
++   content-sized so measured offsets continue to match what is painted. */
+ .board-card-title {
+   font-size: 13px;
+   color: var(--fg);
+   line-height: 1.35;
+   overflow-wrap: anywhere;
+   display: -webkit-box;
+-  -webkit-line-clamp: 2;
+-  line-clamp: 2;
++  -webkit-line-clamp: 3;
++  line-clamp: 3;
+   -webkit-box-orient: vertical;
+   overflow: hidden;
+   flex: 0 0 auto;
+-  height: calc(1.35em * 2);
+ }
+ 
+ .board-card-meta {
+@@ -4767,9 +4596,8 @@ textarea {
+ 
+ /* -- FR-M3: below the narrow breakpoint the board is a list ---------------
+  *
+- * 768px, which is the width the engine's own tabs collapse at — the drawer
+- * goes off-canvas, the tab strip becomes a sheet, and the git and history
+- * panes stop being two columns. A board that kept its columns for another
++ * 768px, where the board becomes a list and the phone navigation takes over.
++ * A board that kept its columns for another
+  * 130px would be the one surface disagreeing with the shell around it, and a
+  * second breakpoint is a second thing to keep true.
+  *
+diff --git a/web/src/tabs.ts b/web/src/tabs.ts
+index 773fc48..5808a4c 100644
+--- a/web/src/tabs.ts
++++ b/web/src/tabs.ts
+@@ -8,13 +8,6 @@ export type Tab =
+   | { id: string; kind: "history"; label: string }
+   | { id: string; kind: "tasks"; label: string }
+   | { id: string; kind: "assistant"; label: string }
+-  // The Vogt surfaces (M11). A board and a backlog are one per client; a work
+-  // item is one tab per item, because two of them open at once is the
+-  // ordinary case when one blocks the other.
+-  | { id: string; kind: "board"; label: string }
+-  | { id: string; kind: "backlog"; label: string }
+-  | { id: string; kind: "projects"; label: string }
+-  | { id: string; kind: "audit"; label: string }
+   | { id: string; kind: "workitem"; ref: string; label: string };
+ 
+ export interface TabsStateSnapshot {
+@@ -23,7 +16,8 @@ export interface TabsStateSnapshot {
+   active: string | null;
+ }
+ 
+-const STORAGE_KEY = "mydevenv2.tabs.v1";
++const STORAGE_KEY = "mydevenv2.tabs.v2";
++const LEGACY_STORAGE_KEY = "mydevenv2.tabs.v1";
+ 
+ function cloneTab(tab: Tab): Tab {
+   return tab.kind === "editor" ? { ...tab, dirty: Boolean(tab.dirty) } : { ...tab };
+@@ -72,10 +66,6 @@ function normalizeTab(value: unknown): Tab | null {
+     case "history":
+     case "tasks":
+     case "assistant":
+-    case "board":
+-    case "backlog":
+-    case "projects":
+-    case "audit":
+       if (typeof raw.label !== "string") return null;
+       return {
+         id: raw.id,
+@@ -104,8 +94,25 @@ function normalizeState(value: unknown): TabsStateSnapshot {
+ 
+ function loadInitial(): TabsStateSnapshot {
+   try {
+-    const raw = localStorage.getItem(STORAGE_KEY);
+-    return raw ? normalizeState(JSON.parse(raw)) : { tabs: [], active: null };
++    const current = localStorage.getItem(STORAGE_KEY);
++    if (current) {
++      const normalized = normalizeState(JSON.parse(current));
++      localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
++      return normalized;
++    }
++    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
++    if (!legacy) return { tabs: [], active: null };
++    // normalizeTab deliberately drops the old product-surface tab kinds.
++    // They are stable places now, so carrying them into v2 would recreate a
++    // second, closable route for the same surface.
++    const migrated = normalizeState(JSON.parse(legacy));
++    const stable = migrated.tabs;
++    const next = {
++      tabs: stable,
++      active: stable.some((tab) => tab.id === migrated.active) ? migrated.active : stable[0]?.id ?? null,
++    };
++    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
++    return next;
+   } catch {
+     return { tabs: [], active: null };
+   }
+@@ -244,7 +251,7 @@ export function openHistoryTab(): Tab {
+     persist();
+     return existing;
+   }
+-  const tab: Tab = { id, kind: "history", label: "📜 History" };
++  const tab: Tab = { id, kind: "history", label: "History" };
+   setStore(
+     produce((s) => {
+       s.tabs.push(tab);
+@@ -334,26 +341,6 @@ export function replaceTabs(next: TabsStateSnapshot) {
+   persist();
+ }
+ 
+-/** The board: one per client, and the surface a Vogt session usually starts from. */
+-export function openBoardTab(): Tab {
+-  return openSingletonTab("board", "board", "Board");
+-}
+-
+-/** The ranked backlog and bugs, which share a tab and a filter set. */
+-export function openBacklogTab(): Tab {
+-  return openSingletonTab("backlog", "backlog", "Backlog");
+-}
+-
+-/** Per-project pages and the drift inbox they carry. */
+-export function openProjectsTab(): Tab {
+-  return openSingletonTab("projects", "projects", "Projects");
+-}
+-
+-/** The audit browser: who wrote what, and the reason they gave. */
+-export function openAuditTab(): Tab {
+-  return openSingletonTab("audit", "audit", "Audit");
+-}
+-
+ /** One work item, addressable so the tab survives a reload (FR-U11). */
+ export function openWorkItemTab(ref: string): Tab {
+   const id = `workitem:${ref}`;
+@@ -373,26 +360,3 @@ export function openWorkItemTab(ref: string): Tab {
+   persist();
+   return tab;
+ }
+-
+-/** Shared by the tabs there is exactly one of. */
+-function openSingletonTab(
+-  id: string,
+-  kind: "board" | "backlog" | "projects" | "audit",
+-  label: string,
+-): Tab {
+-  const existing = store.tabs.find((t) => t.id === id);
+-  if (existing) {
+-    setStore("active", id);
+-    persist();
+-    return existing;
+-  }
+-  const tab: Tab = { id, kind, label } as Tab;
+-  setStore(
+-    produce((s) => {
+-      s.tabs.push(tab);
+-      s.active = id;
+-    }),
+-  );
+-  persist();
+-  return tab;
+-}
+diff --git a/web/src/vogtApi.ts b/web/src/vogtApi.ts
+index 4c59adc..a123c00 100644
+--- a/web/src/vogtApi.ts
++++ b/web/src/vogtApi.ts
+@@ -51,6 +51,7 @@ export const ROUTES = {
+   compliance: "/compliance",
+   "audit.list": "/audit",
+   notifications: "/notifications",
++  "inbox.list": "/inbox",
+   "events.list": "/events",
+   "session.list": "/sessions",
+   "session.start": "/sessions",
+@@ -69,6 +70,16 @@ export class VogtUnavailable extends Error {
+   }
+ }
+ 
++/** The current front door has not shipped the normalized Inbox operation. */
++export class InboxContractUnavailable extends Error {
++  constructor() {
++    super(
++      "The normalized inbox.list contract is not available from this front door yet.",
++    );
++    this.name = "InboxContractUnavailable";
++  }
++}
++
+ function isAbsent(status: number): boolean {
+   // 503: this front door has no core configured. 502: it has one and the
+   // core did not answer. Both mean "Vogt cannot be asked right now", which
+@@ -141,6 +152,52 @@ export interface FreshnessSummary {
+   detail?: string | null;
+ }
+ 
++/**
++ * The normalized attention contract planned for the canonical Inbox.
++ *
++ * This client deliberately only carries the contract shape while the backend
++ * operation is absent from this checkout. Inbox.tsx renders that absence and
++ * never falls back to merging notifications, drift, or events in the browser.
++ */
++export interface InboxEntry {
++  entry_key: string;
++  source: "github" | "drift" | "ci" | "agent" | string;
++  kind: string;
++  occurred_at: string;
++  observed_at?: string | null;
++  title: string;
++  summary?: string | null;
++  project_slug?: string | null;
++  work_item_ref?: string | null;
++  session_id?: string | null;
++  source_subject?: string | null;
++  source_url?: string | null;
++  trust_state?: TrustState;
++  freshness?: FreshnessSummary;
++  triage_state?: "active" | "archived" | "snoozed" | string;
++  snoozed_until?: string | null;
++  action?: {
++    drift_id?: string;
++    observed_subject_key?: string;
++  };
++}
++
++export interface InboxSourceCoverage {
++  status: "current" | "partial" | "unswept" | "unconfigured" | "failed" | string;
++  count: number;
++  observed_at?: string | null;
++  detail?: string | null;
++}
++
++export interface InboxListResult {
++  entries: InboxEntry[];
++  next_cursor?: string | null;
++  snapshot_at: string;
++  coverage: Record<string, InboxSourceCoverage>;
++  instance_scope?: string | null;
++  engine_available?: boolean;
++}
++
+ export interface WorkItem {
+   id: string;
+   ref: string;
+@@ -467,6 +524,11 @@ export const notifications = (params: Record<string, unknown> = {}) =>
+   // different answer from "nothing to say" (FR-N3).
+   call<Record<string, unknown>>("notifications", params);
+ 
++/** Read the canonical server-owned Inbox. The browser never composes legacy
++ * notification, drift, event or engine reads into this answer. */
++export const listInbox = (params: Record<string, unknown> = {}) =>
++  call<InboxListResult>("inbox.list", params);
++
+ /** The audit log, narrowed and paged (FR-S6, FR-U19).
+  *
+  *  `AuditListResult` carries `total` beside the records: how many match the
+-- 
+2.53.0
+

@@ -1,0 +1,80 @@
+From a363ce075aa1894d37d2d18f9b03e95a01e66c11 Mon Sep 17 00:00:00 2001
+From: dancingdeveloper
+ <306930456+thedancingdeveloper@users.noreply.github.com>
+Date: Tue, 18 Aug 2026 04:19:08 +0000
+Subject: [PATCH 3/3] docs: say where the pod toolchain is defined now
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`DEPLOYMENT.md` §10 declares itself the source of truth for the toolchain the
+merged image ships and replaced `docs/engine/TOOLING.md`. Everything it lists
+is now installed by `engine/Dockerfile.pod`, and nothing said so — so the next
+person adding a tool would have edited `engine/Dockerfile`, where those lines
+used to be, and watched it not appear.
+
+§10 now names the file, the published image and the tagging, and states the
+rule directly: adding a tool to the pod means editing `engine/Dockerfile.pod`.
+The repo map in `AGENTS.md` gets its own entry for the same reason.
+
+The ops repo needs nothing. Its compose files pin a digest and describe it as
+"published by `build.yml`'s `stack-image` job from `engine/Dockerfile`", which
+is still exactly true: image name, tag streams and pin mechanism are unchanged.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ AGENTS.md          |  8 ++++++++
+ docs/DEPLOYMENT.md | 18 ++++++++++++++++++
+ 2 files changed, 26 insertions(+)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 465a16e..183ebf1 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -65,6 +65,14 @@ on any surface.
+   engine's image is built by `.github/workflows/build.yml`, and the pre-merge
+   Forgejo repository keeps its own pipeline. Read `engine/AGENTS.md` before
+   changing anything in there.
++- `engine/Dockerfile.pod` — the dev-pod toolchain (Node, the Rust dev
++  toolchain, sway, selkies, Java/Gradle, the Android SDK, Flutter), split out
++  of the merged image's runtime stage because it was 22 of that build's 34
++  minutes and depends on none of this repository's source. Published as
++  `vogt-pod-base:{lean,full}-<hash>-<week>` by
++  `.github/workflows/pod-base.yml` and consumed by digest as `POD_BASE_IMAGE`.
++  **Adding a tool to the pod means editing this file**, not `engine/Dockerfile`;
++  `docs/DEPLOYMENT.md` §10 documents what it carries.
+ - `web/` — the Solid/Vite PWA, and the product's GUI going forward. It is baked
+   into the Rust binary at compile time (`engine/server/src/assets.rs` embeds
+   `../../web/dist/`), so a `cargo build` without a fresh `pnpm build` ships a
+diff --git a/docs/DEPLOYMENT.md b/docs/DEPLOYMENT.md
+index 6288ebf..acb5381 100644
+--- a/docs/DEPLOYMENT.md
++++ b/docs/DEPLOYMENT.md
+@@ -1013,6 +1013,24 @@ This section is the source of truth for the toolchain the merged image ships,
+ and replaces `docs/engine/TOOLING.md`. It describes the image, not the stack:
+ stack shape, environment and rollout are §2.2, §9 and §11.
+ 
++**Where it is defined:** `engine/Dockerfile.pod`, not `engine/Dockerfile`. The
++toolchain moved out of the merged image's runtime stage into a base image of
++its own — `ghcr.io/thedancingdeveloper-org/vogt-pod-base`, built by
++`.github/workflows/pod-base.yml` and consumed by digest as `POD_BASE_IMAGE` —
++because it was 1344s of a 34-minute build and none of it depends on a line of
++this repository's source. Everything §10.1 to §10.3 lists is installed there.
++
++So **adding a tool to the pod means editing `engine/Dockerfile.pod`**, and the
++next build picks it up automatically: the image is tagged
++`<variant>-<hash>-<week>` where the hash is of that file, so a change
++republishes on the next run and an unchanged file is reused. `engine/Dockerfile`
++keeps only what depends on the source — the two halves, the entrypoint, and the
++agent CLIs (§10.3), which stay behind because they are deliberately unpinned and
++a weekly-rebuilt base would have frozen them.
++
++Two variants are published, and §10.2's Flutter note is the only difference
++between them: `full` for `dev`, `lean` for main and every release.
++
+ The pod is a **neutral development baseline** for builds under
+ `~/Working/Active/apps/`. It is not tuned for one language, because the estate
+ it serves is not.
+-- 
+2.53.0
+

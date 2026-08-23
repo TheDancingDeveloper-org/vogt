@@ -1,0 +1,146 @@
+[
+ {
+  "title": "Work item: state, assignee, labels, effort and body cannot be changed from the detail page",
+  "surface": "Work item",
+  "severity": "high",
+  "evidence": "web/src/WorkItemDetail.tsx:1231-1266 \u2014 the only editor (`openEditor`/`submitEdit`) covers title and priority; `transitionWork` is imported nowhere in the file (grep), the state rail at :1463-1479 is display-only, labels at :2058-2068 and assignee/effort chips at :1376-1385 are static text. Board quick-create tells the user the opposite (Board.tsx:2332-2334: \"Body, priority, effort, labels and assignee are set on the item itself\"), and docs/USER_GUIDE.md \u00a74 says per-item verbs \"(transition, comment, start session) are reached through the item's own entry, which opens the page carrying all three forms\". Today a state change is only reachable by Board drag/Shift+Arrow or Backlog bulk-select-one.",
+  "proposal": "Add a 'Move to' select + reason form under the state rail (reuse `ReasonForm` and `transitionWork`, optimistic/rollback pattern already in `submitEdit`), and extend the Edit panel to assignee (actor picker), effort, labels and body via `updateWork`. Fix the USER_GUIDE sentence until then.",
+  "effort": "M"
+ },
+ {
+  "title": "Board: on a phone or any touch screen there is no way to move a card",
+  "surface": "Phone",
+  "severity": "high",
+  "evidence": "web/src/Board.tsx:2535-2557 \u2014 moves are HTML5 drag/drop only (no touch events); the keyboard alternative (Shift+\u2190/\u2192, :1700-1708) needs a hardware keyboard and its on-screen hint is deliberately hidden on coarse pointers (styles.css:6119-6123). The phone layout (:2352-2370) shows one state at a time with no per-card action. Combined with the previous finding, a phone user cannot transition an item anywhere except via Backlog's bulk bar.",
+  "proposal": "Give each card a small 'Move\u2026' control (visible on `pointer: coarse`) that opens the existing move composer with a state select; it reuses `beginMove`/`commitMove` unchanged.",
+  "effort": "S"
+ },
+ {
+  "title": "Board/Backlog: opening an item and returning via the rail discards the filter set",
+  "surface": "Board",
+  "severity": "high",
+  "evidence": "web/src/App.tsx:1458-1463 mounts Board and Backlog inside `<Show when={location.pathname === \"/board\"}>`, so navigating to `/w/<ref>` (Board.tsx:1712-1715, Backlog.tsx:1166-1168) unmounts them; the rail links are bare `href=\"#/board\"` / `#/backlog` (App.tsx:1173, 1641). On remount `filters` is seeded from the now-empty query (Board.tsx:732; Backlog.tsx:487). The 'puts its query back' test (board.test.tsx:824) only covers a still-mounted component. Browser Back works; the rail, the palette and the bottom bar do not.",
+  "proposal": "Have the rail/palette link for a surface carry the last query the surface wrote (App.tsx:753 already records `path+search` via `rememberPlace`), or keep each surface's last filter string in sessionStorage and seed from it when the query is empty.",
+  "effort": "S"
+ },
+ {
+  "title": "Board: dropping a card into another lane in the same column does nothing, silently",
+  "surface": "Board",
+  "severity": "medium",
+  "evidence": "web/src/Board.tsx:1447-1456 \u2014 `beginMove` returns early when `item.state === to`; the drop handler (:2546-2557) accepts the drop, clears the highlight and then nothing happens. The comment explains lanes are groupings not targets, but the cell highlights as a drop target during drag (`dropping` class, :2529) so the user is invited to do it.",
+  "proposal": "When the drop target differs only by lane, show the existing `board-hint` slot with 'Lanes group cards; to change the project/initiative open the item' and do not highlight same-state cells in other lanes as droppable.",
+  "effort": "S"
+ },
+ {
+  "title": "Board/Work item: assignees and projects show as raw identity refs and slugs, never as names or links",
+  "surface": "Board",
+  "severity": "medium",
+  "evidence": "web/src/Board.tsx:2826-2834 card meta prints `item.project_slug` and `item.assignee_identity_ref` verbatim although `actors()` (display_name) and `projects()` (name) are already loaded (:1000-1007, :1015-1020); filter chips do the same (:1864-1870). WorkItemDetail.tsx:1379-1385 prints `project: <slug>` and `assignee: <identity_ref>` as plain chips. Backlog.tsx:1905 prints `project_slug`. AuditBrowser already resolves names (AuditBrowser.tsx:1369-1377), so the product is inconsistent.",
+  "proposal": "Resolve through the loaded actor/project lists with the raw ref in a `title`; make the project chip a link to `#/projects?p=<slug>` and the board/backlog `?project=<slug>`.",
+  "effort": "S"
+ },
+ {
+  "title": "Projects: a project page never links to its own board, backlog or audit trail",
+  "surface": "Projects",
+  "severity": "medium",
+  "evidence": "web/src/Projects.tsx:1528-1575 renders 'Open work', 'Open bugs' and per-state counts as plain text; grep for `#/board`, `#/backlog`, `#/audit` in Projects.tsx returns nothing. Both target surfaces already accept `?project=<slug>` in the URL (Board.tsx:178-193, Backlog.tsx:67-78, AuditBrowser 'Project' filter). Conversely Board/Backlog/Audit never link back to `#/projects?p=`.",
+  "proposal": "Turn the Work panel counts into links: `#/board?project=slug`, `#/backlog?view=bugs&project=slug`, `#/board?project=slug&state=<state>`, and `#/audit?project=slug`.",
+  "effort": "S"
+ },
+ {
+  "title": "Inbox: every live nudge or triage reloads the list, wiping open reason composers and loaded pages",
+  "surface": "Inbox",
+  "severity": "high",
+  "evidence": "web/src/Inbox.tsx:429 `onVogtChanged(() => { if (!loading()) void load(); })` \u2014 unlike Board (Board.tsx:1250, `when: () => !pending()`) there is no composer guard and no hidden-tab guard. `load()` with no cursor replaces `result` wholesale (:386-393), so pages fetched with 'Load more' (:659-663) collapse to page 1, and because `For` maps by object identity (:653) every `Entry` is recreated and its local `composing`/`reason`/`refusal` signals (:101-103) are lost mid-sentence. Any archive/adopt on one entry also calls `load()` (:537, :566).",
+  "proposal": "Switch to `onVogtLive` with `when: () => !anyComposerOpen && !batchAction()`; merge reloads by `entry_key` so unchanged entries keep their component; preserve pagination by reloading up to the current cursor or just appending.",
+  "effort": "M"
+ },
+ {
+  "title": "Inbox: entries without a work item or session have a dead 'Open entry' and the source URL is never shown",
+  "surface": "Inbox",
+  "severity": "medium",
+  "evidence": "web/src/Inbox.tsx:517-521 `openEntry` navigates only when `work_item_ref` or `session_id` is set; otherwise the button does nothing and `seen` is still written. `InboxEntry.source_url` exists on the wire (vogtApi.ts:178) but `Entry` never renders it (grep source_url Inbox.tsx \u2192 none); the meta row instead prints the raw `source_subject_key` (:198).",
+  "proposal": "Render `source_url` as an 'Open on <source>' link (target=_blank) when present; hide or disable 'Open entry' when there is nothing in-app to open, and say so in the button title.",
+  "effort": "S"
+ },
+ {
+  "title": "Inbox: keyboard shortcuts j/k/e/s/r exist but are discoverable nowhere",
+  "surface": "Inbox",
+  "severity": "low",
+  "evidence": "web/src/Inbox.tsx:481-495 binds j/k/ArrowUp/Down, e (archive), s (snooze), r (resolve) on `window`; there is no on-screen hint (grep `kbd` Inbox.tsx \u2192 0), nothing in KeyboardShortcuts.tsx, and docs/USER_GUIDE.md \u00a74 lists none of them. Board prints its keys (Board.tsx:2338-2343). Backlog has no row navigation keys at all (no onKeyDown on rows), so the three list surfaces each behave differently.",
+  "proposal": "Add a `board-keys`-style line to Inbox (hidden on coarse pointers), list the surface keys in the `?` help and USER_GUIDE \u00a74, and give Backlog rows the same j/k + Enter handling.",
+  "effort": "S"
+ },
+ {
+  "title": "Inbox: freshness line never ticks and the surface lacks the shared age badge",
+  "surface": "Inbox",
+  "severity": "low",
+  "evidence": "web/src/Inbox.tsx:599 and :64 compute `age(snapshot_at)` with `Date.now()` at render time; nothing re-renders it, so a tab left open says 'Response 12s ago' an hour later. Every other Vogt surface uses `createViewAge`/`ViewAgeBadge` (viewAge.tsx:165-168, Board.tsx:1780, Backlog.tsx:600, WorkItemDetail.tsx:928).",
+  "proposal": "Feed `snapshot_at` into `createViewAge({ loadedAt, live: true })` and render `ViewAgeBadge` in the header honesty slot.",
+  "effort": "S"
+ },
+ {
+  "title": "Work item: descriptions and comments render upstream markdown as raw text",
+  "surface": "Work item",
+  "severity": "medium",
+  "evidence": "web/src/WorkItemDetail.tsx:1450-1453 `<p class=\"wid-body\">{body()}</p>` and :2017 for comments; styles.css:4665-4669 is `white-space: pre-wrap` only. With the forge pivot (GitHub issue = work item) bodies are GitHub-flavoured markdown, so headings, lists, links and code fences arrive as literal `#`, `-`, `[x](y)`, ```` ``` ````. Board card bodies (Board.tsx:2821, styles.css:5788-5795) have the same problem.",
+  "proposal": "Render body/comment text through a small sanitising markdown renderer (links, lists, code, headings) with a 'raw' toggle; keep the plain path for native items without markup.",
+  "effort": "M"
+ },
+ {
+  "title": "Work item/Backlog: never reconcile on their own \u2014 after 60 s the badge reads 'Stale \u2014 press Refresh' for good",
+  "surface": "Work item",
+  "severity": "medium",
+  "evidence": "web/src/WorkItemDetail.tsx:920-925 'the page does not poll and does not subscribe'; Backlog.tsx:594-598 same by design. viewAge.tsx:118-126 then flips to `stale` after `DEFAULT_STALE_AFTER_MS` (60 s). Neither registers `onVogtLive`, so they also skip the visibility-change reconcile that Board, Audit and Projects get (viewAge.tsx:240-264). The session list's 'live activity' badge (WorkItemDetail.tsx:231-256) is a one-shot snapshot from `listSessions`, yet docs/USER_GUIDE.md \u00a72.3 promises 'the item shows its live activity badge'.",
+  "proposal": "Subscribe both surfaces with `onVogtLive(..., { when: () => no composer has text })` \u2014 at minimum refetch `sessions` and `work` on nudges and on tab return; keep the ranked Backlog on manual refresh but reconcile on visibility return.",
+  "effort": "S"
+ },
+ {
+  "title": "History: archived-output search hits the server and rewrites the URL on every keystroke",
+  "surface": "Sessions",
+  "severity": "medium",
+  "evidence": "web/src/History.tsx:657-671 \u2014 `onInput` sets `outputQuery`, clears the selection and calls `navigate(..., {replace:true})`; `createEffect` at :500-503 runs `loadSearch` immediately with no debounce, so typing 'deploy' issues six full-archive searches and drops the selected session/detail six times. AuditBrowser deliberately commits on `onChange` for the same reason (AuditBrowser.tsx:1078-1080, NFR-S5).",
+  "proposal": "Debounce the search effect (~250 ms) and only clear `selectedId` once the debounced query actually changes; keep the URL write on the debounced value.",
+  "effort": "S"
+ },
+ {
+  "title": "Backlog: the State filter only narrows the loaded page, and the chip does not say so",
+  "surface": "Backlog",
+  "severity": "medium",
+  "evidence": "web/src/Backlog.tsx:1449-1451 'narrows the loaded page \u2014 the ranked views take no state parameter' (note lives inside the `+ Filter` panel, invisible once closed); the chip reads 'State: open' like the server-side chips. Page size is capped at 200 (:69-71, :1686-1690), so 'State: blocked' may show 3 rows while 40 exist further down. The selected-count effect also drops selections when a state chip changes (:737-741).",
+  "proposal": "Suffix the chip ('State: open \u00b7 this page only') and show 'N of M loaded rows' in the summary; file a core issue for a `states` parameter on `backlog`/`bugs` so the filter can be honest.",
+  "effort": "S"
+ },
+ {
+  "title": "Projects: the registry list has no search, sort or filter",
+  "surface": "Projects",
+  "severity": "low",
+  "evidence": "web/src/Projects.tsx:1434-1478 renders `projectRows()` (:939-943) as a grid of cards in server order; the only inputs on the surface are the drift-resolution and import forms (:791, :806, :2061-2090). With the select-all import picker (:1155-1164) registries grow fast, and the palette is the only way to jump to a project by name.",
+  "proposal": "Add a text filter over name/slug and a sort (name / lifecycle / trust) in the list header; keep it client-side.",
+  "effort": "S"
+ },
+ {
+  "title": "Backlog: primary row actions hide behind 'More' and the bulk bar scrolls out of view",
+  "surface": "Backlog",
+  "severity": "low",
+  "evidence": "web/src/Backlog.tsx:918-936 'Open / Select / Start a session\u2026' are rendered only inside the expanded detail (:1972), so starting a session is More \u2192 Start a session\u2026 \u2192 reason \u2192 Confirm; selecting via the tick box works but the bulk bar is rendered above the list (:1539-1549) and is off-screen once the reader is 80 rows into a virtualised list.",
+  "proposal": "Put 'Start a session\u2026' in the collapsed facts row next to 'More', and make `.vogt-backlog-bulk` sticky at the top of the scroller while anything is selected.",
+  "effort": "S"
+ },
+ {
+  "title": "Polish: Board \u2014 lens overwrite/forget without confirmation, WIP tooltip wrong, ack banner off-screen, card click does nothing",
+  "surface": "Board",
+  "severity": "low",
+  "evidence": "(a) Board.tsx:1815-1826 saving a lens with an existing name silently replaces it; ProgressiveFilters.tsx:192-198 'Forget' is immediate with no undo. (b) Board.tsx:2369-2371 `title=\"Work in progress: loaded items in this column\"` but `columnCount` is the server-side `columnTotals` (:1392-1397). (c) Success `ack` is a banner at the top of the surface (:1997-1999) \u2014 invisible when the reader is scrolled down a tall column where the composer was. (d) Cards are `role=\"button\" tabindex=0` (:2745-2747) but single click and Space do nothing; only the ref button, double-click or Enter open the item. (e) 'Hide finished columns' (:1802-1810) becomes a chip reading 'State: open, in_progress, review' rather than something recognisable.",
+  "proposal": "Confirm-on-overwrite and a 6-second undo for forget; fix the tooltip text; move the ack into the composer's cell slot (where the refusal already lands); open on Space/click of the card body; render the hide-finished case as a 'Finished hidden' chip.",
+  "effort": "S"
+ },
+ {
+  "title": "Polish: Inbox \u2014 batch panel at the bottom, raw JSON evidence dumps, snooze has no presets",
+  "surface": "Inbox",
+  "severity": "low",
+  "evidence": "(a) Inbox.tsx:662-716 the 'Batch operations \u00b7 N selected' disclosure is the last thing on the page, after Load more and Coverage, so select-at-top \u2192 scroll-to-bottom every time. (b) :180-190 every drift entry renders `JSON.stringify(evidence_snapshot)` and `proposed_change` in `<pre>` blocks above the fold, unconditionally; Projects' drift inbox renders the same data as a two-sided table. (c) :105-109 snooze defaults to now+24 h with a bare `datetime-local`; no 'tomorrow / next week' presets.",
+  "proposal": "Make the batch bar sticky at the top while `selected().size > 0`; collapse evidence behind the same 'Evidence before action' heading as a `<details>` open only for drift entries; add three snooze preset buttons beside the date field.",
+  "effort": "S"
+ }
+]

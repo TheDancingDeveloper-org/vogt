@@ -1,0 +1,90 @@
+From dbf1f5f24eedee6db73d839594114973b1d0a595 Mon Sep 17 00:00:00 2001
+From: dancingdeveloper
+ <306930456+thedancingdeveloper@users.noreply.github.com>
+Date: Tue, 18 Aug 2026 04:15:50 +0000
+Subject: [PATCH 2/3] fix(tests): the PWA-ordering assertion must not need the
+ engine tree
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+NFR-Q6's `core` job deletes `engine/`, `web/` and `mobile/` and runs this
+suite, and it caught this on the first run — which is the job working.
+
+Moving the PWA-ordering assertion off the workflows and onto
+`engine/Dockerfile` (where the guarantee actually lives) made a core test
+quietly depend on the engine: `FileNotFoundError` with the tree absent.
+
+`needs_engine` already existed for exactly this, but was defined below the
+new test and keyed on one deploy script. Hoisted to the top of the module
+and keyed on the `engine/` directory itself, since "the engine tree is
+absent" is the condition being described and every file under it goes
+together.
+
+Verified against a tree with `engine/`, `web/` and `mobile/` removed: 43
+passed, 13 skipped, where the previous commit gave 1 failed, 43 passed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ tests/test_deploy.py | 31 ++++++++++++++++++-------------
+ 1 file changed, 18 insertions(+), 13 deletions(-)
+
+diff --git a/tests/test_deploy.py b/tests/test_deploy.py
+index 58bd81c..cdf9509 100644
+--- a/tests/test_deploy.py
++++ b/tests/test_deploy.py
+@@ -21,6 +21,23 @@ COMPOSE = REPO_ROOT / "deploy" / "personal-vogt.compose.yml"
+ DOCKERFILE = REPO_ROOT / "Dockerfile"
+ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+ 
++#: Some tests here read the *engine's* tree — its Dockerfile, its deploy
++#: scripts — which a core-only checkout does not have. NFR-Q6's `core` job
++#: proves the core stands alone by deleting `engine/`, `web/` and `mobile/`
++#: and running this suite, and it earns its keep every time: it caught the
++#: deploy-script tests on their first run, and it caught the Dockerfile one
++#: the day the PWA-ordering assertion moved off the workflows and onto
++#: `engine/Dockerfile`. A merged repository makes it very easy to write a
++#: core test that quietly needs the engine.
++#:
++#: Keyed on the directory rather than on any one file inside it, because the
++#: condition being described is "the engine tree is absent" and every file
++#: under it disappears together.
++needs_engine = pytest.mark.skipif(
++    not (REPO_ROOT / "engine").is_dir(),
++    reason="the merged tree carries the engine; a core-only checkout does not",
++)
++
+ 
+ def _without_comments(text: str) -> str:
+     """Strip comments before asserting on content.
+@@ -476,6 +493,7 @@ def test_the_merged_image_is_built_from_the_engine_dockerfile(workflow: str) ->
+     )
+ 
+ 
++@needs_engine
+ def test_the_pwa_is_built_before_the_engine_that_embeds_it() -> None:
+     """`rust-embed` reads `web/dist/` at compile time.
+ 
+@@ -637,19 +655,6 @@ VOGT_MCP_WRAPPER = REPO_ROOT / "engine" / "deploy" / "vogt-mcp-auth.sh"
+ AGENT_AUTH = REPO_ROOT / "engine" / "deploy" / "agent-auth.sh"
+ RETIRED_CORE_STACK = "winrarhost.tailc7d3c.ts.net:18094"
+ 
+-#: These three read the *engine's* deploy scripts, which a core-only checkout
+-#: does not have — and NFR-Q6's `core` job proves the core stands alone by
+-#: deleting `engine/`, `web/` and `mobile/` and running this suite. It found
+-#: these on their first run, which is the job working: a merged repository
+-#: makes it very easy to write a core test that quietly needs the engine.
+-needs_engine = pytest.mark.skipif(
+-    not MCP_BOOTSTRAP.is_file(),
+-    reason=(
+-        "the merged tree carries the engine's deploy scripts; "
+-        "a core-only checkout does not"
+-    ),
+-)
+-
+ 
+ @needs_engine
+ def test_a_sessions_own_endpoint_is_what_its_agent_is_registered_against() -> None:
+-- 
+2.53.0
+

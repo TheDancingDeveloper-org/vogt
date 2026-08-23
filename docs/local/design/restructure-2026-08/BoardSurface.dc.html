@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics><style>
+body{margin:0;background:#0d1117;color:#c9d1d9;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}
+*{box-sizing:border-box}
+a{color:#58a6ff;text-decoration:none}a:hover{color:#79b8ff}
+</style></helmet>
+
+<div style="display:flex;height:100vh;min-height:0;background:#0d1117;overflow:hidden">
+
+  <sc-if value="{{ showRail }}" hint-placeholder-val="{{ true }}">
+  <nav style="width:248px;flex:none;border-right:1px solid #30363d;background:#0d1117;display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;align-items:center;gap:9px;height:53px;padding:0 14px;border-bottom:1px solid #30363d">
+      <span style="font-size:14px;font-weight:600;letter-spacing:.02em;color:#c9d1d9">Vogt</span>
+      <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:#8b949e">r4</span>
+    </div>
+
+    <div style="padding:14px 8px 6px 14px;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#6e7681">Work</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;font-size:13px;color:#c9d1d9;background:#161b22;border-left:2px solid #58a6ff;padding:8px 14px 8px 12px">
+      <span style="font-weight:600">Board</span><span style="font-size:11px;color:#6e7681">{{ totalShown }}</span>
+    </div>
+    <button type="button" style="display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;font:inherit;font-size:13px;color:#8b949e;background:transparent;border:0;border-left:2px solid transparent;padding:8px 14px 8px 12px;cursor:pointer" style-hover="color:#c9d1d9;background:#161b22">Backlog</button>
+    <button type="button" style="display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;text-align:left;font:inherit;font-size:13px;color:#8b949e;background:transparent;border:0;border-left:2px solid transparent;padding:8px 14px 8px 12px;cursor:pointer" style-hover="color:#c9d1d9;background:#161b22">
+      <span>Inbox</span><span style="min-width:20px;padding:0 6px;border-radius:9px;background:#f85149;color:#0d1117;font-size:10.5px;font-weight:700;line-height:18px;text-align:center">9</span>
+    </button>
+
+    <div style="padding:16px 8px 6px 14px;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#6e7681">Estate</div>
+    <button type="button" style="display:flex;align-items:center;gap:8px;width:100%;text-align:left;font:inherit;font-size:13px;color:#8b949e;background:transparent;border:0;border-left:2px solid transparent;padding:8px 14px 8px 12px;cursor:pointer" style-hover="color:#c9d1d9;background:#161b22">Projects</button>
+    <button type="button" style="display:flex;align-items:center;gap:8px;width:100%;text-align:left;font:inherit;font-size:13px;color:#8b949e;background:transparent;border:0;border-left:2px solid transparent;padding:8px 14px 8px 12px;cursor:pointer" style-hover="color:#c9d1d9;background:#161b22">Audit</button>
+
+    <div style="display:flex;align-items:center;gap:6px;padding:16px 10px 5px 14px">
+      <span style="font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#6e7681">Sessions</span>
+      <span style="font-size:10.5px;color:#484f58">4</span>
+    </div>
+    <div style="display:flex;flex-direction:column;max-height:150px;overflow-y:auto">
+      <sc-for list="{{ sessions }}" as="s" hint-placeholder-count="4">
+        <button type="button" onClick="{{ s.open }}" title="{{ s.title }}" style="{{ s.style }}" style-hover="background:#161b22">
+          <span style="{{ s.dotStyle }}"></span>
+          <span style="{{ s.contStyle }}">{{ s.continuity }}</span>
+          <span style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;text-align:left">
+            <span style="font-size:12.5px;color:#c9d1d9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.name }}</span>
+            <span style="font-size:10.5px;color:#6e7681;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.cwd }}</span>
+          </span>
+        </button>
+      </sc-for>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:6px;padding:14px 10px 5px 14px;border-top:1px solid #21262d;margin-top:8px">
+      <span style="font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#6e7681">Files</span>
+    </div>
+    <div style="flex:1;min-height:70px;overflow-y:auto;padding-bottom:6px">
+      <sc-for list="{{ tree }}" as="node" hint-placeholder-count="8">
+        <button type="button" onClick="{{ node.click }}" title="{{ node.path }}" style="{{ node.style }}" style-hover="background:#161b22;color:#c9d1d9">
+          <span style="width:12px;flex:none;color:#6e7681;font-size:10px">{{ node.caret }}</span>
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">{{ node.name }}</span>
+        </button>
+      </sc-for>
+    </div>
+
+    <div style="border-top:1px solid #30363d;padding:11px 14px;display:flex;align-items:center;gap:8px">
+      <span style="width:7px;height:7px;border-radius:50%;background:#3fb950"></span>
+      <span style="font-size:11.5px;color:#8b949e">connected</span>
+    </div>
+  </nav>
+  </sc-if>
+
+  <main style="flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden">
+
+    <header style="display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid #30363d;flex-wrap:wrap">
+      <h2 style="margin:0;font-size:20px;font-weight:600;color:#c9d1d9">Board</h2>
+      <span style="padding:1px 8px;border:1px solid #3fb950;border-radius:10px;font-size:12px;color:#3fb950;white-space:nowrap">live · polled 4s ago</span>
+      <div style="flex:1"></div>
+      <button type="button" onClick="{{ toggleDensity }}" style="border:1px solid #30363d;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:12px;padding:5px 10px;cursor:pointer" style-hover="background:#1c232c">{{ densityLabel }}</button>
+      <button type="button" onClick="{{ toggleLanes }}" style="border:1px solid #30363d;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:12px;padding:5px 10px;cursor:pointer" style-hover="background:#1c232c">{{ laneLabel }}</button>
+      <button type="button" onClick="{{ toggleCreate }}" style="border:1px solid #58a6ff;border-radius:4px;background:#58a6ff;color:#08111c;font:inherit;font-size:12px;font-weight:600;padding:5px 10px;cursor:pointer" style-hover="background:#79b8ff">+ New item</button>
+    </header>
+
+    <div style="display:flex;align-items:center;gap:7px;padding:9px 18px;border-bottom:1px solid #21262d;flex-wrap:wrap">
+      <sc-for list="{{ chips }}" as="chip" hint-placeholder-count="3">
+        <button type="button" onClick="{{ chip.drop }}" style="display:flex;align-items:center;gap:6px;border:1px solid #484f58;border-radius:12px;background:#161b22;color:#c9d1d9;font:inherit;font-size:11.5px;padding:2px 9px;cursor:pointer" style-hover="border-color:#f85149;color:#ff7b72">{{ chip.label }} ×</button>
+      </sc-for>
+      <button type="button" onClick="{{ noop }}" style="border:1px dashed #484f58;border-radius:12px;background:transparent;color:#8b949e;font:inherit;font-size:11.5px;padding:2px 9px;cursor:pointer" style-hover="color:#c9d1d9;border-color:#8b949e">+ filter</button>
+      <span style="font-size:11.5px;color:#8b949e">· {{ shownLabel }}</span>
+      <div style="flex:1"></div>
+      <span style="font-size:11.5px;color:#8b949e">saved lens:</span>
+      <sc-for list="{{ lenses }}" as="lens" hint-placeholder-count="3">
+        <button type="button" onClick="{{ lens.pick }}" style="{{ lens.style }}" style-hover="border-color:#484f58">{{ lens.label }}</button>
+      </sc-for>
+    </div>
+
+    <sc-if value="{{ createOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;flex-direction:column;gap:9px;margin:12px 18px 0;padding:12px;border:1px solid #30363d;border-radius:6px;background:#161b22">
+        <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px">
+          <input type="text" placeholder="title" style="grid-column:span 2;font:inherit;font-size:12.5px;color:#c9d1d9;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:6px 8px" />
+          <input type="text" placeholder="project" style="font:inherit;font-size:12.5px;color:#c9d1d9;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:6px 8px" />
+          <input type="text" placeholder="P1 · bug" style="font:inherit;font-size:12.5px;color:#c9d1d9;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:6px 8px" />
+        </div>
+        <input type="text" placeholder="reason — every write records who, what and why" style="font:inherit;font-size:12.5px;color:#c9d1d9;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:6px 8px" />
+        <div style="display:flex;align-items:center;gap:8px">
+          <button type="button" onClick="{{ noop }}" style="border:1px solid #58a6ff;border-radius:4px;background:#58a6ff;color:#08111c;font:inherit;font-size:12px;font-weight:600;padding:5px 10px;cursor:pointer">Declare</button>
+          <button type="button" onClick="{{ toggleCreate }}" style="border:1px solid #30363d;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:12px;padding:5px 10px;cursor:pointer">Cancel</button>
+          <span style="font-size:11px;color:#8b949e">inline, without leaving the view</span>
+        </div>
+      </div>
+    </sc-if>
+
+    <div style="flex:1;min-height:0;overflow:auto;padding:14px 18px 20px">
+      <sc-for list="{{ lanes }}" as="lane" hint-placeholder-count="1">
+        <div style="margin-bottom:18px">
+          <sc-if value="{{ lane.showHead }}" hint-placeholder-val="{{ false }}">
+            <button type="button" onClick="{{ lane.toggle }}" style="display:flex;align-items:center;gap:8px;width:100%;margin-bottom:9px;padding:6px 2px;border:0;border-bottom:1px solid #30363d;background:transparent;color:#c9d1d9;font:inherit;font-size:12.5px;cursor:pointer;text-align:left">
+              <span style="color:#8b949e;font-size:10px">{{ lane.caret }}</span>
+              <span style="font-weight:600">{{ lane.label }}</span>
+              <span style="color:#8b949e;font-size:11.5px">{{ lane.count }}</span>
+            </button>
+          </sc-if>
+
+          <sc-if value="{{ lane.open }}" hint-placeholder-val="{{ true }}">
+            <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;align-items:start">
+              <sc-for list="{{ lane.columns }}" as="col" hint-placeholder-count="4">
+                <div style="display:flex;flex-direction:column;gap:8px;min-width:0">
+                  <div style="display:flex;align-items:center;gap:8px;padding-bottom:6px;border-bottom:1px solid #30363d">
+                    <span style="flex:1;min-width:0;font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ col.name }}</span>
+                    <span style="{{ col.wipStyle }}">{{ col.wip }}</span>
+                  </div>
+
+                  <sc-for list="{{ col.cards }}" as="card" hint-placeholder-count="2">
+                    <article onClick="{{ card.select }}" style="{{ card.style }}">
+                      <div style="display:flex;align-items:center;gap:6px">
+                        <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#58a6ff">{{ card.ref }}</span>
+                        <span style="{{ card.priStyle }}">{{ card.priority }}</span>
+                        <span style="{{ card.trustStyle }}">{{ card.trust }}</span>
+                        <span style="margin-left:auto;font-size:10.5px;color:#8b949e">{{ card.kind }}</span>
+                      </div>
+                      <div style="{{ card.titleStyle }}">{{ card.title }}</div>
+
+                      <sc-if value="{{ card.expanded }}" hint-placeholder-val="{{ false }}">
+                        <div style="display:flex;flex-direction:column;gap:7px">
+                          <div style="font-size:11.5px;color:#8b949e;line-height:1.5">{{ card.why }}</div>
+                          <div style="display:flex;flex-wrap:wrap;gap:5px">
+                            <sc-for list="{{ card.labels }}" as="label" hint-placeholder-count="2">
+                              <span style="font-size:10px;padding:1px 6px;border:1px solid #30363d;border-radius:9px;color:#8b949e">{{ label }}</span>
+                            </sc-for>
+                          </div>
+                          <div style="display:flex;flex-wrap:wrap;gap:6px">
+                            <button type="button" onClick="{{ card.openItem }}" style="border:1px solid #484f58;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:11.5px;padding:4px 9px;cursor:pointer" style-hover="background:#1c232c">Open</button>
+                            <button type="button" onClick="{{ card.session }}" style="border:1px solid #58a6ff;border-radius:4px;background:transparent;color:#58a6ff;font:inherit;font-size:11.5px;padding:4px 9px;cursor:pointer" style-hover="background:#1c232c">{{ card.sessionLabel }}</button>
+                            <button type="button" onClick="{{ card.move }}" style="border:1px solid #30363d;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:11.5px;padding:4px 9px;cursor:pointer" style-hover="background:#1c232c">Move ▾</button>
+                          </div>
+                        </div>
+                      </sc-if>
+
+                      <div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:#8b949e">
+                        <span>{{ card.project }}</span>
+                        <span>{{ card.age }}</span>
+                        <span style="{{ card.liveStyle }}">{{ card.live }}</span>
+                      </div>
+
+                      <sc-if value="{{ card.moveOpen }}" hint-placeholder-val="{{ false }}">
+                        <div style="display:flex;flex-direction:column;gap:7px;padding:9px;border:1px solid #30363d;border-radius:4px;background:#0d1117">
+                          <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;font-size:11.5px;color:#8b949e">
+                            <strong style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#c9d1d9">{{ card.ref }}</strong>
+                            <span>{{ card.moveTarget }}</span>
+                          </div>
+                          <textarea onInput="{{ card.reasonInput }}" placeholder="why this transition" style="width:100%;min-height:48px;resize:vertical;font:inherit;font-size:12px;color:#c9d1d9;background:#161b22;border:1px solid #30363d;border-radius:4px;padding:6px 8px"></textarea>
+                          <div style="display:flex;align-items:center;gap:7px">
+                            <button type="button" onClick="{{ card.confirmMove }}" style="border:1px solid #58a6ff;border-radius:4px;background:#58a6ff;color:#08111c;font:inherit;font-size:11.5px;font-weight:600;padding:4px 9px;cursor:pointer">Move</button>
+                            <button type="button" onClick="{{ card.cancel }}" style="border:1px solid #30363d;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:11.5px;padding:4px 9px;cursor:pointer">Cancel</button>
+                            <span style="font-size:10px;color:#8b949e">⌘↵ to send</span>
+                          </div>
+                        </div>
+                      </sc-if>
+
+                      <sc-if value="{{ card.refused }}" hint-placeholder-val="{{ false }}">
+                        <div style="display:flex;flex-direction:column;gap:5px;padding:9px;border:1px solid #f85149;border-radius:4px;background:#0d1117">
+                          <div style="display:flex;align-items:baseline;gap:6px;font-size:11px;color:#ff7b72">Vogt refused this transition</div>
+                          <p style="margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.5;color:#c9d1d9">{{ card.refusal }}</p>
+                          <button type="button" onClick="{{ card.cancel }}" style="align-self:flex-start;border:1px solid #30363d;border-radius:4px;background:transparent;color:#c9d1d9;font:inherit;font-size:11.5px;padding:3px 9px;cursor:pointer">Dismiss</button>
+                        </div>
+                      </sc-if>
+                    </article>
+                  </sc-for>
+
+                  <sc-if value="{{ col.empty }}" hint-placeholder-val="{{ false }}">
+                    <div style="padding:12px 10px;border:1px dashed #30363d;border-radius:6px;font-size:11.5px;color:#6e7681;text-align:center">nothing in this state matches the filter</div>
+                  </sc-if>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+
+    <footer style="display:flex;align-items:center;gap:14px;padding:9px 18px;border-top:1px solid #30363d;background:#161b22;font-size:11.5px;color:#8b949e">
+      <span>click a card to expand it in place · every move takes a reason · columns come from the workflow the server published</span>
+      <div style="flex:1"></div>
+      <span>{{ shownLabel }}</span>
+    </footer>
+
+    <sc-if value="{{ toast }}" hint-placeholder-val="{{ false }}">
+      <div style="position:fixed;left:50%;bottom:56px;transform:translateX(-50%);padding:9px 14px;border:1px solid #30363d;border-radius:6px;background:#1c232c;color:#c9d1d9;font-size:12.5px;box-shadow:0 12px 32px rgba(0,0,0,.45)">{{ toast }}</div>
+    </sc-if>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const SESSIONS = [
+  { name: "clip-fix-3", cwd: "/srv/vogt", activity: "waiting-for-input", continuity: "protected" },
+  { name: "sweep-nightly", cwd: "/srv/vogt", activity: "running", continuity: "protected" },
+  { name: "web-dev", cwd: "/srv/vogt/web", activity: "idle", continuity: "unprotected" },
+  { name: "engine", cwd: "/srv/vogt/engine", activity: "done", continuity: "recovering" },
+];
+
+const ACTIVITY_COLOR = { idle: "#6e7681", running: "#d29922", "waiting-for-input": "#f85149", errored: "#ff7b72", done: "#3fb950" };
+const CONTINUITY = {
+  protected: { glyph: "\u25cf", color: "#3fb950", title: "Protected" },
+  recovering: { glyph: "\u25c6", color: "#d29922", title: "Recovery available" },
+  unprotected: { glyph: "\u25cb", color: "#6e7681", title: "Unprotected" },
+};
+
+const TREE = [
+  { path: "docs", name: "docs", dir: true, depth: 0 },
+  { path: "engine", name: "engine", dir: true, depth: 0 },
+  { path: "src", name: "src", dir: true, depth: 0 },
+  { path: "web", name: "web", dir: true, depth: 0 },
+  { path: "web/src", name: "src", dir: true, depth: 1 },
+  { path: "web/src/Board.tsx", name: "Board.tsx", dir: false, depth: 2 },
+  { path: "web/src/styles.css", name: "styles.css", dir: false, depth: 2 },
+  { path: "mobile", name: "mobile", dir: true, depth: 0 },
+  { path: "README.md", name: "README.md", dir: false, depth: 0 },
+];
+
+const STATES = ["proposed", "ready", "in_progress", "done"];
+const STATE_NAME = { proposed: "Proposed", ready: "Ready", in_progress: "In progress", done: "Done" };
+const WIP = { in_progress: 4 };
+
+const ITEMS = [
+  { ref: "WI-142", title: "Copy/paste fails on Android PWA and iOS standalone \u2014 clipboard write silently no-ops", state: "proposed", priority: "P1", kind: "bug", trust: "declared", project: "vogt", age: "11d", lane: "me", labels: ["clipboard", "pwa", "tty"], why: "ranked 1st \u2014 P1 \u00d72.0 \u00b7 blocks 3 items \u00b7 aged 11d \u00d71.4 \u00b7 declared", live: null },
+  { ref: "WI-139", title: "File viewer scroll jumps to top on save", state: "proposed", priority: "P2", kind: "bug", trust: "observed", project: "vogt", age: "3d", lane: "me", labels: ["editor"], why: "observed from a TODO(vogt) marker \u00b7 evidence 3d old, never confirmed", live: null },
+  { ref: "SUB-91", title: "Contract check reports a missing docs/DEPLOYMENT.md in cadastre", state: "proposed", priority: "P3", kind: "chore", trust: "observed", project: "cadastre", age: "3w", lane: "unassigned", labels: ["contract"], why: "collected subject \u00b7 not declared, visible by default", live: null },
+  { ref: "WI-118", title: "Split editor gutter mis-measures at two panes", state: "ready", priority: "P2", kind: "bug", trust: "declared", project: "vogt", age: "6d", lane: "me", labels: ["editor", "layout"], why: "ready since 6d \u00b7 no blockers recorded", live: null },
+  { ref: "WI-121", title: "Audit time filter (FR-S6) delivered only in part", state: "ready", priority: "P2", kind: "feature", trust: "declared", project: "vogt", age: "2w", lane: "unassigned", labels: ["audit"], why: "named as partial in REQUIREMENTS \u00a75", live: null },
+  { ref: "WI-131", title: "Clipboard bridge: one code path for web, PWA and Capacitor", state: "in_progress", priority: "P1", kind: "bug", trust: "declared", project: "vogt", age: "4d", lane: "me", labels: ["clipboard", "engine"], why: "in progress 4d \u00b7 P1 \u00d72.0 \u00b7 a session is attached and writing as its own actor", live: "session live" },
+  { ref: "WI-77", title: "migrate CLI verb (FR-L1)", state: "in_progress", priority: "P2", kind: "feature", trust: "declared", project: "vogt", age: "9d", lane: "agent", labels: ["cli"], why: "agent-owned \u00b7 partial delivery, named in REQUIREMENTS \u00a75", live: "agent" },
+  { ref: "WI-129", title: "Android shell loads the deployed PWA over the tailnet", state: "done", priority: "P2", kind: "feature", trust: "declared", project: "mobile", age: "1d", lane: "me", labels: ["capacitor"], why: "closed 1d ago with a reason", live: null },
+  { ref: "WI-124", title: "Signing pipeline fires on tag", state: "done", priority: "P3", kind: "chore", trust: "declared", project: "indexarr/ops", age: "4d", lane: "agent", labels: ["ci"], why: "closed 4d ago", live: null },
+];
+
+const LANES = [
+  { id: "me", label: "you" },
+  { id: "agent", label: "agents" },
+  { id: "unassigned", label: "unassigned" },
+];
+
+class Component extends DCLogic {
+  state = {
+    expanded: { web: true, "web/src": true },
+    selected: "WI-131",
+    panel: null,
+    reason: "",
+    refused: null,
+    compact: false,
+    swimlanes: false,
+    laneOpen: { me: true, agent: true, unassigned: true },
+    createOpen: false,
+    chips: ["project: vogt", "kind: bug", "priority: P0–P2"],
+    lens: "mine",
+    toast: null,
+  };
+
+  flash(message) {
+    if (this.timer) window.clearTimeout(this.timer);
+    this.setState({ toast: message });
+    this.timer = window.setTimeout(() => this.setState({ toast: null }), 2600);
+  }
+
+  card(item) {
+    const selected = this.state.selected === item.ref;
+    const compact = this.state.compact;
+    const refused = this.state.refused === item.ref;
+    return {
+      ref: item.ref,
+      title: item.title,
+      kind: item.kind,
+      priority: item.priority,
+      trust: item.trust,
+      project: item.project,
+      age: item.age,
+      labels: item.labels,
+      why: item.why,
+      live: item.live ?? "",
+      expanded: selected,
+      moveOpen: selected && this.state.panel === "move",
+      refused,
+      moveTarget: `proposed \u2192 ${STATE_NAME[item.state] ?? item.state}`,
+      sessionLabel: item.live === "session live" ? "Attach session" : "Open session",
+      style: `display:flex;flex-direction:column;gap:${compact ? 5 : 7}px;padding:${compact ? "8px 9px" : "10px 11px"};border:1px solid ${selected ? "#484f58" : "#30363d"};border-radius:6px;background:${selected ? "#1c232c" : "#161b22"};cursor:pointer;box-shadow:${selected ? "inset 2px 0 0 #58a6ff" : "none"}`,
+      titleStyle: `font-size:${compact ? 12 : 13}px;line-height:1.4;color:#c9d1d9;text-wrap:pretty;${selected ? "" : `display:-webkit-box;-webkit-line-clamp:${compact ? 2 : 3};-webkit-box-orient:vertical;overflow:hidden`}`,
+      priStyle: `padding:0 5px;border-radius:8px;font-size:10px;border:1px solid ${item.priority === "P0" || item.priority === "P1" ? "#f85149" : "#30363d"};color:${item.priority === "P0" || item.priority === "P1" ? "#f85149" : "#8b949e"}`,
+      trustStyle: `padding:0 5px;border-radius:8px;font-size:10px;border:1px solid ${item.trust === "declared" ? "#30363d" : "#d29922"};color:${item.trust === "declared" ? "#8b949e" : "#d29922"}`,
+      liveStyle: `margin-left:auto;color:${item.live ? "#3fb950" : "transparent"}`,
+      select: () => this.setState((s) => ({ selected: s.selected === item.ref ? null : item.ref, panel: null, reason: "", refused: null })),
+      openItem: () => this.flash(`Opening ${item.ref}`),
+      session: () => this.flash(`Session in ${item.project}'s working tree, carrying ${item.ref}'s brief`),
+      move: () => this.setState((s) => ({ panel: s.panel === "move" ? null : "move", reason: "", refused: null })),
+      reasonInput: (e) => this.setState({ reason: e.currentTarget.value }),
+      cancel: () => this.setState({ panel: null, reason: "", refused: null }),
+      confirmMove: () => {
+        if (!this.state.reason.trim()) {
+          this.setState({ panel: null, refused: item.ref });
+          return;
+        }
+        this.setState({ panel: null, reason: "", refused: null });
+        this.flash(`${item.ref} moved \u00b7 audit row written with your reason`);
+      },
+      refusal: "reason is required: every write records who, what and why (NFR-S5). The card stays where it was.",
+    };
+  }
+
+  renderVals() {
+    const items = ITEMS;
+    const buildColumns = (subset) =>
+      STATES.map((st) => {
+        const cards = subset.filter((i) => i.state === st);
+        const limit = WIP[st];
+        const over = limit && cards.length > limit;
+        return {
+          name: STATE_NAME[st],
+          cards: cards.map((i) => this.card(i)),
+          empty: cards.length === 0,
+          wip: limit ? `${cards.length} / wip ${limit}` : String(cards.length),
+          wipStyle: `flex:none;padding:0 6px;border-radius:8px;font-size:10.5px;font-variant-numeric:tabular-nums;border:1px solid ${over ? "#f85149" : "transparent"};color:${over ? "#f85149" : "#8b949e"}`,
+        };
+      });
+
+    const lanes = this.state.swimlanes
+      ? LANES.map((lane) => {
+          const subset = items.filter((i) => i.lane === lane.id);
+          const open = this.state.laneOpen[lane.id];
+          return {
+            showHead: true,
+            open,
+            caret: open ? "\u25be" : "\u25b8",
+            label: lane.label,
+            count: `${subset.length} item${subset.length === 1 ? "" : "s"}`,
+            columns: open ? buildColumns(subset) : [],
+            toggle: () => this.setState((s) => ({ laneOpen: { ...s.laneOpen, [lane.id]: !s.laneOpen[lane.id] } })),
+          };
+        })
+      : [{ showHead: false, open: true, caret: "", label: "", count: "", columns: buildColumns(items), toggle: () => {} }];
+
+    const tree = TREE.filter((n) => {
+      const parts = n.path.split("/");
+      for (let i = 1; i < parts.length; i += 1) {
+        if (!this.state.expanded[parts.slice(0, i).join("/")]) return false;
+      }
+      return true;
+    }).map((n) => ({
+      name: n.name,
+      path: n.path,
+      caret: n.dir ? (this.state.expanded[n.path] ? "\u25be" : "\u25b8") : "",
+      style: `display:flex;align-items:center;gap:5px;width:100%;border:0;background:transparent;cursor:pointer;font:inherit;font-size:12px;padding:3px 10px 3px ${n.depth * 12 + 12}px;color:${n.dir ? "#c9d1d9" : "#8b949e"};font-weight:${n.dir ? 500 : 400}`,
+      click: () =>
+        n.dir
+          ? this.setState((s) => ({ expanded: { ...s.expanded, [n.path]: !s.expanded[n.path] } }))
+          : this.flash(`Opening ${n.path}`),
+    }));
+
+    const lensBtn = (id, label) => {
+      const active = this.state.lens === id;
+      return {
+        label,
+        style: `border:1px solid ${active ? "#58a6ff" : "#30363d"};border-radius:12px;background:${active ? "#1c232c" : "transparent"};color:${active ? "#c9d1d9" : "#8b949e"};font:inherit;font-size:11.5px;padding:2px 9px;cursor:pointer`,
+        pick: () => this.setState({ lens: id }),
+      };
+    };
+
+    return {
+      showRail: this.props.embedded !== true,
+      sessions: SESSIONS.map((s) => {
+        const cont = CONTINUITY[s.continuity];
+        return {
+          name: s.name,
+          cwd: s.cwd,
+          title: `${s.name}\ncwd: ${s.cwd}\n${cont.title}`,
+          style: `display:flex;align-items:center;gap:7px;width:100%;border:0;border-left:2px solid ${s.activity === "waiting-for-input" ? "#f85149" : "transparent"};background:transparent;cursor:pointer;font:inherit;padding:6px 12px`,
+          dotStyle: `flex:none;width:7px;height:7px;border-radius:50%;background:${ACTIVITY_COLOR[s.activity]}`,
+          contStyle: `flex:none;font-size:9px;line-height:1;color:${cont.color}`,
+          continuity: cont.glyph,
+          open: () => this.flash(`Attaching to ${s.name}`),
+        };
+      }),
+      tree,
+      lanes,
+      chips: this.state.chips.map((label) => ({
+        label,
+        drop: () => this.setState((s) => ({ chips: s.chips.filter((c) => c !== label) })),
+      })),
+      lenses: [lensBtn("mine", "Mine · P0–P1"), lensBtn("agents", "Agent-owned"), lensBtn("stale", "Stale > 14d")],
+      totalShown: items.length,
+      shownLabel: `${items.length} of 118 items`,
+      densityLabel: this.state.compact ? "Density: compact" : "Density: comfortable",
+      laneLabel: this.state.swimlanes ? "Swimlanes: assignee" : "Swimlanes: off",
+      toggleDensity: () => this.setState((s) => ({ compact: !s.compact })),
+      toggleLanes: () => this.setState((s) => ({ swimlanes: !s.swimlanes })),
+      createOpen: this.state.createOpen,
+      toggleCreate: () => this.setState((s) => ({ createOpen: !s.createOpen })),
+      noop: () => this.flash("Not wired in this mock"),
+      toast: this.state.toast,
+    };
+  }
+}
+</script>
+</body>
+</html>

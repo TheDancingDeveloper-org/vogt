@@ -66,12 +66,17 @@ deploy/vogt-engine-token
 # specific to one deployment and have no place in a public repository — the
 # same reasoning as `deploy/.env` above. `docs/` proper is the product's
 # documentation; this is the operator's.
-docs/local/
+# TEMPORARILY TRACKED (operator, 2026-08-23): un-ignored to hand pending work
+# to another agent. RE-IGNORE this before any dev→main promotion or publish —
+# and remember re-ignoring does not remove it from git history.
+# docs/local/
 
 # Requirements documentation is maintained outside the public repository
 # (it lives under docs/local/). Nothing under this name should be committed.
 docs/REQUIREMENTS*.md
 **/REQUIREMENTS.md
+# Part of the temporary docs/local tracking above; remove with it.
+!docs/local/REQUIREMENTS.md
 
 # Design canvases and wireframes are maintainer working material, kept under
 # docs/local/. Only the contract-required placeholder stays tracked.

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics><style>
+doc-page:not(:defined){visibility:hidden}
+body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1a1c20}
+a{color:#1f6feb}a:hover{color:#144a9e}
+h1,h2,h3{color:#0d1117}
+</style><script src="./doc-page.js"></script></helmet>
+
+<doc-page margin="0.8in">
+  <div slot="header" style="display:flex;align-items:baseline;gap:10px;padding-bottom:6px;border-bottom:1px solid #d8dbdf;font-size:9.5pt;color:#5b6068">
+    <span style="font-weight:600;color:#0d1117">Vogt — design guardrails</span>
+    <span>board · backlog · notifications as first-class citizens</span>
+    <span style="margin-left:auto">r4 · August 2026</span>
+  </div>
+  <div slot="footer" style="display:flex;gap:10px;padding-top:6px;border-top:1px solid #d8dbdf;font-size:9pt;color:#5b6068">
+    <span>Grounded in TheDancingDeveloper-org/vogt @ main — every value here is lifted from the repo, not invented.</span>
+  </div>
+
+  <h1 style="margin:0 0 6px;font-size:26pt;line-height:1.15;letter-spacing:-.01em">Design guardrails</h1>
+  <p style="margin:0 0 22px;font-size:12pt;line-height:1.5;color:#4a4f57;max-width:44em">Rules for the restructured desktop shell and the mobile app. They exist so the next screen anyone adds still looks and behaves like Vogt — and so the product keeps telling the truth about what it knows.</p>
+
+  <h2 style="margin:0 0 8px;font-size:14pt">1 · Principles the UI must not break</h2>
+  <p style="margin:0 0 10px;font-size:11pt;line-height:1.55">These come from the product's own principles. Every one of them is a design constraint, not a backend detail.</p>
+  <ol style="margin:0 0 20px;padding-left:22px;font-size:11pt;line-height:1.6">
+    <li><strong>Every answer carries provenance and freshness.</strong> A number without an age is a bug. "verified 2m ago from GitHub" and "declared 3 weeks ago, never confirmed" must never render the same.</li>
+    <li><strong>Declared and observed stay visually distinct.</strong> Trust is a badge on every row and card: <em>declared</em> is neutral, <em>observed</em> is amber, <em>collected</em> is blue.</li>
+    <li><strong>Reports, never enforces.</strong> No screen may block an action because something is non-compliant, stale or drifting. Colour says what the view is; it never gates.</li>
+    <li><strong>Empty is two different answers.</strong> "Nothing to say" and "not collected" get different copy. If a collector didn't run, the empty state says so — an empty list is never dressed as good news.</li>
+    <li><strong>Every write takes a reason.</strong> Moves, suppressions, adoptions, conversions and approvals all collect a reason inline and refuse without one. The refusal shows Vogt's own sentence, unedited, in monospace.</li>
+    <li><strong>Agents are visible actors.</strong> When a session writes, the UI names it (<span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">session:clip-fix-3</span>), and an approval happens on the approver's credential.</li>
+  </ol>
+
+  <h2 style="margin:0 0 8px;font-size:14pt">2 · Colour</h2>
+  <p style="margin:0 0 10px;font-size:11pt;line-height:1.55">Exactly the tokens in <span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">web/src/styles.css</span>. No new hues; no gradients.</p>
+  <table style="width:100%;border-collapse:collapse;font-size:10.5pt;margin:0 0 8px">
+    <thead><tr style="text-align:left;border-bottom:1px solid #c9ccd1"><th style="padding:5px 8px 5px 0;font-weight:600">Token</th><th style="padding:5px 8px;font-weight:600">Value</th><th style="padding:5px 0;font-weight:600">Use</th></tr></thead>
+    <tbody>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">--bg</td><td style="padding:5px 8px;font-family:ui-monospace,Menlo,monospace">#0d1117</td><td style="padding:5px 0">page, terminal, input fields</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">--bg-elev</td><td style="padding:5px 8px;font-family:ui-monospace,Menlo,monospace">#161b22</td><td style="padding:5px 0">cards, sheets, toolbars, footers</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">--bg-tab</td><td style="padding:5px 8px;font-family:ui-monospace,Menlo,monospace">#1c232c</td><td style="padding:5px 0">selected row, active nav, toast</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">--bd / --bd-strong</td><td style="padding:5px 8px;font-family:ui-monospace,Menlo,monospace">#30363d / #484f58</td><td style="padding:5px 0">default border / selected border</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">--fg / --fg-muted</td><td style="padding:5px 8px;font-family:ui-monospace,Menlo,monospace">#c9d1d9 / #8b949e</td><td style="padding:5px 0">body text / secondary text</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">--accent</td><td style="padding:5px 8px;font-family:ui-monospace,Menlo,monospace">#58a6ff</td><td style="padding:5px 0">refs, primary buttons, focus, active rail bar</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">--activity-waiting</td><td style="padding:5px 8px;font-family:ui-monospace,Menlo,monospace">#f85149</td><td style="padding:5px 0">waiting for input, P0–P1, unread, CI</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">--activity-running</td><td style="padding:5px 8px;font-family:ui-monospace,Menlo,monospace">#d29922</td><td style="padding:5px 0">running, stale evidence, observed trust, drift</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">--activity-done</td><td style="padding:5px 8px;font-family:ui-monospace,Menlo,monospace">#3fb950</td><td style="padding:5px 0">live/fresh, exited 0, protected continuity</td></tr>
+      <tr><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">--activity-idle</td><td style="padding:5px 8px;font-family:ui-monospace,Menlo,monospace">#6e7681</td><td style="padding:5px 0">idle, unprotected, tertiary labels</td></tr>
+    </tbody>
+  </table>
+  <p style="margin:0 0 20px;font-size:10.5pt;line-height:1.55;color:#4a4f57"><strong>Amber is reserved.</strong> It means "this answer is older or less trusted than it looks" — never decoration. Red is reserved for needs-you and failure. One meaning per colour, across every surface.</p>
+
+  <h2 style="margin:0 0 8px;font-size:14pt">3 · Type and density</h2>
+  <ul style="margin:0 0 20px;padding-left:22px;font-size:11pt;line-height:1.6">
+    <li>One family: <span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">ui-sans-serif, system-ui</span>. Monospace (<span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">ui-monospace, SFMono-Regular, Menlo</span>) only for machine text: refs, paths, commands, terminal output, Vogt's own error sentences.</li>
+    <li>Desktop scale: 20px surface title · 13–14px body · 12px controls · 11.5px meta · 10.5px badges. Nothing below 10px.</li>
+    <li>Phone scale: 17px screen title · 14–14.5px row title · 12.5px controls · 11.5px meta. Terminal composer is <strong>16px</strong> — smaller triggers iOS zoom-on-focus.</li>
+    <li><strong>Rows and cards size to their content.</strong> This is the point of the restructure: no fixed <span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">--board-card-h</span> tile, no 40px backlog row. Collapsed cards clamp at 3 lines and expand in place.</li>
+    <li>Uppercase + <span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">letter-spacing:.06–.1em</span> at 10.5–11px is the only label treatment (column heads, rail group names).</li>
+    <li>Borders 1px, radii 4px (controls) / 6px (cards, sheets) / 8–14px (pills, phone cards). No shadows except sheets, toasts and the phone FAB.</li>
+  </ul>
+
+  <h2 style="margin:0 0 8px;font-size:14pt">4 · Desktop shell</h2>
+  <ul style="margin:0 0 20px;padding-left:22px;font-size:11pt;line-height:1.6">
+    <li><strong>Places, not tabs.</strong> A 248px text-first rail holds Board · Backlog · Inbox (Work), Projects · Audit (Estate), Sessions (Machine). Surfaces are not closable; terminals and editors live inside Sessions.</li>
+    <li>No glyph or emoji nav. Active state is a 2px accent bar plus elevated background — never a boxed tile.</li>
+    <li>The rail also carries the running session list (activity dot + continuity mark + name + cwd) and the file tree with search. Both are always available; neither is a modal.</li>
+    <li>Every surface header is the same grammar: title · freshness chip · honesty chip (when relevant) · spacer · view controls · primary action.</li>
+    <li>Filters are chips with an <em>+ filter</em> affordance and named saved lenses — never a 4-column grid of selects.</li>
+    <li>Reasons, refusals and quick-create are inline in the surface. A modal over the board counts as leaving the view.</li>
+  </ul>
+
+  <h2 style="margin:0 0 8px;font-size:14pt">5 · Mobile app</h2>
+  <ul style="margin:0 0 20px;padding-left:22px;font-size:11pt;line-height:1.6">
+    <li><strong>Sessions is the first-class citizen.</strong> The phone is a steering device: it lands on running sessions, sorted by what needs you. Board and Backlog are for reading, not managing.</li>
+    <li>Four-place bottom bar — Sessions · Inbox · Board · Backlog — at 60px with live counts. No hamburger drawer, no tab-count sheet.</li>
+    <li>A session waiting for input is a card carrying the actual PTY prompt and one-tap answers (<span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">y ⏎</span>, <span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">^C</span>). Everything else is a list row.</li>
+    <li>Row actions live in a bottom sheet, one per line at ≥52px. Nothing important behind long-press; nothing at all behind hover.</li>
+    <li>Keep the mod-key row: 44px tall, 52px minimum key width, Ctrl is sticky/armed and chords with the next key.</li>
+    <li>Board shows <strong>one state at a time</strong> via a pill row. Never stack every column vertically — that made the phone board a mile of page.</li>
+    <li>Keyboard hints are hidden on coarse pointers; touch targets never below 44px.</li>
+  </ul>
+
+  <h2 style="margin:0 0 8px;font-size:14pt">6 · The notification inbox</h2>
+  <ul style="margin:0 0 20px;padding-left:22px;font-size:11pt;line-height:1.6">
+    <li>One unified stream with source filters: GitHub · drift · CI · agent events. It is its own place — never a view toggle inside Audit again.</li>
+    <li>Every row: unread dot · source tag in that source's colour · title · provenance and freshness line · relative age.</li>
+    <li>Actions, all present: archive, convert to work item, open the related item, open a session, snooze, suppress with a reason.</li>
+    <li>The header states sweep coverage. Filtering to a source with no collector shows "Not collected", not an empty list.</li>
+    <li>Drift rows show both sides and take a typed reason to resolve; forge write-back stays additive and forward-only.</li>
+  </ul>
+
+  <h2 style="margin:0 0 8px;font-size:14pt">7 · Don't</h2>
+  <ul style="margin:0 0 20px;padding-left:22px;font-size:11pt;line-height:1.6">
+    <li>Don't invent colours, add gradients, or use amber/red decoratively.</li>
+    <li>Don't add emoji or pictographic glyphs to navigation (the repo's <span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">fileIcons.ts</span> emoji set is deliberately not used in these designs).</li>
+    <li>Don't reintroduce fixed row or card heights for windowing convenience.</li>
+    <li>Don't show an aggregate without its age, or a subject without its trust.</li>
+    <li>Don't collect a write without a reason, and don't paraphrase Vogt's refusal text.</li>
+    <li>Don't move a surface behind a closable tab, and don't put a phone action behind hover.</li>
+  </ul>
+
+  <h2 style="margin:0 0 8px;font-size:14pt">8 · Implementation notes that are not design</h2>
+  <ul style="margin:0 0 20px;padding-left:22px;font-size:11pt;line-height:1.6">
+    <li>Content-sized cards mean dropping the windowed-column maths: <span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">CARD_HEIGHT</span>/<span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">CARD_GAP</span> in <span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">Board.tsx</span> and <span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">ROW_HEIGHT</span> in <span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">Backlog.tsx</span> exist only so a column can compute where a tile goes, and they must match the CSS variables exactly. Change them together or the list skips and repeats.</li>
+    <li>Notifications need their own route rather than <span style="font-family:ui-monospace,Menlo,monospace;font-size:10pt">?view=inbox</span> on the audit browser, and the drift read currently on Projects has to feed the same stream.</li>
+    <li>Copy/paste is a PTY and WebView-clipboard problem, not a layout one. The designs only reduce how often you need it (per-block copy, copy on the composer row). One bridge for web, PWA and Capacitor is the actual fix.</li>
+    <li>Nothing here assumes a forge: with GitHub unconfigured, the GitHub and CI sources simply report "not collected".</li>
+  </ul>
+
+  <h2 style="margin:0 0 8px;font-size:14pt">9 · What is in the handover</h2>
+  <table style="width:100%;border-collapse:collapse;font-size:10.5pt;margin:0 0 10px">
+    <thead><tr style="text-align:left;border-bottom:1px solid #c9ccd1"><th style="padding:5px 8px 5px 0;font-weight:600">File</th><th style="padding:5px 0;font-weight:600">What it is</th></tr></thead>
+    <tbody>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">Vogt.dc.html</td><td style="padding:5px 0">Desktop shell — the entry point; rail plus the four built places</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">BoardSurface / BacklogSurface / InboxSurface / SessionsSurface</td><td style="padding:5px 0">The surfaces; each also opens standalone with its own rail</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">Vogt Phone.dc.html</td><td style="padding:5px 0">Working mobile prototype, sessions-first, in an Android shell</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">Vogt Mobile.dc.html</td><td style="padding:5px 0">Phone wireframe options — turn 4 sessions-first, turn 3 the surfaces</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">Vogt Restructure Wireframes.dc.html</td><td style="padding:5px 0">The five shell directions; 1a was chosen</td></tr>
+      <tr style="border-bottom:1px solid #e7e9ec"><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">github.md</td><td style="padding:5px 0">Source association and the screen → repo-file map</td></tr>
+      <tr><td style="padding:5px 8px 5px 0;font-family:ui-monospace,Menlo,monospace">web/src/*</td><td style="padding:5px 0">The repo files read while building, kept for provenance</td></tr>
+    </tbody>
+  </table>
+  <p style="margin:0;font-size:10.5pt;line-height:1.55;color:#4a4f57">Still unbuilt: Projects (with the drift inbox, contract age and dependency graph), Audit, work-item detail, the command palette, the file viewer/editor, and tablet width. The push notification that carries an approval request to the phone is the highest-value remaining piece of the mobile app.</p>
+</doc-page>
+</x-dc>
+</body>
+</html>

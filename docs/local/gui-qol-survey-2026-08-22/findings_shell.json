@@ -1,0 +1,194 @@
+[
+ {
+  "title": "Sessions: add terminal search (Ctrl+Shift+F) \u2014 live scrollback is unsearchable",
+  "surface": "Sessions",
+  "severity": "high",
+  "evidence": "web/src/Terminal.tsx:3-5 loads only @xterm/xterm, addon-fit, addon-web-links; web/package.json has no @xterm/addon-search. Terminal.tsx:376 `scrollback: 5000`. docs/USER_GUIDE.md:127 promises full-text search only for archived History, so the live buffer has no find.",
+  "proposal": "Add @xterm/addon-search, bind Ctrl/Cmd+Shift+F in attachCustomKeyEventHandler to a small find bar (next/prev/Esc) in the workspace toolbar; register in keyboardShortcuts.ts under Terminal.",
+  "effort": "M"
+ },
+ {
+  "title": "Sessions: reconnect overlay has no retry, attempt count, or queued-input indicator",
+  "surface": "Sessions",
+  "severity": "medium",
+  "evidence": "Terminal.tsx:636-645 backs off to 8 s and retries forever; overlay text is just \"Reconnecting...\" (:639, :716) and is pointer-events:none (styles.css:1572-1586). Every drop writes a yellow \"[disconnected]\" line into the buffer and the IndexedDB cache (:708, :714), so a flaky evening leaves dozens of markers. Queued input is dropped silently past 4x limit (:151-157) with no \"queued\" hint. Distinct from #198 (this is the terminal WS, which does reconnect, but says nothing useful).",
+  "proposal": "Make the overlay interactive: \"Reconnecting (try 3, next in 4s) \u00b7 Retry now\"; show \"N bytes queued\" when pendingInputBytes > 0; write the [disconnected] marker once per outage and do not appendToCache it.",
+  "effort": "S"
+ },
+ {
+  "title": "Sessions: exited shell stays silent and listed; Kill confirm fires even when nothing is alive",
+  "surface": "Sessions",
+  "severity": "medium",
+  "evidence": "Only gone-path is Terminal.tsx:623-634 markSessionGone (store no longer lists the session). A shell exiting with code N stays listed; the pane shows nothing, only the 4px toolbar dot changes (TerminalWorkspace.tsx:93-99, :415). App.tsx:1046-1060 onCloseSession always confirms \"Kill and remove\u2026 scrollback will be discarded\" even when exit_code !== null and the scrollback is already archived (USER_GUIDE.md:127).",
+  "proposal": "When activeSession().exit_code !== null overlay a one-line banner \"Exited (code N) \u2014 Restart here \u00b7 Remove\" reusing duplicate/close handlers; skip the confirm and relabel the menu item \"Remove\" for exited sessions.",
+  "effort": "S"
+ },
+ {
+  "title": "Sessions: font-size buttons show no value and theme switching is not exposed in the workspace",
+  "surface": "Sessions",
+  "severity": "medium",
+  "evidence": "TerminalWorkspace.tsx:425-440 A\u2212/A+ call changeTerminalFontSize(\u00b11) with no readout; clamp is 9\u201324 (terminalFont.ts:1-3) so taps at the limit silently do nothing. terminalThemes.ts:134-141 dispatches a live theme event that Terminal.tsx:576-579 honours, but the only picker is deep in Settings (Settings.tsx:857-880).",
+  "proposal": "Render `A\u2212 13 A+`, disable at the clamp, click the number to reset; optionally a theme select in the same toolbar fed by THEMES.",
+  "effort": "S"
+ },
+ {
+  "title": "Sessions: new-session prompt always interrupts with a meaningless default name",
+  "surface": "Sessions",
+  "severity": "low",
+  "evidence": "App.tsx:809-813 promptUser(..., `shell-${Date.now() % 1000}`) modal on every create \u2014 from the Sessions header (+ Session, Sessions.tsx:198-202) and Ctrl+Shift+T alike; split names use `-right-123` (TerminalWorkspace.tsx:339-341). Rosters fill with shell-417, shell-417-right-88.",
+  "proposal": "Create immediately, naming from cwd basename (vogt, vogt-2, vogt \u25b82 for splits); prompt only when Shift is held. Rename covers the rest.",
+  "effort": "S"
+ },
+ {
+  "title": "Phone: sticky Ctrl does not chord with the soft keyboard; modkey row lacks Alt/Home/End/PgUp/PgDn",
+  "surface": "Phone",
+  "severity": "medium",
+  "evidence": "ModKeyRow.tsx:69-75 comment: sticky Ctrl \"only chords with the explicit modkey buttons\"; App's activeSend is not routed through the armed state, so Ctrl then `r` on the soft keyboard sends plain r \u2014 contradicting USER_GUIDE.md:357-358. ModKeyRow.tsx:43-67 has no Alt/Meta/Home/End/PgUp/PgDn/F-keys. Armed state never times out.",
+  "proposal": "Lift ctrlArmed into App and consume it in the terminal input path for the next printable char (clear on use / ~5 s); add Alt (ESC prefix), Home/End, PgUp/PgDn as a second row or long-press variants.",
+  "effort": "M"
+ },
+ {
+  "title": "Phone: terminal toolbar overflows into a hidden scroll strip and hides errors; no copy/paste affordance on touch",
+  "surface": "Phone",
+  "severity": "medium",
+  "evidence": "styles.css:1637-1641 toolbar buttons are 12px/3px-padding; the 44px coarse-pointer floor (styles.css:8121-8132) pushes nine text buttons into a horizontal scroll (:1780-1782); :1783-1786 `display:none` on .terminal-workspace-cwd/.terminal-workspace-error hides split/close failures (TerminalWorkspace.tsx:422-424). Paste only via contextmenu (Terminal.tsx:527-541), auxclick, Ctrl+Shift+V or the modkey button \u2014 iOS Safari long-press does not fire contextmenu, so USER_GUIDE.md:362 \"long-press empty space to paste\" is false there; no Copy chip after a touch selection (:548-550).",
+  "proposal": "Under 768px collapse Broadcast/Maximise/Split/Close into one `\u00b7\u00b7\u00b7` menu and keep the error span visible; on pointer:coarse show a floating Copy chip on non-empty onSelectionChange; fix the guide to name the modkey Paste button.",
+  "effort": "S"
+ },
+ {
+  "title": "Editor: Save never detects on-disk changes and stale drafts silently win on remount",
+  "surface": "Editor",
+  "severity": "high",
+  "evidence": "Editor.tsx:47-52 writeFile(path, content) with no mtime/hash; Editor.tsx:86-87 `remembered?.content ?? savedContent` applies an old draft over fresh disk content with no notice whenever the workspace remounts (App.tsx:1509 Show unmounts it when the route leaves /e/). No Reload-from-disk action in the toolbar (Editor.tsx:167-202).",
+  "proposal": "Return mtime/hash from readFile, re-check before writeFile and show an inline \"File changed on disk: Overwrite / Reload\" banner; add a Reload button; when a draft overrides differing disk content, show \"Restored unsaved draft; disk differs\".",
+  "effort": "M"
+ },
+ {
+  "title": "Editor: file tree loses expansion/search/sidebar state on every tab switch and file op",
+  "surface": "Editor",
+  "severity": "high",
+  "evidence": "App.tsx:1509-1513 wraps the editor workspace in `<Show when={isIDEMode && editorWorkspaceActive()}>` so the `display:none` retention trick never retains anything. FileTree.tsx:90 open state and EditorWorkspace.tsx:35 sidebarCollapsed are component-local. FileTree.tsx:297-300 refreshTree refetches the root resource, recreating every node, so every expanded folder collapses after New/Rename/Delete/Upload/Refresh (:316, :356, :380, :413, :430).",
+  "proposal": "Hoist expanded paths, search query and sidebar state into a small module store keyed by path (like railSections); keep the workspace mounted behind display:none; refetch only the affected parent after a file op.",
+  "effort": "M"
+ },
+ {
+  "title": "Editor: Ctrl+S works only inside Monaco; Save button never reflects dirty state",
+  "surface": "Editor",
+  "severity": "medium",
+  "evidence": "Editor.tsx:126-129 registers save as a Monaco addCommand; App.tsx:1067-1108 onKeyDown has no editor-save case although keyboardShortcuts.ts:138 advertises Ctrl/Cmd+S. With focus in the tab bar, tree or split header the browser Save-Page dialog opens. Editor.tsx:199 Save is enabled on a clean file; the only feedback is `saved HH:MM:SS` (:186-190).",
+  "proposal": "Handle editor-save in App.onKeyDown when the active tab is an editor and the target is not an input; call the registered editor's save via editorRegistry. Disable Save when !tab.dirty.",
+  "effort": "S"
+ },
+ {
+  "title": "Editor/Git: tree, git badges and Git panel never invalidate each other",
+  "surface": "Editor",
+  "severity": "medium",
+  "evidence": "FileTree.tsx:263-272 gitStatus refetches only via refreshTree; Editor.tsx:47-67 save touches neither; Git.tsx:388-405 runGitOp refreshes only its own reads. No shared version signal exists. A terminal `touch` or a commit leaves stale M/? badges until the \u21bb button is found.",
+  "proposal": "Add a workspaceVersion signal bumped by Editor.save, Git.runGitOp and FileWorkflowDialog.createFile; FileTree refetches git status/root on change, plus on window focus/visibilitychange for terminal writes.",
+  "effort": "S"
+ },
+ {
+  "title": "Editor/Git: no cross-links between session cwd, editor, file tree and Git",
+  "surface": "Editor",
+  "severity": "medium",
+  "evidence": "Git.tsx:838-874 diff toolbar has no Open-in-editor though openEditorTab(path) is one call (tabs.ts:311). Editor.tsx:167-202 has no Reveal-in-Git. Session rows display s.cwd (App.tsx:1255) but the menu offers only Attach/Bookmark/Duplicate/Rename (App.tsx:1279-1310); FileTree.tsx:330 has openTerminalHere but no reverse.",
+  "proposal": "Add \"Open file\" to the diff toolbar, \"Reveal in Git\" to the editor toolbar, and \"Open files here\" / \"Git here\" to the session row menu using s.cwd.",
+  "effort": "S"
+ },
+ {
+  "title": "Git: staging is one file at a time from the diff toolbar; no stage-all or row actions",
+  "surface": "Editor",
+  "severity": "medium",
+  "evidence": "Git.tsx:406-418 stageSelected/unstageSelected act on selectedEntry only; buttons live in the right-hand diff toolbar (:855-873), below a 40% status pane on phones (styles.css:2292-2296). Commit is disabled at stagedCount()===0 (:758-762) with no hint. After staging the view stays on the now-empty Worktree diff; actionInfo banners never clear (:455-460).",
+  "proposal": "Per-row +/\u2212 on .git-entry and a Stage all beside the Status heading; flip diffStaged after a successful stage; auto-clear actionInfo after ~4 s.",
+  "effort": "M"
+ },
+ {
+  "title": "Phone: editor sidebar, split handle and diff are desktop-only",
+  "surface": "Phone",
+  "severity": "high",
+  "evidence": "styles.css:3067-3077 .editor-sidebar fixed 280px/min 200px with no \u2264768px override, leaving ~95px of editor on a 375px phone until the small `<` button (EditorWorkspace.tsx:78-84) is found. SplitEditor.tsx:290, :336 use mousedown/mousemove only on a 4px handle (styles.css:4477-4485). Git.tsx:136 `renderSideBySide: true` fixed.",
+  "proposal": "At \u2264768px make the sidebar an overlay drawer, default collapsed; switch the splitter to pointer events with touch-action:none and \u226512px hit area; renderSideBySide only above ~900px or add an Inline toggle.",
+  "effort": "M"
+ },
+ {
+  "title": "Agent tasks: expose vogt_project / vogt_work_item binding and run findings the engine already stores",
+  "surface": "Work item",
+  "severity": "high",
+  "evidence": "docs/USER_GUIDE.md:335-338 promises a task may name a Vogt subject and that notify lines are recorded as findings. engine/server/src/agent_tasks.rs:64-66 vogt_project/vogt_work_item, :133 findings, :431 used. web/src/api.ts:471-505 AgentTask/AgentTaskUpsertRequest omit all three; AgentTasks.tsx:34-48 TaskDraft has no vogt fields; :813-834 run rows show status/prompt_file only.",
+  "proposal": "Add the two fields to api types and two inputs in the form grid; add findings to AgentTaskRun and list them under each run row. No engine change.",
+  "effort": "S"
+ },
+ {
+  "title": "Agent tasks: list never self-refreshes, Run Now yanks to the terminal, reload drops the draft",
+  "surface": "Work item",
+  "severity": "medium",
+  "evidence": "AgentTasks.tsx:315-318 loads once on mount; a finished run shows \"Still running\" (:124) until Refresh, and Refresh (:432-434) pops the save/discard dialog when dirty though loadTasks already preserves drafts (:283). runTaskNow (:473-484) always calls onOpenSession \u2192 navigate to /t/ (App.tsx:1611-1614), triggering useBeforeLeave (:411) mid-run, and runs the saved prompt, not the on-screen one. toolDrafts.ts:1-3 is an in-memory Map, so reload loses the draft despite USER_GUIDE.md:322-325 describing every in-app exit as guarded. Daily times are UTC (USER_GUIDE.md:312) but the placeholder and formatLocalDate (:111, :673) are local.",
+  "proposal": "Subscribe to store session-killed for run.session_id and reload; make Refresh call loadTasks(\u2026, true) directly; disable/relabel Run Now as \"Save & Run\" when dirty and make the session jump a link on the run row; mirror the draft to sessionStorage; label the field \"Daily times (UTC)\".",
+  "effort": "S"
+ },
+ {
+  "title": "Assistant: failed send loses the message with no retry, and there is no cancel",
+  "surface": "Assistant",
+  "severity": "high",
+  "evidence": "Assistant.tsx:402-409 clears the draft and appends the user bubble before the request; on catch only props.onError toasts \u2014 the bubble stays although the server never recorded it, the composer is empty, no retry. Engine timeout is 60 s (engine/server/src/assistant.rs:400) with only \"thinking\u2026\" (:875-877) and a disabled input (:907); no AbortSignal path.",
+  "proposal": "On catch restore setDraft(trimmed), mark the entry failed with a Retry affordance; thread an AbortSignal through api.assistantMessage and show Stop while busy().",
+  "effort": "M"
+ },
+ {
+  "title": "Assistant: single-line input, plain-text replies, focus lost after send, Clear has no confirm",
+  "surface": "Assistant",
+  "severity": "medium",
+  "evidence": "Assistant.tsx:903-911 `<input type=\"text\">` \u2014 Enter sends, no Shift+Enter, pasted multi-line collapses; inputEl (:213, :904) is never focused after send. :790-803 renders entry.text as pre-wrap so fenced code/bullets show raw; no copy button though clipboard.ts exists. Scroll-to-end (:276-280) fires on every change even while the reader has scrolled up. Clear (:748) calls assistantReset with no confirm on a 50-message history (assistant.rs:60). Voice toggle is an unlabelled \ud83d\udd0a/\ud83d\udd07 with title only (:741-747); mic hidden when !sttAvailable() (:912) with no hint; approval card (:807-874) shows no countdown for the 120 s TTL (assistant.rs:58). No stylesheet \u2014 inline styles (:707-717) do not wrap at 360px.",
+  "proposal": "Auto-growing textarea (Enter send / Shift+Enter newline); focus in send's finally; minimal markdown/fence rendering plus a copy icon; auto-scroll only when near bottom; confirmAction before reset; labelled voice button with aria-pressed, disabled mic with reason, expiry timer on the card; move styles to styles.css with flex-wrap.",
+  "effort": "M"
+ },
+ {
+  "title": "Palette: add Inbox/Sessions/Assistant/Sign out entries, rank matches, cap the 200 work items, show shortcuts",
+  "surface": "Palette",
+  "severity": "high",
+  "evidence": "CommandPalette.tsx:849-1085 baseCommands has no Inbox, Sessions, Assistant or Sign out (grep confirms only comment hits), though the rail (App.tsx:1164-1184) and phone bar (:1638-1643) expose Inbox and USER_GUIDE.md:404 promises every surface. fuzzyMatch (:220-228) is an unscored subsequence test, filtered in source order (:1322-1326); :338 listWork({limit:200}) plus projects are spliced into the empty-query list above Open Tabs/Recent Files/Sessions (:1252-1292). No row shows its shortcut; the Go to\u2026 buttons (App.tsx:1151, :1403) carry no Ctrl/Cmd+K hint; footer (:1473-1477) shows only arrows/enter/esc.",
+  "proposal": "Add the four navigate entries; score matches (prefix > word-start > contiguous > subsequence, label over description) and sort; cap work/projects to ~10 on empty query; add shortcut?: string[] to Command and render from KEYBOARD_SHORTCUTS; title/kbd on the Go to\u2026 buttons; persist last ~8 executed ids as a Recent category.",
+  "effort": "M"
+ },
+ {
+  "title": "Settings: one 420px scroll with three save semantics and no confirm on destructive actions",
+  "surface": "Settings",
+  "severity": "high",
+  "evidence": "Settings.tsx:703 single Dialog with no dialogClass \u2192 styles.css:1913-1917 max-width 420px; eleven sections (token 704-757 \u2026 status cards 1400-1483) with the footer at 1492-1500. Theme applies live and is not reverted on Cancel (:861-866); layout/storage/token are staged in save() (:398-427) which is disabled when the token field is blank (:1495) so layout cannot be changed without a token; button reads \"Validate, save & reload\" (:1497) but reloads only on token/base/layout change (:424-426) and the layout radio (:829) does not say reload. Storage has its own Apply now (:1062). `grep -c confirm Settings.tsx` = 0: server history purge (:1370), Clear managed browser data (:1065), Sign out (:818), Delete profile (:807) are one click, whereas App.tsx:958-969 confirms deleting a layout.",
+  "proposal": "dialogClass settings-modal at ~720px with a sticky section list and sticky footer; make theme staged or label it \"applies immediately\"; note \"(requires reload)\" on layout mode and derive the button label from dirty flags; allow saving preferences with the token untouched; thread confirmUser in as a confirmAction prop for the four destructive actions.",
+  "effort": "M"
+ },
+ {
+  "title": "Push: explain denied/unsupported states and recover a server-dropped subscription",
+  "surface": "Settings",
+  "severity": "high",
+  "evidence": "Permission is requested only from Enable (push.ts:158) \u2014 good \u2014 but when denied Settings.tsx:1111-1113 still shows an enabled Enable button that fails with raw \"Push: notification permission denied\" (push.ts:159, Settings.tsx:591); unsupported (iOS not installed, push.ts:79-85) gets only \"Not supported in this browser.\" (:1102). pushOn comes from pushManager.getSubscription() (push.ts:106-111), not the server list, so a subscription the server dropped still reads \"Disable push\"; no pushsubscriptionchange handler in public/sw.js. Send test (:1115-1120) fans out to all devices. Default device label is userAgent.slice(0,60) (:594).",
+  "proposal": "Disable Enable when denied with a \"blocked \u2014 allow in site settings, then reload\" line; iOS hint \"Add to Home Screen\"; in refreshPushState compare currentId against listPushSubscriptions and offer Re-enable; add a pushsubscriptionchange handler that re-POSTs subscribe; default label to \"Chrome \u00b7 Android\".",
+  "effort": "M"
+ },
+ {
+  "title": "Phone: bottom bar reaches 4 of 11 places; Settings/Sign out need a palette round-trip; keyboard inset unused",
+  "surface": "Phone",
+  "severity": "high",
+  "evidence": "styles.css:1148-1155 hides .places-rail \u2264768px; the bar (App.tsx:1638-1643) has Sessions/Inbox/Board/Backlog only, so Projects, Audit, Git, History, Tasks, GUI, Assistant, Settings and Sign out go through mobile-go-to (App.tsx:1403) \u2192 palette, which lacks several of them (see Palette finding). USER_GUIDE.md:48 says \"Open Settings (\u2699)\" but no \u2699 exists on the phone shell. index.tsx:8-32 computes --keyboard-inset but nothing consumes it (grep styles.css/*.tsx: only the declaration at styles.css:32); .command-palette uses 15vh/60vh/400px (styles.css:2745-2795) and .phone-bottom-nav is fixed bottom:0 (:1267-1279), both sitting under the iOS keyboard. .command-palette-item has no min-height in the coarse-pointer block (:2797-2811 vs :8121-8193).",
+  "proposal": "Add a fifth \"More\" slot opening a sheet with the remaining places + Settings + Sign out (or at minimum a \u2699 beside mobile-go-to); size the palette with var(--app-height) and drop the 400px cap under 768px; apply --keyboard-inset to the bar or hide it while inset > 0; add .command-palette-item to the 44px rule.",
+  "effort": "M"
+ },
+ {
+  "title": "Shell+rail: collapsed rail has no keyboard toggle or width reset",
+  "surface": "Shell+rail",
+  "severity": "medium",
+  "evidence": "Collapse is a 28px \u00ab button (App.tsx:1138-1146, styles.css:324-331); reopen is \u00bb Places (App.tsx:1411-1420); no rail entry in KEYBOARD_SHORTCUTS (keyboardShortcuts.ts:32-243), so Settings/Sign out (App.tsx:1353-1360) become mouse-only once hidden, and the flag persists (resizablePane.ts:131-138). Handle supports \u2190/\u2192 (App.tsx:1390-1400) but no double-click/Home reset; resizablePane.ts has no reset().",
+  "proposal": "Add toggle-places-rail (Ctrl/Cmd+B) to KEYBOARD_SHORTCUTS and App.onKeyDown; add reset() to createResizablePane bound to double-click/Home on the handle; put the shortcut in the collapse button title.",
+  "effort": "S"
+ },
+ {
+  "title": "Polish: small affordance gaps across sessions, editor, git, palette and settings",
+  "surface": "Global",
+  "severity": "low",
+  "evidence": "No term.onBell/onTitleChange anywhere, so OSC titles never reach tabs and bells are silent; focus not returned to term.textarea after paste modal (Terminal.tsx:803-827) or prompt/confirm; Sessions.tsx:75-90 sorts by attention while the rail (App.tsx:1211-1217) sorts bookmarks-then-insertion. FileWorkflowDialog.tsx:425-428 results need Tab-through, :445 writeFile(path,\"\",true) overwrites an existing file on create; Git.tsx:733-741 Create-branch and Checkout share the \"checkout\" busy key; EditorWorkspace.tsx:155-181 split buttons labelled `||` `=` `1`; FileTree.tsx:183-189 folder load has no catch; tab bar never scrolls the active tab into view (styles.css:3139-3148, EditorWorkspace.tsx:48-52) and tabs.ts has no move/pin/close-others; TemplateEditor.tsx:125-129 deletes without confirm and Escape discards a half-typed preset (Dialog.tsx:94), storage is localStorage while USER_GUIDE.md:300-309 says engine TOML; palette prefix modes `# @ / >` only in the placeholder (CommandPalette.tsx:1410); Settings status divs lack role=\"status\" (:1331, :836, :1067); Gui.tsx:180-185 names gui_stream_url with no link.",
+  "proposal": "Wire onTitleChange\u2192tab label and onBell\u2192activity dot; term.focus() after dialogs; share attentionRank for the rail sort; arrow/Enter in the Open dialog and overwrite=false on create; distinct busy keys; aria-labels on split buttons; catch in folder toggle; scrollIntoView on active tab; confirm + closeOnEscape guard in TemplateEditor with a \"stored in this browser\" note; list prefix modes in shortcut help; role=status; docs link in Gui.",
+  "effort": "S"
+ }
+]

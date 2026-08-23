@@ -1,0 +1,154 @@
+[
+ {
+  "title": "Phone: terminal pane is 2px tall and below the fold on /t/:id",
+  "surface": "Phone",
+  "severity": "high",
+  "evidence": "At 390\u00d7844 the Sessions shell (kicker+title, honesty line, Tools strip, WaitingSessionCard) is repeated above the terminal; measured `.terminal-pane.active` top=880px height=2px, `.terminal-host` height=4px \u2014 the xterm is entirely off-screen. Screenshot: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/phone-terminal.png. Source: web/src/Sessions.tsx:162-215 (header + waiting cards render on every machine-tool route incl. /t/), web/src/styles.css terminal-workspace/terminal-layout sizing.",
+  "proposal": "On narrow shells, when a terminal is open: collapse the Sessions surface header to one row (title + '+ Session'), hide the WaitingSessionCard for the session that is already open, and give `.terminal-layout` `flex:1; min-height:40dvh`.",
+  "effort": "M"
+ },
+ {
+  "title": "Phone: Inbox action sheet renders inline inside the entry, not as a bottom sheet",
+  "surface": "Phone",
+  "severity": "high",
+  "evidence": "Tapping 'Inbox actions' places the Close/Archive/Snooze/Accept/Reject column beside the entry text, squeezing title and summary to one word per line. `.inbox-action-sheet-backdrop` (web/src/styles.css:1085-1088) replaces `.modal-backdrop` via `backdropClass` (web/src/Inbox.tsx:275-280) but only sets align-items/padding \u2014 it never gets `position:fixed; inset:0; background`, so the 'sheet' flows in document order. Screenshot: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/phone-inbox-sheet.png",
+  "proposal": "Make `.inbox-action-sheet-backdrop` extend `.modal-backdrop` (fixed, inset 0, dim background, z-index) and keep `align-items:flex-end`; or pass `backdropClass=\"modal-backdrop inbox-action-sheet-backdrop\"`.",
+  "effort": "S"
+ },
+ {
+  "title": "Phone: idle/busy sessions are unreachable \u2014 Sessions overview lists only waiting ones",
+  "surface": "Phone",
+  "severity": "high",
+  "evidence": "With 3 live sessions (idle, waiting, busy) the phone Sessions route shows one WaitingSessionCard then 'Choose a session or tool'; the places rail that lists sessions is desktop-only (web/src/Sessions.tsx:204-216, comment at 218-221 says the rail 'already lists running sessions'). The only route to vogt-dev-shell is the palette, where session entries sort after up to 200 work items (see palette finding). Screenshot: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/phone-sessions.png",
+  "proposal": "On narrow shells render a compact running-sessions list (name, activity dot, cwd) under the waiting cards in `.sessions-place-body`, reusing the rail's session-row component.",
+  "effort": "M"
+ },
+ {
+  "title": "Phone: Sessions shell header eats ~560px on every machine tool (History, Git, Assistant, Tasks)",
+  "surface": "Phone",
+  "severity": "high",
+  "evidence": "Measured first useful content top on 390\u00d7844: History session list 1336px, Assistant composer 855px (off-screen), Git repo chooser ~770px. The kicker+title row, two-line honesty text, a two-row Tools strip and the WaitingSessionCard all repeat above each tool. Screenshots: \u2026/shots/phone-history.png, \u2026/shots/phone-assistant.png, \u2026/shots/phone-git.png (dir /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots). Source: web/src/Sessions.tsx:30-40 (SessionTools), 157-216.",
+  "proposal": "On narrow shells: render the Tools strip as a single horizontally-scrolling segmented row, fold honesty behind the existing `.surface-header-more` disclosure, and show WaitingSessionCards only on the Overview tool.",
+  "effort": "M"
+ },
+ {
+  "title": "Inbox: desktop header wraps and the Source select is clipped at the viewport edge",
+  "surface": "Inbox",
+  "severity": "medium",
+  "evidence": "At 1440\u00d7900 the title slot renders 'Work' kicker + 'Inbox' h1 stacked (title top=50, honesty top=70), the header has no inner padding (title left=248 vs Board 264) and the Source `<select>` right edge = 1440 (flush/clipped). Inbox passes a fragment `<p class=place-kicker>Work</p><h1>Inbox</h1>` as the title slot (web/src/Inbox.tsx:580-585) whereas Board/Backlog pass a bare h1. Screenshot: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/desk-inbox.png",
+  "proposal": "Drop the 'Work' kicker (no other Work surface has one), give `.inbox-surface` the same horizontal padding as `.board-header`, and let the controls slot keep a right gutter.",
+  "effort": "S"
+ },
+ {
+  "title": "Global: surface headers are inconsistent across Board, Backlog, Inbox, Sessions, Projects, Work item",
+  "surface": "Global",
+  "severity": "medium",
+  "evidence": "Board: h1 + 'Polling \u2014 updated 1s ago' pill + Refresh-interval select; Backlog: h1 + 'Updated 0s ago' pill, no interval control; Inbox: kicker+h1, sentence honesty; Sessions: kicker 'Machine' + h1 + yellow bar honesty; Projects: plain h1 then a second row with the tabs and the pill; Work item: ref kicker + h1 + pills in the action row. Screenshots: desk-board.png, desk-backlog.png, desk-inbox.png, desk-sessions.png, desk-projects.png, desk-workitem.png in /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/. Projects does not use SurfaceHeader at all (web/src/Projects.tsx).",
+  "proposal": "Route Projects and WorkItemDetail through SurfaceHeader; standardise honesty as the pill form ('<mode> \u2014 updated Ns ago') and give Backlog the same refresh-interval control Board has.",
+  "effort": "M"
+ },
+ {
+  "title": "Board: ~320px of chrome before the first card on desktop, ~470px on phone",
+  "surface": "Board",
+  "severity": "medium",
+  "evidence": "Measured `.board-card` top: desk 318px (title row, 'How this view stays current' disclosure, Filters box, Saved-lenses row, Keyboard legend line), phone 470px of 844; opening '+ Filter' pushes cards to ~500px. Backlog 256px, Inbox 142px. Keyboard legend is always visible (web/src/Board.tsx:2302), saved-lenses row always visible (web/src/Board.tsx:2054). Screenshots: \u2026/shots/desk-board.png, \u2026/shots/desk-board-filter.png, \u2026/shots/phone-board.png.",
+  "proposal": "Move the keyboard legend into the '?' shortcuts dialog (or a `title` on the column header), put Saved lenses inside the '+ Filter' panel, and collapse Filters to a single chip row when no filter is applied.",
+  "effort": "M"
+ },
+ {
+  "title": "Palette: no ranking \u2014 a session name prefix is buried under fuzzy description matches",
+  "surface": "Palette",
+  "severity": "high",
+  "evidence": "Query 'needs' returns Resolve Drift\u2026, Refresh Command Palette Data, then WI-1\u2026WI-8 and never surfaces session 'needs-attention'; only the exact string finds it. `filteredCommands` is a plain subsequence filter over label OR description in source order (web/src/CommandPalette.tsx:1295-1327, fuzzyMatch 220-228) and sessions are appended after up to 200 work items (1265-1292, listWork limit 200 at 338). Also 'inbox' returns Open Projects/Resolve Drift \u2014 there are no 'Open Inbox' / 'Open Sessions' / 'Open History' commands (860-900). Screenshot: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/desk-palette-session.png",
+  "proposal": "Score matches (exact label > label prefix > label subsequence > description) and sort by score; add Open Inbox/Sessions/History/Git/Tasks commands; list sessions before work items.",
+  "effort": "M"
+ },
+ {
+  "title": "Palette: raw words ('drift', 'import', 'work', 'sym', 'run') used as oversized icons",
+  "surface": "Palette",
+  "severity": "low",
+  "evidence": "Icon column shows 'drift' / 'import' / 'work' at ~18px text next to rows whose icon is empty, so label x-position jumps between rows (web/src/CommandPalette.tsx icon: 'drift' at 933, 'work' at 1277, 'sym' 806, 'run' 559). Screenshot: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/desk-palette.png",
+  "proposal": "Replace word icons with a fixed-width category tag (the existing right-hand 'Vogt' badge already carries category) or a 2-letter monospace glyph in a fixed 28px column.",
+  "effort": "S"
+ },
+ {
+  "title": "Shell+rail: Recent places shows duplicates ('History History History', 'Backlog Backlog') and raw '/t/s2'",
+  "surface": "Shell+rail",
+  "severity": "medium",
+  "evidence": "rememberPlace keys on `${path}${currentSearch}` but labels on path only (web/src/App.tsx:727-753, web/src/tabs.ts:158-161), so every filter/query variant of a surface adds another identically-labelled chip; terminal routes fall through to the raw path label. Screenshots: \u2026/shots/desk-history-sel.png (History \u00d73), \u2026/shots/desk-backlog-why.png (Backlog \u00d72, Board \u00d72), \u2026/shots/desk-projects.png ('/t/s2').",
+  "proposal": "Dedupe by path (keep the latest search) in addPlace, and label `/t/:id` with the session name from sessionsStore.",
+  "effort": "S"
+ },
+ {
+  "title": "Sessions: desktop overview is an empty panel with no session list or create CTA",
+  "surface": "Sessions",
+  "severity": "medium",
+  "evidence": "With 3 live sessions the 1180\u00d7780 body says only 'Choose a session or tool'; with 0 sessions the same text appears and nothing points at '+ Session' (web/src/Sessions.tsx:277-279). Screenshots: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/desk-sessions.png, \u2026/shots/desk-sessions-empty.png",
+  "proposal": "Render the session cards (name, activity, cwd, last output line) in the overview body; when there are none, show a 'Start a session' button and the template list.",
+  "effort": "M"
+ },
+ {
+  "title": "Inbox: every entry's evidence block is expanded by default, so ~2 entries fit per screen",
+  "surface": "Inbox",
+  "severity": "medium",
+  "evidence": "Each entry is ~320px tall on desktop (493px on phone): JSON evidence `<section class=inbox-evidence>` (web/src/Inbox.tsx:186) is always open and the five action buttons are 44px+. With 4 entries the list needs 1300px. Screenshot: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/desk-inbox.png, \u2026/shots/phone-inbox.png",
+  "proposal": "Collapse evidence behind a 'Evidence' disclosure that opens on focus/selection (keep it open for the selected entry and on drift entries with a proposed change), and put Archive/Snooze in a compact secondary row.",
+  "effort": "S"
+ },
+ {
+  "title": "Backlog: phone row layout breaks into four rows with a 56px 'score WHY' box",
+  "surface": "Phone",
+  "severity": "medium",
+  "evidence": "At 390px each row becomes: checkbox/rank/ref/trust/date, then a tall '9.00 WHY' button alone on the left and 'More' on the right, then title, then unlabelled meta 'bug open high vogt'; ~1.5 rows visible. Screenshot: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/phone-backlog.png. Source: web/src/Backlog.tsx:1860-1880 (`.vogt-backlog-why`).",
+  "proposal": "On narrow shells render title first, then one meta line (ref \u00b7 kind \u00b7 state \u00b7 score with 'why' as inline link), and move 'More' into the row's overflow.",
+  "effort": "S"
+ },
+ {
+  "title": "Projects: phone header is a broken two-column layout with tabs cut off",
+  "surface": "Projects",
+  "severity": "medium",
+  "evidence": "At 390px the 'Projects' h1 sits left of a second 'Projects' label, the Project/Dependencies/Drift inbox/Import tabs overflow (Import invisible), the 'Updated' pill is stretched and 'Refresh' becomes a full-width button. Screenshot: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/phone-projects.png. 'Dependencies' is disabled on desktop too with no hint why (\u2026/shots/desk-projects.png).",
+  "proposal": "Use SurfaceHeader for Projects (title, honesty pill, tabs as a scrollable segmented control, Refresh as action) and add a `title` on the disabled Dependencies tab.",
+  "effort": "S"
+ },
+ {
+  "title": "Work item: always-open 'Start a session' form and prose-heavy empty panels push comments off-screen",
+  "surface": "Work item",
+  "severity": "medium",
+  "evidence": "At 1440\u00d7900 the page shows Description, then a 'How it got here' two-paragraph disclaimer (web/src/WorkItemDetail.tsx:1188, 1482-1495), a 300px session-start form, Collected evidence; the Audit trail card is two paragraphs of explanation with one link (2111-2130). The one comment in the fixture is below the fold. Screenshot: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/desk-workitem.png",
+  "proposal": "Collapse 'Start a session' behind a button, reduce the empty-history and audit copy to one line each with the link, and place Comments directly under Description.",
+  "effort": "S"
+ },
+ {
+  "title": "Settings: dialog taller than the viewport, no close button in view, odd 'Show token' placement",
+  "surface": "Settings",
+  "severity": "medium",
+  "evidence": "At 1440\u00d7900 the modal extends past the bottom; Cancel/Save are off-screen and there is no X; the 'Show token' checkbox is centred on its own line above a 4-line warning paragraph. On phone the dialog fills the screen with the same layout. Screenshots: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/desk-settings.png, \u2026/shots/phone-settings.png. Source: web/src/Settings.tsx:670-685.",
+  "proposal": "Give the Settings dialog `max-height: 90dvh; overflow:auto` with a sticky footer (Cancel/Save) and a header close button; inline 'Show token' beside the token input.",
+  "effort": "S"
+ },
+ {
+  "title": "Shell+rail: Settings/Sign out sit below the fold at 900px and Files header buttons wrap",
+  "surface": "Shell+rail",
+  "severity": "low",
+  "evidence": "Rail must scroll ~340px to reach Settings at 1440\u00d7900 with 3 sessions (Playwright reported the button not visible). The collapsed FILES header shows '+' and '\u21bb' on one row and '\u2026' (More file actions, web/src/FileTree.tsx:484) wrapped onto a second row. Screenshots: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/desk-rail-bottom.png, \u2026/shots/desk-board.png (bottom-left).",
+  "proposal": "Pin the rail footer (Settings, Sign out, status) with `position:sticky; bottom:0` and let the Files header buttons shrink (`flex-wrap:nowrap`, 28px targets).",
+  "effort": "S"
+ },
+ {
+  "title": "Global: empty states have no next action ('Nothing here' \u00d74, 'Nothing is ranked here')",
+  "surface": "Global",
+  "severity": "low",
+  "evidence": "Empty Board prints 'Nothing here' in each of four columns (web/src/Board.tsx:2921); empty Backlog says 'Nothing is ranked here. The freshness line above says whether anything has looked.' (web/src/Backlog.tsx:1769) but the line above only says 'Updated 0s ago'; neither links to Quick create or Projects. Screenshots: /tmp/claude-1000/-home-sprooty-Working-Active-apps-vogt/e3d17dc7-707e-4bc5-97f7-198f155f966a/scratchpad/shots/desk-board-empty.png, \u2026/shots/desk-backlog-empty.png",
+  "proposal": "One board-level empty panel ('No work items match \u2014 Quick create / Clear filters / Register a project') instead of per-column text; Backlog empty state names the collector status and offers Quick create.",
+  "effort": "S"
+ },
+ {
+  "title": "Polish: Tasks default notify phrase still says MYDEVENV2_NOTIFY:, Git breadcrumb in monospace, Escape does not close Quick create",
+  "surface": "Global",
+  "severity": "low",
+  "evidence": "web/src/AgentTasks.tsx:75 and :774 default/placeholder 'MYDEVENV2_NOTIFY:' (login page was de-branded but this was not); Git tool shows 'Choose a registered project' as a monospace strip in a different type style (\u2026/shots/desk-git.png); Board Quick create form stays open after Escape (\u2026/shots/desk-board-move.png shows it still open after Esc). Phone board state pills overflow (scrollWidth 394 vs 370) with no edge fade (\u2026/shots/phone-board.png).",
+  "proposal": "Rename the default phrase to VOGT_NOTIFY:, style the Git breadcrumb like other kickers, close Quick create on Escape, add a right-edge fade on the pill row.",
+  "effort": "S"
+ }
+]

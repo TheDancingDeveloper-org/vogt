@@ -1,0 +1,2272 @@
+From 6353857171a449075126216f11d24b65ca450ccd Mon Sep 17 00:00:00 2001
+From: dancingdeveloper
+ <306930456+thedancingdeveloper@users.noreply.github.com>
+Date: Tue, 18 Aug 2026 04:05:13 +0000
+Subject: [PATCH 1/3] perf(ci): cache the image builds and stop rebuilding the
+ pod toolchain
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The `dev` build of 2026-08-18 took 34 minutes. Measured from its log:
+
+  1344s  stage-4 — the dev-pod toolchain (apt, rustup, 5x cargo install,
+         sway, GStreamer, JDK, Gradle, Android SDK, Flutter)
+   259s  exporting a tarball into the local Docker daemon for `load: true`
+   243s  exporting and pushing the second, near-identical build
+   215s  cargo build --release
+   178s  core-build (uv sync)
+   174s  web-build
+    75s  generating the second build's SBOM
+
+The Rust compile everyone suspected was 10% of it. The other 90% was work
+that either did not depend on this repository's source or was done twice.
+
+Root cause: no build cache anywhere. All four `build-push-action` calls ran
+without `cache-from`/`cache-to`, and `docker/setup-buildx-action` provisions
+a fresh, randomly-named builder per job and tears it down after — so every
+run logged `booting buildkit` and not one `CACHED` layer, and the
+`--mount=type=cache,target=/app/engine/target` in `engine/Dockerfile` was
+empty every time. 458 crates compiled from nothing on every push.
+
+Five changes:
+
+1. Registry layer cache (`vogt-buildcache`) on every image build. A registry
+   and not a cache mount or a `keep-state` builder, because `node-b` is a
+   fleet: a job lands on whichever worker is free, so builder-local state is
+   cold on most runs by construction. Needs nothing deployed to hold it.
+
+2. The dev-pod toolchain moves to `engine/Dockerfile.pod`, published by
+   `pod-base.yml` as `vogt-pod-base:{lean,full}-<hash>-<week>` and consumed
+   by digest as `POD_BASE_IMAGE`. Content-hashed so an edit republishes
+   immediately, week-stamped so the `latest`-at-build-time installs (rclone,
+   sccache, gh, step, Gradle, selkies) cannot silently freeze. Flutter is now
+   the difference between the two variants rather than a build arg.
+
+3. cargo-chef splits the Rust build into a dependency layer keyed only on
+   Cargo.toml/Cargo.lock and a workspace build on top, with `web/dist` copied
+   in after it. Two bugs fixed at once: cache mounts could not cross a runner,
+   and `web/dist` being a rust-embed compile-time input meant a stylesheet
+   change recompiled all 458 dependencies. Cache mounts removed rather than
+   kept, since a target dir that is a cache mount is not in the layer.
+
+4. Each image is built once, not twice. Pushed under a `candidate-<sha>` tag
+   outside both release streams, smoke-tested at its digest, then promoted
+   with `docker buildx imagetools create`. What gets signed is now the same
+   bytes that ran rather than a second build asserted to be equivalent.
+
+5. The runner-side `pnpm build` is deleted from both workflows. Its output
+   never reached an image: `engine/Dockerfile.dockerignore` lists `web/dist`,
+   so it was excluded from the build context, and stage 1 builds the bundle
+   the image actually embeds. The test that guarded the ordering was green
+   over that inert step; it now reads `engine/Dockerfile`, which is what makes
+   the guarantee true.
+
+The agent CLIs deliberately did not move into the base and are bucketed by
+day via `AI_CLIENTS_EPOCH`: they are documented as latest-at-build-time, and
+both a weekly base image and a warm layer cache would have frozen them
+without anybody deciding to (#23's lesson, kept).
+
+Nothing here is deployed and no new estate infrastructure is introduced. The
+cache and the pod base live in GHCR; production still moves only when the
+digest pinned in `indexarr/ops` changes and Komodo runs `DeployStack`.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ .github/renovate.json5                   |  15 +
+ .github/workflows/build.yml              | 231 +++++++---
+ .github/workflows/mirror-base-images.yml |  12 +-
+ .github/workflows/pod-base.yml           | 263 +++++++++++
+ .github/workflows/release.yml            | 145 +++++--
+ docs/DEPLOYMENT.md                       |  33 +-
+ docs/REQUIREMENTS.md                     |   2 +-
+ engine/AGENTS.md                         |   2 +
+ engine/Dockerfile                        | 528 +++++++----------------
+ engine/Dockerfile.pod                    | 396 +++++++++++++++++
+ engine/Dockerfile.pod.dockerignore       |   9 +
+ tests/test_deploy.py                     | 151 +++++--
+ 12 files changed, 1293 insertions(+), 494 deletions(-)
+ create mode 100644 .github/workflows/pod-base.yml
+ create mode 100644 engine/Dockerfile.pod
+ create mode 100644 engine/Dockerfile.pod.dockerignore
+
+diff --git a/.github/renovate.json5 b/.github/renovate.json5
+index 94fbd27..49c8fa6 100644
+--- a/.github/renovate.json5
++++ b/.github/renovate.json5
+@@ -61,6 +61,21 @@
+   },
+ 
+   packageRules: [
++    {
++      // The pod base is built by this repository, not mirrored from anywhere,
++      // so there is no upstream for Renovate to check and nothing for it to
++      // bump. `engine/Dockerfile`'s `POD_BASE_IMAGE` default names a moving
++      // convenience tag for local builds; every image CI produces is built on
++      // a **digest** that `.github/workflows/pod-base.yml` resolves at build
++      // time and passes in as a build arg. Pinning the placeholder would
++      // therefore be PR noise over a value nothing shipped ever uses — and,
++      // worse, would read as the pin when it is not one.
++      //
++      // The pin that matters is inside `engine/Dockerfile.pod`, on the
++      // mirrored Ubuntu base, and Renovate still maintains that one.
++      matchPackageNames: ["ghcr.io/thedancingdeveloper-org/vogt-pod-base"],
++      enabled: false,
++    },
+     {
+       matchManagers: ["github-actions"],
+       groupName: "github actions",
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index e3e5264..11a9b33 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -56,6 +56,27 @@ env:
+   # Vogt alone (NFR-PO4), and this is the estate's own stack. One repository
+   # with two kinds of tag in it is how somebody eventually pins the wrong one.
+   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
++  # Where BuildKit's layer cache lives.
++  #
++  # A registry, not a cache mount and not a persistent named builder, and that
++  # choice is forced by the runners rather than preferred: `node-b` is a fleet
++  # of three workers and a job lands on whichever is free. Anything held in a
++  # builder's local state — `--mount=type=cache`, `keep-state`, a reused
++  # buildkitd container — is therefore cold on most runs *by construction*,
++  # which is precisely what was happening. `docker/setup-buildx-action` also
++  # provisions a fresh, randomly-named builder per job and tears it down
++  # afterwards, so even a repeat landing on the same worker started from
++  # nothing: every one of these builds logged `booting buildkit` and not one
++  # `CACHED` layer.
++  #
++  # A registry is the only cache all three workers can see, and GHCR is
++  # already on the critical path for the bases, so it needs nothing built,
++  # deployed or maintained on Node B to hold it.
++  #
++  # Its own repository rather than tags alongside the images, for the reason
++  # `vogt` and `vogt-stack` are two repositories: one repository holding two
++  # kinds of tag is how somebody eventually pins the wrong one.
++  CACHE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-buildcache
+ 
+ concurrency:
+   # Only the newest commit on a branch is worth an image; older ones in
+@@ -153,17 +174,38 @@ jobs:
+       # Built and run before it is pushed. v0.1.0 shipped an image whose
+       # entrypoint did not exist and v0.1.1 one that imported no application;
+       # both builds were green and both artefacts had never been started.
++      # Built **once**, then promoted. It used to be built twice: once with
++      # `load: true` to smoke-test and again with `push: true` to publish.
++      # That cost 259s exporting a tarball into the local Docker daemon (96s
++      # exporting layers, 163s sending it) purely so four `docker run`s could
++      # reach it, and then a second export-and-push on top.
++      #
++      # Now it is pushed once under a candidate tag, tested *at its digest*,
++      # and the final tags are moved onto that same digest with
++      # `imagetools create` — a manifest copy, no rebuild and no re-push. The
++      # image that carries `:dev` is then provably the bytes the smoke test
++      # ran, rather than a second build that ought to have been identical.
++      #
++      # The candidate tag is published before the test passes, which is the
++      # one thing this trades away. It is deliberately outside both release
++      # streams — never `sha-*`, never `dev`, never `latest` — so "which build
++      # is that?" stays answerable, and a failed run leaves a tag that nothing
++      # references and the next run overwrites.
+       - uses: docker/build-push-action@v6
+         id: candidate
+         with:
+           context: .
+-          load: true
+-          tags: ${{ env.IMAGE }}:smoke-test
++          push: true
++          tags: ${{ env.IMAGE }}:candidate-${{ github.sha }}
+           labels: ${{ steps.meta.outputs.labels }}
++          provenance: true
++          sbom: true
++          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }}
++          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-${{ github.ref_name }},mode=max
+ 
+       - name: the image runs
+         env:
+-          CANDIDATE: ${{ env.IMAGE }}:smoke-test
++          CANDIDATE: ${{ env.IMAGE }}@${{ steps.candidate.outputs.digest }}
+         run: |
+           set -euo pipefail
+           docker run --rm "$CANDIDATE" --version
+@@ -180,15 +222,42 @@ jobs:
+           fi
+           echo "image runs, has git, and still refuses to guess an address"
+ 
+-      - uses: docker/build-push-action@v6
++      # A manifest copy onto the tested digest, not a rebuild. `imagetools
++      # create` copies the index and everything it references — the platform
++      # manifest and the provenance and SBOM attestations alike.
++      - name: promote the tested image
+         id: push
+-        with:
+-          context: .
+-          push: true
+-          tags: ${{ steps.meta.outputs.tags }}
+-          labels: ${{ steps.meta.outputs.labels }}
+-          provenance: true
+-          sbom: true
++        env:
++          TESTED: ${{ env.IMAGE }}@${{ steps.candidate.outputs.digest }}
++          TAGS: ${{ steps.meta.outputs.tags }}
++        run: |
++          set -euo pipefail
++          args=()
++          while IFS= read -r tag; do
++            [ -n "$tag" ] || continue
++            args+=(--tag "$tag")
++          done <<< "$TAGS"
++          # `imagetools create` with no --tag copies to a digest and publishes
++          # nothing, so an empty tag list would leave a green job that shipped
++          # no image. Fail where it is legible instead.
++          [ "${#args[@]}" -gt 0 ] || {
++            echo "metadata-action produced no tags; nothing to promote" >&2
++            exit 1
++          }
++          docker buildx imagetools create "${args[@]}" "$TESTED"
++
++          # Read the digest back off a published tag rather than reusing the
++          # candidate's. Creating an index from an index is a copy, but it is
++          # a copy this step does not get to assume: what gets signed has to
++          # be what the tags actually resolve to.
++          first="$(printf '%s\n' "$TAGS" | head -n1)"
++          digest="$(docker buildx imagetools inspect "$first" \
++            --format '{{.Manifest.Digest}}')"
++          case "$digest" in
++            sha256:*) ;;
++            *) echo "could not resolve a digest for ${first}" >&2; exit 1 ;;
++          esac
++          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+ 
+       - uses: sigstore/cosign-installer@v3
+ 
+@@ -225,9 +294,27 @@ jobs:
+             echo "semver tag was created, and \`latest\` did not move."
+           } >> "$GITHUB_STEP_SUMMARY"
+ 
++  # The dev-pod toolchain, built (or found already published) before anything
++  # that consumes it. Same prerequisite shape as `base-images` and for the
++  # same reason: the common case is a lookup that costs seconds, and having it
++  # as a companion job instead would mean the image build racing the thing it
++  # is built on.
++  pod-base:
++    name: the pod base is in GHCR
++    needs: base-images
++    uses: ./.github/workflows/pod-base.yml
++    with:
++      # Flutter and the dev/prod split used to be build args on the merged
++      # image; they are the difference between the two published pod variants
++      # now, so the split is made once, here.
++      variant: ${{ github.ref == 'refs/heads/dev' && 'full' || 'lean' }}
++    permissions:
++      contents: read
++      packages: write
++
+   stack-image:
+     name: build and publish the merged image
+-    needs: base-images
++    needs: [base-images, pod-base]
+     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+     permissions:
+       contents: read
+@@ -238,21 +325,16 @@ jobs:
+ 
+       - uses: docker/setup-buildx-action@v3
+ 
+-      - uses: actions/setup-node@v4
+-        with:
+-          node-version: "22"
+-
+-      - name: build the PWA
+-        # `rust-embed` reads `web/dist/` at compile time, so the bundle is a
+-        # build input to the Rust half rather than a separate artefact. An
+-        # image built without this step compiles — and serves a placeholder
+-        # where the product's front end should be.
+-        run: |
+-          set -euo pipefail
+-          corepack enable
+-          cd web
+-          pnpm install --frozen-lockfile
+-          pnpm build
++      # There is deliberately no `pnpm build` here any more.
++      #
++      # There was one, and it never reached the image. `rust-embed` does read
++      # `web/dist/` at compile time — that part of the old comment was right —
++      # but the bundle it reads is the one stage 1 of `engine/Dockerfile`
++      # builds inside the build itself, and `engine/Dockerfile.dockerignore`
++      # lists `web/dist`, so the runner's copy was excluded from the context it
++      # would have had to arrive through. It was a step that looked
++      # load-bearing, cost a Node toolchain and a pnpm install, and produced a
++      # directory nothing read.
+ 
+       # No Docker Hub login, deliberately — and this is a trap worth naming,
+       # because the obvious "improvement" is to add one back.
+@@ -297,6 +379,21 @@ jobs:
+           flavor: |
+             latest=false
+ 
++      # The agent CLIs are the one part of the toolchain that is meant to be
++      # latest-at-build-time, and turning on a layer cache would have frozen
++      # them: their RUN line is textually identical from commit to commit, so
++      # a warm cache reuses it indefinitely. Bucketing by day keeps the
++      # promise: fresh clients daily, cached within the day. `engine/Dockerfile`
++      # places that layer above the two halves precisely so this arg's rate of
++      # change — daily — is what it costs, rather than the commit rate it would
++      # inherit sitting below them.
++      - name: today
++        id: epoch
++        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
++
++      # One build, pushed under a candidate tag, tested at its digest, then
++      # promoted by moving the real tags onto that same digest. See the note
++      # on the core image above for what this replaces and what it trades.
+       - uses: docker/build-push-action@v6
+         id: candidate
+         with:
+@@ -304,16 +401,30 @@ jobs:
+           # `web/dist`, `pyproject.toml` and `src/` as well as the crates.
+           context: .
+           file: engine/Dockerfile
+-          load: true
+-          tags: ${{ env.STACK_IMAGE }}:smoke-test
++          push: true
++          tags: ${{ env.STACK_IMAGE }}:candidate-${{ github.sha }}
+           labels: ${{ steps.meta.outputs.labels }}
++          provenance: true
++          sbom: true
+           build-args: |
++            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
+             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
+-            INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
++            AI_CLIENTS_EPOCH=${{ steps.epoch.outputs.day }}
++          # Per-branch, because `INSTALL_AI_CLIENTS` differs between dev and
++          # main and forks the layer graph from that point down. One shared
++          # cache tag would have the two streams evicting each other's layers
++          # and neither hitting.
++          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
++          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }},mode=max
+ 
++      # Tested at the digest, which means `docker run` pulls it back rather
++      # than finding it in the local daemon. That is the cost of not exporting
++      # a multi-gigabyte tarball into the daemon first, and it falls almost
++      # entirely on a worker's first run: the layers stay in its daemon
++      # afterwards, and the pod base underneath them changes weekly at most.
+       - name: the merged image runs both halves
+         env:
+-          CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
++          CANDIDATE: ${{ env.STACK_IMAGE }}@${{ steps.candidate.outputs.digest }}
+           DEV_IMAGE: ${{ github.ref == 'refs/heads/dev' }}
+         run: |
+           set -euo pipefail
+@@ -344,26 +455,46 @@ jobs:
+             echo "dev image carries the AI clients and the mobile SDK"
+           fi
+ 
+-      - uses: docker/build-push-action@v6
++      # A manifest copy onto the tested digest — no rebuild, no second push.
++      #
++      # This is where the old comment's intent finally holds literally. It said
++      # the second build's args were "identical to the candidate build's, so
++      # the pushed image is the layers the smoke test just ran, not a rebuild
++      # that happens to look similar". That was an argument that two builds
++      # *ought* to agree; there is now only one build, so the tags cannot name
++      # anything else. The `dev` branch is still the only one that carries the
++      # AI clients and the mobile SDK — the same split `.woodpecker/server.yml`
++      # made and the migration to Actions dropped (#23) — but the mobile SDK
++      # half of it is now the pod variant chosen in `needs.pod-base`.
++      - name: promote the tested image
+         id: push
+-        with:
+-          context: .
+-          file: engine/Dockerfile
+-          push: true
+-          tags: ${{ steps.meta.outputs.tags }}
+-          labels: ${{ steps.meta.outputs.labels }}
+-          # Identical to the candidate build's, so the pushed image is the
+-          # layers the smoke test just ran, not a rebuild that happens to
+-          # look similar. The `dev` branch is the dev image (`:dev`,
+-          # `dev-<sha>`) and is the only one that carries the AI clients and
+-          # the mobile SDK — the same split `.woodpecker/server.yml`'s
+-          # `build-and-push-dev` used to make, which the migration to Actions
+-          # dropped without replacing (#23).
+-          build-args: |
+-            INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' }}
+-            INSTALL_FLUTTER=${{ github.ref == 'refs/heads/dev' }}
+-          provenance: true
+-          sbom: true
++        env:
++          TESTED: ${{ env.STACK_IMAGE }}@${{ steps.candidate.outputs.digest }}
++          TAGS: ${{ steps.meta.outputs.tags }}
++        run: |
++          set -euo pipefail
++          args=()
++          while IFS= read -r tag; do
++            [ -n "$tag" ] || continue
++            args+=(--tag "$tag")
++          done <<< "$TAGS"
++          # `imagetools create` with no --tag copies to a digest and publishes
++          # nothing, so an empty tag list would leave a green job that shipped
++          # no image. Fail where it is legible instead.
++          [ "${#args[@]}" -gt 0 ] || {
++            echo "metadata-action produced no tags; nothing to promote" >&2
++            exit 1
++          }
++          docker buildx imagetools create "${args[@]}" "$TESTED"
++
++          first="$(printf '%s\n' "$TAGS" | head -n1)"
++          digest="$(docker buildx imagetools inspect "$first" \
++            --format '{{.Manifest.Digest}}')"
++          case "$digest" in
++            sha256:*) ;;
++            *) echo "could not resolve a digest for ${first}" >&2; exit 1 ;;
++          esac
++          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+ 
+       - uses: sigstore/cosign-installer@v3
+ 
+diff --git a/.github/workflows/mirror-base-images.yml b/.github/workflows/mirror-base-images.yml
+index aa92748..fa1980d 100644
+--- a/.github/workflows/mirror-base-images.yml
++++ b/.github/workflows/mirror-base-images.yml
+@@ -2,7 +2,7 @@ name: mirror base images
+ 
+ # Docker Hub is not on the critical path of a build (#33).
+ #
+-# Every `FROM` in both Dockerfiles used to name a Docker Hub library image.
++# Every `FROM` in the three Dockerfiles used to name a Docker Hub library image.
+ # Anonymous pulls are rate-limited per IP and a self-hosted runner is one IP
+ # for every build this repository makes, so a busy afternoon exhausted the
+ # allowance and the next build failed at `FROM` with 429 — twice on
+@@ -72,11 +72,13 @@ on:
+     paths:
+       - "Dockerfile"
+       - "engine/Dockerfile"
++      - "engine/Dockerfile.pod"
+       - ".github/workflows/mirror-base-images.yml"
+   pull_request:
+     paths:
+       - "Dockerfile"
+       - "engine/Dockerfile"
++      - "engine/Dockerfile.pod"
+       - ".github/workflows/mirror-base-images.yml"
+   schedule:
+     # Renovate's window is "before 5am on monday" (`.github/renovate.json5`).
+@@ -119,7 +121,7 @@ jobs:
+         run: |
+           set -euo pipefail
+           bad=0
+-          for file in Dockerfile engine/Dockerfile; do
++          for file in Dockerfile engine/Dockerfile engine/Dockerfile.pod; do
+             while IFS= read -r ref; do
+               # A stage name, not an image: no registry path and no tag.
+               case "$ref" in
+@@ -179,11 +181,11 @@ jobs:
+           set -euo pipefail
+ 
+           refs="$(
+-            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" Dockerfile engine/Dockerfile \
++            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" Dockerfile engine/Dockerfile engine/Dockerfile.pod \
+               | sort -u
+           )"
+           if [ -z "$refs" ]; then
+-            echo "no mirrored references in either Dockerfile; nothing to copy" >&2
++            echo "no mirrored references in any Dockerfile; nothing to copy" >&2
+             exit 1
+           fi
+ 
+@@ -238,7 +240,7 @@ jobs:
+           {
+             echo "### Base images in GHCR"
+             echo
+-            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" Dockerfile engine/Dockerfile \
++            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" Dockerfile engine/Dockerfile engine/Dockerfile.pod \
+               | sort -u \
+               | sed 's/^/- `/; s/$/`/'
+             echo
+diff --git a/.github/workflows/pod-base.yml b/.github/workflows/pod-base.yml
+new file mode 100644
+index 0000000..6806934
+--- /dev/null
++++ b/.github/workflows/pod-base.yml
+@@ -0,0 +1,263 @@
++name: pod-base
++
++# The dev-pod toolchain base image (`engine/Dockerfile.pod`).
++#
++# Why this workflow exists, in one measurement: on the `dev` build of
++# 2026-08-18 the merged image took 34 minutes, and 1344s of that — 22 minutes —
++# was installing a toolchain that no commit in this repository had touched.
++# apt, rustup, five `cargo install`s, sway, GStreamer, the JDK, Gradle, the
++# Android SDK, Flutter. It was rebuilt every push because it lived in the same
++# Dockerfile as the product, and because nothing was cached between runs.
++#
++# So it is built here instead, published, and consumed by digest. An ordinary
++# push now *pulls* the toolchain rather than building it.
++#
++# ── Tagging ────────────────────────────────────────────────────────────────
++#
++#   <variant>-<hash>-<week>      e.g. full-9f3c1a7b2e40-2026W34
++#
++# `<hash>` is a digest of `engine/Dockerfile.pod`, so editing that file
++# produces a new tag on the next build and the old one stays exactly as it
++# was. `<week>` is the ISO week, so an unchanged file is still rebuilt once a
++# week — which is load-bearing rather than tidy-minded: `rclone`, `sccache`,
++# `gh`, `step`, `github-mcp-server`, Gradle and `selkies` all resolve *latest*
++# at build time, and a purely content-addressed tag would have frozen every
++# one of them at whatever the first build happened to see while looking like
++# reproducibility.
++#
++# A build is skipped entirely when its tag already exists in GHCR — the same
++# shape as `mirror-base-images.yml`, and for the same reason: this runs as a
++# prerequisite of every image build, so the common case has to be a lookup.
++#
++# ── What this is not ───────────────────────────────────────────────────────
++#
++# It is not in the `vogt-base/` namespace, deliberately. That prefix means
++# "a verbatim mirror of an upstream library image" and `mirror-base-images.yml`
++# greps the Dockerfiles for it to decide what to copy from Docker Hub. This
++# image is built here and has no upstream, so it is `vogt-pod-base` and the
++# mirror correctly ignores it. `engine/Dockerfile.pod`'s own `FROM` still names
++# a mirrored base, and that file is now in the mirror's file list.
++#
++# It is also not deployed. Nothing here reaches Node B: the image lives in
++# GHCR, `build.yml` consumes it by digest, and production still moves only when
++# the digest pinned in `indexarr/ops` changes and Komodo runs `DeployStack`
++# (NFR-D10). This workflow adds no infrastructure to the estate.
++
++on:
++  workflow_call:
++    inputs:
++      variant:
++        description: lean (no Flutter — main and releases) or full (dev)
++        required: true
++        type: string
++    outputs:
++      image:
++        description: The pod base, by digest, for POD_BASE_IMAGE
++        value: ${{ jobs.build.outputs.image }}
++
++  workflow_dispatch:
++    inputs:
++      variant:
++        description: Which variant to build
++        required: false
++        default: both
++        type: choice
++        options: [both, lean, full]
++
++  # Deliberately no `push` trigger. `build.yml` calls this workflow on every
++  # push to main and dev, so a push trigger would start a second run computing
++  # the same tag and racing its own caller to publish it.
++
++  schedule:
++    # Weekly, early Monday UTC — the rebuild that keeps the "latest at build
++    # time" tools from silently freezing. Deliberately before the working week
++    # rather than during it: the first build of the week is the slow one, and
++    # it should be the schedule that pays for it and not somebody's push.
++    - cron: "40 4 * * 1"
++
++permissions:
++  contents: read
++
++env:
++  POD_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-pod-base
++  # Layer cache. A separate repository from the image so that a cache tag can
++  # never be mistaken for something deployable — the same reason `vogt` and
++  # `vogt-stack` are two repositories rather than two tags.
++  CACHE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-buildcache
++
++concurrency:
++  # Never cancelled. Two runs racing on the same tag is harmless (the second
++  # finds it published and skips), but a cancelled push leaves the tag absent
++  # and the next image build is what discovers it.
++  # Keyed on the variant, not the caller: dev (`full`) and a release
++  # (`lean`) must not queue behind each other. `github.event.inputs` would be
++  # the *caller's* event on a workflow_call and hold nothing.
++  group: pod-base-${{ inputs.variant || 'both' }}
++  cancel-in-progress: false
++
++jobs:
++  plan:
++    name: which variants
++    runs-on: [self-hosted, node-b, linux, x64]
++    outputs:
++      variants: ${{ steps.plan.outputs.variants }}
++    steps:
++      - id: plan
++        env:
++          # `inputs.variant` is set on workflow_call and workflow_dispatch and
++          # empty on push/schedule, where both variants are wanted.
++          WANTED: ${{ inputs.variant }}
++        run: |
++          set -euo pipefail
++          case "${WANTED:-both}" in
++            lean) variants='["lean"]' ;;
++            full) variants='["full"]' ;;
++            both) variants='["lean","full"]' ;;
++            *)
++              echo "unknown variant '${WANTED}'; expected lean, full or both" >&2
++              exit 1
++              ;;
++          esac
++          echo "variants=${variants}" >> "$GITHUB_OUTPUT"
++          echo "building: ${variants}"
++
++  build:
++    name: ${{ matrix.variant }}
++    needs: plan
++    # `docker`/`publish` is advertised only by the Docker-in-Docker workers.
++    runs-on: [self-hosted, node-b, linux, x64, docker, publish]
++    permissions:
++      contents: read
++      packages: write
++    strategy:
++      # One variant must not take the other down: a Flutter checksum drift
++      # should not cost main its base image.
++      fail-fast: false
++      matrix:
++        variant: ${{ fromJSON(needs.plan.outputs.variants) }}
++    outputs:
++      # Only ever read through `workflow_call`, which passes exactly one
++      # variant, so this is a single-entry matrix at the only time it is
++      # consumed. On push/schedule both variants build and this output is
++      # last-writer-wins and nothing reads it.
++      image: ${{ steps.resolve.outputs.image }}
++    steps:
++      - uses: actions/checkout@v7
++
++      - uses: docker/login-action@v3
++        with:
++          registry: ghcr.io
++          username: ${{ github.actor }}
++          password: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: name this build
++        id: tag
++        env:
++          VARIANT: ${{ matrix.variant }}
++        run: |
++          set -euo pipefail
++          # Only the Dockerfile: everything else about this image — the base
++          # digest, the SDK pins, the Flutter checksum — is inside it, which is
++          # exactly why the pins were moved there rather than passed in.
++          hash="$(sha256sum engine/Dockerfile.pod | cut -c1-12)"
++          week="$(date -u +%GW%V)"
++          tag="${VARIANT}-${hash}-${week}"
++          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
++          echo "ref=${POD_IMAGE}:${tag}" >> "$GITHUB_OUTPUT"
++          echo "pod base for this commit: ${POD_IMAGE}:${tag}"
++
++      # Before the probe, and not conditional on it: `imagetools` is a buildx
++      # subcommand, and `mirror-base-images.yml` — the other workflow that
++      # copies manifests around on these runners — sets buildx up before
++      # reaching for it as well. Thirty seconds against a job whose entire
++      # purpose is to save twenty-two minutes.
++      - uses: docker/setup-buildx-action@v3
++
++      - name: is it already published?
++        id: probe
++        env:
++          REF: ${{ steps.tag.outputs.ref }}
++        run: |
++          set -euo pipefail
++          if docker buildx imagetools inspect "$REF" >/dev/null 2>&1; then
++            echo "exists=true" >> "$GITHUB_OUTPUT"
++            echo "already in GHCR; skipping the build"
++          else
++            echo "exists=false" >> "$GITHUB_OUTPUT"
++            echo "not published yet; building"
++          fi
++
++      - uses: docker/build-push-action@v6
++        if: steps.probe.outputs.exists != 'true'
++        with:
++          # `engine/Dockerfile.pod.dockerignore` empties the context: this
++          # build has no COPY from it.
++          context: .
++          file: engine/Dockerfile.pod
++          push: true
++          tags: ${{ steps.tag.outputs.ref }}
++          build-args: |
++            INSTALL_FLUTTER=${{ matrix.variant == 'full' }}
++          # Registry cache, not a cache mount and not a named builder. The
++          # runners are a fleet: a job lands on whichever node-b worker is
++          # free, so anything held in a builder's local state is cold on most
++          # runs by construction. A registry is the only cache all three
++          # workers can see, and it needs nothing deployed to hold it.
++          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:pod-${{ matrix.variant }}
++          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:pod-${{ matrix.variant }},mode=max
++          provenance: true
++
++      - name: resolve the digest
++        id: resolve
++        env:
++          REF: ${{ steps.tag.outputs.ref }}
++        run: |
++          set -euo pipefail
++          # Read back rather than trusting the push output, because the skip
++          # path has no push output to trust. The digest is what gets passed
++          # to the image build, so a tag is never what anything is built on.
++          digest="$(docker buildx imagetools inspect "$REF" \
++            --format '{{.Manifest.Digest}}')"
++          case "$digest" in
++            sha256:*) ;;
++            *) echo "could not resolve a digest for ${REF}" >&2; exit 1 ;;
++          esac
++          echo "image=${POD_IMAGE}@${digest}" >> "$GITHUB_OUTPUT"
++          echo "resolved ${REF} -> ${digest}"
++
++      # A moving `lean` / `full` alias alongside the content tag, pointed at
++      # whatever this run resolved — updated on the skip path too, which is why
++      # it is its own step rather than a second entry in `tags:`.
++      #
++      # This is the one moving tag in the arrangement and it exists for exactly
++      # one job: `engine/Dockerfile`'s `POD_BASE_IMAGE` default, so that a hand
++      # `docker build -f engine/Dockerfile .` resolves without anybody having
++      # to look a digest up first. Nothing CI publishes is ever built on it —
++      # `build.yml` and `release.yml` pass the digest from `outputs.image` —
++      # and `docs/DEPLOYMENT.md` §9 says so where the hand-build is documented.
++      - name: point the convenience alias at it
++        env:
++          VARIANT: ${{ matrix.variant }}
++          IMAGE: ${{ steps.resolve.outputs.image }}
++        run: |
++          set -euo pipefail
++          docker buildx imagetools create --tag "${POD_IMAGE}:${VARIANT}" "$IMAGE"
++          echo "${POD_IMAGE}:${VARIANT} -> ${IMAGE}"
++
++      - name: summary
++        env:
++          REF: ${{ steps.tag.outputs.ref }}
++          IMAGE: ${{ steps.resolve.outputs.image }}
++          BUILT: ${{ steps.probe.outputs.exists != 'true' }}
++        run: |
++          {
++            if [ "$BUILT" = "true" ]; then
++              echo "### Built \`${REF}\`"
++            else
++              echo "### Reused \`${REF}\` (already published)"
++            fi
++            echo
++            echo '```'
++            echo "${IMAGE}"
++            echo '```'
++          } >> "$GITHUB_STEP_SUMMARY"
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index a451c60..e67f62d 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -27,6 +27,9 @@ env:
+   # Published, versioned and signed; not recommended to anybody who wants
+   # Vogt rather than this estate's pod.
+   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
++  # See `build.yml` for why the cache is a registry and not a builder-local
++  # mount: `node-b` is a fleet, and a job lands on whichever worker is free.
++  CACHE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-buildcache
+ 
+ jobs:
+   # Docker Hub is not on the critical path (#33): both Dockerfiles build
+@@ -139,17 +142,30 @@ jobs:
+       # build was green, the signature was valid, and the artefact had never
+       # been executed. A publish gate that only proves an image assembles
+       # proves the wrong thing.
++      # One build, pushed under a candidate tag and tested at its digest, then
++      # promoted onto the release tags. See `build.yml` for the full note; the
++      # property that matters more here than there is that what gets signed is
++      # provably the bytes that were run, rather than a second build asserted
++      # to be equivalent.
++      #
++      # `cache-from` only, and from `main`: a release is cut from a tag, it is
++      # rare, and it has no later run to hand a cache to. It reads what main's
++      # builds already deposited — the same `INSTALL_AI_CLIENTS=false` layer
++      # graph — and writes nothing back.
+       - uses: docker/build-push-action@v6
+         id: candidate
+         with:
+           context: .
+-          load: true
+-          tags: ${{ env.IMAGE }}:smoke-test
++          push: true
++          tags: ${{ env.IMAGE }}:candidate-${{ github.sha }}
+           labels: ${{ steps.meta.outputs.labels }}
++          provenance: true
++          sbom: true
++          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-main
+ 
+       - name: the image runs
+         env:
+-          CANDIDATE: ${{ env.IMAGE }}:smoke-test
++          CANDIDATE: ${{ env.IMAGE }}@${{ steps.candidate.outputs.digest }}
+         run: |
+           set -euo pipefail
+           # The entrypoint resolves and the interpreter behind it exists.
+@@ -164,15 +180,37 @@ jobs:
+           fi
+           echo "image runs, and still refuses to guess an address"
+ 
+-      - uses: docker/build-push-action@v6
++      # A manifest copy onto the tested digest — index, platform manifest and
++      # both attestations — not a rebuild.
++      - name: promote the tested image
+         id: push
+-        with:
+-          context: .
+-          push: true
+-          tags: ${{ steps.meta.outputs.tags }}
+-          labels: ${{ steps.meta.outputs.labels }}
+-          provenance: true
+-          sbom: true
++        env:
++          TESTED: ${{ env.IMAGE }}@${{ steps.candidate.outputs.digest }}
++          TAGS: ${{ steps.meta.outputs.tags }}
++        run: |
++          set -euo pipefail
++          args=()
++          while IFS= read -r tag; do
++            [ -n "$tag" ] || continue
++            args+=(--tag "$tag")
++          done <<< "$TAGS"
++          # `imagetools create` with no --tag copies to a digest and publishes
++          # nothing, so an empty tag list would leave a green job that shipped
++          # no image. Fail where it is legible instead.
++          [ "${#args[@]}" -gt 0 ] || {
++            echo "metadata-action produced no tags; nothing to promote" >&2
++            exit 1
++          }
++          docker buildx imagetools create "${args[@]}" "$TESTED"
++
++          first="$(printf '%s\n' "$TAGS" | head -n1)"
++          digest="$(docker buildx imagetools inspect "$first" \
++            --format '{{.Manifest.Digest}}')"
++          case "$digest" in
++            sha256:*) ;;
++            *) echo "could not resolve a digest for ${first}" >&2; exit 1 ;;
++          esac
++          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+ 
+       - uses: sigstore/cosign-installer@v3
+ 
+@@ -201,9 +239,22 @@ jobs:
+             echo "and \`DeployStack\` runs for \`personal-vogt\` (NFR-D10)."
+           } >> "$GITHUB_STEP_SUMMARY"
+ 
++  # The dev-pod toolchain base, found already published in the ordinary case.
++  # A release is `lean`: no Flutter, matching main and the `INSTALL_FLUTTER`
++  # default this job has always built with.
++  pod-base:
++    name: the pod base is in GHCR
++    needs: base-images
++    uses: ./.github/workflows/pod-base.yml
++    with:
++      variant: lean
++    permissions:
++      contents: read
++      packages: write
++
+   stack-image:
+     name: build, sign and publish the merged image
+-    needs: [distribution, base-images]
++    needs: [distribution, base-images, pod-base]
+     runs-on: [self-hosted, node-b, linux, x64, docker, publish]
+     permissions:
+       contents: read
+@@ -214,21 +265,11 @@ jobs:
+ 
+       - uses: docker/setup-buildx-action@v3
+ 
+-      - uses: actions/setup-node@v4
+-        with:
+-          node-version: "22"
+-
+-      - name: build the PWA
+-        # `rust-embed` reads `web/dist/` at compile time, so the bundle is a
+-        # build input rather than a separate artefact: an image built without
+-        # this step compiles and serves a placeholder where the product's
+-        # front end should be.
+-        run: |
+-          set -euo pipefail
+-          corepack enable
+-          cd web
+-          pnpm install --frozen-lockfile
+-          pnpm build
++      # No `pnpm build` here any more. There was one, and its output never
++      # reached the image: `engine/Dockerfile.dockerignore` lists `web/dist`,
++      # so the runner's bundle was excluded from the build context, and the
++      # one the image actually embeds is built by stage 1 of the Dockerfile.
++      # See the same note in `build.yml`.
+ 
+       # No Docker Hub login, deliberately — and this is a trap worth naming,
+       # because the obvious "improvement" is to add one back.
+@@ -278,29 +319,55 @@ jobs:
+           # `pyproject.toml` and `src/` as well as the crates.
+           context: .
+           file: engine/Dockerfile
+-          load: true
+-          tags: ${{ env.STACK_IMAGE }}:smoke-test
++          push: true
++          tags: ${{ env.STACK_IMAGE }}:candidate-${{ github.sha }}
+           labels: ${{ steps.meta.outputs.labels }}
++          provenance: true
++          sbom: true
++          build-args: |
++            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
++          # Reads main's cache, writes nothing back: see the core image above.
++          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-main
+ 
+       - name: both halves run
+         env:
+-          CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
++          CANDIDATE: ${{ env.STACK_IMAGE }}@${{ steps.candidate.outputs.digest }}
+         run: |
+           set -euo pipefail
+           docker run --rm --entrypoint vogt "$CANDIDATE" --version
+           docker run --rm --entrypoint mydevenv2-server "$CANDIDATE" --help >/dev/null
+           echo "both halves are present and start"
+ 
+-      - uses: docker/build-push-action@v6
++      # A manifest copy onto the tested digest, not a rebuild.
++      - name: promote the tested image
+         id: push
+-        with:
+-          context: .
+-          file: engine/Dockerfile
+-          push: true
+-          tags: ${{ steps.meta.outputs.tags }}
+-          labels: ${{ steps.meta.outputs.labels }}
+-          provenance: true
+-          sbom: true
++        env:
++          TESTED: ${{ env.STACK_IMAGE }}@${{ steps.candidate.outputs.digest }}
++          TAGS: ${{ steps.meta.outputs.tags }}
++        run: |
++          set -euo pipefail
++          args=()
++          while IFS= read -r tag; do
++            [ -n "$tag" ] || continue
++            args+=(--tag "$tag")
++          done <<< "$TAGS"
++          # `imagetools create` with no --tag copies to a digest and publishes
++          # nothing, so an empty tag list would leave a green job that shipped
++          # no image. Fail where it is legible instead.
++          [ "${#args[@]}" -gt 0 ] || {
++            echo "metadata-action produced no tags; nothing to promote" >&2
++            exit 1
++          }
++          docker buildx imagetools create "${args[@]}" "$TESTED"
++
++          first="$(printf '%s\n' "$TAGS" | head -n1)"
++          digest="$(docker buildx imagetools inspect "$first" \
++            --format '{{.Manifest.Digest}}')"
++          case "$digest" in
++            sha256:*) ;;
++            *) echo "could not resolve a digest for ${first}" >&2; exit 1 ;;
++          esac
++          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+ 
+       - uses: sigstore/cosign-installer@v3
+ 
+diff --git a/docs/DEPLOYMENT.md b/docs/DEPLOYMENT.md
+index 8ec83b1..6288ebf 100644
+--- a/docs/DEPLOYMENT.md
++++ b/docs/DEPLOYMENT.md
+@@ -852,16 +852,35 @@ root, not `engine/`, because `rust-embed` pulls `web/dist/` and the core is
+ `pyproject.toml` and `src/`:
+ 
+ ```bash
+-cd web && pnpm install --frozen-lockfile && pnpm build && cd ..
+ docker build -f engine/Dockerfile -t <registry>/vogt:<sha> .
+ ```
+ 
++There is no `pnpm build` in front of that any more, and there never usefully
++was: `engine/Dockerfile.dockerignore` lists `web/dist`, so a locally built
++bundle is excluded from the build context. Stage 1 of the Dockerfile builds the
++one the image embeds. The workflows carried the same superfluous step until it
++was removed along with it.
++
++A hand-build resolves `POD_BASE_IMAGE` to its default, which is a *moving tag*
++— fine for a local check, not for anything shipped. To reproduce a CI image,
++pass the digest that build used:
++
++```bash
++docker build -f engine/Dockerfile \
++  --build-arg POD_BASE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-pod-base@sha256:... \
++  --build-arg AI_CLIENTS_EPOCH=pinned \
++  -t <registry>/vogt:<sha> .
++```
++
+ **The registry is settled (M14)** — see §9.0. This step is the hand-build, for
+ a change that has not been through `build.yml` yet.
+ 
+-The job also smoke-tests both halves before pushing, for the reason the
+-core-only job records: two releases shipped images that had never been
+-started. It proves the halves start. It does **not** prove the front door
++The job also smoke-tests both halves before the image acquires a tag anything
++follows, for the reason the core-only job records: two releases shipped images
++that had never been started. It builds once, pushes under a `candidate-<sha>`
++tag in neither release stream, tests that digest, and then moves the real tags
++onto it with `docker buildx imagetools create` — so what is signed and pinned
++is the same bytes that ran, not a second build asserted to match. It proves the halves start. It does **not** prove the front door
+ reaches a core — that is §9.2, and it needs a running pair.
+ 
+ ### 9.2 Smoke-test it locally, before any stack sees it
+@@ -1053,7 +1072,11 @@ and `ANDROID_SDK_ROOT` pointing there and `sdkmanager`, `adb`, `apkanalyzer` on
+ compile/target SDK 35; 36 is installed ahead of the bump.
+ 
+ **Flutter (dev image only)** — 3.44.9 stable with its bundled Dart 3.12.2, at
+-`/opt/flutter`, behind `INSTALL_FLUTTER=true`. Production does not carry it.
++`/opt/flutter`. Production does not carry it. This is no longer a build arg on
++the merged image: it is the difference between the two published variants of
++the pod base (`engine/Dockerfile.pod`), so the dev stream is built on
++`vogt-pod-base:full-*` and main and every release on `:lean-*`. `build.yml`
++makes that choice once, in the `variant:` it calls `pod-base.yml` with.
+ 
+ ### 10.3 Container, cloud and agent tooling
+ 
+diff --git a/docs/REQUIREMENTS.md b/docs/REQUIREMENTS.md
+index cd2c47f..f179fb6 100644
+--- a/docs/REQUIREMENTS.md
++++ b/docs/REQUIREMENTS.md
+@@ -1826,7 +1826,7 @@ split across this table and §6.2, only the ones named here are delivered.
+ | **NFR-S5** | Long lists virtualize on all three surfaces that should, and the board's filter and drag paths do not degrade with backlog size | `web/src/__tests__/boardScale.test.tsx` (fifteen). The board's 60-card cap is gone: 60 is now where windowing *starts*, following `Backlog.tsx`'s mechanism rather than a second idea of what virtualization means, and the audit browser pages deliberately because an audit row is variable-height and a reason is never truncated. The second clause is evidenced by **counting, not timing** — jsdom has no layout, so the tests instrument `JSON.parse` to count reads of the one field the projection walks, which keeps the counter out of the product. Tripling the columns adds no pass; four times the estate in four times the lanes costs no more per item; eight keystrokes in the reason composer cost exactly zero, because `placement` compares on ref and target alone. `tests/test_pwa.py` holds the cross-file guard neither suite can: the CSS card height and the windowing constant must agree, or what is drawn and what is under the scrollbar drift apart silently |
+ | **NFR-Q6** | Both suites pass in the merged repository — the halves are path-gated, so "both" is true because one job weighs every result and refuses anything that is neither a pass nor a deliberate skip | `tests/test_deploy.py::test_the_gate_fails_on_anything_that_is_not_success_or_skipped`. The case worth pinning is `cancelled`: a gate written as *fail only on failure* passes a cancelled job, and a cancelled job checked nothing — which this repository was bitten by today from the other direction (§6.3 finding 19). Rewriting the catch-all arm as `failure)` turns it red |
+ | NFR-Q6 | The forge-less run; the core run with no engine present, produced by deleting `engine/`, `web/` and `mobile/` rather than by inspection | `.github/workflows/ci.yml` job `core`; `tests/test_pwa.py`'s skip guard is what lets it pass. **Run for real on 2026-08-14** — the job passed on a self-hosted runner, so "the core alone still works" is now an observation rather than a workflow file |
+-| **NFR-C6** | The pipeline governs the merged image: it is built from `engine/Dockerfile` with the repository as context, the PWA is built first because `rust-embed` reads `web/dist/` at compile time, both entrypoints run in the candidate before the push, the digest is signed, and a tag can release it | `tests/test_deploy.py::test_the_merged_image_is_built_from_the_engine_dockerfile`, `::test_the_pwa_is_built_before_the_merged_image`, `::test_both_halves_run_before_the_merged_image_is_pushed` (all three over both workflows), `::test_a_tag_can_release_the_merged_image`. The build half is more than asserted — it ran, on 2026-08-14, and published a signed `dev-ee18adc`. The release half is a path that exists and no tag has yet taken, which is why its test reads `release.yml` rather than a registry |
++| **NFR-C6** | The pipeline governs the merged image: it is built from `engine/Dockerfile` with the repository as context, the PWA is compiled into the engine because `rust-embed` reads `web/dist/` at compile time, both entrypoints run in the candidate before it is promoted onto any release tag, the digest is signed, and a tag can release it | `tests/test_deploy.py::test_the_merged_image_is_built_from_the_engine_dockerfile` and `::test_both_halves_run_before_the_merged_image_is_promoted` (both over both workflows), `::test_the_pwa_is_built_before_the_engine_that_embeds_it`, `::test_the_merged_image_build_does_not_rebuild_the_pwa_on_the_runner`, `::test_a_tag_can_release_the_merged_image`. The ordering clause is asserted against `engine/Dockerfile` rather than the workflows: the workflow-level assertion it replaced was green over a `pnpm build` step whose output `engine/Dockerfile.dockerignore` excluded from the build context, so it had never been the thing making the guarantee true. The build half is more than asserted — it ran, on 2026-08-14, and published a signed `dev-ee18adc`. The release half is a path that exists and no tag has yet taken, which is why its test reads `release.yml` rather than a registry |
+ | **NFR-C6** | fmt, clippy, `cargo test`, `pnpm typecheck`, `pnpm test`, the APK build and pytest are all in the pipeline | `tests/test_deploy.py::test_every_gate_nfr_c6_names_is_in_the_pipeline`, which restates the requirement's seven and asserts each against `ci.yml`; `::test_the_local_check_runs_what_ci_runs` holds `scripts/check.sh` to the same list from the other side. Presence, not gating — §6.2's row records that each half runs only when its own paths changed, with the argument in the workflow. A step present and skipped is a decision; a step absent is an accident, and until now nothing would have noticed one |
+ | **NFR-D12** | `dev` builds `:dev` images and `main` builds `sha-<commit>`, for the core-only image **and** the merged stack, with no alias either can move | `tests/test_deploy.py::test_the_two_streams_are_kept_apart`, parametrized over both jobs — a rule kept by the core image and dropped by the merged one would leave the artefact the merge exists for as the unlabelled stream |
+ | NFR-D11 | One published port, and it is the engine's: the merged stack publishes exactly one mapping, it maps to 8910, vogt-core's 8911 is published nowhere, and the front door reaches it over loopback | `tests/test_deploy.py::test_the_merged_stack_publishes_the_engine_and_only_the_engine`, `::test_the_merged_stack_pins_a_published_digest`, `::test_the_merged_stack_takes_its_core_token_from_a_file`. Asserted from the compose file, which until this pass no test in the repository read — which is how a placeholder digest of sixty-four zeros survived four stages under prose describing a pinned image. The *stack* half — two processes actually coming up together under `entrypoint.sh` — is still §6.2b's |
+diff --git a/engine/AGENTS.md b/engine/AGENTS.md
+index cfd4552..48f2a4d 100644
+--- a/engine/AGENTS.md
++++ b/engine/AGENTS.md
+@@ -130,6 +130,8 @@ Non-standard bits of the forge's pipeline, kept here because the stacks it
+ deploys are still running and the reasons are not written down there:
+ 
+ - Custom `clone:` block uses `git_auth_token` because the default OAuth clone started 403'ing at pipeline #17. Reference pattern in root Woodpecker pitfalls #2 / #6.
++- **Docker build cache is a registry, not a builder.** `build.yml`, `release.yml` and `pod-base.yml` all pass `cache-from`/`cache-to: type=registry,ref=ghcr.io/thedancingdeveloper-org/vogt-buildcache:<stream>`. Do not "improve" this into `--mount=type=cache` or a persistent named builder with `keep-state`: `node-b` is a fleet of three workers and a job lands on whichever is free, so builder-local state is cold on most runs *by construction*. That is what was happening — every merged-image build logged `booting buildkit` and not one `CACHED` layer, and the `--mount=type=cache,target=/app/engine/target` in `engine/Dockerfile` was empty every time, which is why 458 crates recompiled on every push. The cache mounts were removed in favour of a cargo-chef dependency **layer**, because layers replicate through a registry and cache mounts cannot.
++- **The dev-pod toolchain is not built by the image build.** It is `engine/Dockerfile.pod`, published as `ghcr.io/thedancingdeveloper-org/vogt-pod-base:{lean,full}-<hash>-<week>` by `.github/workflows/pod-base.yml`, and passed into `engine/Dockerfile` by digest as `POD_BASE_IMAGE`. It was 1344s of a 34-minute build and none of it depends on this repository's source. Adding a tool to the pod means editing that file, not `engine/Dockerfile`; the weekly tag component is what keeps the `latest`-at-build-time installs (rclone, sccache, gh, step, Gradle, selkies) from freezing.
+ - `sccache` uses Redis on Node B (`100.92.54.45:6380`) for its `fmt` / `clippy` / `test` steps. Do not `apt install sccache`; Debian's package lacks Redis support. Its `install-sccache.sh` resolves the latest GitHub release at CI run time and verifies it against the sha256 digest that release's own API response publishes — not a hardcoded version/checksum. **This repository does not use it**: `ci.yml` caches with `Swatinem/rust-cache` instead, because that Redis is a Node B service that has OOM-crash-looped and a build cache able to take CI down is the wrong trade when the runners are what is scarce.
+ - `mkdir -p web/dist && touch web/dist/.placeholder` before `clippy` and `test` so `rust-embed` compiles before the image build produces the real bundle. That is the repository-root `web/dist/`, which is what `engine/server/src/assets.rs` embeds (`#[folder = "../../web/dist/"]`). `ci.yml` builds the real bundle first and keeps the placeholder only as a guard.
+ - `mobile-apk` builds the Capacitor signed release APK and uploads it to Forgejo releases API tag `apk-latest`, not the generic-package registry. Signing material comes from Woodpecker secrets `mydevenv2_android_keystore_base64`, `mydevenv2_android_keystore_password`, `mydevenv2_android_key_alias`, and `mydevenv2_android_key_password`. Idempotence is delete-then-create using `scripts/forgejo-api.sh` from `indexarr/ops`. That keystore and that registry stayed with the forge; `release.yml` signs from GitHub secrets and publishes the APK as a workflow artefact.
+diff --git a/engine/Dockerfile b/engine/Dockerfile
+index 9663b9d..0f1f063 100644
+--- a/engine/Dockerfile
++++ b/engine/Dockerfile
+@@ -21,16 +21,25 @@
+ # stays lean without changing what the root `Dockerfile` (the core-only image,
+ # still published by .github/workflows) sees.
+ #
+-# Four stages:
+-#   1. web-build    — pnpm install + vite build of web/
+-#   2. server-build — cargo build --release of engine/server, embedding the bundle
+-#   3. core-build   — uv sync of the Python core into a self-contained venv
+-#   4. runtime      — Ubuntu 26.04 with the full TOOLING.md toolchain, sway,
+-#                     selkies-gstreamer, and both halves copied in
++# Stages:
++#   1. web-build     — pnpm install + vite build of web/
++#   2. chef/planner  — cargo-chef recipe: the dependency graph, without sources
++#      server-build  — deps compiled as their own layer, then the workspace
++#                      built on top with the bundle embedded
++#   3. core-build    — uv sync of the Python core into a self-contained venv
++#   4. runtime       — `FROM ${POD_BASE_IMAGE}` plus both halves + entrypoint
+ #
+ # Stage order matters in one place: rust-embed reads `web/dist` at *compile*
+ # time, so the web bundle is a build input to the Rust binary rather than a
+-# runtime asset. Stage 2 cannot start before stage 1 finishes.
++# runtime asset. Stage 2's *final* step cannot start before stage 1 finishes —
++# but its dependency layer can and does, which is the point of the split.
++#
++# The TOOLING.md toolchain — Node, the Rust dev toolchain, sway, selkies,
++# Java/Gradle, the Android SDK, Flutter — is no longer installed here. It is
++# `engine/Dockerfile.pod`, published as `vogt-pod-base:{lean,full}-*` and passed
++# in as `POD_BASE_IMAGE`. It was 22 of this image's 34 build minutes and none of
++# it depends on this repository's source; that file's header carries the
++# measurement.
+ #
+ # Why the core-only image at the repository root still exists: it is the
+ # hardened artifact (`read_only`, `cap_drop: [ALL]`, runnable as any uid) that
+@@ -80,17 +89,26 @@ ARG RUNTIME_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/ubuntu:26.04
+ # contains exactly what CI tested (NFR-Q5). Same pin as the root Dockerfile;
+ # they should move together.
+ ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.9.18
++# The dev-pod toolchain base — everything stage 4 used to install itself, and
++# 22 of this image's 34 build minutes. Built and published by
++# `.github/workflows/pod-base.yml` from `engine/Dockerfile.pod`; see either for
++# the variants and the tagging.
++#
++# CI always overrides this with a **digest**, resolved by that workflow. The
++# default here names a moving tag and is a readable placeholder for a local
++# build, not a supported way to produce a shipped image — which is why the
++# pin lives in the workflow rather than in this line, unlike the mirrored
++# bases above whose digests Renovate maintains here.
++ARG POD_BASE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean
+ # The interpreter the core runs on. Requested from uv rather than from the
+ # distribution: `requires-python = ">=3.11"` is satisfied by whatever Ubuntu
+ # ships, but "whatever Ubuntu ships" is not a version this repository chose,
+ # and it changes under us on a base-image bump.
+ ARG CORE_PYTHON=3.13
+-ARG ANDROID_CMDLINE_TOOLS_VERSION=15859902
+-ARG ANDROID_CMDLINE_TOOLS_SHA256=4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
+-ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.1
+-ARG ANDROID_PLATFORM_TOOLS_SHA256=d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
+-ARG FLUTTER_VERSION=3.44.9
+-ARG FLUTTER_SHA256=a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4efcb
++# The Android SDK and Flutter pins moved to `engine/Dockerfile.pod` along with
++# the installs that read them. They are the pod's toolchain, not this image's
++# content, and a pin that lives away from its only consumer is a pin that goes
++# stale without anything noticing.
+ # Off by default (prod). `.github/workflows/build.yml` passes
+ # INSTALL_AI_CLIENTS=true when the ref is the `dev` branch — the branch that
+ # also produces the `:dev` and `dev-<sha>` tags — to bake in codex + claude
+@@ -107,9 +125,10 @@ ARG FLUTTER_SHA256=a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4e
+ # A default is only safe while something is documented to override it — and
+ # the something has to exist.
+ ARG INSTALL_AI_CLIENTS=false
+-# Flutter is also dev-only: app CI pins this exact stable release, while the
+-# production MyDevEnv2 runtime has no reason to carry the large mobile SDK.
+-ARG INSTALL_FLUTTER=false
++# Flutter is also dev-only, and is now the thing that separates the two
++# published variants of the pod base rather than a build arg here: `dev` is
++# built on `vogt-pod-base:full-*`; main and every release on `:lean-*`.
++# See `engine/Dockerfile.pod`.
+ 
+ # ─── Stage 1: web bundle ────────────────────────────────────────────────────
+ FROM ${NODE_IMAGE} AS web-build
+@@ -120,27 +139,82 @@ COPY web/ ./
+ RUN pnpm build
+ 
+ # ─── Stage 2: rust binary with embedded web/ ────────────────────────────────
+-FROM ${RUST_IMAGE} AS server-build
++#
++# Split into a dependency bake and a workspace build via cargo-chef, and that
++# split is the whole point of this stage's shape.
++#
++# What it replaces: one `cargo build --release` behind
++# `--mount=type=cache,target=/app/engine/target`. Two things were wrong with
++# that. The first is that a BuildKit cache mount is *builder-local state* —
++# it lives in the buildkitd instance, not in a layer — so it is invisible to
++# `cache-from`/`cache-to` and cannot cross a runner. On a self-hosted fleet
++# where a job lands on whichever node-b worker is free, that mount was empty
++# on essentially every run: 458 crates compiled from nothing, every time,
++# with `codegen-units = 1` and thin LTO on top.
++#
++# The second is subtler and is the one that actually surprises people.
++# `server/src/assets.rs` embeds `../../web/dist/` with rust-embed, which reads
++# it at *compile* time — so the bundle is a build input to the crate. The old
++# stage copied it in before the single build step, which meant a stylesheet
++# change invalidated the layer and recompiled all 458 dependencies to embed a
++# different CSS file. Most of the Rust rebuilds this repository was paying for
++# were not caused by Rust changing.
++#
++# Both are fixed by making the dependency compile a real layer keyed on
++# nothing but `Cargo.toml`/`Cargo.lock`. Layers replicate through
++# `cache-from`/`cache-to` and therefore across the fleet; `web/dist` and the
++# crate sources are copied in *after* it, so a web-only or `server/src`-only
++# change recompiles two crates instead of four hundred and sixty.
++#
++# The cache mounts are gone rather than kept alongside, deliberately: a target
++# directory that is a cache mount is not in the layer, so keeping them would
++# have made the cook stage produce an empty layer and quietly restored the
++# original behaviour with more moving parts.
++FROM ${RUST_IMAGE} AS chef
++# Built from source rather than pulled from `lukemathwalker/cargo-chef`, which
++# is the usual advice: that image is on Docker Hub, and #33 is the whole reason
++# nothing in this repository builds `FROM` there. Compiling it costs a minute
++# on a cold cache and nothing on a warm one — this layer's inputs never change.
++#
++# Pinned, because cargo-chef parses the manifests and emits the recipe that
++# decides what the dependency layer contains: an unpinned version is a silent
++# input to what gets compiled.
++RUN cargo install cargo-chef --locked --version 0.1.78
+ # The layout inside this stage mirrors the repository's, because rust-embed
+ # resolves `../../web/dist/` against the *crate* directory. Build the workspace
+ # at /app/engine and the bundle lands where the macro already looks: put the
+ # crate at /app/server instead and it would read /web/dist, which is nothing.
+ WORKDIR /app/engine
++
++FROM chef AS planner
++COPY engine/Cargo.toml engine/Cargo.lock ./
++COPY engine/contract/Cargo.toml ./contract/Cargo.toml
++COPY engine/contract/src ./contract/src
++COPY engine/server/Cargo.toml ./server/Cargo.toml
++COPY engine/server/src ./server/src
++RUN cargo chef prepare --recipe-path /recipe.json
++
++FROM chef AS server-build
++# The recipe is a normalised description of the dependency graph only: it does
++# not change when a source file does, which is what makes the layer below
++# survive an ordinary commit.
++COPY --from=planner /recipe.json /recipe.json
++# The whole workspace, not `-p mydevenv2-server`: `contract` is a path
++# dependency of `server`, so the dependency set is the same either way, and
++# cooking the workspace keeps this line independent of which binaries the
++# workspace grows.
++RUN cargo chef cook --release --recipe-path /recipe.json
++
++# Only now the things that change on nearly every commit.
+ COPY engine/Cargo.toml engine/Cargo.lock ./
+ COPY engine/contract/Cargo.toml ./contract/Cargo.toml
+ COPY engine/contract/src ./contract/src
+ COPY engine/server/Cargo.toml ./server/Cargo.toml
+ COPY engine/server/src ./server/src
+ COPY --from=web-build /app/web/dist /app/web/dist
+-# BuildKit cache mounts keep registry/git deps + the target dir warm across
+-# rebuilds without the brittle "dummy main.rs to prime deps" dance.
+-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+-    --mount=type=cache,target=/usr/local/cargo/git \
+-    --mount=type=cache,target=/app/engine/target \
+-    cargo build --release -p mydevenv2-server \
++RUN cargo build --release -p mydevenv2-server \
+     && cp target/release/mydevenv2-server /usr/local/bin/mydevenv2-server \
+     && strip /usr/local/bin/mydevenv2-server
+-
+ FROM ${UV_IMAGE} AS uv
+ 
+ # ─── Stage 3: the Python core's virtualenv ──────────────────────────────────
+@@ -184,229 +258,56 @@ RUN --mount=type=cache,target=/root/.cache/uv \
+     uv sync --locked --no-dev --no-editable \
+     && /opt/vogt/.venv/bin/vogt --version
+ 
+-# ─── Stage 4: runtime + dev tooling ─────────────────────────────────────────
+-FROM ${RUNTIME_IMAGE}
+-# Android SDK lives in /opt (NOT ~/Android/Sdk): the runtime bind-mounts the
+-# host home over /home/sprooty, so anything under $HOME vanishes at runtime —
+-# same reason gradle/uv/pnpm are installed system-wide below.
++# ─── Stage 4: the shipped image ─────────────────────────────────────────────
+ #
+-# PATH puts /usr/local/{s,}bin ahead of the per-user npm-global/local dirs so
+-# pod-provided tools (notably the `codex` full-access wrapper installed below
+-# when INSTALL_AI_CLIENTS=true) always win over a same-named binary a user or
+-# a tool like theclawbay installs into their persisted $HOME. Confirmed
+-# 2026-07-31: a theclawbay-managed ~/.npm-global/bin/codex shadowed the
+-# system wrapper under the old ordering, silently running Codex with its
+-# nested sandbox/approvals still active instead of the pod-level bypass.
+-ENV DEBIAN_FRONTEND=noninteractive \
+-    LANG=C.UTF-8 \
+-    NPM_CONFIG_PREFIX=/home/sprooty/.npm-global \
+-    JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+-    ANDROID_HOME=/opt/android-sdk \
+-    ANDROID_SDK_ROOT=/opt/android-sdk \
+-    FLUTTER_ROOT=/opt/flutter \
+-    RUSTUP_HOME=/opt/rust/rustup \
+-    CARGO_HOME=/opt/rust/cargo \
+-    PATH=/usr/local/sbin:/usr/local/bin:/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/opt/flutter/bin:/opt/flutter/bin/cache/dart-sdk/bin:/opt/rust/cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/sbin:/usr/bin:/sbin:/bin
+-
+-# Core system + dev utilities (per TOOLING.md)
+-RUN apt-get update && apt-get install -y --no-install-recommends \
+-        ca-certificates curl wget gnupg lsb-release \
+-        git git-lfs vim nano less man-db sudo \
+-        build-essential pkg-config cmake clang lld nasm \
+-        jq ripgrep fd-find bat rsync \
+-        openssh-client openssh-server iputils-ping netcat-openbsd dnsutils xdg-utils \
+-        htop tree file unzip zip \
+-        musl-tools gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+-        libssl-dev libclang-dev protobuf-compiler \
+-        python3 python3-pip python3-venv python3-dev \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-# Node 22 + pnpm. Override NPM_CONFIG_PREFIX for this one install so pnpm
+-# lands in /usr/local (survives the runtime /home/sprooty bind mount).
+-# User-installed globals go to $NPM_CONFIG_PREFIX (/home/sprooty/.npm-global).
+-ARG NODE_MAJOR=22
+-RUN install -m 0755 -d /usr/share/keyrings \
+-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+-       | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+-    && chmod 0644 /usr/share/keyrings/nodesource.gpg \
+-    && arch="$(dpkg --print-architecture)" \
+-    && printf 'Types: deb\nURIs: https://deb.nodesource.com/node_%s.x\nSuites: nodistro\nComponents: main\nArchitectures: %s\nSigned-By: /usr/share/keyrings/nodesource.gpg\n' \
+-       "${NODE_MAJOR}" "${arch}" > /etc/apt/sources.list.d/nodesource.sources \
+-    && printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' \
+-       > /etc/apt/preferences.d/nodejs \
+-    && printf 'Package: nsolid\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' \
+-       > /etc/apt/preferences.d/nsolid \
+-    && apt-get update \
+-    && apt-get install -y --no-install-recommends nodejs \
+-    && npm install -g --prefix=/usr/local pnpm \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-# Docker CLI (DooD pattern — docker.sock mounted from host)
+-RUN . /etc/os-release \
+-    && install -m 0755 -d /etc/apt/keyrings \
+-    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+-       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+-    && chmod a+r /etc/apt/keyrings/docker.gpg \
+-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+-            https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" \
+-       > /etc/apt/sources.list.d/docker.list \
+-    && apt-get update \
+-    && apt-get install -y --no-install-recommends \
+-        docker-ce-cli \
+-        docker-compose-plugin \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-# GitHub CLI
+-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+-       | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
+-            https://cli.github.com/packages stable main" \
+-       > /etc/apt/sources.list.d/github-cli.list \
+-    && apt-get update && apt-get install -y --no-install-recommends gh \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-# GitHub MCP server — agent-facing MCP access to the GitHub API (issues, PRs,
+-# repos, actions, ...). No apt repo; resolve the latest release via the API
+-# and verify the Linux amd64 tarball against the sha256 digest that same API
+-# response publishes, same pattern as the step CLI and sccache installs above.
+-RUN api="https://api.github.com/repos/github/github-mcp-server/releases/latest" \
+-    && curl -fsSL "$api" -o /tmp/github-mcp-server-release.json \
+-    && asset_url=$(jq -r '.assets[] | select(.name == "github-mcp-server_Linux_x86_64.tar.gz") | .browser_download_url' /tmp/github-mcp-server-release.json) \
+-    && asset_digest=$(jq -r '.assets[] | select(.name == "github-mcp-server_Linux_x86_64.tar.gz") | .digest | ltrimstr("sha256:")' /tmp/github-mcp-server-release.json) \
+-    && curl -fsSL "$asset_url" -o /tmp/github-mcp-server.tar.gz \
+-    && echo "${asset_digest}  /tmp/github-mcp-server.tar.gz" | sha256sum -c - \
+-    && tar -xzf /tmp/github-mcp-server.tar.gz -C /tmp \
+-    && install -m 755 /tmp/github-mcp-server /usr/local/bin/github-mcp-server \
+-    && rm -f /tmp/github-mcp-server-release.json /tmp/github-mcp-server.tar.gz /tmp/github-mcp-server
+-
+-# Tailscale (TUN device must be passed in at runtime)
+-RUN . /etc/os-release \
+-    && curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${VERSION_CODENAME}.noarmor.gpg" \
+-       > /usr/share/keyrings/tailscale-archive-keyring.gpg \
+-    && echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] \
+-            https://pkgs.tailscale.com/stable/ubuntu ${VERSION_CODENAME} main" \
+-       > /etc/apt/sources.list.d/tailscale.list \
+-    && apt-get update && apt-get install -y --no-install-recommends tailscale \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-# rclone — official installer resolves + verifies latest itself.
+-RUN curl -fsSL https://rclone.org/install.sh | bash
+-
+-# Infisical CLI
+-RUN install -m 0755 -d /usr/share/keyrings \
+-    && curl -1sLf https://artifacts-cli.infisical.com/infisical.gpg \
+-       | gpg --dearmor -o /usr/share/keyrings/infisical-archive-keyring.gpg \
+-    && chmod 0644 /usr/share/keyrings/infisical-archive-keyring.gpg \
+-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/infisical-archive-keyring.gpg] https://artifacts-cli.infisical.com/deb stable main" \
+-       > /etc/apt/sources.list.d/infisical.list \
+-    && apt-get update \
+-    && apt-get install -y --no-install-recommends infisical \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-# Smallstep `step` CLI — used to self-issue short-lived SSH certificates against
+-# the step-ca on Node B (`step ssh certificate ...`), the only path to host-shell
+-# SSH for in-pod agents. Installed from the official .deb (lands at /usr/bin/step).
+-# No apt repo for this one, and GitHub doesn't offer a stable "latest" download
+-# URL — resolve the latest release tag via the API, then verify the asset
+-# against the sha256 digest that same API response publishes.
+-RUN api="https://api.github.com/repos/smallstep/cli/releases/latest" \
+-    && curl -fsSL "$api" -o /tmp/step-release.json \
+-    && step_version=$(jq -r '.tag_name | ltrimstr("v")' /tmp/step-release.json) \
+-    && asset_url=$(jq -r --arg v "$step_version" '.assets[] | select(.name == "step-cli_" + $v + "-1_amd64.deb") | .browser_download_url' /tmp/step-release.json) \
+-    && asset_digest=$(jq -r --arg v "$step_version" '.assets[] | select(.name == "step-cli_" + $v + "-1_amd64.deb") | .digest | ltrimstr("sha256:")' /tmp/step-release.json) \
+-    && curl -fsSL "$asset_url" -o /tmp/step-cli.deb \
+-    && echo "${asset_digest}  /tmp/step-cli.deb" | sha256sum -c - \
+-    && apt-get install -y --no-install-recommends /tmp/step-cli.deb \
+-    && rm -f /tmp/step-cli.deb /tmp/step-release.json \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-# Sway (headless Wayland compositor) + minimal apps for in-pod GUI testing
+-RUN apt-get update && apt-get install -y --no-install-recommends \
+-        sway swaybg foot wofi grim slurp wl-clipboard xdg-desktop-portal-wlr \
+-        xwayland chromium \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-# GStreamer + WebRTC bits for in-pod GUI streaming.
++# Everything this stage used to install itself now lives in
++# `engine/Dockerfile.pod` and arrives as `POD_BASE_IMAGE`. It was 1344s of a
++# 34 minute build and not one second of it depended on a line of this
++# repository's source — see that file's header for the measurement and the
++# variant/tagging scheme.
+ #
+-# Selkies-GStreamer was previously installed best-effort because the PyPI name
+-# was unstable. Installs latest and records the resolved version (via `pip3
+-# show`) in /etc/mydevenv2/features.json so the server can expose accurate
+-# "what's available" state via /api/config without misleading users about GUI
+-# support.
+-RUN apt-get update && apt-get install -y --no-install-recommends \
+-        gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+-        gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+-        gstreamer1.0-libav gstreamer1.0-tools \
+-        python3-pip libgstreamer1.0-0 \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-RUN install -d /etc/mydevenv2 \
+-    && if pip3 install --break-system-packages --no-cache-dir selkies; then \
+-        resolved="$(pip3 show selkies 2>/dev/null | sed -n 's/^Version: //p')"; \
+-        echo "{\"selkies\":\"${resolved}\"}" > /etc/mydevenv2/features.json; \
+-    else \
+-        echo "selkies unavailable — GUI streaming disabled in this image" >&2; \
+-        echo "{\"selkies\":null}" > /etc/mydevenv2/features.json; \
+-    fi
+-
+-# Rust toolchain (full dev env so user can build inside the pod too)
+-ARG SPROOTY_UID=1000
+-ARG SPROOTY_GID=1000
+-# Ubuntu 26.04 ships a default `ubuntu` user at UID/GID 1000 — remove it so
+-# we own those numbers (matters because the host bind-mounts /home/sprooty
+-# expect that uid).
+-RUN userdel -r ubuntu 2>/dev/null || true \
+-    && groupdel ubuntu 2>/dev/null || true \
+-    && groupadd -g ${SPROOTY_GID} sprooty \
+-    && useradd -m -s /bin/bash -u ${SPROOTY_UID} -g ${SPROOTY_GID} sprooty \
+-    && usermod -aG sudo sprooty \
+-    && echo 'sprooty ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-sprooty
+-
+-# Rust lives in /opt/rust, NOT ~/.rustup + ~/.cargo — same rule as the Android
+-# SDK above: the runtime bind-mounts the host home over /home/sprooty, so a
+-# toolchain installed under $HOME is invisible at runtime. It was installed
+-# under $HOME until 2026-07-31, which silently cost the pod every cargo-installed
+-# tool (cargo-deb, cargo-zigbuild, cargo-xwin, cargo-watch, rust-analyzer-mcp,
+-# sccache) and every cross-compile target; only whatever rustup the home volume
+-# happened to hold was actually reachable.
++# `POD_BASE_IMAGE` is declared with the other base images at the top of this
++# file, because an ARG referenced by a FROM has to be in the global scope —
++# one declared down here would belong to the preceding stage and expand to
++# nothing, which is a `FROM` with no argument rather than an error naming the
++# variable.
++FROM ${POD_BASE_IMAGE}
++
++# The agent CLIs stayed here rather than moving into the base, and that is a
++# deliberate exception to "the toolchain lives in the base".
+ #
+-# Consequence to keep in mind: the crate registry cache now lives at
+-# /opt/rust/cargo/registry inside the image rather than on the persisted home
+-# volume, so crates re-download after an image redeploy. sccache -> Redis on
+-# Node B still covers recompilation.
+-RUN mkdir -p /opt/rust && chown -R sprooty:sprooty /opt/rust
+-
+-USER sprooty
+-WORKDIR /home/sprooty
+-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+-       | sh -s -- -y --default-toolchain stable --profile minimal \
+-           --no-modify-path \
+-           --component rustfmt --component clippy \
+-    && rustup component add rust-analyzer \
+-    && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-pc-windows-gnu \
+-    && cargo install --locked cargo-deb \
+-    && cargo install --locked cargo-zigbuild \
+-    && cargo install --locked cargo-xwin \
+-    && cargo install --locked cargo-watch \
+-    && cargo install --locked rust-analyzer-mcp \
+-    && test -x /opt/rust/cargo/bin/cargo-zigbuild \
+-    && test -x /opt/rust/cargo/bin/rust-analyzer-mcp
+-
+-# opencode's installer hardcodes $HOME/.opencode/bin with no override, so
+-# relocate the binary to /usr/local/bin afterwards — otherwise the runtime
+-# /home/sprooty bind mount hides it, same as the Rust tools above.
+-RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
+-    && sudo install -m 755 /home/sprooty/.opencode/bin/opencode /usr/local/bin/opencode \
+-    && rm -rf /home/sprooty/.opencode
+-
++# These three are the one part of the toolchain documented as intentionally
++# unpinned — always latest at build time, because dev is where their churn
++# should be absorbed first (see the `INSTALL_AI_CLIENTS` note at the top of
++# this file, and #23 for what happened when nothing overrode the default).
++# A weekly-rebuilt base image would have turned that into "latest as of last
++# Monday" without anybody deciding to, and turning on a build cache would
++# have frozen them outright: the RUN below is textually identical from one
++# commit to the next, so a warm cache would reuse it forever.
++#
++# `AI_CLIENTS_EPOCH` is what keeps the promise honest. CI sets it to the
++# current date, so the layer is reused within a day and rebuilt across one:
++# fresh clients daily, for ~110s once a day.
++#
++# It goes here, *before* the two halves are copied in, and that ordering is
++# the whole reason the 110s is once a day rather than once a commit. The
++# server binary changes on every commit, so every layer after that COPY is
++# rebuilt every time regardless; anything placed below it inherits that rate.
++# Above it, this layer's only input is the epoch.
++#
++# Setting the arg to a fixed string instead pins the clients to whatever a
++# cache holds — the right behaviour for a rebuild meant to reproduce an
++# earlier image, the wrong one for CI, which is why the default is `pinned`
++# and CI overrides it rather than the other way round.
+ ARG INSTALL_AI_CLIENTS
++ARG AI_CLIENTS_EPOCH=pinned
+ # --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
+ # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
+-# mount — same reasoning as the system pnpm install above. sudo because
+-# /usr/local isn't sprooty-writable. The dev pod is the trusted isolation
+-# boundary, so install the real Codex entry point under libexec and expose the
+-# codex-full-access wrapper as `codex`. This overrides persisted per-user
+-# workspace-write/network restrictions for every repo under ~/Working.
++# mount — same reasoning as the system pnpm install in the base. The dev pod
++# is the trusted isolation boundary, so install the real Codex entry point
++# under libexec and expose the codex-full-access wrapper as `codex`. This
++# overrides persisted per-user workspace-write/network restrictions for every
++# repo under ~/Working.
+ #
+ # `theclawbay` is here for the reason the other two already are, learned the
+ # hard way: it was never installed by any image, in MyDevEnv2 or here. It was
+@@ -415,138 +316,24 @@ ARG INSTALL_AI_CLIENTS
+ # nothing was red. A tool the pod is expected to carry belongs in the image
+ # under /usr/local, where the runtime bind mount cannot take it away. That it
+ # also installs *into* $HOME is unchanged and still handled by the PATH
+-# ordering above; this only fixes where `theclawbay` itself lives.
++# ordering in the base; this only fixes where `theclawbay` itself lives.
++#
++# No `sudo` any more: the base hands this stage over as root, where the
++# original ran as `sprooty` and escalated for every line of it.
+ COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
+ RUN if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
+-        sudo npm install -g --prefix=/usr/local @openai/codex @anthropic-ai/claude-code theclawbay \
+-        && sudo install -d /usr/local/libexec \
++        echo "installing agent CLIs (epoch ${AI_CLIENTS_EPOCH})" \
++        && npm install -g --prefix=/usr/local @openai/codex @anthropic-ai/claude-code theclawbay \
++        && install -d /usr/local/libexec \
+         && codex_target="$(readlink -f /usr/local/bin/codex)" \
+-        && sudo ln -s "$codex_target" /usr/local/libexec/codex-real \
+-        && sudo ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex ; \
++        && ln -s "$codex_target" /usr/local/libexec/codex-real \
++        && ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex ; \
+     fi
+ 
+-# sccache (apt package lacks Redis support; pull from GitHub). Resolve latest
+-# release via the API and verify against the sha256 digest that same
+-# response publishes for the asset — no hardcoded checksum to keep in sync.
+-RUN api="https://api.github.com/repos/mozilla/sccache/releases/latest" \
+-    && curl -fsSL "$api" -o /tmp/sccache-release.json \
+-    && sccache_version=$(jq -r '.tag_name | ltrimstr("v")' /tmp/sccache-release.json) \
+-    && asset_name="sccache-v${sccache_version}-x86_64-unknown-linux-musl.tar.gz" \
+-    && asset_url=$(jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .browser_download_url' /tmp/sccache-release.json) \
+-    && asset_digest=$(jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .digest | ltrimstr("sha256:")' /tmp/sccache-release.json) \
+-    && curl -fsSL "$asset_url" -o /tmp/sccache.tar.gz \
+-    && echo "${asset_digest}  /tmp/sccache.tar.gz" | sha256sum -c - \
+-    && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+-    && mv "/tmp/sccache-v${sccache_version}-x86_64-unknown-linux-musl/sccache" /opt/rust/cargo/bin/sccache \
+-    && chmod +x /opt/rust/cargo/bin/sccache \
+-    && rm -f /tmp/sccache-release.json /tmp/sccache.tar.gz
+-
+-USER root
+-
+-# Java + Gradle. Installed globally (/opt + a /usr/local/bin symlink) so they
+-# survive the /home/sprooty bind mount at runtime. gradle finds the JDK via
+-# `java` on PATH, so no JAVA_HOME juggling needed. This system gradle is only
+-# a convenience for ad-hoc use — the actual mobile build is driven by the
+-# committed wrapper (mobile/android/gradlew), which pins its own version
+-# independently, so unpinning this one doesn't affect build reproducibility.
+-# services.gradle.org publishes a "current" endpoint with the download URL
+-# and checksum together, so no separate lookup needed.
+-RUN apt-get update && apt-get install -y --no-install-recommends \
+-        openjdk-21-jdk-headless \
+-    && rm -rf /var/lib/apt/lists/* \
+-    && curl -fsSL https://services.gradle.org/versions/current -o /tmp/gradle-current.json \
+-    && gradle_version=$(jq -r '.version' /tmp/gradle-current.json) \
+-    && gradle_checksum=$(jq -r '.checksum' /tmp/gradle-current.json) \
+-    && curl -fsSL "https://services.gradle.org/distributions/gradle-${gradle_version}-bin.zip" \
+-       -o /tmp/gradle.zip \
+-    && echo "${gradle_checksum}  /tmp/gradle.zip" | sha256sum -c - \
+-    && unzip -q /tmp/gradle.zip -d /opt \
+-    && ln -s "/opt/gradle-${gradle_version}/bin/gradle" /usr/local/bin/gradle \
+-    && rm /tmp/gradle.zip /tmp/gradle-current.json
+-
+-# Android SDK (for the Capacitor android project under mobile/). Installed to
+-# /opt/android-sdk so it survives the /home/sprooty bind mount at runtime — a
+-# ~/Android/Sdk install would be shadowed. sdkmanager/adb/apkanalyzer are put
+-# on PATH via the ANDROID_HOME entries in the stage-3 ENV above. The committed
+-# Gradle wrapper (mobile/android/gradlew) drives builds; system gradle is only
+-# a convenience for ad-hoc use.
+-#
+-# Package set per the dev-pod spec: pinned command-line tools + platform-tools,
+-# platforms;android-35 + android-36, build-tools;35.0.0 + 36.0.0.
+-ARG ANDROID_CMDLINE_TOOLS_VERSION
+-ARG ANDROID_CMDLINE_TOOLS_SHA256
+-ARG ANDROID_PLATFORM_TOOLS_VERSION
+-ARG ANDROID_PLATFORM_TOOLS_SHA256
+-RUN install -d /opt/android-sdk/cmdline-tools \
+-    && curl -fsSL \
+-        "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" \
+-        -o /tmp/cmdline-tools.zip \
+-    && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/cmdline-tools.zip" | sha256sum -c - \
+-    && unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools \
+-    # The zip unpacks to a top-level cmdline-tools/; sdkmanager expects it at
+-    # cmdline-tools/latest/.
+-    && mv /tmp/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest \
+-    && curl -fsSL \
+-        "https://dl.google.com/android/repository/platform-tools_r${ANDROID_PLATFORM_TOOLS_VERSION}-linux.zip" \
+-        -o /tmp/platform-tools.zip \
+-    && echo "${ANDROID_PLATFORM_TOOLS_SHA256}  /tmp/platform-tools.zip" | sha256sum -c - \
+-    && unzip -q /tmp/platform-tools.zip -d /opt/android-sdk \
+-    && rm -rf /tmp/cmdline-tools.zip /tmp/cmdline-tools \
+-        /tmp/platform-tools.zip \
+-    # Accept licenses first (yes feeds the interactive prompts), then install.
+-    && yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null \
+-    && /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --install \
+-        "platforms;android-35" \
+-        "platforms;android-36" \
+-        "build-tools;35.0.0" \
+-        "build-tools;36.0.0" \
+-    # Owned by sprooty so in-pod Gradle builds can write license acks and any
+-    # auto-managed SDK components at runtime (the SDK lives in /opt, which is
+-    # not bind-mounted, so this ownership persists from the image).
+-    && chown -R ${SPROOTY_UID}:${SPROOTY_GID} /opt/android-sdk
+-
+-# Flutter + its bundled Dart SDK are installed only in the dev image. Keep the
+-# SDK under /opt so the runtime /home/sprooty bind mount cannot hide it. The
+-# archive and checksum are pinned to the official stable Linux release entry;
+-# leave the tree sprooty-owned because Flutter manages its artifact cache there.
+-ARG INSTALL_FLUTTER
+-ARG FLUTTER_VERSION
+-ARG FLUTTER_SHA256
+-RUN if [ "$INSTALL_FLUTTER" = "true" ]; then \
+-        apt-get update \
+-        && apt-get install -y --no-install-recommends xz-utils libglu1-mesa \
+-        && rm -rf /var/lib/apt/lists/* \
+-        && curl -fsSL \
+-          "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
+-          -o /tmp/flutter.tar.xz \
+-        && echo "${FLUTTER_SHA256}  /tmp/flutter.tar.xz" | sha256sum -c - \
+-        && tar -xJf /tmp/flutter.tar.xz -C /opt \
+-        && rm /tmp/flutter.tar.xz \
+-        && chown -R ${SPROOTY_UID}:${SPROOTY_GID} /opt/flutter \
+-        && command -v flutter \
+-        && command -v dart \
+-        && sudo -H -u sprooty env "PATH=${PATH}" flutter --version \
+-        && sudo -H -u sprooty env "PATH=${PATH}" dart --version ; \
+-    fi
+-
+-# Python tools the user expects (uv, ruff, pytest). Installed globally into
+-# /usr/local (system pip lands scripts in /usr/local/bin) so they survive the
+-# /home/sprooty bind mount — a --user install would be shadowed at runtime.
+-# Fail the build if they don't install — silent fallback would leave the pod
+-# with broken Python tooling that surfaces as cryptic command-not-found errors.
+-#
+-# cadastre[mcp-client] lands the cadastre-mcp-remote console script the
+-# mydevenv2-cadastre-mcp wrapper execs. Now installable at build time because
+-# cadastre publishes to PyPI as of v0.1.0 — previously this had to happen at
+-# runtime (deploy/mcp-bootstrap.sh's install_bridge) from the mounted
+-# workspace checkout, since the package wasn't available to the build
+-# context at all. That runtime install is left in place as a no-op fallback
+-# (it checks `command -v cadastre-mcp-remote` first) for a workspace with a
+-# newer cadastre than this image shipped.
+-RUN pip3 install --break-system-packages --no-cache-dir uv ruff pytest "cadastre[mcp-client]"
+-
+-# The server binary (built in stage 2 with the web bundle embedded; cache
+-# mounts in stage 2 mean we have to copy out of /usr/local/bin, not /app).
++# The server binary, built in stage 2 with the web bundle embedded. Copied
++# from /usr/local/bin rather than from the target directory because that is
++# where stage 2 installs it; it stays that way now the cache mounts are gone,
++# since a stage boundary is a cleaner contract than a build-profile path.
+ COPY --from=server-build /usr/local/bin/mydevenv2-server /usr/local/bin/mydevenv2-server
+ RUN chmod +x /usr/local/bin/mydevenv2-server
+ 
+@@ -573,6 +360,11 @@ RUN ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt \
+ # uid ${SPROOTY_UID} owning /home/sprooty. A fresh named volume is seeded from
+ # this ownership, so getting it wrong here surfaces on volume *recreation*,
+ # which usually means during a restore.
++# Redeclared here because the stage that used to declare them is now the pod
++# base. They must agree with the uid/gid that base created `sprooty` at —
++# `tests/test_deploy.py` asserts on ownership rather than trusting that they do.
++ARG SPROOTY_UID=1000
++ARG SPROOTY_GID=1000
+ RUN install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0750 /var/lib/vogt
+ 
+ # Runtime scripts. Agent-specific CLIs are optional; these helpers only broker
+diff --git a/engine/Dockerfile.pod b/engine/Dockerfile.pod
+new file mode 100644
+index 0000000..cd85daf
+--- /dev/null
++++ b/engine/Dockerfile.pod
+@@ -0,0 +1,396 @@
++# syntax=docker/dockerfile:1
++#
++# The dev-pod toolchain base (`ghcr.io/thedancingdeveloper-org/vogt-pod-base`).
++#
++# This file is everything the merged image's runtime stage used to install
++# inline and none of what it builds. That split exists because the two halves
++# have completely different rates of change and the build was paying the slow
++# one's price on every push of the fast one.
++#
++# Measured on the `dev` build of 2026-08-18, before the split: the merged
++# image took 34 minutes, of which **1344s — 22 minutes — was this file's
++# contents**, against 215s for `cargo build --release` and 178s for the core's
++# venv. Nothing in here reads a line of `src/`, `engine/*/src/` or `web/`, so
++# every one of those 22 minutes was spent reinstalling an unchanged toolchain
++# because a Python module or a stylesheet had moved.
++#
++# Published as two variants, because the pod's shape is a per-stream decision
++# and always was (`.github/workflows/build.yml` has passed the dev/prod split
++# as build args since #23):
++#
++#   lean  — INSTALL_FLUTTER=false. main, and every release.
++#   full  — INSTALL_FLUTTER=true.  dev, which is where the mobile work lands.
++#
++# **Tagged by content, not by a moving name.** `.github/workflows/pod-base.yml`
++# tags each build `<variant>-<hash>-<week>`, where `<hash>` is a digest of this
++# file and `<week>` is the ISO week. A change here therefore produces a new tag
++# immediately, and an unchanged file still gets rebuilt once a week — which is
++# not cosmetic: `rclone`, `sccache`, `gh`, the `step` CLI, `github-mcp-server`,
++# Gradle and `selkies` all resolve *latest* at build time, so a purely
++# content-addressed tag would freeze them at whatever the first build saw and
++# call it reproducibility. The weekly component is what keeps "latest" meaning
++# something while still letting an ordinary push hit a cache.
++#
++# The consuming build passes the resolved reference in by **digest**, as
++# `POD_BASE_IMAGE` (see `engine/Dockerfile`), so what the merged image is built
++# on is pinned in the same way and to the same standard as every other base here.
++#
++# What deliberately did *not* move into this file: the agent CLIs
++# (`@openai/codex`, `@anthropic-ai/claude-code`, `theclawbay`). They are the
++# one part of the toolchain that is documented as intentionally unpinned and
++# expected to move fast, and a base image rebuilt weekly would have quietly
++# turned "latest at build time" into "latest as of last Monday". They stay in
++# `engine/Dockerfile`, cache-bucketed by day. See the note there.
++
++ARG RUNTIME_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/ubuntu:26.04
++ARG ANDROID_CMDLINE_TOOLS_VERSION=15859902
++ARG ANDROID_CMDLINE_TOOLS_SHA256=4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583
++ARG ANDROID_PLATFORM_TOOLS_VERSION=37.0.1
++ARG ANDROID_PLATFORM_TOOLS_SHA256=d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
++ARG FLUTTER_VERSION=3.44.9
++ARG FLUTTER_SHA256=a9120fa4a01048bdef438ddc3a2d4b7389662ea98a95db86eeaf10382bc4efcb
++# Flutter is dev-only: app CI pins this exact stable release, while production
++# has no reason to carry the large mobile SDK. This is what separates the two
++# published variants.
++ARG INSTALL_FLUTTER=false
++
++FROM ${RUNTIME_IMAGE}
++# Android SDK lives in /opt (NOT ~/Android/Sdk): the runtime bind-mounts the
++# host home over /home/sprooty, so anything under $HOME vanishes at runtime —
++# same reason gradle/uv/pnpm are installed system-wide below.
++#
++# PATH puts /usr/local/{s,}bin ahead of the per-user npm-global/local dirs so
++# pod-provided tools (notably the `codex` full-access wrapper that
++# `engine/Dockerfile` installs on top of this base when INSTALL_AI_CLIENTS=true)
++# always win over a same-named binary a user or a tool like theclawbay installs
++# into their persisted $HOME. Confirmed
++# 2026-07-31: a theclawbay-managed ~/.npm-global/bin/codex shadowed the
++# system wrapper under the old ordering, silently running Codex with its
++# nested sandbox/approvals still active instead of the pod-level bypass.
++ENV DEBIAN_FRONTEND=noninteractive \
++    LANG=C.UTF-8 \
++    NPM_CONFIG_PREFIX=/home/sprooty/.npm-global \
++    JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
++    ANDROID_HOME=/opt/android-sdk \
++    ANDROID_SDK_ROOT=/opt/android-sdk \
++    FLUTTER_ROOT=/opt/flutter \
++    RUSTUP_HOME=/opt/rust/rustup \
++    CARGO_HOME=/opt/rust/cargo \
++    PATH=/usr/local/sbin:/usr/local/bin:/home/sprooty/.npm-global/bin:/home/sprooty/.local/bin:/opt/flutter/bin:/opt/flutter/bin/cache/dart-sdk/bin:/opt/rust/cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/36.0.0:/usr/sbin:/usr/bin:/sbin:/bin
++
++# Core system + dev utilities (per TOOLING.md)
++RUN apt-get update && apt-get install -y --no-install-recommends \
++        ca-certificates curl wget gnupg lsb-release \
++        git git-lfs vim nano less man-db sudo \
++        build-essential pkg-config cmake clang lld nasm \
++        jq ripgrep fd-find bat rsync \
++        openssh-client openssh-server iputils-ping netcat-openbsd dnsutils xdg-utils \
++        htop tree file unzip zip \
++        musl-tools gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
++        libssl-dev libclang-dev protobuf-compiler \
++        python3 python3-pip python3-venv python3-dev \
++    && rm -rf /var/lib/apt/lists/*
++
++# Node 22 + pnpm. Override NPM_CONFIG_PREFIX for this one install so pnpm
++# lands in /usr/local (survives the runtime /home/sprooty bind mount).
++# User-installed globals go to $NPM_CONFIG_PREFIX (/home/sprooty/.npm-global).
++ARG NODE_MAJOR=22
++RUN install -m 0755 -d /usr/share/keyrings \
++    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
++       | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
++    && chmod 0644 /usr/share/keyrings/nodesource.gpg \
++    && arch="$(dpkg --print-architecture)" \
++    && printf 'Types: deb\nURIs: https://deb.nodesource.com/node_%s.x\nSuites: nodistro\nComponents: main\nArchitectures: %s\nSigned-By: /usr/share/keyrings/nodesource.gpg\n' \
++       "${NODE_MAJOR}" "${arch}" > /etc/apt/sources.list.d/nodesource.sources \
++    && printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' \
++       > /etc/apt/preferences.d/nodejs \
++    && printf 'Package: nsolid\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' \
++       > /etc/apt/preferences.d/nsolid \
++    && apt-get update \
++    && apt-get install -y --no-install-recommends nodejs \
++    && npm install -g --prefix=/usr/local pnpm \
++    && rm -rf /var/lib/apt/lists/*
++
++# Docker CLI (DooD pattern — docker.sock mounted from host)
++RUN . /etc/os-release \
++    && install -m 0755 -d /etc/apt/keyrings \
++    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
++       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
++    && chmod a+r /etc/apt/keyrings/docker.gpg \
++    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
++            https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" \
++       > /etc/apt/sources.list.d/docker.list \
++    && apt-get update \
++    && apt-get install -y --no-install-recommends \
++        docker-ce-cli \
++        docker-compose-plugin \
++    && rm -rf /var/lib/apt/lists/*
++
++# GitHub CLI
++RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
++       | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
++    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
++            https://cli.github.com/packages stable main" \
++       > /etc/apt/sources.list.d/github-cli.list \
++    && apt-get update && apt-get install -y --no-install-recommends gh \
++    && rm -rf /var/lib/apt/lists/*
++
++# GitHub MCP server — agent-facing MCP access to the GitHub API (issues, PRs,
++# repos, actions, ...). No apt repo; resolve the latest release via the API
++# and verify the Linux amd64 tarball against the sha256 digest that same API
++# response publishes, same pattern as the step CLI and sccache installs above.
++RUN api="https://api.github.com/repos/github/github-mcp-server/releases/latest" \
++    && curl -fsSL "$api" -o /tmp/github-mcp-server-release.json \
++    && asset_url=$(jq -r '.assets[] | select(.name == "github-mcp-server_Linux_x86_64.tar.gz") | .browser_download_url' /tmp/github-mcp-server-release.json) \
++    && asset_digest=$(jq -r '.assets[] | select(.name == "github-mcp-server_Linux_x86_64.tar.gz") | .digest | ltrimstr("sha256:")' /tmp/github-mcp-server-release.json) \
++    && curl -fsSL "$asset_url" -o /tmp/github-mcp-server.tar.gz \
++    && echo "${asset_digest}  /tmp/github-mcp-server.tar.gz" | sha256sum -c - \
++    && tar -xzf /tmp/github-mcp-server.tar.gz -C /tmp \
++    && install -m 755 /tmp/github-mcp-server /usr/local/bin/github-mcp-server \
++    && rm -f /tmp/github-mcp-server-release.json /tmp/github-mcp-server.tar.gz /tmp/github-mcp-server
++
++# Tailscale (TUN device must be passed in at runtime)
++RUN . /etc/os-release \
++    && curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${VERSION_CODENAME}.noarmor.gpg" \
++       > /usr/share/keyrings/tailscale-archive-keyring.gpg \
++    && echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] \
++            https://pkgs.tailscale.com/stable/ubuntu ${VERSION_CODENAME} main" \
++       > /etc/apt/sources.list.d/tailscale.list \
++    && apt-get update && apt-get install -y --no-install-recommends tailscale \
++    && rm -rf /var/lib/apt/lists/*
++
++# rclone — official installer resolves + verifies latest itself.
++RUN curl -fsSL https://rclone.org/install.sh | bash
++
++# Infisical CLI
++RUN install -m 0755 -d /usr/share/keyrings \
++    && curl -1sLf https://artifacts-cli.infisical.com/infisical.gpg \
++       | gpg --dearmor -o /usr/share/keyrings/infisical-archive-keyring.gpg \
++    && chmod 0644 /usr/share/keyrings/infisical-archive-keyring.gpg \
++    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/infisical-archive-keyring.gpg] https://artifacts-cli.infisical.com/deb stable main" \
++       > /etc/apt/sources.list.d/infisical.list \
++    && apt-get update \
++    && apt-get install -y --no-install-recommends infisical \
++    && rm -rf /var/lib/apt/lists/*
++
++# Smallstep `step` CLI — used to self-issue short-lived SSH certificates against
++# the step-ca on Node B (`step ssh certificate ...`), the only path to host-shell
++# SSH for in-pod agents. Installed from the official .deb (lands at /usr/bin/step).
++# No apt repo for this one, and GitHub doesn't offer a stable "latest" download
++# URL — resolve the latest release tag via the API, then verify the asset
++# against the sha256 digest that same API response publishes.
++RUN api="https://api.github.com/repos/smallstep/cli/releases/latest" \
++    && curl -fsSL "$api" -o /tmp/step-release.json \
++    && step_version=$(jq -r '.tag_name | ltrimstr("v")' /tmp/step-release.json) \
++    && asset_url=$(jq -r --arg v "$step_version" '.assets[] | select(.name == "step-cli_" + $v + "-1_amd64.deb") | .browser_download_url' /tmp/step-release.json) \
++    && asset_digest=$(jq -r --arg v "$step_version" '.assets[] | select(.name == "step-cli_" + $v + "-1_amd64.deb") | .digest | ltrimstr("sha256:")' /tmp/step-release.json) \
++    && curl -fsSL "$asset_url" -o /tmp/step-cli.deb \
++    && echo "${asset_digest}  /tmp/step-cli.deb" | sha256sum -c - \
++    && apt-get install -y --no-install-recommends /tmp/step-cli.deb \
++    && rm -f /tmp/step-cli.deb /tmp/step-release.json \
++    && rm -rf /var/lib/apt/lists/*
++
++# Sway (headless Wayland compositor) + minimal apps for in-pod GUI testing
++RUN apt-get update && apt-get install -y --no-install-recommends \
++        sway swaybg foot wofi grim slurp wl-clipboard xdg-desktop-portal-wlr \
++        xwayland chromium \
++    && rm -rf /var/lib/apt/lists/*
++
++# GStreamer + WebRTC bits for in-pod GUI streaming.
++#
++# Selkies-GStreamer was previously installed best-effort because the PyPI name
++# was unstable. Installs latest and records the resolved version (via `pip3
++# show`) in /etc/mydevenv2/features.json so the server can expose accurate
++# "what's available" state via /api/config without misleading users about GUI
++# support.
++RUN apt-get update && apt-get install -y --no-install-recommends \
++        gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
++        gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
++        gstreamer1.0-libav gstreamer1.0-tools \
++        python3-pip libgstreamer1.0-0 \
++    && rm -rf /var/lib/apt/lists/*
++
++RUN install -d /etc/mydevenv2 \
++    && if pip3 install --break-system-packages --no-cache-dir selkies; then \
++        resolved="$(pip3 show selkies 2>/dev/null | sed -n 's/^Version: //p')"; \
++        echo "{\"selkies\":\"${resolved}\"}" > /etc/mydevenv2/features.json; \
++    else \
++        echo "selkies unavailable — GUI streaming disabled in this image" >&2; \
++        echo "{\"selkies\":null}" > /etc/mydevenv2/features.json; \
++    fi
++
++# Rust toolchain (full dev env so user can build inside the pod too)
++ARG SPROOTY_UID=1000
++ARG SPROOTY_GID=1000
++# Ubuntu 26.04 ships a default `ubuntu` user at UID/GID 1000 — remove it so
++# we own those numbers (matters because the host bind-mounts /home/sprooty
++# expect that uid).
++RUN userdel -r ubuntu 2>/dev/null || true \
++    && groupdel ubuntu 2>/dev/null || true \
++    && groupadd -g ${SPROOTY_GID} sprooty \
++    && useradd -m -s /bin/bash -u ${SPROOTY_UID} -g ${SPROOTY_GID} sprooty \
++    && usermod -aG sudo sprooty \
++    && echo 'sprooty ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-sprooty
++
++# Rust lives in /opt/rust, NOT ~/.rustup + ~/.cargo — same rule as the Android
++# SDK above: the runtime bind-mounts the host home over /home/sprooty, so a
++# toolchain installed under $HOME is invisible at runtime. It was installed
++# under $HOME until 2026-07-31, which silently cost the pod every cargo-installed
++# tool (cargo-deb, cargo-zigbuild, cargo-xwin, cargo-watch, rust-analyzer-mcp,
++# sccache) and every cross-compile target; only whatever rustup the home volume
++# happened to hold was actually reachable.
++#
++# Consequence to keep in mind: the crate registry cache now lives at
++# /opt/rust/cargo/registry inside the image rather than on the persisted home
++# volume, so crates re-download after an image redeploy. sccache -> Redis on
++# Node B still covers recompilation.
++RUN mkdir -p /opt/rust && chown -R sprooty:sprooty /opt/rust
++
++USER sprooty
++WORKDIR /home/sprooty
++RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
++       | sh -s -- -y --default-toolchain stable --profile minimal \
++           --no-modify-path \
++           --component rustfmt --component clippy \
++    && rustup component add rust-analyzer \
++    && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-gnu x86_64-pc-windows-gnu \
++    && cargo install --locked cargo-deb \
++    && cargo install --locked cargo-zigbuild \
++    && cargo install --locked cargo-xwin \
++    && cargo install --locked cargo-watch \
++    && cargo install --locked rust-analyzer-mcp \
++    && test -x /opt/rust/cargo/bin/cargo-zigbuild \
++    && test -x /opt/rust/cargo/bin/rust-analyzer-mcp
++
++# opencode's installer hardcodes $HOME/.opencode/bin with no override, so
++# relocate the binary to /usr/local/bin afterwards — otherwise the runtime
++# /home/sprooty bind mount hides it, same as the Rust tools above.
++RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
++    && sudo install -m 755 /home/sprooty/.opencode/bin/opencode /usr/local/bin/opencode \
++    && rm -rf /home/sprooty/.opencode
++
++# sccache (apt package lacks Redis support; pull from GitHub). Resolve latest
++# release via the API and verify against the sha256 digest that same
++# response publishes for the asset — no hardcoded checksum to keep in sync.
++RUN api="https://api.github.com/repos/mozilla/sccache/releases/latest" \
++    && curl -fsSL "$api" -o /tmp/sccache-release.json \
++    && sccache_version=$(jq -r '.tag_name | ltrimstr("v")' /tmp/sccache-release.json) \
++    && asset_name="sccache-v${sccache_version}-x86_64-unknown-linux-musl.tar.gz" \
++    && asset_url=$(jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .browser_download_url' /tmp/sccache-release.json) \
++    && asset_digest=$(jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .digest | ltrimstr("sha256:")' /tmp/sccache-release.json) \
++    && curl -fsSL "$asset_url" -o /tmp/sccache.tar.gz \
++    && echo "${asset_digest}  /tmp/sccache.tar.gz" | sha256sum -c - \
++    && tar -xzf /tmp/sccache.tar.gz -C /tmp \
++    && mv "/tmp/sccache-v${sccache_version}-x86_64-unknown-linux-musl/sccache" /opt/rust/cargo/bin/sccache \
++    && chmod +x /opt/rust/cargo/bin/sccache \
++    && rm -f /tmp/sccache-release.json /tmp/sccache.tar.gz
++
++USER root
++
++# Java + Gradle. Installed globally (/opt + a /usr/local/bin symlink) so they
++# survive the /home/sprooty bind mount at runtime. gradle finds the JDK via
++# `java` on PATH, so no JAVA_HOME juggling needed. This system gradle is only
++# a convenience for ad-hoc use — the actual mobile build is driven by the
++# committed wrapper (mobile/android/gradlew), which pins its own version
++# independently, so unpinning this one doesn't affect build reproducibility.
++# services.gradle.org publishes a "current" endpoint with the download URL
++# and checksum together, so no separate lookup needed.
++RUN apt-get update && apt-get install -y --no-install-recommends \
++        openjdk-21-jdk-headless \
++    && rm -rf /var/lib/apt/lists/* \
++    && curl -fsSL https://services.gradle.org/versions/current -o /tmp/gradle-current.json \
++    && gradle_version=$(jq -r '.version' /tmp/gradle-current.json) \
++    && gradle_checksum=$(jq -r '.checksum' /tmp/gradle-current.json) \
++    && curl -fsSL "https://services.gradle.org/distributions/gradle-${gradle_version}-bin.zip" \
++       -o /tmp/gradle.zip \
++    && echo "${gradle_checksum}  /tmp/gradle.zip" | sha256sum -c - \
++    && unzip -q /tmp/gradle.zip -d /opt \
++    && ln -s "/opt/gradle-${gradle_version}/bin/gradle" /usr/local/bin/gradle \
++    && rm /tmp/gradle.zip /tmp/gradle-current.json
++
++# Android SDK (for the Capacitor android project under mobile/). Installed to
++# /opt/android-sdk so it survives the /home/sprooty bind mount at runtime — a
++# ~/Android/Sdk install would be shadowed. sdkmanager/adb/apkanalyzer are put
++# on PATH via the ANDROID_HOME entries in the stage-3 ENV above. The committed
++# Gradle wrapper (mobile/android/gradlew) drives builds; system gradle is only
++# a convenience for ad-hoc use.
++#
++# Package set per the dev-pod spec: pinned command-line tools + platform-tools,
++# platforms;android-35 + android-36, build-tools;35.0.0 + 36.0.0.
++ARG ANDROID_CMDLINE_TOOLS_VERSION
++ARG ANDROID_CMDLINE_TOOLS_SHA256
++ARG ANDROID_PLATFORM_TOOLS_VERSION
++ARG ANDROID_PLATFORM_TOOLS_SHA256
++RUN install -d /opt/android-sdk/cmdline-tools \
++    && curl -fsSL \
++        "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" \
++        -o /tmp/cmdline-tools.zip \
++    && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/cmdline-tools.zip" | sha256sum -c - \
++    && unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools \
++    # The zip unpacks to a top-level cmdline-tools/; sdkmanager expects it at
++    # cmdline-tools/latest/.
++    && mv /tmp/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest \
++    && curl -fsSL \
++        "https://dl.google.com/android/repository/platform-tools_r${ANDROID_PLATFORM_TOOLS_VERSION}-linux.zip" \
++        -o /tmp/platform-tools.zip \
++    && echo "${ANDROID_PLATFORM_TOOLS_SHA256}  /tmp/platform-tools.zip" | sha256sum -c - \
++    && unzip -q /tmp/platform-tools.zip -d /opt/android-sdk \
++    && rm -rf /tmp/cmdline-tools.zip /tmp/cmdline-tools \
++        /tmp/platform-tools.zip \
++    # Accept licenses first (yes feeds the interactive prompts), then install.
++    && yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null \
++    && /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --install \
++        "platforms;android-35" \
++        "platforms;android-36" \
++        "build-tools;35.0.0" \
++        "build-tools;36.0.0" \
++    # Owned by sprooty so in-pod Gradle builds can write license acks and any
++    # auto-managed SDK components at runtime (the SDK lives in /opt, which is
++    # not bind-mounted, so this ownership persists from the image).
++    && chown -R ${SPROOTY_UID}:${SPROOTY_GID} /opt/android-sdk
++
++# Flutter + its bundled Dart SDK are installed only in the dev image. Keep the
++# SDK under /opt so the runtime /home/sprooty bind mount cannot hide it. The
++# archive and checksum are pinned to the official stable Linux release entry;
++# leave the tree sprooty-owned because Flutter manages its artifact cache there.
++ARG INSTALL_FLUTTER
++ARG FLUTTER_VERSION
++ARG FLUTTER_SHA256
++RUN if [ "$INSTALL_FLUTTER" = "true" ]; then \
++        apt-get update \
++        && apt-get install -y --no-install-recommends xz-utils libglu1-mesa \
++        && rm -rf /var/lib/apt/lists/* \
++        && curl -fsSL \
++          "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
++          -o /tmp/flutter.tar.xz \
++        && echo "${FLUTTER_SHA256}  /tmp/flutter.tar.xz" | sha256sum -c - \
++        && tar -xJf /tmp/flutter.tar.xz -C /opt \
++        && rm /tmp/flutter.tar.xz \
++        && chown -R ${SPROOTY_UID}:${SPROOTY_GID} /opt/flutter \
++        && command -v flutter \
++        && command -v dart \
++        && sudo -H -u sprooty env "PATH=${PATH}" flutter --version \
++        && sudo -H -u sprooty env "PATH=${PATH}" dart --version ; \
++    fi
++
++# Python tools the user expects (uv, ruff, pytest). Installed globally into
++# /usr/local (system pip lands scripts in /usr/local/bin) so they survive the
++# /home/sprooty bind mount — a --user install would be shadowed at runtime.
++# Fail the build if they don't install — silent fallback would leave the pod
++# with broken Python tooling that surfaces as cryptic command-not-found errors.
++#
++# cadastre[mcp-client] lands the cadastre-mcp-remote console script the
++# mydevenv2-cadastre-mcp wrapper execs. Now installable at build time because
++# cadastre publishes to PyPI as of v0.1.0 — previously this had to happen at
++# runtime (deploy/mcp-bootstrap.sh's install_bridge) from the mounted
++# workspace checkout, since the package wasn't available to the build
++# context at all. That runtime install is left in place as a no-op fallback
++# (it checks `command -v cadastre-mcp-remote` first) for a workspace with a
++# newer cadastre than this image shipped.
++RUN pip3 install --break-system-packages --no-cache-dir uv ruff pytest "cadastre[mcp-client]"
++
++# Left as root on purpose. `engine/Dockerfile` continues from here and needs
++# to install into /usr/local before it drops to `sprooty` at the very end; a
++# base that ended as an unprivileged user would make every consumer's first
++# instruction a `USER` switch.
++USER root
+diff --git a/engine/Dockerfile.pod.dockerignore b/engine/Dockerfile.pod.dockerignore
+new file mode 100644
+index 0000000..3db4ccb
+--- /dev/null
++++ b/engine/Dockerfile.pod.dockerignore
+@@ -0,0 +1,9 @@
++# The pod base has no COPY from the build context — it installs a toolchain and
++# nothing else. Excluding everything makes the context transfer a no-op rather
++# than a several-second upload of a repository the build will not read.
++#
++# BuildKit reads `<dockerfile>.dockerignore` in preference to any
++# `.dockerignore` at the context root, so this affects only this build. The
++# merged image keeps `engine/Dockerfile.dockerignore`; the core-only image at
++# the repository root keeps the root `.dockerignore`.
++**
+diff --git a/tests/test_deploy.py b/tests/test_deploy.py
+index 417e065..58bd81c 100644
+--- a/tests/test_deploy.py
++++ b/tests/test_deploy.py
+@@ -195,8 +195,17 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
+     test outlives the file it was written about because the property was never
+     "a pipeline sets this" — it was "something that actually runs does".
+ 
+-    Both build steps must pass them — the candidate as well as the push, or
+-    the image that gets smoke-tested is not the image that gets published.
++    There is one build step to pass them to now, not two. The candidate is
++    pushed and then promoted onto the real tags by a manifest copy, so "the
++    image that gets smoke-tested is not the image that gets published" is no
++    longer a thing a build arg can cause — there is only one image.
++
++    Flutter left by a different door: it is no longer a build arg on this
++    image at all, but the difference between the two published variants of
++    the pod base (`engine/Dockerfile.pod`). The property is unchanged and so
++    is what it is worth — the dev stream carries the mobile SDK and the prod
++    stream does not — so it is asserted where the decision now lives, on the
++    `variant:` the `pod-base` job is called with.
+ 
+     `theclawbay` joined the probed set after WI-17, by a different route to the
+     same place: it was installed by no image at all, living only in a persisted
+@@ -212,12 +221,20 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
+     """
+     text = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
+     on_dev = r"=\$\{\{ github\.ref == 'refs/heads/dev' \}\}"
+-    for arg in ("INSTALL_AI_CLIENTS", "INSTALL_FLUTTER"):
+-        wired = re.findall(arg + on_dev, text)
+-        assert len(wired) == 2, (
+-            f"{arg} must be passed to both the candidate and the pushed "
+-            f"build of engine/Dockerfile; found {len(wired)}"
+-        )
++    wired = re.findall("INSTALL_AI_CLIENTS" + on_dev, text)
++    assert len(wired) == 1, (
++        "INSTALL_AI_CLIENTS must be passed to the build of engine/Dockerfile "
++        f"and tied to the dev branch; found {len(wired)}"
++    )
++    assert re.search(
++        r"variant: \$\{\{ github\.ref == 'refs/heads/dev' "
++        r"&& 'full' \|\| 'lean' \}\}",
++        text,
++    ), (
++        "the dev stream must be built on the `full` pod base and every other "
++        "stream on `lean`: that is where Flutter now comes from (#23's lesson "
++        "moved, not retired)"
++    )
+     loop = re.search(r"for tool in ([^;]+); do", text)
+     assert loop, (
+         "the dev image's smoke test must loop over the tools the image carries "
+@@ -459,36 +476,118 @@ def test_the_merged_image_is_built_from_the_engine_dockerfile(workflow: str) ->
+     )
+ 
+ 
+-@pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
+-def test_the_pwa_is_built_before_the_merged_image(workflow: str) -> None:
++def test_the_pwa_is_built_before_the_engine_that_embeds_it() -> None:
+     """`rust-embed` reads `web/dist/` at compile time.
+ 
+-    An image built without this step compiles, starts, serves a placeholder
+-    where the product's front end should be, and passes every check that
+-    asks whether it is running.
++    An image built without the bundle compiles, starts, serves a placeholder
++    where the product's front end should be, and passes every check that asks
++    whether it is running. So the ordering is worth a test.
++
++    This used to read the *workflows*, asserting that a `pnpm build` step ran
++    before the `docker build`. It passed, and it was watching the wrong thing:
++    `engine/Dockerfile.dockerignore` lists `web/dist`, so the bundle that step
++    produced was excluded from the build context and no image ever contained
++    it. The step could have been deleted — it since has been — without this
++    test noticing, because what it asserted was never what made the guarantee
++    true. A green test over an inert step is worse than no test: it says the
++    question has been asked.
++
++    What actually makes it true is inside `engine/Dockerfile`, so that is what
++    is read now — the `web-build` stage produces the bundle, and `server-build`
++    copies it in *before* `cargo build`, which is the only ordering rust-embed
++    can observe.
++    """
++    dockerfile = (REPO_ROOT / "engine" / "Dockerfile").read_text(encoding="utf-8")
++
++    assert "FROM ${NODE_IMAGE} AS web-build" in dockerfile, (
++        "the bundle is built inside the image build, not handed to it"
++    )
++    copy_bundle = dockerfile.index("COPY --from=web-build /app/web/dist")
++    compile_engine = dockerfile.index("cargo build --release -p mydevenv2-server")
++    assert copy_bundle < compile_engine, (
++        "the bundle is a compile-time input to the engine, not a later artefact"
++    )
++
++    # And the dependency bake must come *before* the bundle, or a stylesheet
++    # change recompiles every dependency to embed a different CSS file — which
++    # is what it did, and what most of this repository's Rust rebuilds were.
++    cook = dockerfile.index("cargo chef cook --release")
++    assert cook < copy_bundle, (
++        "dependencies are compiled before web/dist is copied in, so a "
++        "web-only change cannot invalidate them"
++    )
++
++
++def _job(workflow: str, name: str) -> str:
++    """One job's text, bounded by the next top-level job key.
++
++    Slicing from a job header to the end of the file is fine until the file
++    grows a job that legitimately contains what you are asserting is absent —
++    `release.yml`'s `android` job installs pnpm, which is exactly what the
++    merged image build must not do.
+     """
+-    job = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+-    job = job[job.index("  stack-image:") :]
+-    assert job.index("pnpm build") < job.index("file: engine/Dockerfile"), (
+-        f"{workflow}: the bundle is a build input, not a later artefact"
++    raw = (WORKFLOWS / workflow).read_text(encoding="utf-8")
++    start = raw.index(f"\n  {name}:\n")
++    rest = raw[start + 1 :]
++    end = re.search(r"\n  [a-z][a-z-]*:\n", rest)
++    return rest[: end.start()] if end else rest
++
++
++@pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
++def test_the_merged_image_build_does_not_rebuild_the_pwa_on_the_runner(
++    workflow: str,
++) -> None:
++    """The step that was deleted must stay deleted.
++
++    It cost a Node toolchain and a pnpm install per build and produced a
++    directory the build context excluded. The reason to assert its absence
++    rather than just remove it is that it reads as load-bearing: the next
++    person to notice `rust-embed` needs `web/dist` will reach for exactly
++    this, and the comment left in its place explains why that is a trap.
++    """
++    job = _job(workflow, "stack-image")
++    assert "pnpm install --frozen-lockfile" not in job, (
++        f"{workflow}: web/dist is dockerignored, so a runner-side PWA build "
++        f"cannot reach the image — stage 1 of engine/Dockerfile builds it"
+     )
+ 
+ 
+ @pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
+-def test_both_halves_run_before_the_merged_image_is_pushed(workflow: str) -> None:
++def test_both_halves_run_before_the_merged_image_is_promoted(
++    workflow: str,
++) -> None:
+     """The failure this catches is a stack missing the half nobody looked at.
+ 
+-    Both entrypoints are exercised in the candidate image, and the push step
+-    comes after — so an image that builds and cannot run one of its two
+-    products never reaches the registry.
++    Both entrypoints are exercised before the image acquires a tag anything
++    follows, so an image that builds and cannot run one of its two products
++    never becomes `:dev`, `dev-<sha>`, `sha-<commit>` or a version.
++
++    The mechanism moved and the guarantee got *stronger*. It used to be
++    "build, smoke-test the loaded copy, then build again and push", which
++    proved the tested image and the published image were produced by
++    equivalent inputs. Now it is one build, pushed under a candidate tag that
++    is in neither release stream, tested at its digest, and promoted by a
++    manifest copy onto that same digest — so the published image is not
++    merely equivalent to the tested one, it is the identical bytes.
++
++    Which is why this reads the promotion and not `push: true`: the push now
++    comes first by design, and a test that still looked for it would fail
++    while describing a weaker property than the one that holds.
+     """
+-    job = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+-    job = job[job.index("  stack-image:") :]
++    job = _job(workflow, "stack-image")
+     smoke_vogt = job.index("--entrypoint vogt")
+     smoke_engine = job.index("--entrypoint mydevenv2-server")
+-    push = job.index("push: true")
+-    assert max(smoke_vogt, smoke_engine) < push, (
+-        f"{workflow}: smoke-test the candidate, then push it"
++    promote = job.index("docker buildx imagetools create")
++    assert max(smoke_vogt, smoke_engine) < promote, (
++        f"{workflow}: smoke-test the candidate, then promote it"
++    )
++    assert "tags: ${{ steps.meta.outputs.tags }}" not in job, (
++        f"{workflow}: the real tags are applied by the promotion, not by a "
++        f"build — otherwise an untested image carries them"
++    )
++    assert re.search(r"tags: \$\{\{ env\.STACK_IMAGE \}\}:candidate-", job), (
++        f"{workflow}: the build publishes a candidate tag, outside both "
++        f"release streams (NFR-D12)"
+     )
+ 
+ 
+-- 
+2.53.0
+
