@@ -20,6 +20,7 @@
 //      one). `call()` cannot invent one — there is no default.
 
 import { ApiError, getBase, getToken, reportAuthResponse } from "./api";
+import { fetchWithRetry } from "./transport";
 
 /** Where the front door mounts vogt-core. */
 export const VOGT_PREFIX = "/api/vogt";
@@ -115,7 +116,7 @@ async function call<T>(
     body = JSON.stringify(params);
   }
 
-  const res = await fetch(url, { method, headers, body, signal });
+  const res = await fetchWithRetry(url, { method, headers, body, signal });
   const text = await res.text();
   if (!res.ok) {
     let message = text;

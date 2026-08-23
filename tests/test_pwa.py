@@ -91,9 +91,17 @@ def test_the_pwa_reaches_vogt_only_through_the_front_door() -> None:
     """One prefix, one place. `/api` at this origin is the engine's own API."""
     text = source(VOGT_CLIENT)
     assert f'export const VOGT_PREFIX = "{FRONT_DOOR_PREFIX}"' in text
-    assert len(re.findall(r"\bfetch\(", text)) == 1, (
+    # The one outbound call site now goes through the shared transport
+    # (`fetchWithRetry`, #198) rather than a bare `fetch`, so a dropped
+    # connection is retried and classified instead of leaking a raw TypeError.
+    # It is still a single site built from the route table above; a second one —
+    # bare `fetch` or a second `fetchWithRetry` — is how a path escapes it.
+    assert len(re.findall(r"\bfetchWithRetry\(", text)) == 1, (
         "a second call site is how a path escapes the route table, and the "
         "route table is what the check above reads"
+    )
+    assert not re.findall(r"\bfetch\(", text), (
+        "a bare fetch bypasses the shared transport's retry and classification"
     )
 
 

@@ -34,10 +34,10 @@ def test_static_user_facing_surfaces_do_not_regress_to_legacy_branding() -> None
     offenders: list[str] = []
     compatibility_literals = {
         WEB / "public" / "sw.js": ('"mydevenv2-default"',),
-        WEB / "src" / "index.tsx": (
-            '"mydevenv2:viewport-resize"',
-            '"mydevenv2:native-insets"',
-        ),
+        # `viewport-resize` and `terminal-*` events were renamed to `vogt:*`
+        # (#271); only `native-insets` keeps the historic name, because the
+        # human-gated Android shell still dispatches it (renamed under #265).
+        WEB / "src" / "index.tsx": ('"mydevenv2:native-insets"',),
     }
     for path in VISIBLE_WEB_FILES:
         text = path.read_text(encoding="utf-8")
@@ -98,14 +98,24 @@ def test_push_metadata_uses_vogt_labels_with_the_stable_android_channel() -> Non
 
 
 def test_compatibility_names_remain_explicitly_stable() -> None:
-    """Renaming these values would lose state or make an Android sibling app."""
+    """Renaming these values would lose state or make an Android sibling app.
+
+    Browser-storage keys are NOT in this set any more: #271 renamed them to
+    `vogt.*` with a one-shot migration (`web/src/storageMigration.ts`), so state
+    is carried across the rename rather than pinned to the historic name. The
+    names that remain are the ones a rename could not migrate — an OS-level
+    Android channel/app id, an IndexedDB database, and a wire prefix a client
+    may still emit.
+    """
     api = (WEB / "src" / "api.ts").read_text()
     push = (WEB / "src" / "push.ts").read_text()
     capacitor = (ROOT / "mobile" / "capacitor.config.ts").read_text()
     android = ROOT / "mobile" / "android" / "app" / "src" / "main"
     agent_tasks = (ROOT / "engine" / "server" / "src" / "agent_tasks.rs").read_text()
 
-    assert 'const TOKEN_KEY = "mydevenv2.token"' in api
+    # The credential key was renamed to `vogt.token`; the migration preserves the
+    # session, so nobody is signed out (#271).
+    assert 'const TOKEN_KEY = "vogt.token"' in api
     assert 'id: "mydevenv2-alerts"' in push
     assert '"com.sprooty.mydevenv2"' in capacitor
     # The default notify prefix was renamed to `VOGT_NOTIFY:` (#203), but the

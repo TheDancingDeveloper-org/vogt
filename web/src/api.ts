@@ -1,5 +1,7 @@
 // Thin typed wrapper over the MyDevEnv2 HTTP+SSE+WS API.
 
+import { fetchWithRetry } from "./transport";
+
 export type ActivityState =
   | "idle"
   | "running"
@@ -309,7 +311,7 @@ async function req<T>(
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<T> {
-  const res = await fetch(`${getBase()}${path}`, {
+  const res = await fetchWithRetry(`${getBase()}${path}`, {
     method,
     headers: authHeaders(
       body !== undefined ? { "Content-Type": "application/json" } : {},
