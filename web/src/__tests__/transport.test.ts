@@ -1,0 +1,105 @@
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { fetchWithRetry, TransportError } from "../transport";
+
+function netError(): TypeError {
+  // What a browser throws when the stream is reset before a response — the raw
+  // string #198 was leaking into surfaces.
+  return new TypeError("NetworkError when attempting to fetch resource.");
+}
+
+function abortError(): DOMException {
+  return new DOMException("The operation was aborted.", "AbortError");
+}
+
+function okResponse(): Response {
+  return new Response("{}", { status: 200 });
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("fetchWithRetry (#198 dropped-connection retry)", () => {
+  it("retries a GET twice then throws a typed TransportError, not the raw TypeError", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(netError());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = fetchWithRetry("/x", { method: "GET" }, { backoffMs: 0 });
+    await expect(promise).rejects.toBeInstanceOf(TransportError);
+    // A written, actionable reason — not the browser implementation detail.
+    await expect(
+      fetchWithRetry("/x", { method: "GET" }, { backoffMs: 0 }),
+    ).rejects.toThrow(/connection was interrupted/i);
+    // first call: 1 initial + 2 retries = 3 attempts
+    expect(fetchMock).toHaveBeenCalledTimes(6); // two invocations above, 3 each
+  });
+
+  it("returns the response as soon as a retry succeeds", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(netError())
+      .mockResolvedValueOnce(okResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await fetchWithRetry("/x", { method: "GET" }, { backoffMs: 0 });
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("never retries a POST — a blind retry could double-write", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(netError());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchWithRetry("/x", { method: "POST" }, { backoffMs: 0 }),
+    ).rejects.toBeInstanceOf(TransportError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a deliberate AbortError pass through untouched (SSE teardown, cancel)", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(abortError());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchWithRetry("/x", { method: "GET" }, { backoffMs: 0 }),
+    ).rejects.toSatisfy((e: unknown) => (e as DOMException).name === "AbortError");
+    // No retry on an abort.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry once the caller's signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchMock = vi.fn().mockRejectedValue(netError());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchWithRetry(
+        "/x",
+        { method: "GET", signal: controller.signal },
+        { backoffMs: 0 },
+      ),
+    ).rejects.toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes an HTTP error response through unchanged — it is not a transport failure", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("nope", { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await fetchWithRetry("/x", { method: "GET" }, { backoffMs: 0 });
+    expect(res.status).toBe(500);
+    // A 5xx resolves; it must NOT be retried here (VogtUnavailable/ApiError own it).
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("defaults an init with no method to a retryable GET", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(netError());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchWithRetry("/x", {}, { backoffMs: 0 })).rejects.toBeInstanceOf(
+      TransportError,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});

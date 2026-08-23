@@ -7,8 +7,9 @@ import { applyAppTheme, initAppThemeSystemWatch } from "./appThemes";
 import { migrateStorageKeys } from "./storageMigration";
 import "./styles.css";
 
-// Rename historic `mydevenv2.*` browser-storage keys to `vogt.*` before any
-// module reads a preference or the credential (#271). One-shot and idempotent.
+// Migrate historic browser-storage keys to the `vogt.*` prefix before any
+// module reads a preference or the credential (#271; see storageMigration.ts).
+// One-shot and idempotent.
 migrateStorageKeys();
 
 function installVisualViewportSizing() {
