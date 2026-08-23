@@ -26,6 +26,7 @@ use crate::{
     pty::{Session, SessionSpec},
     push::{NotificationKind, PushManager},
     sessions::SessionRegistry,
+    workflow_engine::{map_conclusion, FabroProvider, WorkflowEngineConfig, WorkflowProvider},
 };
 
 const TASKS_FILE: &str = "agent-tasks.json";
@@ -151,6 +152,12 @@ pub struct AgentTask {
     /// unset the engine uses whatever branch is checked out in the workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// When set, this task's runs are handed to an external workflow engine
+    /// (#293) instead of a PTY: the engine owns the agent loop, and Vogt tracks
+    /// the run as a polled observation with a typed conclusion. `None` keeps the
+    /// ordinary PTY path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_engine: Option<WorkflowEngineConfig>,
     #[serde(default)]
     pub notify_on_start: bool,
     #[serde(default = "default_notify_phrase")]
@@ -573,6 +580,8 @@ pub struct AgentTaskCreate {
     #[serde(default)]
     pub branch: Option<String>,
     #[serde(default)]
+    pub workflow_engine: Option<WorkflowEngineConfig>,
+    #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
     pub notify_on_start: Option<bool>,
@@ -618,6 +627,8 @@ pub struct AgentTaskUpdate {
     pub output_schema_max_retries: Option<u32>,
     #[serde(default)]
     pub branch: Option<String>,
+    #[serde(default)]
+    pub workflow_engine: Option<WorkflowEngineConfig>,
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
@@ -970,6 +981,7 @@ impl AgentTaskRegistry {
                 .output_schema_max_retries
                 .unwrap_or(DEFAULT_OUTPUT_SCHEMA_MAX_RETRIES),
             branch: clean_optional(req.branch),
+            workflow_engine: clean_workflow_engine(req.workflow_engine),
             notify_on_start: req.notify_on_start.unwrap_or(false),
             notify_on_phrase: clean_notify_phrase(req.notify_on_phrase),
             auto_retry_on_rate_limit: req.auto_retry_on_rate_limit.unwrap_or(true),
@@ -1046,6 +1058,9 @@ impl AgentTaskRegistry {
         }
         if req.branch.is_some() {
             task.branch = clean_optional(req.branch);
+        }
+        if req.workflow_engine.is_some() {
+            task.workflow_engine = clean_workflow_engine(req.workflow_engine);
         }
         if let Some(enabled) = req.enabled {
             task.status = if enabled {
@@ -1355,6 +1370,15 @@ impl AgentTaskRegistry {
             task.vogt_work_item = Some(work_item);
         }
 
+        // A task with a workflow-engine backend (#293) takes an entirely
+        // separate path: no prompt expansion, no PTY, no session. The run is
+        // handed to the engine and tracked by polling. Everything below — the
+        // command build, the session spawn, the orchestrator — is the PTY path
+        // and stays untouched when `workflow_engine` is None.
+        if let Some(we) = task.workflow_engine.clone() {
+            return self.start_workflow_engine_run(id, origin, task, we).await;
+        }
+
         let run_id = Uuid::new_v4();
         let now = OffsetDateTime::now_utc();
         let (prompt_file, context_file) = self.write_prompt_files(&task, run_id, now)?;
@@ -1561,6 +1585,275 @@ impl AgentTaskRegistry {
         }
 
         Ok(Some(run))
+    }
+
+    /// The workflow-engine path (#293): hand a run to an external engine and
+    /// track it by polling, instead of spawning a PTY. Reached only when the
+    /// task carries a [`WorkflowEngineConfig`]; the PTY path above is untouched.
+    ///
+    /// Every provider failure — an unreadable token file, an unreachable engine,
+    /// a non-terminal deadline — records the run *errored* with a written reason
+    /// and returns `Ok`. It never panics and never propagates an error that
+    /// would abort the scheduler: an absent engine is a run that failed, not a
+    /// Vogt that fell over.
+    async fn start_workflow_engine_run(
+        self: &Arc<Self>,
+        id: Uuid,
+        origin: RunOrigin,
+        task: AgentTask,
+        we: WorkflowEngineConfig,
+    ) -> Result<Option<AgentTaskRun>> {
+        let trigger = origin.trigger;
+        let run_id = Uuid::new_v4();
+        // A workflow run has no PTY session; this id backs nothing and only
+        // gives the run and its concluded event a stable, unique handle.
+        let session_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        // Write the prompt/context files for provenance, exactly as the PTY path
+        // does, so a workflow run leaves the same durable brief behind.
+        let (prompt_file, context_file) = self.write_prompt_files(&task, run_id, now)?;
+
+        let mut run = AgentTaskRun {
+            id: run_id,
+            task_id: task.id,
+            started_at: now,
+            trigger,
+            trigger_detail: origin.detail.clone(),
+            session_id,
+            session_name: format!("[Workflow] {}", task.name),
+            prompt_file: prompt_file.to_string_lossy().into_owned(),
+            context_file: context_file.to_string_lossy().into_owned(),
+            status: AgentTaskRunStatus::Running,
+            completed_at: None,
+            exit_code: None,
+            summary: None,
+            findings: vec![],
+            gates: vec![],
+            outcome: None,
+            conclusion: None,
+            retries: 0,
+            schema_ok: None,
+            branch: None,
+            base_sha: None,
+        };
+
+        // Resolve the engine token from its file, if configured (#293). A set
+        // but unreadable file is a provider error, not a boot failure: the run
+        // is recorded errored with the reason, the same non-fatal contract the
+        // unreachable-engine case keeps.
+        let token = match read_workflow_token(we.token_file.as_deref()) {
+            Ok(token) => token,
+            Err(reason) => {
+                self.record_workflow_run(id, trigger, &origin.detail, &run, now)?;
+                self.record_workflow_errored(
+                    task.id,
+                    run_id,
+                    session_id,
+                    now,
+                    OffsetDateTime::now_utc(),
+                    &format!("workflow engine token unavailable: {reason}"),
+                );
+                return Ok(Some(self.reload_run(id, run_id).unwrap_or(run)));
+            }
+        };
+
+        let provider = FabroProvider::from_config(&we, token);
+        let goal = build_workflow_goal(&task);
+        let repo_ref = we.repo_ref.clone();
+
+        match provider.create_run(&goal, repo_ref.as_deref()).await {
+            Ok(provider_run) => {
+                run.summary = Some(match &provider_run.url {
+                    Some(url) => format!("workflow engine run {} ({url})", provider_run.run_id),
+                    None => format!("workflow engine run {}", provider_run.run_id),
+                });
+                self.record_workflow_run(id, trigger, &origin.detail, &run, now)?;
+                // TODO(#293 increment-2): mirror the engine's SSE event stream
+                // onto this run instead of polling; bridge #289 gates onto the
+                // engine's own gates; collect the #283/#284 checkpoint branches
+                // the engine produces (`fabro/run/*`) as run observations.
+                spawn_workflow_poller(
+                    Arc::clone(self),
+                    provider,
+                    provider_run.run_id,
+                    task.id,
+                    run_id,
+                    session_id,
+                    now,
+                );
+                Ok(Some(run))
+            }
+            Err(err) => {
+                // Absence/unreachability is non-fatal: record the run errored
+                // with the reason and return normally.
+                self.record_workflow_run(id, trigger, &origin.detail, &run, now)?;
+                self.record_workflow_errored(
+                    task.id,
+                    run_id,
+                    session_id,
+                    now,
+                    OffsetDateTime::now_utc(),
+                    &format!("workflow engine create-run failed: {err}"),
+                );
+                Ok(Some(self.reload_run(id, run_id).unwrap_or(run)))
+            }
+        }
+    }
+
+    /// Persist a freshly-built workflow run into its task, updating the same
+    /// counters the PTY path does (last run, run count, next scheduled run) and
+    /// announcing a triggered run on the stream. Written once at the start of a
+    /// workflow run's life; the conclusion is written later by the poller.
+    fn record_workflow_run(
+        &self,
+        id: Uuid,
+        trigger: AgentTaskRunTrigger,
+        detail: &Option<RunTriggerDetail>,
+        run: &AgentTaskRun,
+        now: OffsetDateTime,
+    ) -> Result<()> {
+        {
+            let mut tasks = self.tasks.lock();
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or(ApiError::NotFound)?;
+            task.last_run = Some(now);
+            task.run_count = task.run_count.saturating_add(1);
+            if matches!(trigger, AgentTaskRunTrigger::Scheduled) {
+                task.next_run = compute_next_run(&task.schedule, now)?;
+            }
+            task.updated_at = now;
+            task.runs.push(run.clone());
+            if task.runs.len() > 50 {
+                let extra = task.runs.len() - 50;
+                task.runs.drain(0..extra);
+            }
+            self.save_locked(&tasks)?;
+        }
+        if let Some(detail) = detail.as_ref() {
+            self.bus.publish(ServerEvent::TaskRunTriggered {
+                task_id: id,
+                run_id: run.id,
+                session_id: run.session_id,
+                trigger_kind: detail.trigger_kind.clone(),
+                event_kind: detail.event_kind.clone(),
+                event_id: detail.event_id.clone(),
+                event_seq: detail.event_seq,
+            });
+        }
+        Ok(())
+    }
+
+    /// Write a workflow run's terminal verdict back (#293): set its status,
+    /// outcome and durable conclusion, then announce `task.run.concluded` on the
+    /// stream — the same event the PTY completion path emits. A run the registry
+    /// no longer has, or one already concluded, is a no-op (the same tolerance
+    /// the PTY path keeps).
+    fn record_workflow_conclusion(
+        &self,
+        task_id: Uuid,
+        run_id: Uuid,
+        session_id: Uuid,
+        outcome: AgentTaskRunOutcome,
+        conclusion: AgentTaskRunConclusion,
+        summary: String,
+    ) {
+        let finished = conclusion.finished;
+        let duration_ms = conclusion.duration_ms;
+        let branch = conclusion.branch.clone();
+        let final_sha = conclusion.final_sha.clone();
+        let diffstat = conclusion.diffstat;
+        let cost_usd = conclusion.cost.as_ref().and_then(|c| c.total_usd);
+        {
+            let mut tasks = self.tasks.lock();
+            let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) else {
+                return;
+            };
+            let Some(run) = task.runs.iter_mut().find(|r| r.id == run_id) else {
+                return;
+            };
+            if run.status != AgentTaskRunStatus::Running {
+                return;
+            }
+            run.completed_at = Some(finished);
+            run.status = match outcome {
+                AgentTaskRunOutcome::Failed | AgentTaskRunOutcome::Blocked => {
+                    AgentTaskRunStatus::Errored
+                }
+                _ => AgentTaskRunStatus::Completed,
+            };
+            run.summary = Some(summary);
+            run.outcome = Some(outcome);
+            run.conclusion = Some(conclusion);
+            task.updated_at = finished;
+            let _ = self.save_locked(&tasks);
+        }
+        self.bus.publish(ServerEvent::TaskRunConcluded {
+            task_id,
+            run_id,
+            session_id,
+            outcome: outcome.as_str().to_string(),
+            exit_code: None,
+            duration_ms,
+            retries: 0,
+            branch,
+            final_sha,
+            files_changed: diffstat.map(|d| d.files),
+            insertions: diffstat.map(|d| d.insertions),
+            deletions: diffstat.map(|d| d.deletions),
+            cost_usd,
+        });
+    }
+
+    /// Record a workflow run as errored with a written reason (#293). Builds a
+    /// `Failed` conclusion carrying nothing but the timing, so a reader sees a
+    /// verdict and a cause rather than a run stuck `running` forever.
+    fn record_workflow_errored(
+        &self,
+        task_id: Uuid,
+        run_id: Uuid,
+        session_id: Uuid,
+        started: OffsetDateTime,
+        finished: OffsetDateTime,
+        reason: &str,
+    ) {
+        let duration_ms = (finished - started).whole_milliseconds().max(0) as u64;
+        let conclusion = AgentTaskRunConclusion {
+            started,
+            finished,
+            duration_ms,
+            outcome: AgentTaskRunOutcome::Failed,
+            exit_code: None,
+            retries: 0,
+            branch: None,
+            final_sha: None,
+            base_sha: None,
+            diffstat: None,
+            cost: None,
+            findings: vec![],
+        };
+        self.record_workflow_conclusion(
+            task_id,
+            run_id,
+            session_id,
+            AgentTaskRunOutcome::Failed,
+            conclusion,
+            reason.to_string(),
+        );
+    }
+
+    /// Re-read one run from a task by id, for returning the post-conclusion
+    /// state of a run that errored during start.
+    fn reload_run(&self, task_id: Uuid, run_id: Uuid) -> Option<AgentTaskRun> {
+        let tasks = self.tasks.lock();
+        tasks
+            .iter()
+            .find(|t| t.id == task_id)?
+            .runs
+            .iter()
+            .find(|r| r.id == run_id)
+            .cloned()
     }
 
     /// How many of a task's runs still have a live session — the number the
@@ -2817,6 +3110,156 @@ fn clean_output_schema(value: Option<serde_json::Value>) -> Option<serde_json::V
     value.filter(|v| !v.is_null())
 }
 
+/// Normalise a submitted [`WorkflowEngineConfig`] (#293): a config with a blank
+/// `engine_url` or `workflow` is treated as absent (the way a blank string
+/// unbinds elsewhere), so a client can clear the backend by sending an empty
+/// one. String fields are trimmed; the optionals are dropped when blank.
+fn clean_workflow_engine(value: Option<WorkflowEngineConfig>) -> Option<WorkflowEngineConfig> {
+    let cfg = value?;
+    let engine_url = cfg.engine_url.trim().to_string();
+    let workflow = cfg.workflow.trim().to_string();
+    if engine_url.is_empty() || workflow.is_empty() {
+        return None;
+    }
+    Some(WorkflowEngineConfig {
+        engine_url,
+        workflow,
+        token_file: clean_optional(cfg.token_file),
+        repo_ref: clean_optional(cfg.repo_ref),
+    })
+}
+
+/// How often a workflow run is polled for a terminal state (#293). A steer/gate
+/// bridge that would let the engine push instead is increment-2 work; until
+/// then a fixed interval is the whole tracking mechanism.
+const WORKFLOW_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+/// How many consecutive poll errors are tolerated before a workflow run is
+/// given up on as errored — a transient blip is ridden out, a persistently
+/// unreachable engine is not polled forever.
+const WORKFLOW_POLL_MAX_ERRORS: u32 = 5;
+/// The ceiling on how long a workflow run may stay non-terminal before it is
+/// recorded errored, so a run the engine never finishes does not stay `running`
+/// in Vogt indefinitely.
+const WORKFLOW_POLL_DEADLINE: Duration = Duration::hours(6);
+
+/// Read the workflow engine's bearer token from `path`, following the
+/// token-from-file pattern in `config.rs` (`read_token_path`). `None` when no
+/// file is configured; an `Err(reason)` when the file is set but unreadable or
+/// empty, so the caller can record the run errored with the reason rather than
+/// panicking.
+fn read_workflow_token(path: Option<&str>) -> std::result::Result<Option<String>, String> {
+    let Some(path) = path.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    let raw =
+        std::fs::read_to_string(path).map_err(|e| format!("reading token_file ({path}): {e}"))?;
+    let value = raw.trim().to_string();
+    if value.is_empty() {
+        return Err(format!("token_file ({path}) is empty"));
+    }
+    Ok(Some(value))
+}
+
+/// Build the goal handed to the workflow engine: the task prompt, with the Vogt
+/// subject appended when the task is bound to one, so the engine's run names the
+/// same subject Vogt will file its conclusion against.
+fn build_workflow_goal(task: &AgentTask) -> String {
+    let base = task.prompt.trim();
+    match vogt_binding_line(task) {
+        Some(binding) => format!("{base}\n\n(Vogt subject: {binding})"),
+        None => base.to_string(),
+    }
+}
+
+/// The one-line summary stored on a concluded workflow run when the engine gave
+/// no summary of its own — phrased by outcome, and naming the final sha when
+/// there is one.
+fn workflow_outcome_summary(
+    outcome: AgentTaskRunOutcome,
+    conclusion: &AgentTaskRunConclusion,
+) -> String {
+    let base = match outcome {
+        AgentTaskRunOutcome::Succeeded => "Workflow engine run succeeded",
+        AgentTaskRunOutcome::Failed => "Workflow engine run failed",
+        AgentTaskRunOutcome::PartiallySucceeded => "Workflow engine run partially succeeded",
+        AgentTaskRunOutcome::Skipped => "Workflow engine run skipped",
+        AgentTaskRunOutcome::Blocked => "Workflow engine run blocked",
+    };
+    match &conclusion.final_sha {
+        Some(sha) => format!("{base} at {sha}"),
+        None => base.to_string(),
+    }
+}
+
+/// Poll a workflow run to a terminal state and record its conclusion (#293).
+///
+/// Spawned once per workflow run. It polls on a fixed interval until the engine
+/// reports a terminal state (mapped to a conclusion), a persistent poll failure
+/// exhausts the error budget, or the deadline passes — every exit but the happy
+/// one records the run errored with a written reason. Absence is non-fatal:
+/// nothing here panics or touches the scheduler.
+fn spawn_workflow_poller(
+    registry: Arc<AgentTaskRegistry>,
+    provider: FabroProvider,
+    provider_run_id: String,
+    task_id: Uuid,
+    run_id: Uuid,
+    session_id: Uuid,
+    started: OffsetDateTime,
+) {
+    tokio::spawn(async move {
+        let mut consecutive_errors = 0u32;
+        loop {
+            tokio::time::sleep(WORKFLOW_POLL_INTERVAL).await;
+
+            if OffsetDateTime::now_utc() - started > WORKFLOW_POLL_DEADLINE {
+                registry.record_workflow_errored(
+                    task_id,
+                    run_id,
+                    session_id,
+                    started,
+                    OffsetDateTime::now_utc(),
+                    "workflow engine run did not reach a terminal state before the deadline",
+                );
+                return;
+            }
+
+            match provider.poll(&provider_run_id).await {
+                Ok(status) => {
+                    consecutive_errors = 0;
+                    if status.state.is_terminal() {
+                        let finished = OffsetDateTime::now_utc();
+                        let provider_summary =
+                            status.conclusion.as_ref().and_then(|c| c.summary.clone());
+                        let (outcome, conclusion) =
+                            map_conclusion(status.state, status.conclusion, started, finished);
+                        let summary = provider_summary
+                            .unwrap_or_else(|| workflow_outcome_summary(outcome, &conclusion));
+                        registry.record_workflow_conclusion(
+                            task_id, run_id, session_id, outcome, conclusion, summary,
+                        );
+                        return;
+                    }
+                }
+                Err(err) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= WORKFLOW_POLL_MAX_ERRORS {
+                        registry.record_workflow_errored(
+                            task_id,
+                            run_id,
+                            session_id,
+                            started,
+                            OffsetDateTime::now_utc(),
+                            &format!("workflow engine poll failed {consecutive_errors}x: {err}"),
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    });
+}
+
 fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|s| s.trim().to_string())
@@ -3721,6 +4164,7 @@ mod tests {
             output_file: None,
             output_schema_max_retries: DEFAULT_OUTPUT_SCHEMA_MAX_RETRIES,
             branch: None,
+            workflow_engine: None,
             notify_on_start: false,
             notify_on_phrase: None,
             auto_retry_on_rate_limit: false,
@@ -4152,5 +4596,151 @@ mod tests {
             outcome_summary(AgentTaskRunOutcome::Blocked, 137),
             "Blocked at an approval gate"
         );
+    }
+
+    // --- workflow-engine dispatch (#293) ------------------------------------
+
+    fn test_config(state_dir: std::path::PathBuf) -> crate::config::Config {
+        crate::config::Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            token: "test-token-1234567890".into(),
+            token_mutating_request_limit_per_minute: 600,
+            extra_tokens: vec![],
+            scrollback_bytes: 64 * 1024,
+            default_shell: "/bin/bash".into(),
+            default_cwd: std::env::temp_dir(),
+            activity_idle_after_ms: 200,
+            idle_stall_after_ms: 10 * 60 * 1_000,
+            workspace_root: std::env::temp_dir(),
+            gui_stream_url: None,
+            gui_stream_verified: false,
+            state_dir,
+            fcm_service_account_json: None,
+            vapid_subject: "mailto:test@example.invalid".into(),
+            allowed_origins: vec![],
+            auto_agent_auth: false,
+            agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
+            session_templates: vec![],
+            assistant_api_key: None,
+            assistant_base_url: "http://unused.invalid".into(),
+            assistant_model: "test-model".into(),
+            assistant_max_tool_calls: 8,
+            assistant_allow_claude_proxy: false,
+            assistant_reasoning_effort: None,
+            assistant_profiles: vec![],
+            assistant_default_profile: None,
+            assistant_log_retention_days: 30,
+            assistant_stt_base_urls: vec![],
+            assistant_stt_api_key: None,
+            assistant_stt_model: "whisper-1".into(),
+            assistant_tts_base_urls: vec![],
+            assistant_tts_api_key: None,
+            assistant_tts_model: "tts-1".into(),
+            assistant_tts_voice: "alloy".into(),
+            assistant_speech_attempt_timeout_ms: 30_000,
+            public_url: None,
+            vogt_core_url: None,
+            vogt_import_root: None,
+            vogt_engine_state_dir: None,
+            vogt_core_token: None,
+        }
+    }
+
+    fn test_registry() -> Arc<AgentTaskRegistry> {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let cfg = Arc::new(test_config(dir.clone()));
+        let bus = EventBus::default();
+        let sessions = Arc::new(SessionRegistry::new(cfg, bus.clone(), None));
+        let push = Arc::new(PushManager::new(&dir, None).unwrap());
+        Arc::new(AgentTaskRegistry::new(&dir, sessions, push, bus).unwrap())
+    }
+
+    /// The non-fatal contract (#293): a task whose workflow engine cannot be
+    /// reached records its run *errored* with a written reason and never
+    /// panics — the create-run against a dead port fails, and the run is a
+    /// durable `Failed` conclusion rather than a crash or a stuck `running`.
+    #[tokio::test]
+    async fn a_workflow_task_with_a_dead_engine_records_the_run_errored_non_fatally() {
+        let registry = test_registry();
+        let task = registry
+            .create(AgentTaskCreate {
+                name: "Fabro nightly".into(),
+                prompt: "audit the repo".into(),
+                schedule: None,
+                triggers: None,
+                concurrency: None,
+                command: None,
+                cwd: None,
+                env: None,
+                context: None,
+                vogt_project: Some("vogt".into()),
+                vogt_work_item: None,
+                gates: None,
+                auto_approve: None,
+                output_schema: None,
+                output_file: None,
+                output_schema_max_retries: None,
+                branch: None,
+                workflow_engine: Some(WorkflowEngineConfig {
+                    // Port 1 has nothing listening: the connect is refused fast.
+                    engine_url: "http://127.0.0.1:1".into(),
+                    workflow: "nightly".into(),
+                    token_file: None,
+                    repo_ref: None,
+                }),
+                enabled: None,
+                notify_on_start: None,
+                notify_on_phrase: None,
+                auto_retry_on_rate_limit: None,
+            })
+            .expect("task created");
+
+        // The workflow-engine config survived create unchanged.
+        assert!(task.workflow_engine.is_some());
+
+        let run = registry.run_now(task.id).await.expect("run recorded");
+        assert_eq!(run.status, AgentTaskRunStatus::Errored);
+        assert_eq!(run.outcome, Some(AgentTaskRunOutcome::Failed));
+        let conclusion = run.conclusion.expect("a durable conclusion was written");
+        assert_eq!(conclusion.outcome, AgentTaskRunOutcome::Failed);
+        assert!(
+            run.summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("create-run failed"),
+            "summary names the cause: {:?}",
+            run.summary
+        );
+
+        // The stored task carries exactly this one errored run — no PTY session
+        // was spawned, and the scheduler is untouched.
+        let stored = registry.get(task.id).unwrap();
+        assert_eq!(stored.runs.len(), 1);
+        assert_eq!(stored.runs[0].status, AgentTaskRunStatus::Errored);
+    }
+
+    #[test]
+    fn a_workflow_engine_config_round_trips_on_a_task() {
+        let mut task = task_bound_to(Some("vogt"), Some("WI-7"));
+        task.workflow_engine = Some(WorkflowEngineConfig {
+            engine_url: "https://fabro.internal".into(),
+            workflow: "nightly-audit".into(),
+            token_file: Some("/run/secrets/fabro".into()),
+            repo_ref: Some("main".into()),
+        });
+        let json = serde_json::to_string(&task).unwrap();
+        let back: AgentTask = serde_json::from_str(&json).unwrap();
+        let we = back
+            .workflow_engine
+            .expect("workflow_engine survives serde");
+        assert_eq!(we.engine_url, "https://fabro.internal");
+        assert_eq!(we.workflow, "nightly-audit");
+        assert_eq!(we.token_file.as_deref(), Some("/run/secrets/fabro"));
+        assert_eq!(we.repo_ref.as_deref(), Some("main"));
+
+        // A task without the field omits it from the wire form entirely.
+        let bare = task_bound_to(None, None);
+        let wire = serde_json::to_value(&bare).unwrap();
+        assert!(wire.get("workflow_engine").is_none());
     }
 }
