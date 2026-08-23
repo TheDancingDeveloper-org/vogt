@@ -23,6 +23,7 @@ function task(id: string, name: string, prompt = `${name} prompt`): AgentTask {
     name,
     prompt,
     schedule: { kind: "manual" },
+    concurrency: 1,
     status: "active",
     command: null,
     cwd: null,
@@ -422,6 +423,123 @@ describe("Tool draft sessionStorage mirror", () => {
     expect(fresh.readToolDraft("tasks", null)).toEqual({ hello: "world" });
     // Belt and braces: the original module still reads it too.
     expect(readToolDraft("tasks", null)).toEqual({ hello: "world" });
+  });
+});
+
+describe("#290 — the triggers editor", () => {
+  it("adds a work-transition trigger and round-trips it through the upsert", async () => {
+    let saved = ALPHA;
+    vi.spyOn(api, "listAgentTasks").mockImplementation(async () => [saved]);
+    const update = vi.spyOn(api, "updateAgentTask").mockImplementation(
+      async (id: string, request: Partial<AgentTaskUpsertRequest>) => {
+        saved = { ...ALPHA, id, triggers: request.triggers ?? [] };
+        return saved;
+      },
+    );
+
+    mountTasks();
+    await screen.findByRole("button", { name: /Alpha review/ });
+
+    // Arm a work-transition trigger and give it a destination state.
+    await fireEvent.change(screen.getByLabelText("Trigger kind to add"), {
+      target: { value: "work-transition" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Add trigger" }));
+    expect(screen.getByTestId("trigger-row")).toBeInTheDocument();
+    await fireEvent.input(screen.getByLabelText("Destination state"), {
+      target: { value: "ready" },
+    });
+    await fireEvent.input(screen.getByLabelText("Project filter"), {
+      target: { value: "vogt" },
+    });
+
+    await fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update).toHaveBeenCalledWith(
+      "task-alpha",
+      expect.objectContaining({
+        triggers: [
+          {
+            enabled: true,
+            kind: "work-transition",
+            to_state: "ready",
+            project: "vogt",
+          },
+        ],
+      }),
+    );
+  });
+
+  it("disables and removes a trigger", async () => {
+    const withTrigger: AgentTask = {
+      ...ALPHA,
+      triggers: [{ enabled: true, kind: "drift-proposed", project: "vogt" }],
+    };
+    vi.spyOn(api, "listAgentTasks").mockResolvedValue([withTrigger]);
+
+    mountTasks();
+    await screen.findByRole("button", { name: /Alpha review/ });
+
+    // The existing trigger is shown and enabled.
+    const enable = screen.getByLabelText("Trigger enabled") as HTMLInputElement;
+    expect(enable.checked).toBe(true);
+    await fireEvent.click(enable);
+    expect((screen.getByLabelText("Trigger enabled") as HTMLInputElement).checked).toBe(
+      false,
+    );
+
+    // Removing it empties the editor.
+    await fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(screen.queryByTestId("trigger-row")).not.toBeInTheDocument();
+  });
+
+  it("refuses to save a work-transition trigger with no destination state", async () => {
+    vi.spyOn(api, "listAgentTasks").mockResolvedValue([ALPHA]);
+    const update = vi.spyOn(api, "updateAgentTask");
+
+    mountTasks();
+    await screen.findByRole("button", { name: /Alpha review/ });
+    await fireEvent.change(screen.getByLabelText("Trigger kind to add"), {
+      target: { value: "work-transition" },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Add trigger" }));
+    await fireEvent.input(screen.getByLabelText("Destination state"), {
+      target: { value: "" },
+    });
+
+    await fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    expect(
+      (await screen.findAllByText(/needs a destination state/))[0],
+    ).toBeVisible();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("shows a triggered run's originating trigger on its row", async () => {
+    const triggered: AgentTask = {
+      ...task("task-alpha", "Alpha review"),
+      run_count: 1,
+      runs: [
+        run({
+          trigger: "event",
+          trigger_detail: {
+            trigger_kind: "work-transition",
+            event_kind: "work.transitioned",
+            event_id: "wi_7",
+            event_seq: 4102,
+            description: "WI-7 entered ready",
+          },
+        }),
+      ],
+    };
+    vi.spyOn(api, "listAgentTasks").mockResolvedValue([triggered]);
+
+    mountTasks();
+    await fireEvent.click(await screen.findByRole("button", { name: /Alpha review/ }));
+
+    const detail = await screen.findByTestId("run-trigger-detail");
+    expect(detail).toHaveTextContent("WI-7 entered ready");
+    expect(detail).toHaveAttribute("title", expect.stringContaining("work.transitioned"));
   });
 });
 

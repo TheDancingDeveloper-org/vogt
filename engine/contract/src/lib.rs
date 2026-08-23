@@ -192,6 +192,15 @@ pub enum ServerEvent {
         entity_id: String,
         /// The core's sequence number, so a client can tell order and gaps.
         seq: i64,
+        /// The event's own `summary` dict, verbatim from the core feed — the
+        /// per-kind payload (`{"ref","from","to"}` on a `work.transitioned`,
+        /// `{"kind","summary"}` on a `drift.raised`, and so on). Carried so
+        /// the agent-task trigger matcher (#290) can filter on what the change
+        /// actually was — its destination state, its project — rather than
+        /// only that *something* changed. Defaults to `null` for a bare change
+        /// signal that carried no summary, and is omitted from the wire then.
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        summary: serde_json::Value,
     },
     /// An agent-task run held at a prompt boundary on a declared approval gate
     /// (#289). The PTY is paused at the question; a client renders the options
@@ -245,6 +254,35 @@ pub enum ServerEvent {
         interrupt: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+    },
+    /// An agent-task run was started by a trigger — a core-state event, or an
+    /// explicit API fire (#290). Emitted the moment the run's session is
+    /// spawned, and it is the audit line on the stream: `trigger_kind` names
+    /// which trigger fired (`work-transition`, `observation-new`,
+    /// `drift-proposed`, `forge-pr-checks`, or `api`), and `event_kind` /
+    /// `event_id` / `event_seq` name the core event that caused it, so a `why`
+    /// reading this can say "task ran because WI-7 entered ready at seq 4102".
+    /// Absent for a manual or scheduled run — those carry no originating event.
+    ///
+    /// Spelled `task.run.triggered` explicitly, the dotted name clients filter
+    /// on, matching the other `task.*` events.
+    #[serde(rename = "task.run.triggered")]
+    TaskRunTriggered {
+        task_id: Uuid,
+        run_id: Uuid,
+        session_id: Uuid,
+        /// Which trigger fired, kebab-case: `work-transition`,
+        /// `observation-new`, `drift-proposed`, `forge-pr-checks`, or `api`.
+        trigger_kind: String,
+        /// The core event kind that caused it, when a core event did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_kind: Option<String>,
+        /// The core entity the event was about, when there was one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<String>,
+        /// The core event's sequence number, when there was one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_seq: Option<i64>,
     },
     /// An agent-task run reached a terminal state and its conclusion was
     /// recorded (#291). `outcome` is the typed verdict — `succeeded`, `failed`,

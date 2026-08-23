@@ -5128,6 +5128,63 @@ textarea {
   color: var(--fg-muted);
 }
 
+/* Event-trigger editor (#290). */
+.agent-task-triggers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-task-trigger {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, rgba(110, 118, 129, 0.3));
+  border-radius: 8px;
+  background: rgba(110, 118, 129, 0.06);
+}
+
+.agent-task-trigger-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-task-trigger-enable {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.agent-task-trigger-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.agent-task-trigger-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.agent-task-concurrency {
+  max-width: 220px;
+}
+
+.agent-task-run-trigger-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-task-run-findings {
   list-style: none;
   margin: 4px 0 0;

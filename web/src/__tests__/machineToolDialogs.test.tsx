@@ -13,6 +13,7 @@ const TASK: AgentTask = {
   name: "Nightly review",
   prompt: "Review the queue",
   schedule: { kind: "manual" },
+  concurrency: 1,
   status: "active",
   command: null,
   cwd: null,

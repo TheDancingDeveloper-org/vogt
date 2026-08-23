@@ -44,8 +44,10 @@ The engine owns the *doing*:
   `waiting-for-input` / `errored`, derived from output heuristics and published
   on a server-wide SSE stream (FR-E2).
 - **Agent tasks.** A durable scheduled-agent registry — `manual`, `interval`,
-  UTC `daily` — whose runs are real PTY sessions, optionally bound to a Vogt
-  project or work item (FR-E7).
+  UTC `daily`, plus **event triggers** that fire runs from vogt-core's own
+  state (a work-item transition, a raised drift proposal, a new observation, a
+  PR's checks flipping) and an explicit `api` fire — whose runs are real PTY
+  sessions, optionally bound to a Vogt project or work item (FR-E7, #290).
 - **The assistant.** A server-side tool-use loop over sessions and a curated
   read slice of Vogt, with every effector behind an on-screen approval
   (FR-T1–T4, FR-T6).
@@ -839,7 +841,10 @@ Every non-GET route in this group requires `agent-tasks-write`.
 - `POST /api/agent-tasks/:id/resume` -> `AgentTask`
 - `POST /api/agent-tasks/:id/run` -> `AgentTaskRun` — runs now regardless of
   schedule, and returns as soon as the session is spawned. The run's outcome
-  arrives later, on the task's `runs`.
+  arrives later, on the task's `runs`. A human Run Now records `trigger:
+  "manual"`. `POST …/run?trigger=api` records `trigger: "api"` instead, and is
+  refused with `409` unless the task has an enabled `api` trigger — programmatic
+  firing is opt-in (#290).
 - `POST /api/agent-tasks/:id/steer` `{text, interrupt?, actor?, reason?}` ->
   `{"ok": true}` — queue a line of steering for the task's in-flight run,
   delivered to its PTY at the next prompt boundary (the idle / waiting-for-input
@@ -861,6 +866,52 @@ Every non-GET route in this group requires `agent-tasks-write`.
 or `daily` with `times`. `status` is `active` or `paused`. A run carries
 `status` (`running`, `completed`, `errored`), the session it spawned, and the
 paths of the prompt and context files written for it.
+
+#### Event triggers (#290)
+
+A task also carries `triggers: AgentTaskTrigger[]` and a `concurrency` cap
+(default 1), on top of its schedule. Each trigger is `{ enabled, kind, …filter
+}`, tagged by `kind`:
+
+- `work-transition` — a work item entered `to_state`; optional `project`,
+  `item_kind`, `label`, and `work_item` filters. The run is bound to the item
+  that transitioned (its ref becomes the run's `vogt_work_item`), matched from
+  the core's `work.transitioned` event.
+- `observation-new` — a new observed subject of `observation_kind` (optional
+  `project`), matched from an `observation.new` core event.
+- `drift-proposed` — a drift proposal was raised (optional `project`), matched
+  from the core's `drift.raised` event.
+- `forge-pr-checks` — a PR's checks reached `status` (`any` | `green` | `red`;
+  optional `work_item`), matched from a `forge.pr.checks` core event; the linked
+  item is bound to the run.
+- `api` — no core event; it arms `POST …/run?trigger=api`.
+
+**How the engine receives events.** It does not poll the core. The front door
+already follows vogt-core's `events.list` cursor once
+(`vogt_core::spawn_event_follower`, FR-U10) and republishes each change onto the
+engine's own event bus as `VogtChanged`, now carrying the event's `summary`. The
+agent-task **trigger watcher subscribes to that bus** and matches events against
+enabled triggers — one subscription, no second cursor, no core credential of its
+own. The match reads only the event's own fields (`kind`, `entity_id`,
+`summary`); the engine has no view of Vogt's registry, so `work-transition` and
+`drift-proposed` filters on project/kind/label depend on the core carrying those
+on the event, which it now does additively (`work.transitioned` and
+`drift.raised` summaries).
+
+**The rules a fire obeys.**
+
+- *No storm.* A fire that cannot start — the task is at its concurrency cap, or
+  a required binding is missing — is **logged and dropped, never retried**. A
+  missed fire is accepted (a paused engine misses them too), the way FR-M2's
+  drift push already accepts one.
+- *Concurrency cap.* At most `concurrency` runs of a task are in flight at once;
+  events are consumed one at a time, and a single event fires a given task at
+  most once even if two of its triggers match.
+- *Audit.* Every triggered run records a `trigger_detail`
+  (`{trigger_kind, event_kind, event_id, event_seq, description}`) naming the
+  trigger and the exact event that fired it, and the run emits
+  `task.run.triggered` on the stream — so `why` can explain "task ran because
+  WI-7 entered ready at seq 4102".
 
 A task may also carry a **Vogt binding** — `vogt_project` (a project slug) and
 `vogt_work_item` (a ref such as `WI-7`), both optional, both omitted from the

@@ -1,5 +1,6 @@
 import {
   For,
+  Index,
   Show,
   createEffect,
   createMemo,
@@ -14,7 +15,10 @@ import type {
   AgentTaskRunCost,
   AgentTaskRunOutcome,
   AgentTaskSchedule,
+  AgentTaskTrigger,
   AgentTaskUpsertRequest,
+  ForgeCheckStatus,
+  TriggerKind,
 } from "./api";
 import { api } from "./api";
 import AgentTaskSteering from "./AgentTaskSteering";
@@ -41,6 +45,8 @@ interface TaskDraft {
   scheduleKind: AgentTaskSchedule["kind"];
   intervalMinutes: string;
   dailyTimes: string;
+  triggers: AgentTaskTrigger[];
+  concurrency: string;
   commandText: string;
   cwd: string;
   envText: string;
@@ -51,6 +57,35 @@ interface TaskDraft {
   notifyOnStart: boolean;
   notifyOnPhrase: string;
   autoRetryOnRateLimit: boolean;
+}
+
+/** The trigger kinds a task can arm, and how they read in the editor (#290). */
+const TRIGGER_KINDS: { kind: TriggerKind; label: string }[] = [
+  { kind: "work-transition", label: "Work item transition" },
+  { kind: "observation-new", label: "New observation" },
+  { kind: "drift-proposed", label: "Drift proposed" },
+  { kind: "forge-pr-checks", label: "PR checks green/red" },
+  { kind: "api", label: "API (programmatic)" },
+];
+
+function triggerLabel(kind: TriggerKind): string {
+  return TRIGGER_KINDS.find((t) => t.kind === kind)?.label ?? kind;
+}
+
+/** A freshly-added trigger of a kind, with sensible starting filters (#290). */
+function defaultTrigger(kind: TriggerKind): AgentTaskTrigger {
+  switch (kind) {
+    case "work-transition":
+      return { enabled: true, kind, to_state: "ready" };
+    case "observation-new":
+      return { enabled: true, kind, observation_kind: "forge.issue" };
+    case "drift-proposed":
+      return { enabled: true, kind };
+    case "forge-pr-checks":
+      return { enabled: true, kind, status: "any" };
+    case "api":
+      return { enabled: true, kind };
+  }
 }
 
 interface TasksViewDraft {
@@ -72,6 +107,8 @@ const EMPTY_DRAFT: TaskDraft = {
   scheduleKind: "manual",
   intervalMinutes: "720",
   dailyTimes: "09:00",
+  triggers: [],
+  concurrency: "1",
   commandText: "",
   cwd: "",
   envText: "",
@@ -85,7 +122,7 @@ const EMPTY_DRAFT: TaskDraft = {
 };
 
 function cloneDraft(value: TaskDraft): TaskDraft {
-  return { ...value };
+  return { ...value, triggers: value.triggers.map((t) => ({ ...t })) };
 }
 
 function draftsEqual(left: TaskDraft, right: TaskDraft): boolean {
@@ -105,6 +142,8 @@ function taskToDraft(task: AgentTask): TaskDraft {
       task.schedule.kind === "interval" ? String(task.schedule.minutes) : "720",
     dailyTimes:
       task.schedule.kind === "daily" ? task.schedule.times.join(", ") : "09:00",
+    triggers: (task.triggers ?? []).map((t) => ({ ...t })),
+    concurrency: String(task.concurrency ?? 1),
     commandText: (task.command ?? []).join("\n"),
     cwd: task.cwd ?? "",
     envText: task.env.map(([key, value]) => `${key}=${value}`).join("\n"),
@@ -238,10 +277,28 @@ function buildRequest(draft: TaskDraft): AgentTaskUpsertRequest {
     .map((line) => line.trim())
     .filter(Boolean);
 
+  const concurrency = Number.parseInt(draft.concurrency.trim() || "1", 10);
+  if (!Number.isFinite(concurrency) || concurrency < 1) {
+    throw new Error("Concurrency must be a positive integer");
+  }
+
+  // A work-transition trigger with no destination state matches nothing; catch
+  // it here rather than let the engine 400 the whole save.
+  for (const trigger of draft.triggers) {
+    if (trigger.kind === "work-transition" && !trigger.to_state.trim()) {
+      throw new Error("A work-item-transition trigger needs a destination state");
+    }
+    if (trigger.kind === "observation-new" && !trigger.observation_kind.trim()) {
+      throw new Error("A new-observation trigger needs an observation kind");
+    }
+  }
+
   return {
     name,
     prompt,
     schedule,
+    triggers: draft.triggers,
+    concurrency,
     command: command.length > 0 ? command : null,
     cwd: draft.cwd.trim() || null,
     env: parseEnv(draft.envText),
@@ -288,6 +345,8 @@ const AgentTasks = (props: Props) => {
   const [actionError, setActionError] = createSignal<string | null>(null);
   const [retryAction, setRetryAction] = createSignal<(() => void) | null>(null);
   const [steerBusy, setSteerBusy] = createSignal(false);
+  const [newTriggerKind, setNewTriggerKind] =
+    createSignal<TriggerKind>("work-transition");
   const [pendingDecision, setPendingDecision] =
     createSignal<PendingDraftDecision | null>(null);
   let restoreDraftPending = restored.selectedTaskId !== null && !restored.creating;
@@ -419,6 +478,30 @@ const AgentTasks = (props: Props) => {
     setEmptyDraft();
     setActionError(null);
     setRetryAction(null);
+  };
+
+  // --- trigger editing (#290) ---------------------------------------------
+  const addTrigger = (kind: TriggerKind): void => {
+    setDraft({ ...draft(), triggers: [...draft().triggers, defaultTrigger(kind)] });
+  };
+
+  const removeTrigger = (index: number): void => {
+    setDraft({
+      ...draft(),
+      triggers: draft().triggers.filter((_, i) => i !== index),
+    });
+  };
+
+  const patchTrigger = (
+    index: number,
+    patch: Partial<AgentTaskTrigger>,
+  ): void => {
+    setDraft({
+      ...draft(),
+      triggers: draft().triggers.map((trigger, i) =>
+        i === index ? ({ ...trigger, ...patch } as AgentTaskTrigger) : trigger,
+      ),
+    });
   };
 
   const reportActionFailure = (
@@ -844,6 +927,276 @@ const AgentTasks = (props: Props) => {
               </Show>
             </div>
 
+            <div class="agent-task-field agent-task-field-wide agent-task-triggers">
+              <span>Triggers</span>
+              <p class="agent-task-subfield-label">
+                Fire a run from Vogt's own state, on top of the schedule. Each
+                trigger is separately enabled; a fire that can't start (capacity
+                or the item is gone) is dropped, not retried.
+              </p>
+              <Index each={draft().triggers}>
+                {(trigger, index) => {
+                  const t = () => trigger();
+                  return (
+                    <div class="agent-task-trigger" data-testid="trigger-row">
+                      <div class="agent-task-trigger-head">
+                        <label class="agent-task-trigger-enable">
+                          <input
+                            type="checkbox"
+                            aria-label="Trigger enabled"
+                            checked={t().enabled}
+                            onChange={(e) =>
+                              patchTrigger(index, {
+                                enabled: e.currentTarget.checked,
+                              })
+                            }
+                          />
+                          <span>{triggerLabel(t().kind)}</span>
+                        </label>
+                        <button
+                          type="button"
+                          class="agent-task-trigger-remove"
+                          onClick={() => removeTrigger(index)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+
+                      <Show when={t().kind === "work-transition"}>
+                        <div class="agent-task-trigger-filters">
+                          <label class="agent-task-field">
+                            <span>Destination state</span>
+                            <input
+                              type="text"
+                              aria-label="Destination state"
+                              placeholder="e.g. ready"
+                              value={
+                                (t() as Extract<
+                                  AgentTaskTrigger,
+                                  { kind: "work-transition" }
+                                >).to_state
+                              }
+                              onInput={(e) =>
+                                patchTrigger(index, {
+                                  to_state: e.currentTarget.value,
+                                })
+                              }
+                            />
+                          </label>
+                          <label class="agent-task-field">
+                            <span>Project filter</span>
+                            <input
+                              type="text"
+                              aria-label="Project filter"
+                              placeholder="Any project"
+                              value={
+                                (t() as Extract<
+                                  AgentTaskTrigger,
+                                  { kind: "work-transition" }
+                                >).project ?? ""
+                              }
+                              onInput={(e) =>
+                                patchTrigger(index, {
+                                  project: e.currentTarget.value || null,
+                                })
+                              }
+                            />
+                          </label>
+                          <label class="agent-task-field">
+                            <span>Item kind filter</span>
+                            <input
+                              type="text"
+                              aria-label="Item kind filter"
+                              placeholder="Any kind"
+                              value={
+                                (t() as Extract<
+                                  AgentTaskTrigger,
+                                  { kind: "work-transition" }
+                                >).item_kind ?? ""
+                              }
+                              onInput={(e) =>
+                                patchTrigger(index, {
+                                  item_kind: e.currentTarget.value || null,
+                                })
+                              }
+                            />
+                          </label>
+                          <label class="agent-task-field">
+                            <span>Label filter</span>
+                            <input
+                              type="text"
+                              aria-label="Label filter"
+                              placeholder="Any label"
+                              value={
+                                (t() as Extract<
+                                  AgentTaskTrigger,
+                                  { kind: "work-transition" }
+                                >).label ?? ""
+                              }
+                              onInput={(e) =>
+                                patchTrigger(index, {
+                                  label: e.currentTarget.value || null,
+                                })
+                              }
+                            />
+                          </label>
+                        </div>
+                      </Show>
+
+                      <Show when={t().kind === "observation-new"}>
+                        <div class="agent-task-trigger-filters">
+                          <label class="agent-task-field">
+                            <span>Observation kind</span>
+                            <input
+                              type="text"
+                              aria-label="Observation kind"
+                              placeholder="e.g. forge.issue"
+                              value={
+                                (t() as Extract<
+                                  AgentTaskTrigger,
+                                  { kind: "observation-new" }
+                                >).observation_kind
+                              }
+                              onInput={(e) =>
+                                patchTrigger(index, {
+                                  observation_kind: e.currentTarget.value,
+                                })
+                              }
+                            />
+                          </label>
+                          <label class="agent-task-field">
+                            <span>Project filter</span>
+                            <input
+                              type="text"
+                              aria-label="Project filter"
+                              placeholder="Any project"
+                              value={
+                                (t() as Extract<
+                                  AgentTaskTrigger,
+                                  { kind: "observation-new" }
+                                >).project ?? ""
+                              }
+                              onInput={(e) =>
+                                patchTrigger(index, {
+                                  project: e.currentTarget.value || null,
+                                })
+                              }
+                            />
+                          </label>
+                        </div>
+                      </Show>
+
+                      <Show when={t().kind === "drift-proposed"}>
+                        <div class="agent-task-trigger-filters">
+                          <label class="agent-task-field">
+                            <span>Project filter</span>
+                            <input
+                              type="text"
+                              aria-label="Project filter"
+                              placeholder="Any project"
+                              value={
+                                (t() as Extract<
+                                  AgentTaskTrigger,
+                                  { kind: "drift-proposed" }
+                                >).project ?? ""
+                              }
+                              onInput={(e) =>
+                                patchTrigger(index, {
+                                  project: e.currentTarget.value || null,
+                                })
+                              }
+                            />
+                          </label>
+                        </div>
+                      </Show>
+
+                      <Show when={t().kind === "forge-pr-checks"}>
+                        <div class="agent-task-trigger-filters">
+                          <label class="agent-task-field">
+                            <span>Check status</span>
+                            <select
+                              aria-label="Check status"
+                              value={
+                                (t() as Extract<
+                                  AgentTaskTrigger,
+                                  { kind: "forge-pr-checks" }
+                                >).status ?? "any"
+                              }
+                              onChange={(e) =>
+                                patchTrigger(index, {
+                                  status: e.currentTarget
+                                    .value as ForgeCheckStatus,
+                                })
+                              }
+                            >
+                              <option value="any">Green or red</option>
+                              <option value="green">Green only</option>
+                              <option value="red">Red only</option>
+                            </select>
+                          </label>
+                          <label class="agent-task-field">
+                            <span>Work item filter</span>
+                            <input
+                              type="text"
+                              aria-label="Work item filter"
+                              placeholder="Any linked item"
+                              value={
+                                (t() as Extract<
+                                  AgentTaskTrigger,
+                                  { kind: "forge-pr-checks" }
+                                >).work_item ?? ""
+                              }
+                              onInput={(e) =>
+                                patchTrigger(index, {
+                                  work_item: e.currentTarget.value || null,
+                                })
+                              }
+                            />
+                          </label>
+                        </div>
+                      </Show>
+
+                      <Show when={t().kind === "api"}>
+                        <p class="agent-task-subfield-label">
+                          Lets this task be fired programmatically (records the
+                          run as <code>api</code>). No core event matches it.
+                        </p>
+                      </Show>
+                    </div>
+                  );
+                }}
+              </Index>
+
+              <div class="agent-task-trigger-add">
+                <select
+                  aria-label="Trigger kind to add"
+                  value={newTriggerKind()}
+                  onChange={(e) =>
+                    setNewTriggerKind(e.currentTarget.value as TriggerKind)
+                  }
+                >
+                  <For each={TRIGGER_KINDS}>
+                    {(entry) => <option value={entry.kind}>{entry.label}</option>}
+                  </For>
+                </select>
+                <button type="button" onClick={() => addTrigger(newTriggerKind())}>
+                  Add trigger
+                </button>
+              </div>
+
+              <label class="agent-task-field agent-task-concurrency">
+                <span>Max concurrent runs</span>
+                <input
+                  type="text"
+                  aria-label="Max concurrent runs"
+                  value={draft().concurrency}
+                  onInput={(e) =>
+                    setDraft({ ...draft(), concurrency: e.currentTarget.value })
+                  }
+                />
+              </label>
+            </div>
+
             <div class="agent-task-field agent-task-checks">
               <label>
                 <input
@@ -981,6 +1334,25 @@ const AgentTasks = (props: Props) => {
                           <div class="agent-task-run-top">
                             <span>{formatLocalDate(run.started_at)}</span>
                             <span class="agent-task-run-trigger">{run.trigger}</span>
+                            <Show when={run.trigger_detail}>
+                              {(detail) => (
+                                <span
+                                  class="agent-task-run-trigger-detail"
+                                  data-testid="run-trigger-detail"
+                                  title={
+                                    detail().event_kind
+                                      ? `${detail().event_kind}${
+                                          detail().event_seq != null
+                                            ? ` @ seq ${detail().event_seq}`
+                                            : ""
+                                        }`
+                                      : detail().trigger_kind
+                                  }
+                                >
+                                  {detail().description}
+                                </span>
+                              )}
+                            </Show>
                           </div>
                           <div class="agent-task-run-meta">
                             <button

@@ -583,6 +583,11 @@ pub fn spawn_event_follower(state: Arc<AppState>) {
                         .get("seq")
                         .and_then(|v| v.as_i64())
                         .unwrap_or_default(),
+                    // The per-kind payload, verbatim, so an agent-task trigger
+                    // (#290) can match on what changed and not only that
+                    // something did. A malformed or absent summary becomes
+                    // `null`, which the matcher treats as "no fields to match".
+                    summary: event.get("summary").cloned().unwrap_or(serde_json::Value::Null),
                 });
             }
             cursor = next;

@@ -551,6 +551,22 @@ ref, or both, entered on the task form. A bound run's findings become Vogt
 observations against that subject, with the freshness and trust every other
 kind of evidence carries.
 
+**Fire a task from Vogt's own state.** Beyond the schedule, a task can carry
+**triggers** that start a run when something happens in Vogt: a **work-item
+transition** into a state you name (optionally filtered to a project, item kind,
+label, or one item — the run is then bound to the item that moved), a **new
+observation** of a kind you name, a **drift proposal** being raised, or a **PR's
+checks** going green or red. Add each on the task form, enable or disable it
+without losing its filter, and set **Max concurrent runs** to cap how many runs
+of the task run at once. The engine subscribes to Vogt's event stream rather
+than polling it. Two safety rules make triggers boring in the good way: a fire
+that cannot start — the task is at its cap, or the item it would bind to is gone
+— is **dropped, not retried**, so a burst never becomes a storm; and every
+triggered run records **which trigger fired it and which event caused it**, shown
+on the run row, so you (and `why`) can always see that "this run happened because
+WI-7 entered ready". An `api` trigger arms a task to be fired programmatically
+instead of by a person.
+
 **Steer a run without killing it.** While a task's run is live, a **steer bar**
 on its row sends a line of guidance to the agent, delivered the moment the run
 next pauses at its prompt — you are not fighting it mid-thought. Tick **Interrupt

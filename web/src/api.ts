@@ -454,12 +454,52 @@ export interface PushSubscriptionEntry {
 }
 
 export type AgentTaskStatus = "active" | "paused";
-export type AgentTaskRunTrigger = "manual" | "scheduled";
+export type AgentTaskRunTrigger = "manual" | "scheduled" | "event" | "api";
 
 export type AgentTaskSchedule =
   | { kind: "manual" }
   | { kind: "interval"; minutes: number }
   | { kind: "daily"; times: string[] };
+
+/** The kebab-case kinds an event trigger can be (engine `TriggerSpec`, #290). */
+export type TriggerKind =
+  | "work-transition"
+  | "observation-new"
+  | "drift-proposed"
+  | "forge-pr-checks"
+  | "api";
+
+/** A PR check status a `forge-pr-checks` trigger fires on (engine `ForgeCheckStatus`). */
+export type ForgeCheckStatus = "any" | "green" | "red";
+
+/**
+ * One event trigger a task listens on (engine `AgentTaskTrigger` + `TriggerSpec`,
+ * #290). Tagged by `kind`; the per-kind filter fields sit alongside it, and
+ * `enabled` arms or disarms it without losing the filter.
+ */
+export type AgentTaskTrigger = { enabled: boolean } & (
+  | {
+      kind: "work-transition";
+      to_state: string;
+      project?: string | null;
+      item_kind?: string | null;
+      label?: string | null;
+      work_item?: string | null;
+    }
+  | { kind: "observation-new"; observation_kind: string; project?: string | null }
+  | { kind: "drift-proposed"; project?: string | null }
+  | { kind: "forge-pr-checks"; status?: ForgeCheckStatus; work_item?: string | null }
+  | { kind: "api" }
+);
+
+/** Why a run started, when a trigger fired it (engine `RunTriggerDetail`, #290). */
+export interface RunTriggerDetail {
+  trigger_kind: string;
+  event_kind?: string;
+  event_id?: string;
+  event_seq?: number;
+  description: string;
+}
 
 /** One thing a run reported about itself (engine `AgentTaskFinding`, FR-E7). */
 export interface AgentTaskFinding {
@@ -554,6 +594,8 @@ export interface AgentTaskRun {
   task_id: string;
   started_at: string;
   trigger: AgentTaskRunTrigger;
+  // #290: why the run started, when a trigger fired it (event/api runs only).
+  trigger_detail?: RunTriggerDetail;
   session_id: string;
   session_name: string;
   prompt_file: string;
@@ -580,6 +622,10 @@ export interface AgentTask {
   name: string;
   prompt: string;
   schedule: AgentTaskSchedule;
+  // #290: event triggers this task listens on, and how many runs may be in
+  // flight at once (defaults to 1).
+  triggers?: AgentTaskTrigger[];
+  concurrency: number;
   status: AgentTaskStatus;
   command: string[] | null;
   cwd: string | null;
@@ -612,6 +658,8 @@ export interface AgentTaskUpsertRequest {
   name: string;
   prompt: string;
   schedule: AgentTaskSchedule;
+  triggers?: AgentTaskTrigger[];
+  concurrency?: number;
   command?: string[] | null;
   cwd?: string | null;
   env?: [string, string][];

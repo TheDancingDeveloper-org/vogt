@@ -297,6 +297,31 @@ def test_raising_a_proposal_is_an_audited_declared_write(
     assert {record.entity_id for record in rows} == {p.id for p in result.raised}
 
 
+def test_a_raised_drift_event_carries_its_project(released: AppContext) -> None:
+    # #290: the engine's agent-task `drift-proposed` trigger scopes a fire to a
+    # project with no view of this registry, so the raised event carries the
+    # project slug beside the drift kind and summary. Additive — a proposal that
+    # names no project simply omits it.
+    result = detect_drift(released, DriftDetectParams(auto_accept=False, reason=WHY))
+    proposal = result.raised[0]
+    assert proposal.project_id is not None, "the released fixture's proposal is project-bound"
+
+    with released.declared.read() as view:
+        project = view.project_by_id(proposal.project_id)
+        raised = [
+            event
+            for event in view.list_events(after=0, limit=200)
+            if event.kind == DRIFT_RAISED_EVENT
+            and event.entity_id == proposal.id
+        ]
+    assert project is not None
+    assert len(raised) == 1
+    assert raised[0].summary["project"] == project.slug
+    # The fields a reader relied on before are untouched.
+    assert raised[0].summary["kind"] == proposal.kind
+    assert raised[0].summary["summary"] == proposal.summary
+
+
 def test_a_proposal_carries_its_evidence(released: AppContext) -> None:
     proposal = detect_drift(
         released, DriftDetectParams(auto_accept=False, reason=WHY)
