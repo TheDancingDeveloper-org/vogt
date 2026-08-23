@@ -10,14 +10,24 @@ are the source of truth for *what*; this file is the *order* and the *gates*.
 ## ▶ CURRENT INTENDED STATE — start here (2026-08-23)
 
 ### Three parallel streams running (dispatched 2026-08-23, operator-directed)
-1. **APK crash diagnostics — ⏸ PAUSED, HANDED OVER (operator: "pause and hand
-   over to another agent").** #328 IS merged (dev `51a0c66`). Branch
-   `fix/voice-crash-diagnostics` is PUSHED to origin off `51a0c66`; its only
-   commits are the docs/local handover tracking — **no APK work implemented
-   yet**. Full handover brief for the next agent is below ("APK diagnostics —
-   handover brief"). Note: `docs/local/` is TEMPORARILY un-git-ignored
-   (operator, 2026-08-23) purely for this transfer — re-ignore before any
-   promotion/publish; git history will still carry it either way.
+1. **APK crash diagnostics — ✅ DIAGNOSTIC BUILD DELIVERED (2026-08-24), now
+   AWAITING THE OPERATOR'S DEVICE TEST.** The handover brief below was picked
+   up and built as a fresh branch `fix/apk-crash-diagnostics` off live `dev`
+   `fcb3415` (NOT `fix/voice-crash-diagnostics`, to keep the un-gitignored
+   `docs/local/` out of shared `dev`). **PR #334 merged to `dev` (`9283c37`)**,
+   CI green incl. the Android-assembles job. Ships: `VogtApplication` global
+   uncaught-exception handler → `filesDir/last-crash.txt` (version via
+   PackageManager); `MainActivity` shows it once in a copyable monospace dialog
+   then deletes it; `createChannel()`/`acquireWakeLock()` try/catch-wrapped;
+   version `0.2.0`→`0.2.1` (versionCode 2001). The **0.2.1 dev-targeting APK is
+   already served** at the same URLs (`http://192.168.1.75:18234/app-debug.apk`
+   LAN / `http://100.92.54.45:18234/app-debug.apk` tailnet, sha256 `e680e8ae…`,
+   a superset of the #327 voice APK). NEXT = operator: install → verify Settings
+   shows 0.2.1 → Assistant → unmute → reproduce → relaunch → Copy the trace →
+   paste back → fix the real cause. The old paused-state note and the
+   step-by-step handover brief below are now historical. Note: `docs/local/` is
+   TEMPORARILY un-git-ignored (operator, 2026-08-23) — re-ignore before any
+   promotion/publish; git history carries it either way.
 2. **#292 first-run wizard — ✅ DELIVERED, all three increments merged to
    `dev` (2026-08-23, dev tip `fcb3415`).** PRs #329 (core install-mode),
    #330 (PWA identity wizard + engine `/api/install/*` passthrough), #331
@@ -90,6 +100,8 @@ foreground service.
   the rest of the queue proceed in parallel.
 
 ### APK diagnostics — handover brief (2026-08-23, for the next agent)
+> ✅ **DONE 2026-08-24 — delivered as PR #334 (dev `9283c37`); 0.2.1 APK served. The steps below are historical.**
+
 Operator decision: **blind hardened diagnostic build** (no adb from operator).
 Investigation state — READ FIRST, don't redo it:
 - `mobile/android/app/src/main/AndroidManifest.xml` is **already complete**:
