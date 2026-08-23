@@ -89,7 +89,14 @@ public class VoiceConversationService extends Service {
     }
 
     private void startInForeground() {
-        createChannel();
+        // Channel creation sits outside the startForeground try/catch below and
+        // has thrown on some OEM ROMs; a failed channel must not crash the app —
+        // startForeground still degrades gracefully without it.
+        try {
+            createChannel();
+        } catch (Exception e) {
+            Log.w(TAG, "notification channel setup failed; continuing", e);
+        }
         startedAtElapsed = SystemClock.elapsedRealtime();
         // Measurement hook (FR-M6): the device tester reads conversation
         // start/end out of logcat to bound the 30-minute battery + socket
@@ -124,7 +131,14 @@ public class VoiceConversationService extends Service {
             stopSelf();
             return;
         }
-        acquireWakeLock();
+        // Also outside the block above: acquiring the CPU wake lock has thrown on
+        // some devices. The service is already foregrounded by here, so a wake-lock
+        // failure only costs screen-off survival — never the app.
+        try {
+            acquireWakeLock();
+        } catch (Exception e) {
+            Log.w(TAG, "wake lock acquisition failed; continuing without it", e);
+        }
     }
 
     private Notification buildNotification() {
