@@ -263,7 +263,7 @@ describe("#195 — a token refused after boot returns the reader to the login sc
     const shell = mountShell("/board");
     await signedIn(shell);
 
-    const otherTab = new BroadcastChannel("mydevenv2.auth");
+    const otherTab = new BroadcastChannel("vogt.auth");
     otherTab.postMessage({
       type: "auth-rejected",
       source: "another-tab",

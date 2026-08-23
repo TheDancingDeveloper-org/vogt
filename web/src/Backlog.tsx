@@ -77,7 +77,7 @@ interface Props {
 // -- constants --------------------------------------------------------------
 
 /** Saved filters are per-client state in v2 (`REQUIREMENTS.md` §3, FR-U14). */
-const SAVED_FILTERS_KEY = "mydevenv2.vogtSavedFilters.v1";
+const SAVED_FILTERS_KEY = "vogt.vogtSavedFilters.v1";
 
 /** Enough that a runaway list cannot be saved into a full storage quota. */
 const MAX_SAVED_FILTERS = 40;
@@ -125,7 +125,7 @@ type ViewName = "backlog" | "bugs";
  *  is paused, and is the default: re-ranking the estate under a reader's
  *  cursor is opt-in, but the badge's honesty about the age is not. */
 const POLL_CHOICES = [10, 20, 60, 0] as const;
-const POLL_STORAGE_KEY = "mydevenv2.backlog.poll.v1";
+const POLL_STORAGE_KEY = "vogt.backlog.poll.v1";
 
 function readPoll(): number {
   try {

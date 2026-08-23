@@ -167,7 +167,7 @@ async function installFixtures(
   // must never reach it (#212), so a test can assert this stays at zero.
   let sessionDeletes = 0;
   await page.addInitScript(() => {
-    localStorage.setItem("mydevenv2.token", "browser-test-token");
+    localStorage.setItem("vogt.token", "browser-test-token");
     // Pin the shell to Vogt Dark so the default rendering under test stays
     // deterministic — the existing baselines were taken in the dark palette,
     // and the theme system (#299) must not shift them. Per-theme tests below
@@ -1881,7 +1881,7 @@ test("Settings confirms every destructive action before it runs", async ({ page 
   // Seed a saved auth profile so the Delete-profile path exists.
   await page.addInitScript(() => {
     localStorage.setItem(
-      "mydevenv2.authProfiles.v1",
+      "vogt.authProfiles.v1",
       JSON.stringify([
         { id: "p1", name: "Read only", token: "ro-token", base: "", updated_at: "2026-08-22T00:00:00Z" },
       ]),
@@ -2079,7 +2079,7 @@ test("Phone editor keeps the compact Files hierarchy and progressive controls us
   test.skip(test.info().project.name !== "phone", "Phone geometry is validated in the phone browser project");
   await installFixtures(page);
   await page.addInitScript(() => {
-    localStorage.setItem("mydevenv2.layoutMode.v1", "ide");
+    localStorage.setItem("vogt.layoutMode.v1", "ide");
   });
   await page.route("**/api/files**", async (route) => route.fulfill({ json: {
     path: "src/an-identifiable-long-filename.tsx",
@@ -2113,7 +2113,7 @@ test("Phone editor gives the editor the width and floats Files as an overlay dra
   test.skip(test.info().project.name !== "phone", "The overlay drawer is the phone editor layout");
   await installFixtures(page);
   await page.addInitScript(() => {
-    localStorage.setItem("mydevenv2.layoutMode.v1", "ide");
+    localStorage.setItem("vogt.layoutMode.v1", "ide");
   });
   await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
 
@@ -2153,7 +2153,7 @@ test("Phone editor splitter resizes on a touch drag (#240)", async ({ page }) =>
     { name: "beta.tsx", path: "src/beta.tsx", is_dir: false },
   ]);
   await page.addInitScript(() => {
-    localStorage.setItem("mydevenv2.layoutMode.v1", "ide");
+    localStorage.setItem("vogt.layoutMode.v1", "ide");
   });
   // Two open editor tabs are what enables a split. The first goto persists the
   // tab; the second reloads and opens the second alongside it.
@@ -2774,11 +2774,11 @@ test("terminal leaves browser zoom gestures alone and offers explicit font contr
     })),
   );
   expect(cancelled).toBe(false);
-  expect(await page.evaluate(() => localStorage.getItem("mydevenv2.terminalFontSize.v1")))
+  expect(await page.evaluate(() => localStorage.getItem("vogt.terminalFontSize.v1")))
     .toBeNull();
 
   await page.getByRole("button", { name: "Increase terminal font size" }).click();
-  expect(await page.evaluate(() => localStorage.getItem("mydevenv2.terminalFontSize.v1")))
+  expect(await page.evaluate(() => localStorage.getItem("vogt.terminalFontSize.v1")))
     .toBe("14");
 
   for (const zoom of ["80%", "100%", "125%", "150%", "200%"] as const) {
@@ -3005,7 +3005,7 @@ test("Editor workspace keeps its file-tree expansion across a tab switch (#238)"
     files: { "src/an-identifiable-long-filename.tsx": "export const answer = 42;\n" },
   });
   await page.addInitScript(() => {
-    localStorage.setItem("mydevenv2.layoutMode.v1", "ide");
+    localStorage.setItem("vogt.layoutMode.v1", "ide");
   });
   await page.goto("/#/e/src%2Fan-identifiable-long-filename.tsx");
 

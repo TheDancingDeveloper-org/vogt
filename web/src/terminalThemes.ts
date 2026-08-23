@@ -138,8 +138,8 @@ export const THEMES: Record<string, TerminalTheme> = {
   },
 };
 
-const THEME_KEY = "mydevenv2.terminalTheme.v1";
-const THEME_EVENT = "mydevenv2:terminal-theme";
+const THEME_KEY = "vogt.terminalTheme.v1";
+const THEME_EVENT = "vogt:terminal-theme";
 
 /** Has the reader pinned a terminal theme of their own? If so it wins over the
  *  app theme's default preset. */

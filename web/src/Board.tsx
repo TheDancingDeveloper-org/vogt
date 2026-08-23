@@ -156,7 +156,7 @@ const CARD_SPACING_PX = 8;
 const POLL_CHOICES = [10, 20, 60, 0] as const;
 const DEFAULT_POLL_SECONDS = 20;
 
-const LAYOUT_KEY = "mydevenv2.boardLayout.v1";
+const LAYOUT_KEY = "vogt.boardLayout.v1";
 
 // -- filters, which are the URL (FR-U11) ------------------------------------
 
@@ -314,7 +314,7 @@ export function queryFromSearch(search: string): BoardParams {
 // this build stopped understanding is dropped rather than resurrected as
 // `undefined`.
 
-const SAVED_FILTERS_KEY = "mydevenv2.boardFilters.v1";
+const SAVED_FILTERS_KEY = "vogt.boardFilters.v1";
 
 /** Enough that a runaway list cannot be saved into a full storage quota. */
 const MAX_SAVED_FILTERS = 40;

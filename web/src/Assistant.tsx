@@ -35,7 +35,7 @@ import {
   stopVoiceService,
 } from "./voiceService";
 
-const TTS_PREF_KEY = "mydevenv2.assistant.tts";
+const TTS_PREF_KEY = "vogt.assistant.tts";
 
 /** How long the server holds a pending action before it expires (FR-T2). The
  *  card counts down against this so an approval you can no longer make stops

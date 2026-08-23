@@ -34,7 +34,7 @@ export interface ResizablePane {
 }
 
 function storageKey(key: string, field: "width" | "collapsed"): string {
-  return `mydevenv2.pane.${key}.${field}.v1`;
+  return `vogt.pane.${key}.${field}.v1`;
 }
 
 function readWidth(key: string, fallback: number, min: number, max: number): number {

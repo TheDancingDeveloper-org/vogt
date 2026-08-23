@@ -14,7 +14,7 @@ interface SplitState {
   activePane: string | null;
 }
 
-const SPLIT_KEY = "mydevenv2.editorSplit.v1";
+const SPLIT_KEY = "vogt.editorSplit.v1";
 const MIN_PANE_SIZE = 10;
 
 function emptyState(): SplitState {
