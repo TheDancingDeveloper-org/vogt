@@ -483,7 +483,10 @@ mod tests {
             .await
             .expect("create ok");
         assert_eq!(created.run_id, "run-123");
-        assert_eq!(created.url.as_deref(), Some("http://fabro.test/runs/run-123"));
+        assert_eq!(
+            created.url.as_deref(),
+            Some("http://fabro.test/runs/run-123")
+        );
 
         let status = provider.poll(&created.run_id).await.expect("poll ok");
         assert_eq!(status.state, ProviderRunState::Succeeded);
@@ -539,7 +542,10 @@ mod tests {
             "expected Unreachable, got {err:?}"
         );
 
-        let err = provider.poll("run-123").await.expect_err("dead port must error");
+        let err = provider
+            .poll("run-123")
+            .await
+            .expect_err("dead port must error");
         assert!(
             matches!(err, WorkflowEngineError::Unreachable(_)),
             "expected Unreachable, got {err:?}"
