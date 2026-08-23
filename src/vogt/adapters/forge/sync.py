@@ -27,6 +27,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from vogt.adapters.forge.edges import parse_edges
 from vogt.adapters.forge.kinds import (
     COLLECTOR_ISSUES,
     COLLECTOR_PULLS,
@@ -259,16 +260,57 @@ class ForgePullsCollector(_ForgeSyncCollector):
             payload={
                 "number": item.number,
                 "title": item.title,
-                "state": item.state,
+                # `merged` is a distinct lifecycle from a bare `closed`: both
+                # read `closed` upstream, and only the merged one shipped. The
+                # observed store treats `merged` as closed, so the backlog
+                # self-heals the same way (#173).
+                "state": "merged" if item.merged else item.state,
                 "draft": item.draft,
                 "author": item.author,
                 "head": item.head,
+                "head_ref": item.head_ref,
                 "base": item.base,
+                # Reviewability rollups where the provider exposes them (#172,
+                # GitHub first); `None` is an honest "the forge did not say".
+                "review_state": item.review_state,
+                "mergeable": item.mergeable,
+                "checks": item.checks,
+                # The observed `implemented_by` edge, read from the PR's own
+                # closing keywords and branch name, each with its provenance
+                # (#284). Empty when the PR names no work.
+                "implements": _implements(provider, ref, item),
                 "updated_at": item.updated_at,
                 "closed_at": item.closed_at,
                 "repo": ref.slug,
             },
         )
+
+
+def _implements(
+    provider: ForgeProvider, ref: RepoRef, pull: ForgePull
+) -> list[dict[str, object]]:
+    """The `implemented_by` targets this PR asserts, resolved to subject keys.
+
+    Reads the PR's closing keywords (body and title) and its branch name into
+    `ParsedEdge`s (#284), then keys each against the forge so a same-repo `#3`
+    and a cross-repo `owner/repo#3` both land as the subject the rest of Vogt
+    speaks (D5). Provenance travels with every edge, so a reader can see why."""
+    edges: list[dict[str, object]] = []
+    for edge in parse_edges(
+        title=pull.title, body=pull.body, branch=pull.head_ref
+    ):
+        target = ref
+        if edge.owner and edge.repo:
+            target = RepoRef(host=ref.host, owner=edge.owner, repo=edge.repo)
+        edges.append(
+            {
+                "subject": provider.subject_key(target, edge.number),
+                "number": edge.number,
+                "repo": target.slug,
+                "provenance": edge.provenance,
+            }
+        )
+    return edges
 
 
 def forge_sync_collectors(

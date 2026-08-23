@@ -159,7 +159,7 @@ package identity is no longer needed to build the internal graph.
 | Table | Purpose | Key columns |
 |---|---|---|
 | `work_items` | the unit of work | `id, ref, kind(feature\|bug\|chore\|question), title, body, state, priority(p0..p4), effort, project_id, initiative_id, origin(created\|adopted\|observed), trust_state, assignee_actor_id, superseded_by, created_at, updated_at` |
-| `work_relations` | typed DAG edges, cross-project | `work_item_id, related_id, kind(depends_on\|relates_to\|duplicate_of\|parent_of)` |
+| `work_relations` | typed DAG edges, cross-project (the four **declarable** kinds) | `work_item_id, related_id, kind(depends_on\|relates_to\|duplicate_of\|parent_of)` |
 | `labels` | instance-wide tag definitions (GitHub-label aligned) | `id, name, color` |
 | `work_item_labels` | tag assignments | `work_item_id, label_id` |
 | `work_links` | link to observed forge objects | `work_item_id, forge_kind(issue\|pr), repo, number, relation(completion\|reference), created_at` |
@@ -167,6 +167,15 @@ package identity is no longer needed to build the internal graph.
 | `work_overlay` | *(0013, FR-B7)* the vogt-local half of an upstream-truth item on a **linked** project, keyed by the forge subject, not a `wrk_*` id | `subject_key(pk), project_id, rank, workflow_state, priority, effort, assignee_actor_id, initiative_id, created_at, updated_at` |
 | `workflow_defs` | state machine per work-item kind | `kind, definition(json)` |
 | `writeback_actions` | *(M5)* one row per attempted forge write (FR-B2) | `id, at, actor_id, work_item_id, project_id, policy, action(create\|comment\|label\|close\|reopen), outcome(attempted\|succeeded\|failed\|skipped), detail` |
+
+A fifth relation kind, `implemented_by` (a work item → a pull request), does
+**not** live in `work_relations`: it is *observed*, never declared by hand
+(#284). The forge sync reads it from a PR's closing keywords and branch name
+and stores it on the PR observation's payload (`implements`, each target with
+its provenance), so a PR collapses under the work item it implements in the
+ranked views. Being observed rather than declared, it informs but never
+enforces — unlike `depends_on` it does not block completion — and `work relate`
+refuses it.
 
 `writeback_actions` records the *attempt*, not only the success — including
 `skipped`, which is what a policy refusal looks like. Write-back is never a

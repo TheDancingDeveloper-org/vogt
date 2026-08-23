@@ -454,24 +454,46 @@ def _notification_web_url(api_url: object) -> str | None:
 
 
 def _to_pull(ref: RepoRef, item: dict[str, Any]) -> ForgePull:
+    head = item.get("head") or {}
     return ForgePull(
         number=int(item.get("number", 0)),
         title=item.get("title", ""),
         state=item.get("state", "open"),
         repo=ref.slug,
         draft=bool(item.get("draft", False)),
+        # A merged PR reads `state: closed` with `merged`/`merged_at` set; the
+        # list endpoint omits `merged` but carries `merged_at`, so read either.
+        merged=bool(item.get("merged") or item.get("merged_at")),
         author=(item.get("user") or {}).get("login"),
-        head=(item.get("head") or {}).get("sha"),
+        head=head.get("sha"),
+        head_ref=head.get("ref"),
         base=(item.get("base") or {}).get("ref"),
+        body=item.get("body"),
         labels=tuple(
             str(label["name"])
             for label in item.get("labels", [])
             if isinstance(label, dict) and label.get("name")
         ),
+        # Present on a single-PR read, absent from the list page — `None` then,
+        # which the observation carries honestly rather than as a false rollup.
+        mergeable=item.get("mergeable_state"),
+        checks=_check_rollup(item),
         updated_at=item.get("updated_at"),
         closed_at=item.get("closed_at"),
         source_url=item.get("html_url"),
     )
+
+
+def _check_rollup(item: dict[str, Any]) -> str | None:
+    """The PR's combined check state, where the payload carries one.
+
+    GitHub exposes it as `status.state` on the enriched PR object (the list
+    page does not include it, so this is `None` there — a gap reported, not a
+    green light)."""
+    status = item.get("status")
+    if isinstance(status, dict) and isinstance(status.get("state"), str):
+        return str(status["state"])
+    return None
 
 
 __all__ = ["GITHUB_CAPABILITIES", "HOST", "GitHubProvider"]

@@ -377,10 +377,14 @@ class ForgejoProvider:
                 state=item.get("state", "open"),
                 repo=ref.slug,
                 draft=bool(item.get("draft", False)),
+                merged=bool(item.get("merged") or item.get("merged_at")),
                 author=_login(item.get("user")),
                 head=(item.get("head") or {}).get("sha"),
+                head_ref=(item.get("head") or {}).get("ref"),
                 base=(item.get("base") or {}).get("ref"),
+                body=item.get("body"),
                 labels=_label_names(item.get("labels")),
+                mergeable=_forgejo_mergeable(item),
                 updated_at=item.get("updated_at"),
                 closed_at=item.get("closed_at"),
                 source_url=item.get("html_url"),
@@ -670,6 +674,16 @@ def _login(user: object) -> str | None:
         return None
     login = user.get("login") or user.get("username")
     return None if not login else str(login)
+
+
+def _forgejo_mergeable(item: dict[str, Any]) -> str | None:
+    """Gitea/Forgejo reports mergeability as a boolean; normalise it to the
+    same `clean`/`dirty` vocabulary the GitHub provider yields, or `None` when
+    the payload does not say."""
+    mergeable = item.get("mergeable")
+    if not isinstance(mergeable, bool):
+        return None
+    return "clean" if mergeable else "dirty"
 
 
 def _label_names(labels: object) -> tuple[str, ...]:

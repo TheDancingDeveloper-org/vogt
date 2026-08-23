@@ -248,6 +248,15 @@ together, and every row can say why it is where it is.
   provenance, the ranking factors behind its score, and the acts that row
   actually has. Declared rows offer Open and Select; observed subjects offer
   Adopt and Suppress. Nothing moves to a dialog.
+- **A pull request collapses under the work it implements.** When a PR names a
+  work item — through a `Closes #12` / `Fixes owner/repo#9` keyword in its body
+  or title, or a branch named for the issue (`gh-12-…`, `wi-9/…`) — Vogt reads
+  that as an `implemented_by` edge and lists the two as one stream: the item
+  stays on the board and the PR folds under it rather than ranking beside it, so
+  a single piece of work is counted once. The edge is observed, never typed in,
+  and it only informs — unlike `depends_on` it does not block the item from
+  completing. A PR whose target is not itself on the board still lists on its
+  own, so nothing is silently dropped.
 - **Bulk transition and bulk labelling** each collect their own typed reason,
   are applied one audited write at a time, and report each refusal against the
   item that was refused. The bulk bar is pinned to the top of the list while

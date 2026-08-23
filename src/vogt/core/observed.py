@@ -216,6 +216,27 @@ def is_worklike(observation: Observation) -> bool:
     return True
 
 
+def implemented_targets(observation: Observation) -> set[str]:
+    """The work-item subject keys a PR observation says it implements (#284).
+
+    The `implemented_by` edge is observed from the PR's closing keywords and
+    branch name and stored on its payload; this reads back the set of subjects
+    it points at, so the backlog can collapse the PR under the one it
+    implements. Empty for anything that is not a PR, or a PR that named no
+    work — never a guess.
+    """
+    if observation.kind != "forge.pull_request":
+        return set()
+    implements = observation.payload.get("implements")
+    if not isinstance(implements, list):
+        return set()
+    return {
+        str(edge["subject"])
+        for edge in implements
+        if isinstance(edge, dict) and edge.get("subject")
+    }
+
+
 def _labels(observation: Observation) -> list[object]:
     labels = observation.payload.get("labels")
     return list(labels) if isinstance(labels, list) else []

@@ -770,7 +770,10 @@ class TransitionWorkParams(Params):
 class RelateWorkParams(Params):
     ref: str
     kind: RelationKind = Field(
-        description="depends_on / relates_to / duplicate_of / parent_of."
+        description=(
+            "depends_on / relates_to / duplicate_of / parent_of. "
+            "(implemented_by is observed from pull requests, not declarable.)"
+        )
     )
     target: str = Field(description="The other work item's reference.")
     reason: Reason
