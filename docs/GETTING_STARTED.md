@@ -322,6 +322,9 @@ This removes the example's named data volume and cannot be undone by Docker.
 
 - [`docs/USER_GUIDE.md`](USER_GUIDE.md) explains the PWA, ranked views,
   projects, drift, audit, and all supported CLI/API surfaces.
+- [`docs/AGENT_GUIDE.md`](AGENT_GUIDE.md) is for an agent running product work
+  *through* Vogt — connecting over MCP/REST/CLI, picking up ranked work, linking
+  branches and PRs back to items, and a drop-in block for your own repository.
 - [`docs/CONFIG.md`](CONFIG.md) is generated from the configuration schema.
 - [`docs/CUSTOMISATION.md`](CUSTOMISATION.md) names the supported extension
   points — configuration, Compose overlays, image extension, your own front

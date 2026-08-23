@@ -155,6 +155,9 @@ workflow and [`docs/CONFIG.md`](docs/CONFIG.md) for every setting.
   reverse proxy, backups, upgrades, the optional engine.
 - [User guide](docs/USER_GUIDE.md) — daily use of the PWA, CLI, REST, and
   optional agent surfaces.
+- [Agent guide](docs/AGENT_GUIDE.md) — for an agent running a stream of product
+  work *through* Vogt: connecting, picking up work, linking branches and PRs
+  back, and a drop-in block for your own repository.
 - [Configuration reference](docs/CONFIG.md) — generated schema reference.
 - [Customisation](docs/CUSTOMISATION.md) — the supported extension points,
   and how to run a heavily customised deployment without forking.
