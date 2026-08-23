@@ -176,5 +176,5 @@ How recently a subject must have been observed for a linked declared entity to c
   docs or examples.
 - **allocation** — paths and slots on a host the operator owns.
   These always carry a default: gating them produces broken deploys,
-  not safety (`DEPLOYMENT.md` §4.1).
+  not safety (`DEPLOYMENT.md` §4, Configuration).
 - **behaviour** — tuning that decides neither; unconstrained.

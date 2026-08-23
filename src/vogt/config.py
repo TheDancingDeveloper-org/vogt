@@ -690,7 +690,7 @@ def render_config_reference() -> str:
         "  docs or examples.",
         "- **allocation** — paths and slots on a host the operator owns.",
         "  These always carry a default: gating them produces broken deploys,",
-        "  not safety (`DEPLOYMENT.md` §4.1).",
+        "  not safety (`DEPLOYMENT.md` §4, Configuration).",
         "- **behaviour** — tuning that decides neither; unconstrained.",
         "",
     ]
@@ -730,7 +730,7 @@ def _example_value(field: FieldDoc) -> str:
         # Shown as an example rather than `null`, because an exposure value
         # with no default still has a *shape*, and the shape is the part an
         # operator gets wrong.
-        return '"https://host.tailnet.ts.net:18094"'
+        return '"https://vogt.example.com"'
     if isinstance(default, tuple):
         rendered = ", ".join(json.dumps(entry) for entry in default)
         return f"[{rendered}]"
