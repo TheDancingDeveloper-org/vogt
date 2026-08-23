@@ -26,9 +26,7 @@ from typing import Literal
 #: The derived phase ladder, in order. A work item climbs it as git evidence
 #: accumulates: nothing → a branch exists → a PR is open → a review is under
 #: way → it merged. It is shown *beside* the workflow state, never as it.
-GitPhase = Literal[
-    "no_branch", "branch_active", "pr_open", "in_review", "merged"
-]
+GitPhase = Literal["no_branch", "branch_active", "pr_open", "in_review", "merged"]
 
 #: The derived PR state, richer than the observation's raw open/closed/merged:
 #: `draft` and `in-review` are read off the PR's own fields so the phase can

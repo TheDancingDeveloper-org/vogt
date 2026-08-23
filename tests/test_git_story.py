@@ -194,7 +194,8 @@ def test_a_freshly_active_branch_raises_the_score_more_than_a_stale_one() -> Non
 
 
 def test_the_why_explanation_names_the_new_inputs(
-    instance: AppContext, tmp_path: Path,
+    instance: AppContext,
+    tmp_path: Path,
 ) -> None:
     project_id = _project(instance, tmp_path)
     item = native_work_item(instance, title="Moving", project="proj")
@@ -215,7 +216,8 @@ def test_the_why_explanation_names_the_new_inputs(
 
 
 def test_work_get_carries_the_git_block_with_phase_pr_and_freshness(
-    instance: AppContext, tmp_path: Path,
+    instance: AppContext,
+    tmp_path: Path,
 ) -> None:
     project_id = _project(instance, tmp_path)
     item = native_work_item(instance, title="In flight", project="proj")
@@ -250,7 +252,8 @@ def test_work_get_carries_the_git_block_with_phase_pr_and_freshness(
 
 
 def test_a_reviewed_pr_reads_in_review_phase(
-    instance: AppContext, tmp_path: Path,
+    instance: AppContext,
+    tmp_path: Path,
 ) -> None:
     project_id = _project(instance, tmp_path)
     item = native_work_item(instance, title="Under review", project="proj")
@@ -268,7 +271,8 @@ def test_a_reviewed_pr_reads_in_review_phase(
 
 
 def test_an_item_with_no_git_evidence_has_no_git_block(
-    instance: AppContext, tmp_path: Path,
+    instance: AppContext,
+    tmp_path: Path,
 ) -> None:
     _project(instance, tmp_path)
     item = native_work_item(instance, title="Nothing yet", project="proj")
@@ -279,7 +283,8 @@ def test_an_item_with_no_git_evidence_has_no_git_block(
 
 
 def test_a_merged_pr_under_an_open_item_surfaces_as_git_drift(
-    instance: AppContext, tmp_path: Path,
+    instance: AppContext,
+    tmp_path: Path,
 ) -> None:
     project_id = _project(instance, tmp_path)
     item = native_work_item(instance, title="Shipped but open", project="proj")
@@ -292,7 +297,8 @@ def test_a_merged_pr_under_an_open_item_surfaces_as_git_drift(
 
 
 def test_a_closed_item_with_an_open_pr_surfaces_as_git_drift(
-    instance: AppContext, tmp_path: Path,
+    instance: AppContext,
+    tmp_path: Path,
 ) -> None:
     project_id = _project(instance, tmp_path)
     item = native_work_item(
@@ -311,7 +317,8 @@ def test_a_closed_item_with_an_open_pr_surfaces_as_git_drift(
 
 
 def test_an_open_item_with_an_open_pr_has_no_drift(
-    instance: AppContext, tmp_path: Path,
+    instance: AppContext,
+    tmp_path: Path,
 ) -> None:
     project_id = _project(instance, tmp_path)
     item = native_work_item(instance, title="Healthy in-flight", project="proj")
