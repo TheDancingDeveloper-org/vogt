@@ -1,0 +1,81 @@
+name: Feature request
+description: Propose a capability, surface change, or improvement.
+title: "[surface]: short description"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Vogt treats the operation registry as the authority for every
+        surface (CLI/REST/MCP), so a new capability usually means a new
+        registered operation, not a GUI-only feature. See
+        [`AGENTS.md`](../../AGENTS.md) and
+        [`docs/DESIGN.md`](../../docs/DESIGN.md) for the shape of the
+        product before proposing something that cuts across it.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Where would this live?
+      options:
+        - CLI
+        - REST API
+        - MCP
+        - GUI (legacy, /ui)
+        - PWA (/, session engine)
+        - Mobile shell
+        - Docs
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: effort
+    attributes:
+      label: Effort (your best guess)
+      options:
+        - S (a focused change, one surface)
+        - M (touches a few files, maybe a migration)
+        - L (a new capability, schema, or cross-surface change)
+        - not sure
+    validations:
+      required: false
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today, and why does it matter?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: >
+        What you'd add or change. A sketch of the operation, model, or UI
+        is welcome; it doesn't need to be a full design.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you're using now, or other approaches you ruled out.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: >
+            I've checked `docs/ROADMAP.md` — this isn't already designed
+            and pending.
+          required: false

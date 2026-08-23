@@ -1,0 +1,92 @@
+name: Bug report
+description: Something in Vogt does not work the way it is documented to.
+title: "[surface]: short description"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The more precise the
+        surface and evidence, the faster this is actionable — a file and
+        line beats a description of the symptom.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Where did you hit this?
+      options:
+        - CLI
+        - REST API
+        - MCP
+        - GUI (legacy, /ui)
+        - PWA (/, session engine)
+        - Mobile shell
+        - Docs
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: Your best guess — a maintainer may re-triage this.
+      options:
+        - low (cosmetic, easy workaround)
+        - medium (annoying, has a workaround)
+        - high (blocks a core workflow)
+        - critical (data loss, security, crash on startup)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >
+        Command run, request made, or steps to reproduce. Logs, stack
+        traces, or a file/line if you found one. Redact tokens and any
+        project data that is not yours to share.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`vogt --version`, the image tag, or the commit."
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >
+        How you're running it — published image, built-from-checkout,
+        with or without the session engine — and your OS/platform.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: >
+            This is a bug in Vogt itself, not in my deployment's
+            configuration (see `docs/DEPLOYMENT.md` and `docs/CONFIG.md`
+            first).
+          required: false
