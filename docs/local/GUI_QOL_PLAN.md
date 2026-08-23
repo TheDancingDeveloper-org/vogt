@@ -12,9 +12,12 @@ are the source of truth for *what*; this file is the *order* and the *gates*.
 ### Three parallel streams running (dispatched 2026-08-23, operator-directed)
 1. **APK crash diagnostics — ⏸ PAUSED, HANDED OVER (operator: "pause and hand
    over to another agent").** #328 IS merged (dev `51a0c66`). Branch
-   `fix/voice-crash-diagnostics` exists locally off `51a0c66` with **zero
-   commits — nothing implemented yet**. Full handover brief for the next
-   agent is below ("APK diagnostics — handover brief").
+   `fix/voice-crash-diagnostics` is PUSHED to origin off `51a0c66`; its only
+   commits are the docs/local handover tracking — **no APK work implemented
+   yet**. Full handover brief for the next agent is below ("APK diagnostics —
+   handover brief"). Note: `docs/local/` is TEMPORARILY un-git-ignored
+   (operator, 2026-08-23) purely for this transfer — re-ignore before any
+   promotion/publish; git history will still carry it either way.
 2. **#292 first-run wizard — ✅ DELIVERED, all three increments merged to
    `dev` (2026-08-23, dev tip `fcb3415`).** PRs #329 (core install-mode),
    #330 (PWA identity wizard + engine `/api/install/*` passthrough), #331
