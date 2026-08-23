@@ -529,7 +529,9 @@ def test_a_transition_event_carries_project_kind_and_labels(
     assert moved.summary["to"] == "in_progress"
     assert moved.summary["kind"] == "bug"
     assert moved.summary["project"] == slug
-    assert sorted(moved.summary["labels"]) == ["backend", "urgent"]
+    labels = moved.summary["labels"]
+    assert isinstance(labels, list)
+    assert sorted(labels) == ["backend", "urgent"]
 
 
 def test_an_items_history_excludes_every_other_items(instance: AppContext) -> None:

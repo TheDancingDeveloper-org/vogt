@@ -304,7 +304,9 @@ def test_a_raised_drift_event_carries_its_project(released: AppContext) -> None:
     # names no project simply omits it.
     result = detect_drift(released, DriftDetectParams(auto_accept=False, reason=WHY))
     proposal = result.raised[0]
-    assert proposal.project_id is not None, "the released fixture's proposal is project-bound"
+    assert (
+        proposal.project_id is not None
+    ), "the released fixture's proposal is project-bound"
 
     with released.declared.read() as view:
         project = view.project_by_id(proposal.project_id)

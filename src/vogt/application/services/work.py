@@ -780,7 +780,7 @@ def _transition_native(ctx: AppContext, params: TransitionWorkParams) -> WorkRes
             summary=_transition_summary(
                 item,
                 params.to_state,
-                (proj := _project_of(txn, item)) and proj.slug,
+                proj.slug if (proj := _project_of(txn, item)) is not None else None,
             ),
         )
 
