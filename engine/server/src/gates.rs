@@ -226,9 +226,10 @@ impl GateRecord {
     /// nothing, which is the point of failing closed.
     pub fn answered_input(&self) -> Option<&str> {
         match &self.state {
-            GateState::Answered { option_index, .. } => {
-                self.options.get(*option_index).map(|opt| opt.input.as_str())
-            }
+            GateState::Answered { option_index, .. } => self
+                .options
+                .get(*option_index)
+                .map(|opt| opt.input.as_str()),
             _ => None,
         }
     }
@@ -391,7 +392,10 @@ mod tests {
         // by an answer that arrives a moment too late.
         let mut gate = GateRecord::open(&deploy_gate(), ts());
         gate.block("timed out", ts());
-        assert_eq!(gate.answer(0, "sprooty", false, ts()), Err(GateError::AlreadyResolved));
+        assert_eq!(
+            gate.answer(0, "sprooty", false, ts()),
+            Err(GateError::AlreadyResolved)
+        );
         match &gate.state {
             GateState::Blocked { reason } => assert_eq!(reason, "timed out"),
             other => panic!("expected Blocked to stand, got {other:?}"),
@@ -414,11 +418,19 @@ mod tests {
         let spec = deploy_gate();
         assert_eq!(spec.approve_index(), Some(0));
         let mut gate = GateRecord::open(&spec, ts());
-        gate.answer(spec.approve_index().unwrap(), AUTO_APPROVE_ACTOR, true, ts())
-            .unwrap();
+        gate.answer(
+            spec.approve_index().unwrap(),
+            AUTO_APPROVE_ACTOR,
+            true,
+            ts(),
+        )
+        .unwrap();
         match &gate.state {
             GateState::Answered {
-                actor, auto, approved, ..
+                actor,
+                auto,
+                approved,
+                ..
             } => {
                 assert_eq!(actor, AUTO_APPROVE_ACTOR);
                 assert!(auto);

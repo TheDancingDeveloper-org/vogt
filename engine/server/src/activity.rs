@@ -1,8 +1,8 @@
 use std::time::Instant;
 
-pub use vogt_engine_contract::ActivityState;
 use once_cell::sync::Lazy;
 use regex::bytes::RegexSet;
+pub use vogt_engine_contract::ActivityState;
 
 /// Patterns that indicate the program is waiting for the user. Matched against
 /// the *tail* of scrollback with ANSI escape sequences stripped.

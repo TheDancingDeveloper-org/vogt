@@ -19,9 +19,9 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use vogt_engine_server::{app::router, Config};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
+use vogt_engine_server::{app::router, Config};
 
 const TEST_TOKEN: &str = "test-token-1234567890abcdef";
 /// The exact bytes the mock TTS server "synthesises"; the test asserts the

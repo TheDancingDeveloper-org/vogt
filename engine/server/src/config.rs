@@ -421,7 +421,11 @@ pub fn load(
     // fallback with its deprecation warning. Precedence: CLI flag > env >
     // config file.
     let bind_str = cli_bind
-        .or_else(|| engine_env("ENGINE_BIND").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            engine_env("ENGINE_BIND")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
         .or(from_file.bind)
         .unwrap_or_else(|| "127.0.0.1:8910".to_string());
     let bind: SocketAddr = bind_str
@@ -429,7 +433,11 @@ pub fn load(
         .map_err(|e| ApiError::Config(format!("invalid bind {bind_str:?}: {e}")))?;
 
     let token = cli_token
-        .or_else(|| engine_env("ENGINE_TOKEN").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            engine_env("ENGINE_TOKEN")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
         .or(from_file.token)
         .ok_or_else(|| {
             ApiError::Config("token required (ENGINE_TOKEN env or config.token)".into())

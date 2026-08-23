@@ -1,5 +1,5 @@
-pub use vogt_engine_contract::ServerEvent;
 use tokio::sync::broadcast;
+pub use vogt_engine_contract::ServerEvent;
 
 #[derive(Clone)]
 pub struct EventBus {

@@ -7,9 +7,9 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use vogt_engine_contract::{BranchInfo, DiffResp, GitStatus, LogEntry, StatusEntry, StatusKind};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use vogt_engine_contract::{BranchInfo, DiffResp, GitStatus, LogEntry, StatusEntry, StatusKind};
 
 use crate::{
     app::AppState,

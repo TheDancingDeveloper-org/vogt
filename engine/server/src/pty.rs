@@ -10,11 +10,11 @@ use std::{
 };
 
 use bytes::Bytes;
-pub use vogt_engine_contract::{SessionSpec, SessionSummary};
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, PtySize};
 use tokio::sync::{broadcast, Notify};
 use uuid::Uuid;
+pub use vogt_engine_contract::{SessionSpec, SessionSummary};
 
 use crate::{
     activity::{classify, strip_ansi, ActivityState},
