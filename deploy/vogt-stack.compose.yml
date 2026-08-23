@@ -390,7 +390,10 @@ services:
       # 404 and the PWA hides the tab.
       MYDEVENV2_ASSISTANT_API_KEY: "${MYDEVENV2_ASSISTANT_API_KEY:-}"
       MYDEVENV2_ASSISTANT_MODEL: "${MYDEVENV2_ASSISTANT_MODEL:-gpt-5.4-mini}"
-      MYDEVENV2_ASSISTANT_BASE_URL: "${MYDEVENV2_ASSISTANT_BASE_URL:-https://api.theclawbay.com/v1}"
+      # An exposure value, so no default: a public build ships no maintainer
+      # hostname. A key with no base URL is a documented startup error, which
+      # is the correct "unconfigured" signal — set both to turn chat on.
+      MYDEVENV2_ASSISTANT_BASE_URL: "${MYDEVENV2_ASSISTANT_BASE_URL:-}"
       # Server-side speech (FR-T12), configured INDEPENDENTLY of the chat
       # profile above — the audio provider need not be where chat runs. Base
       # URLs are an ordered fallback list (voicemode's VOICEMODE_*_BASE_URLS

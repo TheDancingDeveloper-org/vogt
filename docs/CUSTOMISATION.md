@@ -168,6 +168,63 @@ The two-service shape this enables — your front door on the published port,
 the core reachable only on the Compose network — is a supported topology, not
 a workaround.
 
+### Self-hosted voice (STT/TTS) as an optional overlay
+
+The engine's voice assistant speaks the standard OpenAI audio interface —
+`POST /v1/audio/transcriptions` for speech-to-text and `POST /v1/audio/speech`
+for text-to-speech — configured entirely by environment. On the public stack
+both point at nothing, so a fresh install shows the voice controls but they are
+inert until you name an audio provider.
+
+You have two ways to make them work, and neither locks you to a vendor.
+
+**Point at any provider.** Set the base URLs (and a key, model and voice) in
+`deploy/.env` to OpenAI, Groq, or any OpenAI-compatible speech endpoint:
+
+```dotenv
+ENGINE_ASSISTANT_STT_BASE_URLS=https://api.openai.com/v1
+ENGINE_ASSISTANT_STT_API_KEY=sk-...
+ENGINE_ASSISTANT_STT_MODEL=whisper-1
+ENGINE_ASSISTANT_TTS_BASE_URLS=https://api.openai.com/v1
+ENGINE_ASSISTANT_TTS_API_KEY=sk-...
+ENGINE_ASSISTANT_TTS_MODEL=tts-1
+ENGINE_ASSISTANT_TTS_VOICE=nova
+```
+
+**Or run it locally with no account.** Layer `deploy/voice.overlay.yml`. It
+adds two small, CPU-only, OpenAI-compatible containers — `whisper`
+([speaches](https://github.com/speaches-ai/speaches), faster-whisper) for STT
+and `tts` ([openedai-speech](https://github.com/matatonic/openedai-speech),
+Piper voices) for TTS — on the same Compose network as the engine, and points
+the engine's speech base URLs at them:
+
+```bash
+docker compose \
+  -f deploy/vogt.compose.yml \
+  -f deploy/engine.overlay.yml \
+  -f deploy/voice.overlay.yml \
+  up --build -d
+```
+
+Notes:
+
+- Neither service is published to the host; the engine reaches them by service
+  name over the Compose network (`http://whisper:8000/v1`,
+  `http://tts:8000/v1`).
+- Model weights persist in named volumes (`whisper-cache`, `tts-voices`), so
+  the download happens once. The `whisper` container pre-fetches its
+  faster-whisper model at boot before it serves, so the first utterance works
+  without a manual download step; the first start therefore takes a minute or
+  two longer while the model lands.
+- The defaults are the ids these two images actually serve —
+  `Systran/faster-whisper-small` for STT, `tts-1` + voice `nova` for TTS. Every
+  one stays a `${VAR:-default}`, so the same overlay can front a different
+  local model or a hosted provider by setting the matching `ENGINE_ASSISTANT_*`
+  variable in `deploy/.env`.
+
+This is an ordinary Layer 2 overlay: it states only the speech wiring and the
+two services, and it composes with any other overlay you already layer.
+
 ### Giving the front door its core token in one deploy
 
 A fronted deployment needs a token the front door presents to the core, so
