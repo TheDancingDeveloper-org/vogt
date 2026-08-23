@@ -24,6 +24,34 @@ If configuration fields change, regenerate the committed reference files:
 uv run python scripts/gen_config_docs.py
 ```
 
+A change under `engine/` or `web/` has its own toolchain and gates
+(`engine/AGENTS.md`, [`ENGINE.md`](ENGINE.md)); run them from their own
+directories, not the repository root:
+
+```console
+cd engine && cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
+cd web && pnpm install && pnpm typecheck && pnpm test && pnpm test:browser
+```
+
+## CI runs on self-hosted runners — a fork cannot run it as-is
+
+`.github/workflows/runner-policy.yml` fails any job that names a hosted
+runner (`ubuntu-latest` and friends); every job in this repository's
+workflows names a self-hosted one instead, because the runners have access
+this project's maintainer does not want to hand a hosted worker (see the
+comment at the top of that workflow). That is a deliberate, durable choice,
+not an oversight — do not "fix" a queued or failing check by changing
+`runs-on`.
+
+The practical effect: if you fork this repository, GitHub Actions will not
+run your fork's copy of these workflows (there is no runner registered to
+your fork), and a pull request from a fork runs against *this* repository's
+runners only after a maintainer approves it. Either way, run the commands
+above locally (or the ones in `AGENTS.md`) before opening a PR — they are
+exactly what CI runs — and use the PR template's checklist to record what you
+ran. This split between fork-safe local checks and self-hosted CI is tracked
+as its own piece of work (#207); it is not solved by this file.
+
 ## Before opening a change
 
 - Add or update tests, including a parity case in `tests/test_parity.py` for
