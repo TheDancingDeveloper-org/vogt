@@ -406,6 +406,26 @@ pub async fn mcp(State(state): State<Arc<AppState>>, request: Request) -> Respon
     core.forward(&path, None, request).await
 }
 
+/// The first-run install surface (#292), passed through untouched.
+///
+/// Same trust story as `/mcp`: the core is the sole authority. Its bootstrap
+/// answers only while its token store holds no tokens at all and refuses with
+/// `install_closed` the moment one exists, so the door adds no gate of its
+/// own here — a browser that has no credential yet is exactly the caller this
+/// surface exists for. Nothing is injected either: a bootstrap attributed to
+/// the deployment's shared pairing would put the wrong name on the first
+/// operator, and a later wizard step may present the caller's own core token,
+/// which must reach the core exactly as `/mcp`'s credentials do.
+pub const INSTALL_PATHS: [&str; 2] = ["/api/install/status", "/api/install/bootstrap"];
+
+pub async fn install(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let Some(core) = state.vogt_core.as_ref() else {
+        return not_configured();
+    };
+    let path = request.uri().path().to_string();
+    core.forward(&path, None, request).await
+}
+
 /// The probes of FR-A7, at the same paths, answered by the core.
 ///
 /// `AGENTS.md` and `connect` both advertise these as the way to discover a

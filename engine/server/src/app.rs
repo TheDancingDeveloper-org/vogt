@@ -331,7 +331,17 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     for path in vogt_core::PROBE_PATHS {
         vogt_open_routes = vogt_open_routes.route(path, get(vogt_core::probe));
     }
+    // The first-run install surface (#292) is open for the same reason the
+    // probes are: it exists precisely for a browser that holds no token yet.
+    // The core self-gates — its bootstrap answers only while its token store
+    // is empty — and the door forwards the caller's own headers untouched,
+    // exactly as `/mcp` does. Written as literals rather than built from
+    // `vogt_core::INSTALL_PATHS` because the PWA's source-scan test reads
+    // this router's route strings; a test below pins the two against the
+    // constant so they cannot drift.
     let vogt_open_routes = vogt_open_routes
+        .route("/api/install/status", get(vogt_core::install))
+        .route("/api/install/bootstrap", post(vogt_core::install))
         .route("/mcp", any(vogt_core::mcp))
         .route("/mcp/", any(vogt_core::mcp))
         .route("/mcp/{*path}", any(vogt_core::mcp));
@@ -440,6 +450,23 @@ fn build_cors(origins: &[String]) -> CorsLayer {
         layer
     } else {
         layer.allow_origin(parsed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The install routes above are literals so the PWA's source-scan test
+    /// can read them out of the router; this pins them to the constant the
+    /// rest of the code names, so neither can move without the other.
+    #[test]
+    fn the_install_route_literals_match_the_constant() {
+        let source = include_str!("app.rs");
+        for path in crate::vogt_core::INSTALL_PATHS {
+            assert!(
+                source.contains(&format!("\"{path}\"")),
+                "{path} is in INSTALL_PATHS but not registered as a route literal"
+            );
+        }
     }
 }
 

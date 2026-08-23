@@ -135,6 +135,10 @@ interface PlaceMetricFixtures {
    *  409, so a test can simulate an external change and prove the editor's
    *  on-disk conflict handling (#237). */
   files?: Record<string, string>;
+  /** First-run install mode (#292): what `/api/install/status` reports. */
+  installMode?: boolean;
+  /** Start signed out — the wizard and the login gate only appear then. */
+  noToken?: boolean;
 }
 
 async function installFixtures(
@@ -166,13 +170,39 @@ async function installFixtures(
   // A session DELETE is the kill path; composing a split and detaching a pane
   // must never reach it (#212), so a test can assert this stays at zero.
   let sessionDeletes = 0;
-  await page.addInitScript(() => {
-    localStorage.setItem("vogt.token", "browser-test-token");
+  await page.addInitScript((signedIn) => {
+    if (signedIn) localStorage.setItem("vogt.token", "browser-test-token");
     // Pin the shell to Vogt Dark so the default rendering under test stays
     // deterministic — the existing baselines were taken in the dark palette,
     // and the theme system (#299) must not shift them. Per-theme tests below
     // register their own init script after this one to override it.
     localStorage.setItem("vogt.appTheme.v1", "dark");
+  }, !metrics.noToken);
+  // First-run install mode (#292). Answered for every test — the app asks
+  // only when it starts signed out — so the wizard's presence is a fixture
+  // decision, never an accidental 404.
+  const bootstrapRequests: Record<string, unknown>[] = [];
+  await page.route("**/api/install/status", async (route) =>
+    route.fulfill({ json: { install_mode: metrics.installMode ?? false } }),
+  );
+  await page.route("**/api/install/bootstrap", async (route) => {
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    bootstrapRequests.push(body);
+    const slug = String(body.display_name ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    return route.fulfill({ json: {
+      actor: {
+        id: "act-wizard",
+        identity_ref: `human:${slug}`,
+        display_name: body.display_name,
+        kind: "human",
+      },
+      token: { id: "tok-wizard", name: "first-run browser token", scopes: ["admin"] },
+      secret: "vogt_browser-test-first-run-secret",
+      warning: "This is the only time the secret is shown.",
+    } });
   });
   await page.route("**/api/status**", async (route) => route.fulfill({ json: {
     version: "test",
@@ -550,6 +580,7 @@ async function installFixtures(
     inboxCalls: () => inboxCalls,
     createdSessions: () => createdSessions,
     sessionDeletes: () => sessionDeletes,
+    bootstrapRequests,
     boardRequests,
     transitionRequests,
     updateRequests,
@@ -658,6 +689,79 @@ test("Login and authentication errors present Vogt as the only product", async (
   await page.getByLabel("Bearer token").fill("rejected-browser-token");
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("alert")).toContainText("current Vogt token");
+});
+
+// The first-run wizard (#292). A fresh instance has no tokens, so the core
+// reports install mode and the shell leads with the wizard rather than a
+// demand for a token nobody has minted yet. Verified at the two shapes the
+// product ships: a 1440×900 desktop and a 390×844 phone.
+test("First run: the wizard claims the instance, shows the secret once, and signs in", async ({ page }) => {
+  if (test.info().project.name === "desktop") {
+    await page.setViewportSize({ width: 1440, height: 900 });
+  } else {
+    await page.setViewportSize({ width: 390, height: 844 });
+  }
+  const fixtures = await installFixtures(page, {}, [], undefined, {
+    installMode: true,
+    noToken: true,
+  });
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: "Claim this instance" })).toBeVisible();
+  // The whole journey is named up front, identity first.
+  const steps = page.getByRole("list", { name: "Setup steps" });
+  await expect(steps).toContainText("Identity");
+  await expect(steps).toContainText("Forge");
+  await expect(steps).toContainText("First project");
+  // The wizard stays inside the viewport at both shapes.
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+  );
+  expect(overflow, "the wizard must not overflow horizontally").toBe(false);
+
+  await page.getByLabel("Your name").fill("Ada Lovelace");
+  await page.getByRole("button", { name: "Claim instance & mint my token" }).click();
+
+  await expect(page.getByRole("heading", { name: "Welcome, Ada Lovelace" })).toBeVisible();
+  await expect(page.getByTestId("setup-secret")).toContainText(
+    "vogt_browser-test-first-run-secret",
+  );
+  expect(fixtures.bootstrapRequests).toEqual([{ display_name: "Ada Lovelace" }]);
+  // The CLI/MCP equivalents are one disclosure away.
+  await page.getByText("Use it from a terminal or an agent").click();
+  await expect(page.getByText("vogt-mcp-remote")).toBeVisible();
+
+  // Continue hands the minted secret to the ordinary sign-in path, and the
+  // shell comes up authenticated with it stored where a pasted token lives.
+  await page.getByRole("button", { name: "Continue to Vogt" }).click();
+  const shellHeading = test.info().project.name === "phone" ? "Sessions" : "Board";
+  await expect(
+    page.getByRole("heading", { name: shellHeading, exact: true }),
+  ).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("vogt.token"))).toBe(
+    "vogt_browser-test-first-run-secret",
+  );
+});
+
+test("First run: a closed install mode means the ordinary sign-in gate", async ({ page }) => {
+  await installFixtures(page, {}, [], undefined, {
+    installMode: false,
+    noToken: true,
+  });
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Sign in to Vogt" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Claim this instance" })).not.toBeVisible();
+});
+
+test("First run: a reader who already holds a token can reach the gate from the wizard", async ({ page }) => {
+  await installFixtures(page, {}, [], undefined, {
+    installMode: true,
+    noToken: true,
+  });
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Claim this instance" })).toBeVisible();
+  await page.getByRole("button", { name: "Sign in instead" }).click();
+  await expect(page.getByRole("heading", { name: "Sign in to Vogt" })).toBeVisible();
 });
 
 test("Board dragover/drop uses the real browser gesture and keeps its filter on reload", async ({ page }) => {

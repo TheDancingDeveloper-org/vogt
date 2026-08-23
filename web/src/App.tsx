@@ -81,6 +81,8 @@ import {
 import { terminalWorkspaceHandle } from "./paneComposeBus";
 import type { SessionSummary } from "./api";
 import { getToken, setBase, setToken } from "./api";
+import SetupWizard from "./SetupWizard";
+import { fetchInstallStatus } from "./installApi";
 import {
   deleteWorkspaceLayout,
   getWorkspaceLayout,
@@ -485,6 +487,12 @@ const App: Component = () => {
   const [configReady, setConfigReady] = createSignal(false);
   const [authState, setAuthState] = createSignal<"checking" | "unauthenticated" | "authenticated">("checking");
   const [authError, setAuthError] = createSignal<string | null>(null);
+  // First-run install mode (#292): true only when the instance said so, and
+  // only checked when there is no saved credential — a reader whose token was
+  // rejected is sent to the sign-in gate, because a rejection proves a token
+  // exists somewhere and install mode is therefore closed on the core side.
+  const [installMode, setInstallMode] = createSignal(false);
+  const [wizardDismissed, setWizardDismissed] = createSignal(false);
   const layoutMode = getLayoutMode();
 
   // Check if we're in IDE mode
@@ -591,6 +599,12 @@ const App: Component = () => {
     void (async () => {
       const token = getToken();
       if (!token) {
+        // Ask about install mode before showing the gate, so the first thing
+        // a new operator sees is the wizard rather than a demand for a token
+        // no one has minted yet (#292). `null` — unreachable, or a deployment
+        // that predates the install surface — falls back to the gate.
+        const install = await fetchInstallStatus();
+        setInstallMode(install?.install_mode ?? false);
         setAuthState("unauthenticated");
         return;
       }
@@ -1234,12 +1248,22 @@ const App: Component = () => {
     <>
       <Show when={authState() === "authenticated"} fallback={
         <Show when={authState() === "unauthenticated"} fallback={<main class="login-loading">Checking your session…</main>}>
-          <LoginScreen
-            initialToken={getToken()}
-            initialBase={getBase()}
-            error={authError()}
-            onAuthenticated={authenticate}
-          />
+          <Show
+            when={installMode() && !wizardDismissed()}
+            fallback={
+              <LoginScreen
+                initialToken={getToken()}
+                initialBase={getBase()}
+                error={authError()}
+                onAuthenticated={authenticate}
+              />
+            }
+          >
+            <SetupWizard
+              onSignIn={() => setWizardDismissed(true)}
+              onAuthenticated={authenticate}
+            />
+          </Show>
         </Show>
       }>
       <div
