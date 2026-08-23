@@ -102,8 +102,13 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .expect("push manager init"),
     );
     let agent_tasks = Arc::new(
-        AgentTaskRegistry::new(&cfg.state_dir, Arc::clone(&sessions), Arc::clone(&push))
-            .expect("agent task registry init"),
+        AgentTaskRegistry::new(
+            &cfg.state_dir,
+            Arc::clone(&sessions),
+            Arc::clone(&push),
+            bus.clone(),
+        )
+        .expect("agent task registry init"),
     );
 
     // The durable assistant interaction log (FR-T14), opened like session
@@ -120,6 +125,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     let assistant = AssistantRuntime::from_config(
         &cfg,
         Arc::clone(&sessions),
+        Arc::clone(&agent_tasks),
         Arc::clone(&push),
         assistant_log.clone(),
     );
@@ -266,6 +272,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/agent-tasks/{id}/pause", post(agent_tasks::pause))
         .route("/api/agent-tasks/{id}/resume", post(agent_tasks::resume))
         .route("/api/agent-tasks/{id}/run", post(agent_tasks::run_now))
+        .route("/api/agent-tasks/{id}/steer", post(agent_tasks::steer))
+        .route(
+            "/api/agent-tasks/{id}/gates/{gate_id}/answer",
+            post(agent_tasks::answer_gate),
+        )
         .route(
             "/api/agent-tasks/artifacts/cleanup",
             post(agent_tasks::cleanup_prompt_artifacts),

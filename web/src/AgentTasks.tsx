@@ -15,6 +15,7 @@ import type {
   AgentTaskUpsertRequest,
 } from "./api";
 import { api } from "./api";
+import AgentTaskSteering from "./AgentTaskSteering";
 import Dialog from "./Dialog";
 import { onSessionKilled } from "./store";
 import { focusTab, setTasksDirty } from "./tabs";
@@ -243,6 +244,7 @@ const AgentTasks = (props: Props) => {
   );
   const [actionError, setActionError] = createSignal<string | null>(null);
   const [retryAction, setRetryAction] = createSignal<(() => void) | null>(null);
+  const [steerBusy, setSteerBusy] = createSignal(false);
   const [pendingDecision, setPendingDecision] =
     createSignal<PendingDraftDecision | null>(null);
   let restoreDraftPending = restored.selectedTaskId !== null && !restored.creating;
@@ -538,6 +540,42 @@ const AgentTasks = (props: Props) => {
 
   const openRunSession = (run: AgentTaskRun) => {
     props.onOpenSession?.(run.session_id, run.session_name);
+  };
+
+  const steerRun = async (task: AgentTask, text: string, interrupt: boolean) => {
+    setSteerBusy(true);
+    try {
+      await api.steerAgentTask(task.id, { text, interrupt });
+      await loadTasks(task.id, dirty());
+    } catch (error) {
+      reportActionFailure(
+        "Failed to steer run",
+        error,
+        () => void steerRun(task, text, interrupt),
+      );
+    } finally {
+      setSteerBusy(false);
+    }
+  };
+
+  const answerGate = async (
+    task: AgentTask,
+    gateId: string,
+    optionIndex: number,
+  ) => {
+    setSteerBusy(true);
+    try {
+      await api.answerAgentTaskGate(task.id, gateId, { option: optionIndex });
+      await loadTasks(task.id, dirty());
+    } catch (error) {
+      reportActionFailure(
+        "Failed to answer gate",
+        error,
+        () => void answerGate(task, gateId, optionIndex),
+      );
+    } finally {
+      setSteerBusy(false);
+    }
   };
 
   return (
@@ -933,6 +971,16 @@ const AgentTasks = (props: Props) => {
                               </For>
                             </ul>
                           </Show>
+                          <AgentTaskSteering
+                            run={run}
+                            busy={steerBusy()}
+                            onSteer={(text, interrupt) =>
+                              steerRun(task(), text, interrupt)
+                            }
+                            onAnswerGate={(gateId, optionIndex) =>
+                              answerGate(task(), gateId, optionIndex)
+                            }
+                          />
                         </div>
                         <button onClick={() => openRunSession(run)}>Open Session</button>
                       </div>

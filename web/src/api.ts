@@ -468,6 +468,44 @@ export interface AgentTaskFinding {
   source: string;
 }
 
+/** One choice a gate offers (engine `gates::GateOption`, #289). */
+export interface AgentTaskGateOption {
+  label: string;
+  input?: string;
+  approve?: boolean;
+}
+
+/** A declared approval point on a task (engine `gates::GateSpec`, #289). */
+export interface AgentTaskGateSpec {
+  id?: string;
+  question: string;
+  options: AgentTaskGateOption[];
+  timeout_ms?: number | null;
+}
+
+/**
+ * A gate instance on a run (engine `gates::GateRecord`, #289). `state` is the
+ * flattened tag: `open` while held, `answered` once a person or the audited
+ * bypass chose an option, `blocked` when it failed closed. `interrupted !=
+ * approved` — a blocked gate is never an approval.
+ */
+export interface AgentTaskGate {
+  id: string;
+  question: string;
+  options: AgentTaskGateOption[];
+  state: "open" | "answered" | "blocked";
+  opened_at: string;
+  resolved_at: string | null;
+  // Present only on `answered`.
+  option_index?: number;
+  option_label?: string;
+  approved?: boolean;
+  actor?: string;
+  auto?: boolean;
+  // Present only on `blocked`.
+  reason?: string;
+}
+
 export interface AgentTaskRun {
   id: string;
   task_id: string;
@@ -482,6 +520,7 @@ export interface AgentTaskRun {
   exit_code: number | null;
   summary: string | null;
   findings: AgentTaskFinding[];
+  gates?: AgentTaskGate[];
 }
 
 export interface AgentTask {
@@ -496,6 +535,8 @@ export interface AgentTask {
   context: string | null;
   vogt_project: string | null;
   vogt_work_item: string | null;
+  gates?: AgentTaskGateSpec[];
+  auto_approve?: boolean;
   notify_on_start: boolean;
   notify_on_phrase: string | null;
   auto_retry_on_rate_limit: boolean;
@@ -517,6 +558,8 @@ export interface AgentTaskUpsertRequest {
   context?: string | null;
   vogt_project?: string | null;
   vogt_work_item?: string | null;
+  gates?: AgentTaskGateSpec[];
+  auto_approve?: boolean;
   enabled?: boolean;
   notify_on_start?: boolean;
   notify_on_phrase?: string | null;
@@ -618,6 +661,22 @@ export const api = {
     req<AgentTask>("POST", `/api/agent-tasks/${id}/resume`),
   runAgentTask: (id: string) =>
     req<AgentTaskRun>("POST", `/api/agent-tasks/${id}/run`),
+  /** Queue a steer for a task's in-flight run (#289). */
+  steerAgentTask: (
+    id: string,
+    body: { text: string; interrupt?: boolean; actor?: string; reason?: string },
+  ) => req<OkResponse>("POST", `/api/agent-tasks/${id}/steer`, body),
+  /** Answer an open approval gate on a task's in-flight run (#289). */
+  answerAgentTaskGate: (
+    id: string,
+    gateId: string,
+    body: { option: number; actor?: string; reason?: string },
+  ) =>
+    req<AgentTaskGate>(
+      "POST",
+      `/api/agent-tasks/${id}/gates/${gateId}/answer`,
+      body,
+    ),
   cleanupAgentTaskArtifacts: (keepLatestRunsPerTask: number) =>
     req<{
       removed_task_dir_count: number;

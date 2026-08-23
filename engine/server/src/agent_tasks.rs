@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -12,13 +12,16 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::{Duration, OffsetDateTime, Time};
+use tokio::sync::Notify;
 use uuid::Uuid;
+use vogt_engine_contract::ActivityState;
 
 use crate::{
     activity::strip_ansi,
     app::AppState,
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
+    gates::{self, GateRecord, GateSpec, GateState, SteerItem, AUTO_APPROVE_ACTOR},
     prompt_files,
     pty::{Session, SessionSpec},
     push::{NotificationKind, PushManager},
@@ -73,6 +76,19 @@ pub struct AgentTask {
     pub vogt_project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vogt_work_item: Option<String>,
+    /// Approval points this task's runs hold at (#289). Each is a first-class
+    /// step with options; a run opens them in order at the prompt boundaries
+    /// its CLI reaches, and holds the PTY at each until it is answered or fails
+    /// closed to `blocked`. Empty for a task that never pauses for a decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<GateSpec>,
+    /// The one audited bypass (#289): with it set, a run answers its own gates
+    /// with each gate's `approve` option instead of waiting for a human. It is
+    /// recorded on every gate it resolves (actor `auto-approve`), because a run
+    /// that approved its own gates is a fact a reader must be able to see. A
+    /// gate with no `approve` option still fails closed under it.
+    #[serde(default)]
+    pub auto_approve: bool,
     #[serde(default)]
     pub notify_on_start: bool,
     #[serde(default = "default_notify_phrase")]
@@ -140,6 +156,13 @@ pub struct AgentTaskRun {
     /// push notifications", not "instead of".
     #[serde(default)]
     pub findings: Vec<AgentTaskFinding>,
+    /// The approval gates this run opened, in the order it opened them, each
+    /// carrying its own terminal state (#289). This is the audit trail: an
+    /// answered gate names who chose which option, a blocked gate names why it
+    /// failed closed, and both survive a restart so a sweep can read what a run
+    /// stopped for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<GateRecord>,
 }
 
 /// One thing a run reported about itself.
@@ -193,6 +216,10 @@ pub struct AgentTaskCreate {
     #[serde(default)]
     pub vogt_work_item: Option<String>,
     #[serde(default)]
+    pub gates: Option<Vec<GateSpec>>,
+    #[serde(default)]
+    pub auto_approve: Option<bool>,
+    #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
     pub notify_on_start: Option<bool>,
@@ -222,6 +249,10 @@ pub struct AgentTaskUpdate {
     pub vogt_project: Option<String>,
     #[serde(default)]
     pub vogt_work_item: Option<String>,
+    #[serde(default)]
+    pub gates: Option<Vec<GateSpec>>,
+    #[serde(default)]
+    pub auto_approve: Option<bool>,
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
@@ -278,13 +309,31 @@ struct PromptArtifactRemovalTally {
     bytes: u64,
 }
 
+/// The live controls for one in-flight run (#289): the handle its steer and
+/// gate answers reach, and the wake-up the orchestrator waits on. Kept out of
+/// the persisted task store because none of it outlives the process — a steer
+/// queued for a run whose engine restarted has nothing to be delivered to, and
+/// a gate left open by a restart fails closed on reconcile.
+struct RunControl {
+    session: Arc<Session>,
+    /// Text queued to reach the PTY at the next prompt boundary, in order.
+    steer: Mutex<VecDeque<SteerItem>>,
+    /// Woken when a steer is queued or a gate is answered, so the orchestrator
+    /// acts at once rather than on its next poll tick.
+    notify: Arc<Notify>,
+}
+
 pub struct AgentTaskRegistry {
     path: PathBuf,
     prompt_dir: PathBuf,
     sessions: Arc<SessionRegistry>,
     push: Arc<PushManager>,
+    bus: EventBus,
     tasks: Mutex<Vec<AgentTask>>,
     executing: Mutex<HashSet<Uuid>>,
+    /// Live run controls, keyed by run id. An entry exists only while the
+    /// orchestrator for that run is running; it removes its own on exit.
+    runs: Mutex<HashMap<Uuid, Arc<RunControl>>>,
 }
 
 impl AgentTaskRegistry {
@@ -292,6 +341,7 @@ impl AgentTaskRegistry {
         state_dir: &Path,
         sessions: Arc<SessionRegistry>,
         push: Arc<PushManager>,
+        bus: EventBus,
     ) -> Result<Self> {
         std::fs::create_dir_all(state_dir)?;
         let prompt_dir = prompt_files::prompt_root(state_dir);
@@ -303,8 +353,10 @@ impl AgentTaskRegistry {
             prompt_dir,
             sessions,
             push,
+            bus,
             tasks: Mutex::new(tasks),
             executing: Mutex::new(HashSet::new()),
+            runs: Mutex::new(HashMap::new()),
         };
         registry.reconcile_run_history()?;
         registry.normalize_startup_schedule()?;
@@ -367,6 +419,7 @@ impl AgentTaskRegistry {
         let prompt = clean_required("prompt", req.prompt)?;
         let schedule = req.schedule.unwrap_or(AgentTaskSchedule::Manual);
         validate_schedule(&schedule)?;
+        let gates = clean_gates(req.gates)?;
         let now = OffsetDateTime::now_utc();
         let status = if req.enabled == Some(false) {
             AgentTaskStatus::Paused
@@ -390,6 +443,8 @@ impl AgentTaskRegistry {
             context: clean_optional(req.context),
             vogt_project: clean_optional(req.vogt_project),
             vogt_work_item: clean_optional(req.vogt_work_item),
+            gates,
+            auto_approve: req.auto_approve.unwrap_or(false),
             notify_on_start: req.notify_on_start.unwrap_or(false),
             notify_on_phrase: clean_notify_phrase(req.notify_on_phrase),
             auto_retry_on_rate_limit: req.auto_retry_on_rate_limit.unwrap_or(true),
@@ -442,6 +497,12 @@ impl AgentTaskRegistry {
         }
         if req.vogt_work_item.is_some() {
             task.vogt_work_item = clean_optional(req.vogt_work_item);
+        }
+        if let Some(gates) = req.gates {
+            task.gates = clean_gates(Some(gates))?;
+        }
+        if let Some(auto_approve) = req.auto_approve {
+            task.auto_approve = auto_approve;
         }
         if let Some(enabled) = req.enabled {
             task.status = if enabled {
@@ -765,6 +826,7 @@ impl AgentTaskRegistry {
             exit_code: None,
             summary: None,
             findings: vec![],
+            gates: vec![],
         };
 
         {
@@ -832,6 +894,25 @@ impl AgentTaskRegistry {
                 session.subscribe(),
             );
         }
+
+        // The orchestrator holds the PTY at each declared gate and drains the
+        // steer queue between rounds (#289). Spawned for every run, not only
+        // gated ones, because steering is a general ability a run acquires the
+        // moment it exists — a task with no gates can still be redirected
+        // mid-flight.
+        let control = Arc::new(RunControl {
+            session: Arc::clone(&session),
+            steer: Mutex::new(VecDeque::new()),
+            notify: Arc::new(Notify::new()),
+        });
+        self.runs.lock().insert(run.id, Arc::clone(&control));
+        spawn_run_orchestrator(
+            Arc::clone(self),
+            control,
+            run.id,
+            task.gates.clone(),
+            task.auto_approve,
+        );
 
         Ok(Some(run))
     }
@@ -939,6 +1020,290 @@ impl AgentTaskRegistry {
         self.save_locked(&tasks)
     }
 
+    // --- steering and gates (#289) -----------------------------------------
+
+    /// Queue a steer for a task's live run, delivered to the PTY at the next
+    /// prompt boundary (FR #289). `interrupt` sends the CLI's cancel first.
+    ///
+    /// Addressed to the task rather than a session so a phone that knows only
+    /// "the nightly audit" can steer it without first resolving which session
+    /// this run happens to be. Refused when the task has no run in flight —
+    /// there is nothing to steer, and queuing for a run that will never read it
+    /// would be a silent no-op dressed as a success.
+    pub fn steer(
+        &self,
+        task_id: Uuid,
+        text: String,
+        interrupt: bool,
+        actor: String,
+        reason: Option<String>,
+    ) -> Result<()> {
+        let text = text.trim_end_matches(['\r', '\n']).to_string();
+        if text.is_empty() && !interrupt {
+            return Err(ApiError::BadRequest(
+                "steer needs text, or interrupt=true".into(),
+            ));
+        }
+        let (_run_id, control) = self.live_run(task_id)?;
+        control.steer.lock().push_back(SteerItem {
+            text,
+            interrupt,
+            actor,
+            reason,
+        });
+        control.notify.notify_one();
+        Ok(())
+    }
+
+    /// Answer a currently-open gate on a task's live run. The chosen option's
+    /// input is delivered to the PTY by the orchestrator; this only records the
+    /// resolution and wakes it. Fail-closed lives elsewhere — this is the human
+    /// path, and the only path that can produce an approval.
+    pub fn answer_gate(
+        &self,
+        task_id: Uuid,
+        gate_id: Uuid,
+        option_index: usize,
+        actor: String,
+        reason: Option<String>,
+    ) -> Result<GateRecord> {
+        let (run_id, control) = self.live_run(task_id)?;
+        let record = self.resolve_gate_answer(run_id, gate_id, option_index, &actor, false, reason)?;
+        control.notify.notify_one();
+        Ok(record)
+    }
+
+    /// The in-flight run of a task and its live control, or a 409 when the task
+    /// has none running.
+    fn live_run(&self, task_id: Uuid) -> Result<(Uuid, Arc<RunControl>)> {
+        let run_ids: Vec<Uuid> = {
+            let tasks = self.tasks.lock();
+            let task = tasks.iter().find(|t| t.id == task_id).ok_or(ApiError::NotFound)?;
+            task.runs.iter().rev().map(|run| run.id).collect()
+        };
+        let controls = self.runs.lock();
+        for run_id in run_ids {
+            if let Some(control) = controls.get(&run_id) {
+                if control.session.exit_code().is_none() {
+                    return Ok((run_id, Arc::clone(control)));
+                }
+            }
+        }
+        Err(ApiError::Conflict("task has no run in flight to steer".into()))
+    }
+
+    /// Record a gate answer (human or the audited bypass) and emit the event.
+    /// The pure state machine refuses a resolved or out-of-range gate; this
+    /// only translates its verdict into an API error, a save, and an event.
+    fn resolve_gate_answer(
+        &self,
+        run_id: Uuid,
+        gate_id: Uuid,
+        option_index: usize,
+        actor: &str,
+        auto: bool,
+        reason: Option<String>,
+    ) -> Result<GateRecord> {
+        let now = OffsetDateTime::now_utc();
+        let mut tasks = self.tasks.lock();
+        let (task_id, session_id, record) = {
+            let task = task_with_run_mut(&mut tasks, run_id).ok_or(ApiError::NotFound)?;
+            let task_id = task.id;
+            let run_idx = task
+                .runs
+                .iter()
+                .position(|r| r.id == run_id)
+                .expect("task_with_run_mut found the run");
+            let session_id = task.runs[run_idx].session_id;
+            let gate = task.runs[run_idx]
+                .gates
+                .iter_mut()
+                .find(|g| g.id == gate_id)
+                .ok_or(ApiError::NotFound)?;
+            gate.answer(option_index, actor, auto, now).map_err(|e| match e {
+                gates::GateError::AlreadyResolved => {
+                    ApiError::Conflict("gate is already resolved".into())
+                }
+                gates::GateError::UnknownOption => {
+                    ApiError::BadRequest("no such gate option".into())
+                }
+            })?;
+            let record = gate.clone();
+            task.updated_at = now;
+            (task_id, session_id, record)
+        };
+        self.save_locked(&tasks)?;
+        drop(tasks);
+        let (option, outcome) = match &record.state {
+            GateState::Answered {
+                option_label,
+                approved,
+                ..
+            } => (
+                Some(option_label.clone()),
+                if *approved { "approved" } else { "resolved" }.to_string(),
+            ),
+            _ => (None, "resolved".to_string()),
+        };
+        self.bus.publish(ServerEvent::TaskGateAnswered {
+            task_id,
+            run_id,
+            session_id,
+            gate_id,
+            option,
+            outcome,
+            actor: actor.to_string(),
+            reason,
+        });
+        Ok(record)
+    }
+
+    /// Open a gate on a run at a prompt boundary: persist it, notify, and emit
+    /// `task.gate.opened`. Called only by the orchestrator, only when the run
+    /// is at a boundary.
+    fn open_gate(&self, run_id: Uuid, spec: &GateSpec) -> Result<()> {
+        let now = OffsetDateTime::now_utc();
+        let record = GateRecord::open(spec, now);
+        let (task_id, task_name, session_id) = {
+            let mut tasks = self.tasks.lock();
+            let task = task_with_run_mut(&mut tasks, run_id).ok_or(ApiError::NotFound)?;
+            let out = (task.id, task.name.clone());
+            let run = task
+                .runs
+                .iter_mut()
+                .find(|r| r.id == run_id)
+                .expect("task_with_run_mut found the run");
+            let session_id = run.session_id;
+            run.gates.push(record.clone());
+            task.updated_at = now;
+            self.save_locked(&tasks)?;
+            (out.0, out.1, session_id)
+        };
+        self.bus.publish(ServerEvent::TaskGateOpened {
+            task_id,
+            run_id,
+            session_id,
+            gate_id: spec.id,
+            question: spec.question.clone(),
+            options: spec.options.iter().map(|o| o.label.clone()).collect(),
+        });
+        let data = json!({
+            "kind": "agent-task-gate",
+            "task_id": task_id.to_string(),
+            "run_id": run_id.to_string(),
+            "gate_id": spec.id.to_string(),
+            "session_id": session_id.to_string(),
+            "url": format!("/#/t/{session_id}"),
+        });
+        let title = format!("{task_name} needs approval");
+        let push = Arc::clone(&self.push);
+        let question = spec.question.clone();
+        tokio::spawn(async move {
+            let _ = push
+                .notify(NotificationKind::AgentTaskNotify, &title, &question, data)
+                .await;
+        });
+        Ok(())
+    }
+
+    /// Fail one gate closed. Emits `task.gate.answered` with a `blocked`
+    /// outcome exactly once — the pure `block` returns whether it was the call
+    /// that resolved it, so a second interrupt or a death-after-timeout does
+    /// not double-emit.
+    fn block_gate(&self, run_id: Uuid, gate_id: Uuid, reason: &str) {
+        let now = OffsetDateTime::now_utc();
+        let mut tasks = self.tasks.lock();
+        let Some(task) = task_with_run_mut(&mut tasks, run_id) else {
+            return;
+        };
+        let task_id = task.id;
+        let run_idx = task
+            .runs
+            .iter()
+            .position(|r| r.id == run_id)
+            .expect("task_with_run_mut found the run");
+        let session_id = task.runs[run_idx].session_id;
+        let Some(gate) = task.runs[run_idx].gates.iter_mut().find(|g| g.id == gate_id) else {
+            return;
+        };
+        if !gate.block(reason, now) {
+            return;
+        }
+        task.updated_at = now;
+        let _ = self.save_locked(&tasks);
+        drop(tasks);
+        self.bus.publish(ServerEvent::TaskGateAnswered {
+            task_id,
+            run_id,
+            session_id,
+            gate_id,
+            option: None,
+            outcome: "blocked".to_string(),
+            actor: "system".to_string(),
+            reason: Some(reason.to_string()),
+        });
+    }
+
+    /// Fail every still-open gate on a run closed — used when a run's session
+    /// dies with a gate held. Fail-closed, in as many words: a session that
+    /// went away with an unanswered question answered nothing.
+    fn block_open_gates(&self, run_id: Uuid, reason: &str) {
+        let open: Vec<Uuid> = {
+            let tasks = self.tasks.lock();
+            match tasks.iter().flat_map(|t| &t.runs).find(|r| r.id == run_id) {
+                Some(run) => run
+                    .gates
+                    .iter()
+                    .filter(|g| g.state.is_open())
+                    .map(|g| g.id)
+                    .collect(),
+                None => vec![],
+            }
+        };
+        for gate_id in open {
+            self.block_gate(run_id, gate_id, reason);
+        }
+    }
+
+    /// A snapshot of one gate record on a run, for the orchestrator to read the
+    /// state the API may have changed underneath it.
+    fn gate_record(&self, run_id: Uuid, gate_id: Uuid) -> Option<GateRecord> {
+        let tasks = self.tasks.lock();
+        tasks
+            .iter()
+            .flat_map(|t| &t.runs)
+            .find(|r| r.id == run_id)?
+            .gates
+            .iter()
+            .find(|g| g.id == gate_id)
+            .cloned()
+    }
+
+    fn emit_steered(&self, run_id: Uuid, item: &SteerItem) {
+        let (task_id, session_id) = {
+            let tasks = self.tasks.lock();
+            match tasks
+                .iter()
+                .find_map(|t| t.runs.iter().find(|r| r.id == run_id).map(|r| (t.id, r.session_id)))
+            {
+                Some(pair) => pair,
+                None => return,
+            }
+        };
+        self.bus.publish(ServerEvent::TaskSteered {
+            task_id,
+            run_id,
+            session_id,
+            actor: item.actor.clone(),
+            interrupt: item.interrupt,
+            reason: item.reason.clone(),
+        });
+    }
+
+    fn remove_run_control(&self, run_id: Uuid) {
+        self.runs.lock().remove(&run_id);
+    }
+
     fn advance_next_run(&self, id: Uuid) -> Result<()> {
         let mut tasks = self.tasks.lock();
         let task = tasks
@@ -991,6 +1356,17 @@ impl AgentTaskRegistry {
                         .get_or_insert_with(|| "Outcome unavailable after restart".to_string());
                     task_changed = true;
                     changed = true;
+                }
+                // A gate left `Open` by a restart has no orchestrator to hold
+                // it and no session to answer into: fail it closed, the same
+                // rule that governs a live gate. An `Open` gate that survived a
+                // restart as "approved" would be the exact failure #289 exists
+                // against.
+                for gate in &mut run.gates {
+                    if gate.state.is_open() && gate.block("engine restarted", now) {
+                        task_changed = true;
+                        changed = true;
+                    }
                 }
             }
             if task_changed {
@@ -1145,6 +1521,56 @@ pub async fn run_now(
     AxumPath(id): AxumPath<Uuid>,
 ) -> Result<Json<AgentTaskRun>> {
     Ok(Json(state.agent_tasks.run_now(id).await?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SteerReq {
+    #[serde(default)]
+    pub text: String,
+    /// Send the CLI's cancel (Ctrl-C) before the text.
+    #[serde(default)]
+    pub interrupt: bool,
+    /// Who is steering, for the audit trail. Defaults to `operator`.
+    #[serde(default)]
+    pub actor: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+pub async fn steer(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<Uuid>,
+    Json(req): Json<SteerReq>,
+) -> Result<Json<serde_json::Value>> {
+    let actor = clean_optional(req.actor).unwrap_or_else(|| "operator".to_string());
+    state
+        .agent_tasks
+        .steer(id, req.text, req.interrupt, actor, clean_optional(req.reason))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GateAnswerReq {
+    /// Index of the chosen option in the gate's declared order.
+    pub option: usize,
+    /// Who answered, for the audit trail. Defaults to `operator`.
+    #[serde(default)]
+    pub actor: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+pub async fn answer_gate(
+    State(state): State<Arc<AppState>>,
+    AxumPath((id, gate_id)): AxumPath<(Uuid, Uuid)>,
+    Json(req): Json<GateAnswerReq>,
+) -> Result<Json<GateRecord>> {
+    let actor = clean_optional(req.actor).unwrap_or_else(|| "operator".to_string());
+    let record =
+        state
+            .agent_tasks
+            .answer_gate(id, gate_id, req.option, actor, clean_optional(req.reason))?;
+    Ok(Json(record))
 }
 
 pub async fn cleanup_prompt_artifacts(
@@ -1342,6 +1768,27 @@ fn remove_path_recursive(path: &Path, tally: &mut PromptArtifactRemovalTally) ->
     }
 }
 
+/// The task owning a given run, mutably. A run id is unique across the store,
+/// so the first task carrying it is the only one.
+fn task_with_run_mut(tasks: &mut [AgentTask], run_id: Uuid) -> Option<&mut AgentTask> {
+    tasks
+        .iter_mut()
+        .find(|t| t.runs.iter().any(|r| r.id == run_id))
+}
+
+/// Validate and normalise a task's declared gates. A gate a client could not
+/// meaningfully answer — no question, no options, a blank option label — is
+/// rejected at write time rather than discovered when a run tries to open it.
+fn clean_gates(gates: Option<Vec<GateSpec>>) -> Result<Vec<GateSpec>> {
+    let Some(gates) = gates else {
+        return Ok(vec![]);
+    };
+    for gate in &gates {
+        gate.validate().map_err(ApiError::BadRequest)?;
+    }
+    Ok(gates)
+}
+
 fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|s| s.trim().to_string())
@@ -1509,6 +1956,164 @@ fn parse_hhmm(raw: &str) -> Result<Time> {
         .map_err(|e| ApiError::BadRequest(format!("invalid minute in {raw:?}: {e}")))?;
     Time::from_hms(hour, minute, 0)
         .map_err(|e| ApiError::BadRequest(format!("invalid time {raw:?}: {e}")))
+}
+
+/// How often the orchestrator re-checks a run it is not otherwise woken for —
+/// short enough that a gate timeout or a session death is noticed promptly,
+/// long enough not to spin. A steer or an answer wakes it immediately through
+/// its `Notify`, so this is only the ceiling on latency for the polled events.
+const ORCHESTRATOR_POLL_MS: u64 = 120;
+
+/// Drive one run's gates and steer queue for its whole life (#289).
+///
+/// The single loop is the whole mechanism, and it is small on purpose:
+///
+/// * **Holding a gate.** While a gate it opened is still `Open`, the loop stays
+///   in the gate branch and never reaches the steer drain — that is what
+///   "hold the PTY at the prompt boundary" means in code. Nothing is written
+///   to the PTY until the gate resolves.
+/// * **Failing closed.** A gate that is not answered before its deadline is
+///   blocked and its session killed; a session that dies with a gate held has
+///   every open gate blocked. Neither path can write an approval — only the
+///   answer branch delivers a chosen option's input.
+/// * **Steering between rounds.** With no gate pending or open, at a prompt
+///   boundary (activity ≠ Running) the loop drains one queued steer per pass.
+///
+/// The orchestrator opens gates only at a boundary, so a gate is always put to
+/// the human at a point the CLI is actually waiting — never mid-thought.
+fn spawn_run_orchestrator(
+    registry: Arc<AgentTaskRegistry>,
+    control: Arc<RunControl>,
+    run_id: Uuid,
+    gates: Vec<GateSpec>,
+    auto_approve: bool,
+) {
+    tokio::spawn(async move {
+        let session = Arc::clone(&control.session);
+        let mut pending: VecDeque<GateSpec> = gates.into();
+        // The gate this loop is currently holding, if any. Held as its spec so
+        // its deadline is known without another lookup; its live state is read
+        // back from the store each pass, because the API may have answered it.
+        let mut current: Option<GateSpec> = None;
+
+        loop {
+            if session.exit_code().is_some() {
+                // Fail closed: a run that ended with a question unanswered
+                // answered nothing.
+                registry.block_open_gates(run_id, "session ended while a gate was open");
+                break;
+            }
+
+            if let Some(spec) = current.clone() {
+                let Some(record) = registry.gate_record(run_id, spec.id) else {
+                    // The run (or its gate) was deleted underneath us; nothing
+                    // left to hold.
+                    current = None;
+                    continue;
+                };
+                match &record.state {
+                    GateState::Open => {
+                        let elapsed_ms = (OffsetDateTime::now_utc() - record.opened_at)
+                            .whole_milliseconds()
+                            .max(0) as u64;
+                        if elapsed_ms >= spec.timeout_ms() {
+                            registry.block_gate(run_id, spec.id, "timed out awaiting an answer");
+                            // The CLI is still blocked at its prompt; end the
+                            // run rather than leave it paused forever.
+                            let _ = session.kill();
+                            current = None;
+                            continue;
+                        }
+                        wait_a_beat(&control.notify).await;
+                        continue;
+                    }
+                    GateState::Answered { .. } => {
+                        if let Some(input) = record.answered_input() {
+                            deliver_line(&session, input);
+                        }
+                        current = None;
+                        continue;
+                    }
+                    GateState::Blocked { .. } => {
+                        // Blocked by a timeout we already handled, or by a
+                        // death race; the run cannot proceed past a blocked
+                        // gate, so end it.
+                        let _ = session.kill();
+                        current = None;
+                        continue;
+                    }
+                }
+            }
+
+            // No gate held. Only act at a prompt boundary.
+            if session.activity() == ActivityState::Running {
+                wait_a_beat(&control.notify).await;
+                continue;
+            }
+
+            if let Some(spec) = pending.pop_front() {
+                if let Err(e) = registry.open_gate(run_id, &spec) {
+                    tracing::warn!(run = %run_id, error = %e, "failed to open agent-task gate");
+                    continue;
+                }
+                if auto_approve {
+                    // The audited bypass: answer with the gate's own approve
+                    // option, recorded as `auto-approve`. A gate with no
+                    // approve option is left open and will fail closed on its
+                    // deadline — the bypass is "yes", not "pick anything".
+                    if let Some(idx) = spec.approve_index() {
+                        if let Err(e) = registry.resolve_gate_answer(
+                            run_id,
+                            spec.id,
+                            idx,
+                            AUTO_APPROVE_ACTOR,
+                            true,
+                            Some("--auto-approve".to_string()),
+                        ) {
+                            tracing::warn!(run = %run_id, error = %e, "auto-approve failed");
+                        }
+                    }
+                }
+                current = Some(spec);
+                continue;
+            }
+
+            // No gates. Drain one steer per boundary pass.
+            let next = control.steer.lock().pop_front();
+            if let Some(item) = next {
+                let bytes = gates::steer_delivery_bytes(&item);
+                if let Err(e) = session.write_input(&bytes) {
+                    tracing::warn!(run = %run_id, error = %e, "failed to deliver steer to PTY");
+                }
+                registry.emit_steered(run_id, &item);
+                continue;
+            }
+
+            wait_a_beat(&control.notify).await;
+        }
+
+        registry.remove_run_control(run_id);
+    });
+}
+
+/// Wait for a wake-up (a steer queued, a gate answered) or the poll ceiling,
+/// whichever comes first. Swallows the timeout: the caller re-checks
+/// everything each pass regardless of why it woke.
+async fn wait_a_beat(notify: &Notify) {
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(ORCHESTRATOR_POLL_MS),
+        notify.notified(),
+    )
+    .await;
+}
+
+/// Write a line to the PTY: the text, then the Enter the CLI is waiting for.
+fn deliver_line(session: &Arc<Session>, text: &str) {
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.push(b'\r');
+    if let Err(e) = session.write_input(&bytes) {
+        tracing::warn!(session = %session.id, error = %e, "failed to deliver gate answer to PTY");
+    }
 }
 
 /// Watch a run's output for the phrase its task asked to be told about.
@@ -1692,6 +2297,8 @@ mod tests {
             context: None,
             vogt_project: project.map(str::to_string),
             vogt_work_item: work_item.map(str::to_string),
+            gates: vec![],
+            auto_approve: false,
             notify_on_start: false,
             notify_on_phrase: None,
             auto_retry_on_rate_limit: false,
