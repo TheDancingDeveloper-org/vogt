@@ -41,6 +41,7 @@ use uuid::Uuid;
 
 use crate::{
     activity::strip_ansi,
+    agent_tasks::AgentTaskRegistry,
     assistant_log::{AssistantLog, ListQuery, LogEvent, LoggedEntry},
     config::Config,
     error::{ApiError, Result},
@@ -299,6 +300,10 @@ impl ChatBackend {
 
 pub struct AssistantRuntime {
     sessions: Arc<SessionRegistry>,
+    /// The agent-task registry, so the assistant can steer a task's in-flight
+    /// run (#289). `None` in unit tests that do not exercise steering; always
+    /// present in a real deployment.
+    agent_tasks: Option<Arc<AgentTaskRegistry>>,
     /// Push is a hint only. The client must read assistant/history and match
     /// the id against this same in-memory action before showing controls.
     push: Option<Arc<PushManager>>,
@@ -388,6 +393,7 @@ impl AssistantRuntime {
     pub fn from_config(
         cfg: &Config,
         sessions: Arc<SessionRegistry>,
+        agent_tasks: Arc<AgentTaskRegistry>,
         push: Arc<PushManager>,
         log: Option<Arc<AssistantLog>>,
     ) -> Option<Arc<Self>> {
@@ -406,6 +412,7 @@ impl AssistantRuntime {
         }
         Some(Arc::new(Self {
             sessions,
+            agent_tasks: Some(agent_tasks),
             push: Some(push),
             vogt,
             backend: ChatBackend::Http { client },
@@ -1312,6 +1319,7 @@ impl AssistantRuntime {
                     "send_input only runs after on-screen approval".into(),
                 ))
             }
+            "steer_agent_task" => self.dispatch_steer(args, tool_trace).await,
             other => Err(ApiError::BadRequest(format!("unknown tool {other}"))),
         }
     }
@@ -1341,6 +1349,47 @@ impl AssistantRuntime {
             Ok(text) => Ok(vogt_tools::delimit(&def.operation, &text)),
             Err(reason) => Err(ApiError::BadGateway(reason)),
         }
+    }
+
+    /// Steer a task's in-flight run: queue text (optionally after the CLI's
+    /// cancel) delivered to its PTY at the next prompt boundary (#289).
+    ///
+    /// Dispatched directly rather than through the on-screen approval gate that
+    /// wraps `send_input`, and the distinction is deliberate: `send_input`
+    /// types arbitrary bytes into *any* session a name resolves to, which is
+    /// the injection the gate exists against. Steering is bounded — it reaches
+    /// only a task's own in-flight run, is held until that run is at a safe
+    /// boundary, and every delivery emits an audited `task.steered` event with
+    /// the actor on it. The actor here is the assistant, recorded as such.
+    async fn dispatch_steer(&self, args: &Value, tool_trace: &mut Vec<String>) -> Result<String> {
+        let agent_tasks = self
+            .agent_tasks
+            .as_ref()
+            .ok_or_else(|| ApiError::BadRequest("agent tasks are not available".into()))?;
+        let task_id = args
+            .get("task_id")
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or_else(|| ApiError::BadRequest("task_id must be an agent-task UUID".into()))?;
+        let text = args
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let interrupt = args
+            .get("interrupt")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let reason = args
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        agent_tasks.steer(task_id, text.clone(), interrupt, "assistant".to_string(), reason)?;
+        tool_trace.push(format!("steered agent task {task_id}"));
+        Ok(format!(
+            "Queued steering for task {task_id}; it will reach the run at its next prompt boundary{}.",
+            if interrupt { " (after cancelling the current action)" } else { "" }
+        ))
     }
 }
 
@@ -1654,6 +1703,23 @@ fn tool_definitions() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "steer_agent_task",
+                "description": "Steer a scheduled agent task's in-flight run: queue a line of guidance delivered to its terminal at the next prompt boundary. Use interrupt=true to cancel what the CLI is currently doing (Ctrl-C) before the text. This does not pause for approval — it only reaches that task's own run and is recorded in the audit trail.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string", "description": "Agent-task UUID"},
+                        "text": {"type": "string", "description": "The guidance to deliver at the next boundary"},
+                        "interrupt": {"type": "boolean", "description": "Cancel the CLI's current action (Ctrl-C) before the text (default false)"},
+                        "reason": {"type": "string", "description": "Why you are steering, for the audit trail"}
+                    },
+                    "required": ["task_id", "text"]
+                }
+            }
+        }),
     ]
 }
 
@@ -1717,6 +1783,7 @@ mod tests {
     fn runtime_with_script(sessions: Arc<SessionRegistry>, script: Vec<Value>) -> AssistantRuntime {
         AssistantRuntime {
             sessions,
+            agent_tasks: None,
             push: None,
             vogt: None,
             backend: ChatBackend::Mock {
@@ -2362,6 +2429,36 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn steer_is_one_of_the_engines_own_tools() {
+        // The steer tool is declared alongside the engine's other built-ins,
+        // not fetched from Vogt — it reaches this crate's own PTYs (#289).
+        let names: Vec<String> = tool_definitions()
+            .iter()
+            .filter_map(|t| {
+                t.pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect();
+        assert!(names.contains(&"steer_agent_task".to_string()), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn steering_without_an_agent_task_registry_is_refused_cleanly() {
+        // A unit runtime has no agent-task registry; the tool must say so
+        // rather than panic. In a real deployment the registry is always wired.
+        let rt = runtime_with_script(test_registry(), vec![]);
+        let err = rt
+            .dispatch_steer(
+                &json!({ "task_id": Uuid::new_v4().to_string(), "text": "focus here" }),
+                &mut Vec::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("agent tasks are not available"));
+    }
+
     fn offered_schema(rt: &AssistantRuntime, function_name: &str) -> Value {
         let ChatBackend::Mock { seen, .. } = &rt.backend else {
             panic!("not a mock backend");
@@ -2433,7 +2530,9 @@ mod tests {
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("hi"));
         let offered = offered_tools(&rt);
-        assert_eq!(offered.len(), 3, "only the engine's own tools: {offered:?}");
+        // The engine's own four: list_sessions, read_session_tail, send_input,
+        // and steer_agent_task (#289). No Vogt tools without a core.
+        assert_eq!(offered.len(), 4, "only the engine's own tools: {offered:?}");
         assert!(!offered.iter().any(|name| name.starts_with("vogt_")));
     }
 

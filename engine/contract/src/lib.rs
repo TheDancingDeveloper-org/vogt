@@ -193,6 +193,59 @@ pub enum ServerEvent {
         /// The core's sequence number, so a client can tell order and gaps.
         seq: i64,
     },
+    /// An agent-task run held at a prompt boundary on a declared approval gate
+    /// (#289). The PTY is paused at the question; a client renders the options
+    /// and a phone push invites an answer. The gate is not resolved until a
+    /// person (or the audited `--auto-approve` bypass) picks an option, or it
+    /// fails closed to `blocked` — reported as `task.gate.answered` either way.
+    ///
+    /// The tag is spelled explicitly rather than left to the container's
+    /// kebab-case rule so it reads `task.gate.opened`, the dotted name the PWA
+    /// and phone filter on.
+    #[serde(rename = "task.gate.opened")]
+    TaskGateOpened {
+        task_id: Uuid,
+        run_id: Uuid,
+        session_id: Uuid,
+        gate_id: Uuid,
+        question: String,
+        /// The option labels, in the order they were declared.
+        options: Vec<String>,
+    },
+    /// A gate reached a terminal state (#289). `outcome` is `approved` when a
+    /// person or the audited bypass chose an option, and `blocked` when the
+    /// gate was interrupted, timed out, or its session died — the fail-closed
+    /// half of the guarantee, where `interrupted != approved`. `actor` names
+    /// who resolved it (`auto-approve` for the bypass, a reason string for a
+    /// fail-closed block).
+    #[serde(rename = "task.gate.answered")]
+    TaskGateAnswered {
+        task_id: Uuid,
+        run_id: Uuid,
+        session_id: Uuid,
+        gate_id: Uuid,
+        /// The chosen option's label, present only for an `approved` outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        option: Option<String>,
+        /// `approved` or `blocked`.
+        outcome: String,
+        actor: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// Mid-run steering was delivered to an agent-task run's PTY at a prompt
+    /// boundary (#289). `interrupt` records whether the CLI's cancel was sent
+    /// first. `actor` and `reason` are the audit trail — who steered and why.
+    #[serde(rename = "task.steered")]
+    TaskSteered {
+        task_id: Uuid,
+        run_id: Uuid,
+        session_id: Uuid,
+        actor: String,
+        interrupt: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -434,6 +487,53 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn gate_and_steer_events_carry_dotted_type_tags() {
+        // The PWA and phone filter on the dotted names; the container's
+        // kebab-case rule would otherwise spell them `task-gate-opened`.
+        let opened = ServerEvent::TaskGateOpened {
+            task_id: Uuid::nil(),
+            run_id: Uuid::nil(),
+            session_id: Uuid::nil(),
+            gate_id: Uuid::nil(),
+            question: "Deploy to prod?".into(),
+            options: vec!["Approve".into(), "Hold".into()],
+        };
+        let json = serde_json::to_value(&opened).unwrap();
+        assert_eq!(json["type"], "task.gate.opened");
+        assert_eq!(json["question"], "Deploy to prod?");
+        assert_eq!(json["options"][0], "Approve");
+
+        let answered = ServerEvent::TaskGateAnswered {
+            task_id: Uuid::nil(),
+            run_id: Uuid::nil(),
+            session_id: Uuid::nil(),
+            gate_id: Uuid::nil(),
+            option: None,
+            outcome: "blocked".into(),
+            actor: "timed out".into(),
+            reason: Some("no answer within deadline".into()),
+        };
+        let json = serde_json::to_value(&answered).unwrap();
+        assert_eq!(json["type"], "task.gate.answered");
+        assert_eq!(json["outcome"], "blocked");
+        // A blocked outcome names no option.
+        assert!(json.get("option").is_none());
+
+        let steered = ServerEvent::TaskSteered {
+            task_id: Uuid::nil(),
+            run_id: Uuid::nil(),
+            session_id: Uuid::nil(),
+            actor: "operator".into(),
+            interrupt: true,
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&steered).unwrap()["type"],
+            "task.steered"
+        );
     }
 
     #[test]

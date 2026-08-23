@@ -663,7 +663,11 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
 
 - `GET /api/events` -> `text/event-stream` of `ServerEvent`, one JSON object
   per `data:` line. Variants are `session-created`, `session-renamed`,
-  `session-killed` and `activity`, each tagged by `type`.
+  `session-killed`, `activity`, `vogt.changed`, and the agent-task steering
+  trio — `task.gate.opened` (`{task_id, run_id, session_id, gate_id, question,
+  options}`), `task.gate.answered` (`{…, gate_id, option?, outcome, actor,
+  reason?}` where `outcome` is `approved` or `blocked`), and `task.steered`
+  (`{…, actor, interrupt, reason?}`) — each tagged by `type`.
 - `GET /api/status` -> `OperationalStatus` — version, session count, push
   subscription count, live GUI process count, whether the GUI stream and FCM
   are configured, and nested `history`, `agent_tasks`, `auth_broker` and
@@ -834,6 +838,17 @@ Every non-GET route in this group requires `agent-tasks-write`.
 - `POST /api/agent-tasks/:id/run` -> `AgentTaskRun` — runs now regardless of
   schedule, and returns as soon as the session is spawned. The run's outcome
   arrives later, on the task's `runs`.
+- `POST /api/agent-tasks/:id/steer` `{text, interrupt?, actor?, reason?}` ->
+  `{"ok": true}` — queue a line of steering for the task's in-flight run,
+  delivered to its PTY at the next prompt boundary (the idle / waiting-for-input
+  state the activity heuristics detect). `interrupt: true` sends the CLI's
+  cancel (Ctrl-C) before the text. Refused with `409` when the task has no run
+  in flight — there is nothing to deliver to. Each delivery emits `task.steered`
+  on the event stream, carrying the actor and reason.
+- `POST /api/agent-tasks/:id/gates/:gate_id/answer` `{option, actor?, reason?}`
+  -> `GateRecord` — answer a currently-open approval gate by the index of the
+  chosen option. Delivers that option's input to the PTY. This is the only path
+  that resolves a gate to *approved*; see §7 for the fail-closed rule.
 - `POST /api/agent-tasks/artifacts/cleanup`
   `{"keep_latest_runs_per_task": 10}` -> `PromptArtifactCleanup`
   `{removed_task_dir_count, removed_prompt_file_count,
@@ -857,6 +872,22 @@ notify phrase is seen in the run's output. `source` is `notify-phrase`, the
 only producer today. The push notification is unchanged; the finding is the
 durable copy, so that a bound task's report survives a phone that was off and
 can be collected as evidence rather than only delivered.
+
+**Approval gates and steering (#289).** A task may declare `gates`: named
+approval points, each a first-class step with `question`, `options`
+(`{label, input, approve}`), and an optional `timeout_ms`. A run opens them in
+order at the prompt boundaries its CLI reaches, holding the PTY at each until it
+is answered or fails closed. A run's `gates` is the audit trail: each
+`GateRecord` carries its `question`, `options`, and a flattened `state` —
+`open` while held, `answered` (with `option_index`, `option_label`, `approved`,
+`actor`, `auto`) once a person or the audited bypass chose an option, or
+`blocked` (with a `reason`) when it failed closed. A task's `auto_approve` is
+the one bypass: with it set, a run answers each gate with that gate's `approve`
+option itself, recorded as actor `auto-approve` — a gate with no `approve`
+option still fails closed under it. The events `task.gate.opened`,
+`task.gate.answered` (with `outcome` `approved`/`blocked`) and `task.steered`
+report gate and steer activity on the event stream (see Events and status
+above). See §7 for the fail-closed rule and the `--auto-approve` bypass.
 
 `GET /api/status` reports the same artifacts as counts and bytes, so an
 operator can see whether a cleanup is worth running before running one.
@@ -1270,7 +1301,7 @@ buys a choice of vendor rather than a capability.
 
 ### Tools
 
-The engine's own three are literals in `assistant.rs` — they are this
+The engine's own four are literals in `assistant.rs` — they are this
 process's surface onto its own PTYs:
 
 | Tool | Effect |
@@ -1278,6 +1309,13 @@ process's surface onto its own PTYs:
 | `list_sessions` | id, name, command, activity state, exit code, cwd, created_at for every session |
 | `read_session_tail` | last N bytes of a session's scrollback (default 4 KiB, max 16 KiB), ANSI-stripped by default |
 | `send_input` | type text (max 4 KiB) into a session's PTY, optional Enter |
+| `steer_agent_task` | queue a steer (`{task_id, text, interrupt?, reason?}`) for a task's in-flight run, delivered at its next prompt boundary (#289) |
+
+`send_input` pauses for on-screen approval before it types (§6). `steer_agent_task`
+does not: unlike `send_input`, which can inject arbitrary bytes into any session,
+a steer reaches only a task's own in-flight run, is held until that run is at a
+safe boundary, and is audited on the `task.steered` event with the actor
+recorded as `assistant`.
 
 #### The Vogt tools are fetched, not written (FR-T1)
 
@@ -1511,6 +1549,41 @@ Example task payload for the Hisense PX3 monitor:
 The command is intentionally user-supplied. The engine does not depend on a
 specific AI CLI, because production deliberately leaves Codex, Claude and
 other agents user-managed.
+
+### Approval gates and mid-run steering (#289)
+
+An agent task runs a CLI in a PTY unattended. Two abilities let a human stay in
+the loop without killing the run:
+
+- **Steer.** `POST /api/agent-tasks/:id/steer` queues a line of guidance for the
+  task's in-flight run. The engine holds it and delivers it to the PTY at the
+  **next prompt boundary** — the idle / waiting-for-input state the activity
+  heuristics in `activity.rs` already detect — so guidance lands when the CLI is
+  actually waiting, never mid-thought. `interrupt: true` sends the CLI's cancel
+  (Ctrl-C) before the text. The queue is drained one item per boundary between
+  agent rounds. A steer bar on the Tasks tab and an `steer_agent_task` engine
+  tool (offered to the voice assistant, §6) both reach this endpoint; every
+  delivery emits `task.steered` with the actor and reason.
+
+- **Approval gates, fail-closed.** A task declares `gates`: named approval
+  points, each a first-class step with a `question`, `options`
+  (`{label, input, approve}`), and an optional `timeout_ms`. A run opens them in
+  order at its prompt boundaries and **holds the PTY** at each — nothing is
+  delivered — until it resolves. A person answers with
+  `POST /api/agent-tasks/:id/gates/:gate_id/answer {option}`, which delivers the
+  chosen option's `input` to the PTY. The guarantee is that a gate **fails
+  closed**: one that is interrupted, times out, or whose session dies resolves
+  to `blocked`, **never** to an approval. `interrupted != approved` is enforced
+  in the type — the only transition into `answered` is an actor choosing an
+  option while the gate is still open (`engine/server/src/gates.rs`), and a
+  block can only ever write `blocked` and only from `open`, so a late answer
+  cannot overturn a block and a death cannot un-approve a real answer. The one
+  bypass is a task's `auto_approve`: the run answers each gate with that gate's
+  `approve` option itself, audited as actor `auto-approve` on the gate record
+  and on the `task.gate.answered` event. A gate with no `approve` option still
+  fails closed under the bypass — it is a "yes", not "pick anything". A gate the
+  engine restarts on is failed closed on reconcile, because a paused run has no
+  orchestrator to hold it and no session to answer into.
 
 ### External content is not instruction
 

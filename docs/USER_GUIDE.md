@@ -551,6 +551,26 @@ ref, or both, entered on the task form. A bound run's findings become Vogt
 observations against that subject, with the freshness and trust every other
 kind of evidence carries.
 
+**Steer a run without killing it.** While a task's run is live, a **steer bar**
+on its row sends a line of guidance to the agent, delivered the moment the run
+next pauses at its prompt — you are not fighting it mid-thought. Tick **Interrupt
+first** to cancel what the CLI is currently doing (Ctrl-C) before the guidance
+lands. The same steering is available to the voice assistant as a tool, and a
+steer is recorded with who sent it.
+
+**Approval gates pause the run for a decision, and fail closed.** A task can
+declare **gates**: named checkpoints — "Deploy to prod?", with options like
+*Approve* and *Hold* — that a run stops at and holds the terminal until you
+answer. The question shows on the row and on your phone; each option is a button
+that sends its own reply into the run. The safety rule is that a gate never
+approves itself by accident: a gate that is interrupted, times out, or whose
+session dies resolves to **blocked**, never approved — an interruption is not a
+yes. The one exception is a task set to **auto-approve**, which answers its own
+gates with their affirmative option and records that it did so (as
+`auto-approve`), so a run that approved its own checkpoints is always visible as
+such. A resolved gate stays on the run as a one-line note — who approved which
+option, or why it was blocked.
+
 Daily schedules are read in **UTC**, and the daily-times field is labelled so —
 a `09:00` is 09:00 UTC, not the reader's local morning.
 

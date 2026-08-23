@@ -3909,3 +3909,442 @@ async fn config_advertises_configured_server_speech() {
         "the base URL is an exposure value and must never leak"
     );
 }
+
+// --- #289: fail-closed approval gates and mid-run steering -----------------
+
+/// A config whose workspace and state dir are a throwaway tempdir. The dir must
+/// outlive the server, so the caller holds the returned `TempDir`.
+fn agent_task_config() -> (Config, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    (cfg, tmp)
+}
+
+/// Create a task and start one run of it, returning `(task_id, run_id)`.
+async fn create_and_run(client: &reqwest::Client, base: &str, body: Value) -> (String, String) {
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap().to_string();
+    let run: Value = client
+        .post(format!("{base}/api/agent-tasks/{task_id}/run"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let run_id = run["id"].as_str().unwrap().to_string();
+    (task_id, run_id)
+}
+
+/// Poll a task's latest run until its first gate satisfies `pred`, or time out.
+async fn wait_for_gate<F>(client: &reqwest::Client, base: &str, task_id: &str, pred: F) -> Value
+where
+    F: Fn(&Value) -> bool,
+{
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let detail: Value = client
+                .get(format!("{base}/api/agent-tasks/{task_id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if let Some(gate) = detail["runs"][0]["gates"].get(0) {
+                if !gate.is_null() && pred(gate) {
+                    break gate.clone();
+                }
+            }
+        }
+    })
+    .await
+    .expect("the gate should reach the awaited state")
+}
+
+/// Decode a session's scrollback to a lossy string, for asserting what reached
+/// the PTY.
+async fn session_scrollback(client: &reqwest::Client, base: &str, session_id: &str) -> String {
+    let session: SessionDetail = client
+        .get(format!("{base}/api/sessions/{session_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(session.scrollback_base64.as_bytes())
+        .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn approve_hold_gate() -> Value {
+    json!({
+        "question": "Proceed with the deploy?",
+        "options": [
+            { "label": "Approve", "input": "go", "approve": true },
+            { "label": "Hold", "input": "stop", "approve": false },
+        ],
+    })
+}
+
+/// A declared gate opens at the run's prompt boundary and holds the PTY: the
+/// session stays alive and the run stays running until the gate is answered.
+#[tokio::test]
+async fn a_declared_gate_opens_and_holds_the_run() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "gated idle",
+            "prompt": "Wait at a gate.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("idle"),
+            "gates": [ approve_hold_gate() ],
+        }),
+    )
+    .await;
+
+    let gate = wait_for_gate(&client, &base, &task_id, |g| g["state"] == "open").await;
+    assert_eq!(gate["question"], "Proceed with the deploy?");
+
+    // Held: after the gate opens, the run does not proceed on its own.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let detail: Value = client
+        .get(format!("{base}/api/agent-tasks/{task_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        detail["runs"][0]["status"], "running",
+        "an unanswered gate must hold the run"
+    );
+    assert_eq!(detail["runs"][0]["gates"][0]["state"], "open");
+
+    // End the held run so the fake-agent exits: a session left blocked on its
+    // stdin keeps a `child.wait()` blocking task alive, which the test
+    // runtime's shutdown would otherwise wait on forever.
+    let session_id = detail["runs"][0]["session_id"].as_str().unwrap();
+    client
+        .post(format!("{base}/api/sessions/{session_id}/kill"))
+        .send()
+        .await
+        .unwrap();
+}
+
+/// Answering an open gate resolves it to the chosen option, delivers that
+/// option's input to the PTY, and lets the run finish.
+#[tokio::test]
+async fn answering_a_gate_resolves_it_and_the_run_continues() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "gated idle",
+            "prompt": "Wait at a gate.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("idle"),
+            "gates": [ approve_hold_gate() ],
+        }),
+    )
+    .await;
+
+    let gate = wait_for_gate(&client, &base, &task_id, |g| g["state"] == "open").await;
+    let gate_id = gate["id"].as_str().unwrap().to_string();
+
+    let answered: Value = client
+        .post(format!(
+            "{base}/api/agent-tasks/{task_id}/gates/{gate_id}/answer"
+        ))
+        .json(&json!({ "option": 0, "actor": "sprooty" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(answered["state"], "answered");
+    assert_eq!(answered["actor"], "sprooty");
+    assert_eq!(answered["approved"], true);
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    assert_eq!(detail["runs"][0]["status"], "completed");
+    let session_id = detail["runs"][0]["session_id"].as_str().unwrap();
+    let text = session_scrollback(&client, &base, session_id).await;
+    assert!(
+        text.contains("steered with 'go'"),
+        "the approve option's input should reach the PTY: {text:?}"
+    );
+}
+
+/// Fail closed on death: a session killed with a gate held resolves the gate to
+/// `blocked`, never approved.
+#[tokio::test]
+async fn a_gate_whose_session_dies_fails_closed_to_blocked() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "gated idle",
+            "prompt": "Wait at a gate.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("idle"),
+            "gates": [ approve_hold_gate() ],
+        }),
+    )
+    .await;
+
+    let gate = wait_for_gate(&client, &base, &task_id, |g| g["state"] == "open").await;
+    assert_eq!(gate["state"], "open");
+    let detail: Value = client
+        .get(format!("{base}/api/agent-tasks/{task_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session_id = detail["runs"][0]["session_id"].as_str().unwrap().to_string();
+
+    client
+        .post(format!("{base}/api/sessions/{session_id}/kill"))
+        .send()
+        .await
+        .unwrap();
+
+    let blocked = wait_for_gate(&client, &base, &task_id, |g| g["state"] == "blocked").await;
+    assert_eq!(blocked["state"], "blocked");
+    assert!(
+        blocked.get("approved").is_none(),
+        "a blocked gate is never approved"
+    );
+    assert!(blocked["reason"].as_str().unwrap().contains("session"));
+}
+
+/// Fail closed on timeout: a gate nobody answers within its deadline resolves
+/// to `blocked` and the run ends errored.
+#[tokio::test]
+async fn a_gate_that_times_out_fails_closed_to_blocked() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let mut gate = approve_hold_gate();
+    gate["timeout_ms"] = json!(300);
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "gated idle",
+            "prompt": "Wait at a gate.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("idle"),
+            "gates": [ gate ],
+        }),
+    )
+    .await;
+
+    let blocked = wait_for_gate(&client, &base, &task_id, |g| g["state"] == "blocked").await;
+    assert!(
+        blocked["reason"].as_str().unwrap().contains("timed out"),
+        "the block reason should name the timeout: {blocked:?}"
+    );
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    assert_eq!(
+        detail["runs"][0]["status"], "errored",
+        "a run whose gate blocked cannot complete successfully"
+    );
+}
+
+/// `--auto-approve` is the one bypass: it answers the gate with its approve
+/// option without a human, and the resolution is audited as `auto-approve`.
+#[tokio::test]
+async fn auto_approve_bypasses_the_gate_and_is_audited() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "auto gated idle",
+            "prompt": "Wait at a gate, but approve it yourself.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("idle"),
+            "gates": [ approve_hold_gate() ],
+            "auto_approve": true,
+        }),
+    )
+    .await;
+
+    let answered = wait_for_gate(&client, &base, &task_id, |g| g["state"] == "answered").await;
+    assert_eq!(answered["actor"], "auto-approve");
+    assert_eq!(answered["auto"], true);
+    assert_eq!(answered["approved"], true);
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    assert_eq!(detail["runs"][0]["status"], "completed");
+}
+
+/// A queued steer is delivered to the PTY at the next prompt boundary.
+#[tokio::test]
+async fn a_queued_steer_reaches_the_pty_at_the_next_boundary() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "steerable idle",
+            "prompt": "Idle until steered.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("idle"),
+        }),
+    )
+    .await;
+
+    let steered: Value = client
+        .post(format!("{base}/api/agent-tasks/{task_id}/steer"))
+        .json(&json!({ "text": "focus here", "actor": "sprooty" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(steered["ok"], true);
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    assert_eq!(detail["runs"][0]["status"], "completed");
+    let session_id = detail["runs"][0]["session_id"].as_str().unwrap();
+    let text = session_scrollback(&client, &base, session_id).await;
+    assert!(
+        text.contains("steered with 'focus here'"),
+        "the steer text should reach the PTY at the boundary: {text:?}"
+    );
+}
+
+/// `interrupt=true` sends the CLI's cancel (Ctrl-C) first: it reaches the idle
+/// fake-agent as a SIGINT, ending the run — proof the cancel was delivered
+/// ahead of the text.
+#[tokio::test]
+async fn an_interrupting_steer_cancels_the_cli_first() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "interruptible idle",
+            "prompt": "Idle until interrupted.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("idle"),
+        }),
+    )
+    .await;
+
+    // Give the run a moment to reach its idle boundary before interrupting.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    client
+        .post(format!("{base}/api/agent-tasks/{task_id}/steer"))
+        .json(&json!({ "text": "stop", "interrupt": true, "actor": "sprooty" }))
+        .send()
+        .await
+        .unwrap();
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    assert_eq!(
+        detail["runs"][0]["status"], "errored",
+        "the cancel should interrupt the idle CLI, ending the run: {detail:?}"
+    );
+}
+
+/// Steering a task with no run in flight is a 409, not a silent no-op: there is
+/// nothing to deliver the text to.
+#[tokio::test]
+async fn steering_a_task_with_no_live_run_is_refused() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/agent-tasks"))
+        .json(&json!({
+            "name": "never run",
+            "prompt": "Nothing runs.",
+            "schedule": { "kind": "manual" },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let task_id = created["id"].as_str().unwrap();
+
+    let res = client
+        .post(format!("{base}/api/agent-tasks/{task_id}/steer"))
+        .json(&json!({ "text": "hello" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+}

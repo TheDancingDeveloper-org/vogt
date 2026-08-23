@@ -13,6 +13,7 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod files;
+pub mod gates;
 pub mod git;
 pub mod gui;
 pub mod history;
