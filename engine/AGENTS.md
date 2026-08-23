@@ -44,7 +44,7 @@ Before changing files here:
 | Cargo workspace root | `engine/` (`engine/Cargo.toml`, members `server` and `contract`). The repository root is a Python project, not a Rust workspace. |
 | CI pipeline | `.github/workflows/ci.yml` (fmt/clippy/test, PWA typecheck and tests, Android shell) and `.github/workflows/build.yml` (the merged image, cosign-signed, to GHCR). |
 | Image | built from `engine/Dockerfile` with the repository root as context; `engine/Dockerfile.pod` is the toolchain base it starts from (`docs/ENGINE.md` §3) |
-| Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port; `/api/vogt`, `/mcp` and `/ui-legacy` proxied to the core) |
+| Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port; `/api/vogt` and `/mcp` proxied to the core) |
 | DB / state | No database. Sessions in-memory; agent tasks, push subscriptions and the assistant log persisted under `state_dir` (JSON and SQLite). |
 | Secrets used at runtime | `MYDEVENV2_TOKEN` (primary API bearer — the CLI parser still reads this name only), optional `ENGINE_EXTRA_TOKENS_JSON` (scoped JSON token list), optional `ENGINE_FCM_SERVICE_ACCOUNT_JSON` for native FCM, optional `ENGINE_ASSISTANT_API_KEY` and the speech keys (`docs/ENGINE.md` §6), optional `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` for the front door. VAPID keys are generated and persisted under `state_dir`. |
 
@@ -73,7 +73,7 @@ Axum server (vogt-engine-server) — bind :8910
    |-- /api/gui/*                  compositor-driven GUI launcher
    |-- /api/agent-tasks/*          scheduled agent runs
    |-- /api/assistant/*            the tool-use assistant (404 until configured)
-   |-- /api/vogt/*, /mcp, /ui-legacy   proxied to vogt-core on loopback
+   |-- /api/vogt/*, /mcp            proxied to vogt-core on loopback
    `-- /                            embedded PWA (rust-embed)
 ```
 

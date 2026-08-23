@@ -16,37 +16,52 @@ address beyond loopback — must be set by the operator.
 
 ## What is supported
 
-The supported public artefact is the **Python core**: the `vogt` package and
-CLI, the FastAPI listener (REST, GUI, health, optional MCP transport), SQLite
-storage with migrations and backups, the local collectors, and the optional
-GitHub adapter. It is built from the repository-root `Dockerfile` and run from
-`deploy/vogt.compose.yml` (published image) or that file plus
-`deploy/vogt.build.yml` (build from the checkout). Building or running the
-core needs Python 3.11+ and nothing else — no Rust, Cargo, Node, pnpm, a forge
-token, an AI provider, or an MCP client.
+The supported public product is the **two-container stack** (this replaces the
+earlier boundary that named the Python core alone as the artefact):
 
-A core with every optional integration absent is a complete, supported
-product: it starts, passes `/health/ready`, and performs every core workflow.
-Absence is reported as "not collected" or "not configured", never as an error
-or an empty result pretending to be a true one.
+- the Python **core** — the `vogt` package and CLI, the FastAPI listener (REST,
+  health, optional MCP transport), SQLite storage with migrations and backups,
+  the local collectors, and the optional GitHub adapter; and
+- the Rust **engine** — which serves the Solid PWA at `/`, owns the terminal
+  sessions a work item runs in, hosts the voice assistant, and fronts the core
+  on one published port.
+
+The core is built from the repository-root `Dockerfile` and run from
+`deploy/vogt.compose.yml` (published image) or that file plus
+`deploy/vogt.build.yml` (build from the checkout). The engine has no published
+image; it is built from `engine/Dockerfile` and layered onto the base with
+`deploy/engine.overlay.yml`. Building the core needs Python 3.11+ and nothing
+else; building the engine needs its Rust and Node toolchain, which its
+Dockerfile provides, so an operator with Docker needs neither installed.
+
+The core is also a complete, supported product **on its own**, over the CLI,
+REST, and MCP: run without the engine it starts, passes `/health/ready`, and
+performs every core workflow — no Rust, Node, forge token, AI provider, or MCP
+client required. What the core alone does not serve is the browser experience —
+the PWA, terminals, and assistant — which is the engine's half of the stack.
+Absence of any optional integration is reported as "not collected" or "not
+configured", never as an error or an empty result pretending to be a true one.
 
 ## What is optional
+
+Beyond the two halves above, these add capability when configured and are
+absent-safe when not:
 
 | Component | Status | Where it is documented |
 |---|---|---|
 | GitHub adapter | optional; enabled by `VOGT_GITHUB_TOKEN_FILE` or `VOGT_FORGE_TOKEN_FILES` | [`docs/CONFIG.md`](docs/CONFIG.md), [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) |
 | MCP (`vogt-mcp`, `vogt-mcp-remote`) | optional; ships in the package, never required for startup or health | [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) |
-| Rust session engine + PWA (`engine/`, `web/`) | optional; built from source with `engine/Dockerfile`; not in the core image | [`docs/ENGINE.md`](docs/ENGINE.md) |
 | Voice/chat assistant | optional; part of the engine; any OpenAI-compatible chat endpoint | [`docs/ENGINE.md`](docs/ENGINE.md) §6 |
 | Mobile shell (`mobile/`) | optional; a Capacitor WebView over a deployed PWA | [`docs/ENGINE.md`](docs/ENGINE.md) |
 | External MCP integrations (e.g. Cadastre) | optional; configured in your agent client, not in Vogt | — |
 
-The engine and mobile shell are real parts of the project and are maintained
-in this repository, but they are a separate toolchain and a separate image.
-The core must never come to require them; they consume the core's HTTP
-adapter like any other client, and the core reaches the engine only through
-`VOGT_ENGINE_URL`, `VOGT_ENGINE_TOKEN_FILE`, and `VOGT_ENGINE_STATE_DIR`, all
-of which default to unset.
+The engine and mobile shell are a separate toolchain and a separate image from
+the core, and that separation is load-bearing: the core must never come to
+require the engine. The dependency runs one way — the engine consumes the
+core's HTTP adapter like any other client, and the core reaches the engine only
+through `VOGT_ENGINE_URL`, `VOGT_ENGINE_TOKEN_FILE`, and `VOGT_ENGINE_STATE_DIR`,
+all of which default to unset — which is exactly what keeps the core-alone
+deployment above a real, supported one.
 
 The public Compose example and Dockerfile must stay self-contained: no private
 registries, absolute home-directory paths, secret brokers, VPN assumptions, or

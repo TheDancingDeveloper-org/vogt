@@ -344,8 +344,8 @@ pub struct Config {
     /// could infer its own. `None` is reported as "nobody has said", never
     /// filled in.
     pub public_url: Option<String>,
-    /// Base URL of vogt-core on loopback. None disables `/api/vogt`, `/mcp`
-    /// and `/ui-legacy`: they answer 503 with a named reason rather than
+    /// Base URL of vogt-core on loopback. None disables `/api/vogt` and
+    /// `/mcp`: they answer 503 with a named reason rather than
     /// pretending the core is empty (FR-U21). The engine itself keeps
     /// serving — sessions do not depend on the core (FR-E9).
     pub vogt_core_url: Option<String>,

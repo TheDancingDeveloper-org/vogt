@@ -1,22 +1,26 @@
 # Getting started with Vogt
 
-This guide gets a new operator from nothing to a working Python-core
-instance. It does not require Rust, Node, a forge token, an AI provider, or an
-MCP client. Those integrations are optional and are documented separately.
-Production concerns — a reverse proxy, TLS, digest pinning, backups on a
-schedule, the optional session engine — are in
-[`docs/DEPLOYMENT.md`](DEPLOYMENT.md); this guide stops at a working instance.
+This guide gets a new operator from nothing to a working Vogt stack — the
+Python core and the Rust engine that serves the PWA — with Docker as the only
+prerequisite (it builds the engine for you). A forge token, an AI provider,
+and an MCP client are all optional and documented separately. Production
+concerns — a reverse proxy, TLS, digest pinning, backups on a schedule — are
+in [`docs/DEPLOYMENT.md`](DEPLOYMENT.md); this guide stops at a working
+instance.
 
 ## Choose an installation path
 
-There are two supported ways to run the core:
+There are three supported ways to run Vogt:
 
-- **Docker Compose** — the recommended self-hosting path. It gives you a
-  persistent data volume, a health check, and a choice between the published
-  image and an image built from the checkout.
-- **Local Python** — useful for development or a single-user workstation.
-  It writes to the normal Vogt data directory unless you set
-  `VOGT_DATA_DIR`.
+- **The stack (recommended)** — the core plus the engine, two containers on
+  one published port. Docker builds the engine from the checkout, so you need
+  Docker and nothing else; the browser experience — the PWA at `/` — is the
+  reason to run it.
+- **Core only** — the base Compose file on its own, no engine and no browser
+  front end. A supported deployment for CLI, REST, and MCP use.
+- **Local Python** — the core as a plain package, useful for development or a
+  single-user workstation. It writes to the normal Vogt data directory unless
+  you set `VOGT_DATA_DIR`.
 
 ## Docker Compose (recommended)
 
@@ -39,28 +43,37 @@ container cannot infer the address clients will use. For a local installation,
 the example value `http://localhost:8080` is correct. Change `VOGT_PORT` if
 port 8080 is already in use.
 
-Start the core. There are two ways to obtain the image, and the same base
-Compose file serves both.
+**Start the stack (recommended).** Layer the engine overlay on the base. The
+base pulls the published core image; the overlay builds the engine from this
+checkout, since no engine image is published. Fill in the engine block of
+`deploy/.env` first — the overlay's own header and [`docs/ENGINE.md`](ENGINE.md)
+list the keys — then:
 
-**Published image.** `deploy/vogt.compose.yml` on its own pulls
-`ghcr.io/thedancingdeveloper-org/vogt`. Set `VOGT_IMAGE` in `deploy/.env` to
-the tag — or better, the digest — you intend to run, then:
+```console
+docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d --wait
+```
+
+**Core only.** The base Compose file on its own runs the core without the
+engine — no browser front end, but the full API, CLI, and MCP. There are two
+ways to obtain the core image, and the same base serves both. Set `VOGT_IMAGE`
+in `deploy/.env` to the tag — or better, the digest — you intend to run, then
+pull the published image:
 
 ```console
 docker compose -f deploy/vogt.compose.yml up -d --wait
 ```
 
-**Build from source.** Add the one-service build overlay and the base builds
-the image from this checkout instead of pulling it (`VOGT_IMAGE` is ignored):
+Or add the one-service build overlay and the base builds the core from this
+checkout instead of pulling it (`VOGT_IMAGE` is ignored):
 
 ```console
 docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d --wait
 ```
 
 `--wait` blocks until the healthcheck reports healthy. Without it, the curls
-below can race the container: `vogt init` runs first, and the healthcheck's
-`start_period` is 20s, so a curl right after a bare `up -d` can see
-connection-refused rather than a real answer.
+below can race the container: `vogt init` runs first, the healthcheck's
+`start_period` is 20s, and the engine build takes a moment, so a curl right
+after a bare `up -d` can see connection-refused rather than a real answer.
 
 The base is never edited; every deployment states only its difference from it
 as an overlay or an environment value. That is the whole customisation model,
@@ -83,14 +96,13 @@ curl http://localhost:8080/health/ready
 
 Readiness reports whether both stores are migrated to this build's schema — it
 does not migrate them, which is why the Compose command runs `vogt init`
-first. A healthy response includes the declared and observed schema
-versions. Open
-`http://localhost:8080/ui` in a browser to use the GUI.
+first. A healthy response includes the declared and observed schema versions.
 
-On this core-only path, `/ui` is the legacy vanilla GUI. The full PWA
-(terminals, agent tasks, the voice assistant) ships with the optional
-session engine overlay instead — see [`docs/ENGINE.md`](ENGINE.md) — where
-this legacy GUI moves to `/ui-legacy`.
+If you ran the stack, open `http://localhost:8080/` in a browser: the engine
+serves the PWA — the board, backlog, terminals, agent tasks, and the voice
+assistant — at the root. [`docs/USER_GUIDE.md`](USER_GUIDE.md) is the tour.
+The core-only path publishes no browser front end; it answers the CLI, REST,
+and MCP surfaces, and a browser at `/` gets nothing to render.
 
 Stop or inspect the instance with:
 
@@ -308,7 +320,7 @@ This removes the example's named data volume and cannot be undone by Docker.
 
 ## Where to go next
 
-- [`docs/USER_GUIDE.md`](USER_GUIDE.md) explains the GUI, ranked views,
+- [`docs/USER_GUIDE.md`](USER_GUIDE.md) explains the PWA, ranked views,
   projects, drift, audit, and all supported CLI/API surfaces.
 - [`docs/CONFIG.md`](CONFIG.md) is generated from the configuration schema.
 - [`docs/CUSTOMISATION.md`](CUSTOMISATION.md) names the supported extension
