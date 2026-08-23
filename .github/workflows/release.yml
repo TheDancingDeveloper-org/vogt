@@ -399,7 +399,7 @@ jobs:
             echo '```'
             echo
             echo "Publishing is not deploying (NFR-D10). See"
-            echo "\`docs/DEPLOYMENT.md\` §9 before the first one."
+            echo "\`docs/DEPLOYMENT.md\` §2 before the first one."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ── The signed APK (NFR-C6) ───────────────────────────────────────────────
@@ -446,7 +446,7 @@ jobs:
           [ -n "${KEY_ALIAS:-}" ]         || missing="$missing MYDEVENV2_ANDROID_KEY_ALIAS"
           [ -n "${KEY_PASSWORD:-}" ]      || missing="$missing MYDEVENV2_ANDROID_KEY_PASSWORD"
           if [ -n "$missing" ]; then
-            echo "::error::No release keystore configured; missing:$missing. The keystore is the one in the retired forge — a new one is a different app identity and cannot upgrade an existing install. See docs/DEPLOYMENT.md §9.6."
+            echo "::error::No release keystore configured; missing:$missing. The keystore is the one in the retired forge — a new one is a different app identity and cannot upgrade an existing install."
             exit 1
           fi
           echo "configured=true" >> "$GITHUB_OUTPUT"

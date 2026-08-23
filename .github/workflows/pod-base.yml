@@ -257,7 +257,7 @@ jobs:
       # `docker build -f engine/Dockerfile .` resolves without anybody having
       # to look a digest up first. Nothing CI publishes is ever built on it —
       # `build.yml` and `release.yml` pass the digest from `outputs.image` —
-      # and `docs/DEPLOYMENT.md` §9 says so where the hand-build is documented.
+      # and `docs/ENGINE.md` §3.1 says so where the hand-build is documented.
       - name: point the convenience alias at it
         env:
           VARIANT: ${{ matrix.variant }}
