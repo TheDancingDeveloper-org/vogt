@@ -7,7 +7,7 @@
 import { createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 
-const EXPANDED_KEY = "mydevenv2.fileTree.expanded.v1";
+const EXPANDED_KEY = "vogt.fileTree.expanded.v1";
 // The drawer open/closed state moved to a `vogt.`-prefixed key (#240). The
 // historic `mydevenv2.` key is still read once, as a fallback, so a reader who
 // had explicitly collapsed the sidebar keeps that choice across the rename.

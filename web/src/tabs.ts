@@ -33,7 +33,10 @@ export interface LegacyMigrationResult {
   initialRoute: string | null;
 }
 
-const STORAGE_KEY = "mydevenv2.tabs.v2";
+const STORAGE_KEY = "vogt.tabs.v2";
+// The pre-v2 tab shape still lives under its historic `mydevenv2.` key and is
+// migrated into the current state below; it keeps its original name so that
+// data is not orphaned by the #271 identity rename.
 const LEGACY_STORAGE_KEY = "mydevenv2.tabs.v1";
 
 function cloneTab(tab: Tab): Tab {

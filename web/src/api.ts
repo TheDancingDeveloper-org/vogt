@@ -84,9 +84,9 @@ export type ServerEvent =
       seq: number;
     };
 
-const TOKEN_KEY = "mydevenv2.token";
-const BASE_KEY = "mydevenv2.base";
-const AUTH_CHANNEL_NAME = "mydevenv2.auth";
+const TOKEN_KEY = "vogt.token";
+const BASE_KEY = "vogt.base";
+const AUTH_CHANNEL_NAME = "vogt.auth";
 const AUTH_SOURCE_ID = `auth-${Math.random().toString(36).slice(2)}`;
 
 interface AuthStateMessage {

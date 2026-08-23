@@ -1,7 +1,7 @@
 // Custom session templates stored in localStorage, merged with server defaults.
 import { api, type SessionTemplate } from "./api";
 
-const CUSTOM_TEMPLATES_KEY = "mydevenv2.customTemplates.v1";
+const CUSTOM_TEMPLATES_KEY = "vogt.customTemplates.v1";
 
 export interface TemplateContext {
   cwd: string | null;

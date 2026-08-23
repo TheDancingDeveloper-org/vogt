@@ -152,7 +152,7 @@ describe("the server-side speech pipeline", () => {
 
   it("plays a spoken reply through the server TTS route when the browser cannot synthesize", async () => {
     installMediaGlobals();
-    localStorage.setItem("mydevenv2.assistant.tts", "1"); // TTS on from the start
+    localStorage.setItem("vogt.assistant.tts", "1"); // TTS on from the start
     fakeVogt({}, engine());
     const errors: string[] = [];
     const { container } = render(() => <Assistant onError={(m) => errors.push(m)} />);

@@ -450,7 +450,7 @@ const Inbox: Component<Props> = (props) => {
     live: true,
   }));
 
-  const seenKey = "mydevenv2.inbox.seen.v1";
+  const seenKey = "vogt.inbox.seen.v1";
   const readSeen = () => {
     try {
       const parsed = JSON.parse(localStorage.getItem(seenKey) ?? "[]") as unknown;

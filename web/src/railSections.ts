@@ -3,7 +3,7 @@
 // a write from either side cannot drop the other's field (rail-spec.md B3).
 import { createStore } from "solid-js/store";
 
-const KEY = "mydevenv2.rail.sections.v1";
+const KEY = "vogt.rail.sections.v1";
 
 export interface RailSections {
   running: boolean;

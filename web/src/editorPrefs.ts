@@ -1,5 +1,5 @@
 // Editor preferences stored in localStorage.
-const MINIMAP_KEY = "mydevenv2.editor.minimap.v1";
+const MINIMAP_KEY = "vogt.editor.minimap.v1";
 
 export function getMinimapEnabled(): boolean {
   try {

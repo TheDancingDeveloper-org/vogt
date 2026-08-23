@@ -114,9 +114,9 @@ describe("applying a theme", () => {
 
   it("re-fires the terminal-theme channel so open terminals re-read their preset", () => {
     const spy = vi.fn();
-    window.addEventListener("mydevenv2:terminal-theme", spy);
+    window.addEventListener("vogt:terminal-theme", spy);
     setAppTheme("dark");
-    window.removeEventListener("mydevenv2:terminal-theme", spy);
+    window.removeEventListener("vogt:terminal-theme", spy);
     expect(spy).toHaveBeenCalled();
   });
 });

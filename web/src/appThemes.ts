@@ -141,7 +141,7 @@ export function applyAppTheme(selection: string = getAppThemeSelection()): strin
       new CustomEvent(APP_THEME_EVENT, { detail: { selection, themeId } }),
     );
     // Terminals and editors follow the shell unless the user pinned their own.
-    window.dispatchEvent(new CustomEvent("mydevenv2:terminal-theme", { detail: {} }));
+    window.dispatchEvent(new CustomEvent("vogt:terminal-theme", { detail: {} }));
   }
   return themeId;
 }

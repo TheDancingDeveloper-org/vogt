@@ -4,7 +4,12 @@ import App from "./App";
 import { APP_ROUTES } from "./routes";
 import { registerServiceWorker } from "./push";
 import { applyAppTheme, initAppThemeSystemWatch } from "./appThemes";
+import { migrateStorageKeys } from "./storageMigration";
 import "./styles.css";
+
+// Rename historic `mydevenv2.*` browser-storage keys to `vogt.*` before any
+// module reads a preference or the credential (#271). One-shot and idempotent.
+migrateStorageKeys();
 
 function installVisualViewportSizing() {
   const apply = () => {
@@ -22,7 +27,7 @@ function installVisualViewportSizing() {
       "--keyboard-inset",
       `${keyboardInset}px`,
     );
-    window.dispatchEvent(new CustomEvent("mydevenv2:viewport-resize"));
+    window.dispatchEvent(new CustomEvent("vogt:viewport-resize"));
   };
 
   apply();
@@ -55,6 +60,10 @@ function installNativeInsetsFallback() {
   };
 
   apply();
+  // Prefer the renamed event, but keep listening for the historic name: the
+  // native-insets event is dispatched by the human-gated Android shell, whose
+  // rename is deferred to #265. Both are harmless no-ops when unused.
+  window.addEventListener("vogt:native-insets", apply);
   window.addEventListener("mydevenv2:native-insets", apply);
 }
 

@@ -8,12 +8,12 @@ export interface StoragePrefs {
 }
 
 export const BROWSER_STORAGE_KEYS = {
-  recentFiles: "mydevenv2.recentFiles.v1",
-  workspaceLayouts: "mydevenv2.workspaceLayouts.v1",
-  authProfiles: "mydevenv2.authProfiles.v1",
-  sessionBookmarks: "mydevenv2.sessionBookmarks.v1",
-  historyPins: "mydevenv2.historyPins.v1",
-  prefs: "mydevenv2.storagePrefs.v1",
+  recentFiles: "vogt.recentFiles.v1",
+  workspaceLayouts: "vogt.workspaceLayouts.v1",
+  authProfiles: "vogt.authProfiles.v1",
+  sessionBookmarks: "vogt.sessionBookmarks.v1",
+  historyPins: "vogt.historyPins.v1",
+  prefs: "vogt.storagePrefs.v1",
 } as const;
 
 export const DEFAULT_STORAGE_PREFS: StoragePrefs = {
