@@ -36,7 +36,7 @@ def test_ids_are_unique() -> None:
         ("nzb-core", "nzb-core"),
         ("A//B", "a-b"),
         ("///", ""),
-        ("Node B (winrarhost)", "node-b-winrarhost"),
+        ("Region 2 (west)", "region-2-west"),
     ],
 )
 def test_slugify(name: str, expected: str) -> None:
