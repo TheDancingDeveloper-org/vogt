@@ -45,7 +45,7 @@ fn test_config() -> Config {
         // it would a real agent template.
         session_templates: vec![fake_agent_template()],
         assistant_api_key: None,
-        assistant_base_url: "https://api.theclawbay.com/v1".into(),
+        assistant_base_url: "https://api.example.com/v1".into(),
         assistant_model: "gpt-5.4-mini".into(),
         assistant_max_tool_calls: 8,
         assistant_allow_claude_proxy: false,

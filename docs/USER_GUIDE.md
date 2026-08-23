@@ -397,6 +397,27 @@ work if they speak that API. Voice is separate and also optional:
 text-to-speech endpoints, and without them the assistant is text-only. The
 full table is in [`ENGINE.md`](ENGINE.md) §6.
 
+**Voice without an account (optional).** You do not need a paid speech provider
+to turn voice on. Layer the voice overlay and the engine gets a local,
+CPU-only, OpenAI-compatible speech stack — a Whisper transcriber and a Piper
+voice — running beside it in Compose:
+
+```bash
+docker compose \
+  -f deploy/vogt.compose.yml \
+  -f deploy/engine.overlay.yml \
+  -f deploy/voice.overlay.yml \
+  up --build -d
+```
+
+Nothing else to configure: the overlay points the engine's `STT`/`TTS` base
+URLs at the two containers and picks models they serve. The first start
+downloads a small Whisper model into a named volume, so give it a minute before
+the microphone works. If you would rather use a hosted provider, skip the
+overlay and set `ENGINE_ASSISTANT_STT_BASE_URLS` / `ENGINE_ASSISTANT_TTS_BASE_URLS`
+(with a key and the provider's model/voice names) instead — the engine is bound
+to neither. See [`CUSTOMISATION.md`](CUSTOMISATION.md#self-hosted-voice-sttts-as-an-optional-overlay).
+
 It can read every session's scrollback and a curated read slice of Vogt
 (`backlog`, `bugs`, `why`, `project.brief`, `project.list`, `work.get`,
 `work.list`, `compliance`). It can propose four Vogt writes and typing into a
