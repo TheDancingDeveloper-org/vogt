@@ -129,6 +129,7 @@ addopts = [
 ]
 markers = [
   "live_forge: exercises the real GitHub forge adapter against the TheDancingDeveloper-org/vogt-fixture repository. Opt-in: SKIPPED unless selected with `-m live_forge` and a token is present. See docs/FORGE_FIXTURE.md.",
+  "estate: assertions true only of the maintainer's own estate; they read the estate deploy files (relocated by #204) or hard-code an estate value, and self-skip on a public clone. Deselect with `-m 'not estate'`.",
 ]
 
 [tool.coverage.run]
