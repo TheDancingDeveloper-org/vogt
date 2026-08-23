@@ -10,6 +10,13 @@
 import { getBase } from "./api";
 import { fetchWithRetry } from "./transport";
 
+/** Set by the identity wizard once the bootstrap has minted the first token,
+ *  cleared when the setup steps (`#/setup`) finish — the shell reads it to
+ *  bring a fresh operator straight to the remaining steps after their first
+ *  sign-in. Lives here rather than in `SetupSteps.tsx` so `App.tsx` can read
+ *  it without eagerly loading the lazily-split setup surface. */
+export const SETUP_PENDING_KEY = "vogt.setup.pending";
+
 export interface InstallStatus {
   install_mode: boolean;
 }

@@ -16,6 +16,7 @@
 import { createSignal, For, Show, type Component } from "solid-js";
 import {
   bootstrapInstall,
+  SETUP_PENDING_KEY,
   type InstallBootstrapResult,
 } from "./installApi";
 import { getBase } from "./api";
@@ -54,6 +55,10 @@ const SetupWizard: Component<SetupWizardProps> = (props) => {
     setError(null);
     try {
       setResult(await bootstrapInstall(displayName));
+      // The remaining steps — forge link, first project — live at `#/setup`
+      // inside the shell; this flag is what brings a fresh operator there
+      // after their first sign-in, however that sign-in happens.
+      localStorage.setItem(SETUP_PENDING_KEY, "1");
     } catch (value) {
       setError(value instanceof Error ? value.message : String(value));
     } finally {
@@ -196,8 +201,8 @@ const SetupWizard: Component<SetupWizardProps> = (props) => {
                 </button>
               </Show>
               <p class="login-help">
-                Forge linking and your first project come next, once you are
-                signed in — Projects covers both.
+                Forge linking and your first project are the next two steps —
+                they open automatically once you are signed in.
               </p>
             </>
           )}

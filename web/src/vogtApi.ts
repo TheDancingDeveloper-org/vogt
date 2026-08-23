@@ -32,7 +32,12 @@ export const ROUTES = {
   "project.get": "/projects/get",
   "project.brief": "/projects/brief",
   "project.import": "/projects/import",
+  "project.register": "/projects",
   "forge.repos": "/forge/repos",
+  "forge.account_status": "/forge/accounts",
+  "forge.account_link": "/forge/accounts",
+  sweep: "/sweep",
+  coverage: "/coverage",
   "work.list": "/work",
   "board.list": "/board/list",
   "work.get": "/work/get",
@@ -886,6 +891,78 @@ export interface ForgeReposResult {
  *  no repositories". */
 export const listForgeRepos = (host = "github.com") =>
   call<ForgeReposResult>("forge.repos", { host }, "GET");
+
+/** One linked forge account, as `forge.account_status` reports it — never
+ *  carrying the token. */
+export interface ForgeAccountView {
+  host: string;
+  login: string;
+  scopes: string;
+  linked: boolean;
+}
+
+/** Whether the acting actor has linked a forge account, and as whom (#179). */
+export const forgeAccountStatus = (host?: string) =>
+  call<{ accounts: ForgeAccountView[] }>(
+    "forge.account_status",
+    host ? { host } : {},
+    "GET",
+  );
+
+/** Link the acting actor's own forge PAT (#179). Validated against the forge,
+ *  stored encrypted, never echoed — the answer is who it authenticated as. */
+export const linkForgeAccount = (params: {
+  host?: string;
+  token: string;
+  reason: string;
+}) =>
+  call<{ host: string; login: string | null; scopes: string; linked: boolean }>(
+    "forge.account_link",
+    params,
+    "POST",
+  );
+
+/** Register an existing folder or repository as a project (FR-P1). */
+export const registerProject = (
+  params: Record<string, unknown> & {
+    name: string;
+    root_path: string;
+    reason: string;
+  },
+) => call<{ project: { slug: string; name: string } }>(
+  "project.register",
+  params,
+  "POST",
+);
+
+/** One collector's coverage row — what has looked at what, and how long ago. */
+export interface CoverageEntry {
+  collector: string;
+  status: string;
+  last_swept_at: string | null;
+  age_seconds: number | null;
+  projects: number;
+}
+
+export interface CoverageResult {
+  collectors: CoverageEntry[];
+  swept_project_ids: string[];
+  unswept_project_ids: string[];
+}
+
+export interface SweepResult {
+  scope: string;
+  projects: number;
+  subjects: number;
+  dep_refs: number;
+}
+
+/** Run the collectors over the registered projects (FR-L1). */
+export const runSweep = (params: { project?: string; reason: string }) =>
+  call<SweepResult>("sweep", params, "POST");
+
+/** What has looked at what, and how long ago (FR-O3). */
+export const fetchCoverage = () => call<CoverageResult>("coverage", {}, "GET");
 
 export const startSession = (
   params: Record<string, unknown> & { reason: string },

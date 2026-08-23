@@ -53,6 +53,16 @@ namespace (`ENGINE.md` §3), the wizard says so and hands you to the ordinary
 sign-in below; the minted token remains your credential for the CLI, REST and
 MCP surfaces.
 
+Your first sign-in then lands on **Setup** (`#/setup`), which walks the two
+remaining steps with a visible pass or fail on each: linking your own forge
+PAT — upstream writes are then attributed to you, and the repositories your
+credential can see become the import picker — and your first project, imported
+from the forge or registered from a path already mounted into the instance,
+followed by the first sweep and the collector coverage it earns. Every step is
+skippable and nothing is wizard-only: Projects and Settings own the same
+capabilities afterwards, and each write asks for a reason because it is
+audited like any other.
+
 1. Open your instance's address in a browser. The engine serves the GUI at
    `/` and proxies the core's API behind it, so work surfaces and terminals
    share one origin.
