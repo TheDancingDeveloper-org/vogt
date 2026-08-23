@@ -43,6 +43,7 @@ from vogt.application.models import (
 )
 from vogt.application.services import _resolve, upstream, writeback
 from vogt.application.services.branches import branch_views_for
+from vogt.application.services.git_story import git_story_for
 from vogt.application.services.sessions import list_sessions
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.entities import (
@@ -406,13 +407,18 @@ def get_work(ctx: AppContext, params: GetWorkParams) -> WorkResult:
         # disagreement reads as drift. Computed for upstream items too, which
         # have no native sessions but can still carry a `gh-<n>` branch.
         branches = branch_views_for(ctx, view, item)
+        # The derived git story (#285): the branches above joined to the
+        # observed PR edge (#284) into a phase shown beside the workflow state,
+        # with the contradictions between them as drift. Read-only — never
+        # written back onto the item.
+        git = git_story_for(ctx, view, item, branches)
     sessions = (
         list_sessions(ctx, ListSessionsParams(work_item=item.ref)).sessions
         if native
         else []
     )
     return WorkResult(
-        item=item, comments=comments, sessions=sessions, branches=branches
+        item=item, comments=comments, sessions=sessions, branches=branches, git=git
     )
 
 

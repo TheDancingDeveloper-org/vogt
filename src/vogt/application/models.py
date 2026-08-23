@@ -627,6 +627,92 @@ class WorkItemBranchView(Result):
     )
 
 
+class WorkItemPullRequestView(Result):
+    """The pull request observed to implement a work item (#284, #285).
+
+    Read from the `forge.pull_request` observation the `implemented_by` edge
+    points at — never declared. `state` is the *derived* PR state, richer than
+    the observation's raw open/closed/merged: `draft` and `in-review` are read
+    off the PR's own draft flag and review decision so the git phase can tell
+    "opened" from "being reviewed". Every field carries where it came from and
+    how old it is, so the surface can say "observed 4 min ago from GitHub"
+    rather than presenting a stale rollup as current.
+    """
+
+    number: int
+    #: Derived state: `draft` / `open` / `in-review` / `merged` / `closed`.
+    state: Literal["draft", "open", "in-review", "merged", "closed"]
+    title: str | None = None
+    url: str | None = None
+    draft: bool = False
+    review_decision: str | None = Field(
+        default=None, description="The forge's review decision, None if it gave none."
+    )
+    checks: str | None = Field(
+        default=None, description="The PR's combined check rollup, None if unknown."
+    )
+    mergeable: str | None = None
+    head_ref: str | None = None
+    base: str | None = None
+    #: Which subject the `implemented_by` edge matched, and from where — the
+    #: PR body, its title, or its branch name (#284).
+    provenance: str | None = None
+    updated_at: datetime | None = None
+    updated_age_seconds: int | None = Field(
+        default=None, description="Age of the PR's last upstream update, at read time."
+    )
+    observed_at: datetime | None = Field(
+        default=None, description="When a sweep last saw this PR, if it has."
+    )
+    observed_age_seconds: int | None = Field(
+        default=None, description="How long ago Vogt last observed this PR."
+    )
+
+
+class GitStoryDriftView(Result):
+    """One contradiction between a work item and its git evidence (#285).
+
+    Derived and read-only (FR-O2): Vogt *reports* the disagreement — a closed
+    item with an open PR, a merged PR under an open item, an active branch on a
+    done item — it does not reconcile it. `provenance` says which observation
+    the contradiction was read from, so a reader can check it.
+    """
+
+    code: str
+    message: str
+    provenance: str | None = None
+
+
+class WorkItemGitStory(Result):
+    """Where a work item is in git, derived from branches + the PR edge (#285).
+
+    A single read-only answer to "where is this in git?", assembled from the
+    already-observed branch bindings (#283) and the `implemented_by` PR edge
+    (#284). `phase` is a derived opinion shown *beside* the workflow state, not
+    written onto it: a `merged` phase on an item still `in_progress` is exactly
+    the disagreement this is meant to make visible. `drift` carries the obvious
+    contradictions. `task_conclusion_available` records that the #291 task-run
+    conclusion is an engine-side seam not yet folded in, so the phase is honest
+    about what it is *not* considering.
+    """
+
+    phase: Literal["no_branch", "branch_active", "pr_open", "in_review", "merged"]
+    #: The workflow state the phase sits beside, for the surface to show the
+    #: two together without re-reading the item.
+    workflow_state: str
+    branches: list[WorkItemBranchView] = []
+    pull_request: WorkItemPullRequestView | None = None
+    drift: list[GitStoryDriftView] = []
+    task_conclusion_available: bool = Field(
+        default=False,
+        description=(
+            "Whether the #291 task-run conclusion fed the phase. False today: "
+            "it is an engine-side record not surfaced through the work item, so "
+            "the phase is derived from branches and the PR edge alone."
+        ),
+    )
+
+
 class WorkResult(Result):
     item: WorkItem
     comments: list[Comment] = []
@@ -638,6 +724,11 @@ class WorkResult(Result):
     #: observed by the `git-local` sweep, kept separate so a disagreement
     #: reads as drift. Populated by `work.get`; empty on the write operations.
     branches: list[WorkItemBranchView] = []
+    #: The derived git story (#285): branch/PR summary, a phase shown beside
+    #: the workflow state, and the contradictions between them as drift.
+    #: Populated by `work.get`; None on the write operations and when there is
+    #: no git evidence at all.
+    git: WorkItemGitStory | None = None
 
 
 class GetWorkParams(Params):

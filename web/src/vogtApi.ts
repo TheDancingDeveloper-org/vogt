@@ -451,6 +451,56 @@ export interface WorkItemBranch {
   observed_at?: string | null;
 }
 
+/** The pull request observed to implement a work item (#284, #285).
+ *
+ *  Read from the `implemented_by` PR edge, never declared. `state` is the
+ *  *derived* state, richer than the observation's raw open/closed/merged:
+ *  `draft` and `in-review` are read off the PR's own fields so the git phase
+ *  can tell "opened" from "being reviewed". Every field carries where it came
+ *  from and how old it is. */
+export interface WorkItemPullRequest {
+  number: number;
+  state: "draft" | "open" | "in-review" | "merged" | "closed";
+  title?: string | null;
+  url?: string | null;
+  draft?: boolean;
+  review_decision?: string | null;
+  checks?: string | null;
+  mergeable?: string | null;
+  head_ref?: string | null;
+  base?: string | null;
+  provenance?: string | null;
+  updated_at?: string | null;
+  updated_age_seconds?: number | null;
+  observed_at?: string | null;
+  observed_age_seconds?: number | null;
+}
+
+/** One contradiction between a work item and its git evidence (#285). Derived
+ *  and read-only (FR-O2): Vogt reports the disagreement, it does not reconcile
+ *  it. */
+export interface GitStoryDrift {
+  code: string;
+  message: string;
+  provenance?: string | null;
+}
+
+/** Where a work item is in git, derived from branches + the PR edge (#285).
+ *
+ *  `phase` is a derived opinion shown *beside* the workflow state, never as it:
+ *  a `merged` phase on an item still `in_progress` is exactly the disagreement
+ *  this makes visible. `drift` carries the obvious contradictions.
+ *  `task_conclusion_available` records that the #291 task-run conclusion is an
+ *  engine-side seam not yet folded into the phase. */
+export interface WorkItemGitStory {
+  phase: "no_branch" | "branch_active" | "pr_open" | "in_review" | "merged";
+  workflow_state: string;
+  branches?: WorkItemBranch[];
+  pull_request?: WorkItemPullRequest | null;
+  drift?: GitStoryDrift[];
+  task_conclusion_available?: boolean;
+}
+
 export interface WorkDetail {
   item: WorkItem;
   comments: { id: string; body: string; created_at: string }[];
@@ -458,6 +508,10 @@ export interface WorkDetail {
   /** Branches this item is worked on (#283), declared and observed side by
    *  side. Empty when no branch has been declared and none observed. */
   branches?: WorkItemBranch[];
+  /** The derived git story (#285): branch/PR summary, a phase shown beside the
+   *  workflow state, and the contradictions between them as drift. Absent when
+   *  there is no git evidence at all. */
+  git?: WorkItemGitStory | null;
 }
 
 /** The evidence a drift proposal carries, copied at raise time (FR-R5).

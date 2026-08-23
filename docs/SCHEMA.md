@@ -177,6 +177,20 @@ ranked views. Being observed rather than declared, it informs but never
 enforces — unlike `depends_on` it does not block completion — and `work relate`
 refuses it.
 
+*The derived git story (#285)* joins these two observed facts — the `git.branch`
+observations (#283) and the `implemented_by` PR edge (#284) — into a read-only
+answer to *where is this in git?* on `work.get`. It is **not a table and not a
+column**: nothing is written. From the branch tips and the PR's observed state
+it derives a single **phase** (`no_branch → branch_active → pr_open → in_review
+→ merged`) shown *beside* the workflow state, never as it; a PR summary carrying
+the PR's derived state, review decision and checks rollup; and the obvious
+contradictions between item and evidence as **drift** — a closed item with an
+open PR, a merged PR under an open item, a branch active on a done item. Each
+carries its provenance and freshness. The same two signals feed the ranker: an
+open PR or a recently-committed branch lifts a moving item (`why` shows the
+contributions). The engine's per-task run conclusion (#291) is a remaining seam,
+not yet an input to the phase.
+
 `writeback_actions` records the *attempt*, not only the success — including
 `skipped`, which is what a policy refusal looks like. Write-back is never a
 separate operation (`ROADMAP.md` M5): a comment authored here posts upstream

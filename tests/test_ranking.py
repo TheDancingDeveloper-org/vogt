@@ -204,6 +204,8 @@ def test_why_explains_every_input(instance: AppContext) -> None:
         "blocking_fan_out",
         "initiative_weight",
         "trust_penalty",
+        "open_pr",
+        "branch_activity",
     ]
     assert explanation.total == pytest.approx(
         sum(entry.contribution for entry in explanation.contributions)

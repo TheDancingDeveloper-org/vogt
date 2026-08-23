@@ -346,6 +346,135 @@ describe("#283 — the item's branches, declared and observed", () => {
   });
 });
 
+// -- #285: the derived git story — branch / PR / phase + drift ---------------
+//
+// With branches (#283) and the PR edge (#284) observed, the item answers "where
+// is this in git?" A phase is derived and shown *beside* the workflow state,
+// never as it; the PR row carries its state, checks and freshness; and the
+// contradictions between the two read as drift. Everything here is read-only.
+
+describe("#285 — the item's derived git story", () => {
+  const GIT_OPEN = {
+    phase: "pr_open",
+    workflow_state: "in_progress",
+    branches: [
+      {
+        name: "wi-1",
+        source: "observed",
+        drift: false,
+        last_commit_age_seconds: 3600,
+      },
+    ],
+    pull_request: {
+      number: 7,
+      state: "open",
+      url: "https://example.test/pull/7",
+      checks: "success",
+      provenance: "from PR body",
+      observed_age_seconds: 240,
+    },
+    drift: [],
+    task_conclusion_available: false,
+  };
+
+  it("shows the phase chip beside the state, and a PR row with checks + age", async () => {
+    fakeVogt({
+      "GET /work/get": {
+        body: {
+          item: workItem(),
+          comments: [],
+          sessions: [],
+          branches: GIT_OPEN.branches,
+          git: GIT_OPEN,
+        },
+      },
+    });
+    const { container } = detail();
+
+    const panel = await waitFor(() => panelNamed(container, "Git story"));
+
+    // The phase sits in the facts row, beside the workflow state, marked as a
+    // derived git phase and not the state itself.
+    const phase = container.querySelector<HTMLElement>(
+      '[data-testid="git-phase"]',
+    )!;
+    expect(phase.textContent).toContain("PR open");
+    expect(facts(container)).toContain("PR open");
+
+    // The PR row carries its derived state, its checks rollup, and how fresh
+    // the observation is.
+    const pr = panel.querySelector<HTMLElement>('[data-testid="git-pr"]')!;
+    expect(
+      pr.querySelector('[data-testid="git-pr-state"]')?.textContent,
+    ).toBe("open");
+    expect(
+      pr.querySelector('[data-testid="git-pr-checks"]')?.textContent,
+    ).toContain("success");
+    expect(pr.textContent).toContain("observed 4m ago");
+    // No contradiction, so no drift is shown.
+    expect(panel.querySelector('[data-testid="git-drift"]')).toBeNull();
+  });
+
+  it("reads a merged PR under an open item as drift", async () => {
+    const merged = {
+      phase: "merged",
+      workflow_state: "in_progress",
+      branches: [],
+      pull_request: {
+        number: 9,
+        state: "merged",
+        provenance: "from PR body",
+        observed_age_seconds: 60,
+      },
+      drift: [
+        {
+          code: "merged_pr_open_item",
+          message: "the pull request merged but the item is still open",
+          provenance: "forge PR #9",
+        },
+      ],
+      task_conclusion_available: false,
+    };
+    fakeVogt({
+      "GET /work/get": {
+        body: {
+          item: workItem(),
+          comments: [],
+          sessions: [],
+          branches: [],
+          git: merged,
+        },
+      },
+    });
+    const { container } = detail();
+
+    const panel = await waitFor(() => panelNamed(container, "Git story"));
+    const phase = container.querySelector<HTMLElement>(
+      '[data-testid="git-phase"]',
+    )!;
+    expect(phase.textContent).toContain("merged");
+    const drift = panel.querySelector<HTMLElement>(
+      '[data-testid="git-drift-merged_pr_open_item"]',
+    )!;
+    expect(drift.textContent).toContain("still open");
+    expect(drift.textContent).toContain("forge PR #9");
+  });
+
+  it("shows no Git story panel and no phase chip when there is no git evidence", async () => {
+    fakeVogt();
+    const { container } = detail();
+
+    await waitFor(() => panelNamed(container, "Comments"));
+    const headings = [...container.querySelectorAll(".wid-panel h3")].map(
+      (node) => node.textContent,
+    );
+    expect(headings).not.toContain("Git story");
+    expect(
+      container.querySelector('[data-testid="git-phase"]'),
+    ).toBeNull();
+  });
+});
+
 // -- FR-U5's "state history" ------------------------------------------------
 //
 // §6.2 recorded this as the one clause of FR-U5 the page did not answer: the
