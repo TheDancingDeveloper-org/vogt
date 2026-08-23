@@ -236,6 +236,13 @@ class WorkOverlay(Entity):
     effort: Effort | None = None
     assignee_actor_id: str | None = None
     initiative_id: str | None = None
+    #: Branches a Vogt-started session declared it would work this item on
+    #: (#283). The *declared* half of the branch binding — additive and
+    #: forward-only (#287): recording one never touches git, and it is kept
+    #: separate from the `git.branch` observations a sweep collects so the two
+    #: can disagree as drift (FR-O2) rather than one silently overwriting the
+    #: other.
+    branches: list[str] = []
     created_at: datetime
     updated_at: datetime
 

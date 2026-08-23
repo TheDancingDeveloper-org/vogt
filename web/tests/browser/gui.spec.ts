@@ -4127,6 +4127,69 @@ test("Work item state is changed from the detail page via Move to", async ({ pag
   await expect(rail.locator(".wid-rail-state.is-current")).toHaveText("done");
 });
 
+// #283: the branch panel is layout-bearing — declared and observed branches
+// are shown side by side, an observed one says when it was last active, and a
+// branch on one side only is marked drift rather than merged. This overrides
+// `/work/get` for this test alone (a route registered later wins), so the
+// shared fixture — and the visual snapshots that read it — are untouched.
+test("The item detail page shows the branches it is worked on, with age (#283)", async ({
+  page,
+}) => {
+  await installFixtures(page);
+  await page.route(/\/work\/get(\?|$)/, (route) =>
+    route.fulfill({
+      json: {
+        item: {
+          id: "01JWORKITEM",
+          ref: "WI-7",
+          kind: "feature",
+          title: "Measured board card",
+          body: "",
+          state: "open",
+          priority: "normal",
+          project_slug: "vogt",
+          initiative_id: null,
+          origin: "declared",
+          trust_state: "verified",
+          assignee_identity_ref: null,
+          labels: [],
+          relations: [],
+          created_at: "2026-08-01T00:00:00Z",
+          updated_at: "2026-08-17T10:00:00Z",
+        },
+        comments: [],
+        sessions: [],
+        branches: [
+          {
+            name: "wi-7",
+            source: "both",
+            drift: false,
+            ahead: 1,
+            behind: 0,
+            default_branch: "main",
+            last_commit_age_seconds: 7200,
+          },
+          { name: "wi-9", source: "declared", drift: true },
+        ],
+      },
+    }),
+  );
+
+  await page.goto("/#/w/WI-7");
+  const panel = page.locator('[data-testid="branches"]');
+  await expect(panel).toBeVisible();
+  // The observed-and-declared branch: named, badged `both`, active 2h ago.
+  await expect(panel.locator('[data-testid="branch-wi-7"]')).toContainText("wi-7");
+  await expect(panel).toContainText("active 2h ago");
+  await expect(
+    panel.locator('[data-testid="branch-wi-7"] .wid-branch-source--both'),
+  ).toBeVisible();
+  // The declared-only branch reads as drift, not as an observation.
+  await expect(
+    panel.locator('[data-testid="branch-wi-9"] .wid-branch-drift'),
+  ).toBeVisible();
+});
+
 test("The item editor's assignee picker is keyboard-operable", async ({ page }) => {
   await installFixtures(page, {}, [], undefined, {
     actors: [

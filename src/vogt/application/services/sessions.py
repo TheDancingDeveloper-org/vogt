@@ -26,6 +26,8 @@ Three rules this module exists to keep:
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
 from vogt.application import writes
 from vogt.application.context import AppContext
@@ -47,7 +49,8 @@ from vogt.application.services._brief import (
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.auth import Scope, issue
-from vogt.core.entities import Actor, CodingSession, Token, WorkItem
+from vogt.core.branches import default_branch_name
+from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
 from vogt.errors import Conflict, InvalidRequest, NotFound, VogtError
 from vogt.storage.interface import ReadView, WriteTxn
 
@@ -126,6 +129,22 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             stopped_at=None,
         )
         txn.insert_session(session)
+        # The declared half of the branch binding (#283): a session opened for
+        # a work item records, on that item's overlay, the branch it will use.
+        # Additive and forward-only — this writes a name, never a branch: git
+        # is not touched, and the row rides this session's audit like every
+        # other change in the transaction (FR-B4).
+        declared_branch = (
+            None
+            if subject.work_item is None
+            else _record_declared_branch(
+                txn,
+                work_ref=subject.work_item.ref,
+                project_id=subject.project_id,
+                at=now,
+                template=ctx.config.branch_binding_template,
+            )
+        )
         return WriteOutcome(
             result=SessionResult(
                 session=_summarize(txn, session, engine_session=started)
@@ -136,6 +155,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             event_kind=SESSION_STARTED_EVENT,
             summary={
                 "work_item": subject.work_item_ref,
+                "branch": declared_branch,
                 "project": subject.project_slug,
                 "cwd": subject.cwd,
                 # Named in the audit summary because a spoken request that
@@ -367,6 +387,38 @@ def _resolve_subject(
         work_item=None,
         brief=brief_for_project(view, project.slug, session_id),
     )
+
+
+def _record_declared_branch(
+    txn: WriteTxn, *, work_ref: str, project_id: str, at: datetime, template: str
+) -> str:
+    """Add the branch a session will use to the item's overlay, idempotently.
+
+    Read-modify-write on the `branches` list rather than a blind append, so
+    starting a second session on an item that already declared its branch adds
+    nothing and re-starting after a stop does not accumulate duplicates. Keyed
+    by the work-item ref, which is `WI-7` for a native item and the subject key
+    for an upstream one — the same key `work.get` reads the overlay back under.
+    """
+    branch = default_branch_name(work_ref, template=template)
+    existing = txn.work_overlay(work_ref)
+    current = list(existing.branches) if existing is not None else []
+    if branch in current:
+        return branch
+    current.append(branch)
+    overlay = (
+        existing.model_copy(update={"branches": current, "updated_at": at})
+        if existing is not None
+        else WorkOverlay(
+            subject_key=work_ref,
+            project_id=project_id,
+            branches=current,
+            created_at=at,
+            updated_at=at,
+        )
+    )
+    txn.upsert_work_overlay(overlay)
+    return branch
 
 
 def _engine(ctx: AppContext) -> EngineClient:

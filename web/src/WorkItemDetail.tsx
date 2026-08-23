@@ -59,6 +59,7 @@ import {
   type WhyResult,
   type WorkDetail,
   type WorkItem,
+  type WorkItemBranch,
 } from "./vogtApi";
 import SurfaceHeader from "./SurfaceHeader";
 import {
@@ -222,6 +223,35 @@ function describeAge(seconds: number | null | undefined): string {
   if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
   if (seconds < 172800) return `${Math.round(seconds / 3600)}h`;
   return `${Math.round(seconds / 86400)}d`;
+}
+
+/** Where a branch came from, in words: declared, observed, or both agreeing. */
+function branchSourceLabel(source: WorkItemBranch["source"]): string {
+  if (source === "both") return "declared + observed";
+  return source;
+}
+
+/** One branch's status line (#283): "active 2h ago", how far it has diverged,
+ *  or — for a branch only declared, never yet seen in a checkout — that it is
+ *  a declared intention and not an observation. Declared and observed are kept
+ *  separate here rather than merged, so a disagreement reads as drift. */
+function branchStatusText(branch: WorkItemBranch): string {
+  if (branch.source === "declared") {
+    return "declared, not yet observed in a sweep";
+  }
+  const parts: string[] = [];
+  const age = branch.last_commit_age_seconds;
+  parts.push(age === null || age === undefined ? "observed" : `active ${describeAge(age)} ago`);
+  const ahead = branch.ahead ?? 0;
+  const behind = branch.behind ?? 0;
+  if (ahead || behind) {
+    const bits: string[] = [];
+    if (ahead) bits.push(`${ahead} ahead`);
+    if (behind) bits.push(`${behind} behind`);
+    const base = branch.default_branch ? ` ${branch.default_branch}` : " the default branch";
+    parts.push(`${bits.join(", ")} of${base}`);
+  }
+  return parts.join(" · ");
 }
 
 /** The freshness sentence, in the legacy GUI's words. */
@@ -994,6 +1024,14 @@ const WorkItemDetail: Component<Props> = (props) => {
   const sessionList = createMemo<SessionSummary[]>(() => {
     const loaded = sessions();
     return loaded && loaded.ok ? loaded.value.sessions : [];
+  });
+
+  /** Branches this item is worked on (#283): declared on the overlay and
+   *  observed by the sweep, kept separate so a disagreement shows as drift.
+   *  Read from `work.get`, not the session list. */
+  const branchList = createMemo<WorkItemBranch[]>(() => {
+    const loaded = work();
+    return loaded && loaded.ok ? (loaded.value.branches ?? []) : [];
   });
 
   /** What the engine said when it could not be asked, or null. */
@@ -2013,6 +2051,48 @@ const WorkItemDetail: Component<Props> = (props) => {
                     </Show>
                   </div>
                 </section>
+
+                <Show when={branchList().length > 0}>
+                  <section class="wid-panel" data-testid="branches">
+                    <div class="wid-panel-head">
+                      <h3>Branches</h3>
+                      <span class="wid-hint">
+                        {branchList().length} bound · declared and observed kept
+                        separate
+                      </span>
+                    </div>
+                    <ul class="wid-branches">
+                      <For each={branchList()}>
+                        {(branch) => (
+                          <li
+                            class={`wid-branch${branch.drift ? " wid-branch--drift" : ""}`}
+                            data-testid={`branch-${branch.name}`}
+                          >
+                            <div class="wid-branch-head">
+                              <code class="wid-branch-name">{branch.name}</code>
+                              <span
+                                class={`wid-branch-source wid-branch-source--${branch.source}`}
+                              >
+                                {branchSourceLabel(branch.source)}
+                              </span>
+                              <Show when={branch.drift}>
+                                <span
+                                  class="wid-branch-drift"
+                                  title="Declared and observed disagree about this branch — Vogt reports it, it does not reconcile it (FR-O2)."
+                                >
+                                  drift
+                                </span>
+                              </Show>
+                            </div>
+                            <p class="wid-branch-status">
+                              {branchStatusText(branch)}
+                            </p>
+                          </li>
+                        )}
+                      </For>
+                    </ul>
+                  </section>
+                </Show>
 
                 <section class="wid-panel">
                   <div class="wid-panel-head">

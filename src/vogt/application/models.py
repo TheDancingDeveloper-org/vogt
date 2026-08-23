@@ -598,6 +598,35 @@ class CreateWorkParams(Params):
     reason: Reason
 
 
+class WorkItemBranchView(Result):
+    """One branch bound to a work item, declared or observed or both (#283).
+
+    `source` is the whole point: `declared` is a branch a Vogt-started session
+    said it would use, `observed` is one a sweep actually found in the
+    checkout, and `both` is the two agreeing. A branch that is one but not the
+    other is drift — declared and observed are kept separate and never merged
+    (FR-O2), so the surface can show the disagreement rather than paper over
+    it. `last_commit_age_seconds` is derived from `last_commit_at` at read time
+    so it is always current without the observation churning every sweep.
+    """
+
+    name: str
+    source: Literal["declared", "observed", "both"]
+    drift: bool = Field(
+        default=False,
+        description="True when declared and observed disagree about this branch.",
+    )
+    tip: str | None = None
+    ahead: int | None = None
+    behind: int | None = None
+    default_branch: str | None = None
+    last_commit_at: datetime | None = None
+    last_commit_age_seconds: int | None = None
+    observed_at: datetime | None = Field(
+        default=None, description="When a sweep last saw this branch, if it has."
+    )
+
+
 class WorkResult(Result):
     item: WorkItem
     comments: list[Comment] = []
@@ -605,6 +634,10 @@ class WorkResult(Result):
     #: Populated by `work.get`; empty on the write operations, which answer
     #: about the change they made rather than about what is running.
     sessions: list[SessionSummary] = []
+    #: Branches this item is worked on (#283): declared on the overlay,
+    #: observed by the `git-local` sweep, kept separate so a disagreement
+    #: reads as drift. Populated by `work.get`; empty on the write operations.
+    branches: list[WorkItemBranchView] = []
 
 
 class GetWorkParams(Params):

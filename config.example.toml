@@ -64,6 +64,14 @@
 # default policy: behaviour
 # marker_file_extensions = [".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".rb", ".sh", ".sql", ".toml", ".yaml", ".yml", ".md"]
 
+# Regular expressions that recognise which work item a git branch belongs to (#283). A branch whose name matches one is that item's branch: the default set reads `wi-7/…` and `feature/WI-7-…` (the vogt work-item number, via a `n` capture group) and `gh-264-…` (a linked project's forge issue number, via a `forge` group). The `git-local` collector applies these to every branch it observes and records the match; widening the set is how an estate teaches Vogt its own branch conventions. Reported, never enforced: matching a branch never creates, renames or deletes one (FR-B4).
+# default policy: behaviour
+# branch_binding_patterns = ["(?i)\\bwi-?(?P<n>\\d+)\\b", "(?i)\\bgh-(?P<forge>\\d+)\\b"]
+
+# The branch a session started from Vogt for a work item declares it will use (#283), formatted with a single `{number}` field: `WI-7` becomes `wi-7`. This is the *declared* half of the branch binding, recorded on the item's overlay and kept separate from what a sweep observes — an upstream item always declares the forge form `gh-<number>` regardless of this template, because that is the shape its own default project recognises.
+# default policy: behaviour
+# branch_binding_template = "wi-{number}"
+
 # How long observation *history* is kept (NFR-I5). The newest observation per subject is kept indefinitely regardless, and so is anything a drift proposal references.
 # default policy: behaviour
 # retention_days = 180

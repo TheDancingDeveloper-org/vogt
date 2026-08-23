@@ -429,10 +429,35 @@ export interface SessionSummary {
   alive?: boolean | null;
 }
 
+/** One branch bound to a work item (#283).
+ *
+ *  `source` is the whole point: `declared` is a branch a Vogt-started session
+ *  said it would use, `observed` is one a sweep found in the checkout, and
+ *  `both` is the two agreeing. A branch on one side only is `drift` — declared
+ *  and observed are kept separate, never merged (FR-O2), so the surface shows
+ *  the disagreement rather than papering over it. `last_commit_age_seconds` is
+ *  derived server-side at read time, so it is current without the observation
+ *  churning every sweep. */
+export interface WorkItemBranch {
+  name: string;
+  source: "declared" | "observed" | "both";
+  drift?: boolean;
+  tip?: string | null;
+  ahead?: number | null;
+  behind?: number | null;
+  default_branch?: string | null;
+  last_commit_at?: string | null;
+  last_commit_age_seconds?: number | null;
+  observed_at?: string | null;
+}
+
 export interface WorkDetail {
   item: WorkItem;
   comments: { id: string; body: string; created_at: string }[];
   sessions: SessionSummary[];
+  /** Branches this item is worked on (#283), declared and observed side by
+   *  side. Empty when no branch has been declared and none observed. */
+  branches?: WorkItemBranch[];
 }
 
 /** The evidence a drift proposal carries, copied at raise time (FR-R5).
