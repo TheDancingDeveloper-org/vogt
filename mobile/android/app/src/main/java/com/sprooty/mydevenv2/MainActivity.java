@@ -5,9 +5,14 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Typeface;
+import android.util.Log;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
+import android.widget.ScrollView;
+import android.widget.TextView;
 
+import androidx.appcompat.app.AlertDialog;
 import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -15,7 +20,10 @@ import androidx.core.view.WindowInsetsCompat;
 
 import com.getcapacitor.BridgeActivity;
 
+import java.io.File;
+
 public class MainActivity extends BridgeActivity {
+    private static final String TAG = "MainActivity";
     private static final String JS_CLIPBOARD_BRIDGE = "AndroidClipboard";
     private static final String JS_VOICE_BRIDGE = "AndroidVoice";
     /** DOM event the PWA listens for when the notification ended the call. */
@@ -24,6 +32,12 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // Before anything else: if the last run crashed, VogtApplication left a
+        // trace. Show it once so the operator can copy it back without adb, then
+        // clear it. Deliberately ahead of the bridge check — a crash in bridge
+        // setup itself must still surface.
+        maybeShowCrashReport();
 
         final WebView webView = getBridge() != null ? getBridge().getWebView() : null;
         if (webView == null) {
@@ -45,6 +59,53 @@ public class MainActivity extends BridgeActivity {
             return insets;
         });
         ViewCompat.requestApplyInsets(webView);
+    }
+
+    /**
+     * If {@link VogtApplication} recorded a crash on the previous run, show it in
+     * a copyable dialog and delete the file (read-once, so a fixed launch does not
+     * keep nagging). This is how the operator returns a native stack trace with no
+     * tooling: reproduce → relaunch → Copy → paste back.
+     */
+    private void maybeShowCrashReport() {
+        final File crashFile = new File(getFilesDir(), VogtApplication.CRASH_FILE);
+        if (!crashFile.exists()) {
+            return;
+        }
+        final String trace = VogtApplication.readCrash(crashFile);
+        // Delete after reading, regardless of what we do with the contents.
+        if (!crashFile.delete()) {
+            Log.w(TAG, "could not delete " + VogtApplication.CRASH_FILE + " after reading");
+        }
+        if (trace == null || trace.trim().isEmpty()) {
+            return;
+        }
+
+        String firstLine = trace.split("\n", 2)[0].trim();
+        String title = firstLine.isEmpty() ? "Vogt crash report" : ("Crashed: " + firstLine);
+
+        int pad = Math.round(16 * getResources().getDisplayMetrics().density);
+        TextView body = new TextView(this);
+        body.setText(trace);
+        body.setTypeface(Typeface.MONOSPACE);
+        body.setTextSize(11);
+        body.setTextIsSelectable(true);
+        body.setPadding(pad, pad, pad, pad);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(body);
+
+        new AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(scroll)
+            .setPositiveButton("Copy", (dialog, which) -> {
+                ClipboardManager clipboard =
+                    (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (clipboard != null) {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Vogt crash", trace));
+                }
+            })
+            .setNegativeButton("Dismiss", null)
+            .show();
     }
 
     private void publishInsetCssVars(WebView webView, Insets bars) {
