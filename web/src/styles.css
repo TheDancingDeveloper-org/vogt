@@ -6223,6 +6223,83 @@ textarea {
   color: var(--fg-muted);
 }
 
+/* The derived git story (#285): a phase chip beside the state, the PR row, and
+   the contradictions between the two as drift. Read-only — a second opinion on
+   where the item is in git, never the workflow state itself. */
+.wid-chip--phase {
+  color: var(--fg-muted);
+  border-style: dashed;
+}
+.wid-phase--merged {
+  color: var(--ok, #2e7d32);
+  border-color: var(--ok, #2e7d32);
+}
+.wid-phase--in_review {
+  color: var(--accent, #6a5acd);
+  border-color: var(--accent, #6a5acd);
+}
+.wid-pr {
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wid-pr--merged {
+  border-color: var(--ok, #2e7d32);
+}
+.wid-pr-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wid-pr-number {
+  font-family: var(--mono, monospace);
+  font-size: 13px;
+  color: var(--fg);
+}
+.wid-pr-state {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.wid-pr-state--merged {
+  color: var(--ok, #2e7d32);
+  border-color: var(--ok, #2e7d32);
+}
+.wid-pr-state--in-review {
+  color: var(--accent, #6a5acd);
+  border-color: var(--accent, #6a5acd);
+}
+.wid-pr-checks {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.wid-pr-status,
+.wid-pr-provenance {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.wid-git-drift {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wid-git-drift-item {
+  font-size: 12px;
+  color: var(--fg);
+}
+
 /* The activity badge is the liveness indicator (FR-U17, FR-U20). `unknown`
    is deliberately its own colour: it is not `idle` and not `stopped`. */
 .wid-activity {

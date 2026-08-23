@@ -186,6 +186,8 @@ def test_m1_demo(instance: AppContext, agent: Agent) -> None:
         "blocking_fan_out",
         "initiative_weight",
         "trust_penalty",
+        "open_pr",
+        "branch_activity",
     ]
 
     # the same state from the CLI and from curl, with identical answers

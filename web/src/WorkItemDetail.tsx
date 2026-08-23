@@ -60,6 +60,8 @@ import {
   type WorkDetail,
   type WorkItem,
   type WorkItemBranch,
+  type WorkItemGitStory,
+  type WorkItemPullRequest,
 } from "./vogtApi";
 import SurfaceHeader from "./SurfaceHeader";
 import {
@@ -251,6 +253,43 @@ function branchStatusText(branch: WorkItemBranch): string {
     const base = branch.default_branch ? ` ${branch.default_branch}` : " the default branch";
     parts.push(`${bits.join(", ")} of${base}`);
   }
+  return parts.join(" · ");
+}
+
+/** The derived git phase (#285), in words, shown beside the workflow state.
+ *  It is a second opinion read from git evidence — never the state itself. */
+function gitPhaseLabel(phase: WorkItemGitStory["phase"]): string {
+  switch (phase) {
+    case "no_branch":
+      return "no branch";
+    case "branch_active":
+      return "branch active";
+    case "pr_open":
+      return "PR open";
+    case "in_review":
+      return "in review";
+    case "merged":
+      return "merged";
+  }
+}
+
+/** The PR's derived state, in words, for the PR row's badge. */
+function prStateLabel(state: WorkItemPullRequest["state"]): string {
+  return state === "in-review" ? "in review" : state;
+}
+
+/** The PR row's status line: state, review decision, checks rollup and how
+ *  fresh the observation is — the freshness the product's first principle
+ *  requires beside every collected fact. */
+function pullRequestStatusText(pr: WorkItemPullRequest): string {
+  const parts: string[] = [prStateLabel(pr.state)];
+  if (pr.review_decision) parts.push(`review: ${pr.review_decision}`);
+  if (pr.checks) parts.push(`checks: ${pr.checks}`);
+  const observed =
+    pr.observed_age_seconds === null || pr.observed_age_seconds === undefined
+      ? null
+      : `observed ${describeAge(pr.observed_age_seconds)} ago from the forge`;
+  if (observed) parts.push(observed);
   return parts.join(" · ");
 }
 
@@ -1034,6 +1073,15 @@ const WorkItemDetail: Component<Props> = (props) => {
     return loaded && loaded.ok ? (loaded.value.branches ?? []) : [];
   });
 
+  /** The derived git story (#285): branch/PR summary, a phase shown beside the
+   *  workflow state, and the contradictions between them as drift. Read-only —
+   *  derived from the same observations #283 and #284 already collected, never
+   *  written back onto the item. Null when there is no git evidence at all. */
+  const gitStory = createMemo<WorkItemGitStory | null>(() => {
+    const loaded = work();
+    return loaded && loaded.ok ? (loaded.value.git ?? null) : null;
+  });
+
   /** What the engine said when it could not be asked, or null. */
   /**
    * What the engine said when it could not be asked, or null.
@@ -1631,6 +1679,21 @@ const WorkItemDetail: Component<Props> = (props) => {
             <div class="wid-facts">
               <span class="wid-chip">{current().kind}</span>
               <span class="wid-chip wid-chip--state">{current().state}</span>
+              {/* The derived git phase (#285), shown *beside* the workflow
+                  state, never as it — a second opinion read from branches and
+                  the PR edge, so a `merged` phase on an open item reads as the
+                  disagreement it is. */}
+              <Show when={gitStory()}>
+                {(story) => (
+                  <span
+                    class={`wid-chip wid-chip--phase wid-phase--${story().phase}`}
+                    data-testid="git-phase"
+                    title="Derived from the branches and the pull request Vogt observed (#285). Shown beside the workflow state, never written onto it."
+                  >
+                    git: {gitPhaseLabel(story().phase)}
+                  </span>
+                )}
+              </Show>
               <span class="wid-chip">{current().priority}</span>
               <Show when={current().effort}>
                 {(effort) => <span class="wid-chip">effort {effort()}</span>}
@@ -2051,6 +2114,119 @@ const WorkItemDetail: Component<Props> = (props) => {
                     </Show>
                   </div>
                 </section>
+
+                {/* The derived git story (#285): where this item is in git,
+                    read from the branches (#283) and the PR edge (#284). The
+                    phase sits beside the state above; here are the PR and the
+                    contradictions between the two, each with its freshness.
+                    Read-only — nothing here is written back onto the item. */}
+                <Show when={gitStory()}>
+                  {(story) => (
+                    <section class="wid-panel" data-testid="git-story">
+                      <div class="wid-panel-head">
+                        <h3>Git story</h3>
+                        <span
+                          class={`wid-hint wid-phase--${story().phase}`}
+                          data-testid="git-story-phase"
+                        >
+                          phase: {gitPhaseLabel(story().phase)} · beside state{" "}
+                          {story().workflow_state}
+                        </span>
+                      </div>
+
+                      <Show
+                        when={story().pull_request}
+                        fallback={
+                          <p class="wid-absent">
+                            No pull request has been observed to implement this
+                            item yet.
+                          </p>
+                        }
+                      >
+                        {(pr) => (
+                          <div
+                            class={`wid-pr wid-pr--${pr().state}`}
+                            data-testid="git-pr"
+                          >
+                            <div class="wid-pr-head">
+                              <Show
+                                when={pr().url}
+                                fallback={
+                                  <span class="wid-pr-number">
+                                    #{pr().number}
+                                  </span>
+                                }
+                              >
+                                {(url) => (
+                                  <a
+                                    class="wid-pr-number"
+                                    href={url()}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    #{pr().number}
+                                  </a>
+                                )}
+                              </Show>
+                              <span
+                                class={`wid-pr-state wid-pr-state--${pr().state}`}
+                                data-testid="git-pr-state"
+                              >
+                                {prStateLabel(pr().state)}
+                              </span>
+                              <Show when={pr().checks}>
+                                {(checks) => (
+                                  <span
+                                    class="wid-pr-checks"
+                                    data-testid="git-pr-checks"
+                                  >
+                                    checks: {checks()}
+                                  </span>
+                                )}
+                              </Show>
+                            </div>
+                            <p class="wid-pr-status">
+                              {pullRequestStatusText(pr())}
+                            </p>
+                            <Show when={pr().provenance}>
+                              {(prov) => (
+                                <p class="wid-pr-provenance">
+                                  edge {prov()}
+                                </p>
+                              )}
+                            </Show>
+                          </div>
+                        )}
+                      </Show>
+
+                      <Show when={(story().drift ?? []).length > 0}>
+                        <ul class="wid-git-drift" data-testid="git-drift">
+                          <For each={story().drift ?? []}>
+                            {(finding) => (
+                              <li
+                                class="wid-git-drift-item"
+                                data-testid={`git-drift-${finding.code}`}
+                              >
+                                <span
+                                  class="wid-branch-drift"
+                                  title="Vogt reports this disagreement between the item and its git evidence — it does not reconcile it (FR-O2)."
+                                >
+                                  drift
+                                </span>{" "}
+                                {finding.message}
+                                <Show when={finding.provenance}>
+                                  {(prov) => (
+                                    <span class="wid-hint"> ({prov()})</span>
+                                  )}
+                                </Show>
+                              </li>
+                            )}
+                          </For>
+                        </ul>
+                      </Show>
+                    </section>
+                  )}
+                </Show>
 
                 <Show when={branchList().length > 0}>
                   <section class="wid-panel" data-testid="branches">

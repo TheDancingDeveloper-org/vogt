@@ -311,6 +311,29 @@ Vogt *reports* where work is in git and never drives it, so declared and
 observed are shown side by side rather than merged, and a disagreement between
 them is surfaced rather than silently reconciled.
 
+**The git story** reads those same branches and the pull request that
+implements the item (its observed `implemented_by` edge) back as one answer to
+*where is this in git?* Beside the workflow state sits a derived **phase** —
+`no branch → branch active → PR open → in review → merged` — climbed as the git
+evidence accumulates. It is a second opinion, never the state itself: a `merged`
+phase on an item still `in_progress` is exactly the disagreement the phase is
+meant to make visible. A **Git story** panel shows the pull request with its
+derived state (`draft` / `open` / `in review` / `merged` / `closed`), its review
+decision and checks rollup, and — like every collected fact on the page — how
+fresh the observation is ("observed 4m ago from the forge"). The obvious
+contradictions between the item and its git evidence read as **drift**: an issue
+closed with a pull request still open, a pull request merged while the item is
+still open, or a branch still active in a checkout for an item marked done.
+Everything here is derived and read-only — Vogt reports where the work is in
+git, it never writes the phase back onto the item. (The engine's per-task
+run conclusion, #291, is not yet folded into the phase; it stays an engine-side
+seam, so the phase is derived from the branches and the PR edge alone.)
+
+The git story also feeds the ranking: an item with an open pull request or a
+recently-committed branch is *moving*, and `why` shows it lifting above idle
+work of the same priority — the branch's contribution decaying as its last
+commit ages out of the activity window.
+
 The page keeps itself current the way the board does: it **subscribes to the
 change stream**, so a transition or a new comment somebody else made — and the
 session's live-activity badge — arrive here without a manual refresh, and a tab

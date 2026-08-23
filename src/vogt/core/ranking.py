@@ -42,6 +42,19 @@ BLOCKING_FAN_OUT_POINTS = 8.0
 #: heavily weighted initiative lifts its items about one priority band.
 INITIATIVE_WEIGHT_FACTOR = 0.25
 
+#: Points for an item with an open pull request against it (#285). Work in
+#: flight should surface above idle work of the same priority — an open PR is
+#: the strongest signal that a piece of work is *moving*. Sized a little under
+#: a p2, so it lifts an item without overriding a hand-set priority.
+OPEN_PR_POINTS = 12.0
+
+#: Points for a branch committed to recently (#285), decaying to nothing over a
+#: window. A branch touched today is active work; one untouched for a fortnight
+#: is not, and should not keep lifting the item forever. Linear from full at
+#: age zero to zero at the window's end.
+BRANCH_ACTIVITY_POINTS = 8.0
+BRANCH_ACTIVITY_WINDOW_DAYS = 14.0
+
 #: Penalty for items whose declaration nothing has confirmed. Zero until M2
 #: gives trust states something to be computed from, and negative-only: trust
 #: never *promotes* an item, it only declines to vouch for one.
@@ -116,6 +129,13 @@ class RankingInputs:
     blocking_fan_out: int = 0
     initiative_weight: int = 0
     is_terminal: bool = False
+    #: Whether an open pull request implements this item (#285). Derived from
+    #: the observed `implemented_by` edge, never declared.
+    open_pr: bool = False
+    #: Age of the most recent commit on a branch bound to this item, in
+    #: seconds (#285). `None` where no branch was observed — a fact absent,
+    #: which contributes nothing rather than a stale boost.
+    branch_activity_seconds: int | None = None
 
 
 def score_item(item: Rankable, inputs: RankingInputs) -> Score:
@@ -196,6 +216,37 @@ def score_item(item: Rankable, inputs: RankingInputs) -> Score:
         )
     )
 
+    open_pr = OPEN_PR_POINTS if inputs.open_pr else 0.0
+    contributions.append(
+        Contribution.of(
+            input="open_pr",
+            detail=(
+                "an open pull request implements this"
+                if inputs.open_pr
+                else "no open pull request"
+            ),
+            value=1.0 if inputs.open_pr else 0.0,
+            weight=OPEN_PR_POINTS,
+            contribution=open_pr,
+        )
+    )
+
+    branch_fraction = _branch_activity_fraction(inputs.branch_activity_seconds)
+    branch_activity = branch_fraction * BRANCH_ACTIVITY_POINTS
+    contributions.append(
+        Contribution.of(
+            input="branch_activity",
+            detail=(
+                _branch_activity_detail(inputs.branch_activity_seconds)
+                if inputs.branch_activity_seconds is not None
+                else "no branch observed"
+            ),
+            value=round(branch_fraction, 3),
+            weight=BRANCH_ACTIVITY_POINTS,
+            contribution=branch_activity,
+        )
+    )
+
     if inputs.is_terminal:
         contributions.append(
             Contribution.of(
@@ -214,6 +265,23 @@ def score_item(item: Rankable, inputs: RankingInputs) -> Score:
         total=round(total, SCORE_PRECISION),
         contributions=tuple(contributions),
     )
+
+
+def _branch_activity_fraction(seconds: int | None) -> float:
+    """1.0 for a branch touched now, decaying linearly to 0 over the window."""
+    if seconds is None:
+        return 0.0
+    days = max(0.0, seconds / 86_400.0)
+    return max(0.0, 1.0 - days / BRANCH_ACTIVITY_WINDOW_DAYS)
+
+
+def _branch_activity_detail(seconds: int | None) -> str:
+    if seconds is None:
+        return "no branch observed"
+    days = max(0.0, seconds / 86_400.0)
+    if days >= BRANCH_ACTIVITY_WINDOW_DAYS:
+        return f"branch last active {days:.1f}d ago, outside the activity window"
+    return f"branch active {days:.1f}d ago"
 
 
 def rank(scores: list[Score]) -> list[Score]:

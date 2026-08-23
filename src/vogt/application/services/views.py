@@ -37,6 +37,7 @@ from vogt.application.models import (
     WhyResult,
 )
 from vogt.application.services import _resolve
+from vogt.application.services.git_story import GitSignals, build_git_signals
 from vogt.core.entities import (
     Observation,
     Priority,
@@ -213,9 +214,15 @@ class _Candidate:
     entry: RankedItem
     fan_out: int = 0
     initiative_weight: int = 0
+    #: Git-activity ranking inputs (#285): an open PR and a recently-committed
+    #: branch lift a moving item above idle work of the same priority.
+    open_pr: bool = False
+    branch_activity_seconds: int | None = None
 
 
-def _declared_candidates(view: ReadView, items: list[WorkItem]) -> list[_Candidate]:
+def _declared_candidates(
+    view: ReadView, items: list[WorkItem], signals: GitSignals
+) -> list[_Candidate]:
     fan_out = view.blocking_fan_out([item.id for item in items])
     weights: dict[str, int] = {}
     for item in items:
@@ -223,30 +230,35 @@ def _declared_candidates(view: ReadView, items: list[WorkItem]) -> list[_Candida
             initiative = view.initiative_by_id(item.initiative_id)
             weights[item.initiative_id] = 0 if initiative is None else initiative.weight
 
-    return [
-        _Candidate(
-            rankable=Rankable.from_work_item(item),
-            entry=RankedItem(
-                origin="declared",
-                ref=item.ref,
-                title=item.title,
-                kind=item.kind,
-                state=item.state,
-                priority=item.priority,
-                project_slug=item.project_slug,
-                trust_state=item.trust_state,
-                labels=list(item.labels),
-                score=0.0,
-                updated_at=item.updated_at,
-                item=item,
-            ),
-            fan_out=fan_out.get(item.id, 0),
-            initiative_weight=(
-                weights.get(item.initiative_id, 0) if item.initiative_id else 0
-            ),
+    candidates: list[_Candidate] = []
+    for item in items:
+        open_pr, branch_activity = signals.for_ref(item.ref)
+        candidates.append(
+            _Candidate(
+                rankable=Rankable.from_work_item(item),
+                entry=RankedItem(
+                    origin="declared",
+                    ref=item.ref,
+                    title=item.title,
+                    kind=item.kind,
+                    state=item.state,
+                    priority=item.priority,
+                    project_slug=item.project_slug,
+                    trust_state=item.trust_state,
+                    labels=list(item.labels),
+                    score=0.0,
+                    updated_at=item.updated_at,
+                    item=item,
+                ),
+                fan_out=fan_out.get(item.id, 0),
+                initiative_weight=(
+                    weights.get(item.initiative_id, 0) if item.initiative_id else 0
+                ),
+                open_pr=open_pr,
+                branch_activity_seconds=branch_activity,
+            )
         )
-        for item in items
-    ]
+    return candidates
 
 
 def _observed_candidates(
@@ -255,6 +267,7 @@ def _observed_candidates(
     *,
     projects: dict[str, Project],
     adopted: dict[str, str],
+    signals: GitSignals,
     refined: dict[str, tuple[Priority | None, str]] | None = None,
 ) -> list[_Candidate]:
     """Rankable candidates from the observed half.
@@ -285,6 +298,7 @@ def _observed_candidates(
         labels = (
             [str(label) for label in raw_labels] if isinstance(raw_labels, list) else []
         )
+        open_pr, branch_activity = signals.for_ref(observation.subject_key)
         candidates.append(
             _Candidate(
                 rankable=Rankable(
@@ -313,6 +327,8 @@ def _observed_candidates(
                     observed_at=observation.observed_at,
                     adopted_as=adopted.get(observation.subject_key),
                 ),
+                open_pr=open_pr,
+                branch_activity_seconds=branch_activity,
             )
         )
     return candidates
@@ -327,6 +343,8 @@ def _score_all(candidates: list[_Candidate], *, now: datetime) -> list[RankedIte
                 blocking_fan_out=candidate.fan_out,
                 initiative_weight=candidate.initiative_weight,
                 is_terminal=candidate.rankable.state in TERMINAL_STATES,
+                open_pr=candidate.open_pr,
+                branch_activity_seconds=candidate.branch_activity_seconds,
             ),
         )
         for candidate in candidates
@@ -395,7 +413,15 @@ def _gather(
         excluded_unlinked = view.count_work_items(
             replace(work_filter, exclude_unlinked_native=False)
         ) - view.count_work_items(work_filter)
-        candidates = _declared_candidates(view, declared_items)
+        # Git-activity ranking inputs (#285), gathered once for the scope: a
+        # recently-committed branch or an open PR lifts a moving item above idle
+        # work of the same priority.
+        signals = build_git_signals(
+            ctx,
+            project_id=None if project_row is None else project_row.id,
+            now=ctx.clock(),
+        )
+        candidates = _declared_candidates(view, declared_items, signals)
         projects = {p.id: p for p in view.list_projects(limit=10_000, offset=0)}
         suppressions = SuppressionFilter.build(view.list_suppressions(limit=1000))
 
@@ -516,7 +542,12 @@ def _gather(
                 )
             ]
             candidates += _observed_candidates(
-                ctx, observed, projects=projects, adopted=adopted, refined=refined
+                ctx,
+                observed,
+                projects=projects,
+                adopted=adopted,
+                signals=signals,
+                refined=refined,
             )
 
     ranked = _score_all(candidates, now=ctx.clock())
@@ -679,6 +710,7 @@ def why(ctx: AppContext, params: WhyParams) -> WhyResult:
     GitHub issue above my bug" is exactly the question an explainable
     ranking has to be able to take.
     """
+    now = ctx.clock()
     with ctx.declared.read() as view:
         item = view.work_item_by_ref(params.ref)
         if item is not None:
@@ -689,11 +721,16 @@ def why(ctx: AppContext, params: WhyParams) -> WhyResult:
                 weight = 0 if initiative is None else initiative.weight
             rankable = Rankable.from_work_item(item)
             title = item.title
+            open_pr, branch_activity = build_git_signals(
+                ctx, project_id=item.project_id, now=now
+            ).for_ref(item.ref)
             inputs = RankingInputs(
-                now=ctx.clock(),
+                now=now,
                 blocking_fan_out=fan_out.get(item.id, 0),
                 initiative_weight=weight,
                 is_terminal=item.state in TERMINAL_STATES,
+                open_pr=open_pr,
+                branch_activity_seconds=branch_activity,
             )
         else:
             observation = _observation_for(ctx, params.ref)
@@ -712,7 +749,14 @@ def why(ctx: AppContext, params: WhyParams) -> WhyResult:
                 ),
                 state=OBSERVED_STATE,
             )
-            inputs = RankingInputs(now=ctx.clock())
+            open_pr, branch_activity = build_git_signals(
+                ctx, project_id=observation.project_id, now=now
+            ).for_ref(observation.subject_key)
+            inputs = RankingInputs(
+                now=now,
+                open_pr=open_pr,
+                branch_activity_seconds=branch_activity,
+            )
 
     score = score_item(rankable, inputs)
     return WhyResult(

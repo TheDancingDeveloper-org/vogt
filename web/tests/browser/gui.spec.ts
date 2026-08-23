@@ -4190,6 +4190,94 @@ test("The item detail page shows the branches it is worked on, with age (#283)",
   ).toBeVisible();
 });
 
+// #285: the derived git story is layout-bearing — a phase chip sits beside the
+// workflow state, the PR row carries its state/checks/age, and a merged PR under
+// an open item reads as drift. Overrides `/work/get` for this test alone (a
+// route registered later wins), so the shared fixture is untouched.
+test("The item detail page shows its derived git story — phase, PR, drift (#285)", async ({
+  page,
+}) => {
+  await installFixtures(page);
+  await page.route(/\/work\/get(\?|$)/, (route) =>
+    route.fulfill({
+      json: {
+        item: {
+          id: "01JWORKITEM",
+          ref: "WI-7",
+          kind: "feature",
+          title: "Shipped but still open",
+          body: "",
+          state: "in_progress",
+          priority: "normal",
+          project_slug: "vogt",
+          initiative_id: null,
+          origin: "declared",
+          trust_state: "verified",
+          assignee_identity_ref: null,
+          labels: [],
+          relations: [],
+          created_at: "2026-08-01T00:00:00Z",
+          updated_at: "2026-08-17T10:00:00Z",
+        },
+        comments: [],
+        sessions: [],
+        branches: [
+          {
+            name: "wi-7",
+            source: "observed",
+            drift: false,
+            last_commit_age_seconds: 3600,
+          },
+        ],
+        git: {
+          phase: "merged",
+          workflow_state: "in_progress",
+          branches: [
+            {
+              name: "wi-7",
+              source: "observed",
+              drift: false,
+              last_commit_age_seconds: 3600,
+            },
+          ],
+          pull_request: {
+            number: 7,
+            state: "merged",
+            url: "https://example.test/pull/7",
+            checks: "success",
+            provenance: "from PR body",
+            observed_age_seconds: 240,
+          },
+          drift: [
+            {
+              code: "merged_pr_open_item",
+              message:
+                "the pull request merged but the item is still open",
+              provenance: "forge PR #7",
+            },
+          ],
+          task_conclusion_available: false,
+        },
+      },
+    }),
+  );
+
+  await page.goto("/#/w/WI-7");
+  // The derived phase sits beside the workflow state, marked as git.
+  await expect(page.locator('[data-testid="git-phase"]')).toContainText("merged");
+  const panel = page.locator('[data-testid="git-story"]');
+  await expect(panel).toBeVisible();
+  // The PR row carries its derived state and its checks rollup.
+  await expect(panel.locator('[data-testid="git-pr-state"]')).toHaveText("merged");
+  await expect(panel.locator('[data-testid="git-pr-checks"]')).toContainText(
+    "success",
+  );
+  // The contradiction between a merged PR and an open item reads as drift.
+  await expect(
+    panel.locator('[data-testid="git-drift-merged_pr_open_item"]'),
+  ).toContainText("still open");
+});
+
 test("The item editor's assignee picker is keyboard-operable", async ({ page }) => {
   await installFixtures(page, {}, [], undefined, {
     actors: [
