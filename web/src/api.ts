@@ -506,6 +506,49 @@ export interface AgentTaskGate {
   reason?: string;
 }
 
+/** The typed verdict of a finished run (engine `AgentTaskRunOutcome`, #291). */
+export type AgentTaskRunOutcome =
+  | "succeeded"
+  | "failed"
+  | "partially-succeeded"
+  | "skipped"
+  | "blocked";
+
+/** Files/insertions/deletions a run left on its bound branch (#291). */
+export interface AgentTaskDiffStat {
+  files: number;
+  insertions: number;
+  deletions: number;
+}
+
+/** What a run cost, when the CLI reported usage (#291). */
+export interface AgentTaskRunCost {
+  total_usd?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+}
+
+/**
+ * The durable conclusion a run leaves behind (engine `AgentTaskRunConclusion`,
+ * #291): the typed outcome plus how long it ran, what it exited with, how many
+ * schema re-prompts it took, the final sha of the bound branch and what it
+ * changed there, and the parsed cost when the CLI reported one.
+ */
+export interface AgentTaskRunConclusion {
+  started: string;
+  finished: string;
+  duration_ms: number;
+  outcome: AgentTaskRunOutcome;
+  exit_code: number | null;
+  retries: number;
+  branch?: string;
+  final_sha?: string;
+  base_sha?: string;
+  diffstat?: AgentTaskDiffStat;
+  cost?: AgentTaskRunCost;
+  findings: AgentTaskFinding[];
+}
+
 export interface AgentTaskRun {
   id: string;
   task_id: string;
@@ -521,6 +564,15 @@ export interface AgentTaskRun {
   summary: string | null;
   findings: AgentTaskFinding[];
   gates?: AgentTaskGate[];
+  // #291: the typed verdict and durable conclusion, present once the run ends.
+  outcome?: AgentTaskRunOutcome;
+  conclusion?: AgentTaskRunConclusion;
+  // Schema-validation bookkeeping (#291): re-prompts spent and whether the
+  // findings ultimately validated. `schema_ok` is absent when no schema was set.
+  retries?: number;
+  schema_ok?: boolean;
+  branch?: string;
+  base_sha?: string;
 }
 
 export interface AgentTask {
@@ -537,6 +589,14 @@ export interface AgentTask {
   vogt_work_item: string | null;
   gates?: AgentTaskGateSpec[];
   auto_approve?: boolean;
+  // #291: an optional JSON Schema the findings block must satisfy, where the
+  // block lives when it is a file, and the re-prompt budget before a mismatch
+  // is recorded `partially-succeeded`. `branch` names the bound branch a run's
+  // conclusion reports against.
+  output_schema?: unknown | null;
+  output_file?: string | null;
+  output_schema_max_retries?: number;
+  branch?: string | null;
   notify_on_start: boolean;
   notify_on_phrase: string | null;
   auto_retry_on_rate_limit: boolean;
@@ -560,6 +620,10 @@ export interface AgentTaskUpsertRequest {
   vogt_work_item?: string | null;
   gates?: AgentTaskGateSpec[];
   auto_approve?: boolean;
+  output_schema?: unknown | null;
+  output_file?: string | null;
+  output_schema_max_retries?: number;
+  branch?: string | null;
   enabled?: boolean;
   notify_on_start?: boolean;
   notify_on_phrase?: string | null;

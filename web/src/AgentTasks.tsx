@@ -11,6 +11,8 @@ import { useBeforeLeave } from "@solidjs/router";
 import type {
   AgentTask,
   AgentTaskRun,
+  AgentTaskRunCost,
+  AgentTaskRunOutcome,
   AgentTaskSchedule,
   AgentTaskUpsertRequest,
 } from "./api";
@@ -137,6 +139,47 @@ function runStatusLabel(run: AgentTaskRun): string {
         ? "Exited with error"
         : `Exited with status ${run.exit_code}`;
   }
+}
+
+/** The short label on a run's outcome badge (#291). */
+function outcomeLabel(outcome: AgentTaskRunOutcome): string {
+  switch (outcome) {
+    case "succeeded":
+      return "Succeeded";
+    case "failed":
+      return "Failed";
+    case "partially-succeeded":
+      return "Partial";
+    case "skipped":
+      return "Skipped";
+    case "blocked":
+      return "Blocked";
+    default:
+      return outcome;
+  }
+}
+
+/** A run's duration, from milliseconds to a compact human string. */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  return `${minutes}m ${rest}s`;
+}
+
+/** A conclusion's cost as a short string, or null when the CLI reported none. */
+function formatCost(cost?: AgentTaskRunCost): string | null {
+  if (!cost) return null;
+  if (typeof cost.total_usd === "number") return `$${cost.total_usd.toFixed(2)}`;
+  const tokens = [cost.input_tokens, cost.output_tokens].filter(
+    (t): t is number => typeof t === "number",
+  );
+  if (tokens.length > 0) {
+    return `${tokens.reduce((a, b) => a + b, 0)} tok`;
+  }
+  return null;
 }
 
 function scheduleSummary(task: AgentTask): string {
@@ -954,6 +997,60 @@ const AgentTasks = (props: Props) => {
                                 : `Prompt ${run.prompt_file}`}
                             </span>
                           </div>
+                          <Show when={run.outcome}>
+                            {(outcome) => (
+                              <div class="agent-task-run-conclusion">
+                                <span
+                                  class={`agent-task-outcome-badge outcome-${outcome()}`}
+                                  data-testid="run-outcome"
+                                >
+                                  {outcomeLabel(outcome())}
+                                </span>
+                                <Show when={run.conclusion}>
+                                  {(concl) => (
+                                    <span class="agent-task-conclusion-facts">
+                                      <span>
+                                        {formatDuration(concl().duration_ms)}
+                                      </span>
+                                      <Show when={concl().exit_code !== null}>
+                                        <span>exit {concl().exit_code}</span>
+                                      </Show>
+                                      <Show when={(concl().retries ?? 0) > 0}>
+                                        <span>{concl().retries} retries</span>
+                                      </Show>
+                                      <Show when={concl().final_sha}>
+                                        {(sha) => (
+                                          <span class="agent-task-sha">
+                                            {sha().slice(0, 7)}
+                                          </span>
+                                        )}
+                                      </Show>
+                                      <Show when={concl().diffstat}>
+                                        {(diff) => (
+                                          <span class="agent-task-diffstat">
+                                            {diff().files} files{" "}
+                                            <span class="diff-add">
+                                              +{diff().insertions}
+                                            </span>{" "}
+                                            <span class="diff-del">
+                                              -{diff().deletions}
+                                            </span>
+                                          </span>
+                                        )}
+                                      </Show>
+                                      <Show when={formatCost(concl().cost)}>
+                                        {(cost) => (
+                                          <span class="agent-task-cost">
+                                            {cost()}
+                                          </span>
+                                        )}
+                                      </Show>
+                                    </span>
+                                  )}
+                                </Show>
+                              </div>
+                            )}
+                          </Show>
                           <Show when={(run.findings ?? []).length > 0}>
                             <ul class="agent-task-run-findings">
                               <For each={run.findings ?? []}>

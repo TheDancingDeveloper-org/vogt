@@ -4348,3 +4348,289 @@ async fn steering_a_task_with_no_live_run_is_refused() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::CONFLICT);
 }
+
+// --- #291: typed outcomes, the conclusion record, schema-validated findings -
+
+/// A committable git repo under `dir`, so a run's workspace has a branch and a
+/// base sha for the conclusion to report against.
+fn init_git_repo(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "seed@vogt.invalid"],
+        vec!["config", "user.name", "seed"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+}
+
+/// A clean exit in a git workspace concludes `succeeded`, and the conclusion
+/// carries the run's duration, exit code, the final sha of the bound branch and
+/// the diff stats for what the run left on it (#291).
+#[tokio::test]
+async fn a_succeeded_run_records_a_conclusion_with_git_stats() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_git_repo(&repo);
+
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "succeeds",
+            "prompt": "Make a checkpoint.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("edit+commit"),
+            "cwd": repo.to_string_lossy(),
+        }),
+    )
+    .await;
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    let run = &detail["runs"][0];
+    assert_eq!(run["status"], "completed");
+    assert_eq!(run["outcome"], "succeeded");
+
+    let concl = &run["conclusion"];
+    assert_eq!(concl["outcome"], "succeeded");
+    assert_eq!(concl["exit_code"], 0);
+    assert!(
+        concl["duration_ms"].as_u64().unwrap() > 0,
+        "a run that ran took some time: {concl}"
+    );
+    assert!(
+        concl["final_sha"].as_str().is_some_and(|s| s.len() >= 7),
+        "the bound branch has a tip sha: {concl}"
+    );
+    let diff = &concl["diffstat"];
+    assert!(
+        diff["files"].as_u64().unwrap() >= 1,
+        "edit+commit touched at least one file: {concl}"
+    );
+    assert!(
+        diff["insertions"].as_u64().unwrap() >= 1,
+        "edit+commit added at least one line: {concl}"
+    );
+}
+
+/// A non-zero exit concludes `failed`, and the conclusion records the code.
+#[tokio::test]
+async fn a_nonzero_exit_concludes_failed() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "fails",
+            "prompt": "Exit non-zero.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("outcome"),
+            "env": [["FAKE_AGENT_EXIT_CODE", "7"]],
+        }),
+    )
+    .await;
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    let run = &detail["runs"][0];
+    assert_eq!(run["status"], "errored");
+    assert_eq!(run["outcome"], "failed");
+    assert_eq!(run["conclusion"]["exit_code"], 7);
+}
+
+/// A run that prints the skip sentinel and exits cleanly concludes `skipped` —
+/// distinct from `succeeded`, so a reader can tell "nothing to do" from "did it".
+#[tokio::test]
+async fn a_skip_sentinel_concludes_skipped() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "skips",
+            "prompt": "Nothing to do.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("skip"),
+            "env": [["FAKE_AGENT_SKIP_REASON", "already current"]],
+        }),
+    )
+    .await;
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    let run = &detail["runs"][0];
+    assert_eq!(run["outcome"], "skipped");
+    assert_eq!(run["conclusion"]["outcome"], "skipped");
+}
+
+/// A gate that fails closed (here by timing out) concludes the run `blocked` —
+/// the #289 fail-closed path surfaced as the #291 verdict.
+#[tokio::test]
+async fn a_gate_that_times_out_concludes_blocked() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "gated",
+            "prompt": "Wait at a gate that no one answers.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("idle"),
+            "gates": [ {
+                "question": "Proceed?",
+                "options": [ { "label": "Approve", "input": "go", "approve": true } ],
+                "timeout_ms": 300,
+            } ],
+        }),
+    )
+    .await;
+
+    // The gate fails closed on its deadline, which kills the session.
+    let gate = wait_for_gate(&client, &base, &task_id, |g| g["state"] == "blocked").await;
+    assert_eq!(gate["state"], "blocked");
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    let run = &detail["runs"][0];
+    assert_eq!(run["outcome"], "blocked");
+    assert_eq!(run["conclusion"]["outcome"], "blocked");
+}
+
+fn findings_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["summary", "risk"],
+        "properties": {
+            "summary": { "type": "string" },
+            "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+        },
+    })
+}
+
+/// Findings that match the `output_schema` first try conclude `succeeded` with
+/// no re-prompts.
+#[tokio::test]
+async fn output_schema_that_matches_first_try_concludes_succeeded() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "schema-pass",
+            "prompt": "Report structured findings.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("schema"),
+            "output_schema": findings_schema(),
+            "env": [["FAKE_AGENT_SCHEMA_PASS_ON", "1"]],
+        }),
+    )
+    .await;
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    let run = &detail["runs"][0];
+    assert_eq!(run["outcome"], "succeeded", "run: {run}");
+    assert_eq!(run["retries"], 0);
+    assert_eq!(run["schema_ok"], true);
+}
+
+/// Findings that never match are re-prompted up to the budget, then the run
+/// concludes `partially-succeeded` with the re-prompt count recorded.
+#[tokio::test]
+async fn output_schema_that_never_matches_concludes_partially_succeeded_after_retries() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "schema-fail",
+            "prompt": "Report structured findings it cannot get right.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("schema"),
+            "output_schema": findings_schema(),
+            "output_schema_max_retries": 2,
+            // Never reaches a good block, so every attempt fails validation.
+            "env": [["FAKE_AGENT_SCHEMA_PASS_ON", "9"]],
+        }),
+    )
+    .await;
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    let run = &detail["runs"][0];
+    assert_eq!(run["outcome"], "partially-succeeded", "run: {run}");
+    assert_eq!(run["retries"], 2, "two re-prompts were spent: {run}");
+    assert_eq!(run["schema_ok"], false);
+    assert_eq!(run["conclusion"]["outcome"], "partially-succeeded");
+}
+
+/// A `VOGT_COST:` line the run prints is parsed into the conclusion's cost.
+#[tokio::test]
+async fn a_cost_line_is_parsed_into_the_conclusion() {
+    let (cfg, _tmp) = agent_task_config();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let (task_id, _run) = create_and_run(
+        &client,
+        &base,
+        json!({
+            "name": "reports-cost",
+            "prompt": "Report a cost then finish.",
+            "schedule": { "kind": "manual" },
+            "command": fake_agent_command("cost"),
+            "env": [["FAKE_AGENT_COST", "{\"total_usd\": 0.42, \"input_tokens\": 1200}"]],
+        }),
+    )
+    .await;
+
+    let detail = wait_for_run_finish(&client, &base, &task_id).await;
+    let run = &detail["runs"][0];
+    assert_eq!(run["outcome"], "succeeded");
+    let cost = &run["conclusion"]["cost"];
+    assert_eq!(cost["total_usd"].as_f64().unwrap(), 0.42);
+    assert_eq!(cost["input_tokens"].as_u64().unwrap(), 1200);
+}

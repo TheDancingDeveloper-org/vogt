@@ -79,6 +79,9 @@ def test_print_contract_is_valid_json_naming_every_step() -> None:
         "idle",
         "outcome",
         "stall",
+        "skip",
+        "cost",
+        "schema",
     }
     assert contract["notify_phrase_default"] == "VOGT_NOTIFY:"
 
@@ -193,6 +196,41 @@ def test_scenario_from_prompt_marker(tmp_path: Path) -> None:
     # The marker selected `outcome`; the exit-code knob then took effect.
     assert result.returncode == 5
     assert "scenario outcome" in result.stdout
+
+
+def test_skip_prints_the_skip_sentinel_and_exits_clean() -> None:
+    result = run_fake_agent("skip", env={"FAKE_AGENT_SKIP_REASON": "already current"})
+    assert result.returncode == 0, result.stderr
+    assert "VOGT_SKIP: already current" in result.stdout
+
+
+def test_cost_prints_a_parseable_cost_line() -> None:
+    result = run_fake_agent("cost", env={"FAKE_AGENT_COST": "$0.40"})
+    assert result.returncode == 0, result.stderr
+    assert "VOGT_COST: $0.40" in result.stdout
+
+
+def test_schema_passes_first_try_emits_a_good_block_and_exits() -> None:
+    result = run_fake_agent(
+        "schema",
+        env={"FAKE_AGENT_SCHEMA_DELAY": "0", "FAKE_AGENT_SCHEMA_PASS_ON": "1"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "```json" in result.stdout
+    assert '"risk": "low"' in result.stdout
+
+
+def test_schema_without_reprompt_gives_up_on_eof() -> None:
+    # PASS_ON high enough that the first block is wrong; with no re-prompt on
+    # stdin the step stops cleanly on eof rather than spinning.
+    result = run_fake_agent(
+        "schema",
+        env={"FAKE_AGENT_SCHEMA_DELAY": "0", "FAKE_AGENT_SCHEMA_PASS_ON": "9"},
+        stdin="",
+    )
+    assert result.returncode == 0, result.stderr
+    # The first (wrong) block omits the required `risk` field.
+    assert '"summary": "did the thing"' in result.stdout
 
 
 def test_unknown_step_is_refused() -> None:

@@ -571,6 +571,23 @@ gates with their affirmative option and records that it did so (as
 such. A resolved gate stays on the run as a one-line note — who approved which
 option, or why it was blocked.
 
+**Every run ends with a verdict and a conclusion.** When a run finishes its row
+shows a typed **outcome** badge — *Succeeded*, *Failed*, *Partial*, *Skipped*,
+or *Blocked* — next to the durable facts of what it did: how long it ran, the
+exit code, the tip of the branch it worked on (a short sha) and the diff stats
+for what it changed there (files, `+` insertions, `−` deletions), plus its cost
+when the agent reported one. *Blocked* is a run that stopped at a gate that
+failed closed; *Skipped* is a run that decided there was nothing to do (it
+prints a `VOGT_SKIP:` line) rather than a run that did the work — the two are
+worth telling apart.
+
+**Ask for structured findings.** A task can carry an **output schema** — a JSON
+Schema the run's findings must match. When set, the agent's findings block (a
+fenced `json` block, or a file you name) is validated against it, and on a
+mismatch the agent is **re-prompted to fix it**, up to a small budget, before
+the run is recorded as *Partial*. Leave the schema unset and findings stay
+free-text, exactly as before.
+
 Daily schedules are read in **UTC**, and the daily-times field is labelled so —
 a `09:00` is 09:00 UTC, not the reader's local morning.
 

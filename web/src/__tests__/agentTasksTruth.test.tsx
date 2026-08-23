@@ -424,3 +424,70 @@ describe("Tool draft sessionStorage mirror", () => {
     expect(readToolDraft("tasks", null)).toEqual({ hello: "world" });
   });
 });
+
+describe("#291 — a run's typed outcome and conclusion", () => {
+  it("renders the outcome badge with its diffstat, retries, sha, and cost", async () => {
+    const concluded = run({
+      status: "errored",
+      exit_code: 1,
+      summary: "Findings did not match the output schema",
+      outcome: "partially-succeeded",
+      retries: 2,
+      schema_ok: false,
+      conclusion: {
+        started: "2026-08-18T00:00:00Z",
+        finished: "2026-08-18T00:00:03Z",
+        duration_ms: 3000,
+        outcome: "partially-succeeded",
+        exit_code: 1,
+        retries: 2,
+        branch: "feat/x",
+        final_sha: "abcdef1234567890",
+        base_sha: "0000000",
+        diffstat: { files: 2, insertions: 10, deletions: 3 },
+        cost: { total_usd: 0.42 },
+        findings: [],
+      },
+    });
+    const withRun: AgentTask = {
+      ...task("task-alpha", "Alpha review"),
+      runs: [concluded],
+    };
+    vi.spyOn(api, "listAgentTasks").mockResolvedValue([withRun]);
+
+    mountTasks();
+    await fireEvent.click(await screen.findByRole("button", { name: /Alpha review/ }));
+
+    const badge = await screen.findByTestId("run-outcome");
+    expect(badge).toHaveTextContent("Partial");
+    expect(badge).toHaveClass("outcome-partially-succeeded");
+    // The conclusion facts a reader scans without opening the session.
+    expect(screen.getByText("3.0s")).toBeVisible();
+    expect(screen.getByText("2 retries")).toBeVisible();
+    expect(screen.getByText("abcdef1")).toBeVisible();
+    expect(screen.getByText(/2 files/)).toBeVisible();
+    expect(screen.getByText("+10")).toBeVisible();
+    expect(screen.getByText("-3")).toBeVisible();
+    expect(screen.getByText("$0.42")).toBeVisible();
+  });
+
+  it("shows no outcome badge for a run that is still running", async () => {
+    const running = run({
+      status: "running",
+      completed_at: null,
+      exit_code: null,
+      outcome: undefined,
+      conclusion: undefined,
+    });
+    const withRun: AgentTask = {
+      ...task("task-alpha", "Alpha review"),
+      runs: [running],
+    };
+    vi.spyOn(api, "listAgentTasks").mockResolvedValue([withRun]);
+
+    mountTasks();
+    await fireEvent.click(await screen.findByRole("button", { name: /Alpha review/ }));
+    await screen.findByText("Still running");
+    expect(screen.queryByTestId("run-outcome")).not.toBeInTheDocument();
+  });
+});
