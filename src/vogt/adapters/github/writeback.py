@@ -118,6 +118,28 @@ class ForgeWriter:
             method="PATCH",
         )
 
+    def update_issue_body(
+        self, *, repo_url: str | None, number: int, body: str
+    ) -> WriteBackResult:
+        """Re-render an issue body's managed region (#286).
+
+        The one edit verb on the write surface, and deliberately the narrowest
+        one that #286 needs: it replaces an issue *body*, never a title, never a
+        state, never anything on an item Vogt does not own. It is bounded to
+        forward-only use by its single caller — the initiative projection edits
+        only the span between its own markers and copies every other byte of the
+        body through (`splice_managed_region`), so a human's prose is preserved,
+        not overwritten. FR-B4's "no deletion, no force" still holds: nothing is
+        removed upstream and the edit is a plain `PATCH`, recoverable by another.
+        """
+        return self._post(
+            repo_url,
+            path="/repos/{owner}/{repo}/issues/{number}",
+            number=number,
+            payload={"body": body},
+            method="PATCH",
+        )
+
     def create_repo(
         self, *, name: str, private: bool, description: str | None = None
     ) -> dict[str, Any]:

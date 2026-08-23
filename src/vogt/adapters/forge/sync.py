@@ -226,6 +226,11 @@ class ForgeIssuesCollector(_ForgeSyncCollector):
                 "author": item.author,
                 "assignees": list(item.assignees),
                 "comments": item.comments,
+                # Carried so an initiative tracking issue (#286) is observed
+                # body-and-all: a human ticking a box upstream edits the body,
+                # and a sweep must be able to see the tick to raise it as drift
+                # against the overlay (FR-O2) rather than silently overwrite it.
+                "body": item.body,
                 "updated_at": item.updated_at,
                 "closed_at": item.closed_at,
                 "repo": ref.slug,
@@ -296,9 +301,7 @@ def _implements(
     and a cross-repo `owner/repo#3` both land as the subject the rest of Vogt
     speaks (D5). Provenance travels with every edge, so a reader can see why."""
     edges: list[dict[str, object]] = []
-    for edge in parse_edges(
-        title=pull.title, body=pull.body, branch=pull.head_ref
-    ):
+    for edge in parse_edges(title=pull.title, body=pull.body, branch=pull.head_ref):
         target = ref
         if edge.owner and edge.repo:
             target = RepoRef(host=ref.host, owner=edge.owner, repo=edge.repo)

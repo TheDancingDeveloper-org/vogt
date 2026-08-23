@@ -45,6 +45,10 @@ from vogt.application.services.inbox import (
     restore_inbox,
     snooze_inbox,
 )
+from vogt.application.services.initiative_publish import (
+    publish_initiative,
+    reproject_initiative,
+)
 from vogt.application.services.instance import (
     init_instance,
     migrate_instance,
@@ -162,9 +166,11 @@ __all__ = [
     "observations",
     "onboard",
     "prune",
+    "publish_initiative",
     "publish_project",
     "register_project",
     "relate_work",
+    "reproject_initiative",
     "resolve_drift",
     "restore",
     "restore_inbox",

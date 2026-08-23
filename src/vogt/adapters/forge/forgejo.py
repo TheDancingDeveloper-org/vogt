@@ -353,6 +353,7 @@ class ForgejoProvider:
                     if login
                 ),
                 comments=int(item.get("comments", 0)),
+                body=item.get("body"),
                 updated_at=item.get("updated_at"),
                 closed_at=item.get("closed_at"),
                 source_url=item.get("html_url"),
@@ -562,6 +563,23 @@ class ForgejoProvider:
             ref,
             endpoint=f"/repos/{ref.owner}/{ref.repo}/issues/{number}",
             payload={"state": state},
+            number=number,
+            method="PATCH",
+        )
+
+    def update_issue_body(
+        self, ref: RepoRef, number: int, *, body: str
+    ) -> WriteBackResult:
+        """Re-render an issue body's managed region (#286).
+
+        The one edit verb, kept as narrow here as on GitHub: a `PATCH` of the
+        body only, driven solely by the initiative projection, which rewrites
+        just the span between its own markers and copies the rest through — so
+        no human text is removed and FR-B4's spirit holds."""
+        return self._post(
+            ref,
+            endpoint=f"/repos/{ref.owner}/{ref.repo}/issues/{number}",
+            payload={"body": body},
             number=number,
             method="PATCH",
         )

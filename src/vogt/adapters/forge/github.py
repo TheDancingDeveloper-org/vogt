@@ -358,6 +358,13 @@ class GitHubProvider:
             state=state,  # type: ignore[arg-type]
         )
 
+    def update_issue_body(
+        self, ref: RepoRef, number: int, *, body: str
+    ) -> WriteBackResult:
+        return self._writer().update_issue_body(
+            repo_url=self.web_url(ref), number=number, body=body
+        )
+
     def create_repo(
         self, name: str, *, private: bool, description: str | None = None
     ) -> ForgeRepo:
@@ -436,6 +443,7 @@ def _to_issue(ref: RepoRef, item: dict[str, Any]) -> ForgeIssue:
             if (a or {}).get("login")
         ),
         comments=int(item.get("comments", 0)),
+        body=item.get("body"),
         updated_at=item.get("updated_at"),
         closed_at=item.get("closed_at"),
         source_url=item.get("html_url"),

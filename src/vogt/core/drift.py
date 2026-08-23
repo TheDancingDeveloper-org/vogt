@@ -73,6 +73,15 @@ HUMAN_GATED_REASON: dict[str, str] = {
         "adopted as a link, and only somebody who knows which register is "
         "right can say whether to close the issue or reopen the item"
     ),
+    "initiative_checkbox_drift": (
+        "a checkbox was ticked upstream and the member's workflow state was "
+        "not; only somebody who knows which is right can say whether to move "
+        "the item or let the next re-render restore the box"
+    ),
+    "initiative_tracking_close": (
+        "the initiative is closed here; whether its tracking issue should be "
+        "closed upstream is a person's call — Vogt proposes it, never writes it"
+    ),
 }
 
 
@@ -273,6 +282,14 @@ FORGE_STATE_MISMATCH = "forge_state_mismatch"
 VANISHED_UPSTREAM = "vanished_upstream"
 CI_RED_VS_HEALTHY = "ci_red_vs_healthy"
 UPDATE_AUTOMATION_GAP = "update_automation_gap"
+#: A checkbox on an initiative tracking issue was ticked (or unticked) upstream
+#: and no longer matches what the member's workflow state says (#286). The tick
+#: is a human's edit inside Vogt's managed region; surfacing it as drift is what
+#: keeps the projection from silently overwriting it on the next re-render.
+INITIATIVE_CHECKBOX_DRIFT = "initiative_checkbox_drift"
+#: Closing an initiative proposes closing its tracking issues; Vogt never
+#: writes that close itself (#286 deliverable 4).
+INITIATIVE_TRACKING_CLOSE = "initiative_tracking_close"
 
 #: `forge_state_mismatch` joins the auto-acceptable set: it is state-sync,
 #: and the change it proposes is one somebody already made upstream.
@@ -282,7 +299,13 @@ FORGE_AUTO_ACCEPTABLE: frozenset[str] = frozenset({FORGE_STATE_MISMATCH})
 #: The forge kinds that are always human-gated, already listed in
 #: HUMAN_GATED_REASON above. Kept as a set for the engine to check against.
 FORGE_HUMAN_GATED: frozenset[str] = frozenset(
-    {VANISHED_UPSTREAM, CI_RED_VS_HEALTHY, UPDATE_AUTOMATION_GAP}
+    {
+        VANISHED_UPSTREAM,
+        CI_RED_VS_HEALTHY,
+        UPDATE_AUTOMATION_GAP,
+        INITIATIVE_CHECKBOX_DRIFT,
+        INITIATIVE_TRACKING_CLOSE,
+    }
 )
 
 
@@ -315,6 +338,54 @@ def forge_state_mismatch(
             "from": declared_state,
             "to": "done" if upstream_state == "closed" else "open",
             "work_ref": work_ref,
+        },
+        evidence=evidence,
+        evidence_observation_id=evidence_observation_id,
+    )
+
+
+def initiative_checkbox_drift(
+    *,
+    initiative_id: str,
+    initiative_slug: str,
+    project_id: str | None,
+    subject_key: str,
+    number: int,
+    work_ref: str,
+    upstream_checked: bool,
+    expected_checked: bool,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: str | None,
+) -> DriftFinding:
+    """A tracking-issue checkbox disagrees with the member's state (#286).
+
+    Human-gated on purpose: the tick is somebody's edit, and only a person can
+    say whether the item should move to match it or the box should be restored
+    on the next re-render. Vogt neither auto-moves the item nor silently
+    re-renders the box away — it raises the disagreement and waits.
+    """
+    ticked = "ticked" if upstream_checked else "unticked"
+    ought = "done/terminal" if expected_checked else "still open"
+    return DriftFinding(
+        kind=INITIATIVE_CHECKBOX_DRIFT,
+        subject_kind="initiative",
+        # One proposal per member, not per initiative: two boxes ticked out of
+        # step are two questions, and collapsing them by initiative id would
+        # hide the second behind the first (the `open_drift_subjects` dedup).
+        subject_id=f"{initiative_id}:{number}",
+        project_id=project_id,
+        summary=(
+            f"initiative {initiative_slug!r}: {work_ref} (#{number}) is {ticked} "
+            f"on the tracking issue but is {ought} here"
+        ),
+        proposed_change={
+            "entity": "work_item",
+            "initiative": initiative_slug,
+            "work_ref": work_ref,
+            "subject_key": subject_key,
+            "number": number,
+            "upstream_checked": upstream_checked,
+            "expected_checked": expected_checked,
         },
         evidence=evidence,
         evidence_observation_id=evidence_observation_id,

@@ -168,6 +168,21 @@ class ForgeProvider(Protocol):
     def set_state(self, ref: RepoRef, number: int, state: str) -> WriteBackResult:
         """Close or reopen. Both directions are recoverable by the other."""
 
+    def update_issue_body(
+        self, ref: RepoRef, number: int, *, body: str
+    ) -> WriteBackResult:
+        """Re-render an issue *body* — the one edit verb, bounded by #286.
+
+        Added for the initiative tracking issue: a projection that keeps a
+        checkbox task list current has to rewrite a body, which the append-only
+        set (`comment`, `create_issue`, `add_labels`, `set_state`) has no verb
+        for. It stays inside FR-B4's spirit by construction of its only caller —
+        the projection edits solely the span between its own markers and copies
+        every other byte through, so no human text is ever removed — and by the
+        verb's own shape: it touches a body and nothing else, never a title,
+        never a state, and a `PATCH` is recoverable by the next `PATCH`.
+        """
+
     def create_repo(
         self, name: str, *, private: bool, description: str | None = None
     ) -> ForgeRepo:

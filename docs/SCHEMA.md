@@ -197,6 +197,25 @@ separate operation (`ROADMAP.md` M5): a comment authored here posts upstream
 as part of commenting, so this table is the only place the upstream half of
 a declared write is visible before the next sweep re-observes it.
 
+*Added at #286*: `initiative.publish` projects an initiative onto **one forge
+tracking issue per linked repo** it spans — an issue labelled
+`initiative:<slug>` whose body carries a checkbox task list of the member work
+items (`- [ ] #<n> <title>`, checked when the member is terminal). It is the one
+write-back that *edits* a body rather than only appending, so the provider write
+surface gains a single bounded verb, `update_issue_body`, beside the append-only
+set (`comment`, `create_issue`, `add_labels`, `set_state`). It stays additive
+and forward-only by construction: Vogt rewrites only the span between two
+`<!-- vogt:initiative:… -->` markers (the **managed region**) and copies every
+other byte of the body through, so a human's own notes survive a re-render, and
+it never deletes. A re-run *adopts* the marked issue instead of opening a second
+one. The projection is recorded as an audited action (the effect lands upstream,
+like `forge.onboard`), not as a declared row. Two consequences reach the drift
+table (§2.4): closing the initiative **proposes** closing its tracking issues
+(`initiative_tracking_close`) rather than writing the close, and — because the
+tracking issue is observed like any other — a human ticking a box upstream out
+of step with the member's state surfaces as `initiative_checkbox_drift` on the
+next sweep rather than being silently re-rendered away.
+
 *Added at 0013 (#181, FR-B7)*: `work_overlay` carries only what must never
 cross the forge boundary — decision 2's invariant — and joins the observed
 mirror (which stays the truth for title/labels/open-closed) into the item
@@ -273,6 +292,8 @@ Drift kinds (v1):
 | `update_automation_gap` | M5 | a required automation toggle is off (FR-D6) |
 | `broken_path_dependency` | M3 | a path reference inside the project's own tree resolving to nothing |
 | `referenced_issue_state_mismatch` | r15 | a work item's own text names a forge issue whose observed state disagrees (FR-R7) |
+| `initiative_checkbox_drift` | #286 | a box on an initiative tracking issue was ticked upstream out of step with the member's workflow state |
+| `initiative_tracking_close` | #286 | the initiative is closed here; its tracking issue is still open upstream — a *proposal* to close it, never an automatic write |
 
 *r2 removals*: `contract_violation` and `unregistered_project` are no
 longer drift — the first is `projects.compliance_status` (`DESIGN.md` §5),

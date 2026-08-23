@@ -93,6 +93,10 @@ class ForgeIssue:
     author: str | None = None
     assignees: tuple[str, ...] = ()
     comments: int = 0
+    #: The issue body. Carried so an initiative tracking issue (#286) can be
+    #: recognised by its managed marker and its checkbox states read back —
+    #: `None` is "the forge did not include it", never "empty".
+    body: str | None = None
     updated_at: str | None = None
     closed_at: str | None = None
     source_url: str | None = None
