@@ -471,7 +471,38 @@ store, naming the migration, and operations that touch the changed tables
 fail. Rolling back across a schema change means restoring the backup from
 step 1, not just running the older image.
 
-## 8. Troubleshooting
+## 8. Public demo image
+
+The `demo-runtime` target in `engine/Dockerfile` builds a separate, static-only
+artifact from `dev`.
+It compiles the Solid PWA once, records each asset hash and the exact source
+SHA in `demo-build.json`, verifies them, and only then adds
+`demo-manifest.json` plus the simulated GUI document. The runtime is a small
+read-only Node static server. It has no Python core, Rust engine, PTY,
+subprocess route, workspace mount, upstream proxy or deploy credential.
+
+The `demo-image` job in `build.yml` runs only for `dev`, smoke-tests that APIs
+are refused, emits an SBOM and signs the digest. It **does not deploy**.
+Deployment follows the same NFR-D10 path as every other Vogt image: pin the
+reported `ghcr.io/thedancingdeveloper-org/vogt-demo@sha256:…` reference in the
+operator's `indexarr/ops` stack and let Komodo apply it. The repository-local
+[`deploy/demo.overlay.yml`](../deploy/demo.overlay.yml) documents the hardened
+runtime and safe allocation defaults; it is not an alternate deployment path.
+
+To build and prove the artifact locally:
+
+```console
+docker build -f engine/Dockerfile --target demo-runtime \
+  --build-arg VOGT_SOURCE_REF=dev \
+  --build-arg VOGT_SOURCE_SHA="$(git rev-parse HEAD)" .
+```
+
+The public origin should expose only port 8910 through the operator's chosen
+private/TLS binding. It needs no token or persisted volume. A stale source SHA
+or asset hash makes demo augmentation (and browser selection) fail rather than
+claiming parity.
+
+## 9. Troubleshooting
 
 **`/health/ready` returns 503 with "run `vogt init` first".** The container
 command is not the base's `vogt init && exec vogt serve`, or the data

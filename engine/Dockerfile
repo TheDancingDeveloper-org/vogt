@@ -23,6 +23,7 @@
 #
 # Stages:
 #   1. web-build    — pnpm install + vite build of web/
+#   1a. demo-web / demo-runtime — metadata-only augmentation + static demo image
 #   2. server-build — cargo build --release of engine/server, embedding the bundle
 #   3. core         — the published public core image, lifted whole (#143)
 #   4. runtime      — `FROM ${POD_BASE_IMAGE}` plus both halves + entrypoint
@@ -91,6 +92,8 @@ ARG POD_BASE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean
 # with a **digest** so a commit-identified build pins both halves — see stage 3
 # and `.github/workflows/build.yml`, exactly as `POD_BASE_IMAGE` above.
 ARG CORE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt:latest
+ARG VOGT_SOURCE_REF=local
+ARG VOGT_SOURCE_SHA=0000000000000000000000000000000000000000
 # Off by default (prod). `.github/workflows/build.yml` passes
 # INSTALL_AI_CLIENTS=true when the ref is the `dev` branch — the branch that
 # also produces the `:dev` and `dev-<sha>` tags — to bake in codex + claude
@@ -117,11 +120,38 @@ ARG INSTALL_THECLAWBAY=false
 
 # ─── Stage 1: web bundle ────────────────────────────────────────────────────
 FROM ${NODE_IMAGE} AS web-build
+ARG VOGT_SOURCE_REF
+ARG VOGT_SOURCE_SHA
 WORKDIR /app/web
 COPY web/package.json web/pnpm-lock.yaml ./
 RUN npm install -g pnpm && pnpm install --frozen-lockfile
 COPY web/ ./
-RUN pnpm build
+RUN VOGT_SOURCE_REF="$VOGT_SOURCE_REF" VOGT_SOURCE_SHA="$VOGT_SOURCE_SHA" pnpm build
+
+# ─── Public demo target ────────────────────────────────────────────────────
+# `demo-runtime` branches from the exact `web-build` stage the normal engine
+# embeds. It verifies those already-built asset hashes before adding the two
+# demo-only documents. CI builds the normal stack first, then this target from
+# that stack's exported cache, so parity is a shared layer rather than two
+# compilers being expected to agree.
+FROM web-build AS demo-web
+ARG VOGT_SOURCE_REF
+ARG VOGT_SOURCE_SHA
+RUN VOGT_SOURCE_REF="$VOGT_SOURCE_REF" VOGT_SOURCE_SHA="$VOGT_SOURCE_SHA" pnpm demo:augment
+
+FROM ${NODE_IMAGE} AS demo-runtime
+WORKDIR /app
+COPY --from=demo-web /app/web/dist /app/dist
+COPY engine/deploy/demo-server.mjs /app/demo-server.mjs
+# A restrictive checkout umask may make COPY preserve mode 0600.  Normalize
+# the one executable input before dropping to the unprivileged node user.
+RUN chmod 0444 /app/demo-server.mjs
+USER node
+EXPOSE 8910
+ENV DEMO_BIND=0.0.0.0 \
+    DEMO_PORT=8910 \
+    NODE_ENV=production
+ENTRYPOINT ["node", "/app/demo-server.mjs"]
 
 # ─── Stage 2: rust binary with embedded web/ ────────────────────────────────
 FROM ${RUST_IMAGE} AS server-build

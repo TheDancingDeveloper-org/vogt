@@ -1,0 +1,27 @@
+# Public-demo service for an operator-managed Komodo stack. Publishing this
+# image never deploys it; production pins the signed digest in indexarr/ops.
+services:
+  vogt-demo:
+    image: ${VOGT_DEMO_IMAGE:?Set VOGT_DEMO_IMAGE to ghcr.io/thedancingdeveloper-org/vogt-demo@sha256:...}
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "${VOGT_DEMO_BIND_IP:-127.0.0.1}:${VOGT_DEMO_PORT:-8912}:8910"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8910/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

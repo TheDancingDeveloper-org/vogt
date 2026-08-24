@@ -10,6 +10,7 @@
 
 import { api, getBase, getToken } from "./api";
 import { Capacitor } from "@capacitor/core";
+import { isDemoMode, runtimeTransport } from "./runtimeTransport";
 
 export interface PushPublicKey {
   vapid_public_key: string;
@@ -19,6 +20,7 @@ export interface PushPublicKey {
 let serviceWorkerMessageHandlerRegistered = false;
 
 export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
+  if (isDemoMode()) return null;
   if (isNativePlatform()) {
     void registerNativePushHandlers();
   }
@@ -69,6 +71,7 @@ export async function pushPermission(): Promise<PushPermissionState> {
 }
 
 export async function requestPushPermission(): Promise<NotificationPermission> {
+  if (isDemoMode()) return "denied";
   if (!("Notification" in window)) return "denied";
   if (Notification.permission === "default") {
     return Notification.requestPermission();
@@ -77,6 +80,7 @@ export async function requestPushPermission(): Promise<NotificationPermission> {
 }
 
 export function isPushSupported(): boolean {
+  if (isDemoMode()) return false;
   return (
     "serviceWorker" in navigator &&
     "PushManager" in window &&
@@ -213,7 +217,7 @@ function arrayBufferToBase64Url(buf: ArrayBuffer): string {
 }
 
 async function fetchPublicKey(): Promise<PushPublicKey> {
-  const r = await fetch(`${getBase()}/api/push/public-key`);
+  const r = await runtimeTransport().request(`${getBase()}/api/push/public-key`);
   if (!r.ok) throw new Error(`public-key fetch: ${r.status}`);
   return r.json();
 }
@@ -249,7 +253,7 @@ export async function subscribePush(label?: string): Promise<{
     label,
   };
   const tok = getToken();
-  const r = await fetch(`${getBase()}/api/push/subscribe`, {
+  const r = await runtimeTransport().request(`${getBase()}/api/push/subscribe`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -273,7 +277,7 @@ export async function unsubscribePush(): Promise<void> {
 
   const tok = getToken();
   if (id) {
-    await fetch(`${getBase()}/api/push/unsubscribe`, {
+    await runtimeTransport().request(`${getBase()}/api/push/unsubscribe`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -444,7 +448,7 @@ export async function subscribeNativeFcm(label?: string): Promise<{ id: string }
   const token = await tokenPromise;
 
   const tok = getToken();
-  const r = await fetch(`${getBase()}/api/push/subscribe`, {
+  const r = await runtimeTransport().request(`${getBase()}/api/push/subscribe`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -471,7 +475,7 @@ export async function unsubscribeNativeFcm(): Promise<void> {
   } finally {
     if (id) {
       const tok = getToken();
-      await fetch(`${getBase()}/api/push/unsubscribe`, {
+      await runtimeTransport().request(`${getBase()}/api/push/unsubscribe`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
