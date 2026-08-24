@@ -2,8 +2,8 @@ name: deploy production
 
 # Publishing a release never changes production. This separately dispatched
 # workflow makes the cross-repository handoff explicit, records its exact
-# digest, and lets GitHub's `vogt-prod` environment require an approver before
-# it can modify estate desired state or call Node B's Komodo deployment API.
+# digest, and requires an explicit live-change confirmation before it can
+# modify estate desired state or call Node B's Komodo deployment API.
 
 on:
   workflow_dispatch:
@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   deploy:
@@ -52,6 +53,13 @@ jobs:
             echo "::error::$TAG ($tag_sha) is not reachable from origin/prod"
             exit 1
           }
+
+      - name: authenticate to the release registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: resolve the signed merged-image digest
         id: image
