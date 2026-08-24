@@ -49,6 +49,10 @@ const LEGACY_NOTIFY_PHRASE: &str = "MYDEVENV2_NOTIFY:";
 /// implied so that a second one arriving has to say it is a second one.
 const FINDING_SOURCE_NOTIFY_PHRASE: &str = "notify-phrase";
 
+/// The provenance stamped on a collected checkpoint-branch observation (#284):
+/// the workflow engine. Provider-agnostic by rule — never a vendor name.
+const CHECKPOINT_PROVENANCE: &str = "workflow-engine";
+
 /// The sentinel a run prints to declare itself a deliberate no-op (#291). A run
 /// that prints this and exits cleanly is `skipped`, not `succeeded` — the
 /// difference between "there was nothing to do" and "I did it", which a `why`
@@ -390,6 +394,37 @@ pub struct AgentTaskRun {
     /// fresh repo), in which case the diff is measured from the empty tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_sha: Option<String>,
+    /// The per-stage git checkpoint branches this run reported, collected as
+    /// observations off its live event stream (#284). Each carries its own
+    /// provenance and age. Empty for a PTY run, and for a workflow run the
+    /// engine reported no checkpoints for — absence is not an error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<CheckpointObservation>,
+}
+
+/// One per-stage git checkpoint branch a workflow run reported, collected as a
+/// run observation (#284).
+///
+/// Observed-first: a checkpoint branch is evidence a stage of the run produced,
+/// carrying where it came from (`provenance` — the workflow engine) and when it
+/// was seen (`observed_at`, its age). It is bound to the run, and through the
+/// run to the task's `vogt_work_item`. A run the engine reports no checkpoints
+/// for simply has none; that is the ordinary, non-fatal case, never an error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointObservation {
+    /// The git branch the engine checkpointed the stage on.
+    pub branch: String,
+    /// The stage/node the checkpoint belongs to, when the event named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    /// Where this observation came from — the workflow engine. Named rather than
+    /// implied so a reader can tell the mechanism apart from a future one, the
+    /// same reason [`AgentTaskFinding::source`] exists.
+    pub provenance: String,
+    /// When the checkpoint was observed: the stream event's own timestamp when
+    /// it carried one, else the moment it was collected. This is its age.
+    #[serde(with = "time::serde::rfc3339")]
+    pub observed_at: OffsetDateTime,
 }
 
 /// One thing a run reported about itself.
@@ -1469,6 +1504,7 @@ impl AgentTaskRegistry {
             schema_ok: None,
             branch: start_branch,
             base_sha: start_sha,
+            checkpoints: vec![],
         };
 
         {
@@ -1639,6 +1675,7 @@ impl AgentTaskRegistry {
             schema_ok: None,
             branch: None,
             base_sha: None,
+            checkpoints: vec![],
         };
 
         // Resolve the engine token from its file, if configured (#293). A set
@@ -1674,9 +1711,11 @@ impl AgentTaskRegistry {
                 self.record_workflow_run(id, trigger, &origin.detail, &run, now)?;
                 // Track the run off its live SSE event stream (#293 inc-2),
                 // degrading to the poller when the stream is absent or breaks.
-                // DEFERRED to a later slice: bridging #289 gates onto the
-                // engine's own gates, and collecting the #283/#284 checkpoint
-                // checkpoint branches the engine produces as run observations.
+                // The tracker also collects each per-stage checkpoint branch the
+                // stream reports as a run observation (#284). DEFERRED to a later
+                // slice: bridging #289 gates onto the engine's own gates,
+                // collecting checkpoints on the poll-only fallback path, and a
+                // live-engine smoke of the provisional wire field names.
                 spawn_workflow_tracker(
                     Arc::clone(self),
                     provider,
@@ -1809,6 +1848,56 @@ impl AgentTaskRegistry {
             deletions: diffstat.map(|d| d.deletions),
             cost_usd,
         });
+    }
+
+    /// Collect a per-stage git checkpoint branch a workflow run reported as a
+    /// run observation (#284).
+    ///
+    /// Observed-first and non-fatal: the branch is stamped with its provenance
+    /// (the workflow engine, [`CHECKPOINT_PROVENANCE`]) and the age at which it
+    /// was seen, then appended to the run — and through the run, bound to the
+    /// task's `vogt_work_item`. A checkpoint already recorded for the same
+    /// `(branch, step)` is not duplicated, so a stream that re-announces a stage
+    /// is idempotent. A blank branch, or a run the registry no longer has, is a
+    /// silent no-op — nothing here can fail the run or the scheduler.
+    fn record_workflow_checkpoint(
+        &self,
+        task_id: Uuid,
+        run_id: Uuid,
+        step_id: Option<&str>,
+        branch: &str,
+        observed_at: OffsetDateTime,
+    ) {
+        let branch = branch.trim();
+        if branch.is_empty() {
+            return;
+        }
+        let step_id = step_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let mut tasks = self.tasks.lock();
+        let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) else {
+            return;
+        };
+        let Some(run) = task.runs.iter_mut().find(|r| r.id == run_id) else {
+            return;
+        };
+        if run
+            .checkpoints
+            .iter()
+            .any(|c| c.branch == branch && c.step_id.as_deref() == step_id.as_deref())
+        {
+            return;
+        }
+        run.checkpoints.push(CheckpointObservation {
+            branch: branch.to_string(),
+            step_id,
+            provenance: CHECKPOINT_PROVENANCE.to_string(),
+            observed_at,
+        });
+        task.updated_at = OffsetDateTime::now_utc();
+        let _ = self.save_locked(&tasks);
     }
 
     /// Record a workflow run as errored with a written reason (#293). Builds a
@@ -3253,6 +3342,20 @@ fn spawn_workflow_tracker(
                             message = event.message.as_deref().unwrap_or(""),
                             "workflow run event",
                         );
+                        // Collect a per-stage checkpoint branch the event
+                        // reported as a run observation (#284), stamped with its
+                        // provenance and age. Done before the terminal check so
+                        // a terminal event that also names a checkpoint still
+                        // contributes one. Non-fatal: absence records nothing.
+                        if let Some(branch) = event.checkpoint_branch.as_deref() {
+                            registry.record_workflow_checkpoint(
+                                task_id,
+                                run_id,
+                                event.step_id.as_deref(),
+                                branch,
+                                event.at.unwrap_or_else(OffsetDateTime::now_utc),
+                            );
+                        }
                         if let Some(state) = event.terminal_state {
                             finalize_workflow_run(
                                 &registry,
@@ -4881,6 +4984,160 @@ mod tests {
         let stored = registry.get(task.id).unwrap();
         assert_eq!(stored.runs.len(), 1);
         assert_eq!(stored.runs[0].status, AgentTaskRunStatus::Errored);
+    }
+
+    /// Seed a `Running` workflow run into a task and return its id, so a test
+    /// can exercise the post-start observation path without a live engine.
+    fn seed_running_run(registry: &AgentTaskRegistry, task_id: Uuid) -> Uuid {
+        let run_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        let mut tasks = registry.tasks.lock();
+        let task = tasks.iter_mut().find(|t| t.id == task_id).unwrap();
+        task.runs.push(AgentTaskRun {
+            id: run_id,
+            task_id,
+            started_at: now,
+            trigger: AgentTaskRunTrigger::Manual,
+            trigger_detail: None,
+            session_id: Uuid::new_v4(),
+            session_name: "[Workflow] test".into(),
+            prompt_file: String::new(),
+            context_file: String::new(),
+            status: AgentTaskRunStatus::Running,
+            completed_at: None,
+            exit_code: None,
+            summary: None,
+            findings: vec![],
+            gates: vec![],
+            outcome: None,
+            conclusion: None,
+            retries: 0,
+            schema_ok: None,
+            branch: None,
+            base_sha: None,
+            checkpoints: vec![],
+        });
+        run_id
+    }
+
+    /// #284: a workflow run's per-stage checkpoint branches are collected as run
+    /// observations, each carrying its provenance (the workflow engine) and the
+    /// age it was seen at; re-announcing a stage does not duplicate it.
+    #[test]
+    fn checkpoint_branches_are_collected_with_provenance_and_age() {
+        let registry = test_registry();
+        let task = registry
+            .create(AgentTaskCreate {
+                name: "engine nightly".into(),
+                prompt: "audit".into(),
+                schedule: None,
+                triggers: None,
+                concurrency: None,
+                command: None,
+                cwd: None,
+                env: None,
+                context: None,
+                vogt_project: Some("vogt".into()),
+                vogt_work_item: Some("WI-7".into()),
+                gates: None,
+                auto_approve: None,
+                output_schema: None,
+                output_file: None,
+                output_schema_max_retries: None,
+                branch: None,
+                workflow_engine: None,
+                enabled: None,
+                notify_on_start: None,
+                notify_on_phrase: None,
+                auto_retry_on_rate_limit: None,
+            })
+            .expect("task created");
+        let run_id = seed_running_run(&registry, task.id);
+
+        let t1 = OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+        let t2 = OffsetDateTime::from_unix_timestamp(2_000).unwrap();
+        registry.record_workflow_checkpoint(task.id, run_id, Some("n1"), "wf/run-1/stage-1", t1);
+        registry.record_workflow_checkpoint(task.id, run_id, Some("n2"), "wf/run-1/stage-2", t2);
+        // The same (branch, step) again is idempotent — a re-announced stage.
+        registry.record_workflow_checkpoint(task.id, run_id, Some("n1"), "wf/run-1/stage-1", t1);
+        // Whitespace-only branches are dropped, never a blank observation.
+        registry.record_workflow_checkpoint(task.id, run_id, Some("n3"), "   ", t2);
+
+        let stored = registry.get(task.id).unwrap();
+        let run = stored.runs.iter().find(|r| r.id == run_id).unwrap();
+        assert_eq!(run.checkpoints.len(), 2, "two distinct stages, deduped");
+
+        let first = &run.checkpoints[0];
+        assert_eq!(first.branch, "wf/run-1/stage-1");
+        assert_eq!(first.step_id.as_deref(), Some("n1"));
+        assert_eq!(first.provenance, "workflow-engine");
+        assert_eq!(first.observed_at, t1);
+        // No vendor name leaks into the provenance stamp.
+        assert!(run
+            .checkpoints
+            .iter()
+            .all(|c| c.provenance == CHECKPOINT_PROVENANCE));
+
+        assert_eq!(run.checkpoints[1].step_id.as_deref(), Some("n2"));
+        assert_eq!(run.checkpoints[1].observed_at, t2);
+
+        // The run stays bound to its task's work item — the observation's home.
+        assert_eq!(stored.vogt_work_item.as_deref(), Some("WI-7"));
+
+        // A checkpoint observation survives the run's serde round trip (the same
+        // shape persisted to disk), and omits the empty step when there is none.
+        let json = serde_json::to_string(run).unwrap();
+        let back: AgentTaskRun = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.checkpoints.len(), 2);
+        assert_eq!(back.checkpoints[0].provenance, "workflow-engine");
+        assert_eq!(back.checkpoints[0].observed_at, t1);
+    }
+
+    /// #284 non-fatal absence: recording a checkpoint against a run the registry
+    /// does not have, and a run that reports none, are both silent no-ops.
+    #[test]
+    fn checkpoint_collection_is_non_fatal_when_absent() {
+        let registry = test_registry();
+        let task = registry
+            .create(AgentTaskCreate {
+                name: "engine nightly".into(),
+                prompt: "audit".into(),
+                schedule: None,
+                triggers: None,
+                concurrency: None,
+                command: None,
+                cwd: None,
+                env: None,
+                context: None,
+                vogt_project: None,
+                vogt_work_item: None,
+                gates: None,
+                auto_approve: None,
+                output_schema: None,
+                output_file: None,
+                output_schema_max_retries: None,
+                branch: None,
+                workflow_engine: None,
+                enabled: None,
+                notify_on_start: None,
+                notify_on_phrase: None,
+                auto_retry_on_rate_limit: None,
+            })
+            .expect("task created");
+        let run_id = seed_running_run(&registry, task.id);
+
+        // An unknown run id must not panic and must record nothing.
+        registry.record_workflow_checkpoint(
+            task.id,
+            Uuid::new_v4(),
+            Some("n1"),
+            "wf/ghost",
+            OffsetDateTime::now_utc(),
+        );
+        // A run the engine reported no checkpoints for simply has an empty list.
+        let stored = registry.get(task.id).unwrap();
+        let run = stored.runs.iter().find(|r| r.id == run_id).unwrap();
+        assert!(run.checkpoints.is_empty());
     }
 
     #[test]
