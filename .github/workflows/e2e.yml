@@ -77,6 +77,11 @@ jobs:
       ENGINE_BIND: "127.0.0.1"
       ENGINE_PORT: "8910"
       ENGINE_PUBLIC_URL: "http://127.0.0.1:8910"
+      # Build the core image locally and point BOTH the core service's `image:`
+      # and the engine build's `CORE_IMAGE` arg (both read `${VOGT_IMAGE}`) at
+      # it, so nothing pulls the private GHCR core (#266) — #295 runs with no
+      # registry credentials.
+      VOGT_IMAGE: "vogt-core:local"
     steps:
       # A clean clone, every run: the whole point is that nothing on the runner
       # is carried between runs except the layer/toolchain caches.
@@ -98,6 +103,16 @@ jobs:
           # when the secret is unset — the core then has no github.com provider
           # and the forge half skips, which is exactly the credential-free run.
           printf '%s' "${VOGT_FIXTURE_PAT:-}" > deploy/github-token
+
+      - name: build the core image locally (no GHCR pull — #295 needs no registry creds)
+        run: |
+          set -euo pipefail
+          # The core is pinned to a private GHCR image (#266) the runner has no
+          # credentials for; build it here from the repo's own Dockerfile and
+          # tag it `vogt-core:local`, which VOGT_IMAGE points both the core
+          # service and the engine build at. `--build` below then builds only
+          # the engine; the core is already present locally, so nothing pulls.
+          docker build -t vogt-core:local -f Dockerfile .
 
       - name: build and start the stack (local build, no pull)
         run: |
