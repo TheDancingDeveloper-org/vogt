@@ -1,0 +1,145 @@
+name: deploy production
+
+# Publishing a release never changes production. This separately dispatched
+# workflow makes the cross-repository handoff explicit, records its exact
+# digest, and lets GitHub's `vogt-prod` environment require an approver before
+# it can modify estate desired state or call Node B's Komodo deployment API.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to deploy (for example v0.3.0)
+        required: true
+        type: string
+      confirm:
+        description: Type DEPLOY to confirm the live Node B production change
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: pin and deploy the approved release
+    runs-on: [self-hosted, tailnet]
+    environment: vogt-prod
+    steps:
+      - name: confirm the live deployment
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          [ "$CONFIRM" = DEPLOY ] || {
+            echo "::error::Type DEPLOY in the confirmation field to change vogt-prod."
+            exit 1
+          }
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: validate the release tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags origin "$TAG"
+          tag_sha="$(git rev-list -n1 "$TAG")"
+          git fetch --no-tags origin "+refs/heads/prod:refs/remotes/origin/prod"
+          git merge-base --is-ancestor "$tag_sha" origin/prod || {
+            echo "::error::$TAG ($tag_sha) is not reachable from origin/prod"
+            exit 1
+          }
+
+      - name: resolve the signed merged-image digest
+        id: image
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/thedancingdeveloper-org/vogt-stack:$TAG"
+          digest="$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}')"
+          case "$digest" in sha256:*) ;; *) echo "invalid digest: $digest" >&2; exit 1;; esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: pin the production stack's desired state
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          KOMODO_API_KEY: ${{ secrets.VOGT_KOMODO_API_KEY }}
+          KOMODO_API_SECRET: ${{ secrets.VOGT_KOMODO_API_SECRET }}
+          KOMODO_URL: ${{ vars.VOGT_KOMODO_URL || 'http://100.92.54.45:3011' }}
+        run: |
+          set -euo pipefail
+          : "${KOMODO_API_KEY:?Configure VOGT_KOMODO_API_KEY in the vogt-prod environment}"
+          : "${KOMODO_API_SECRET:?Configure VOGT_KOMODO_API_SECRET in the vogt-prod environment}"
+          api() {
+            curl -fsS -X POST "$KOMODO_URL/$1" \
+              -H "X-Api-Key: $KOMODO_API_KEY" -H "X-Api-Secret: $KOMODO_API_SECRET" \
+              -H 'Content-Type: application/json' -d "$2"
+          }
+          # The compose source lives in indexarr/ops, but this stack's actual
+          # VOGT_STACK_IMAGE pin lives in Komodo's protected environment.
+          # Update only that field; do not print the environment because it
+          # intentionally contains deployment secrets.
+          stack="$(api read '{"type":"GetStack","params":{"stack":"vogt-prod"}}')"
+          payload="$(python3 -c '
+import json, sys
+from pathlib import Path
+import importlib.util
+spec = importlib.util.spec_from_file_location("pin", Path("scripts/pin_estate_image.py"))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+stack = json.load(sys.stdin)
+environment, changed = module.pin_environment(stack["config"]["environment"], sys.argv[1])
+if not changed:
+    print("")
+else:
+    print(json.dumps({"type": "UpdateStack", "params": {"id": stack["_id"]["$oid"], "config": {"environment": environment}}}))
+' "$DIGEST" <<<"$stack")"
+          if [ -n "$payload" ]; then
+            api write "$payload" >/dev/null
+            echo "pinned vogt-prod to vogt-stack@$DIGEST"
+          else
+            echo "vogt-prod already pins vogt-stack@$DIGEST"
+          fi
+
+      - name: deploy Node B through Komodo
+        env:
+          KOMODO_API_KEY: ${{ secrets.VOGT_KOMODO_API_KEY }}
+          KOMODO_API_SECRET: ${{ secrets.VOGT_KOMODO_API_SECRET }}
+          KOMODO_URL: ${{ vars.VOGT_KOMODO_URL || 'http://100.92.54.45:3011' }}
+        run: |
+          set -euo pipefail
+          : "${KOMODO_API_KEY:?Configure VOGT_KOMODO_API_KEY in the vogt-prod environment}"
+          : "${KOMODO_API_SECRET:?Configure VOGT_KOMODO_API_SECRET in the vogt-prod environment}"
+          api() {
+            curl -fsS -X POST "$KOMODO_URL/$1" \
+              -H "X-Api-Key: $KOMODO_API_KEY" -H "X-Api-Secret: $KOMODO_API_SECRET" \
+              -H 'Content-Type: application/json' -d "$2"
+          }
+          update="$(api execute '{"type":"DeployStack","params":{"stack":"vogt-prod"}}')"
+          update_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["_id"]["$oid"])' <<<"$update")"
+          echo "Komodo update: $update_id"
+          for _ in $(seq 1 120); do
+            result="$(api read "{\"type\":\"GetUpdate\",\"params\":{\"id\":\"$update_id\"}}")"
+            status="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$result")"
+            [ "$status" = InProgress ] || break
+            sleep 3
+          done
+          python3 -c '
+import json, sys
+result = json.load(sys.stdin)
+print("status:", result["status"], "success:", result["success"])
+for log in result.get("logs", []): print(f"[{log[\"stage\"]}] success={log[\"success\"]}")
+raise SystemExit(0 if result["success"] else 1)
+' <<<"$result"
+
+      - name: verify the live front door
+        env:
+          VOGT_URL: ${{ vars.VOGT_PROD_URL }}
+        run: |
+          set -euo pipefail
+          : "${VOGT_URL:?Configure VOGT_PROD_URL in the vogt-prod environment}"
+          curl --fail --show-error --retry 12 --retry-delay 5 "$VOGT_URL/readyz"

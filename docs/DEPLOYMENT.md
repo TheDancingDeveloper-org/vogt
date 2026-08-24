@@ -43,8 +43,9 @@ core (§3.2). Without it the core's `session.*` operations report that no
 engine is configured, and nothing else changes.
 
 **The mobile shell** (optional) — a Capacitor wrapper under `mobile/` around
-the same PWA. Nothing server-side depends on it; it is built from source
-alongside `web/`. It is not covered further here.
+the same PWA. Nothing server-side depends on it. It loads the deployed front
+door, so ordinary server and PWA releases reach installed phones without an
+APK rebuild; the production APK procedure is in §7.1.
 
 ## 2. Run from published images
 
@@ -324,9 +325,66 @@ token with the bootstrap token file
 Whatever sits in front: `/health/ready` and `/version` must remain plain
 HTTP, unauthenticated, and reachable by whatever probes you run.
 
-## 7. Data, backup, restore, upgrade
+## 7. Production promotion, Android releases, and data
 
-### 7.1 What is on disk
+CI, release, and deployment are deliberately separate: CI proves a commit;
+a version tag creates signed, immutable artifacts; deployment selects the
+digest a production instance runs. A successful build or published image does
+not change production by itself.
+
+### 7.1 Promote `dev` to production
+
+1. Promote the approved `dev` commit to `prod` and wait for its CI run to
+   pass. Create the release tag only on that commit: the release workflow
+   rejects a tag whose target is not reachable from `prod`.
+2. Back up the running instance and copy the resulting backup directory off
+   its data volume:
+
+   ```console
+   docker compose -f deploy/vogt.compose.yml exec vogt \
+     vogt backup --reason "pre-production release"
+   ```
+
+3. Increase the package version if a new Android artifact is needed, then
+   create and push the matching `v<version>` tag. The tagged release publishes
+   signed, immutable core and merged-stack image digests. It also builds the
+   signed APK when its release prerequisites are configured.
+4. In the estate deployment repository, change the production stack's image
+   pin to the exact merged-stack digest from the release summary, review that
+   change under the estate's approval policy, and run its `DeployStack` for
+   `personal-vogt`. That repository and Node B are operator infrastructure;
+   public/self-hosted deployments remain independent of this handoff.
+5. Check the production front door's `/health/ready`, the engine's `/readyz`
+   when deployed, authentication, and one representative read/write workflow.
+   Keep the former digest and the pre-release backup until those checks pass.
+
+The mobile shell is a remote WebView. Do **not** issue a new APK for a
+server-only or PWA-only release: installed shells load the updated front door.
+Create/distribute a new APK only when native code, Capacitor plugins,
+permissions, package identity, Firebase configuration, signing identity, or
+the baked-in front-door URL changes.
+
+For a production APK, before tagging:
+
+- Set the GitHub secret `VOGT_ANDROID_SERVER_URL` to the exact production
+  front-door URL (the same value as `VOGT_PUBLIC_URL`).
+- Retain the existing signing identity in the four
+  `MYDEVENV2_ANDROID_KEYSTORE_*`, `..._PASSWORD`, `..._KEY_ALIAS`, and
+  `..._KEY_PASSWORD` GitHub secrets; replacing the key cannot update devices
+  carrying the previous app.
+- Increase `mobile/package.json`'s SemVer version. Gradle derives the Android
+  `versionCode` from it, so each published upgrade must be greater than the
+  last.
+- Supply the real production `google-services.json` in the release environment
+  if Firebase Cloud Messaging is required. The committed example deliberately
+  cannot deliver real notifications.
+
+The release workflow runs `apksigner verify` before uploading the
+`vogt-android-release-v<version>` artifact. Install it over the prior release
+on a real device and verify it loads production before distribution.
+
+### 7.2 What is on disk
+
 
 One directory, `VOGT_DATA_DIR` (`/var/lib/vogt` in the image, a named
 volume in Compose):
@@ -347,7 +405,7 @@ it with `VOGT_SQLITE_SYNCHRONOUS=off` in production: that trades durability
 for speed in a product whose declared store is an audit log. The knob exists
 for test runs.
 
-### 7.2 Backup and restore
+### 7.3 Backup and restore
 
 ```console
 docker compose -f deploy/vogt.compose.yml exec vogt \
@@ -374,9 +432,9 @@ traffic first if you can; restore from the container that owns the data
 directory, never from a front-door container that merely has a `vogt`
 binary.
 
-### 7.3 Upgrade
+### 7.4 Upgrade
 
-1. Take a backup (§7.2).
+1. Take a backup (§7.3).
 2. Change the digest (or tag) in `deploy/.env`.
 3. `docker compose -f deploy/vogt.compose.yml up -d`.
 4. Watch `/health/ready`: it answers 503 — naming the store and both
@@ -388,7 +446,7 @@ binary.
 Read [`SCHEMA.md`](SCHEMA.md) before a major version: it lists every
 migration and what each changes.
 
-### 7.4 Rollback
+### 7.5 Rollback
 
 A rollback is the digest line reverted plus `up -d` — **unless the upgrade
 applied a migration**. Migrations are forward-only: an older build against a

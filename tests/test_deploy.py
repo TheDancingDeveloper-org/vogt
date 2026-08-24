@@ -1179,6 +1179,51 @@ def test_a_release_apk_is_signed_or_the_job_stops() -> None:
     )
 
 
+def test_release_tags_are_required_to_reference_prod() -> None:
+    """A release tag is a production assertion, not an arbitrary ref alias."""
+    release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    assert "\n  validate-release:" in release
+    guard = release[
+        release.index("\n  validate-release:") : release.index("\n  # Docker Hub")
+    ]
+    assert "fetch-depth: 0" in guard
+    assert "refs/heads/prod:refs/remotes/origin/prod" in guard
+    assert 'git merge-base --is-ancestor "$TAG_SHA" origin/prod' in guard
+    assert "exit 1" in guard
+
+    # Both independent first-release paths wait on the guard. Every image,
+    # distribution, and signed APK job is downstream from one of these.
+    assert (
+        "needs: validate-release"
+        in release[
+            release.index("\n  base-images:") : release.index("\n  distribution:")
+        ]
+    )
+    assert (
+        "needs: validate-release"
+        in release[release.index("\n  distribution:") : release.index("\n  image:")]
+    )
+
+
+def test_production_deploy_is_approval_gated_and_pins_an_immutable_digest() -> None:
+    workflow = (WORKFLOWS / "deploy-production.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in workflow
+    assert "environment: vogt-prod" in workflow
+    assert (
+        "description: Type DEPLOY to confirm the live Node B production change"
+        in workflow
+    )
+    assert '[ "$CONFIRM" = DEPLOY ]' in workflow
+    assert "git merge-base --is-ancestor" in workflow
+    assert "docker buildx imagetools inspect" in workflow
+    assert '"type":"GetStack"' in workflow
+    assert '"type": "UpdateStack"' in workflow
+    assert "module.pin_environment" in workflow
+    assert '"stack":"vogt-prod"' in workflow
+    assert '"type":"DeployStack"' in workflow
+    assert '"$VOGT_URL/readyz"' in workflow
+
+
 ENGINE_DOCKERFILE = WORKFLOWS.parent.parent / "engine" / "Dockerfile"
 
 

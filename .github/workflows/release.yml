@@ -37,6 +37,27 @@ env:
   CACHE_IMAGE: 192.168.1.75:5500/vogt-buildcache
 
 jobs:
+  validate-release:
+    name: the tag is promotable from prod
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The release tag and prod can be far apart.  A shallow checkout
+          # cannot prove ancestry and would turn this guard into a guess.
+          fetch-depth: 0
+
+      - name: the tagged commit is contained by prod
+        env:
+          TAG_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/prod:refs/remotes/origin/prod"
+          if ! git merge-base --is-ancestor "$TAG_SHA" origin/prod; then
+            echo "::error::Release tag $GITHUB_REF_NAME ($TAG_SHA) is not reachable from origin/prod. Promote and validate the commit on prod before tagging it."
+            exit 1
+          fi
+
   # Docker Hub is not on the critical path (#33): both Dockerfiles build
   # `FROM` this organisation's GHCR mirror of the library images. This job
   # makes sure the mirror holds what this tag's Dockerfiles ask for before
@@ -45,6 +66,7 @@ jobs:
   # carry a base digest that was never copied.
   base-images:
     name: the bases are in GHCR
+    needs: validate-release
     uses: ./.github/workflows/mirror-base-images.yml
     permissions:
       contents: read
@@ -52,6 +74,7 @@ jobs:
 
   distribution:
     name: build distribution
+    needs: validate-release
     runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v7
