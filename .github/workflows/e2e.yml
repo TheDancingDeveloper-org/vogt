@@ -98,11 +98,18 @@ jobs:
           engine_token="$(openssl rand -hex 32)"
           echo "::add-mask::$engine_token"
           echo "ENGINE_TOKEN=$engine_token" >> "$GITHUB_ENV"
-          openssl rand -hex 32 > deploy/vogt-core-token
-          # The fixture PAT as the core's github.com file token (FR-S7). Empty
-          # when the secret is unset — the core then has no github.com provider
-          # and the forge half skips, which is exactly the credential-free run.
-          printf '%s' "${VOGT_FIXTURE_PAT:-}" > deploy/github-token
+          # The shared core token the bootstrap adopts, and the fixture PAT,
+          # are both injected as Compose `environment:` secrets rather than host
+          # files: the CI runner's filesystem is not the docker daemon's, so a
+          # bind-mounted file secret's source does not exist for the daemon.
+          # Export them to GITHUB_ENV so the `up` step materialises the secrets.
+          core_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$core_token"
+          echo "VOGT_CORE_TOKEN_VALUE=$core_token" >> "$GITHUB_ENV"
+          # Empty when the secret is unset -> no github.com provider -> the forge
+          # half skips (the credential-free run). Masked when present.
+          if [ -n "${VOGT_FIXTURE_PAT:-}" ]; then echo "::add-mask::$VOGT_FIXTURE_PAT"; fi
+          printf 'VOGT_FIXTURE_PAT=%s\n' "${VOGT_FIXTURE_PAT:-}" >> "$GITHUB_ENV"
 
       - name: build the core image locally (no GHCR pull — #295 needs no registry creds)
         run: |
