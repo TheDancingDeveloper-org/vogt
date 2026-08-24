@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { DEMO_NOW } from "../../src/demo/fixtures";
 
 const sha = "23ac0a9b8f7c6d5e4a32100123456789abcdef01";
 
@@ -98,6 +99,13 @@ test("stale provenance cannot activate demo mode", async ({ page }) => {
 
 test("canonical demo compositions stay visually stable at target widths", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "one canonical screenshot set");
+  // Freeze the wall clock at the scenario anchor. The demo's data timestamps
+  // are a stable logical clock, but the "updated Xs ago" badges (viewAge's
+  // createNow) subtract the *real* Date.now(), so their text advances between
+  // captures and drifted these screenshots by ~1% on the age strings alone.
+  // setFixedTime pins Date.now() without pausing timers, so the scripted
+  // terminal streams below still play out for the three-pane shot.
+  await page.clock.setFixedTime(new Date(DEMO_NOW));
   await installDemo(page);
 
   await page.setViewportSize({ width: 1440, height: 1000 });

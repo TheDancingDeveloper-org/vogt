@@ -29,6 +29,22 @@ def _code(path: Path) -> str:
     return "\n".join(line.split("//", 1)[0] for line in text.splitlines())
 
 
+# The `core alone` CI job runs `rm -rf engine web mobile` before pytest to prove
+# the core carries no hidden dependency on them (ci.yml). These delivery checks
+# read those very trees, so they belong to the full-tree runs — the `test
+# (py3.x)` jobs — and skip, rather than error, when the tree they inspect is
+# absent. Same shape as the `docker`-conditional check below.
+requires_engine = pytest.mark.skipif(
+    not (DEMO_SERVER.exists() and ENGINE_DOCKERFILE.exists()),
+    reason="engine tree absent (the `core alone` job deletes it)",
+)
+requires_web = pytest.mark.skipif(
+    not WEB_SRC.exists(),
+    reason="web tree absent (the `core alone` job deletes it)",
+)
+
+
+@requires_web
 def test_every_browser_transport_enters_through_the_runtime_seam() -> None:
     """A new bare network primitive would bypass deterministic demo state."""
     offenders: list[str] = []
@@ -46,6 +62,7 @@ def test_every_browser_transport_enters_through_the_runtime_seam() -> None:
     assert not offenders, f"browser I/O bypasses runtimeTransport: {offenders}"
 
 
+@requires_engine
 def test_demo_image_branches_from_the_normal_web_build() -> None:
     text = ENGINE_DOCKERFILE.read_text(encoding="utf-8")
     assert "FROM web-build AS demo-web" in text
@@ -59,6 +76,7 @@ def test_demo_image_branches_from_the_normal_web_build() -> None:
     assert "vogt-core" not in demo
 
 
+@requires_engine
 def test_demo_origin_has_no_process_proxy_or_write_implementation() -> None:
     text = DEMO_SERVER.read_text(encoding="utf-8")
     for forbidden in (
