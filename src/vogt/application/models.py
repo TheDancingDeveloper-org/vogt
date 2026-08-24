@@ -910,6 +910,23 @@ class UnrelateWorkParams(Params):
     reason: Reason
 
 
+class BindBranchParams(Params):
+    """Declare the git branch a work item is worked on (#283, declared path)."""
+
+    ref: str = Field(description="Work item reference, e.g. WI-7.")
+    branch: str | None = Field(
+        default=None,
+        description=(
+            "The branch name to declare. Defaults from `branch_binding_template` "
+            "when omitted (`WI-7` becomes `wi-7`, an upstream item its `gh-<n>` "
+            "form). Declaring a branch already on the item is a no-op, not an "
+            "error. Additive and forward-only: this records a name, it never "
+            "creates, renames or deletes a branch in git (FR-B4)."
+        ),
+    )
+    reason: Reason
+
+
 class CommentParams(Params):
     ref: str
     body: Name = Field(description="The comment text.")

@@ -20,6 +20,7 @@ import pytest
 
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    BindBranchParams,
     GetWorkParams,
     ObservationsParams,
     RegisterProjectParams,
@@ -27,6 +28,7 @@ from vogt.application.models import (
     SweepParams,
 )
 from vogt.application.services import (
+    bind_branch,
     get_work,
     observations,
     register_project,
@@ -41,6 +43,7 @@ from vogt.core.branches import (
     match_branch,
 )
 from vogt.core.entities import Project
+from vogt.errors import InvalidRequest, NotFound
 
 from tests.conftest import native_work_item
 
@@ -278,3 +281,87 @@ def test_declared_and_observed_are_surfaced_separately_as_drift(
     two = {b.name: b for b in get_work(ctx, GetWorkParams(ref="WI-2")).branches}
     assert two["wi-2"].source == "declared" and two["wi-2"].drift is True
     assert two["wi-2"].observed_at is None
+
+
+# -- the declared binding as a first-class write (`work.bind_branch`) -------
+
+
+def _with_project(instance: AppContext, root: Path) -> AppContext:
+    """A context with a registered project, no engine — `bind_branch` needs none."""
+    register_project(
+        instance, RegisterProjectParams(name="Proj", root_path=str(root), reason=WHY)
+    )
+    return instance
+
+
+def test_bind_branch_defaults_from_the_pattern_and_is_audited(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """No branch given: the name defaults from the template, audited like any
+    declared write, and the result echoes the item's branches."""
+    ctx = _with_project(instance, tmp_path)
+    native_work_item(ctx, title="An item", project="proj")  # WI-1
+
+    result = bind_branch(ctx, BindBranchParams(ref="WI-1", reason=WHY))
+
+    assert {b.name for b in result.branches} == {"wi-1"}
+    assert result.branches[0].source == "declared"
+    with ctx.declared.read() as view:
+        overlay = view.work_overlay("WI-1")
+        ops = [r.operation for r in view.list_audit(limit=200)]
+    assert overlay is not None and overlay.branches == ["wi-1"]
+    assert "work.bind_branch" in ops
+
+
+def test_bind_branch_accepts_an_explicit_name(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    ctx = _with_project(instance, tmp_path)
+    native_work_item(ctx, title="An item", project="proj")  # WI-1
+
+    result = bind_branch(
+        ctx, BindBranchParams(ref="WI-1", branch="feature/WI-1-thing", reason=WHY)
+    )
+
+    assert {b.name for b in result.branches} == {"feature/WI-1-thing"}
+    with ctx.declared.read() as view:
+        overlay = view.work_overlay("WI-1")
+    assert overlay is not None and overlay.branches == ["feature/WI-1-thing"]
+
+
+def test_bind_branch_is_idempotent_on_a_branch_already_bound(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """Binding the same branch twice dedupes rather than erroring or growing."""
+    ctx = _with_project(instance, tmp_path)
+    native_work_item(ctx, title="An item", project="proj")  # WI-1
+
+    bind_branch(ctx, BindBranchParams(ref="WI-1", branch="wi-1", reason=WHY))
+    bind_branch(ctx, BindBranchParams(ref="WI-1", branch="wi-1", reason=WHY))
+    result = bind_branch(ctx, BindBranchParams(ref="WI-1", reason=WHY))
+
+    assert [b.name for b in result.branches] == ["wi-1"]
+    with ctx.declared.read() as view:
+        overlay = view.work_overlay("WI-1")
+    assert overlay is not None and overlay.branches == ["wi-1"]
+
+
+def test_bind_branch_on_an_unknown_ref_says_no_work_item(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """A typo resolves to a domain not-found, not a foreign-key error."""
+    ctx = _with_project(instance, tmp_path)
+
+    with pytest.raises(NotFound, match="WI-70"):
+        bind_branch(ctx, BindBranchParams(ref="WI-70", reason=WHY))
+
+
+def test_bind_branch_on_a_projectless_item_is_refused(
+    instance: AppContext, tmp_path: Path
+) -> None:
+    """An item that belongs to no project has no checkout to bind against."""
+    del tmp_path
+    native_work_item(instance, title="Homeless")  # WI-1, no project
+
+    with pytest.raises(InvalidRequest, match="no project"):
+        bind_branch(instance, BindBranchParams(ref="WI-1", reason=WHY))

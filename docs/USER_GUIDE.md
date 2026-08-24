@@ -323,7 +323,12 @@ branch belongs to an item when its name carries the item's reference:
 `wi-7/…`, `feature/WI-7-…`, or, on a forge-linked project, `gh-264-…` for
 issue #264. The convention is a configurable pattern
 (`branch_binding_patterns`); the branch a session started *from Vogt* declares
-it will use comes from `branch_binding_template` (default `wi-7`). Each row
+it will use comes from `branch_binding_template` (default `wi-7`). You can also
+declare a branch on an item yourself, without starting a session, with `work
+bind-branch WI-7 --reason …`; omit the name to take the default from the
+template, or pass `--branch feature/WI-7-…` to name your own. It only records
+the name — Vogt never creates or renames a branch — and declaring one already
+bound is a no-op. Each row
 says where it came from — **declared** (a session said it would use it),
 **observed** (a sweep found it in the checkout), or **both** — and an observed
 branch says when it was last active ("active 2h ago") and how far it has

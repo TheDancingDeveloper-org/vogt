@@ -236,6 +236,14 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "reason": WHY,
         },
     ),
+    # The declared branch binding (#283): a branch name lands on the linked
+    # item's overlay, defaulted from the pattern (the upstream item's `gh-1`
+    # form) since none is given. The result echoes the item's branches, and
+    # all three surfaces must agree on the declared-side view.
+    (
+        "work.bind_branch",
+        {"ref": "gh:parity-org/parity-project#1", "reason": WHY},
+    ),
     ("work.comment", {"ref": "WI-1", "body": "seen by the harness", "reason": WHY}),
     # A comment on the linked item posts upstream, fail-loud.
     (
