@@ -595,6 +595,18 @@ class CreateWorkParams(Params):
     labels: list[str] | None = Field(
         default=None, description="Existing label names to attach."
     )
+    local_only: bool = Field(
+        default=False,
+        description=(
+            "Create the item locally without writing it upstream (#347). On a "
+            "linked project a create normally goes through to the forge, and a "
+            "write-back policy that does not permit 'create' refuses it; pass "
+            "this to opt in to a native, local-only item instead — it carries "
+            "no upstream subject yet and is exactly what a later `forge link` "
+            "or `forge writeback` migrates upstream. Default off: the refusal "
+            "stays the default so nothing is created locally by surprise."
+        ),
+    )
     reason: Reason
 
 
@@ -2259,6 +2271,50 @@ class ForgeReposResult(Result):
             "rather than 'you have no repositories'."
         ),
     )
+
+
+class ForgeImportParams(Params):
+    """Import a repository the picker listed, as a project (#344).
+
+    Named exactly as `forge.repos` shows it — `owner` and `name` — because
+    this is the verb that turns one of those listed rows into a project:
+    clone under the acting credential (#179), register, and consolidate. The
+    credential that reaches the repository to list it is the credential the
+    clone runs under, so a private repository a personal PAT can see imports
+    without the instance file token ever needing access to it.
+    """
+
+    owner: str = Field(
+        description="Repository owner, as `forge repos` lists it.", min_length=1
+    )
+    name: str = Field(
+        description="Repository name, as `forge repos` lists it.", min_length=1
+    )
+    host: str = Field(
+        default="github.com",
+        description="The forge host. Only github.com is supported in v1.",
+    )
+    display_name: str | None = Field(
+        default=None,
+        description="Project display name. Defaults to the repository name.",
+    )
+    root_path: str | None = Field(
+        default=None,
+        description=(
+            "Where to clone to. Defaults to `<import_root>/<slug>`; supply "
+            "this only when the repository must live somewhere specific."
+        ),
+    )
+    lifecycle_state: LifecycleState = "active"
+    consolidate: bool = Field(
+        default=True,
+        description=(
+            "Read existing issues, PRs, labels and releases after registering "
+            "(FR-B3). Read-only, and on by default so the imported project "
+            "arrives as upstream-truth rather than looking empty."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
 
 
 class OnboardParams(Params):

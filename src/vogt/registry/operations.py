@@ -65,6 +65,7 @@ from vogt.application.models import (
     ForgeAccountStatusParams,
     ForgeAccountStatusResult,
     ForgeAccountUnlinkParams,
+    ForgeImportParams,
     ForgeLinkParams,
     ForgeLinkResult,
     ForgePublishParams,
@@ -1050,6 +1051,24 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.list_forge_repos,
             route=HttpRoute("GET", "/forge/repos"),
             cli=CliBinding(("forge", "repos")),
+        ),
+        # The verb the picker leads to (#344): turn a repository `forge.repos`
+        # listed into a project — clone under the acting credential, register,
+        # consolidate. It writes (a project row, a clone on disk) and arms
+        # write-through by linking, exactly as `project.import` does, so it
+        # takes the same `project.write` scope and reason as that verb.
+        Operation(
+            name="forge.import",
+            summary="Import a repository the picker listed as a project: clone "
+            "it under your forge credential, register it, and consolidate its "
+            "forge state so it comes back linked and ready for write-back.",
+            scope="project.write",
+            mutating=True,
+            params_model=ForgeImportParams,
+            result_model=ImportProjectResult,
+            handler=services.import_forge_repo,
+            route=HttpRoute("POST", "/forge/import"),
+            cli=CliBinding(("forge", "import")),
         ),
         Operation(
             name="forge.actions",

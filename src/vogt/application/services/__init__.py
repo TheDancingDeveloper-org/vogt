@@ -34,6 +34,7 @@ from vogt.application.services.forge_accounts import (
     status_forge_account,
     unlink_forge_account,
 )
+from vogt.application.services.forge_import import import_forge_repo
 from vogt.application.services.forge_link import link_project
 from vogt.application.services.forge_publish import publish_project
 from vogt.application.services.forge_repos import list_forge_repos
@@ -141,6 +142,7 @@ __all__ = [
     "export_instance",
     "get_project",
     "get_work",
+    "import_forge_repo",
     "import_instance",
     "import_project",
     "init_instance",

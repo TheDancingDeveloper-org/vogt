@@ -138,6 +138,19 @@ SCRIPT: list[tuple[str, StepParams]] = [
     # The import picker (#180): the same accessible-repo list must arrive
     # byte-identically on all three surfaces.
     ("forge.repos", {}),
+    # The verb the picker leads to (#344): clone a listed repository under the
+    # actor's linked credential, register it, consolidate. The stand-in forge
+    # answers `describe` and the sync reads; the injected cloner writes the
+    # tree — so import parity covers the production path up to the network
+    # edges, on all three surfaces.
+    (
+        "forge.import",
+        {
+            "owner": "parity-org",
+            "name": "parity-forge",
+            "reason": WHY,
+        },
+    ),
     (
         "forge.writeback",
         {"project": "parity-project", "policy": "full", "reason": WHY},
@@ -194,6 +207,20 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "body": "created through the forge",
             "project": "parity-project",
             "labels": ["parity"],
+            "reason": WHY,
+        },
+    ),
+    # The explicit local-only create (#347): on a linked project this makes a
+    # native declared item that carries no upstream subject yet — no forge call,
+    # the same receipt on every surface. It is the opt-in that neither the
+    # policy gate nor the decision-10 refusal applies to.
+    (
+        "work.create",
+        {
+            "kind": "chore",
+            "title": "Local only",
+            "project": "parity-project",
+            "local_only": True,
             "reason": WHY,
         },
     ),

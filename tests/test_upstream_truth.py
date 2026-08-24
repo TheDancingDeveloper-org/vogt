@@ -686,3 +686,146 @@ def test_import_with_consolidation_links_the_project(
         ImportProjectParams(repo="acme/other", consolidate=False, reason=WHY),
     )
     assert skipped.project.link_state == "unlinked"
+
+
+# -- #347: the local-only create path and the complete refusal -------------
+
+
+def test_local_only_create_succeeds_under_policy_none(
+    tmp_path: Path, forge: RecordingForge
+) -> None:
+    """The explicit opt-in create on a linked project with policy `none` (#347).
+
+    The default refusal stays the default; `local_only` reaches past it to a
+    native declared item that carries no upstream subject yet — no forge call —
+    and that item *is* the open-native population a later `forge link`/`forge
+    writeback` migrates upstream (#183).
+    """
+    ctx = _instance(tmp_path, forge)
+    register_project(
+        ctx,
+        RegisterProjectParams(
+            name="Demo", root_path="/srv/demo", repo_url=REPO, reason=WHY
+        ),
+    )
+    link_project(ctx, ForgeLinkParams(project="demo", reason=WHY))
+    forge.requests.clear()
+
+    created = create_work(
+        ctx,
+        CreateWorkParams(
+            kind="chore",
+            title="Local only",
+            project="demo",
+            local_only=True,
+            reason=WHY,
+        ),
+    )
+
+    assert created.item.ref.startswith("WI-"), "a native ref, not a subject key"
+    assert created.item.origin == "created"
+    assert created.item.project_slug == "demo"
+    assert forge.mutations == [], "local-only wrote nothing upstream"
+
+    # Precisely the 'not yet upstreamed' signal: it is what migration moves.
+    from vogt.application.services import native_migration
+
+    with ctx.declared.read() as view:
+        project = view.project_by_slug("demo")
+        assert project is not None
+        pending = native_migration.open_native_items(view, project)
+    assert [item.ref for item in pending] == [created.item.ref]
+
+
+def test_default_create_on_linked_none_still_refuses(
+    tmp_path: Path, forge: RecordingForge
+) -> None:
+    """Without `local_only`, the decision-9 refusal is unchanged (#347)."""
+    ctx = _instance(tmp_path, forge)
+    register_project(
+        ctx,
+        RegisterProjectParams(
+            name="Demo", root_path="/srv/demo", repo_url=REPO, reason=WHY
+        ),
+    )
+    link_project(ctx, ForgeLinkParams(project="demo", reason=WHY))
+    forge.requests.clear()
+
+    with pytest.raises(UpstreamWriteRefused) as refused:
+        create_work(
+            ctx,
+            CreateWorkParams(kind="bug", title="Refused", project="demo", reason=WHY),
+        )
+    # The refusal names the escape hatch, so the opt-in is discoverable.
+    assert "local_only" in str(refused.value)
+    assert forge.mutations == []
+
+
+def test_refusal_enumerates_every_missing_gate(
+    tmp_path: Path, forge: RecordingForge
+) -> None:
+    """The refusal names the WHOLE chain, not just the first gate (#347.2).
+
+    Policy `none` AND no credential: the old message advised only 'set the
+    policy', and following it still failed because no forge account was linked.
+    The remedy now enumerates both, so one pass fixes it.
+    """
+    ctx = _instance(tmp_path, forge)
+    register_project(
+        ctx,
+        RegisterProjectParams(
+            name="Demo", root_path="/srv/demo", repo_url=REPO, reason=WHY
+        ),
+    )
+    link_project(ctx, ForgeLinkParams(project="demo", reason=WHY))
+    # Withdraw the only credential the link used, leaving no way upstream.
+    (tmp_path / "github_token").unlink()
+    forge.requests.clear()
+
+    with pytest.raises(UpstreamWriteRefused) as refused:
+        create_work(
+            ctx,
+            CreateWorkParams(kind="bug", title="Refused", project="demo", reason=WHY),
+        )
+    message = str(refused.value)
+    assert "none" in message, "the policy gate is named"
+    assert "does not permit 'create'" in message
+    assert "forge account link" in message, "the missing-credential gate is named"
+    assert "local_only" in message, "the escape hatch is offered"
+    assert forge.mutations == []
+
+
+def test_local_only_create_works_on_an_unlinked_project(
+    tmp_path: Path, forge: RecordingForge
+) -> None:
+    """`local_only` is the sanctioned opt-in past the decision-10 refusal too.
+
+    On an unlinked project the default create is `NotLinked`; the explicit
+    local-only path creates the native item the read plane already serves.
+    """
+    ctx = _instance(tmp_path, forge)
+    register_project(
+        ctx,
+        RegisterProjectParams(name="Folder", root_path="/srv/folder", reason=WHY),
+    )
+    forge.requests.clear()
+
+    with pytest.raises(NotLinked):
+        create_work(
+            ctx,
+            CreateWorkParams(kind="bug", title="Nope", project="folder", reason=WHY),
+        )
+
+    created = create_work(
+        ctx,
+        CreateWorkParams(
+            kind="chore",
+            title="Local",
+            project="folder",
+            local_only=True,
+            reason=WHY,
+        ),
+    )
+    assert created.item.project_slug == "folder"
+    assert created.item.ref.startswith("WI-")
+    assert forge.mutations == []
