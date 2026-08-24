@@ -100,20 +100,69 @@ def _refuse_unlinked(project: Project, verb: str) -> NotLinked:
     )
 
 
-def _require_permitted(project: Project, action: str) -> None:
-    """Fail loud on policy before anything is sent (decision 9).
+def _write_through_gaps(ctx: AppContext, project: Project, action: str) -> list[str]:
+    """Every unmet precondition for a write-through, named (#347).
 
-    Write-through makes the upstream half *part of* the operation, so a
-    policy that does not permit the action refuses the whole thing rather
-    than committing a local half silently.
+    The write-back chain is three gates: the policy must permit the action, a
+    forge credential must resolve, and the project's `repo_url` must address a
+    repository the provider can reach. A create refused for the first gate used
+    to advise only "set the policy", which still failed when a later gate was
+    also unmet. This reports the whole chain, in order, so a caller fixes it in
+    one pass rather than one refusal at a time.
     """
+    gaps: list[str] = []
     if not permits(project.write_back, action):
-        raise UpstreamWriteRefused(
-            f"{project.slug!r} has write-back policy {project.write_back!r}, "
-            f"which does not permit {action!r}; on a linked project the "
-            "write goes upstream or not at all — set the policy with "
-            "`forge writeback` first"
+        gaps.append(
+            f"write-back policy is {project.write_back!r}, which does not "
+            f"permit {action!r} — set it with `forge writeback`"
         )
+    with ctx.declared.read() as view:
+        actor = view.actor_by_identity(ctx.principal.identity_ref)
+    provider, _identity = writeback._writer_provider(ctx, actor, project.repo_url)
+    if provider is None:
+        gaps.append(
+            "no forge credential resolves for this project — link your forge "
+            "account with `forge account link`, or configure the instance "
+            "token file (FR-S7)"
+        )
+    elif provider.parse(project.repo_url) is None:
+        gaps.append(
+            f"the project's repo_url {project.repo_url!r} does not parse for "
+            "the forge provider — correct it with `project update`"
+        )
+    return gaps
+
+
+def _require_permitted(
+    ctx: AppContext,
+    project: Project,
+    action: str,
+    *,
+    offer_local_only: bool = False,
+) -> None:
+    """Refuse a write-through whose chain is incomplete, naming every gap.
+
+    Write-through makes the upstream half *part of* the operation (decision
+    9), so an unmet precondition refuses the whole thing rather than committing
+    a local half silently. Every gap in the write-back chain is named, not just
+    the first (#347), so following the advice cannot still fail on a gate the
+    message never mentioned. `offer_local_only` adds the `work.create` escape
+    hatch to the message — the one verb with a sanctioned local-only path.
+    """
+    gaps = _write_through_gaps(ctx, project, action)
+    if not gaps:
+        return
+    enumerated = "; ".join(f"({n}) {gap}" for n, gap in enumerate(gaps, start=1))
+    tail = (
+        " Or pass `local_only` to create the item locally, without upstreaming it now."
+        if offer_local_only
+        else ""
+    )
+    raise UpstreamWriteRefused(
+        f"cannot {action} on linked project {project.slug!r}: on a linked "
+        "project the write goes upstream or not at all, and "
+        f"{len(gaps)} precondition(s) are unmet: {enumerated}.{tail}"
+    )
 
 
 def _upstream_writer(
@@ -210,22 +259,41 @@ def _merged_overlay(
 def create_work(ctx: AppContext, params: CreateWorkParams) -> WorkResult:
     """Create a work item (FR-W1) — upstream on a linked project (#181).
 
-    Three paths, split by the project named: none → a native declared item,
-    unchanged; linked → `provider.create_issue` write-through, the subject
-    key becomes the ref, and an overlay row carries the vogt-local fields;
-    unlinked → the typed decision-10 refusal.
+    Split by the project named and by `local_only` (#347):
+
+    - no project → a native declared item, unchanged;
+    - a project, `local_only` → a native declared item *in* that project,
+      the sanctioned local-only path: it carries no upstream subject yet and
+      is exactly the open native row a later `forge link`/`forge writeback`
+      migrates upstream (#183). Reachable on linked and unlinked projects
+      alike, because it is the opt-in that neither the policy gate nor the
+      decision-10 refusal applies to;
+    - a linked project, default → `provider.create_issue` write-through, the
+      subject key becomes the ref, and an overlay row carries the vogt-local
+      fields;
+    - an unlinked project, default → the typed decision-10 refusal.
     """
-    if params.project is not None:
-        with ctx.declared.read() as view:
-            project = _resolve.project(view, params.project)
-        if not upstream.is_linked(project):
-            raise _refuse_unlinked(project, "work.create")
-        return _create_upstream(ctx, params, project)
-    return _create_native(ctx, params)
+    if params.project is None:
+        return _create_native(ctx, params, project=None)
+    with ctx.declared.read() as view:
+        project = _resolve.project(view, params.project)
+    if params.local_only:
+        return _create_native(ctx, params, project=project)
+    if not upstream.is_linked(project):
+        raise _refuse_unlinked(project, "work.create")
+    return _create_upstream(ctx, params, project)
 
 
-def _create_native(ctx: AppContext, params: CreateWorkParams) -> WorkResult:
-    """The pre-#181 native create, for items that belong to no project."""
+def _create_native(
+    ctx: AppContext, params: CreateWorkParams, *, project: Project | None
+) -> WorkResult:
+    """A native declared item, optionally scoped to a project (#181, #347).
+
+    `project is None` is the pre-#181 no-project create. `project` set is the
+    `local_only` path: the row belongs to the project but has a `WI-n` ref and
+    `origin="created"`, so it reads as not-yet-upstreamed — the same shape
+    `work.adopt` and the #183 migration population already speak.
+    """
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[WorkResult]:
         del actor
@@ -252,7 +320,7 @@ def _create_native(ctx: AppContext, params: CreateWorkParams) -> WorkResult:
             state=workflow.initial_state,
             priority=params.priority,
             effort=params.effort,
-            project_id=None,
+            project_id=None if project is None else project.id,
             initiative_id=initiative_id,
             origin="created",
             trust_state="unverified",
@@ -289,7 +357,7 @@ def _create_upstream(
     the issue like anything else (FR-B2); the reverse window — a local item
     the forge never heard of — is the one decision 9 forbids.
     """
-    _require_permitted(project, "create")
+    _require_permitted(ctx, project, "create", offer_local_only=True)
     labels = list(params.labels or [])
     with ctx.declared.read() as view:
         workflow = view.workflow_for(params.kind)
@@ -655,7 +723,7 @@ def _update_upstream(
     sent = None
     identity = ""
     if add_labels:
-        _require_permitted(project, "label")
+        _require_permitted(ctx, project, "label")
         provider, identity, repo = _upstream_writer(ctx, project)
         number = provider.number_of(item.ref)
         if number is None:
@@ -835,7 +903,7 @@ def _transition_upstream(
     sent = None
     identity = ""
     if action is not None:
-        _require_permitted(project, action)
+        _require_permitted(ctx, project, action)
         provider, identity, repo = _upstream_writer(ctx, project)
         number = provider.number_of(item.ref)
         if number is None:
@@ -1121,7 +1189,7 @@ def _comment_native(ctx: AppContext, params: CommentParams) -> CommentResult:
 def _comment_upstream(
     ctx: AppContext, params: CommentParams, item: WorkItem, project: Project
 ) -> CommentResult:
-    _require_permitted(project, "comment")
+    _require_permitted(ctx, project, "comment")
     provider, identity, repo = _upstream_writer(ctx, project)
     number = provider.number_of(item.ref)
     if number is None:

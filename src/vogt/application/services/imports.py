@@ -33,6 +33,7 @@ from vogt.application.models import (
 )
 from vogt.application.services.projects import record_registration
 from vogt.application.services.writeback import onboard
+from vogt.core.entities import LifecycleState
 from vogt.core.ids import slugify
 from vogt.errors import Conflict, InvalidRequest, NotFound
 
@@ -44,6 +45,13 @@ _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 PROJECT_IMPORT = "project.import"
 PROJECT_IMPORTED_EVENT = "project.imported"
 
+#: `forge.import` (#344) lands the same clone+register+consolidate as
+#: `project.import`, but the audit must say which act put the project there:
+#: "imported from GitHub by reference" and "imported from the forge picker
+#: under my credential" are different provenance answers (FR-S1).
+FORGE_IMPORT = "forge.import"
+FORGE_IMPORTED_EVENT = "forge.imported"
+
 #: Import is GitHub-shaped in v1 (it clones from GitHub and consolidates its
 #: history). The pure identity operations — parsing a reference and building
 #: its URLs — need no credential, so they go through the registry's token-less
@@ -54,18 +62,61 @@ _GITHUB = github_identity()
 def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjectResult:
     """Clone, register, and consolidate — one operation, one reason.
 
-    Ordering is load-bearing. The clone happens before the declared write,
-    so the failure mode of a half-finished import is a directory nobody
-    registered rather than a project pointing at nothing. `project create`
-    scaffolds in the same order, for the same reason.
+    The caller names the repository by reference (`owner/name` or a URL), and
+    the clone runs under the instance file token (FR-S7). The clone, register
+    and consolidate themselves are `import_from_ref`, which `forge.import`
+    (#344) shares — the only difference between the two verbs is how the
+    repository is named and whose credential the clone runs under.
     """
     owner, repo = _resolve_repo(params.repo)
     ref = RepoRef(host="github.com", owner=owner, repo=repo)
+    provider = github_provider(ctx.config, transport=ctx.forge_transport)
+    return import_from_ref(
+        ctx,
+        ref=ref,
+        provider=provider,
+        display_name=params.name,
+        root_path=params.root_path,
+        lifecycle_state=params.lifecycle_state,
+        consolidate=params.consolidate,
+        reason=params.reason,
+        operation=PROJECT_IMPORT,
+        event_kind=PROJECT_IMPORTED_EVENT,
+    )
+
+
+def import_from_ref(
+    ctx: AppContext,
+    *,
+    ref: RepoRef,
+    provider: GitHubProvider | None,
+    display_name: str | None,
+    root_path: str | None,
+    lifecycle_state: LifecycleState,
+    consolidate: bool,
+    reason: str,
+    operation: str,
+    event_kind: str,
+) -> ImportProjectResult:
+    """Clone the named repository, register it, and consolidate (#344).
+
+    The shared core of `project.import` and `forge.import`. The caller
+    resolves the `provider` — the file token for `project.import`, the
+    acting actor's linked credential for `forge.import` (#179) — so the same
+    clone+register+consolidate runs under whichever credential named the
+    repository; `None` is the honest unconfigured case (a public repository
+    still clones, and consolidation is skipped with a 'not collected' detail).
+
+    Ordering is load-bearing. The clone happens before the declared write, so
+    the failure mode of a half-finished import is a directory nobody
+    registered rather than a project pointing at nothing. `project create`
+    scaffolds in the same order, for the same reason.
+    """
     remote = _GITHUB.clone_url(ref)
-    display_name = params.name or repo
-    slug = slugify(display_name)
+    name = display_name or ref.repo
+    slug = slugify(name)
     if not slug:
-        msg = f"cannot derive a slug from name {display_name!r}"
+        msg = f"cannot derive a slug from name {name!r}"
         raise InvalidRequest(msg)
 
     # A read, not a gate: cloning a large repository only to fail on a name
@@ -76,12 +127,11 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
             msg = f"a project with slug {slug!r} is already registered"
             raise Conflict(msg)
 
-    provider = github_provider(ctx.config, transport=ctx.forge_transport)
     metadata = _describe(provider, ref)
 
     destination = (
-        Path(params.root_path).expanduser()
-        if params.root_path
+        Path(root_path).expanduser()
+        if root_path
         else ctx.config.resolved_import_root / slug
     )
     outcome = ctx.cloner(
@@ -99,32 +149,30 @@ def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjec
     registered = record_registration(
         ctx,
         RegisterProjectParams(
-            name=display_name,
+            name=name,
             root_path=str(outcome.destination),
             repo_url=_GITHUB.web_url(ref),
-            lifecycle_state=params.lifecycle_state,
-            reason=params.reason,
+            lifecycle_state=lifecycle_state,
+            reason=reason,
         ),
-        operation=PROJECT_IMPORT,
-        event_kind=PROJECT_IMPORTED_EVENT,
+        operation=operation,
+        event_kind=event_kind,
         # A clone + consolidate of a forge repo is one of the explicit acts
         # that make a project upstream-truth (#181): its work items are its
         # issues from the first read. Without a provider, or without a
         # consolidation, the project stays unlinked and `forge.link` remains
         # the way to opt it in later.
-        link_state=(
-            "linked" if params.consolidate and provider is not None else "unlinked"
-        ),
+        link_state=("linked" if consolidate and provider is not None else "unlinked"),
     )
 
     consolidated = None
     detail = None
-    if params.consolidate and provider is not None:
+    if consolidate and provider is not None:
         consolidated = onboard(
             ctx,
-            OnboardParams(project=registered.project.slug, reason=params.reason),
+            OnboardParams(project=registered.project.slug, reason=reason),
         )
-    elif params.consolidate:
+    elif consolidate:
         detail = (
             "cloned and registered, but the forge adapter is not configured, "
             "so nothing upstream was read — which is 'not collected', not "
@@ -191,4 +239,11 @@ def _describe(provider: GitHubProvider | None, ref: RepoRef) -> dict[str, object
     return payload
 
 
-__all__ = ["PROJECT_IMPORT", "PROJECT_IMPORTED_EVENT", "import_project"]
+__all__ = [
+    "FORGE_IMPORT",
+    "FORGE_IMPORTED_EVENT",
+    "PROJECT_IMPORT",
+    "PROJECT_IMPORTED_EVENT",
+    "import_from_ref",
+    "import_project",
+]
