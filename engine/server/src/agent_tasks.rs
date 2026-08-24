@@ -27,7 +27,8 @@ use crate::{
     push::{NotificationKind, PushManager},
     sessions::SessionRegistry,
     workflow_engine::{
-        map_conclusion, FabroProvider, ProviderRunState, WorkflowEngineConfig, WorkflowProvider,
+        map_conclusion, HttpWorkflowProvider, ProviderRunState, WorkflowEngineConfig,
+        WorkflowProvider,
     },
 };
 use futures_util::StreamExt;
@@ -1660,7 +1661,7 @@ impl AgentTaskRegistry {
             }
         };
 
-        let provider = FabroProvider::from_config(&we, token);
+        let provider = HttpWorkflowProvider::from_config(&we, token);
         let goal = build_workflow_goal(&task);
         let repo_ref = we.repo_ref.clone();
 
@@ -1675,7 +1676,7 @@ impl AgentTaskRegistry {
                 // degrading to the poller when the stream is absent or breaks.
                 // DEFERRED to a later slice: bridging #289 gates onto the
                 // engine's own gates, and collecting the #283/#284 checkpoint
-                // branches the engine produces (`fabro/run/*`) as observations.
+                // checkpoint branches the engine produces as run observations.
                 spawn_workflow_tracker(
                     Arc::clone(self),
                     provider,
@@ -3215,7 +3216,7 @@ fn workflow_outcome_summary(
 /// scheduler; a broken or missing stream simply becomes a polled run.
 fn spawn_workflow_tracker(
     registry: Arc<AgentTaskRegistry>,
-    provider: FabroProvider,
+    provider: HttpWorkflowProvider,
     provider_run_id: String,
     task_id: Uuid,
     run_id: Uuid,
@@ -3327,7 +3328,7 @@ fn spawn_workflow_tracker(
 #[allow(clippy::too_many_arguments)]
 async fn finalize_workflow_run(
     registry: &Arc<AgentTaskRegistry>,
-    provider: &FabroProvider,
+    provider: &HttpWorkflowProvider,
     provider_run_id: &str,
     task_id: Uuid,
     run_id: Uuid,
@@ -3365,7 +3366,7 @@ async fn finalize_workflow_run(
 /// touches the scheduler.
 async fn poll_workflow_to_terminal(
     registry: Arc<AgentTaskRegistry>,
-    provider: FabroProvider,
+    provider: HttpWorkflowProvider,
     provider_run_id: String,
     task_id: Uuid,
     run_id: Uuid,
@@ -4827,7 +4828,7 @@ mod tests {
         let registry = test_registry();
         let task = registry
             .create(AgentTaskCreate {
-                name: "Fabro nightly".into(),
+                name: "engine nightly".into(),
                 prompt: "audit the repo".into(),
                 schedule: None,
                 triggers: None,
@@ -4886,9 +4887,9 @@ mod tests {
     fn a_workflow_engine_config_round_trips_on_a_task() {
         let mut task = task_bound_to(Some("vogt"), Some("WI-7"));
         task.workflow_engine = Some(WorkflowEngineConfig {
-            engine_url: "https://fabro.internal".into(),
+            engine_url: "https://engine.internal".into(),
             workflow: "nightly-audit".into(),
-            token_file: Some("/run/secrets/fabro".into()),
+            token_file: Some("/run/secrets/workflow-engine".into()),
             repo_ref: Some("main".into()),
         });
         let json = serde_json::to_string(&task).unwrap();
@@ -4896,9 +4897,12 @@ mod tests {
         let we = back
             .workflow_engine
             .expect("workflow_engine survives serde");
-        assert_eq!(we.engine_url, "https://fabro.internal");
+        assert_eq!(we.engine_url, "https://engine.internal");
         assert_eq!(we.workflow, "nightly-audit");
-        assert_eq!(we.token_file.as_deref(), Some("/run/secrets/fabro"));
+        assert_eq!(
+            we.token_file.as_deref(),
+            Some("/run/secrets/workflow-engine")
+        );
         assert_eq!(we.repo_ref.as_deref(), Some("main"));
 
         // A task without the field omits it from the wire form entirely.
