@@ -5,12 +5,54 @@ use bytes::Bytes;
 /// Lines are intentionally not tracked — terminal output is full of partial
 /// lines, escape sequences, and binary payloads. Replaying raw bytes into
 /// xterm.js is the cleanest path to a faithful redraw on reattach.
+///
+/// The one boundary the ring *does* respect is where it drops its oldest
+/// bytes on overflow. A naive byte-exact cut can slice through the middle of
+/// an ANSI/CSI escape sequence or a UTF-8 multibyte character; when the
+/// resulting snapshot is replayed into a freshly-reset xterm.js the truncated
+/// leading sequence is misparsed — a chopped `\x1b[32m` left as `\x1b[s...`
+/// is read as "save cursor" and eats the following characters, so a line like
+/// `scope` renders as `cope` (issue #366). To avoid that, overflow trimming
+/// advances the cut forward to just past the next newline, so the retained
+/// buffer always begins in the terminal's ground state: a line feed never
+/// appears inside a CSI/OSC sequence and `0x0A` is never a UTF-8 continuation
+/// byte, so a replay that starts there is always safe.
 pub struct Scrollback {
     capacity: usize,
     buf: Vec<u8>,
     /// Wall-clock-ish counter of total bytes ever written. Useful for clients
     /// that want a monotonic position cursor.
     total_written: u64,
+}
+
+/// Given a minimum number of leading bytes to drop from `buf`, return the
+/// index the retained region should start at so that it begins in the
+/// terminal's ground state.
+///
+/// We must drop *at least* `at_least` bytes (the ring-buffer overflow). We
+/// then extend the cut forward to just past the next newline, because the byte
+/// after a `\n` is the only position we can prove is ground state without
+/// replaying the entire prior history: a line feed never appears inside a
+/// CSI/OSC escape sequence, and `0x0A` is never a UTF-8 continuation byte, so
+/// no multibyte character straddles it. When `at_least` is 0 nothing is being
+/// cut off the front (the retained region already starts at a natural stream
+/// boundary), so we align nothing. When no newline exists at or after the cut
+/// (a single very long line with no line breaks) we fall back to the raw
+/// `at_least` cut rather than dropping the whole buffer.
+fn newline_aligned_start(buf: &[u8], at_least: usize) -> usize {
+    if at_least == 0 {
+        return 0;
+    }
+    if at_least >= buf.len() {
+        return buf.len();
+    }
+    // The newline must sit at index >= at_least - 1 so that dropping through it
+    // (its index + 1) still removes at least `at_least` bytes.
+    let from = at_least - 1;
+    match buf[from..].iter().position(|&b| b == b'\n') {
+        Some(rel) => from + rel + 1,
+        None => at_least,
+    }
 }
 
 impl Scrollback {
@@ -25,16 +67,22 @@ impl Scrollback {
     pub fn push(&mut self, chunk: &[u8]) {
         self.total_written = self.total_written.saturating_add(chunk.len() as u64);
         if chunk.len() >= self.capacity {
-            // Single chunk bigger than capacity: keep only the tail.
+            // Single chunk bigger than capacity: keep only the tail, aligned
+            // forward to a ground-state boundary so replay never starts inside
+            // an escape sequence or a UTF-8 char.
             let start = chunk.len() - self.capacity;
+            let start = newline_aligned_start(chunk, start);
             self.buf.clear();
             self.buf.extend_from_slice(&chunk[start..]);
             return;
         }
         let overflow = (self.buf.len() + chunk.len()).saturating_sub(self.capacity);
         if overflow > 0 {
-            // Drop the oldest `overflow` bytes.
-            self.buf.drain(..overflow);
+            // Drop at least the oldest `overflow` bytes, extending the cut
+            // forward to just past the next newline so the retained buffer
+            // begins in the terminal's ground state (see the type comment).
+            let drop_to = newline_aligned_start(&self.buf, overflow);
+            self.buf.drain(..drop_to);
         }
         self.buf.extend_from_slice(chunk);
     }
@@ -125,5 +173,85 @@ mod tests {
         assert_eq!(sb.snapshot_since(10).as_deref(), Some(&b""[..]));
         assert!(sb.snapshot_since(1).is_none());
         assert!(sb.snapshot_since(11).is_none());
+    }
+
+    // ---- boundary-safe overflow trimming (issue #366) ----
+
+    #[test]
+    fn newline_aligned_start_advances_past_next_newline() {
+        // Must drop >= 2 bytes; the next newline is at index 3, so the retained
+        // region starts at 4 ("def").
+        assert_eq!(newline_aligned_start(b"abc\ndef", 2), 4);
+        // Newline exactly at the minimum-drop boundary is honoured, not skipped.
+        assert_eq!(newline_aligned_start(b"a\nbcd", 1), 2);
+        // No newline at or after the cut: fall back to the raw minimum drop.
+        assert_eq!(newline_aligned_start(b"abcdef", 3), 3);
+        // Nothing to drop off the front: never advance.
+        assert_eq!(newline_aligned_start(b"a\nbc", 0), 0);
+        // Dropping everything is clamped to the buffer length.
+        assert_eq!(newline_aligned_start(b"ab", 5), 2);
+    }
+
+    /// A chopped ANSI escape sequence is exactly issue #366: an overflow cut
+    /// that lands inside `\x1b[7m` would leave the buffer starting with the
+    /// sequence tail (`7mHI…`), which xterm.js misparses. Alignment must drop
+    /// forward past the newline so the retained buffer starts in ground state.
+    #[test]
+    fn overflow_trim_never_starts_mid_escape_sequence() {
+        let mut sb = Scrollback::new(8);
+        sb.push(b"\x1b[7mHI\n"); // 7 bytes: inverse-video "HI" then newline
+        sb.push(b"XYZ"); // overflow = 2, raw cut would land inside "\x1b[7m"
+
+        let snap = sb.snapshot();
+        // The whole chopped-escape line was dropped; replay resumes cleanly.
+        assert_eq!(&*snap, b"XYZ");
+        // Invariant: the snapshot never begins with the tail of the escape.
+        assert_ne!(snap.first(), Some(&b'7'));
+        assert_ne!(snap.first(), Some(&0x1b));
+    }
+
+    /// The same invariant for the single-chunk-bigger-than-capacity path.
+    #[test]
+    fn oversized_chunk_trim_starts_after_a_newline() {
+        let mut sb = Scrollback::new(6);
+        sb.push(b"12345\nABCDE"); // 11 bytes > capacity; raw cut lands at index 5
+
+        // Retained region begins right after the only newline.
+        assert_eq!(&*sb.snapshot(), b"ABCDE");
+        assert_eq!(sb.total_written(), 11);
+    }
+
+    /// A cut through a UTF-8 multibyte character must never leave the snapshot
+    /// beginning on a continuation byte (which renders as mojibake).
+    #[test]
+    fn trim_never_starts_on_a_utf8_continuation_byte() {
+        let mut sb = Scrollback::new(3);
+        // bytes: 'a' 0xC3 0xA9('é') '\n' 'b'; raw cut at index 2 = the 0xA9
+        // continuation byte.
+        sb.push(&[0x61, 0xC3, 0xA9, 0x0A, 0x62]);
+
+        let snap = sb.snapshot();
+        assert_eq!(&*snap, b"b");
+        // Continuation bytes are 0b10xx_xxxx.
+        assert!(snap.first().map_or(true, |&b| (b & 0xC0) != 0x80));
+    }
+
+    /// Even after a boundary-aligned overflow trim, the retained-cursor
+    /// accounting stays exact, so a delta resume neither gaps nor duplicates.
+    #[test]
+    fn delta_resume_stays_byte_exact_after_aligned_trim() {
+        let mut sb = Scrollback::new(8);
+        sb.push(b"ab\ncd\n"); // 6 bytes
+        sb.push(b"ef\ngh"); // overflow = 3 -> aligned trim drops "ab\n" (3 bytes)
+
+        // Retained buffer starts after the first newline.
+        assert_eq!(&*sb.snapshot(), b"cd\nef\ngh");
+        assert_eq!(sb.total_written(), 11);
+
+        // A client that had already consumed up to absolute position 6 resumes
+        // with exactly the bytes after it, no gap and no repeat.
+        assert_eq!(sb.snapshot_since(6).as_deref(), Some(&b"ef\ngh"[..]));
+        // A cursor older than what the ring retained forces a full reset.
+        assert!(sb.snapshot_since(2).is_none());
     }
 }
