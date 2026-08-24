@@ -5,7 +5,7 @@ name: deploy production
 # digest, and requires an explicit live-change confirmation before it can
 # modify estate desired state or call Node B's Komodo deployment API.
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       tag:
