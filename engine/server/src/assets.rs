@@ -33,7 +33,12 @@ fn serve(path: &str) -> Response {
             // HTML and the service worker are unversioned entry points and must
             // be revalidated so a browser can discover each deployment. Vite's
             // hashed JS/CSS assets can be cached immutably.
-            let cache = if path == "index.html" || path == "/" || path.is_empty() || path == "sw.js"
+            let cache = if path == "index.html"
+                || path == "/"
+                || path.is_empty()
+                || path == "sw.js"
+                || path == "demo-manifest.json"
+                || path == "demo-build.json"
             {
                 "no-store, must-revalidate"
             } else {

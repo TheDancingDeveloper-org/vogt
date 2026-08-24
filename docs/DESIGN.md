@@ -1059,6 +1059,23 @@ run without a browser and a phone: M11's and M13's. `ROADMAP.md` says so at
 each stage and the gap register carries them, so that "built" nowhere
 quietly means "watched working".
 
+### 10.1 Public demo artifact
+
+The public demo is the shipped Solid PWA selected by a runtime
+`/demo-manifest.json`, not a fork or screenshot site. Before `App` evaluates,
+the boot module validates that manifest against `demo-build.json` and installs
+a browser-only transport. Its deterministic state lives in `sessionStorage`;
+HTTP, event-stream and terminal-socket requests are answered in the browser.
+Terminal sessions replay the real snapshot ordering but accept only canned
+input. The only server in the demo image is a read-only static-file origin: it
+contains no Vogt core, session engine, credentials, PTY or proxy.
+
+Normal and demo packaging share one PWA compilation. `demo-build.json` records
+the source ref/SHA and SHA-256 of each built asset; demo augmentation verifies
+those hashes before adding the runtime manifest and the static GUI-stream
+illustration. [`DEMO_SITE_PLAN.md`](DEMO_SITE_PLAN.md) records the complete
+implementation and acceptance rationale.
+
 ---
 
 ## 11. Relationship to cadastre

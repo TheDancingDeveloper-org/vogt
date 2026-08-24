@@ -63,6 +63,12 @@ docs
 design
 tests
 scripts
+# The PWA build itself now owns a tiny provenance writer.  Keep excluding the
+# repository-level helper scripts from this context, but do not let that broad
+# directory name hide a build input nested below web/ on Docker versions that
+# match slashless patterns at any depth.
+!web/scripts
+!web/scripts/**
 mobile
 deploy
 **/*.md

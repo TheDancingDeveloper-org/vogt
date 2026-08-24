@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Orbit IDE · simulated GUI stream</title>
+  <style>
+    :root{color-scheme:dark;font:14px ui-sans-serif,system-ui;background:#0d1117;color:#c9d1d9}
+    *{box-sizing:border-box}body{margin:0;height:100vh;display:grid;grid-template-rows:34px 1fr 25px;overflow:hidden}
+    header,footer{display:flex;align-items:center;gap:15px;padding:0 11px;background:#161b22;border-color:#30363d}
+    header{border-bottom:1px solid #30363d}footer{border-top:1px solid #30363d;color:#8b949e;font-size:12px}
+    header b{color:#f0f6fc}header span{color:#8b949e}.dot{width:9px;height:9px;border-radius:50%;background:#3fb950;box-shadow:0 0 8px #3fb950}
+    main{min-height:0;display:grid;grid-template-columns:210px 1fr 270px}.side,.inspect{padding:12px;background:#0f141b;overflow:auto}.side{border-right:1px solid #30363d}.inspect{border-left:1px solid #30363d}
+    h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;margin:3px 0 10px}.tree{line-height:1.9}.tree .active{display:block;margin-left:-6px;padding-left:6px;background:#1c2734;color:#79b8ff}.indent{padding-left:17px}
+    .editor{display:grid;grid-template-rows:34px 1fr;min-width:0}.tabs{padding:8px 12px;border-bottom:1px solid #30363d;background:#161b22;color:#f0f6fc}.code{padding:16px 0;overflow:auto;background:#0d1117}.line{display:grid;grid-template-columns:44px 1fr;white-space:pre;font:13px/1.65 ui-monospace,SFMono-Regular,monospace}.line i{font-style:normal;text-align:right;padding-right:12px;color:#484f58}.kw{color:#ff7b72}.fn{color:#d2a8ff}.str{color:#a5d6ff}.comment{color:#8b949e}
+    .card{padding:10px;margin:8px 0;border:1px solid #30363d;border-radius:6px;background:#161b22}.ok{color:#7ee787}.warn{color:#e3b341}
+  </style>
+</head>
+<body>
+  <header><span class="dot"></span><b>Orbit IDE</b><span>Simulated same-origin GUI stream · no process is running</span></header>
+  <main>
+    <aside class="side"><h2>Explorer</h2><div class="tree">▾ orbit-demo<div class="indent">▾ src<br><span class="active">TS runtime.ts</span>TS main.ts<br>▾ docs<br><span class="indent">architecture.md</span><br>README.md<br>package.json</div></div><h2>Source control · 3</h2><div class="tree">M README.md<br>M src/runtime.ts<br>? docs/demo-notes.md</div></aside>
+    <section class="editor"><div class="tabs">runtime.ts&nbsp;&nbsp; ●</div><div class="code"><div class="line"><i>1</i><span><span class="kw">export function</span> <span class="fn">start</span>(options: DemoOptions) {</span></div><div class="line"><i>2</i><span>  <span class="kw">if</span> (!options.safe) <span class="kw">throw new</span> Error(<span class="str">"demo must stay local"</span>);</span></div><div class="line"><i>3</i><span></span></div><div class="line"><i>4</i><span>  <span class="comment">// Runtime requests resolve from deterministic browser state.</span></span></div><div class="line"><i>5</i><span>  <span class="kw">return</span> createDemoTransport({</span></div><div class="line"><i>6</i><span>    scenario: <span class="str">"full-estate-v1"</span>,</span></div><div class="line"><i>7</i><span>    terminal: <span class="str">"scripted"</span>,</span></div><div class="line"><i>8</i><span>    persistence: <span class="str">"sessionStorage"</span>,</span></div><div class="line"><i>9</i><span>  });</span></div><div class="line"><i>10</i><span>}</span></div></div></section>
+    <aside class="inspect"><h2>Demo checks</h2><div class="card"><b class="ok">✓ Browser-only state</b><p>No request reaches a workspace or subprocess.</p></div><div class="card"><b class="ok">✓ Visual parity</b><p>The embedded PWA assets match the recorded build manifest.</p></div><div class="card"><b class="warn">● Waiting for review</b><p>Phone disclosure snapshot · WI-104</p></div><h2>Outline</h2><div class="tree">DemoOptions<br>start(options)<br>createDemoTransport()</div></aside>
+  </main>
+  <footer><span>demo/full-estate</span><span>TypeScript</span><span>UTF-8</span><span>Ln 5, Col 3</span><span>Offline simulation</span></footer>
+</body>
+</html>

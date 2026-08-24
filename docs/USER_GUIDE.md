@@ -866,6 +866,23 @@ scope the token does not hold all say which they are.
 
 ## 7. Frequently asked
 
+### The public demo
+
+A deployment showing the persistent **Demo data** strip is the public demo,
+not a connected Vogt instance. Its Board, Backlog, Inbox, Projects, Audit,
+files, Git, tasks, Assistant and sessions are deterministic fictional data.
+Writes last only in that browser tab. **Reset demo** restores the canonical
+tour; Sign out shows the normal sign-in surface and a reload restores the
+disposable demo identity.
+
+The strip links directly to three terminal compositions: **Build + tests** is
+a two-pane row, **Agent review** is a nested three-pane view, and **Incident
+view** is a three-pane broadcast example. They use the real attach/replay
+ordering, but the output is scripted. Input matches a small canned command
+list and is never executed. The GUI stream is likewise a same-origin static
+illustration, not a remote desktop. The source link in the strip names the
+exact commit whose PWA asset hashes the demo advertises.
+
 **Can I use it offline?** No. Installed PWAs show an explicit offline fallback
 page rather than pretending to support disconnected use — a queued offline
 write could not carry an honest freshness answer, so none is offered.

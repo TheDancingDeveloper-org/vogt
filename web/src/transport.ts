@@ -1,4 +1,4 @@
-// Shared transport layer for the two fetch choke points — `req()` in `api.ts`
+// Shared retry policy above the runtime transport selected at application boot.
 // (engine calls) and `call()` in `vogtApi.ts` (Vogt calls). It exists because a
 // dropped connection used to reach a surface as a raw `TypeError`
 // ("NetworkError when attempting to fetch resource"), rendered verbatim as the
@@ -16,6 +16,8 @@
 //   * a transient wire failure — retried for idempotent methods, then raised as
 //     a typed `TransportError` carrying a written reason instead of the
 //     browser's implementation detail.
+
+import { runtimeTransport } from "./runtimeTransport";
 
 /** A transport-level failure: the request never reached a responding server. */
 export class TransportError extends Error {
@@ -77,7 +79,7 @@ export async function fetchWithRetry(
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      return await fetch(url, init);
+      return await runtimeTransport().request(url, init);
     } catch (err) {
       if (isAbort(err, signal)) throw err;
       lastError = err;
