@@ -20,13 +20,22 @@ from load import (
     DatasetPlan,
     LatencyRecorder,
     OperationStats,
+    Regression,
+    SoakOperationStats,
+    SoakPlan,
+    SoakRecorder,
     build_parser,
     build_report,
+    build_soak_report,
+    compare_to_baseline,
+    current_rss_mb,
     percentile,
     plan_from_args,
     plan_from_scale,
     relation_triples,
     run_load,
+    run_soak,
+    soak_plan_from_scale,
 )
 from vogt.core.entities import DECLARABLE_RELATION_KINDS
 
@@ -224,6 +233,261 @@ def test_run_load_drives_real_operations_and_emits_the_shape(tmp_path: Path) -> 
         assert ops[name]["count"] >= 1
         assert ops[name]["p50_ms"] >= 0
     assert ops["work.create"]["count"] == 2
+
+
+# -- soak: SoakPlan --------------------------------------------------------
+
+
+def test_soak_plan_counts_its_sweeps() -> None:
+    base = DatasetPlan(
+        projects=1, work_items_per_project=1, relations=0, ranking_iterations=1
+    )
+    plan = SoakPlan(base=base, iterations=100, sweep_every=25)
+    assert plan.sweeps == 4
+    assert plan.to_dict()["sweeps"] == 4
+    assert plan.to_dict()["base"]["total_work_items"] == 1
+
+
+@pytest.mark.parametrize(("iterations", "sweep_every"), [(0, 1), (1, 0)])
+def test_soak_plan_rejects_non_positive_knobs(
+    iterations: int, sweep_every: int
+) -> None:
+    base = DatasetPlan(
+        projects=1, work_items_per_project=1, relations=0, ranking_iterations=1
+    )
+    with pytest.raises(ValueError, match="must be >= 1"):
+        SoakPlan(base=base, iterations=iterations, sweep_every=sweep_every)
+
+
+def test_soak_plan_from_scale_trims_seed_ranking() -> None:
+    plan = soak_plan_from_scale(2, iterations=50, sweep_every=10)
+    assert plan.iterations == 50
+    assert plan.sweep_every == 10
+    # The base reuses plan_from_scale's sizing but not its 20 warm-up rankings.
+    assert plan.base.projects == plan_from_scale(2).projects
+    assert plan.base.ranking_iterations == 1
+
+
+# -- soak: SoakOperationStats / SoakRecorder -------------------------------
+
+
+def test_soak_operation_stats_rounds_and_carries_errors() -> None:
+    stats = SoakOperationStats(
+        count=3, errors=2, p50_ms=1.2345, p95_ms=9.8765, p99_ms=12.3456
+    )
+    assert stats.to_dict() == {
+        "count": 3,
+        "errors": 2,
+        "p50_ms": 1.234,
+        "p95_ms": 9.877,
+        "p99_ms": 12.346,
+    }
+
+
+def test_soak_recorder_guard_times_success_and_counts_failure() -> None:
+    recorder = SoakRecorder()
+    recorder.guard("op", lambda: None)
+
+    def _boom() -> None:
+        raise RuntimeError("under load")
+
+    recorder.guard("op", _boom)
+
+    assert recorder.successful_calls == 1
+    assert recorder.total_errors == 1
+    stats = recorder.stats()["op"]
+    assert stats.count == 1
+    assert stats.errors == 1
+
+
+def test_soak_recorder_computes_p99() -> None:
+    recorder = SoakRecorder()
+    for sample in range(1, 101):  # 1..100 ms
+        recorder.record("op", float(sample))
+    stats = recorder.stats()["op"]
+    assert stats.p50_ms == 50.0
+    assert stats.p95_ms == 95.0
+    assert stats.p99_ms == 99.0
+
+
+def test_current_rss_is_positive() -> None:
+    assert current_rss_mb() > 0
+
+
+# -- soak: build_soak_report -----------------------------------------------
+
+
+def test_build_soak_report_computes_throughput_and_error_rate() -> None:
+    from datetime import UTC, datetime
+
+    base = DatasetPlan(
+        projects=1, work_items_per_project=2, relations=0, ranking_iterations=1
+    )
+    plan = SoakPlan(base=base, iterations=10, sweep_every=5)
+    stats = {"backlog": SoakOperationStats(2, 0, 1.0, 2.0, 3.0)}
+    report = build_soak_report(
+        plan=plan,
+        stats=stats,
+        successful_calls=90,
+        total_errors=10,
+        rss_start_mb=50.0,
+        rss_end_mb=55.0,
+        rss_peak_mb=52.0,
+        seed=1,
+        duration_s=2.0,
+        produced_by="in-process",
+        generated_at=datetime(2026, 8, 24, tzinfo=UTC),
+    )
+    assert report["kind"] == "soak"
+    assert report["schema_version"] == load.SOAK_REPORT_SCHEMA_VERSION
+    assert report["produced_by"] == "in-process"
+    assert report["throughput_ops_per_s"] == 45.0  # 90 / 2s
+    assert report["error_rate"] == 0.1  # 10 / (90 + 10)
+    assert report["total_calls"] == 100
+    assert report["rss_mb"]["growth"] == 5.0
+    # Peak is clamped to at least the observed live samples.
+    assert report["rss_mb"]["peak"] == 55.0
+    json.dumps(report)
+
+
+# -- soak: compare_to_baseline ---------------------------------------------
+
+
+def _soak_report(*, p95: float, throughput: float) -> dict[str, object]:
+    return {
+        "throughput_ops_per_s": throughput,
+        "operations": {"backlog": {"p95_ms": p95}},
+    }
+
+
+def test_compare_flags_a_latency_regression_past_the_threshold() -> None:
+    baseline = _soak_report(p95=10.0, throughput=100.0)
+    current = _soak_report(p95=25.0, throughput=100.0)  # 2.5x, past 2x
+    regressions = compare_to_baseline(baseline, current)
+    assert [r.metric for r in regressions] == ["backlog.p95_ms"]
+    assert regressions[0].ratio == 2.5
+
+
+def test_compare_flags_a_throughput_drop_past_the_threshold() -> None:
+    baseline = _soak_report(p95=10.0, throughput=100.0)
+    current = _soak_report(p95=10.0, throughput=40.0)  # fell to 0.4x, past 1/2x
+    regressions = compare_to_baseline(baseline, current)
+    assert [r.metric for r in regressions] == ["throughput_ops_per_s"]
+
+
+def test_compare_is_quiet_within_the_threshold() -> None:
+    baseline = _soak_report(p95=10.0, throughput=100.0)
+    current = _soak_report(p95=18.0, throughput=60.0)  # 1.8x / 1.67x, both under 2x
+    assert compare_to_baseline(baseline, current) == []
+
+
+def test_compare_skips_operations_absent_from_either_report() -> None:
+    baseline = {"operations": {"backlog": {"p95_ms": 10.0}}}
+    current = {"operations": {"bugs": {"p95_ms": 999.0}}}  # no overlap
+    assert compare_to_baseline(baseline, current) == []
+
+
+def test_compare_rejects_a_non_positive_threshold() -> None:
+    with pytest.raises(ValueError, match="threshold"):
+        compare_to_baseline({}, {}, threshold=0)
+
+
+def test_regression_describes_itself() -> None:
+    text = Regression("backlog.p95_ms", 10.0, 25.0, 2.5).describe()
+    assert "backlog.p95_ms" in text
+    assert "2.5" in text
+
+
+# -- soak: end to end ------------------------------------------------------
+
+
+def test_run_soak_drives_the_steady_mix_and_records_numbers(tmp_path: Path) -> None:
+    base = DatasetPlan(
+        projects=1, work_items_per_project=2, relations=1, ranking_iterations=1
+    )
+    plan = SoakPlan(base=base, iterations=6, sweep_every=3)
+    report = run_soak(plan, data_dir=tmp_path / "instance", seed=0)
+
+    assert report["kind"] == "soak"
+    assert report["error_rate"] == 0.0
+    assert report["throughput_ops_per_s"] > 0
+    ops = report["operations"]
+    for name in ("work.create", "work.update", "work.get", "backlog", "bugs", "sweep"):
+        assert name in ops, f"{name} was not exercised"
+    # 6 iterations, one create each; sweep every 3 -> 2 sweeps.
+    assert ops["work.create"]["count"] == 6
+    assert ops["sweep"]["count"] == 2
+    assert report["rss_mb"]["end"] > 0
+
+
+def test_main_soak_mode_writes_and_checks_a_baseline(tmp_path: Path) -> None:
+    baseline_path = tmp_path / "baseline.json"
+    args = [
+        "--mode",
+        "soak",
+        "--projects",
+        "1",
+        "--work-items-per-project",
+        "2",
+        "--relations",
+        "0",
+        "--iterations",
+        "6",
+        "--sweep-every",
+        "3",
+        "--data-dir",
+        str(tmp_path / "data"),
+        "--out",
+        str(baseline_path),
+    ]
+    assert load.main(args) == 0
+    written = json.loads(baseline_path.read_text(encoding="utf-8"))
+    assert written["kind"] == "soak"
+
+    # Checking a run against itself as the baseline is drift-free -> exit 0.
+    check = [
+        *args,
+        "--data-dir",
+        str(tmp_path / "data2"),
+        "--check-baseline",
+        str(baseline_path),
+    ]
+    assert load.main(check) == 0
+
+
+def test_main_check_baseline_fails_on_drift(tmp_path: Path) -> None:
+    # A baseline with an absurdly fast p95 forces a regression on any real run.
+    baseline_path = tmp_path / "tiny.json"
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "throughput_ops_per_s": 1_000_000.0,
+                "operations": {"backlog": {"p95_ms": 0.0001}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = [
+        "--mode",
+        "soak",
+        "--projects",
+        "1",
+        "--work-items-per-project",
+        "2",
+        "--relations",
+        "0",
+        "--iterations",
+        "4",
+        "--sweep-every",
+        "2",
+        "--data-dir",
+        str(tmp_path / "data"),
+        "--out",
+        str(tmp_path / "out.json"),
+        "--check-baseline",
+        str(baseline_path),
+    ]
+    assert load.main(args) == 1
 
 
 def test_main_writes_a_report_file(tmp_path: Path) -> None:

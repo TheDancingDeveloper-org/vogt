@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "kind": "soak",
+  "generated_at": "2026-08-24T08:46:02.851872+00:00",
+  "produced_by": "in-process (dev box, scripts/load.py --mode soak)",
+  "note": "Soak measurements from scripts/load.py --mode soak (#297, increment 2). Not a production SLA; comparable only to another run with the same `produced_by`.",
+  "host": {
+    "python": "3.14.4",
+    "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.43"
+  },
+  "seed": 0,
+  "duration_s": 3.815,
+  "throughput_ops_per_s": 316.61,
+  "error_rate": 0.0,
+  "total_calls": 1208,
+  "total_errors": 0,
+  "rss_mb": {
+    "start": 61.4,
+    "end": 63.7,
+    "growth": 2.3,
+    "peak": 63.7
+  },
+  "plan": {
+    "iterations": 200,
+    "sweep_every": 25,
+    "sweeps": 8,
+    "base": {
+      "projects": 5,
+      "work_items_per_project": 20,
+      "total_work_items": 100,
+      "relations": 20,
+      "ranking_iterations": 1
+    }
+  },
+  "operations": {
+    "backlog": {
+      "count": 200,
+      "errors": 0,
+      "p50_ms": 8.562,
+      "p95_ms": 12.547,
+      "p99_ms": 17.417
+    },
+    "bugs": {
+      "count": 200,
+      "errors": 0,
+      "p50_ms": 4.667,
+      "p95_ms": 5.642,
+      "p99_ms": 6.828
+    },
+    "sweep": {
+      "count": 8,
+      "errors": 0,
+      "p50_ms": 11.329,
+      "p95_ms": 13.764,
+      "p99_ms": 13.764
+    },
+    "work.create": {
+      "count": 200,
+      "errors": 0,
+      "p50_ms": 1.098,
+      "p95_ms": 1.317,
+      "p99_ms": 1.708
+    },
+    "work.get": {
+      "count": 200,
+      "errors": 0,
+      "p50_ms": 1.251,
+      "p95_ms": 1.496,
+      "p99_ms": 1.626
+    },
+    "work.list": {
+      "count": 200,
+      "errors": 0,
+      "p50_ms": 1.197,
+      "p95_ms": 1.463,
+      "p99_ms": 1.781
+    },
+    "work.update": {
+      "count": 200,
+      "errors": 0,
+      "p50_ms": 1.557,
+      "p95_ms": 1.91,
+      "p99_ms": 2.311
+    }
+  }
+}
