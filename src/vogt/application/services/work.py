@@ -28,6 +28,7 @@ from vogt.adapters.forge.models import RepoRef
 from vogt.adapters.forge.writeback import WriteBackResult, permits
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    BindBranchParams,
     CommentParams,
     CommentResult,
     CreateWorkParams,
@@ -46,6 +47,7 @@ from vogt.application.services.branches import branch_views_for
 from vogt.application.services.git_story import git_story_for
 from vogt.application.services.sessions import list_sessions
 from vogt.application.writes import WriteOutcome, audited_write
+from vogt.core.branches import default_branch_name
 from vogt.core.entities import (
     DECLARABLE_RELATION_KINDS,
     Actor,
@@ -75,6 +77,7 @@ WORK_TRANSITION = "work.transition"
 WORK_RELATE = "work.relate"
 WORK_UNRELATE = "work.unrelate"
 WORK_COMMENT = "work.comment"
+WORK_BIND_BRANCH = "work.bind_branch"
 
 WORK_CREATED_EVENT = "work.created"
 WORK_UPDATED_EVENT = "work.updated"
@@ -82,6 +85,7 @@ WORK_TRANSITIONED_EVENT = "work.transitioned"
 WORK_RELATED_EVENT = "work.related"
 WORK_UNRELATED_EVENT = "work.unrelated"
 WORK_COMMENTED_EVENT = "work.commented"
+WORK_BRANCH_BOUND_EVENT = "work.branch_bound"
 
 
 # -- the linked/unlinked gate ----------------------------------------------
@@ -975,6 +979,75 @@ def _declared_only(ctx: AppContext, view: ReadView, ref: str) -> WorkItem:
                 "them on the forge"
             ) from None
         raise
+
+
+# -- the declared branch binding (#283) ------------------------------------
+
+
+def bind_branch(ctx: AppContext, params: BindBranchParams) -> WorkResult:
+    """Declare the git branch a work item is worked on (#283, declared path).
+
+    The declared half of the branch binding as a first-class write, alongside
+    `session.start`'s automatic recording: it lands a branch *name* on the
+    item's overlay, audited with a principal and reason like every other
+    declared field. Additive and forward-only (FR-B4) — Vogt never creates,
+    renames or deletes a branch; it only records the convention (#287) so a
+    sweep's observations have a declared side to agree or drift with.
+
+    The branch defaults from `branch_binding_template` (`WI-7` → `wi-7`, an
+    upstream item → its `gh-<n>` form) when none is given. The write is a
+    read-modify-write on the overlay's `branches` list, so declaring a branch
+    already bound is a no-op rather than an error — the same idempotence
+    `session.start` relies on when a session is restarted on an item.
+
+    An item that belongs to no project is refused rather than bound: the
+    overlay is keyed to a project and, like a session, a branch binding has no
+    working tree to mean anything against.
+    """
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[WorkResult]:
+        del actor
+        item = upstream.resolve_work_ref(ctx, txn, params.ref)
+        if item.project_id is None:
+            # Not a lookup failure (mirrors `session.start`): an unassigned
+            # item has no checkout for a branch name to bind to, and the
+            # overlay row is keyed to a project.
+            raise InvalidRequest(
+                f"{item.ref} belongs to no project, so there is no branch to bind it to"
+            )
+        requested = params.branch.strip() if params.branch else ""
+        branch = requested or default_branch_name(
+            item.ref, template=ctx.config.branch_binding_template
+        )
+        now = ctx.clock()
+        existing = txn.work_overlay(item.ref)
+        current = list(existing.branches) if existing is not None else []
+        if branch not in current:
+            current.append(branch)
+            overlay = (
+                existing.model_copy(update={"branches": current, "updated_at": now})
+                if existing is not None
+                else WorkOverlay(
+                    subject_key=item.ref,
+                    project_id=item.project_id,
+                    branches=current,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            txn.upsert_work_overlay(overlay)
+        return WriteOutcome(
+            result=WorkResult(item=item, branches=branch_views_for(ctx, txn, item)),
+            entity_kind="work_item",
+            entity_id=item.id,
+            payload={"ref": item.ref, "branch": branch},
+            event_kind=WORK_BRANCH_BOUND_EVENT,
+            summary={"ref": item.ref, "branch": branch},
+        )
+
+    return audited_write(
+        ctx, operation=WORK_BIND_BRANCH, reason=params.reason, body=body
+    )
 
 
 # -- comments --------------------------------------------------------------

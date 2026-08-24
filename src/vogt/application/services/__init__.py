@@ -97,6 +97,7 @@ from vogt.application.services.taxonomy import (
 )
 from vogt.application.services.views import backlog, bugs, why
 from vogt.application.services.work import (
+    bind_branch,
     comment_work,
     create_work,
     get_work,
@@ -117,6 +118,7 @@ __all__ = [
     "archive_inbox",
     "backlog",
     "backup",
+    "bind_branch",
     "brief_project",
     "bugs",
     "comment_work",
