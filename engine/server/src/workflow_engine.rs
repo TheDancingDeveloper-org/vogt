@@ -5,15 +5,15 @@
 //! [`WorkflowEngineConfig`] instead hands its run to an external **workflow
 //! engine** — a service that owns the agent loop, sandboxes, checkpoints and
 //! gates — and Vogt tracks the run as an observation with a typed conclusion.
-//! Fabro (<https://github.com/fabro-sh/fabro>) is the concrete provider this
-//! increment targets; see `docs/local/FABRO_COMPARISON.md` for why Vogt
-//! integrates such an engine rather than re-building its execution features.
+//! The first concrete provider is a generic HTTP client ([`HttpWorkflowProvider`])
+//! speaking a REST + SSE contract; Vogt integrates such an engine rather than
+//! re-building its execution features (sandboxes, checkpoints, gates, billing).
 //!
 //! ## Scope of this increment
 //!
-//! This module is the **seam plus the Fabro client**, fully unit/integration
-//! tested against a *fake* HTTP server whose responses match the documented
-//! Fabro contract below. The estate has no running Fabro instance, so live
+//! This module is the **seam plus a concrete HTTP client**, fully unit/integration
+//! tested against a *fake* HTTP server whose responses match the assumed
+//! contract below. No live engine instance is available here, so live
 //! end-to-end validation is deliberately **deferred**. Increment 1 tracked a
 //! run purely by polling; **increment 2 (this slice)** adds SSE event
 //! mirroring: [`WorkflowProvider::stream_events`] subscribes to the engine's
@@ -22,14 +22,14 @@
 //! poller when the stream is absent or breaks. Gate bridging (#289) and
 //! checkpoint-branch collection (#283/#284) remain deferred to a later slice.
 //!
-//! ## ASSUMED Fabro REST contract
+//! ## ASSUMED workflow-engine REST contract
 //!
-//! The shapes below are **assumed** from the shallow-clone reading captured in
-//! `docs/local/FABRO_COMPARISON.md` (Fabro exposes REST + SSE and is an MCP
-//! server; its runs end `succeeded | failed | partially_succeeded | skipped`
+//! The shapes below are **assumed** from a reference workflow engine exposing
+//! REST + SSE: its runs end `succeeded | failed | partially_succeeded | skipped`
 //! with a terminal `Conclusion` carrying timing, billing in `usd_micros`, final
-//! sha and diff). They are **not yet verified against a live Fabro** — that
-//! verification is increment-2 work, and the exact routes/field names may move.
+//! sha and diff. They are **not yet verified against a live engine** — that
+//! verification is deferred to a live smoke, and the exact routes/field names
+//! may move.
 //!
 //! * **create run** — `POST {base}/api/runs`
 //!   request  `{ "workflow": <name>, "goal": <goal>, "repo_ref": <ref?> }`
@@ -51,9 +51,9 @@
 //! * **stream run events** — `GET {base}/api/runs/{id}/events`
 //!   with `Accept: text/event-stream`. A `text/event-stream` (SSE) response
 //!   whose `data:` lines carry a JSON envelope. The exact envelope schema is
-//!   **not specified** by `FABRO_COMPARISON.md` (it records only "one event
-//!   envelope everywhere (SSE, NDJSON, export)"), so the shape below is a
-//!   **PROVISIONAL envelope, unverified against a live Fabro** — a live smoke
+//!   **not specified** by the reference (only "one event envelope everywhere
+//!   (SSE, NDJSON, export)" is documented), so the shape below is a
+//!   **PROVISIONAL envelope, unverified against a live engine** — a live smoke
 //!   test in a later slice may rename these fields. See [`SseEnvelope`].
 //!   ```json
 //!   {
@@ -85,11 +85,11 @@ use time::OffsetDateTime;
 /// ordinary PTY path is unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowEngineConfig {
-    /// Base URL of the engine, e.g. `https://fabro.internal`. The provider
+    /// Base URL of the engine, e.g. `https://engine.internal`. The provider
     /// appends its own routes (`/api/runs`, …).
     pub engine_url: String,
-    /// The workflow to run — for Fabro, the name of a `.fabro/workflows/<name>`
-    /// checked into the target repo.
+    /// The workflow to run — e.g. the name of a workflow definition checked
+    /// into the target repo that the engine runs.
     pub workflow: String,
     /// A file the engine's bearer token is read from at run time, following the
     /// same token-from-file pattern as the core token (`read_token_path`). When
@@ -213,7 +213,7 @@ pub type ProviderEventStream =
     Pin<Box<dyn Stream<Item = Result<ProviderEvent, WorkflowEngineError>> + Send>>;
 
 /// The seam: create a run, then poll it to a terminal state. Implemented per
-/// engine; [`FabroProvider`] is the only implementation this increment ships.
+/// engine; [`HttpWorkflowProvider`] is the only implementation this increment ships.
 ///
 /// The crate has no `async_trait` dependency, so the async methods are written
 /// with return-position `impl Future` (stable since Rust 1.75) rather than a
@@ -249,7 +249,7 @@ pub trait WorkflowProvider {
     ) -> impl Future<Output = Result<ProviderEventStream, WorkflowEngineError>> + Send;
 }
 
-/// The Fabro provider — a thin REST client for the assumed contract documented
+/// The HTTP workflow-engine provider — a thin REST client for the assumed contract documented
 /// at the top of this module.
 ///
 /// Carries the `workflow` name alongside the base URL: the trait's `create_run`
@@ -257,14 +257,14 @@ pub trait WorkflowProvider {
 /// property of *this* configured backend, not of each run), so the provider
 /// holds it and puts it in the create body. It is built from a
 /// [`WorkflowEngineConfig`] once per run.
-pub struct FabroProvider {
+pub struct HttpWorkflowProvider {
     base_url: String,
     workflow: String,
     token: Option<String>,
     client: reqwest::Client,
 }
 
-impl FabroProvider {
+impl HttpWorkflowProvider {
     /// Build a provider against `engine_url` running `workflow`, optionally
     /// carrying a bearer `token`. The base URL's trailing slash is trimmed so
     /// route joining is unambiguous.
@@ -358,7 +358,7 @@ struct PollDiff {
     deletions: u64,
 }
 
-/// The **provisional** JSON envelope carried on a Fabro SSE `data:` line (see
+/// The **provisional** JSON envelope carried on a workflow-engine SSE `data:` line (see
 /// the module doc). Every field is optional and tolerant: a record that fails to
 /// parse as this shape does not panic — it degrades to a bare progress event
 /// carrying the raw `data` as its message (see [`parse_sse_record`]). The field
@@ -575,7 +575,7 @@ fn sse_event_stream(
     })
 }
 
-impl WorkflowProvider for FabroProvider {
+impl WorkflowProvider for HttpWorkflowProvider {
     async fn create_run(
         &self,
         goal: &str,
@@ -668,11 +668,12 @@ impl WorkflowProvider for FabroProvider {
 /// Map a terminal provider state and its conclusion onto Vogt's own
 /// [`AgentTaskRunOutcome`] and a durable [`AgentTaskRunConclusion`] (#291).
 ///
-/// The four terminal Fabro states line up one-to-one with existing outcome
+/// The four terminal engine states line up one-to-one with existing outcome
 /// variants — `succeeded → Succeeded`, `failed → Failed`,
 /// `partially_succeeded → PartiallySucceeded`, `skipped → Skipped` — so nothing
-/// is invented here. Vogt's `Blocked` outcome has no Fabro counterpart in this
-/// increment (Fabro gates would map to it once gate bridging lands in #289) and
+/// is invented here. Vogt's `Blocked` outcome has no counterpart in the engine's
+/// terminal states in this increment (engine gates would map to it once gate
+/// bridging lands in #289) and
 /// is simply never produced by this provider. A non-terminal `Running` state is
 /// a caller bug and is mapped to `Failed` with a note rather than panicking.
 pub fn map_conclusion(
@@ -727,10 +728,10 @@ mod tests {
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
 
-    /// Spin up a fake Fabro on `127.0.0.1:0` that answers create-run with a
+    /// Spin up a fake engine on `127.0.0.1:0` that answers create-run with a
     /// fixed id and poll with the caller-provided terminal body. Returns the
     /// bound address; the server runs for the test's lifetime.
-    async fn fake_fabro(poll_body: Value) -> SocketAddr {
+    async fn fake_engine(poll_body: Value) -> SocketAddr {
         let app = Router::new()
             .route(
                 "/api/runs",
@@ -738,7 +739,7 @@ mod tests {
                     // Echo enough to prove the request shape reached the server.
                     assert!(body.get("workflow").is_some(), "workflow in body");
                     assert!(body.get("goal").is_some(), "goal in body");
-                    Json(json!({ "id": "run-123", "url": "http://fabro.test/runs/run-123" }))
+                    Json(json!({ "id": "run-123", "url": "http://engine.test/runs/run-123" }))
                 }),
             )
             .route(
@@ -766,7 +767,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_then_poll_succeeded_maps_to_a_succeeded_conclusion() {
-        let addr = fake_fabro(json!({
+        let addr = fake_engine(json!({
             "state": "succeeded",
             "conclusion": {
                 "final_sha": "abc1234",
@@ -777,7 +778,7 @@ mod tests {
         }))
         .await;
         let base = format!("http://{addr}");
-        let provider = FabroProvider::with_client(&base, "nightly", None, short_client());
+        let provider = HttpWorkflowProvider::with_client(&base, "nightly", None, short_client());
 
         let created = provider
             .create_run("fix the bug", Some("main"))
@@ -786,7 +787,7 @@ mod tests {
         assert_eq!(created.run_id, "run-123");
         assert_eq!(
             created.url.as_deref(),
-            Some("http://fabro.test/runs/run-123")
+            Some("http://engine.test/runs/run-123")
         );
 
         let status = provider.poll(&created.run_id).await.expect("poll ok");
@@ -813,9 +814,9 @@ mod tests {
 
     #[tokio::test]
     async fn poll_failed_maps_to_a_failed_conclusion() {
-        let addr = fake_fabro(json!({ "state": "failed" })).await;
+        let addr = fake_engine(json!({ "state": "failed" })).await;
         let base = format!("http://{addr}");
-        let provider = FabroProvider::with_client(&base, "nightly", None, short_client());
+        let provider = HttpWorkflowProvider::with_client(&base, "nightly", None, short_client());
 
         let status = provider.poll("run-123").await.expect("poll ok");
         assert_eq!(status.state, ProviderRunState::Failed);
@@ -832,8 +833,12 @@ mod tests {
     async fn a_dead_port_is_unreachable_not_a_hard_error() {
         // Nothing is listening here — the connect must fail fast and classify
         // as Unreachable (the non-fatal case), never panic.
-        let provider =
-            FabroProvider::with_client("http://127.0.0.1:1", "nightly", None, short_client());
+        let provider = HttpWorkflowProvider::with_client(
+            "http://127.0.0.1:1",
+            "nightly",
+            None,
+            short_client(),
+        );
         let err = provider
             .create_run("goal", None)
             .await
@@ -866,9 +871,9 @@ mod tests {
     #[test]
     fn config_round_trips_through_serde() {
         let cfg = WorkflowEngineConfig {
-            engine_url: "https://fabro.internal".into(),
+            engine_url: "https://engine.internal".into(),
             workflow: "nightly-audit".into(),
-            token_file: Some("/run/secrets/fabro".into()),
+            token_file: Some("/run/secrets/workflow-engine".into()),
             repo_ref: Some("main".into()),
         };
         let json = serde_json::to_string(&cfg).unwrap();
@@ -888,10 +893,10 @@ mod tests {
         assert!(wire.get("repo_ref").is_none());
     }
 
-    /// Spin up a fake Fabro whose `/api/runs/{id}/events` streams `sse_body`
+    /// Spin up a fake engine whose `/api/runs/{id}/events` streams `sse_body`
     /// back as `text/event-stream`, in small chunks so the parser is exercised
     /// across record and line boundaries. Returns the bound address.
-    async fn fake_fabro_events(sse_body: &'static str) -> SocketAddr {
+    async fn fake_engine_events(sse_body: &'static str) -> SocketAddr {
         let app = Router::new().route(
             "/api/runs/{id}/events",
             get(move |Path(_id): Path<String>| async move {
@@ -937,9 +942,9 @@ data: {\"message\":\"tests passed\",\"node_id\":\"n2\"}\n\
 event: run.completed\n\
 data: {\"type\":\"run.completed\",\"state\":\"succeeded\",\"message\":\"all done\",\"ts_ms\":2000}\n\
 \n";
-        let addr = fake_fabro_events(body).await;
+        let addr = fake_engine_events(body).await;
         let base = format!("http://{addr}");
-        let provider = FabroProvider::with_client(&base, "nightly", None, short_client());
+        let provider = HttpWorkflowProvider::with_client(&base, "nightly", None, short_client());
 
         let stream = provider.stream_events("run-1").await.expect("subscribe ok");
         let events = collect_events(stream).await;
@@ -982,9 +987,9 @@ data: {\"type\":\"run.completed\",\"state\":\"succeeded\",\"message\":\"all done
         let body = "event: run.completed\n\
 data: {\"state\":\"failed\",\"message\":\"boom\"}\n\
 \n";
-        let addr = fake_fabro_events(body).await;
+        let addr = fake_engine_events(body).await;
         let base = format!("http://{addr}");
-        let provider = FabroProvider::with_client(&base, "nightly", None, short_client());
+        let provider = HttpWorkflowProvider::with_client(&base, "nightly", None, short_client());
 
         let events = collect_events(provider.stream_events("run-1").await.unwrap()).await;
         assert_eq!(events.len(), 1);
@@ -1003,9 +1008,9 @@ data: not json at all\n\
 \n\
 event: weird\n\
 data: {\"broken\": ";
-        let addr = fake_fabro_events(body).await;
+        let addr = fake_engine_events(body).await;
         let base = format!("http://{addr}");
-        let provider = FabroProvider::with_client(&base, "nightly", None, short_client());
+        let provider = HttpWorkflowProvider::with_client(&base, "nightly", None, short_client());
 
         let events = collect_events(provider.stream_events("run-1").await.unwrap()).await;
         // The comment dispatches nothing; the two data records both survive.
@@ -1024,8 +1029,12 @@ data: {\"broken\": ";
 
     #[tokio::test]
     async fn stream_events_on_a_dead_port_is_unreachable() {
-        let provider =
-            FabroProvider::with_client("http://127.0.0.1:1", "nightly", None, short_client());
+        let provider = HttpWorkflowProvider::with_client(
+            "http://127.0.0.1:1",
+            "nightly",
+            None,
+            short_client(),
+        );
         // The Ok variant is a boxed stream (not `Debug`), so match rather than
         // `expect_err`.
         match provider.stream_events("run-1").await {
