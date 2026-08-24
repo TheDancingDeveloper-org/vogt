@@ -6,6 +6,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SearchAddon, type ISearchResultChangeEvent } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import { openAttach } from "./api";
+import type { RuntimeSocket } from "./runtimeTransport";
 import { readClipboardText, writeClipboardText } from "./clipboard";
 import { terminalContextMenuAction } from "./terminalContextMenu";
 import { sessionsStore } from "./store";
@@ -113,7 +114,7 @@ const TerminalView: Component<Props> = (props) => {
   const [openedFor, setOpenedFor] = createSignal<string | null>(null);
   let hostRef: HTMLDivElement | undefined;
   let term: XTerm | null = null;
-  let ws: WebSocket | null = null;
+  let ws: RuntimeSocket | null = null;
   let fit: FitAddon | null = null;
   let search: SearchAddon | null = null;
   let resizeObserver: ResizeObserver | null = null;

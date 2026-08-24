@@ -760,15 +760,7 @@ const CommandPalette: Component<Props> = (props) => {
       setSpecialSearchState("loading");
       try {
         if (mode === ">") {
-          const res = await fetch(
-            `${api.getBase()}/api/history/search?q=${encodeURIComponent(term)}`,
-            {
-              headers: { Authorization: `Bearer ${api.getToken()}` },
-              signal: controller.signal,
-            },
-          );
-          if (!res.ok) throw new Error(`History search failed (${res.status})`);
-          setHistoryResults((await res.json()) as HistorySearchResult[]);
+          setHistoryResults(await api.searchHistory(term));
           setFileResults([]);
           setSymbolResults([]);
           setSymbolMessage(null);

@@ -64,6 +64,10 @@ env:
   # Vogt alone (NFR-PO4), and this is the estate's own stack. One repository
   # with two kinds of tag in it is how somebody eventually pins the wrong one.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+  # Static public-demo image. It contains neither the engine nor the core and
+  # is published only from dev; deployment remains a separate digest bump in
+  # indexarr/ops through Komodo.
+  DEMO_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-demo
   # Where BuildKit's layer cache lives (#184, superseding #55's GHCR backend).
   #
   # The estate's own `local-registry` container on Node B, not GHCR and not a
@@ -308,6 +312,138 @@ jobs:
             echo "semver tag was created, and \`latest\` did not move."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  demo-image:
+    name: build, smoke, and publish the static public demo
+    # The normal stack runs first and exports its web-build layer. This target
+    # imports that cache and augments those exact bytes; it does not compile a
+    # second PWA and merely hope for deterministic output.
+    needs: [base-images, stack-image]
+    if: github.ref == 'refs/heads/dev'
+    runs-on: [self-hosted, publish]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."192.168.1.75:5500"]
+              http = true
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: demo-meta
+        with:
+          images: ${{ env.DEMO_IMAGE }}
+          tags: |
+            type=sha,prefix=dev-
+            type=raw,value=dev
+          flavor: |
+            latest=false
+
+      - uses: docker/build-push-action@v6
+        id: demo-candidate
+        with:
+          context: .
+          file: engine/Dockerfile
+          target: demo-runtime
+          load: true
+          tags: ${{ env.DEMO_IMAGE }}:smoke-test
+          labels: ${{ steps.demo-meta.outputs.labels }}
+          build-args: |
+            VOGT_SOURCE_REF=dev
+            VOGT_SOURCE_SHA=${{ github.sha }}
+          cache-from: |
+            type=registry,ref=${{ env.CACHE_IMAGE }}:stack-dev
+            type=registry,ref=${{ env.CACHE_IMAGE }}:demo-dev
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:demo-dev,mode=max
+
+      - name: static demo serves provenance and refuses APIs
+        env:
+          CANDIDATE: ${{ env.DEMO_IMAGE }}:smoke-test
+        run: |
+          set -euo pipefail
+          cid="$(docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m -p 127.0.0.1::8910 "$CANDIDATE")"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          port=""
+          for _ in $(seq 1 30); do
+            port="$(docker port "$cid" 8910/tcp 2>/dev/null | sed 's/.*://' || true)"
+            [ -n "$port" ] || { sleep 1; continue; }
+            curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null && break
+            sleep 1
+          done
+          manifest="$(curl -fsS "http://127.0.0.1:${port}/demo-manifest.json")"
+          build="$(curl -fsS "http://127.0.0.1:${port}/demo-build.json")"
+          grep -F '"full-estate-v1"' <<<"$manifest"
+          grep -F "\"source_sha\": \"${GITHUB_SHA}\"" <<<"$manifest"
+          grep -F "\"source_sha\": \"${GITHUB_SHA}\"" <<<"$build"
+          for route in '#/board' '#/inbox' '#/t/demo-build' '#/t/demo-agent' '#/t/demo-logs'; do
+            curl -fsS "http://127.0.0.1:${port}/${route}" | grep -F 'id="root"'
+          done
+          test "$(curl -sS -o /tmp/demo-api-body -w '%{http_code}' \
+            -X POST "http://127.0.0.1:${port}/api/sessions")" = 404
+          grep -F 'no server-side API' /tmp/demo-api-body
+
+      - name: scan the static demo image
+        uses: aquasecurity/trivy-action@v0.33.1
+        with:
+          image-ref: ${{ env.DEMO_IMAGE }}:smoke-test
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - uses: docker/build-push-action@v6
+        id: demo-push
+        with:
+          context: .
+          file: engine/Dockerfile
+          target: demo-runtime
+          push: true
+          tags: ${{ steps.demo-meta.outputs.tags }}
+          labels: ${{ steps.demo-meta.outputs.labels }}
+          build-args: |
+            VOGT_SOURCE_REF=dev
+            VOGT_SOURCE_SHA=${{ github.sha }}
+          provenance: true
+          sbom: true
+          cache-from: |
+            type=registry,ref=${{ env.CACHE_IMAGE }}:stack-dev
+            type=registry,ref=${{ env.CACHE_IMAGE }}:demo-dev
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:demo-dev,mode=max
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: sign the static demo image
+        env:
+          DIGEST: ${{ steps.demo-push.outputs.digest }}
+        run: cosign sign --yes "${DEMO_IMAGE}@${DIGEST}"
+
+      - name: report the digest for the Komodo-managed ops stack
+        env:
+          DIGEST: ${{ steps.demo-push.outputs.digest }}
+        run: |
+          {
+            echo "### Static public demo from \`${GITHUB_SHA:0:7}\`"
+            echo
+            echo "Nothing has been deployed. Pin this signed digest in"
+            echo "\`indexarr/ops\`, then let Komodo apply that stack:"
+            echo
+            echo '```yaml'
+            echo "image: ${DEMO_IMAGE}@${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # The dev-pod toolchain, built (or found already published) before anything
   # that consumes it (#184). Same prerequisite shape as `base-images` and for
   # the same reason: the common case is a lookup that costs seconds, and having
@@ -442,6 +578,8 @@ jobs:
           build-args: |
             POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
+            VOGT_SOURCE_REF=${{ github.ref_name }}
+            VOGT_SOURCE_SHA=${{ github.sha }}
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
@@ -503,6 +641,8 @@ jobs:
           build-args: |
             POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
+            VOGT_SOURCE_REF=${{ github.ref_name }}
+            VOGT_SOURCE_SHA=${{ github.sha }}
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
