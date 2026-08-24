@@ -378,6 +378,8 @@ jobs:
           build-args: |
             POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
+            VOGT_SOURCE_REF=${{ github.ref_name }}
+            VOGT_SOURCE_SHA=${{ github.sha }}
             INSTALL_CADASTRE_MCP=true
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release,mode=max
@@ -402,6 +404,8 @@ jobs:
           build-args: |
             POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
+            VOGT_SOURCE_REF=${{ github.ref_name }}
+            VOGT_SOURCE_SHA=${{ github.sha }}
             INSTALL_CADASTRE_MCP=true
           provenance: true
           sbom: true

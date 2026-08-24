@@ -1,16 +1,30 @@
 import { ErrorBoundary, render } from "solid-js/web";
 import { HashRouter, Route } from "@solidjs/router";
-import App from "./App";
 import { APP_ROUTES } from "./routes";
-import { registerServiceWorker } from "./push";
-import { applyAppTheme, initAppThemeSystemWatch } from "./appThemes";
 import { migrateStorageKeys } from "./storageMigration";
 import "./styles.css";
+import { initializeRuntimeTransport } from "./runtimeTransport";
+
+await initializeRuntimeTransport();
 
 // Migrate historic browser-storage keys to the `vogt.*` prefix before any
 // module reads a preference or the credential (#271; see storageMigration.ts).
 // One-shot and idempotent.
 migrateStorageKeys();
+
+// `App` owns storage-backed singletons (tabs, layouts, recent places). Keep it
+// out of the static import graph so the demo transport can seed those stores
+// before their modules evaluate. The normal build takes the same path and the
+// same chunks; only a valid runtime manifest selects the simulator.
+const [
+  { default: App },
+  { registerServiceWorker },
+  { applyAppTheme, initAppThemeSystemWatch },
+] = await Promise.all([
+  import("./App"),
+  import("./push"),
+  import("./appThemes"),
+]);
 
 function installVisualViewportSizing() {
   const apply = () => {

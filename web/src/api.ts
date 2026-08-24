@@ -1,6 +1,7 @@
 // Thin typed wrapper over the Vogt HTTP+SSE+WS API.
 
 import { fetchWithRetry } from "./transport";
+import { isDemoMode, runtimeTransport, type RuntimeSocket } from "./runtimeTransport";
 
 export type ActivityState =
   | "idle"
@@ -332,11 +333,12 @@ export async function validateCredentials(
   token: string,
   base: string,
 ): Promise<OperationalStatus> {
+  if (isDemoMode()) return api.operationalStatus();
   const candidateToken = token.trim();
   const candidateBase = base.trim().replace(/\/+$/, "");
   if (!candidateToken) throw new ApiError(401, "Bearer token is required");
 
-  const res = await fetch(`${candidateBase}/api/status`, {
+  const res = await runtimeTransport().request(`${candidateBase}/api/status`, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${candidateToken}`,
@@ -731,7 +733,7 @@ export const api = {
   downloadFile: async (path: string): Promise<void> => {
     const url = `${getBase()}/api/files/download?path=${encodeURIComponent(path)}`;
     const tok = getToken();
-    const res = await fetch(url, {
+    const res = await runtimeTransport().request(url, {
       headers: tok ? { Authorization: `Bearer ${tok}` } : {},
     });
     if (!res.ok) throw refused(res.status, await res.text());
@@ -829,7 +831,7 @@ export const api = {
   downloadHistorySession: async (id: string): Promise<void> => {
     const url = `${getBase()}/api/history/${id}/download`;
     const tok = getToken();
-    const res = await fetch(url, {
+    const res = await runtimeTransport().request(url, {
       headers: tok ? { Authorization: `Bearer ${tok}` } : {},
     });
     if (!res.ok) throw refused(res.status, await res.text());
@@ -866,7 +868,7 @@ export const api = {
 
   // Public — no token required.
   publicConfig: () =>
-    fetch(`${getBase()}/api/config`).then((r) => r.json() as Promise<PublicConfig>),
+    runtimeTransport().request(`${getBase()}/api/config`).then((r) => r.json() as Promise<PublicConfig>),
   operationalStatus: () => req<OperationalStatus>("GET", "/api/status"),
 
   guiLaunch: (command: string[], via_sway = true) =>
@@ -927,7 +929,7 @@ export const api = {
     // The engine forwards the first file-bearing field regardless of name; the
     // filename's extension hints the provider at the container.
     form.append("file", audio, "take.webm");
-    const res = await fetch(`${getBase()}/api/assistant/stt`, {
+    const res = await runtimeTransport().request(`${getBase()}/api/assistant/stt`, {
       method: "POST",
       headers: authHeaders(),
       body: form,
@@ -942,7 +944,7 @@ export const api = {
    * `status: 404` when unconfigured, so the caller falls back (FR-T6).
    */
   assistantTts: async (text: string): Promise<Blob> => {
-    const res = await fetch(`${getBase()}/api/assistant/tts`, {
+    const res = await runtimeTransport().request(`${getBase()}/api/assistant/tts`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ text }),
@@ -1150,12 +1152,18 @@ export function subscribeEvents(
   onEvent: (ev: ServerEvent) => void,
   onError?: (e: Event) => void,
 ): () => void {
+  if (isDemoMode()) {
+    const candidate = runtimeTransport() as {
+      subscribe?: (listener: (event: ServerEvent) => void) => () => void;
+    };
+    if (candidate.subscribe) return candidate.subscribe(onEvent);
+  }
   let cancelled = false;
   const controller = new AbortController();
 
   (async () => {
     try {
-      const res = await fetch(`${getBase()}/api/events`, {
+      const res = await runtimeTransport().request(`${getBase()}/api/events`, {
         headers: authHeaders({ Accept: "text/event-stream" }),
         signal: controller.signal,
       });
@@ -1219,10 +1227,10 @@ export function subscribeEvents(
  * can't set Authorization on a WS handshake, and we don't want the token
  * leaking into proxy/access logs via the query string.
  */
-export function openAttach(id: string, resumeFrom?: number): WebSocket {
+export function openAttach(id: string, resumeFrom?: number): RuntimeSocket {
   const base = getBase() || `${location.protocol}//${location.host}`;
   const wsBase = base.replace(/^http/, "ws");
-  const ws = new WebSocket(`${wsBase}/api/sessions/${id}/attach`);
+  const ws = runtimeTransport().openSocket(`${wsBase}/api/sessions/${id}/attach`);
   ws.binaryType = "arraybuffer";
   const tok = getToken();
   ws.addEventListener(

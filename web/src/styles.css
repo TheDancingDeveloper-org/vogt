@@ -2389,6 +2389,45 @@ textarea {
   overflow: hidden;
 }
 
+.demo-disclosure {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, var(--bd));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
+  color: var(--fg);
+  font-size: 12px;
+}
+.demo-disclosure-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+.demo-disclosure-copy span { color: var(--fg-muted); }
+.demo-disclosure nav {
+  display: flex;
+  flex: 1;
+  justify-content: flex-end;
+  gap: 9px;
+  min-width: 0;
+}
+.demo-disclosure a { color: var(--accent); white-space: nowrap; }
+.demo-disclosure button { padding: 4px 8px; white-space: nowrap; }
+
+@media (max-width: 768px) {
+  .demo-disclosure { align-items: flex-start; flex-wrap: wrap; gap: 6px 10px; }
+  .demo-disclosure-copy { flex-basis: 100%; }
+  .demo-disclosure nav {
+    justify-content: flex-start;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+}
+
 .tab-view {
   flex: 1;
   display: flex;

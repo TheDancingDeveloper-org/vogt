@@ -9,6 +9,7 @@
 
 import { getBase } from "./api";
 import { fetchWithRetry } from "./transport";
+import { isDemoMode } from "./runtimeTransport";
 
 /** Set by the identity wizard once the bootstrap has minted the first token,
  *  cleared when the setup steps (`#/setup`) finish — the shell reads it to
@@ -38,6 +39,7 @@ export interface InstallBootstrapResult {
  * login gate — because a wizard that appears on a guess would appear wrongly.
  */
 export async function fetchInstallStatus(): Promise<InstallStatus | null> {
+  if (isDemoMode()) return { install_mode: false };
   try {
     const res = await fetchWithRetry(`${getBase()}/api/install/status`);
     if (!res.ok) return null;

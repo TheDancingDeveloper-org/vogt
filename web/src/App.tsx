@@ -118,6 +118,7 @@ import {
 } from "./sessionRowModel";
 import { railSections, setRailSection } from "./railSections";
 import { setExpanded } from "./fileTreeState";
+import { demoManifest, resetDemoData } from "./runtimeTransport";
 
 // -- what the first screen does not have to carry (NFR-S5, #104) -----------
 //
@@ -1607,6 +1608,31 @@ const App: Component = () => {
           />
         </Show>
         <main class="main">
+          <Show when={demoManifest()}>
+            {(manifest) => (
+              <section class="demo-disclosure" aria-label="Public demo information">
+                <div class="demo-disclosure-copy">
+                  <strong>Demo data</strong>
+                  <span>Writes stay in this browser tab and disappear when reset.</span>
+                </div>
+                <nav aria-label="Demo showcase links">
+                  <a href="#/t/demo-build">Build + tests</a>
+                  <a href="#/t/demo-agent">Agent review</a>
+                  <a href="#/t/demo-logs">Incident view</a>
+                  <a href="/demo-gui.html" target="_blank" rel="noreferrer">GUI stream</a>
+                  <a
+                    href={`https://github.com/TheDancingDeveloper-org/vogt/commit/${manifest().source_sha}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={`${manifest().source_ref}@${manifest().source_sha}`}
+                  >
+                    Source {manifest().source_sha.slice(0, 8)}
+                  </a>
+                </nav>
+                <button type="button" onClick={() => resetDemoData()}>Reset demo</button>
+              </section>
+            )}
+          </Show>
           <button type="button" class="mobile-go-to" title="Go to… (Ctrl/Cmd+K)" onClick={() => setCommandPaletteOpen(true)}>
             Go to…
           </button>

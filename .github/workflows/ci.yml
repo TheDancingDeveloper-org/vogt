@@ -332,6 +332,17 @@ jobs:
         working-directory: web
         run: pnpm test
 
+      - name: install the demo browser
+        working-directory: web
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: demo routes, phone composition, split layouts, and screenshots
+        working-directory: web
+        env:
+          CI: "true"
+          PLAYWRIGHT_PORT: "4175"
+        run: pnpm exec playwright test tests/browser/demo.spec.ts --project=desktop --project=phone
+
       # Built *before* cargo, so the engine embeds the real bundle and the
       # compile is over what actually ships. The engine's pipeline built the
       # PWA only in its image stage and compiled Rust against a placeholder;
@@ -339,7 +350,27 @@ jobs:
       # check the engine against assets it will never serve.
       - name: build the PWA
         working-directory: web
+        env:
+          VOGT_SOURCE_REF: ${{ github.ref_name }}
+          VOGT_SOURCE_SHA: ${{ github.sha }}
         run: pnpm build
+
+      - uses: astral-sh/setup-uv@v9.0.0
+
+      - name: normal and demo packaging share one PWA artifact
+        run: |
+          set -euo pipefail
+          cp -a web/dist web/dist-normal
+          (
+            cd web
+            VOGT_SOURCE_REF="${GITHUB_REF_NAME}" VOGT_SOURCE_SHA="${GITHUB_SHA}" pnpm demo:augment
+          )
+          mv web/dist web/dist-demo
+          cp -a web/dist-normal web/dist
+          uv run --no-project python scripts/check_demo_assets.py \
+            --normal web/dist-normal \
+            --demo web/dist-demo \
+            --source-sha "${GITHUB_SHA}"
 
       # What a cold visit costs, enforced rather than hoped for. The editor
       # and the terminal are behind their own routes (#104); one careless
@@ -349,8 +380,6 @@ jobs:
       # `--no-project`: the check reads the build manifest and the standard
       # library and nothing else, so it does not need this repo's Python
       # environment synced into a job that is otherwise Rust and Node.
-      - uses: astral-sh/setup-uv@v9.0.0
-
       - name: the first screen stays inside its budget
         run: uv run --no-project python scripts/check_bundle.py
 
