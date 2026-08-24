@@ -125,21 +125,26 @@ jobs:
           # shellcheck disable=SC2086  # COMPOSE_FILES is intentionally split
           docker compose $COMPOSE_FILES up -d
 
-      - name: wait for /health/ready
+      - name: wait for the front door + core to be ready
         run: |
           set -euo pipefail
+          # The engine serves /readyz (not /health/ready). FR-E9 makes the core
+          # check non-fatal, so a 200 alone can mean "no core"; wait for the
+          # vogt_core check to be ok:true so the walk's /api/vogt calls work.
           for _ in $(seq 1 60); do
-            if curl -fsS "$SMOKE_BASE/health/ready" >/dev/null 2>&1; then
-              echo "stack is ready"
+            body="$(curl -fsS "$SMOKE_BASE/readyz" 2>/dev/null || true)"
+            if printf '%s' "$body" | grep -q '"name":"vogt_core","ok":true'; then
+              echo "stack is ready (vogt-core reachable)"
               exit 0
             fi
             sleep 5
           done
-          echo "the stack did not answer /health/ready within 300s" >&2
+          echo "the stack's vogt-core was not ready within 300s" >&2
           # shellcheck disable=SC2086
           docker compose $COMPOSE_FILES ps || true
           # shellcheck disable=SC2086
           docker compose $COMPOSE_FILES logs --tail=200 || true
+          exit 1
           exit 1
 
       - name: stack smoke — walk the stranger's path

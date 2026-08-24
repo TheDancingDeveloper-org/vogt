@@ -136,13 +136,17 @@ run_step() {
 # ── steps: the credential-free half ──────────────────────────────────────
 
 step_health() {
-    # The front door proxies the core's readiness probe (FR-A7). A stranger's
-    # very first request; nothing below means anything if this does not answer.
-    if get "${BASE}/health/ready" >/dev/null; then
-        pass "the stack answers /health/ready"
+    # The engine serves /healthz (liveness) and /readyz (readiness). FR-E9 makes
+    # the core check non-fatal, so assert vogt_core is ok:true — a stack can be
+    # "ready" with no core behind it (the failure smoke_merged_stack.sh exists
+    # for). Nothing below means anything if the core is not reachable.
+    local ready
+    ready="$(get "${BASE}/readyz" || true)"
+    if printf '%s' "$ready" | grep -q '"name":"vogt_core","ok":true'; then
+        pass "the stack is ready and vogt-core is reachable"
     else
-        fail "GET /health/ready did not succeed — the stack is not up, and no"
-        fail "  step below can be trusted"
+        fail "vogt-core is not ready via ${BASE}/readyz — the front door is up but"
+        fail "  the core is absent (FR-E9), so no /api/vogt step below can be trusted"
     fi
 }
 
