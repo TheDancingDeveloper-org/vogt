@@ -418,8 +418,12 @@ const Inbox: Component<Props> = (props) => {
   const [triaging, setTriaging] = createSignal<string | null>(null);
   const [selected, setSelected] = createSignal<Set<string>>(new Set<string>());
   const [batchReason, setBatchReason] = createSignal("");
-  const [batchAction, setBatchAction] = createSignal<"selected" | "read" | null>(null);
+  const [batchAction, setBatchAction] = createSignal<"selected" | "read" | "all" | null>(null);
   const [batchBusy, setBatchBusy] = createSignal(false);
+  // #350: free-text over the loaded entries, alongside the source pills. A
+  // display filter, deliberately: it narrows what is drawn, not what the batch
+  // actions below reach for — "clear all" clears the source, not the search.
+  const [search, setSearch] = createSignal("");
   const [focusedIndex, setFocusedIndex] = createSignal(0);
   const [phone, setPhone] = createSignal(false);
   // How many pages the reader has loaded, so a live re-read reconciles what is
@@ -588,10 +592,25 @@ const Inbox: Component<Props> = (props) => {
   });
 
   const entries = () => result()?.entries ?? [];
+  // #350: what the list draws, after the free-text box. Kept separate from
+  // `entries()` so the batch actions keep working on the whole loaded set.
+  const visibleEntries = () => {
+    const needle = search().trim().toLowerCase();
+    if (!needle) return entries();
+    return entries().filter((entry) =>
+      `${entry.title} ${entry.summary ?? ""}`.toLowerCase().includes(needle),
+    );
+  };
   const hasReadEntries = () =>
     entries().some((entry) => seen().has(entry.entry_key) && entry.triage_state === "active");
+  // The active entries currently loaded — already scoped to the chosen source,
+  // because the server filtered them (#353). "Clear all" archives exactly these.
+  const activeEntries = () => entries().filter((entry) => entry.triage_state === "active");
+  const hasActiveEntries = () => activeEntries().length > 0;
   // The batch bar earns its sticky place when there is something to batch: a
   // selection, a decision half-made, or read entries the reader could sweep.
+  // "Clear all" is not in this set: it lives in its own always-available
+  // control so the selection bar stays hidden until the reader engages it.
   const batchable = () =>
     Boolean(result()) && (selected().size > 0 || batchAction() !== null || hasReadEntries());
   const toggleSelected = (entry: InboxEntry) => {
@@ -639,6 +658,16 @@ const Inbox: Component<Props> = (props) => {
       .filter((entry) => seen().has(entry.entry_key) && entry.triage_state === "active")
       .map((entry) => entry.entry_key);
     if (readKeys.length) await archiveKeys(readKeys);
+  };
+
+  // #353: clear every active entry currently in the inbox. It goes through the
+  // same `archiveKeys` path, so a per-entry refusal keeps its current
+  // behaviour — the refused entries are retained and counted in the toast. The
+  // source filter is honoured for free: `entries()` is already the server's
+  // source-scoped answer, so a filtered inbox clears only that source.
+  const archiveAll = async () => {
+    const keys = activeEntries().map((entry) => entry.entry_key);
+    if (keys.length) await archiveKeys(keys);
   };
 
   const focusEntry = (index: number) => {
@@ -782,30 +811,44 @@ const Inbox: Component<Props> = (props) => {
           </p>
         )}
         controls={(
-          <Show when={phone()} fallback={(
-            <label class="inbox-filter">
-              <span>Source</span>
-              <select value={source()} onChange={(event) => applySource(event.currentTarget.value)}>
-                <option value="">All sources</option>
-                <For each={SOURCES}>{(value) => <option value={value}>{value}</option>}</For>
-              </select>
+          <>
+            <Show when={phone()} fallback={(
+              <label class="inbox-filter">
+                <span>Source</span>
+                <select value={source()} onChange={(event) => applySource(event.currentTarget.value)}>
+                  <option value="">All sources</option>
+                  <For each={SOURCES}>{(value) => <option value={value}>{value}</option>}</For>
+                </select>
+              </label>
+            )}>
+              <div class="inbox-filter-pills" role="group" aria-label="Source filter">
+                <For each={["", ...SOURCES]}>
+                  {(value) => (
+                    <button
+                      type="button"
+                      class={source() === value ? "active" : ""}
+                      aria-pressed={source() === value}
+                      onClick={() => applySource(value)}
+                    >
+                      {value || "All sources"}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
+            {/* #350: a free-text box beside the source pills, over the loaded
+                entries' title and summary. */}
+            <label class="inbox-filter inbox-search">
+              <span>Search</span>
+              <input
+                type="search"
+                aria-label="Search inbox entries"
+                placeholder="Match title or summary"
+                value={search()}
+                onInput={(event) => setSearch(event.currentTarget.value)}
+              />
             </label>
-          )}>
-            <div class="inbox-filter-pills" role="group" aria-label="Source filter">
-              <For each={["", ...SOURCES]}>
-                {(value) => (
-                  <button
-                    type="button"
-                    class={source() === value ? "active" : ""}
-                    aria-pressed={source() === value}
-                    onClick={() => applySource(value)}
-                  >
-                    {value || "All sources"}
-                  </button>
-                )}
-              </For>
-            </div>
-          </Show>
+          </>
         )}
         detail={(
           <details class="surface-header-disclosure">
@@ -857,9 +900,21 @@ const Inbox: Component<Props> = (props) => {
               onSubmit={(event) => {
                 event.preventDefault();
                 if (batchAction() === "selected") void archiveSelected();
-                else void archiveRead();
+                else if (batchAction() === "read") void archiveRead();
+                else void archiveAll();
               }}
             >
+              <Show when={batchAction() === "all"}>
+                <p class="inbox-batch-confirm" role="alert">
+                  {source()
+                    ? `Archive all ${activeEntries().length} active ${source()} entr${
+                        activeEntries().length === 1 ? "y" : "ies"
+                      } in view? Archiving is restorable.`
+                    : `Archive all ${activeEntries().length} active entr${
+                        activeEntries().length === 1 ? "y" : "ies"
+                      } in view? Archiving is restorable.`}
+                </p>
+              </Show>
               <label>
                 <span>Reason</span>
                 <input
@@ -870,19 +925,45 @@ const Inbox: Component<Props> = (props) => {
                 />
               </label>
               <button type="submit" disabled={batchBusy() || !batchReason().trim()}>
-                {batchBusy() ? "Archiving…" : "Confirm archive"}
+                {batchBusy()
+                  ? "Archiving…"
+                  : batchAction() === "all"
+                    ? "Confirm clear all"
+                    : "Confirm archive"}
               </button>
               <button type="button" disabled={batchBusy()} onClick={() => setBatchAction(null)}>Cancel</button>
             </form>
           </Show>
         </div>
       </Show>
+      {/* #353: clear every active entry in view. Its own always-available
+          control, so the selection bar above stays hidden until engaged. The
+          label names the source when one filters, so it is never mistaken for
+          a whole-inbox sweep; clicking opens the confirm composer above. */}
+      <Show when={hasActiveEntries() && batchAction() !== "all"}>
+        <div class="inbox-clearall" aria-label="Clear the inbox">
+          <button
+            type="button"
+            class="inbox-clear-all"
+            disabled={batchBusy()}
+            onClick={() => setBatchAction("all")}
+          >
+            {source() ? `Clear all ${source()}…` : "Clear all…"}
+          </button>
+        </div>
+      </Show>
       <p class="board-keys inbox-keys" aria-hidden="true">
         Keyboard: <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>e</kbd> archive ·{" "}
         <kbd>s</kbd> snooze · <kbd>r</kbd> resolve
       </p>
+      <Show when={search().trim() && visibleEntries().length === 0 && entries().length > 0}>
+        <p class="inbox-empty">
+          No loaded entries match “{search().trim()}”. The search covers the entries
+          on screen; load more or clear it to see the rest.
+        </p>
+      </Show>
       <div class="inbox-list" aria-label="Attention stream" aria-live="polite">
-        <For each={entries()}>
+        <For each={visibleEntries()}>
           {(entry, index) => <Entry entry={entry} seen={seen().has(entry.entry_key)} selected={selected().has(entry.entry_key)} busy={triaging() === entry.entry_key} phone={phone()} onSelect={toggleSelected} onOpen={(value) => { setFocusedIndex(index()); openEntry(value); }} onComposerChange={onComposerChange} onTriage={triage} onAction={action} />}
         </For>
       </div>

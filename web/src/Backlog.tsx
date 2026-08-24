@@ -105,7 +105,11 @@ const DEFAULT_PAGE_SIZE = 100;
 /** Kinds are a closed set in Vogt (`WorkKind`), so the picker is not derived. */
 const WORK_KINDS = ["feature", "bug", "chore", "question"] as const;
 
-/** The URL keys this surface owns. Anything else in the query is left alone. */
+/** The URL keys this surface owns. Anything else in the query is left alone.
+ *
+ *  `q` is the free-text search (#350); the `not_*` keys carry the exclusion
+ *  set (#351). An older build has none of them in its own `URL_KEYS`, so it
+ *  reads them as keys it does not own and drops them — the tolerance rule. */
 const URL_KEYS = [
   "view",
   "project",
@@ -114,6 +118,11 @@ const URL_KEYS = [
   "label",
   "initiative",
   "actor",
+  "q",
+  "not_project",
+  "not_kind",
+  "not_state",
+  "not_label",
   "limit",
   "why",
 ] as const;
@@ -140,7 +149,32 @@ function readPoll(): number {
   return 0;
 }
 
-/** The six filters FR-U14 names, plus the view they apply to. */
+/**
+ * The exclusion (negative) half of the filter set (#351).
+ *
+ * Only the facets a ranked row actually carries — project, kind, state,
+ * label — can be excluded here, because the exclusion is applied over the
+ * loaded page (the ranked views take no such parameter) and a `RankedEntry`
+ * reports no initiative or actor to test against. Encoded under its own
+ * `not_*` key so a stale reader drops it rather than misreads it.
+ */
+interface ExcludeFilter {
+  projects: string[];
+  kinds: string[];
+  states: string[];
+  labels: string[];
+}
+
+const EMPTY_EXCLUDE: ExcludeFilter = { projects: [], kinds: [], states: [], labels: [] };
+
+function excludeCount(exclude: ExcludeFilter): number {
+  return (
+    exclude.projects.length + exclude.kinds.length + exclude.states.length + exclude.labels.length
+  );
+}
+
+/** The six filters FR-U14 names, plus the view they apply to, plus the free
+ *  text and exclusions the triage grammar gained (#350, #351). */
 interface Filter {
   view: ViewName;
   project: string;
@@ -149,6 +183,8 @@ interface Filter {
   label: string;
   initiative: string;
   actor: string;
+  q: string;
+  exclude: ExcludeFilter;
 }
 
 interface SavedFilter {
@@ -164,6 +200,8 @@ const EMPTY_FILTER: Filter = {
   label: "",
   initiative: "",
   actor: "",
+  q: "",
+  exclude: EMPTY_EXCLUDE,
 };
 
 // -- reading what the API actually sends ------------------------------------
@@ -353,6 +391,13 @@ function normalizeFilter(value: unknown): Filter {
     const found = raw[key];
     return typeof found === "string" ? found : "";
   };
+  const excludeRaw = record(raw.exclude);
+  const excludeList = (key: string): string[] => {
+    const found = excludeRaw[key];
+    return Array.isArray(found)
+      ? found.filter((item): item is string => typeof item === "string")
+      : [];
+  };
   return {
     view: text("view") === "bugs" ? "bugs" : "backlog",
     project: text("project"),
@@ -361,6 +406,13 @@ function normalizeFilter(value: unknown): Filter {
     label: text("label"),
     initiative: text("initiative"),
     actor: text("actor"),
+    q: text("q"),
+    exclude: {
+      projects: excludeList("projects"),
+      kinds: excludeList("kinds"),
+      states: excludeList("states"),
+      labels: excludeList("labels"),
+    },
   };
 }
 
@@ -387,6 +439,13 @@ function filterFromQuery(query: Query): Filter {
     label: one(query.label),
     initiative: one(query.initiative),
     actor: one(query.actor),
+    q: one(query.q),
+    exclude: {
+      projects: many(query.not_project),
+      kinds: many(query.not_kind),
+      states: many(query.not_state),
+      labels: many(query.not_label),
+    },
   };
 }
 
@@ -410,6 +469,11 @@ function queryFor(
     label: filter.label || null,
     initiative: filter.initiative || null,
     actor: filter.actor || null,
+    q: filter.q || null,
+    not_project: filter.exclude.projects.length ? filter.exclude.projects : null,
+    not_kind: filter.exclude.kinds.length ? filter.exclude.kinds : null,
+    not_state: filter.exclude.states.length ? filter.exclude.states : null,
+    not_label: filter.exclude.labels.length ? filter.exclude.labels : null,
     limit: limit === DEFAULT_PAGE_SIZE ? null : String(limit),
     why: explained.length ? explained : null,
   };
@@ -450,8 +514,13 @@ function sameFilter(a: Filter, b: Filter): boolean {
     a.label === b.label &&
     a.initiative === b.initiative &&
     a.actor === b.actor &&
+    a.q === b.q &&
     a.kinds.join("\u0000") === b.kinds.join("\u0000") &&
-    a.states.join("\u0000") === b.states.join("\u0000")
+    a.states.join("\u0000") === b.states.join("\u0000") &&
+    a.exclude.projects.join("\u0000") === b.exclude.projects.join("\u0000") &&
+    a.exclude.kinds.join("\u0000") === b.exclude.kinds.join("\u0000") &&
+    a.exclude.states.join("\u0000") === b.exclude.states.join("\u0000") &&
+    a.exclude.labels.join("\u0000") === b.exclude.labels.join("\u0000")
   );
 }
 
@@ -467,7 +536,47 @@ function describeFilter(filter: Filter): string {
   if (filter.label) parts.push(`label ${filter.label}`);
   if (filter.initiative) parts.push(`initiative ${filter.initiative}`);
   if (filter.actor) parts.push(`actor ${filter.actor}`);
+  if (filter.q) parts.push(`search “${filter.q}”`);
+  const ex = filter.exclude;
+  if (ex.projects.length) parts.push(`not project ${ex.projects.join("/")}`);
+  if (ex.kinds.length) parts.push(`not type ${ex.kinds.join("/")}`);
+  if (ex.states.length) parts.push(`not state ${ex.states.join("/")}`);
+  if (ex.labels.length) parts.push(`not label ${ex.labels.join("/")}`);
   return parts.join(" · ");
+}
+
+/** Free-text match for the backlog search (#350): the ranked row's title and
+ *  ref, and the adopted work item's body when the ranking carried it. */
+function entryMatchesText(entry: RankedEntry, needle: string): boolean {
+  if (!needle) return true;
+  const haystack = `${entry.title ?? ""} ${entry.ref ?? ""} ${entry.item?.body ?? ""}`;
+  return haystack.toLowerCase().includes(needle);
+}
+
+// -- the default lens (#352) ------------------------------------------------
+//
+// The named lens applied on a bare load. Stored by name in a key of its own,
+// beside the saved list, so a build that predates it never reads it and the
+// saved lenses still recall. A non-empty query always wins.
+
+const DEFAULT_FILTER_KEY = "vogt.backlogDefaultFilter.v1";
+
+function readDefaultLens(): string {
+  try {
+    return localStorage.getItem(DEFAULT_FILTER_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeDefaultLens(name: string): string {
+  try {
+    if (name) localStorage.setItem(DEFAULT_FILTER_KEY, name);
+    else localStorage.removeItem(DEFAULT_FILTER_KEY);
+  } catch {
+    /* private mode / no storage: the choice still holds for this session */
+  }
+  return name;
 }
 
 // -- results, tagged rather than thrown -------------------------------------
@@ -511,11 +620,36 @@ const Backlog: Component<Props> = (props) => {
   // URL were the source of truth, switching tabs and switching back would
   // silently clear the filters, which is the "filter that resets on reload"
   // r9 names as a GUI failure. The effect below puts them back instead.
-  const [filter, setFilter] = createSignal<Filter>(filterFromQuery(query));
+  // The default lens (#352) is applied only on a bare load; a non-empty query
+  // is an explicit instruction and always wins. Resolved once, here, so the
+  // address the effect below writes carries the default's chips.
+  const initialFilter = (): Filter => {
+    const fromUrl = filterFromQuery(query);
+    if (encodeQuery(query) !== "") return fromUrl;
+    const defaultName = readDefaultLens();
+    if (!defaultName) return fromUrl;
+    const saved = loadSavedFilters().find((entry) => entry.name === defaultName);
+    return saved ? saved.filter : fromUrl;
+  };
+
+  const [filter, setFilter] = createSignal<Filter>(initialFilter());
   const [limit, setLimit] = createSignal<number>(limitFromQuery(query));
   const [explained, setExplained] = createSignal<string[]>(many(query.why).slice(0, 2));
 
   const [savedFilters, setSavedFilters] = createSignal<SavedFilter[]>(loadSavedFilters());
+
+  // #352: which saved lens (by name) is the default. Persisted alongside the
+  // saved list; dropped once it names a lens no longer saved.
+  const [defaultLens, setDefaultLens] = createSignal<string>(readDefaultLens());
+  createEffect(() => {
+    const name = defaultLens();
+    if (name && !savedFilters().some((entry) => entry.name === name)) {
+      setDefaultLens(writeDefaultLens(""));
+    }
+  });
+  const toggleDefaultLens = (name: string) => {
+    setDefaultLens(writeDefaultLens(defaultLens() === name ? "" : name));
+  };
 
   const [selected, setSelected] = createSignal<string[]>([]);
   const selectedSet = createMemo(() => new Set(selected()));
@@ -684,11 +818,33 @@ const Backlog: Component<Props> = (props) => {
    * estate was searched.
    */
   const visible = createMemo<RankedEntry[]>(() => {
-    const states = filter().states;
-    if (!states.length) return entries();
-    const wanted = new Set(states);
-    return entries().filter((entry) => wanted.has(entry.state));
+    const active = filter();
+    const needle = active.q.trim().toLowerCase();
+    const ex = active.exclude;
+    const wanted = active.states.length ? new Set(active.states) : null;
+    if (!wanted && !needle && excludeCount(ex) === 0) return entries();
+    // Search (#350) and exclusion (#351) join the page-only state filter over
+    // the loaded ranked page: the ranked views take no free-text or negative
+    // parameter, so this narrows what was loaded, and the count line says so.
+    return entries().filter((entry) => {
+      if (wanted && !wanted.has(entry.state)) return false;
+      if (needle && !entryMatchesText(entry, needle)) return false;
+      if (ex.projects.length && entry.project_slug && ex.projects.includes(entry.project_slug))
+        return false;
+      if (ex.kinds.includes(entry.kind)) return false;
+      if (ex.states.includes(entry.state)) return false;
+      if (ex.labels.length && (entry.labels ?? []).some((one) => ex.labels.includes(one)))
+        return false;
+      return true;
+    });
   });
+
+  /** Whether a client-side filter (state, search, or exclusion) is narrowing
+   *  the loaded page — so the count line can say "N of M loaded" (#226). */
+  const pageNarrowed = () => {
+    const active = filter();
+    return Boolean(active.states.length || active.q || excludeCount(active.exclude) > 0);
+  };
 
   const stateOptions = createMemo(() => {
     const seen = new Set<string>(entries().map((entry) => entry.state));
@@ -1484,8 +1640,27 @@ const Backlog: Component<Props> = (props) => {
         label: `Actor: ${actorLabel(active.actor)}`,
         title: active.actor,
       });
+    if (active.q) chips.push({ key: "q", label: `Search: “${active.q}” · this page only` });
+    const ex = active.exclude;
+    // #351: exclusions read as negations, so a reader never mistakes one for
+    // the inclusion it is the opposite of.
+    if (ex.projects.length)
+      chips.push({
+        key: "not:project",
+        label: `Not project: ${ex.projects.map(projectLabel).join(", ")}`,
+        title: ex.projects.join(", "),
+      });
+    if (ex.kinds.length)
+      chips.push({ key: "not:kind", label: `Not type: ${ex.kinds.join(", ")}` });
+    if (ex.states.length)
+      chips.push({ key: "not:state", label: `Not state: ${ex.states.join(", ")}` });
+    if (ex.labels.length)
+      chips.push({ key: "not:label", label: `Not label: ${ex.labels.join(", ")}` });
     return chips;
   });
+
+  const patchExclude = (next: Partial<ExcludeFilter>) =>
+    update("exclude", { ...filter().exclude, ...next });
 
   const removeFilter = (key: string) => {
     switch (key) {
@@ -1495,7 +1670,61 @@ const Backlog: Component<Props> = (props) => {
       case "label": update("label", ""); break;
       case "initiative": update("initiative", ""); break;
       case "actor": update("actor", ""); break;
+      case "q": update("q", ""); break;
+      case "not:project": patchExclude({ projects: [] }); break;
+      case "not:kind": patchExclude({ kinds: [] }); break;
+      case "not:state": patchExclude({ states: [] }); break;
+      case "not:label": patchExclude({ labels: [] }); break;
     }
+  };
+
+  // -- the exclusion builder (#351): one facet, one value, over the loaded page.
+  type ExcludeField = keyof ExcludeFilter;
+  interface ExcludeFacet {
+    field: ExcludeField;
+    label: string;
+    options: () => { value: string; label: string }[];
+  }
+  const excludeFacets: ExcludeFacet[] = [
+    {
+      field: "projects",
+      label: "Project",
+      options: () => projectOptions().map((one) => ({ value: one, label: projectLabel(one) })),
+    },
+    {
+      field: "kinds",
+      label: "Type",
+      options: () => WORK_KINDS.map((one) => ({ value: one, label: one })),
+    },
+    {
+      field: "states",
+      label: "State",
+      options: () => stateOptions().map((one) => ({ value: one, label: one })),
+    },
+    {
+      field: "labels",
+      label: "Label",
+      options: () => labelOptions().map((one) => ({ value: one, label: one })),
+    },
+  ];
+  const [excludeField, setExcludeField] = createSignal<ExcludeField>("projects");
+  const [excludeValue, setExcludeValue] = createSignal("");
+  const currentExcludeFacet = () =>
+    excludeFacets.find((one) => one.field === excludeField()) ?? excludeFacets[0]!;
+  const excludeOptions = createMemo(() => {
+    const already = new Set(filter().exclude[excludeField()]);
+    return currentExcludeFacet()
+      .options()
+      .filter((one) => !already.has(one.value));
+  });
+  const addExclude = () => {
+    const value = excludeValue();
+    if (!value) return;
+    const field = excludeField();
+    const current = filter().exclude[field];
+    if (current.includes(value)) return;
+    patchExclude({ [field]: [...current, value] } as Partial<ExcludeFilter>);
+    setExcludeValue("");
   };
 
   const counts = createMemo(() => {
@@ -1611,14 +1840,31 @@ const Backlog: Component<Props> = (props) => {
             lenses={savedFilters().map((entry) => ({
               name: entry.name,
               title: describeFilter(entry.filter),
+              isDefault: entry.name === defaultLens(),
             }))}
             onSave={saveCurrent}
             onRecall={recallSaved}
             onForget={removeSaved}
-            note="saved lenses are kept in this browser"
+            onDefault={toggleDefaultLens}
+            note="saved lenses are kept in this browser · a starred lens loads on a bare /backlog"
           />
         )}
       >
+        <label class="vogt-backlog-field vogt-backlog-field-wide">
+          <span>Search</span>
+          {/* #350: free text over the loaded page's titles (and adopted item
+              bodies). A filter like every other — it deep-links and saves into
+              a lens — so it is in the URL, not a separate box. */}
+          <input
+            type="search"
+            class="vogt-backlog-search"
+            placeholder="Match title or body — this page only"
+            aria-label="Search ranked work"
+            value={filter().q}
+            onInput={(event) => update("q", event.currentTarget.value)}
+          />
+        </label>
+
         <label class="vogt-backlog-field">
           <span>Project</span>
           <select
@@ -1738,6 +1984,41 @@ const Backlog: Component<Props> = (props) => {
             </span>
           </div>
         </div>
+
+        <div class="vogt-backlog-field vogt-backlog-field-wide vogt-backlog-exclude">
+          <span>Exclude</span>
+          {/* #351: a negation is a facet plus a value. It lands as a "Not …"
+              chip and round-trips under its own `not_*` URL key, so a stale
+              reader drops it rather than misreading it. Over the loaded page,
+              like the state and search filters. */}
+          <div class="vogt-backlog-exclude-builder">
+            <select
+              aria-label="Exclude which facet"
+              value={excludeField()}
+              onInput={(event) => {
+                setExcludeField(event.currentTarget.value as ExcludeField);
+                setExcludeValue("");
+              }}
+            >
+              <For each={excludeFacets}>
+                {(facet) => <option value={facet.field}>{facet.label}</option>}
+              </For>
+            </select>
+            <select
+              aria-label="Exclude which value"
+              value={excludeValue()}
+              onInput={(event) => setExcludeValue(event.currentTarget.value)}
+            >
+              <option value="">Choose a value…</option>
+              <For each={excludeOptions()}>
+                {(option) => <option value={option.value}>{option.label}</option>}
+              </For>
+            </select>
+            <button type="button" onClick={addExclude} disabled={!excludeValue()}>
+              Exclude
+            </button>
+          </div>
+        </div>
       </ProgressiveFilters>
 
       <Show when={facetNote()}>
@@ -1828,11 +2109,11 @@ const Backlog: Component<Props> = (props) => {
           {(summary) => (
             <span>
               <Show
-                when={filter().states.length}
+                when={pageNarrowed()}
                 fallback={<>{visible().length} shown</>}
               >
-                {/* The State filter is page-only, so the count says so out
-                    loud: N of the M rows this page loaded (#226). */}
+                {/* State, search and exclusion are page-only, so the count says
+                    so out loud: N of the M rows this page loaded (#226). */}
                 {visible().length} of {entries().length} loaded rows
               </Show>
               <Show when={summary().considered !== null}>

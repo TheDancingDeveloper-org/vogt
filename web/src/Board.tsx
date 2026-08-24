@@ -160,6 +160,34 @@ const LAYOUT_KEY = "vogt.boardLayout.v1";
 
 // -- filters, which are the URL (FR-U11) ------------------------------------
 
+/**
+ * The exclusion (negative) half of the filter set (#351).
+ *
+ * Every facet the board can include on, it can also exclude on: "project is
+ * not vogt". Each is a list, because "not vogt and not core" is a set the
+ * reader can mean. Encoded under its own `not_*` URL key rather than as a `!`
+ * prefix on the inclusion key, and that choice is the tolerance rule (a build
+ * that predates this reads `not_project` as a key it does not own and drops
+ * it — never as an inclusion of a project literally named "!vogt").
+ */
+interface ExcludeFilters {
+  projects: string[];
+  kinds: string[];
+  states: string[];
+  labels: string[];
+  initiatives: string[];
+  assignees: string[];
+}
+
+const EMPTY_EXCLUDE: ExcludeFilters = {
+  projects: [],
+  kinds: [],
+  states: [],
+  labels: [],
+  initiatives: [],
+  assignees: [],
+};
+
 interface Filters {
   project: string;
   kinds: string[];
@@ -168,6 +196,10 @@ interface Filters {
   initiative: string;
   assignee: string;
   lanes: LaneMode;
+  /** Free-text search over the loaded cards' title and body (#350). */
+  q: string;
+  /** The negative filter set (#351). */
+  exclude: ExcludeFilters;
   /** Phone presentation state. This selects a visible column, not a filter. */
   column: string;
   /** Seconds between polls; 0 means the user paused it. */
@@ -182,6 +214,13 @@ interface BoardParams {
   initiative?: string;
   assignee?: string;
   lanes?: string;
+  q?: string;
+  not_project?: string | string[];
+  not_kind?: string | string[];
+  not_state?: string | string[];
+  not_label?: string | string[];
+  not_initiative?: string | string[];
+  not_assignee?: string | string[];
   column?: string;
   poll?: string;
   [key: string]: string | string[] | undefined;
@@ -205,7 +244,11 @@ export function asPoll(value: string | undefined): number {
   return parsed;
 }
 
-/** The URL keys this surface owns. Anything else in the query is left alone. */
+/** The URL keys this surface owns. Anything else in the query is left alone.
+ *
+ *  The `not_*` keys carry the exclusion set (#351); an older build has none of
+ *  them in its own `URL_KEYS`, so it reads them as keys it does not own and
+ *  drops them, which is the tolerance rule negation had to preserve. */
 const URL_KEYS = [
   "project",
   "kind",
@@ -214,9 +257,28 @@ const URL_KEYS = [
   "initiative",
   "assignee",
   "lanes",
+  "q",
+  "not_project",
+  "not_kind",
+  "not_state",
+  "not_label",
+  "not_initiative",
+  "not_assignee",
   "column",
   "poll",
 ] as const;
+
+/** The URL keys whose value is a repeatable list rather than a single scalar. */
+const LIST_KEYS: ReadonlySet<string> = new Set([
+  "kind",
+  "state",
+  "not_project",
+  "not_kind",
+  "not_state",
+  "not_label",
+  "not_initiative",
+  "not_assignee",
+]);
 
 export function filtersFromQuery(query: BoardParams): Filters {
   return {
@@ -227,6 +289,15 @@ export function filtersFromQuery(query: BoardParams): Filters {
     initiative: (query.initiative ?? "").trim(),
     assignee: (query.assignee ?? "").trim(),
     lanes: asLaneMode(query.lanes),
+    q: (query.q ?? "").trim(),
+    exclude: {
+      projects: asList(query.not_project),
+      kinds: asList(query.not_kind),
+      states: asList(query.not_state),
+      labels: asList(query.not_label),
+      initiatives: asList(query.not_initiative),
+      assignees: asList(query.not_assignee),
+    },
     column: (query.column ?? "").trim(),
     poll: asPoll(query.poll),
   };
@@ -244,6 +315,13 @@ function queryFor(
     initiative: active.initiative || null,
     assignee: active.assignee || null,
     lanes: active.lanes === "none" ? null : active.lanes,
+    q: active.q || null,
+    not_project: active.exclude.projects.length ? active.exclude.projects : null,
+    not_kind: active.exclude.kinds.length ? active.exclude.kinds : null,
+    not_state: active.exclude.states.length ? active.exclude.states : null,
+    not_label: active.exclude.labels.length ? active.exclude.labels : null,
+    not_initiative: active.exclude.initiatives.length ? active.exclude.initiatives : null,
+    not_assignee: active.exclude.assignees.length ? active.exclude.assignees : null,
     column: active.column || null,
     poll:
       active.poll === DEFAULT_POLL_SECONDS
@@ -293,7 +371,7 @@ export function queryFromSearch(search: string): BoardParams {
   for (const key of URL_KEYS) {
     const all = params.getAll(key);
     if (!all.length) continue;
-    out[key] = key === "kind" || key === "state" ? all : (all[0] as string);
+    out[key] = LIST_KEYS.has(key) ? all : (all[0] as string);
   }
   return out as BoardParams;
 }
@@ -365,8 +443,45 @@ export function describeFilters(active: Filters): string {
   if (active.label) parts.push(`label ${active.label}`);
   if (active.initiative) parts.push(`initiative ${active.initiative}`);
   if (active.assignee) parts.push(`assignee ${active.assignee}`);
+  if (active.q) parts.push(`search “${active.q}”`);
+  const ex = active.exclude;
+  if (ex.projects.length) parts.push(`not project ${ex.projects.join("/")}`);
+  if (ex.kinds.length) parts.push(`not type ${ex.kinds.join("/")}`);
+  if (ex.states.length) parts.push(`not state ${ex.states.join("/")}`);
+  if (ex.labels.length) parts.push(`not label ${ex.labels.join("/")}`);
+  if (ex.initiatives.length) parts.push(`not initiative ${ex.initiatives.join("/")}`);
+  if (ex.assignees.length) parts.push(`not assignee ${ex.assignees.join("/")}`);
   if (active.lanes !== "none") parts.push(`lanes by ${active.lanes}`);
   return parts.length ? parts.join(" · ") : "no filters — the whole board";
+}
+
+// -- the default lens (#352) ------------------------------------------------
+//
+// Named lenses recall on demand; the default is the one applied on its own
+// when the reader lands on a bare `/board`. It is stored by name in a key of
+// its own, next to the saved list rather than inside it, so a build that
+// predates the default simply never reads it and the saved lenses still work.
+// A non-empty query someone pasted always wins — the default is a starting
+// point, never an override of an explicit link.
+
+const DEFAULT_FILTER_KEY = "vogt.boardDefaultFilter.v1";
+
+export function readDefaultLens(): string {
+  try {
+    return window.localStorage.getItem(DEFAULT_FILTER_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeDefaultLens(name: string): string {
+  try {
+    if (name) window.localStorage.setItem(DEFAULT_FILTER_KEY, name);
+    else window.localStorage.removeItem(DEFAULT_FILTER_KEY);
+  } catch {
+    // Private mode / no storage: the choice still holds for this session.
+  }
+  return name;
 }
 
 /**
@@ -562,6 +677,30 @@ function serverReason(error: unknown): string {
 
 function humanState(state: string): string {
   return state.replace(/_/g, " ");
+}
+
+/** Free-text match for the board search (#350): title first, then body/ref, so
+ *  a search finds the card whether the reader remembers its name or a phrase
+ *  from its description. Case-insensitive; the caller lower-cases `needle`. */
+export function itemMatchesText(
+  item: Pick<WorkItem, "title" | "body" | "ref">,
+  needle: string,
+): boolean {
+  if (!needle) return true;
+  const haystack = `${item.title ?? ""} ${item.body ?? ""} ${item.ref ?? ""}`;
+  return haystack.toLowerCase().includes(needle);
+}
+
+/** How many exclusion values are set across every facet (#351). */
+export function excludeCount(exclude: ExcludeFilters): number {
+  return (
+    exclude.projects.length +
+    exclude.kinds.length +
+    exclude.states.length +
+    exclude.labels.length +
+    exclude.initiatives.length +
+    exclude.assignees.length
+  );
 }
 
 /**
@@ -763,7 +902,26 @@ const Board: Component<Props> = (props) => {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const [filters, setFilters] = createSignal<Filters>(filtersFromQuery(searchParams));
+  // The default lens (#352) is applied only on a bare load: a non-empty query
+  // is an explicit instruction and always wins. `initialFilters` resolves that
+  // once, at construction, so the address the effect below then writes carries
+  // the default's chips — visible and removable — rather than a hidden narrow.
+  const initialFilters = (): Filters => {
+    const fromUrl = filtersFromQuery(searchParams);
+    if (encodeQuery(searchParams) !== "") return fromUrl;
+    const defaultName = readDefaultLens();
+    if (!defaultName) return fromUrl;
+    const saved = readSavedFilters().find((entry) => entry.name === defaultName);
+    if (!saved) return fromUrl;
+    return {
+      ...filtersFromQuery(queryFromSearch(saved.query)),
+      // The default sets what is filtered, not how often the board refreshes.
+      column: fromUrl.column,
+      poll: fromUrl.poll,
+    };
+  };
+
+  const [filters, setFilters] = createSignal<Filters>(initialFilters());
   const [phone, setPhone] = createSignal(false);
   // The phone state-pill row scrolls horizontally when the workflow has more
   // states than fit; a right-edge fade signals there is more to scroll to, and
@@ -1383,9 +1541,50 @@ const Board: Component<Props> = (props) => {
         active.initiative ||
         active.assignee ||
         active.kinds.length ||
-        active.states.length,
+        active.states.length ||
+        active.q ||
+        excludeCount(active.exclude) > 0,
     );
   };
+
+  /**
+   * The cards left after the two client-side filters (#350, #351).
+   *
+   * Search and exclusion are applied here, over the loaded set, rather than in
+   * `board.list`: the board pages each cell server-side and has no free-text or
+   * negative parameter, so narrowing what was loaded is the honest reach —
+   * the summary counts loaded matches, and the server totals still describe the
+   * server-side scope. `board.list` gaining a `q`/`not_*` parameter is the way
+   * to make this search past the loaded page; see the PR notes.
+   */
+  const visibleItems = createMemo<WorkItem[]>(() => {
+    const active = filters();
+    const needle = active.q.trim().toLowerCase();
+    const ex = active.exclude;
+    if (!needle && excludeCount(ex) === 0) return items();
+    return items().filter((item) => {
+      if (needle && !itemMatchesText(item, needle)) return false;
+      if (ex.projects.length && item.project_slug && ex.projects.includes(item.project_slug))
+        return false;
+      if (ex.kinds.includes(item.kind)) return false;
+      if (ex.states.includes(item.state)) return false;
+      if (ex.labels.length && (item.labels ?? []).some((one) => ex.labels.includes(one)))
+        return false;
+      if (
+        ex.initiatives.length &&
+        item.initiative_id &&
+        ex.initiatives.includes(item.initiative_id)
+      )
+        return false;
+      if (
+        ex.assignees.length &&
+        item.assignee_identity_ref &&
+        ex.assignees.includes(item.assignee_identity_ref)
+      )
+        return false;
+      return true;
+    });
+  });
 
   /**
    * A board with columns but no matching work — one empty panel, not four
@@ -1394,9 +1593,16 @@ const Board: Component<Props> = (props) => {
    * and not for an unlinked project scope, which has its own link-or-publish
    * banner rather than an empty one.
    */
-  const boardEmpty = createMemo(
-    () => total() === 0 && !loading() && !outage() && !scopeUnlinked(),
-  );
+  const boardEmpty = createMemo(() => {
+    if (loading() || outage() || scopeUnlinked()) return false;
+    if (total() === 0) return true;
+    // Client-side search/exclusion (#350, #351) can empty the loaded set even
+    // when the server counted matches; say "no matching work" once rather than
+    // draw columns whose heads count cards the filters removed.
+    const active = filters();
+    const clientFiltering = Boolean(active.q) || excludeCount(active.exclude) > 0;
+    return clientFiltering && visibleItems().length === 0;
+  });
 
   /**
    * The honesty gap (#187): the Board draws declared cards, but the estate's
@@ -1450,7 +1656,7 @@ const Board: Component<Props> = (props) => {
       }
       grouped.set("", { key: "", label: "No initiative", items: [] });
     }
-    for (const item of items()) {
+    for (const item of visibleItems()) {
       const { key, label } = laneOf(item);
       const lane = grouped.get(key) ?? { key, label, items: [] };
       lane.items.push(item);
@@ -1905,6 +2111,10 @@ const Board: Component<Props> = (props) => {
     });
   };
 
+  // #352: the whole-board escape. Clears every filter — search and exclusions
+  // included — in one action, so a persisted default lens can never trap the
+  // reader in a narrowed view they cannot get out of. The default is applied
+  // only on a bare load, so clearing here does not re-arm it this session.
   const clearFilters = () =>
     patch({
       project: "",
@@ -1914,6 +2124,8 @@ const Board: Component<Props> = (props) => {
       initiative: "",
       assignee: "",
       lanes: "none",
+      q: "",
+      exclude: EMPTY_EXCLUDE,
     });
 
   const hideFinishedColumns = () => {
@@ -1928,6 +2140,23 @@ const Board: Component<Props> = (props) => {
   // -- saved filters (FR-U14) ----------------------------------------------
 
   const [savedFilters, setSavedFilters] = createSignal<SavedFilter[]>(readSavedFilters());
+
+  // #352: which saved lens (by name) is applied on a bare load. Held here so
+  // the row can star it, and persisted so the choice outlives the session.
+  const [defaultLens, setDefaultLens] = createSignal<string>(readDefaultLens());
+
+  // A default that names a lens no longer saved is inert but should not linger
+  // in storage; drop it once the saved list is known not to contain it.
+  createEffect(() => {
+    const name = defaultLens();
+    if (name && !savedFilters().some((entry) => entry.name === name)) {
+      setDefaultLens(writeDefaultLens(""));
+    }
+  });
+
+  const toggleDefaultLens = (name: string) => {
+    setDefaultLens(writeDefaultLens(defaultLens() === name ? "" : name));
+  };
 
   const saveCurrent = async (name: string) => {
     // #229: a name already in use is an overwrite, and overwriting a saved view
@@ -2013,7 +2242,9 @@ const Board: Component<Props> = (props) => {
       (active.label ? 1 : 0) +
       (active.initiative ? 1 : 0) +
       (active.assignee ? 1 : 0) +
-      (active.lanes !== "none" ? 1 : 0)
+      (active.lanes !== "none" ? 1 : 0) +
+      (active.q ? 1 : 0) +
+      (excludeCount(active.exclude) > 0 ? 1 : 0)
     );
   });
 
@@ -2059,9 +2290,45 @@ const Board: Component<Props> = (props) => {
         label: `Assignee: ${assigneeName(active.assignee)}`,
         title: active.assignee,
       });
+    if (active.q) chips.push({ key: "q", label: `Search: “${active.q}”` });
+    const ex = active.exclude;
+    // #351: exclusions read as negations — "Not project: vogt" — so a reader
+    // never mistakes one for the inclusion it is the opposite of. One chip per
+    // facet, matching the inclusion side; removing it drops that whole facet's
+    // exclusions.
+    if (ex.projects.length)
+      chips.push({
+        key: "not:project",
+        label: `Not project: ${ex.projects.map(projectName).join(", ")}`,
+        title: ex.projects.join(", "),
+      });
+    if (ex.kinds.length)
+      chips.push({ key: "not:kind", label: `Not type: ${ex.kinds.join(", ")}` });
+    if (ex.states.length)
+      chips.push({
+        key: "not:state",
+        label: `Not state: ${ex.states.map(humanState).join(", ")}`,
+      });
+    if (ex.labels.length)
+      chips.push({ key: "not:label", label: `Not label: ${ex.labels.join(", ")}` });
+    if (ex.initiatives.length)
+      chips.push({
+        key: "not:initiative",
+        label: `Not initiative: ${ex.initiatives.map(initiativeLabel).join(", ")}`,
+        title: ex.initiatives.join(", "),
+      });
+    if (ex.assignees.length)
+      chips.push({
+        key: "not:assignee",
+        label: `Not assignee: ${ex.assignees.map(assigneeName).join(", ")}`,
+        title: ex.assignees.join(", "),
+      });
     if (active.lanes !== "none") chips.push({ key: "lanes", label: `Swimlanes: ${active.lanes}` });
     return chips;
   });
+
+  const patchExclude = (next: Partial<ExcludeFilters>) =>
+    patch({ exclude: { ...filters().exclude, ...next } });
 
   const removeFilter = (key: string) => {
     switch (key) {
@@ -2072,12 +2339,88 @@ const Board: Component<Props> = (props) => {
       case "initiative": patch({ initiative: "" }); break;
       case "assignee": patch({ assignee: "" }); break;
       case "lanes": patch({ lanes: "none" }); break;
+      case "q": patch({ q: "" }); break;
+      case "not:project": patchExclude({ projects: [] }); break;
+      case "not:kind": patchExclude({ kinds: [] }); break;
+      case "not:state": patchExclude({ states: [] }); break;
+      case "not:label": patchExclude({ labels: [] }); break;
+      case "not:initiative": patchExclude({ initiatives: [] }); break;
+      case "not:assignee": patchExclude({ assignees: [] }); break;
     }
   };
 
   const kindOptions = createMemo(() =>
     (workflows() ?? []).map((workflow) => workflow.kind),
   );
+
+  // -- the exclusion builder (#351) -----------------------------------------
+  //
+  // One facet picker plus one value picker adds a negation. Kept compact — a
+  // single row — because exclusions are the quieter half of the grammar; the
+  // chips above are where an active one lives and is removed.
+  type ExcludeField = keyof ExcludeFilters;
+  interface ExcludeFacet {
+    field: ExcludeField;
+    label: string;
+    options: () => { value: string; label: string }[];
+  }
+  const excludeFacets: ExcludeFacet[] = [
+    {
+      field: "projects",
+      label: "Project",
+      options: () => projects().map((one) => ({ value: one.slug, label: one.name })),
+    },
+    {
+      field: "kinds",
+      label: "Type",
+      options: () => kindOptions().map((one) => ({ value: one, label: one })),
+    },
+    {
+      field: "states",
+      label: "State",
+      options: () =>
+        allColumns().map((one) => ({ value: one.state, label: humanState(one.state) })),
+    },
+    {
+      field: "labels",
+      label: "Label",
+      options: () => labels().map((one) => ({ value: one, label: one })),
+    },
+    {
+      field: "initiatives",
+      label: "Initiative",
+      options: () =>
+        initiatives().flatMap((one) =>
+          one.id ? [{ value: one.id, label: one.title }] : [],
+        ),
+    },
+    {
+      field: "assignees",
+      label: "Assignee",
+      options: () => actors().map((one) => ({ value: one.identity_ref, label: one.display_name })),
+    },
+  ];
+  const [excludeField, setExcludeField] = createSignal<ExcludeField>("projects");
+  const [excludeValue, setExcludeValue] = createSignal("");
+  const currentExcludeFacet = () =>
+    excludeFacets.find((one) => one.field === excludeField()) ?? excludeFacets[0]!;
+  // The values still addable: this facet's options, minus what is already
+  // excluded, so a reader cannot exclude the same value twice.
+  const excludeOptions = createMemo(() => {
+    const already = new Set(filters().exclude[excludeField()]);
+    return currentExcludeFacet()
+      .options()
+      .filter((one) => !already.has(one.value));
+  });
+  const addExclude = () => {
+    const value = excludeValue();
+    if (!value) return;
+    const field = excludeField();
+    const current = filters().exclude[field];
+    if (current.includes(value)) return;
+    patchExclude({ [field]: [...current, value] } as Partial<ExcludeFilters>);
+    setExcludeValue("");
+  };
 
   return (
     <div
@@ -2099,7 +2442,7 @@ const Board: Component<Props> = (props) => {
               age={freshness()}
               class={`board-freshness board-freshness--${freshness().tone}`}
             /></strong>
-            <span>{items().length} loaded</span>
+            <span>{visibleItems().length} loaded</span>
             <span>of {total()} matching</span>
             <span>{columns().length} columns</span>
           </div>
@@ -2221,10 +2564,12 @@ const Board: Component<Props> = (props) => {
             lenses={savedFilters().map((entry) => ({
               name: entry.name,
               title: describeSaved(entry),
+              isDefault: entry.name === defaultLens(),
             }))}
             onSave={saveCurrent}
             onRecall={recallSaved}
             onForget={forgetSaved}
+            onDefault={toggleDefaultLens}
             undo={(
               <Show when={forgotten()}>
                 {(entry) => (
@@ -2246,6 +2591,21 @@ const Board: Component<Props> = (props) => {
           />
         )}
       >
+        <label class="board-field board-field--wide">
+          <span>Search</span>
+          {/* #350: free text over the loaded cards' title and body. A filter
+              like every other — it deep-links and saves into a lens — so it is
+              in the URL, not a separate box. */}
+          <input
+            type="search"
+            class="board-search"
+            placeholder="Match title or body"
+            aria-label="Search work items"
+            value={filters().q}
+            onInput={(event) => patch({ q: event.currentTarget.value })}
+          />
+        </label>
+
         <label class="board-field">
           <span>Project</span>
           {/* Selection is declared on the options rather than on the select.
@@ -2398,6 +2758,40 @@ const Board: Component<Props> = (props) => {
                 </button>
               )}
             </For>
+          </div>
+        </div>
+
+        <div class="board-field board-field--wide board-exclude">
+          <span>Exclude</span>
+          {/* #351: a negation is a facet plus a value. It lands as a "Not …"
+              chip above and round-trips through the URL under its own `not_*`
+              key, so a stale reader drops it rather than misreading it. */}
+          <div class="board-exclude-builder">
+            <select
+              aria-label="Exclude which facet"
+              value={excludeField()}
+              onInput={(event) => {
+                setExcludeField(event.currentTarget.value as ExcludeField);
+                setExcludeValue("");
+              }}
+            >
+              <For each={excludeFacets}>
+                {(facet) => <option value={facet.field}>{facet.label}</option>}
+              </For>
+            </select>
+            <select
+              aria-label="Exclude which value"
+              value={excludeValue()}
+              onInput={(event) => setExcludeValue(event.currentTarget.value)}
+            >
+              <option value="">Choose a value…</option>
+              <For each={excludeOptions()}>
+                {(option) => <option value={option.value}>{option.label}</option>}
+              </For>
+            </select>
+            <button type="button" onClick={addExclude} disabled={!excludeValue()}>
+              Exclude
+            </button>
           </div>
         </div>
 

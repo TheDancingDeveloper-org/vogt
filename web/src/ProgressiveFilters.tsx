@@ -151,6 +151,11 @@ export interface Lens {
   name: string;
   /** What the combination is, for the recall control's tooltip. */
   title: string;
+  /**
+   * The one lens applied automatically on a bare load (#352). At most one is
+   * true; the surface owns which, and persists it alongside the saved list.
+   */
+  isDefault?: boolean;
 }
 
 interface LensProps {
@@ -159,6 +164,12 @@ interface LensProps {
   onSave: (name: string) => void;
   onRecall: (name: string) => void;
   onForget: (name: string) => void;
+  /**
+   * Mark this lens as the default, or clear the default when it already is
+   * (#352). Optional so a surface without persisted defaults still renders a
+   * plain recall/forget row.
+   */
+  onDefault?: (name: string) => void;
   /** Where the lenses live, said out loud — they are per-client (§3). */
   note: JSX.Element;
   /**
@@ -201,7 +212,9 @@ export function SavedLenses(props: LensProps): JSX.Element {
       </button>
       <For each={props.lenses}>
         {(lens) => (
-          <span class={`vogt-lens ${props.prefix}-saved`}>
+          <span
+            class={`vogt-lens ${props.prefix}-saved${lens.isDefault ? " vogt-lens--default" : ""}`}
+          >
             <button
               type="button"
               class={`vogt-lens-recall ${props.prefix}-saved-recall`}
@@ -209,7 +222,30 @@ export function SavedLenses(props: LensProps): JSX.Element {
               onClick={() => props.onRecall(lens.name)}
             >
               {lens.name}
+              <Show when={lens.isDefault}>
+                <span class="vogt-lens-default-tag"> · default</span>
+              </Show>
             </button>
+            <Show when={props.onDefault}>
+              <button
+                type="button"
+                class={`vogt-lens-default ${props.prefix}-saved-default`}
+                aria-pressed={lens.isDefault ?? false}
+                aria-label={
+                  lens.isDefault
+                    ? `Stop applying ${lens.name} by default`
+                    : `Apply ${lens.name} by default on a bare load`
+                }
+                title={
+                  lens.isDefault
+                    ? "Applied on a bare load — click to stop"
+                    : "Apply this lens by default on a bare load"
+                }
+                onClick={() => props.onDefault?.(lens.name)}
+              >
+                {lens.isDefault ? "★" : "☆"}
+              </button>
+            </Show>
             <button
               type="button"
               class={`vogt-lens-drop ${props.prefix}-saved-drop`}
