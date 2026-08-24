@@ -13,7 +13,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_COMPOSE = REPO_ROOT / "deploy" / "vogt.compose.yml"
 BUILD_OVERLAY = REPO_ROOT / "deploy" / "vogt.build.yml"
 ENGINE_OVERLAY = REPO_ROOT / "deploy" / "engine.overlay.yml"
-ESTATE_OVERLAY = REPO_ROOT / "deploy" / "estate.overlay.yml"
 PUBLIC_ENV = REPO_ROOT / "deploy" / ".env.example"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 
@@ -167,102 +166,16 @@ def test_public_dockerignore_excludes_private_toolchains() -> None:
         assert not any(entry.lstrip("!").rstrip("/*") == path for entry in reincluded)
 
 
-def test_the_estate_overlay_states_differences_only() -> None:
-    """The reference customisation is the base plus config, not a second base.
-
-    `docs/CUSTOMISATION.md` claims the estate deployment is built from the
-    documented extension points. That is only checkable if the overlay really
-    is an overlay, so it must not restate the base's image or health check for
-    the core service.
-    """
-    overlay = _without_comments(ESTATE_OVERLAY.read_text(encoding="utf-8"))
-    assert "engine:" in overlay
-    assert 'VOGT_CORE_URL: "http://vogt:8000"' in overlay
-
-    core = overlay.split("  engine:")[0]
-    assert "image:" not in core, "the overlay must not rebuild or repin the core"
-    assert "healthcheck:" not in core
-    # Compose concatenates `ports`, so an override would publish both.
-    assert "ports: !reset []" in core
-
-
-def test_the_estate_overlay_wires_the_two_filesystem_couplings() -> None:
-    """A naive split loses collection and half of every backup.
-
-    The core is what reads repositories, and it reads engine state off the
-    filesystem for backup/restore — in the merged image both worked by
-    co-location. Split them without these mounts and `backup` does not fail,
-    it writes `engine_state: "not configured"` (NFR-I6).
-    """
-    core = _without_comments(ESTATE_OVERLAY.read_text(encoding="utf-8")).split(
-        "  engine:"
-    )[0]
-    assert "VOGT_ENGINE_STATE_DIR:" in core
-    assert ".local/share/mydevenv2:/home/sprooty/.local/share/mydevenv2" in core
-    assert ':/home/sprooty/Working"' in core, (
-        "import clones into this tree; it cannot be :ro"
-    )
-
-
-def test_the_estate_overlay_points_the_core_at_the_engine() -> None:
-    """#157: the split core reaches the engine by service name, no /etc/hosts pin.
-
-    The one-way DNS landmine is the engine's: it runs Tailscale and rewrites
-    its own resolv.conf, which is why it pins `vogt`. The core runs the vanilla
-    public image with Docker's resolver intact, so `engine` resolves without a
-    pin. The token is brokered as a file (FR-S7), never a value.
-    """
-    core = _without_comments(ESTATE_OVERLAY.read_text(encoding="utf-8")).split(
-        "  engine:"
-    )[0]
-    assert 'VOGT_ENGINE_URL: "http://engine:8910"' in core
-    assert "VOGT_ENGINE_TOKEN_FILE:" in core
-    assert not re.search(r"^\s+VOGT_ENGINE_TOKEN:", core, re.MULTILINE), (
-        "the engine token is brokered as a file, never a value"
-    )
-
-
-def test_the_estate_overlay_keeps_the_existing_core_volume() -> None:
-    """The base's volume name is not the one the estate's data is in.
-
-    `deploy/vogt.compose.yml` declares `vogt-data`; the estate's core has
-    lived in `vogt-core-data` since the stack was created. Without the
-    mapping the core comes up against an empty volume — not a failure, a
-    *new instance*: new instance_id, no projects, no audit history, and the
-    real database still in the volume nobody is reading any more.
-    """
-    overlay = ESTATE_OVERLAY.read_text(encoding="utf-8")
-    assert 'name: "${VOGT_CORE_VOLUME:-vogt-core-data}"' in overlay
-
-
-def test_the_estate_overlay_does_not_gate_on_an_assistant_endpoint() -> None:
-    """The engine enforces r20's rule; compose must not enforce it twice.
-
-    A key with no stated destination is a startup error in the engine. Gating
-    `MYDEVENV2_ASSISTANT_BASE_URL` with `${X:?}` here as well would refuse to
-    deploy a stack that simply has no assistant key — the common case.
-    """
-    overlay = ESTATE_OVERLAY.read_text(encoding="utf-8")
-    assert (
-        'MYDEVENV2_ASSISTANT_BASE_URL: "${MYDEVENV2_ASSISTANT_BASE_URL:-}"' in overlay
-    )
-    required = set(re.findall(r"\$\{([A-Z_]+):\?", _without_comments(overlay)))
-    # Only genuine exposure values and the image may be required.
-    assert required <= {
-        "VOGT_BIND_IP",
-        "VOGT_PUBLIC_URL",
-        "VOGT_STACK_IMAGE",
-        "MYDEVENV2_TOKEN",
-    }, f"unexpected required variables: {sorted(required)}"
-
-
 # ── The generic engine overlay (#202) ───────────────────────────────────────
 #
-# `deploy/engine.overlay.yml` is the public, estate-neutral counterpart of the
-# estate overlay: it adds the session engine in front of the core with no host
-# paths, no tailnet, and no maintainer integrations. These mirror the base's
-# own contracts — loopback by default, an overlay states differences only, and
-# nothing private leaks into a file a stranger is meant to run.
+# `deploy/engine.overlay.yml` is the public, estate-neutral worked example of
+# the two-service deployment: it adds the session engine in front of the core
+# with no host paths, no tailnet, and no maintainer integrations. The
+# maintainer's own estate overlay is not tracked here (#204) — it is held in
+# the operator's private ops repository — so this is the only engine overlay
+# the suite asserts. These mirror the base's own contracts — loopback by
+# default, an overlay states differences only, and nothing private leaks into
+# a file a stranger is meant to run.
 
 # Estate leaks the public overlay must never carry. `sprooty` is deliberately
 # absent from this list: `/home/sprooty` is the engine *image's* build-time

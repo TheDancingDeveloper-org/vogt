@@ -13,9 +13,11 @@
 # It knows nothing about any particular deployment: no host paths, no tailnet,
 # no Infisical/Komodo/Cadastre, no maintainer hostnames. Every value an
 # operator must choose is a `${VAR}`; where one is genuinely required the
-# reference fails the deploy with a message rather than guessing. The estate's
-# own deployment layers its specifics in `deploy/estate.overlay.yml` instead —
-# this file is the base that overlay (and any other) builds on.
+# reference fails the deploy with a message rather than guessing. An operator's
+# own deployment layers its specifics (host mounts, tailnet, secret
+# integrations) on top of this file in an overlay of its own — kept in that
+# operator's private repository, never in this public tree (#204). This file is
+# the base any such overlay builds on.
 #
 # Topology: the engine is the only surface an operator publishes (the core has
 # no port of its own once fronted); the two containers reach each other over

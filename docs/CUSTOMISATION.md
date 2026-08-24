@@ -382,20 +382,28 @@ selection, optional integrations — and is described in
 [`DEPLOYMENT.md`](DEPLOYMENT.md) §3.2 and §6 rather than as the way Vogt is
 meant to be run.
 
-You can read it as a diff. [`deploy/estate.overlay.yml`](../deploy/estate.overlay.yml)
+You can read it as a diff. [`deploy/engine.overlay.yml`](../deploy/engine.overlay.yml)
 is that deployment expressed against this same base:
 
 ```console
-docker compose -f deploy/vogt.compose.yml -f deploy/estate.overlay.yml up -d
+docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d
 ```
 
 It adds one service and some configuration. It does not rebuild, repin, or
 restate the core — that is the published image, unmodified, which is what
 makes "a customised deployment is the public image plus configuration" a
 claim you can check rather than one you have to believe
-(`tests/test_public_delivery.py` checks it). Treat the overlay as a pattern:
-its mount paths and the engine image it names are one operator's choices,
-not defaults, and an engine image has to be built from source first.
+(`tests/test_public_delivery.py` checks it). No engine image is published, so
+the overlay always builds one from this checkout; it carries no host paths, no
+tailnet and no maintainer integrations, so it runs on any host unchanged.
+
+The maintainer's own estate layers its host mounts, tailnet, and secret
+integrations on top of this same base. That overlay is not tracked in this
+repository (#204) — a deployment tied to one operator's paths and addresses
+does not belong in a public tree — and lives in the operator's private ops
+repository instead. Treat `engine.overlay.yml` as the pattern: every
+estate-specific value it would add is an environment value or a mount an
+operator supplies, never a default baked into a file a stranger clones.
 
 If your deployment needs something none of these layers reach, that is worth
 an issue. The generic base is only generic if the customisations people
