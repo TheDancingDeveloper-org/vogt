@@ -61,13 +61,16 @@ services:
       - ./e2e.engine.toml:/opt/vogt-e2e/engine.toml:ro
 
 secrets:
-  # The fixture PAT, as a github.com file token for the core. Create it beside
-  # this file before `up`:
+  # Injected from the ENVIRONMENT, not a host file: in CI the runner's
+  # filesystem is not the docker daemon's, so a bind-mounted file secret's
+  # source path does not exist for the daemon. `environment:` makes Compose read
+  # the value from the named env var and mount it at /run/secrets/<name> with no
+  # host path — topology-independent.
   #
-  #   printf '%s' "$VOGT_FIXTURE_PAT" > deploy/github-token
-  #
-  # A relative path, so nothing here is tied to one host. Legitimately empty
-  # until the CI job writes the secret in — an empty file just leaves the core
-  # with no github.com provider, which is the credential-free posture.
+  # github_token: empty VOGT_FIXTURE_PAT ⇒ no github.com provider ⇒ the forge
+  # half skips (the credential-free posture). vogt_core_token overrides the
+  # file-based definition in engine.overlay.yml for the same reason.
   github_token:
-    file: ./github-token
+    environment: VOGT_FIXTURE_PAT
+  vogt_core_token: !override
+    environment: VOGT_CORE_TOKEN_VALUE
