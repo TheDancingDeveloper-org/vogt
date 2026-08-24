@@ -118,6 +118,10 @@ jobs:
           docker build -t vogt-core:local -f Dockerfile .
           docker build -t vogt-engine:local -f engine/Dockerfile --build-arg CORE_IMAGE=vogt-core:local .
           docker build -t vogt-engine-e2e:local -f deploy/e2e.engine.Dockerfile .
+          # The live-Playwright image (#295): web/ + browsers baked in so the
+          # `live` project runs in-network with no bind-mount. Public base image,
+          # so this pull needs no registry creds.
+          docker build -t vogt-e2e-playwright:local -f deploy/e2e.playwright.Dockerfile .
 
       - name: start the stack (images prebuilt; no --build, no bind-mounts)
         run: |
@@ -172,10 +176,26 @@ jobs:
             -e VOGT_FIXTURE_PAT="${VOGT_FIXTURE_PAT:-}" \
             engine bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
 
-      # TODO(#295): the live Playwright project must also run in-network — a
-      # Playwright container on the compose network reaching http://engine:8910,
-      # since the runner cannot reach the stack over host loopback. Deferred to a
-      # follow-up; the in-network smoke walk above is the hard end-to-end gate.
+      # The live Playwright project (#295, item 3), in-network. A Playwright
+      # container on the compose network runs the SAME gui.spec.ts specs against
+      # http://engine:8910 with the real API (no installFixtures), so mock/truth
+      # drift fails a test. The runner cannot reach the stack over host loopback,
+      # so this runs via `docker compose run` on the network like the smoke walk.
+      #
+      # First landing is advisory (continue-on-error): the in-network smoke walk
+      # above is the hard end-to-end gate, and this project is being brought up
+      # on the self-hosted runner — promote it to a hard gate once it is green
+      # across a few runs. Its failures still surface in the run for triage.
+      - name: live Playwright — the same specs against the running stack (in-network)
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_LIVE_TOKEN: ${{ env.ENGINE_TOKEN }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086  # COMPOSE_FILES is intentionally split
+          docker compose $COMPOSE_FILES --profile live run --rm -T \
+            -e PLAYWRIGHT_LIVE_TOKEN="$PLAYWRIGHT_LIVE_TOKEN" \
+            playwright
 
       - name: stack logs on failure
         if: failure()

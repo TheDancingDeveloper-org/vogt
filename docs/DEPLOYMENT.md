@@ -201,9 +201,13 @@ one container carries both halves; the overlay passes it as a build arg,
 defaulting to the same image the base runs. The engine then proxies to the
 sibling core because `VOGT_CORE_URL` names it (§5.2) — it runs its own core
 only when that URL is a loopback address. The engine's base image
-(`POD_BASE_IMAGE`) and toolchain build args are described at the top of the
-Dockerfile and in [`ENGINE.md`](ENGINE.md) §3, which also covers running the
-engine from `cargo` without a container.
+(`POD_BASE_IMAGE`) is the dev-pod toolchain, which since #184 is defined in
+`engine/Dockerfile.pod` (built once by `.github/workflows/pod-base.yml` as the
+`vogt-pod-base` image and consumed by digest) — `engine/Dockerfile` installs
+only the per-commit halves on top of it, so **adding a tool to the pod means
+editing `engine/Dockerfile.pod`**, not `engine/Dockerfile`. The base image and
+its toolchain build args are also covered in [`ENGINE.md`](ENGINE.md) §3, which
+covers running the engine from `cargo` without a container.
 
 Be aware before you run it: the engine image is a **development pod**, not a
 hardened service image — it carries a writable home, `sudo`, optional agent
