@@ -79,6 +79,7 @@ import {
   type Tab,
 } from "./tabs";
 import { terminalWorkspaceHandle } from "./paneComposeBus";
+import { SESSION_DND_MIME } from "./terminalDnd";
 import type { SessionSummary } from "./api";
 import { getToken, setBase, setToken } from "./api";
 import SetupWizard from "./SetupWizard";
@@ -970,12 +971,14 @@ const App: Component = () => {
       showToast("Open a terminal tab first, then split it beside this session");
       return;
     }
-    if (handle.shownSessionIds().includes(s.id)) {
-      showToast(`${s.name} is already in this workspace`);
+    navigate(`/t/${activeTab.sessionId}`);
+    // Duplicate guard, touch + a11y path (#355): a session already in the
+    // workspace can't be shown twice, so focus its pane instead of splitting.
+    if (handle.focusSession(s.id)) {
+      showToast(`Focused ${s.name}`);
       return;
     }
     handle.splitWithSession("row", s.id);
-    navigate(`/t/${activeTab.sessionId}`);
   };
 
   const onSaveWorkspaceLayout = async () => {
@@ -1387,9 +1390,22 @@ const App: Component = () => {
                 <div
                   role="link"
                   tabIndex={0}
+                  draggable={true}
                   aria-current={tabsStore.active === `term:${s.id}` ? "page" : undefined}
                   aria-label={`${s.name}, ${activityLabel(s.activity, s.exit_code)}`}
                   class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""} ${s.activity === "waiting-for-input" ? "waiting" : ""}`}
+                  onDragStart={(event) => {
+                    // Drag a session into the terminal workspace to mirror it as
+                    // a split (#355). The dedicated mime keeps the workspace from
+                    // reacting to unrelated drags; the text/plain mirror lets a
+                    // plain target still read the id. Touch/a11y: the ··· menu's
+                    // "Add to current split" is the no-drag path.
+                    if (event.dataTransfer) {
+                      event.dataTransfer.effectAllowed = "copy";
+                      event.dataTransfer.setData(SESSION_DND_MIME, s.id);
+                      event.dataTransfer.setData("text/plain", s.id);
+                    }
+                  }}
                   onClick={() => {
                     setOpenMenuId(null);
                     clearBell(s.id);
@@ -1481,9 +1497,9 @@ const App: Component = () => {
                   <button
                     type="button"
                     role="menuitem"
-                    aria-label={`Open ${s.name} beside the current pane`}
+                    aria-label={`Add ${s.name} to the current split`}
                     onClick={() => onOpenBesideCurrent(s)}
-                  >Open beside current</button>
+                  >Add to current split</button>
                   <button
                     type="button"
                     role="menuitem"
