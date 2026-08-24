@@ -1,0 +1,52 @@
+name: promotion policy
+
+# main and prod are release branches. Feature work targets dev; the only
+# allowed PR edges into the release branches are dev → main and main → prod.
+
+on:
+  pull_request:
+    branches: [main, prod]
+
+permissions:
+  contents: read
+
+jobs:
+  promotion-policy:
+    name: promotion-policy
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: release branches accept only their promotion edge
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ] || {
+            echo "::error::Release branches accept promotion PRs from this repository only."
+            exit 1
+          }
+          case "$BASE:$HEAD" in
+            main:dev|prod:main) ;;
+            *)
+              echo "::error::Only dev → main and main → prod PRs may enter release branches."
+              exit 1
+              ;;
+          esac
+
+          git fetch --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" \
+            "+refs/heads/$HEAD:refs/remotes/origin/$HEAD"
+          base_sha="$(git rev-parse "origin/$BASE")"
+          head_sha="$(git rev-parse "origin/$HEAD")"
+          git merge-base --is-ancestor "$base_sha" "$head_sha" || {
+            echo "::error::The promotion is not fast-forwardable; update $HEAD first."
+            exit 1
+          }
+          [ "$base_sha" != "$head_sha" ] || {
+            echo "::error::The release branches already point at the same commit."
+            exit 1
+          }
