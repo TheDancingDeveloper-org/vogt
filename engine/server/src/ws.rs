@@ -37,6 +37,30 @@ const MAX_INPUT_BYTES: usize = 64 * 1024;
 /// we drop it. Keeps unauth clients from hanging on to a socket indefinitely.
 const AUTH_DEADLINE: Duration = Duration::from_secs(5);
 
+/// De-duplicate a live broadcast chunk against the already-replayed snapshot.
+///
+/// `chunk_pos` is the absolute byte offset where the chunk begins and
+/// `snap_pos` is the exclusive end of the snapshot (`total_written` at the
+/// moment the snapshot was taken). Returns:
+/// - `None` if the whole chunk is `< snap_pos` (fully in the snapshot: drop it),
+/// - `Some(0)` if the chunk begins at or after `snap_pos` (all new: send it all),
+/// - `Some(skip)` for a chunk straddling `snap_pos` (send `data[skip..]`).
+///
+/// The boundary is exclusive on both sides — a chunk ending exactly at
+/// `snap_pos` is fully covered, and a chunk beginning exactly at `snap_pos` is
+/// fully new — so replay and live stream meet with no gap and no duplicate.
+fn live_skip(chunk_pos: u64, chunk_len: usize, snap_pos: u64) -> Option<usize> {
+    let chunk_end = chunk_pos + chunk_len as u64;
+    if chunk_end <= snap_pos {
+        return None;
+    }
+    if chunk_pos >= snap_pos {
+        Some(0)
+    } else {
+        Some((snap_pos - chunk_pos) as usize)
+    }
+}
+
 pub async fn attach(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -217,17 +241,15 @@ async fn handle_socket(
         loop {
             match rx.recv().await {
                 Ok(chunk) => {
-                    // Skip wholly-replayed chunks (chunk.pos < snap_pos and chunk
-                    // ends before snap_pos). If chunk straddles snap_pos, send
-                    // only the tail.
-                    let chunk_end = chunk.pos + chunk.data.len() as u64;
-                    if chunk_end <= snap_pos {
+                    // Skip anything already delivered in the replayed snapshot;
+                    // for a chunk straddling the snapshot boundary, send only
+                    // the not-yet-seen tail.
+                    let Some(skip) = live_skip(chunk.pos, chunk.data.len(), snap_pos) else {
                         continue;
-                    }
-                    let send_buf = if chunk.pos >= snap_pos {
+                    };
+                    let send_buf = if skip == 0 {
                         chunk.data
                     } else {
-                        let skip = (snap_pos - chunk.pos) as usize;
                         chunk.data.slice(skip..)
                     };
                     if sink
@@ -256,5 +278,41 @@ async fn handle_socket(
     tokio::select! {
         _ = inbound => {}
         _ = outbound => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::live_skip;
+
+    #[test]
+    fn chunk_fully_in_snapshot_is_dropped() {
+        // Chunk [0,5) with a snapshot ending at 5: fully covered.
+        assert_eq!(live_skip(0, 5, 5), None);
+        assert_eq!(live_skip(0, 3, 5), None);
+    }
+
+    #[test]
+    fn chunk_fully_after_snapshot_is_sent_whole() {
+        // Chunk beginning exactly at the boundary is entirely new.
+        assert_eq!(live_skip(5, 4, 5), Some(0));
+        assert_eq!(live_skip(10, 4, 5), Some(0));
+    }
+
+    #[test]
+    fn chunk_straddling_snapshot_boundary_skips_the_replayed_head() {
+        // Chunk [3,7) with snapshot ending at 5: send only bytes [5,7).
+        assert_eq!(live_skip(3, 4, 5), Some(2));
+        // One-byte overlap: send all but the first byte.
+        assert_eq!(live_skip(4, 3, 5), Some(1));
+    }
+
+    #[test]
+    fn boundary_is_gapless_and_duplicate_free() {
+        // Two adjacent chunks around the boundary reconstruct [snap_pos, end)
+        // exactly once: the first is dropped, the second sent whole.
+        let snap_pos = 8;
+        assert_eq!(live_skip(4, 4, snap_pos), None); // [4,8) fully replayed
+        assert_eq!(live_skip(8, 4, snap_pos), Some(0)); // [8,12) all new
     }
 }
