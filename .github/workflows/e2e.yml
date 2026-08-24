@@ -1,0 +1,190 @@
+# End-to-end stack smoke (#295).
+#
+# Everything else that calls itself a test stops short of the whole product:
+# the core parity harness is in-process, `test_front_door.py` pairs two
+# processes, the Playwright suite runs against a mocked API (`installFixtures`),
+# and `test_public_delivery.py` only renders `docker compose config`. This job
+# is the mechanical form of the human-on-a-phone smoke #273 asked for: it
+# clones `dev` fresh, builds and starts the two-container stack (#202), and
+# walks the stranger's path against it — `/health/ready`, the PWA, the first
+# token, the forge, a work item, a session, a synthetic agent task — then runs
+# the *same* Playwright specs against the live stack so mock/truth drift fails.
+#
+# ── What the operator must set ───────────────────────────────────────────
+#
+#   `VOGT_FIXTURE_PAT` (repository secret) — a GitHub PAT with read/write to
+#   `TheDancingDeveloper-org/vogt-fixture` (classic `repo` scope, plus
+#   `workflow` for the fixture's failing-checks PR file). It is the ONLY
+#   credential this job needs. With it, the forge half runs: reset the fixture,
+#   import it, link, sweep, rank, and create a work item that appears upstream.
+#   WITHOUT it the job still runs the whole credential-free half — health, the
+#   PWA, the first token, a native work item, a session, and the fake-agent —
+#   and the forge steps print `SKIP (no VOGT_FIXTURE_PAT)`. So an operator who
+#   has not set the secret still gets a real end-to-end signal.
+#
+# ── Where it runs, and when ──────────────────────────────────────────────
+#
+# On `dev` merges and nightly, plus manual — never on pull requests, which keep
+# the mocked suites (that is the whole point of #295). Self-hosted by design
+# (NFR-C4): the `docker` label because it builds and runs the compose stack.
+#
+# Run the smoke locally against any stack (see docs/E2E_SMOKE.md):
+#
+#   scripts/e2e_stack_smoke.sh https://vogt.example.com "$FRONT_DOOR_TOKEN"
+
+name: e2e
+
+on:
+  # `dev` merges only (NFR-D12 makes it a real environment). Not `pull_request`
+  # — PRs keep the mocked suites. A docs-only push skips the expensive build:
+  # nothing under `docs/` or a stray Markdown file changes what the stack does.
+  push:
+    branches: [dev]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  # Nightly, so drift that no `dev` merge would have caught is still caught.
+  schedule:
+    - cron: "0 3 * * *"
+  # The Woodpecker pipeline's `event: manual` equivalent, for a re-run on
+  # demand (e.g. just after setting the secret).
+  workflow_dispatch:
+
+concurrency:
+  # One live stack per ref at a time — two builds racing for the same loopback
+  # port would fight. Not cancel-in-progress: a nightly and a push should not
+  # evict each other's teardown, and every run tears its own stack down.
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: compose up, walk the path, live Playwright
+    # Self-hosted (NFR-C4), `docker` because it builds and runs the stack. A
+    # static selector — dynamic `runs-on` is what the runner-policy gate forbids.
+    runs-on: [self-hosted, docker]
+    env:
+      # The three compose files: the public base, the engine overlay, and the
+      # e2e overlay that mounts the fake-agent and its preset (#296).
+      COMPOSE_FILES: "-f deploy/vogt.compose.yml -f deploy/engine.overlay.yml -f deploy/e2e.overlay.yml"
+      # The stack publishes the engine to host loopback; the smoke and the live
+      # Playwright both reach it there.
+      SMOKE_BASE: "http://127.0.0.1:8910"
+      VOGT_PUBLIC_URL: "http://127.0.0.1:8910"
+      ENGINE_BIND: "127.0.0.1"
+      ENGINE_PORT: "8910"
+      ENGINE_PUBLIC_URL: "http://127.0.0.1:8910"
+    steps:
+      # A clean clone, every run: the whole point is that nothing on the runner
+      # is carried between runs except the layer/toolchain caches.
+      - uses: actions/checkout@v7
+
+      - name: mint the stack's secrets
+        env:
+          VOGT_FIXTURE_PAT: ${{ secrets.VOGT_FIXTURE_PAT }}
+        run: |
+          set -euo pipefail
+          # The engine bearer (>= 16 chars) and the shared core token the
+          # bootstrap adopts. Kept out of the log; the engine token is exported
+          # for the later steps that act as the front-door client.
+          engine_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$engine_token"
+          echo "ENGINE_TOKEN=$engine_token" >> "$GITHUB_ENV"
+          openssl rand -hex 32 > deploy/vogt-core-token
+          # The fixture PAT as the core's github.com file token (FR-S7). Empty
+          # when the secret is unset — the core then has no github.com provider
+          # and the forge half skips, which is exactly the credential-free run.
+          printf '%s' "${VOGT_FIXTURE_PAT:-}" > deploy/github-token
+
+      - name: build and start the stack (local build, no pull)
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086  # COMPOSE_FILES is intentionally split
+          docker compose $COMPOSE_FILES up --build -d
+
+      - name: wait for /health/ready
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if curl -fsS "$SMOKE_BASE/health/ready" >/dev/null 2>&1; then
+              echo "stack is ready"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "the stack did not answer /health/ready within 300s" >&2
+          # shellcheck disable=SC2086
+          docker compose $COMPOSE_FILES ps || true
+          # shellcheck disable=SC2086
+          docker compose $COMPOSE_FILES logs --tail=200 || true
+          exit 1
+
+      - name: stack smoke — walk the stranger's path
+        env:
+          # The front-door token the smoke acts with. The forge half also needs
+          # the PAT (for fixture_reset.py and to confirm the upstream write).
+          VOGT_SMOKE_TOKEN: ${{ env.ENGINE_TOKEN }}
+          VOGT_FIXTURE_PAT: ${{ secrets.VOGT_FIXTURE_PAT }}
+        run: |
+          set -euo pipefail
+          scripts/e2e_stack_smoke.sh "$SMOKE_BASE"
+
+      # Same Node/pnpm setup as ci.yml's engine job: the self-hosted image
+      # preinstalls no language runtime.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: install the PWA's test deps and a browser
+        working-directory: web
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install chromium
+
+      # Advisory on purpose, not a weakened gate. The mocked `gui.spec.ts`
+      # specs assert fixture data a freshly-built live stack does not hold
+      # (specific inbox rows, WI-7, exact counts), so on the first runs most
+      # will fail until the live-safe subset is curated — which needs a live
+      # run to see, exactly what this job provides. Treating all of them as a
+      # hard gate on day one would wedge the whole pipeline red. So the drift
+      # they catch is surfaced as failed tests in this step's report, while the
+      # HARD end-to-end gate is the smoke step above (which is written to be
+      # live-correct). Remove `continue-on-error` once the live spec set is
+      # curated. The mocked PR suites are untouched and stay hard gates.
+      - name: Playwright — the live project against the running stack
+        continue-on-error: true
+        working-directory: web
+        env:
+          # Naming the base URL is what registers *and* selects the live
+          # project; the token gets the specs past the sign-in gate. The
+          # default/PR Playwright runs set neither, so they never run `live`.
+          PLAYWRIGHT_LIVE_BASE_URL: ${{ env.SMOKE_BASE }}
+          PLAYWRIGHT_LIVE_TOKEN: ${{ env.ENGINE_TOKEN }}
+        run: |
+          set -euo pipefail
+          pnpm exec playwright test --project=live
+
+      - name: stack logs on failure
+        if: failure()
+        run: |
+          # shellcheck disable=SC2086
+          docker compose $COMPOSE_FILES logs --tail=400 || true
+
+      # Always tear the stack down and drop its volumes — a run must leave the
+      # runner as clean as it found it, whatever happened above.
+      - name: teardown
+        if: always()
+        run: |
+          # shellcheck disable=SC2086
+          docker compose $COMPOSE_FILES down -v || true
+          rm -f deploy/vogt-core-token deploy/github-token || true

@@ -1,5 +1,16 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+// #295: the `live` Playwright project drives these specs against a *running*
+// stack (real API) rather than the mocked Vite server. In that mode
+// `installFixtures` stops intercepting routes — every request reaches the live
+// front door — and seeds a real front-door token where the mocked run seeds a
+// fake one. The project is opt-in (see playwright.config.ts), so `LIVE` is
+// false for the default and PR invocations and these specs behave exactly as
+// before. Per-test route overrides outside `installFixtures` are left in
+// place; the live project's coverage is what `installFixtures` alone drives.
+const LIVE = Boolean(process.env.PLAYWRIGHT_LIVE_BASE_URL);
+const LIVE_TOKEN = process.env.PLAYWRIGHT_LIVE_TOKEN ?? "";
+
 const inboxEntry = {
   entry_key: "drift:proposal-1:material-v1",
   source: "drift",
@@ -156,6 +167,13 @@ async function installFixtures(
   metricOverrides: PlaceMetricFixtures = {},
   agentTasks: Record<string, unknown>[] | null = null,
 ) {
+  // In live mode this is a no-op: nothing is intercepted, so every request
+  // below reaches the real front door. In mocked mode it is `page.route`, so
+  // the fixtures install exactly as before. Typed as `Page["route"]` so each
+  // route callback keeps its full type-checking either way.
+  const registerRoute: Page["route"] = LIVE
+    ? (((..._args: unknown[]) => Promise.resolve()) as unknown as Page["route"])
+    : page.route.bind(page);
   const metrics = {
     sessionsUnavailable: false,
     inboxActive: 1,
@@ -174,14 +192,19 @@ async function installFixtures(
   // A session DELETE is the kill path; composing a split and detaching a pane
   // must never reach it (#212), so a test can assert this stays at zero.
   let sessionDeletes = 0;
-  await page.addInitScript((signedIn) => {
-    if (signedIn) localStorage.setItem("vogt.token", "browser-test-token");
-    // Pin the shell to Vogt Dark so the default rendering under test stays
-    // deterministic — the existing baselines were taken in the dark palette,
-    // and the theme system (#299) must not shift them. Per-theme tests below
-    // register their own init script after this one to override it.
-    localStorage.setItem("vogt.appTheme.v1", "dark");
-  }, !metrics.noToken);
+  await page.addInitScript(
+    ({ signedIn, token }) => {
+      // Live mode needs a real front-door token to pass the sign-in gate; the
+      // mocked run uses a fixed fake one the mocked API accepts.
+      if (signedIn) localStorage.setItem("vogt.token", token || "browser-test-token");
+      // Pin the shell to Vogt Dark so the default rendering under test stays
+      // deterministic — the existing baselines were taken in the dark palette,
+      // and the theme system (#299) must not shift them. Per-theme tests below
+      // register their own init script after this one to override it.
+      localStorage.setItem("vogt.appTheme.v1", "dark");
+    },
+    { signedIn: !metrics.noToken, token: LIVE ? LIVE_TOKEN : "" },
+  );
   // First-run install mode (#292). Answered for every test — the app asks
   // only when it starts signed out — so the wizard's presence is a fixture
   // decision, never an accidental 404.
@@ -190,10 +213,10 @@ async function installFixtures(
   const registerRequests: Record<string, unknown>[] = [];
   const importRequests: Record<string, unknown>[] = [];
   const sweepRequests: Record<string, unknown>[] = [];
-  await page.route("**/api/install/status", async (route) =>
+  await registerRoute("**/api/install/status", async (route) =>
     route.fulfill({ json: { install_mode: metrics.installMode ?? false } }),
   );
-  await page.route("**/api/install/bootstrap", async (route) => {
+  await registerRoute("**/api/install/bootstrap", async (route) => {
     const body = route.request().postDataJSON() as Record<string, unknown>;
     bootstrapRequests.push(body);
     const slug = String(body.display_name ?? "")
@@ -212,7 +235,7 @@ async function installFixtures(
       warning: "This is the only time the secret is shown.",
     } });
   });
-  await page.route("**/api/status**", async (route) => route.fulfill({ json: {
+  await registerRoute("**/api/status**", async (route) => route.fulfill({ json: {
     version: "test",
     session_count: 0,
     push_subscription_count: 0,
@@ -230,13 +253,13 @@ async function installFixtures(
     auth_broker: { auto_agent_auth: false, helper: "disabled" },
     storage: { state_dir: "/tmp/vogt", workspace_root: "/workspace" },
   } }));
-  await page.route("**/api/config**", async (route) => route.fulfill({ json: {
+  await registerRoute("**/api/config**", async (route) => route.fulfill({ json: {
     assistant_enabled: false, gui_stream_url: null, session_templates: [],
     gui_stream_available: false,
     vogt: { configured: true },
     ...config,
   } }));
-  await page.route("**/api/sessions", async (route) => {
+  await registerRoute("**/api/sessions", async (route) => {
     if (route.request().method() === "POST") {
       createdSessions += 1;
       const body = route.request().postDataJSON() as Record<string, unknown>;
@@ -257,16 +280,16 @@ async function installFixtures(
     }
     return route.fulfill({ json: sessions });
   });
-  await page.route("**/api/sessions/*/kill", async (route) =>
+  await registerRoute("**/api/sessions/*/kill", async (route) =>
     route.fulfill({ json: { ok: true } }),
   );
-  await page.route("**/api/sessions/*/input", async (route) => {
+  await registerRoute("**/api/sessions/*/input", async (route) => {
     const id = new URL(route.request().url()).pathname.split("/").at(-2) ?? "";
     const body = route.request().postDataJSON() as { text: string; submit: boolean };
     sessionInputs.push({ id, ...body });
     return route.fulfill({ json: { ok: true } });
   });
-  await page.route("**/api/sessions/*", async (route) => {
+  await registerRoute("**/api/sessions/*", async (route) => {
     if (
       route.request().method() === "POST"
       && new URL(route.request().url()).pathname.endsWith("/kill")
@@ -291,8 +314,8 @@ async function installFixtures(
     }
     return route.fulfill({ status: 404, json: { error: "not found" } });
   });
-  await page.route("**/api/events", async (route) => route.fulfill({ status: 200, contentType: "text/event-stream", body: "" }));
-  await page.route("**/api/tree**", async (route) => {
+  await registerRoute("**/api/events", async (route) => route.fulfill({ status: 200, contentType: "text/event-stream", body: "" }));
+  await registerRoute("**/api/tree**", async (route) => {
     const path = new URL(route.request().url()).searchParams.get("path") ?? "";
     if (path === "src") {
       return route.fulfill({ json: [
@@ -312,7 +335,7 @@ async function installFixtures(
   };
   const fileStore = new Map<string, string>(Object.entries(metrics.files ?? {}));
   let fileMtime = 1000;
-  await page.route(/\/api\/files(\?|$)/, async (route) => {
+  await registerRoute(/\/api\/files(\?|$)/, async (route) => {
     const request = route.request();
     if (request.method() === "PUT") {
       const body = request.postDataJSON() as {
@@ -349,23 +372,23 @@ async function installFixtures(
       },
     });
   });
-  await page.route("**/api/tasks**", async (route) => route.fulfill({ json: [] }));
+  await registerRoute("**/api/tasks**", async (route) => route.fulfill({ json: [] }));
   // Push endpoints: Settings polls these on open. Answer them deterministically
   // so opening Settings never reaches a live backend. `pushSubscriptions` lets
   // a test model the server having dropped this device's subscription.
-  await page.route("**/api/push/list", async (route) =>
+  await registerRoute("**/api/push/list", async (route) =>
     route.fulfill({ json: metrics.pushSubscriptions ?? [] }),
   );
-  await page.route("**/api/push/public-key", async (route) =>
+  await registerRoute("**/api/push/public-key", async (route) =>
     route.fulfill({ json: { vapid_public_key: "", fcm_enabled: false } }),
   );
-  await page.route("**/api/push/subscribe", async (route) =>
+  await registerRoute("**/api/push/subscribe", async (route) =>
     route.fulfill({ json: { id: "browser-sub" } }),
   );
-  await page.route("**/api/push/unsubscribe", async (route) =>
+  await registerRoute("**/api/push/unsubscribe", async (route) =>
     route.fulfill({ json: { ok: true } }),
   );
-  await page.route("**/api/push/test", async (route) =>
+  await registerRoute("**/api/push/test", async (route) =>
     route.fulfill({ json: { ok: 0, fail: 0, queued: 0 } }),
   );
   // Agent-task fixtures: only wired when a caller hands over tasks, so the
@@ -374,10 +397,10 @@ async function installFixtures(
   const agentTaskRuns: string[] = [];
   if (agentTasks) {
     const tasks = agentTasks.map((task) => ({ ...task }));
-    await page.route("**/api/agent-tasks", async (route) =>
+    await registerRoute("**/api/agent-tasks", async (route) =>
       route.fulfill({ json: tasks }),
     );
-    await page.route("**/api/agent-tasks/*/run", async (route) => {
+    await registerRoute("**/api/agent-tasks/*/run", async (route) => {
       const id = new URL(route.request().url()).pathname.split("/").at(-2) ?? "";
       agentTaskRuns.push(id);
       return route.fulfill({ json: {
@@ -396,7 +419,7 @@ async function installFixtures(
         findings: [],
       } });
     });
-    await page.route("**/api/agent-tasks/*", async (route) => {
+    await registerRoute("**/api/agent-tasks/*", async (route) => {
       const method = route.request().method();
       const id = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
       const index = tasks.findIndex((task) => task.id === id);
@@ -413,20 +436,20 @@ async function installFixtures(
   // unstubbed they reach whatever backend sits behind the dev proxy, and a
   // 401 from it flips the whole app to the login gate mid-test — so answer
   // them with benign, empty engine state.
-  await page.route("**/api/git/status**", async (route) => route.fulfill({ json: {
+  await registerRoute("**/api/git/status**", async (route) => route.fulfill({ json: {
     repo: "", is_repo: false, branch: "", ahead: 0, behind: 0, entries: [],
   } }));
-  await page.route("**/api/assistant/history**", async (route) => route.fulfill({ json: {
+  await registerRoute("**/api/assistant/history**", async (route) => route.fulfill({ json: {
     transcript: [],
   } }));
   // A default assistant turn: a plain acknowledgement. Individual tests
   // register their own `**/api/assistant/message` handler afterwards to fail
   // it, hold it open, or answer with Markdown — a later route wins in
   // Playwright, so those overrides take precedence over this default (#242).
-  await page.route("**/api/assistant/message", async (route) => route.fulfill({ json: {
+  await registerRoute("**/api/assistant/message", async (route) => route.fulfill({ json: {
     reply: "Acknowledged.", pending_action: null, tool_trace: [],
   } }));
-  await page.route("**/api/vogt/**", async (route) => {
+  await registerRoute("**/api/vogt/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname.endsWith("/inbox")) {

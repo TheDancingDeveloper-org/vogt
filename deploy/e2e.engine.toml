@@ -1,0 +1,27 @@
+# Engine config for the end-to-end stack smoke (#295).
+#
+# The only thing this file carries is a session preset for the synthetic agent
+# CLI (#296): `scripts/fake-agent`, mounted into the engine container by
+# `deploy/e2e.overlay.yml` at `/opt/vogt-e2e/scripts`. Registering it here is
+# exactly how a real deployment registers `claude`/`codex` — the difference is
+# only that this command is a deterministic stand-in with no model behind it,
+# so the agent-task step of `scripts/e2e_stack_smoke.sh` can run in CI, which
+# has no coding-agent binary and no way to type into a PTY.
+#
+# Config precedence is CLI flags > environment > this file (see
+# `docs/ENGINE.md`), so `ENGINE_TOKEN`, `ENGINE_BIND`, `VOGT_CORE_URL` and the
+# rest stay owned by the environment the overlay sets — this file adds only the
+# one thing the environment cannot express, the session-template list. Naming
+# `session_templates` here replaces the built-in defaults (Shell, the agent
+# CLIs, …); that is deliberate for a test stack, which needs only this preset.
+#
+# Kept out of the production image on purpose: `fake-agent` is a test artifact
+# and is not in `SessionTemplate::default_templates()`.
+
+[[session_templates]]
+name = "Fake Agent (test)"
+description = "Deterministic synthetic agent CLI for the e2e stack smoke (#296)."
+command = ["/opt/vogt-e2e/scripts/fake-agent"]
+env = []
+default_name = "fake-agent-{timestamp}"
+tags = ["agent", "test"]
