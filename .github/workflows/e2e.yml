@@ -125,86 +125,57 @@ jobs:
           # shellcheck disable=SC2086  # COMPOSE_FILES is intentionally split
           docker compose $COMPOSE_FILES up -d
 
-      - name: wait for the front door, and report core readiness
+      - name: wait for the core to be ready (in-network)
         run: |
           set -euo pipefail
-          # Gate on engine liveness (/healthz). The core's readiness is proven
-          # by the walk's token+status steps, which go through the front door to
-          # the core; the engine's own /readyz vogt_core probe is a 2s check
-          # that flakes under CI load, so it is logged for visibility, not gated.
-          ready=""
+          # The runner is a container and the daemon publishes ports on the
+          # host, so the stack is NOT reachable over the runner's loopback.
+          # Everything that talks to the stack therefore runs INSIDE the compose
+          # network via `docker compose exec`. Gate on the core's own readiness,
+          # reached from the engine container by service DNS.
+          # shellcheck disable=SC2086
+          dc() { docker compose $COMPOSE_FILES "$@"; }
+          ok=""
           for _ in $(seq 1 60); do
-            if curl -fsS "$SMOKE_BASE/healthz" >/dev/null 2>&1; then
-              ready=yes
-              break
+            if dc exec -T engine curl -fsS http://vogt:8000/health/ready >/dev/null 2>&1; then
+              ok=yes; break
             fi
             sleep 5
           done
-          echo "----- /readyz (diagnostic) -----"
-          curl -fsS "$SMOKE_BASE/readyz" 2>/dev/null || echo "(no /readyz answer)"
-          echo
-          echo "--------------------------------"
-          if [ -z "$ready" ]; then
-            echo "the front door did not answer /healthz within 300s" >&2
-            # shellcheck disable=SC2086
-            docker compose $COMPOSE_FILES ps || true
-            # shellcheck disable=SC2086
-            docker compose $COMPOSE_FILES logs --tail=200 || true
+          if [ -z "$ok" ]; then
+            echo "vogt-core did not report ready within 300s" >&2
+            dc exec -T engine curl -sS http://vogt:8000/health/ready || true
+            dc logs --tail=200 || true
             exit 1
           fi
-          echo "front door is live"
+          echo "vogt-core is ready"
 
-      - name: stack smoke — walk the stranger's path
+      - name: stack smoke — walk the stranger's path (in-network)
         env:
-          # The front-door token the smoke acts with. The forge half also needs
-          # the PAT (for fixture_reset.py and to confirm the upstream write).
           VOGT_SMOKE_TOKEN: ${{ env.ENGINE_TOKEN }}
           VOGT_FIXTURE_PAT: ${{ secrets.VOGT_FIXTURE_PAT }}
         run: |
           set -euo pipefail
-          scripts/e2e_stack_smoke.sh "$SMOKE_BASE"
+          # Copy the walk + fixture reset + manifest into the engine container at
+          # the layout the smoke expects (REPO_ROOT = the script dir's parent),
+          # then run it from inside the network against the engine's own port.
+          # The fake-agent is already baked into this image at /opt/vogt-e2e.
+          # fixture_reset.py is stdlib-only and the image carries python3+curl.
+          # shellcheck disable=SC2086
+          dc() { docker compose $COMPOSE_FILES "$@"; }
+          dc exec -T engine mkdir -p /tmp/e2e/scripts /tmp/e2e/tests/fixtures
+          dc cp scripts/e2e_stack_smoke.sh engine:/tmp/e2e/scripts/e2e_stack_smoke.sh
+          dc cp scripts/fixture_reset.py engine:/tmp/e2e/scripts/fixture_reset.py
+          dc cp tests/fixtures/forge_fixture_manifest.json engine:/tmp/e2e/tests/fixtures/forge_fixture_manifest.json
+          dc exec -T \
+            -e VOGT_SMOKE_TOKEN="$VOGT_SMOKE_TOKEN" \
+            -e VOGT_FIXTURE_PAT="${VOGT_FIXTURE_PAT:-}" \
+            engine sh /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
 
-      # Same Node/pnpm setup as ci.yml's engine job: the self-hosted image
-      # preinstalls no language runtime.
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-
-      - name: install the PWA's test deps and a browser
-        working-directory: web
-        run: |
-          set -euo pipefail
-          pnpm install --frozen-lockfile
-          pnpm exec playwright install chromium
-
-      # Advisory on purpose, not a weakened gate. The mocked `gui.spec.ts`
-      # specs assert fixture data a freshly-built live stack does not hold
-      # (specific inbox rows, WI-7, exact counts), so on the first runs most
-      # will fail until the live-safe subset is curated — which needs a live
-      # run to see, exactly what this job provides. Treating all of them as a
-      # hard gate on day one would wedge the whole pipeline red. So the drift
-      # they catch is surfaced as failed tests in this step's report, while the
-      # HARD end-to-end gate is the smoke step above (which is written to be
-      # live-correct). Remove `continue-on-error` once the live spec set is
-      # curated. The mocked PR suites are untouched and stay hard gates.
-      - name: Playwright — the live project against the running stack
-        continue-on-error: true
-        working-directory: web
-        env:
-          # Naming the base URL is what registers *and* selects the live
-          # project; the token gets the specs past the sign-in gate. The
-          # default/PR Playwright runs set neither, so they never run `live`.
-          PLAYWRIGHT_LIVE_BASE_URL: ${{ env.SMOKE_BASE }}
-          PLAYWRIGHT_LIVE_TOKEN: ${{ env.ENGINE_TOKEN }}
-        run: |
-          set -euo pipefail
-          pnpm exec playwright test --project=live
+      # TODO(#295): the live Playwright project must also run in-network — a
+      # Playwright container on the compose network reaching http://engine:8910,
+      # since the runner cannot reach the stack over host loopback. Deferred to a
+      # follow-up; the in-network smoke walk above is the hard end-to-end gate.
 
       - name: stack logs on failure
         if: failure()
