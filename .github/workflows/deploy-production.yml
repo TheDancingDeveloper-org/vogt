@@ -93,19 +93,19 @@ jobs:
           # intentionally contains deployment secrets.
           stack="$(api read '{"type":"GetStack","params":{"stack":"vogt-prod"}}')"
           payload="$(python3 -c '
-import json, sys
-from pathlib import Path
-import importlib.util
-spec = importlib.util.spec_from_file_location("pin", Path("scripts/pin_estate_image.py"))
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-stack = json.load(sys.stdin)
-environment, changed = module.pin_environment(stack["config"]["environment"], sys.argv[1])
-if not changed:
-    print("")
-else:
-    print(json.dumps({"type": "UpdateStack", "params": {"id": stack["_id"]["$oid"], "config": {"environment": environment}}}))
-' "$DIGEST" <<<"$stack")"
+          import json, sys
+          from pathlib import Path
+          import importlib.util
+          spec = importlib.util.spec_from_file_location("pin", Path("scripts/pin_estate_image.py"))
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          stack = json.load(sys.stdin)
+          environment, changed = module.pin_environment(stack["config"]["environment"], sys.argv[1])
+          if not changed:
+              print("")
+          else:
+              print(json.dumps({"type": "UpdateStack", "params": {"id": stack["_id"]["$oid"], "config": {"environment": environment}}}))
+          ' "$DIGEST" <<<"$stack")"
           if [ -n "$payload" ]; then
             api write "$payload" >/dev/null
             echo "pinned vogt-prod to vogt-stack@$DIGEST"
@@ -137,12 +137,12 @@ else:
             sleep 3
           done
           python3 -c '
-import json, sys
-result = json.load(sys.stdin)
-print("status:", result["status"], "success:", result["success"])
-for log in result.get("logs", []): print(f"[{log[\"stage\"]}] success={log[\"success\"]}")
-raise SystemExit(0 if result["success"] else 1)
-' <<<"$result"
+          import json, sys
+          result = json.load(sys.stdin)
+          print("status:", result["status"], "success:", result["success"])
+          for log in result.get("logs", []): print(f"[{log[\"stage\"]}] success={log[\"success\"]}")
+          raise SystemExit(0 if result["success"] else 1)
+          ' <<<"$result"
 
       - name: verify the live front door
         env:
