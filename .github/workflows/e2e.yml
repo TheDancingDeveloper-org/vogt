@@ -35,21 +35,16 @@
 name: e2e
 
 on:
-  # `dev` merges only (NFR-D12 makes it a real environment). Not `pull_request`
-  # — PRs keep the mocked suites. A docs-only push skips the expensive build:
-  # nothing under `docs/` or a stray Markdown file changes what the stack does.
-  push:
-    branches: [dev]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
-  # Nightly, so drift that no `dev` merge would have caught is still caught.
-  schedule:
-    - cron: "0 3 * * *"
-  # The Woodpecker pipeline's `event: manual` equivalent, for a re-run on
-  # demand (e.g. just after setting the secret).
+  # TEMPORARILY dispatch-only (#295). The compose-up stack does not yet run on
+  # this self-hosted runner: the runner's filesystem is not the docker daemon's,
+  # so file-secrets and volume bind-mounts don't resolve, and this compose
+  # rejects `environment:` secrets ("file is the sole supported option"). Until
+  # the stack's token + fake-agent delivery is redesigned to avoid host
+  # bind-mounts (bake into an image / entrypoint-inject from env, or point the
+  # walk at a deployed instance), the `push: [dev]` and nightly `schedule`
+  # triggers are removed so it stops building the full stack and failing on
+  # every dev merge. Restore them once it goes green.
   workflow_dispatch:
-
 concurrency:
   # One live stack per ref at a time — two builds racing for the same loopback
   # port would fight. Not cancel-in-progress: a nightly and a push should not
