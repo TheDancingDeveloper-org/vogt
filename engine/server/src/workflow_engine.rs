@@ -19,8 +19,13 @@
 //! mirroring: [`WorkflowProvider::stream_events`] subscribes to the engine's
 //! live event stream, yields typed [`ProviderEvent`]s, and drives a run to its
 //! terminal conclusion the moment the stream reports one — falling back to the
-//! poller when the stream is absent or breaks. Gate bridging (#289) and
-//! checkpoint-branch collection (#283/#284) remain deferred to a later slice.
+//! poller when the stream is absent or breaks. **Increment 3 (this slice)**
+//! adds #284 checkpoint-branch collection: a stream event that names a
+//! per-stage git checkpoint branch is surfaced on [`ProviderEvent`] as
+//! `checkpoint_branch`, and the tracker records each as a run observation with
+//! provenance and age (see `agent_tasks::AgentTaskRegistry::record_workflow_checkpoint`).
+//! Gate bridging (#289), poll-fallback checkpoint collection, and a live-engine
+//! smoke of the wire field names all remain deferred to a later slice.
 //!
 //! ## ASSUMED workflow-engine REST contract
 //!
@@ -62,6 +67,7 @@
 //!     "node_id": "<step/node id>?",
 //!     "state": "running" | "succeeded" | "failed"
 //!            | "partially_succeeded" | "skipped",   // present on a terminal event
+//!     "checkpoint_branch": "<branch>?",  // the stage's git checkpoint branch (#284)
 //!     "ts_ms": <u64>?                    // event time, Unix epoch milliseconds
 //!   }
 //!   ```
@@ -202,6 +208,13 @@ pub struct ProviderEvent {
     /// The mapped terminal state, present only on an event that signals the run
     /// has ended. `None` for an in-flight progress event.
     pub terminal_state: Option<ProviderRunState>,
+    /// The per-stage git checkpoint branch this event reports, when the envelope
+    /// named one (#284). A workflow engine writes a checkpoint branch per stage
+    /// as it runs; the event that announces a stage carries that branch's name,
+    /// and the tracker collects it as a run observation with provenance and age.
+    /// `None` for an event that reports no checkpoint — most events — which is
+    /// the ordinary, non-fatal case.
+    pub checkpoint_branch: Option<String>,
 }
 
 /// A live stream of a run's [`ProviderEvent`]s. Boxed (rather than an
@@ -381,6 +394,12 @@ struct SseEnvelope {
     /// state that is actually terminal marks the event terminal.
     #[serde(default)]
     state: Option<String>,
+    /// The per-stage checkpoint branch the event reports (#284). Accepts
+    /// `checkpoint_branch` primarily; a bare `checkpoint` alias is tolerated for
+    /// whichever spelling the live engine settles on. Absent on the vast
+    /// majority of events, which is expected — collection is non-fatal.
+    #[serde(default, alias = "checkpoint")]
+    checkpoint_branch: Option<String>,
     /// The event time as Unix epoch milliseconds, when present.
     #[serde(default)]
     ts_ms: Option<i64>,
@@ -432,12 +451,17 @@ fn parse_sse_record(event_name: Option<&str>, data: &str) -> ProviderEvent {
             let at = env.ts_ms.and_then(|ms| {
                 OffsetDateTime::from_unix_timestamp_nanos((ms as i128) * 1_000_000).ok()
             });
+            let checkpoint_branch = env
+                .checkpoint_branch
+                .map(|b| b.trim().to_string())
+                .filter(|b| !b.is_empty());
             ProviderEvent {
                 kind,
                 message: env.message,
                 step_id: env.node_id,
                 at,
                 terminal_state,
+                checkpoint_branch,
             }
         }
         None => ProviderEvent {
@@ -446,6 +470,7 @@ fn parse_sse_record(event_name: Option<&str>, data: &str) -> ProviderEvent {
             step_id: None,
             at: None,
             terminal_state: None,
+            checkpoint_branch: None,
         },
     }
 }
@@ -980,6 +1005,48 @@ data: {\"type\":\"run.completed\",\"state\":\"succeeded\",\"message\":\"all done
             started + time::Duration::seconds(1),
         );
         assert_eq!(outcome, AgentTaskRunOutcome::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn sse_events_surface_per_stage_checkpoint_branches() {
+        // #284: a stage event names the git checkpoint branch the engine wrote
+        // for that stage; a plain progress event names none. The parser lifts
+        // the branch onto the event, and the `checkpoint` alias is accepted.
+        let body = "event: node.completed\n\
+data: {\"message\":\"stage 1 done\",\"node_id\":\"n1\",\"checkpoint_branch\":\"wf/run-1/stage-1\",\"ts_ms\":1000}\n\
+\n\
+event: node.completed\n\
+data: {\"message\":\"stage 2 done\",\"node_id\":\"n2\",\"checkpoint\":\"  wf/run-1/stage-2  \"}\n\
+\n\
+event: node.started\n\
+data: {\"message\":\"stage 3 running\",\"node_id\":\"n3\"}\n\
+\n";
+        let addr = fake_engine_events(body).await;
+        let base = format!("http://{addr}");
+        let provider = HttpWorkflowProvider::with_client(&base, "nightly", None, short_client());
+
+        let events = collect_events(provider.stream_events("run-1").await.unwrap()).await;
+        assert_eq!(events.len(), 3);
+
+        // The primary spelling, with a step id and a timestamp for its age.
+        assert_eq!(
+            events[0].checkpoint_branch.as_deref(),
+            Some("wf/run-1/stage-1")
+        );
+        assert_eq!(events[0].step_id.as_deref(), Some("n1"));
+        assert_eq!(
+            events[0].at,
+            Some(OffsetDateTime::from_unix_timestamp(1).unwrap())
+        );
+
+        // The `checkpoint` alias is accepted and trimmed.
+        assert_eq!(
+            events[1].checkpoint_branch.as_deref(),
+            Some("wf/run-1/stage-2")
+        );
+
+        // An event that names no checkpoint carries none — the ordinary case.
+        assert!(events[2].checkpoint_branch.is_none());
     }
 
     #[tokio::test]
