@@ -39,14 +39,19 @@ import type { CapacitorConfig } from "@capacitor/cli";
 // — a phone showing "MyDevEnv2" beside a product that calls itself something
 // else is the naming decision failing at the only place a user reads it.
 //
-// **`appId` stays `com.sprooty.mydevenv2`, and that is not an oversight.** A
-// package name is an identity, not a label: `android/app/google-services.json`
-// is keyed to it, so changing it invalidates FCM registration for every
-// installed device; `build.gradle`'s `applicationId` would have to move in the
-// same commit; and the store/sideload result is a *second* app beside the
-// first rather than an upgrade of it. Renaming it is a migration with a
-// device-side cost, and it belongs with the FCM project decision rather than
-// with a URL change.
+// **`appId` is now `com.sprooty.vogt` (#271).** It used to stay
+// `com.sprooty.mydevenv2` precisely because a package name is an identity, not
+// a label, and moving it has a real device-side cost — which is exactly the
+// migration #271 accepts now that the FCM project decision is being taken with
+// it. Two consequences are operator follow-ups, not oversights: (a) the new id
+// is a *new* app, so there is no in-place upgrade — users of the old
+// `com.sprooty.mydevenv2` build reinstall — and (b) FCM will not deliver on the
+// new id until the operator adds `com.sprooty.vogt` (and `.dev`) to the
+// Firebase project and supplies a real `android/app/google-services.json`; the
+// committed placeholder there is sanitized and non-live (#265). `build.gradle`
+// moves `applicationId` and `namespace` in the same change, and this file and
+// that one must keep the same fallback id — tests/test_mobile_identity.py
+// asserts it.
 
 const SERVER_URL =
   process.env.VOGT_ANDROID_SERVER_URL ||
@@ -65,7 +70,11 @@ if (!SERVER_URL) {
 }
 
 const config: CapacitorConfig = {
-  appId: process.env.MYDEVENV2_ANDROID_APP_ID || "com.sprooty.mydevenv2",
+  appId:
+    process.env.VOGT_ANDROID_APP_ID ||
+    // The transition alias, as with the server URL and app name above.
+    process.env.MYDEVENV2_ANDROID_APP_ID ||
+    "com.sprooty.vogt",
   appName:
     process.env.VOGT_ANDROID_APP_NAME ||
     // The transition alias, as with the server URL above.

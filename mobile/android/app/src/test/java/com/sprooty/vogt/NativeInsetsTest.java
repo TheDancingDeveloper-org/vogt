@@ -1,4 +1,4 @@
-package com.sprooty.mydevenv2;
+package com.sprooty.vogt;
 
 import static org.junit.Assert.assertEquals;
 

@@ -42,10 +42,16 @@ def androidVersionCode = parseVersionCodeOverride(
     semverVersionCode(packageVersion),
 )
 // Distinct applicationId lets a dev build install side by side with prod on
-// one device. `namespace` stays fixed — it's the Java/Kotlin source package
-// (MainActivity.java etc.), unrelated to which app the built APK installs
-// as. Keep in sync with capacitor.config.ts's MYDEVENV2_ANDROID_APP_ID.
-def androidApplicationId = (System.getenv('MYDEVENV2_ANDROID_APP_ID') ?: 'com.sprooty.mydevenv2').trim()
+// one device. `namespace` (the Java/Kotlin source package, MainActivity.java
+// etc.) and the applicationId default were renamed together from
+// com.sprooty.mydevenv2 to com.sprooty.vogt (#271). The env var is read
+// Vogt-name first with the legacy MYDEVENV2_ name as a transition fallback,
+// matching capacitor.config.ts — keep the two in sync.
+def androidApplicationId = (
+    System.getenv('VOGT_ANDROID_APP_ID')
+        ?: System.getenv('MYDEVENV2_ANDROID_APP_ID')
+        ?: 'com.sprooty.vogt'
+).trim()
 
 def releaseKeystorePath = System.getenv('MYDEVENV2_ANDROID_KEYSTORE_PATH')
 def releaseKeystorePassword = System.getenv('MYDEVENV2_ANDROID_KEYSTORE_PASSWORD')
@@ -59,7 +65,7 @@ def hasReleaseSigning = [
 ].every { it != null && !it.trim().isEmpty() }
 
 android {
-    namespace "com.sprooty.mydevenv2"
+    namespace "com.sprooty.vogt"
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
         applicationId androidApplicationId

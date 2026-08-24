@@ -1,4 +1,4 @@
-package com.sprooty.mydevenv2;
+package com.sprooty.vogt;
 
 import android.app.Application;
 import android.content.pm.PackageInfo;

@@ -54,7 +54,7 @@ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 #: The variable both build files read. Named once here so a rename shows up as
 #: one failure rather than as a silent divergence.
 APP_ID_VAR = "MYDEVENV2_ANDROID_APP_ID"
-DEFAULT_APP_ID = "com.sprooty.mydevenv2"
+DEFAULT_APP_ID = "com.sprooty.vogt"
 
 pytestmark = pytest.mark.skipif(
     not SERVICES.is_file(),
@@ -159,11 +159,14 @@ def test_the_dev_stream_builds_under_its_own_id() -> None:
     )
 
 
-def test_the_source_package_stays_put() -> None:
-    """`namespace` is the Java package, not the app identity.
+def test_namespace_matches_the_source_package() -> None:
+    """`namespace` is the Java package, and it tracks the app-id family.
 
-    Moving it alongside `applicationId` would rename `MainActivity` and break
-    the manifest, and it is the obvious wrong fix for somebody making dev and
-    prod distinct. The comment in `build.gradle` says so; this is the check.
+    The manifest names its components relatively (`.MainActivity`,
+    `.VogtApplication`, ...), so `namespace` must equal the package the source
+    actually declares. #271 renamed both together — the source tree moved from
+    `com/sprooty/mydevenv2/` to `com/sprooty/vogt/` and the applicationId
+    default moved with it — so `namespace` and `DEFAULT_APP_ID` share a value.
+    A divergence here means the manifest resolves to a class that is not there.
     """
     assert f'namespace "{DEFAULT_APP_ID}"' in GRADLE.read_text(encoding="utf-8")
