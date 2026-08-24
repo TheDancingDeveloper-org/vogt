@@ -437,16 +437,15 @@ step_forge_upstream_work() {
         return
     fi
     ref="$(printf '%s' "$body" | jget 'd["item"]["ref"]' || true)"
-
-    # Confirm upstream, from the forge's own side.
-    if ! found="$(gh_api "https://api.github.com/repos/${FIXTURE_REPO}/issues?state=open&per_page=100")"; then
-        fail "could not read the fixture issues back from GitHub to confirm the"
-        fail "  work item appeared upstream: ${found}"
+    # The ref is gh:owner/repo#N; take N. Verify by number, not by listing open
+    # issues (GitHub's list endpoint lags a fresh create, so a title search races
+    # it; a single-issue GET is strongly consistent).
+    number="${ref##*#}"
+    if [[ -z "$ref" || "$number" == "$ref" ]]; then
+        fail "work.create (with project) returned no upstream ref: ${body}"
         return
     fi
-    number="$(printf '%s' "$found" |
-        python3 -c 'import sys,json;t=sys.argv[1];print(next((str(i["number"]) for i in json.load(sys.stdin) if i.get("title")==t),""))' "$title" 2>/dev/null || true)"
-    if [[ -n "$number" ]]; then
+    if found="$(gh_api "https://api.github.com/repos/${FIXTURE_REPO}/issues/${number}")"; then
         pass "the work item appears upstream as issue #${number} (ref ${ref})"
         # Cleanup: close the issue we created (never delete — history stands).
         if gh_api -X PATCH \
@@ -458,8 +457,8 @@ step_forge_upstream_work() {
             skip "could not close upstream issue #${number} (leaving it open)"
         fi
     else
-        fail "created work item ${ref} but no matching issue titled '${title}'"
-        fail "  is open upstream — the write-through did not reach the forge"
+        fail "work item ${ref} created but issue #${number} is not readable"
+        fail "  upstream — the write-through did not reach the forge: ${found}"
     fi
 }
 
