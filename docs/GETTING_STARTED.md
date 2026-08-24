@@ -43,31 +43,38 @@ container cannot infer the address clients will use. For a local installation,
 the example value `http://localhost:8080` is correct. Change `VOGT_PORT` if
 port 8080 is already in use.
 
-**Start the stack (recommended).** Layer the engine overlay on the base. The
-base pulls the published core image; the overlay builds the engine from this
-checkout, since no engine image is published. Fill in the engine block of
-`deploy/.env` first — the overlay's own header and [`docs/ENGINE.md`](ENGINE.md)
-list the keys — then:
-
-```console
-docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d --wait
-```
-
-**Core only.** The base Compose file on its own runs the core without the
-engine — no browser front end, but the full API, CLI, and MCP. There are two
-ways to obtain the core image, and the same base serves both. Set `VOGT_IMAGE`
-in `deploy/.env` to the tag — or better, the digest — you intend to run, then
-pull the published image:
-
-```console
-docker compose -f deploy/vogt.compose.yml up -d --wait
-```
-
-Or add the one-service build overlay and the base builds the core from this
-checkout instead of pulling it (`VOGT_IMAGE` is ignored):
+**Start the core (recommended).** The core image
+`ghcr.io/thedancingdeveloper-org/vogt` is not yet a public package, so build it
+from this checkout with the one-service build overlay `deploy/vogt.build.yml`
+(`VOGT_IMAGE` is ignored) — the path verified to run from a clean clone:
 
 ```console
 docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d --wait
+```
+
+This runs the core without the engine — no browser front end, but the full
+API, CLI, and MCP.
+
+**Add the engine (the browser front end).** The engine overlay builds the Rust
+engine from this checkout, since no engine image is published, and fronts the
+core with it. Fill in the engine block of `deploy/.env` first — the overlay's
+own header and [`docs/ENGINE.md`](ENGINE.md) list the keys. The engine image
+lifts the core image in (`CORE_IMAGE`), so until the `vogt` package is public,
+name the core you build here by layering all three files:
+
+```console
+VOGT_IMAGE=vogt:local docker compose \
+  -f deploy/vogt.compose.yml -f deploy/vogt.build.yml -f deploy/engine.overlay.yml \
+  up --build -d --wait
+```
+
+**Once the `vogt` package is public**, the build overlay becomes optional: the
+base pulls the published core (and the engine overlay pulls it as `CORE_IMAGE`
+too), so the stack is just the base plus the engine overlay. Set `VOGT_IMAGE`
+in `deploy/.env` to the tag — or better, the digest — you intend to run:
+
+```console
+docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d --wait
 ```
 
 `--wait` blocks until the healthcheck reports healthy. Without it, the curls

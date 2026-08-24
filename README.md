@@ -17,30 +17,53 @@ when you opt in.
 ## Run it
 
 The stack is two Compose files layered together: the base
-(`deploy/vogt.compose.yml`) runs the published core image,
-`ghcr.io/thedancingdeveloper-org/vogt`, and the engine overlay
-(`deploy/engine.overlay.yml`) adds the Rust engine in front of it. No engine
-image is published, so the overlay always builds one from this checkout.
+(`deploy/vogt.compose.yml`) defines the core service, and the engine overlay
+(`deploy/engine.overlay.yml`) adds the Rust engine — the PWA front end — in
+front of it. No engine image is published, so that overlay always builds one
+from this checkout.
+
+The core image `ghcr.io/thedancingdeveloper-org/vogt` is not yet a public
+package, so the quickstart below **builds the core from this checkout** with
+the one-service build overlay `deploy/vogt.build.yml` — the path verified to
+run from a clean clone. Once the package is made public you can drop
+`-f deploy/vogt.build.yml` and the base pulls the published image instead.
 
 ```console
 git clone https://github.com/TheDancingDeveloper-org/vogt.git
 cd vogt
-cp deploy/.env.example deploy/.env     # set VOGT_PUBLIC_URL, the engine block
-docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d
+cp deploy/.env.example deploy/.env     # set VOGT_PUBLIC_URL
+docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d --wait
 curl http://localhost:8080/health/ready
 ```
 
-Once it is up, open the published URL in a browser: the engine serves the PWA
-at `/`, and [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) is the tour of it. The
-health check's `start_period` and the engine build both take a moment, so add
-`--wait` to block until the stack reports healthy.
+That runs the core on its own — the full API, CLI, and MCP, no browser front
+end. `--wait` blocks until the healthcheck reports healthy; without it a curl
+can race the idempotent `vogt init` bootstrap and the healthcheck's
+`start_period`.
 
-**Core alone.** The base runs the core on its own, without the engine — a
-supported deployment for CLI, REST, and MCP use with no browser front end:
+**Add the engine (the PWA).** The engine overlay builds the Rust engine from
+this checkout and fronts the core with it, serving the Solid PWA at `/`; see
+[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for the tour. The engine image lifts
+the core image in (`CORE_IMAGE`), so until the `vogt` package is public, point
+it at the core you build here by layering all three files and naming the local
+core:
 
 ```console
-cp deploy/.env.example deploy/.env     # set VOGT_PUBLIC_URL, VOGT_IMAGE
-docker compose -f deploy/vogt.compose.yml up -d --wait
+VOGT_IMAGE=vogt:local docker compose \
+  -f deploy/vogt.compose.yml -f deploy/vogt.build.yml -f deploy/engine.overlay.yml \
+  up --build -d --wait
+```
+
+Fill in the engine block of `deploy/.env` first — the overlay's own header and
+[`docs/ENGINE.md`](docs/ENGINE.md) list the keys.
+
+**Once the `vogt` package is public**, the build overlay is optional: the base
+pulls the published core and the engine overlay pulls it as `CORE_IMAGE` too,
+so the stack is just the base plus the engine overlay. Set `VOGT_IMAGE` in
+`deploy/.env` to the tag — or better, the digest — you intend to run:
+
+```console
+docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d --wait
 ```
 
 Or skip containers altogether — the core is a plain Python 3.11+ package:
