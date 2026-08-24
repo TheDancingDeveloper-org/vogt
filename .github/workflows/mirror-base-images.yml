@@ -23,9 +23,9 @@ name: mirror base images
 # usage is busy — which is when builds happen. See `build.yml` for why the
 # login has been removed rather than left inert.
 #
-# So every project base, including the public root image's Python base, is
-# mirrored into GHCR, where this project already publishes, is already
-# authenticated, and has no such limit.
+# So every project base used by CI, including the public root image's optional
+# Python override, is mirrored into GHCR, where this project already
+# publishes, is already authenticated, and has no such limit.
 #
 # ## The naming rule is the whole design
 #
@@ -138,7 +138,7 @@ jobs:
         run: |
           set -euo pipefail
           bad=0
-          for file in Dockerfile engine/Dockerfile engine/Dockerfile.pod; do
+          for file in engine/Dockerfile engine/Dockerfile.pod; do
             while IFS= read -r ref; do
               # A stage name, not an image: no registry path and no tag.
               case "$ref" in
@@ -198,8 +198,15 @@ jobs:
           set -euo pipefail
 
           refs="$(
-            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" Dockerfile engine/Dockerfile engine/Dockerfile.pod \
-              | sort -u
+            {
+              grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile engine/Dockerfile.pod
+              # The root Dockerfile defaults to an upstream public base for
+              # external builders, but CI supplies its equivalent mirror as
+              # PYTHON_IMAGE. Mirror that default before the CI override is
+              # used, preserving both the public and reliable CI paths.
+              grep -Eho '^ARG PYTHON_IMAGE=python:[A-Za-z0-9._:@-]+' Dockerfile \
+                | sed "s#^ARG PYTHON_IMAGE=#${MIRROR_PREFIX}python:#; s#python:python:#python:#"
+            } | sort -u
           )"
           if [ -z "$refs" ]; then
             echo "no mirrored references in the Dockerfiles; nothing to copy" >&2

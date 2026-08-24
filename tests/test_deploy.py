@@ -278,12 +278,9 @@ def test_the_base_image_is_pinned_by_digest() -> None:
     (FR-D6) — hard to justify raising for others and not for itself.
     """
     dockerfile = _without_comments(DOCKERFILE.read_text(encoding="utf-8"))
-    froms = [
-        line.strip() for line in dockerfile.splitlines() if line.startswith("FROM ")
-    ]
-    assert froms, "the Dockerfile builds from something"
-    for line in froms:
-        assert "@sha256:" in line, f"base image is not digest-pinned: {line}"
+    match = re.search(r"^ARG PYTHON_IMAGE=\S+@(sha256:[0-9a-f]{64})$", dockerfile, re.M)
+    assert match, "PYTHON_IMAGE must be a digest-pinned public default"
+    assert dockerfile.count("FROM ${PYTHON_IMAGE}") == 2
 
 
 def test_both_build_stages_use_the_same_base() -> None:
@@ -291,9 +288,7 @@ def test_both_build_stages_use_the_same_base() -> None:
     the runtime from a different image than the one the venv was resolved
     against — the kind of skew that only shows up at runtime."""
     dockerfile = _without_comments(DOCKERFILE.read_text(encoding="utf-8"))
-    digests = re.findall(r"FROM \S+@(sha256:[0-9a-f]{64})", dockerfile)
-    assert len(digests) >= 2
-    assert len(set(digests)) == 1, f"stages disagree on the base image: {set(digests)}"
+    assert dockerfile.count("FROM ${PYTHON_IMAGE}") == 2
 
 
 # ── The merged stack (NFR-D11, NFR-D12, NFR-C6) ───────────────────────────
@@ -1230,12 +1225,9 @@ def test_root_image_base_is_mirrored_before_a_release_build() -> None:
     )
     mirror = (WORKFLOWS / "mirror-base-images.yml").read_text(encoding="utf-8")
 
-    assert (
-        "ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:"
-        in root_dockerfile
-    )
+    assert "ARG PYTHON_IMAGE=python:3.13-slim@sha256:" in root_dockerfile
     assert '"Dockerfile"' in mirror
-    assert "Dockerfile engine/Dockerfile engine/Dockerfile.pod" in mirror
+    assert "ARG PYTHON_IMAGE=python:" in mirror
 
 
 ENGINE_DOCKERFILE = WORKFLOWS.parent.parent / "engine" / "Dockerfile"
