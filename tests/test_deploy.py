@@ -1217,6 +1217,44 @@ def test_production_deploy_is_approval_gated_and_pins_an_immutable_digest() -> N
     assert '"stack":"vogt-prod"' in workflow
     assert '"type":"DeployStack"' in workflow
     assert '"$VOGT_URL/readyz"' in workflow
+    assert "sigstore/cosign-installer@v3" in workflow
+    assert "cosign verify" in workflow
+
+
+def test_promotion_is_fast_forward_only_and_never_pushes_a_branch() -> None:
+    workflow = (WORKFLOWS / "promote.yml").read_text(encoding="utf-8")
+    assert "type: choice" in workflow
+    assert "dev-to-main" in workflow
+    assert "main-to-prod" in workflow
+    environment = (
+        "environment: ${{ inputs.stage == 'dev-to-main' && 'promote-main' || "
+        "'promote-prod' }}"
+    )
+    assert environment in workflow
+    assert "git merge-base --is-ancestor" in workflow
+    assert "gh pr create" in workflow
+    assert "VOGT_PROMOTION_TOKEN" in workflow
+    assert "GITHUB_TOKEN" in workflow
+    assert "contents: write" not in workflow
+    assert "git push" not in workflow
+    assert "required source checks" in workflow
+    assert "for check in ci runner-policy; do" in workflow
+
+
+def test_release_branches_accept_only_the_promotion_edges() -> None:
+    workflow = (WORKFLOWS / "promotion-policy.yml").read_text(encoding="utf-8")
+    assert "branches: [main, prod]" in workflow
+    assert "main:dev|prod:main" in workflow
+    assert "git merge-base --is-ancestor" in workflow
+    assert "HEAD_REPO" in workflow
+
+
+def test_release_core_build_waits_for_the_mirrored_base() -> None:
+    workflow = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    image = workflow[
+        workflow.index("\n  image:\n") : workflow.index("\n  # The dev-pod")
+    ]
+    assert "needs: [distribution, base-images]" in image
 
 
 def test_root_image_base_is_mirrored_before_a_release_build() -> None:

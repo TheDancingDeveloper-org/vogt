@@ -72,6 +72,18 @@ jobs:
           case "$digest" in sha256:*) ;; *) echo "invalid digest: $digest" >&2; exit 1;; esac
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      - uses: sigstore/cosign-installer@v3
+
+      - name: verify the signed merged-image digest
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-identity-regexp "^https://github.com/TheDancingDeveloper-org/vogt/.github/workflows/release.yml@refs/tags/v[0-9].*$" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "ghcr.io/thedancingdeveloper-org/vogt-stack@${DIGEST}"
+
       - name: pin the production stack's desired state
         env:
           DIGEST: ${{ steps.image.outputs.digest }}

@@ -106,7 +106,10 @@ jobs:
 
   image:
     name: build, sign and publish the image
-    needs: distribution
+    # The core Dockerfile starts FROM the organisation's GHCR mirror too.
+    # Keep the mirror job on the dependency edge: a release must not race the
+    # copy of a newly bumped base digest.
+    needs: [distribution, base-images]
     # The merged image copies /opt/vogt out of this one by digest (#143).
     outputs:
       digest: ${{ steps.push.outputs.digest }}
