@@ -1,4 +1,4 @@
-// Thin typed wrapper over the MyDevEnv2 HTTP+SSE+WS API.
+// Thin typed wrapper over the Vogt HTTP+SSE+WS API.
 
 import { fetchWithRetry } from "./transport";
 
