@@ -1,0 +1,11 @@
+# BuildKit uses THIS file (not the root allow-list, which admits only the Python
+# core) for `-f deploy/e2e.engine.Dockerfile` builds. The image COPYs
+# scripts/fake-agent, scripts/fake_agent_core.py and deploy/e2e.engine.toml, so
+# a deny-list is used here: keep those trees, drop only the heavy/irrelevant
+# ones. (The FROM is a local image; the context is only for the COPYs.)
+.git
+**/node_modules
+**/target
+web/dist
+mobile/android/.gradle
+mobile/android/app/build
