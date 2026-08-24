@@ -41,29 +41,53 @@ end-of-take, so likely deploy-lag or a native-path bug — parked, not urgent).
 "Queue v2 — Bucket A" section (2026-08-23) as the source of truth — **NOT** the
 older "Queue — current order (2026-08-22)" section further down, which lists
 #283/#289 as future work when they were **already built on `dev`** (`641f75c`
-and PR #309 `ead06a0`). That stale section caused redundant work — an OPEN issue
-≠ unbuilt (Closes fires only on `main`); always `git grep`/`gh issue view` dev's
-ACTUAL state before dispatching.
+and PR #309 `ead06a0`). An OPEN issue ≠ unbuilt (Closes fires only on `main`);
+always `git grep`/`gh issue view` dev's ACTUAL state before dispatching.
 
 **Merged to `dev` this session (2026-08-24):**
-- #334 APK crash diagnostics — unmute crash RESOLVED (operator-confirmed on
-  0.2.1; #328 was the fix, the stale build was the confounder).
-- #336 #293 inc-2 — SSE event mirroring (provider-agnostic; provisional contract).
-- #337 #297 inc-1 — registry-driven load generator (local numbers; soak deferred).
-- #338 genericise the workflow provider — **no vendor name (Fabro) in shipped
-  code**; `HttpWorkflowProvider`, `fake_engine*`. Keep it so.
-- #339 #283 — added the `work.bind_branch` operation (the one missing declared
-  piece; the rest of #283 was already on dev).
-- #340 #295 — e2e stack smoke harness (compose-up CI job + walk + live
-  Playwright). First dev-run failed on a private-GHCR core pull; **#341** fixes
-  it (build the core locally, `VOGT_IMAGE=vogt-core:local`).
+- **#334** — APK crash diagnostics; the unmute crash is **RESOLVED**
+  (operator-confirmed on 0.2.1; #328 was the fix, the stale build was the
+  confounder). See [[apk-crash-diagnostics]].
+- **#336** — #293 inc-2 SSE event mirroring (provider-agnostic; provisional
+  contract, fake-server tested).
+- **#337** — #297 inc-1 registry-driven load generator (local numbers; the
+  S-hour soak + nightly results branch deferred).
+- **#338** — genericise the workflow provider: **no vendor name in shipped
+  code** (`HttpWorkflowProvider`, `fake_engine*`). Keep it so; Fabro specifics
+  live only in `docs/local/FABRO_COMPARISON.md`.
+- **#339** — #283 `work.bind_branch` operation (the one missing declared piece;
+  the rest of #283 was already on dev via `641f75c`).
+- **#340–#360 — #295 end-to-end stack smoke: the in-network walk is GREEN.**
+  ~14 PRs, almost all CI-topology fixes, because this self-hosted runner is
+  containerised with the docker daemon on the host — so **no host bind-mounts,
+  no compose file/env secrets, and no host-loopback access to published ports**
+  (see [[e2e-ci-daemon-topology]]). The working shape: build core→engine→e2e
+  images locally (no GHCR pull), deliver the fake-agent (#296) via a **baked
+  image** and the run tokens via a **named-volume init service**, and run the
+  health-wait + smoke walk **inside the compose network** via `docker compose
+  exec` (`vogt:8000` / `localhost:8910`). The walk passes every step: health,
+  PWA, first-token bootstrap, native work-create, session, **fake-agent finding
+  (FR-E7)**, fixture reset/import/link/sweep, backlog 6/6 ranked, 6 PR observed
+  edges, write-back arm (`full`), and the **upstream write-through creating a
+  real GitHub issue**. `VOGT_FIXTURE_PAT` CI secret is **SET** (from the
+  existing homelab PAT). Triggers: push:dev + nightly + dispatch, never PRs.
+  **Remaining #295 follow-up:** the live-Playwright project must also move
+  in-network (a Playwright container on the compose net → `http://engine:8910`);
+  it is deferred with a TODO in `e2e.yml` and is `continue-on-error` — the smoke
+  walk is the hard gate and is green.
+
+**Also this session:** filed **#335** (auto-submit on voice end — likely a
+vogt-dev deploy-lag or a native-path bug; the PWA already auto-sends at
+end-of-take, so investigate before rebuilding; parked, not urgent).
 
 **Remaining is operator/human/infra-gated only** (no unblocked agent feature
-work): dev→main promotion (redeploy dev + phone smoke — human; Closes list of 57
-pre-generated); #295 forge half needs the `VOGT_FIXTURE_PAT` CI secret; #297
-soak numbers need a running stack; voice #188–#194/#190 device validation; Phase-4
-publish (#265/#266/#204 — human). New feature filed: **#335** (auto-submit on
-voice end — likely deploy-lag or a phone-path bug; parked, not urgent).
+work left): **dev→main promotion** (redeploy dev + manual phone smoke — human;
+the 57-issue `Closes` list is pre-generated); **#297 soak numbers** need a
+running stack; **voice #188–#194/#190** device validation; **Phase-4 publish**
+(#265 rotate Firebase → #271 Android app-id → #204 relocate estate compose →
+#266 package public → repo public — human, in that order). #293 inc-2's live
+smoke + the #289/#283-#284 further slices are buildable against a fake whenever
+wanted (no live instance needed to build).
 
 ---
 
