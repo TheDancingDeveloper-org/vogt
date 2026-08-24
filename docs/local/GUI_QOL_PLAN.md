@@ -33,6 +33,40 @@ end-of-take, so likely deploy-lag or a native-path bug — parked, not urgent).
 
 ---
 
+## ✅ 2026-08-24 — ACCURATE STATE (read before trusting anything below)
+
+**The plan is essentially DELIVERED on `dev`.** 60 issues sit in milestone
+`0 release` (delivered, awaiting the dev→main promotion); `1 hygiene`
+(#198/#207/#208/#271-web) is delivered too. Trust the **milestones** and the
+"Queue v2 — Bucket A" section (2026-08-23) as the source of truth — **NOT** the
+older "Queue — current order (2026-08-22)" section further down, which lists
+#283/#289 as future work when they were **already built on `dev`** (`641f75c`
+and PR #309 `ead06a0`). That stale section caused redundant work — an OPEN issue
+≠ unbuilt (Closes fires only on `main`); always `git grep`/`gh issue view` dev's
+ACTUAL state before dispatching.
+
+**Merged to `dev` this session (2026-08-24):**
+- #334 APK crash diagnostics — unmute crash RESOLVED (operator-confirmed on
+  0.2.1; #328 was the fix, the stale build was the confounder).
+- #336 #293 inc-2 — SSE event mirroring (provider-agnostic; provisional contract).
+- #337 #297 inc-1 — registry-driven load generator (local numbers; soak deferred).
+- #338 genericise the workflow provider — **no vendor name (Fabro) in shipped
+  code**; `HttpWorkflowProvider`, `fake_engine*`. Keep it so.
+- #339 #283 — added the `work.bind_branch` operation (the one missing declared
+  piece; the rest of #283 was already on dev).
+- #340 #295 — e2e stack smoke harness (compose-up CI job + walk + live
+  Playwright). First dev-run failed on a private-GHCR core pull; **#341** fixes
+  it (build the core locally, `VOGT_IMAGE=vogt-core:local`).
+
+**Remaining is operator/human/infra-gated only** (no unblocked agent feature
+work): dev→main promotion (redeploy dev + phone smoke — human; Closes list of 57
+pre-generated); #295 forge half needs the `VOGT_FIXTURE_PAT` CI secret; #297
+soak numbers need a running stack; voice #188–#194/#190 device validation; Phase-4
+publish (#265/#266/#204 — human). New feature filed: **#335** (auto-submit on
+voice end — likely deploy-lag or a phone-path bug; parked, not urgent).
+
+---
+
 ## ▶ CURRENT INTENDED STATE — start here (2026-08-23)
 
 ### Three parallel streams running (dispatched 2026-08-23, operator-directed)
@@ -718,7 +752,9 @@ way, before the next round so the backlog is honest.
 **Open PR:** #300 `deploy/public-engine-overlay` (#202) — the two-container
 public stack. Mergeable. This is the gate for the public quickstart.
 
-## Queue — current order (operator-set 2026-08-22)
+## Queue — current order (operator-set 2026-08-22) — ⚠ SUPERSEDED
+
+> ⚠ **STALE — do not action.** This queue listed #283/#289 etc. as future work; they were already delivered on `dev`. Use the milestones and the 2026-08-24 state block at the top instead.
 
 One list, top is next. GUI work keeps the same rules, gates and batching as
 the waves above (distinct primary `.tsx` per agent, isolated Playwright as
