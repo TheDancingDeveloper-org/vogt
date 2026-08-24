@@ -15,14 +15,14 @@
 # other people's repositories (FR-D6) — hard to justify raising for others
 # while leaving it here.
 #
-# The upstream Docker Official Image, pinned by digest. Keeping the public
-# image on an upstream registry is the point: a new operator must be able to
-# build Vogt without reaching a private organisation mirror. This is the
-# multi-arch index digest, so it still resolves per-platform, and Renovate
-# keeps it current (`pinDigests: true`). The build and runtime stages share
-# the digest deliberately, so the virtualenv is built against the interpreter
-# that runs it.
-FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS build
+# The Docker Official Image is mirrored into this project's GHCR namespace,
+# while retaining its upstream index digest. The release runner otherwise
+# shares Docker Hub's anonymous pull limit with every build on its egress IP.
+# `mirror-base-images.yml` copies the manifest list before a build begins;
+# Renovate still tracks the Docker Official Image through its registry alias.
+# The build and runtime stages deliberately share a digest so the virtualenv
+# is built against the interpreter that runs it.
+FROM ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS build
 
 # uv resolves and installs from the committed lockfile, so the image contains
 # exactly what CI tested (NFR-Q5).
@@ -85,7 +85,7 @@ COPY src/ ./src/
 RUN uv sync --locked --no-dev --no-editable
 
 
-FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS runtime
+FROM ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS runtime
 
 LABEL org.opencontainers.image.title="vogt" \
       org.opencontainers.image.description="A product development environment for the AI era" \

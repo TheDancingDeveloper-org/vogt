@@ -1224,6 +1224,20 @@ def test_production_deploy_is_approval_gated_and_pins_an_immutable_digest() -> N
     assert '"$VOGT_URL/readyz"' in workflow
 
 
+def test_root_image_base_is_mirrored_before_a_release_build() -> None:
+    root_dockerfile = (WORKFLOWS.parent.parent / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    mirror = (WORKFLOWS / "mirror-base-images.yml").read_text(encoding="utf-8")
+
+    assert (
+        "ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:"
+        in root_dockerfile
+    )
+    assert '"Dockerfile"' in mirror
+    assert "Dockerfile engine/Dockerfile engine/Dockerfile.pod" in mirror
+
+
 ENGINE_DOCKERFILE = WORKFLOWS.parent.parent / "engine" / "Dockerfile"
 
 
