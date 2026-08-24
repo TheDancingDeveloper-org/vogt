@@ -334,10 +334,25 @@ not change production by itself.
 
 ### 7.1 Promote `dev` to production
 
-1. Promote the approved `dev` commit to `prod` and wait for its CI run to
-   pass. Create the release tag only on that commit: the release workflow
-   rejects a tag whose target is not reachable from `prod`.
-2. Back up the running instance and copy the resulting backup directory off
+Promotion is two explicit, fast-forward-only pull requests. Run **Actions →
+promote**, choose `dev-to-main`, type `PROMOTE`, and confirm the generated PR
+gets its required review and checks. The workflow checks that the source branch
+is green (`ci` and `runner-policy`) and opens `dev → main`; it never pushes a
+branch. Merge that PR only after its target checks pass. Dispatch the same
+workflow again with `main-to-prod`, merge that PR after the production branch
+checks pass, and only then continue below. The promotion-policy check rejects
+every other PR edge into `main` or `prod`. On GitHub plans that support it, the
+workflow's `promote-main` and `promote-prod` environments can add a separate
+reviewer gate before a PR is opened.
+
+Before the first run, add the `VOGT_PROMOTION_TOKEN` repository secret. It
+should be a fine-grained token owned by the release operator with **Pull
+requests: read and write** and **Contents: read** on this repository. A
+dedicated token is required because a pull request created with the default
+Actions token does not start another workflow run; without it, the required
+promotion checks would remain pending.
+
+1. Back up the running instance and copy the resulting backup directory off
    its data volume:
 
    ```console
@@ -345,16 +360,16 @@ not change production by itself.
      vogt backup --reason "pre-production release"
    ```
 
-3. Increase the package version if a new Android artifact is needed, then
+2. Increase the package version if a new Android artifact is needed, then
    create and push the matching `v<version>` tag. The tagged release publishes
    signed, immutable core and merged-stack image digests. It also builds the
    signed APK when its release prerequisites are configured.
-4. In the estate deployment repository, change the production stack's image
+3. In the estate deployment repository, change the production stack's image
    pin to the exact merged-stack digest from the release summary, review that
    change under the estate's approval policy, and run its `DeployStack` for
    `personal-vogt`. That repository and Node B are operator infrastructure;
    public/self-hosted deployments remain independent of this handoff.
-5. Check the production front door's `/health/ready`, the engine's `/readyz`
+4. Check the production front door's `/health/ready`, the engine's `/readyz`
    when deployed, authentication, and one representative read/write workflow.
    Keep the former digest and the pre-release backup until those checks pass.
 
