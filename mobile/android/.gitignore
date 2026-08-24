@@ -62,7 +62,13 @@ captures/
 .cxx/
 
 # Google Services (e.g. APIs or Firebase)
-# google-services.json
+# The real google-services.json is operator-supplied and MUST NOT be committed
+# (issue #265: the previously tracked file carried a live Firebase API key).
+# A sanitized placeholder ships as `app/google-services.json.example`; when no
+# real file is present, `app/build.gradle` copies the example to this path so
+# the build still assembles. Drop your real file in as `app/google-services.json`
+# — it is ignored here and stays out of git.
+app/google-services.json
 
 # Freeline
 freeline.py

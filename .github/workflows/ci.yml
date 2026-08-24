@@ -472,14 +472,17 @@ jobs:
       # and setting it on one is the exact divergence `tests/
       # test_mobile_identity.py` exists to catch.
       #
-      # `com.sprooty.mydevenv2.dev` has its own client entry in
-      # `mobile/android/app/google-services.json`, so this build can register
-      # for push; that agreement is asserted, not assumed.
+      # `com.sprooty.vogt.dev` has its own client entry in the sanitized
+      # placeholder `mobile/android/app/google-services.json.example` (copied to
+      # `google-services.json` by build.gradle when no real, operator-supplied
+      # file is present — #265), so this build can register for push; that
+      # agreement is asserted, not assumed. FCM only delivers once the operator
+      # adds the id to a real Firebase project and drops in the real config.
       - name: capacitor sync
         working-directory: mobile
         env:
           VOGT_ANDROID_SERVER_URL: ${{ vars.VOGT_ANDROID_SERVER_URL || 'http://127.0.0.1:8910' }}
-          MYDEVENV2_ANDROID_APP_ID: "com.sprooty.mydevenv2.dev"
+          MYDEVENV2_ANDROID_APP_ID: "com.sprooty.vogt.dev"
         run: npx cap sync android
 
       # A *debug* APK: it is signed with Gradle's generated debug key, so it
@@ -489,7 +492,7 @@ jobs:
       - name: assemble
         working-directory: mobile/android
         env:
-          MYDEVENV2_ANDROID_APP_ID: "com.sprooty.mydevenv2.dev"
+          MYDEVENV2_ANDROID_APP_ID: "com.sprooty.vogt.dev"
         run: ./gradlew assembleDebug --no-daemon
 
       - uses: actions/upload-artifact@v7

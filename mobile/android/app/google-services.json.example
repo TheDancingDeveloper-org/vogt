@@ -1,0 +1,68 @@
+{
+  "_comment": [
+    "SANITIZED PLACEHOLDER — not a live Firebase config (issue #265).",
+    "JSON has no comments, so this doc lives in _comment and is ignored by the",
+    "google-services Gradle plugin. Every value below is a non-live dummy: the",
+    "api_key is a fake AIzaSyDUMMY... string, the project id/number are",
+    "placeholders, and the mobilesdk_app_id values are structurally valid but",
+    "point at no real Firebase project.",
+    "",
+    "Forks and operators: DROP IN YOUR REAL google-services.json next to this",
+    "file (as 'google-services.json'). It is git-ignored, so it will not be",
+    "committed. When no real file is present, build.gradle copies this example",
+    "to google-services.json so `assembleDebug` still compiles and the",
+    "google-services plugin can validate the applicationId <-> package_name",
+    "match. FCM will not deliver against these placeholder values — a real",
+    "config from your own Firebase project is required for push to work.",
+    "",
+    "The client entries must carry the package names the build assembles under:",
+    "the applicationId default and the CI dev id (see build.gradle and",
+    "ci.yml). Keep them in sync — tests/test_mobile_identity.py asserts it."
+  ],
+  "project_info": {
+    "project_number": "000000000000",
+    "project_id": "vogt-placeholder",
+    "storage_bucket": "vogt-placeholder.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+        "android_client_info": {
+          "package_name": "com.sprooty.vogt"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDUMMY0000000000000000000000000000000"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:000000000000:android:1111111111111111111111",
+        "android_client_info": {
+          "package_name": "com.sprooty.vogt.dev"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDUMMY0000000000000000000000000000000"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

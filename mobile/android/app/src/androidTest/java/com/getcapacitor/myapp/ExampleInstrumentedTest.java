@@ -6,7 +6,7 @@ import android.content.Context;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
-import com.sprooty.mydevenv2.MainActivity;
+import com.sprooty.vogt.MainActivity;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -19,11 +19,11 @@ import org.junit.runner.RunWith;
 public class ExampleInstrumentedTest {
 
     @Test
-    public void usesMyDevEnv2AppContext() {
+    public void usesVogtAppContext() {
         // Context of the app under test.
         Context appContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
 
-        assertEquals("com.sprooty.mydevenv2", appContext.getPackageName());
+        assertEquals("com.sprooty.vogt", appContext.getPackageName());
     }
 
     @Test

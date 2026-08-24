@@ -1,4 +1,4 @@
-package com.sprooty.mydevenv2;
+package com.sprooty.vogt;
 
 import android.os.Bundle;
 import android.content.ClipData;
