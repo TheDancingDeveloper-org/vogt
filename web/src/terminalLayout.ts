@@ -112,6 +112,7 @@ export function insertPane(
   targetPaneId: string,
   direction: SplitDirection,
   nextPane: PaneNode,
+  before = false,
 ): TerminalLayoutNode | null {
   if (node.type === "pane") {
     if (node.id !== targetPaneId) return null;
@@ -119,19 +120,58 @@ export function insertPane(
       type: "split",
       id: newSplitId(),
       direction,
-      children: [node, nextPane],
+      // `before` places the new pane ahead of the target — a drop on the
+      // left/top edge lands the mirror there rather than always after.
+      children: before ? [nextPane, node] : [node, nextPane],
     };
   }
   for (let index = 0; index < node.children.length; index += 1) {
     const child = node.children[index];
     if (!child) continue;
-    const inserted = insertPane(child, targetPaneId, direction, nextPane);
+    const inserted = insertPane(child, targetPaneId, direction, nextPane, before);
     if (!inserted) continue;
     const children = node.children.slice();
     children[index] = inserted;
     return { ...node, children };
   }
   return null;
+}
+
+export interface DropOutcome {
+  root: TerminalLayoutNode;
+  activePaneId: string;
+  /** True when a new pane was inserted; false when the session was already on
+   *  screen and the existing pane was focused instead. */
+  inserted: boolean;
+}
+
+/**
+ * Drop an existing session onto a pane, splitting in the hit-tested direction.
+ *
+ * Duplicate guard (#355): a pane id is derived from its session id, so a
+ * session can render at most once per workspace. If the dropped session is
+ * already shown, this focuses that pane instead of inserting a second copy.
+ * The session is MIRRORED — it is not moved or detached from anywhere else it
+ * renders; the server's attach fans out from a snapshot, so each pane holds
+ * its own WebSocket onto the same PTY.
+ *
+ * Returns null only when the target pane is gone (a race), matching
+ * `insertPane`'s contract.
+ */
+export function dropSessionIntoPane(
+  root: TerminalLayoutNode,
+  targetPaneId: string,
+  sessionId: string,
+  direction: SplitDirection,
+  before = false,
+): DropOutcome | null {
+  if (containsSession(root, sessionId)) {
+    return { root, activePaneId: paneIdFor(sessionId), inserted: false };
+  }
+  const nextPane = makePane(sessionId);
+  const next = insertPane(root, targetPaneId, direction, nextPane, before);
+  if (!next) return null;
+  return { root: next, activePaneId: nextPane.id, inserted: true };
 }
 
 export function removePane(

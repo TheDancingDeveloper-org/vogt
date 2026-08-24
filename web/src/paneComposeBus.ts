@@ -17,6 +17,10 @@ export interface TerminalWorkspaceHandle {
   splitWithSession: (direction: SplitDirection, sessionId: string) => void;
   /** Re-target the active pane at an existing session (swaps on a clash). */
   showSessionInActivePane: (sessionId: string) => void;
+  /** Focus the pane already showing a session. Returns false when the session
+   *  is not currently in this workspace, so the caller can fall back to a
+   *  split. Used by the drag/drop duplicate guard's touch + a11y path (#355). */
+  focusSession: (sessionId: string) => boolean;
 }
 
 const handles = new Map<string, TerminalWorkspaceHandle>();

@@ -25,6 +25,7 @@ import {
   collectPanes,
   commitCreatedPane,
   containsSession,
+  dropSessionIntoPane,
   findPane,
   firstPane,
   insertPane,
@@ -38,6 +39,14 @@ import {
   type SplitDirection,
   type TerminalLayoutNode,
 } from "./terminalLayout";
+import {
+  directionForZone,
+  dragCarriesSession,
+  dropZoneForPoint,
+  SESSION_DND_MIME,
+  zoneInsertsBefore,
+  type DropZone,
+} from "./terminalDnd";
 import Dialog from "./Dialog";
 import { registerTerminalWorkspace } from "./paneComposeBus";
 import {
@@ -134,6 +143,12 @@ interface LayoutNodeProps {
   sessions: SessionSummary[];
   onFocusPane: (paneId: string) => void;
   onRetargetPane: (paneId: string, sessionId: string) => void;
+  /** Which pane (and edge) a session drag is currently hovering, for the
+   *  drop-zone highlight. Null when no session is being dragged over a pane. */
+  dropTarget: { paneId: string; zone: DropZone } | null;
+  onPaneDragOver: (paneId: string, event: DragEvent) => void;
+  onPaneDragLeave: (paneId: string, event: DragEvent) => void;
+  onPaneDrop: (paneId: string, event: DragEvent) => void;
   interceptPaneInput: (paneId: string, data: string | ArrayBuffer) => boolean;
   registerPaneSend: (
     paneId: string,
@@ -164,7 +179,16 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
               props.activePaneId === paneId ? "active" : ""
             }`}
             onPointerDown={() => props.onFocusPane(paneId)}
+            onDragOver={(event) => props.onPaneDragOver(paneId, event)}
+            onDragLeave={(event) => props.onPaneDragLeave(paneId, event)}
+            onDrop={(event) => props.onPaneDrop(paneId, event)}
           >
+            <Show when={props.dropTarget?.paneId === paneId}>
+              <div
+                class={`terminal-pane-dropzone ${props.dropTarget?.zone ?? ""}`}
+                aria-hidden="true"
+              />
+            </Show>
             <Show when={props.withHeaders}>
               <div class="terminal-pane-header">
                 <span class={`activity-dot ${activityClass(paneSession())}`} />
@@ -222,6 +246,10 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
                 sessions={props.sessions}
                 onFocusPane={props.onFocusPane}
                 onRetargetPane={props.onRetargetPane}
+                dropTarget={props.dropTarget}
+                onPaneDragOver={props.onPaneDragOver}
+                onPaneDragLeave={props.onPaneDragLeave}
+                onPaneDrop={props.onPaneDrop}
                 interceptPaneInput={props.interceptPaneInput}
                 registerPaneSend={props.registerPaneSend}
                 registerPaneActions={props.registerPaneActions}
@@ -244,6 +272,12 @@ const TerminalWorkspace: Component<Props> = (props) => {
   const [root, setRoot] = createSignal<TerminalLayoutNode>(initial.root);
   const [activePaneId, setActivePaneId] = createSignal(initial.activePaneId);
   const [broadcast, setBroadcast] = createSignal(Boolean(initial.broadcast));
+  // The pane (and edge) a rail session drag is hovering, for the drop-zone
+  // highlight; cleared on drop or drag-leave.
+  const [dropTarget, setDropTarget] = createSignal<{
+    paneId: string;
+    zone: DropZone;
+  } | null>(null);
   // Maximise/solo: show only the active pane at full size, without closing the
   // others (#185). Only meaningful with a split; a single pane already fills.
   const [soloed, setSoloed] = createSignal(false);
@@ -587,6 +621,67 @@ const TerminalWorkspace: Component<Props> = (props) => {
     if (inserted) setActivePaneId(nextPane.id);
   };
 
+  // Drag a session from the places rail onto a pane to mirror it into a split
+  // (#355). No PTY is created — the session already exists; the server's attach
+  // fans out from a snapshot, so the same shell renders in both panes, each on
+  // its own WebSocket. A session already on screen is not duplicated: its pane
+  // is focused instead (the duplicate guard lives in `dropSessionIntoPane`).
+  const dropSessionOnPane = (
+    targetPaneId: string,
+    sessionId: string,
+    zone: DropZone,
+  ) => {
+    // Ignore payloads for sessions this client doesn't know — a stale drag or a
+    // foreign source. `splitWithExisting`/`retargetPane` accept only live ids.
+    if (!sessionId || !sessionsStore.sessions[sessionId]) return;
+    const outcome = dropSessionIntoPane(
+      root(),
+      targetPaneId,
+      sessionId,
+      directionForZone(zone),
+      zoneInsertsBefore(zone),
+    );
+    if (!outcome) return;
+    setError(null);
+    setRoot(outcome.root);
+    setActivePaneId(outcome.activePaneId);
+  };
+
+  const onPaneDragOver = (paneId: string, event: DragEvent) => {
+    if (!dragCarriesSession(event.dataTransfer?.types)) return;
+    // preventDefault marks the pane a valid drop target and lets the drop fire.
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const zone = dropZoneForPoint(rect, event.clientX, event.clientY);
+    const current = dropTarget();
+    if (!current || current.paneId !== paneId || current.zone !== zone) {
+      setDropTarget({ paneId, zone });
+    }
+  };
+
+  const onPaneDragLeave = (paneId: string, event: DragEvent) => {
+    // dragleave also fires crossing into a child element — only clear when the
+    // pointer actually left this pane's box, else the highlight flickers.
+    const related = event.relatedTarget as Node | null;
+    const host = event.currentTarget as HTMLElement;
+    if (related && host.contains(related)) return;
+    if (dropTarget()?.paneId === paneId) setDropTarget(null);
+  };
+
+  const onPaneDrop = (paneId: string, event: DragEvent) => {
+    if (!dragCarriesSession(event.dataTransfer?.types)) return;
+    event.preventDefault();
+    const sessionId =
+      event.dataTransfer?.getData(SESSION_DND_MIME) ||
+      event.dataTransfer?.getData("text/plain") ||
+      "";
+    const current = dropTarget();
+    const zone = current?.paneId === paneId ? current.zone : "right";
+    setDropTarget(null);
+    dropSessionOnPane(paneId, sessionId, zone);
+  };
+
   // Point a pane at another session without disturbing the layout; a clash with
   // a session already on screen swaps the two. No PTY is created (#212).
   const retargetPaneTo = (paneId: string, sessionId: string) => {
@@ -654,6 +749,11 @@ const TerminalWorkspace: Component<Props> = (props) => {
         splitWithExisting(direction, sessionId),
       showSessionInActivePane: (sessionId) =>
         retargetPaneTo(activePaneId(), sessionId),
+      focusSession: (sessionId) => {
+        if (!containsSession(root(), sessionId)) return false;
+        setActivePaneId(paneIdFor(sessionId));
+        return true;
+      },
     });
     onCleanup(unregister);
   });
@@ -922,6 +1022,10 @@ const TerminalWorkspace: Component<Props> = (props) => {
           sessions={allSessions()}
           onFocusPane={setActivePaneId}
           onRetargetPane={retargetPaneTo}
+          dropTarget={dropTarget()}
+          onPaneDragOver={onPaneDragOver}
+          onPaneDragLeave={onPaneDragLeave}
+          onPaneDrop={onPaneDrop}
           interceptPaneInput={interceptPaneInput}
           registerPaneSend={(paneId, fn) => {
             if (fn) paneSenders.set(paneId, fn);

@@ -7,6 +7,7 @@ import { SearchAddon, type ISearchResultChangeEvent } from "@xterm/addon-search"
 import "@xterm/xterm/css/xterm.css";
 import { openAttach } from "./api";
 import { readClipboardText, writeClipboardText } from "./clipboard";
+import { terminalContextMenuAction } from "./terminalContextMenu";
 import { sessionsStore } from "./store";
 import { getTheme, TERMINAL_THEME_EVENT } from "./terminalThemes";
 import {
@@ -479,46 +480,36 @@ const TerminalView: Component<Props> = (props) => {
     // is a terminal-state leak recoverable with `reset`; don't fix it here by
     // stripping bracketing for everyone.
 
-    // Clipboard plumbing.
+    // Clipboard plumbing. `writeClipboardText` owns the whole browser fallback
+    // chain (async Clipboard API → hidden-textarea execCommand) and the native
+    // Android bridge, so this only records the last failure reason for the
+    // toast — the generic "check clipboard permissions" hid the real cause
+    // (non-secure LAN origin, denied permission) from the reporter.
+    let lastCopyError: string | null = null;
     const copySelection = async (): Promise<boolean> => {
       const sel = term?.getSelection() ?? "";
-      if (!sel) return false;
-
+      if (!sel) {
+        lastCopyError = null;
+        return false;
+      }
       try {
         await writeClipboardText(sel);
+        lastCopyError = null;
         return true;
       } catch (err) {
-        console.warn("Clipboard write failed, trying fallback:", err);
-      }
-
-      // Fallback: use a hidden textarea + execCommand for older mobile WebViews
-      // or when clipboard permissions are denied.
-      try {
-        const ta = document.createElement("textarea");
-        ta.value = sel;
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        ta.style.left = "-9999px";
-        ta.setAttribute("readonly", "");
-        document.body.appendChild(ta);
-
-        // For iOS Safari
-        ta.contentEditable = "true";
-        ta.readOnly = false;
-
-        const range = document.createRange();
-        range.selectNodeContents(ta);
-        const selection = window.getSelection();
-        selection?.removeAllRanges();
-        selection?.addRange(range);
-        ta.setSelectionRange(0, ta.value.length);
-
-        const success = document.execCommand("copy");
-        document.body.removeChild(ta);
-        return success;
-      } catch (err) {
-        console.error("All copy methods failed:", err);
+        lastCopyError = err instanceof Error ? err.message : String(err);
+        console.error("Copy failed:", err);
         return false;
+      }
+    };
+    const notifyCopy = (success: boolean) => {
+      if (success) {
+        props.onNotify?.("Copied to clipboard", "info");
+      } else {
+        props.onNotify?.(
+          lastCopyError ? `Copy failed: ${lastCopyError}` : "Copy failed",
+          "error",
+        );
       }
     };
     const pasteFromClipboard = async () => {
@@ -554,13 +545,7 @@ const TerminalView: Component<Props> = (props) => {
       if ((meta || mac) && (e.key === "c" || e.key === "C")) {
         if (term?.hasSelection()) {
           e.preventDefault();
-          copySelection().then((success) => {
-            if (success) {
-              props.onNotify?.("Copied to clipboard", "info");
-            } else {
-              props.onNotify?.("Copy failed - check clipboard permissions", "error");
-            }
-          });
+          copySelection().then(notifyCopy);
           return false;
         }
         // No selection: fall through so Ctrl+C still sends SIGINT.
@@ -612,15 +597,16 @@ const TerminalView: Component<Props> = (props) => {
     // the browser context menu — most users on mobile/desktop just want one
     // of those two actions on a terminal.
     const onContextMenu = (e: MouseEvent) => {
+      const action = terminalContextMenuAction(
+        e.shiftKey,
+        term?.hasSelection() ?? false,
+      );
+      // Shift+right-click is the escape hatch to the browser's own menu — do
+      // NOT preventDefault, and run none of the custom copy/paste path.
+      if (action === "native") return;
       e.preventDefault();
-      if (term?.hasSelection()) {
-        copySelection().then((success) => {
-          if (success) {
-            props.onNotify?.("Copied to clipboard", "info");
-          } else {
-            props.onNotify?.("Copy failed - check clipboard permissions", "error");
-          }
-        });
+      if (action === "copy") {
+        copySelection().then(notifyCopy);
       } else {
         void pasteFromClipboard();
       }
@@ -641,12 +627,7 @@ const TerminalView: Component<Props> = (props) => {
     // whenever there is a live selection — a tap copies, it does not auto-fire.
     runCopyChip = () => {
       setShowCopyChip(false);
-      void copySelection().then((success) => {
-        props.onNotify?.(
-          success ? "Copied to clipboard" : "Copy failed - check clipboard permissions",
-          success ? "info" : "error",
-        );
-      });
+      void copySelection().then(notifyCopy);
       term?.clearSelection();
     };
     if (isCoarsePointer) {

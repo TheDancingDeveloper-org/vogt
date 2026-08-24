@@ -2699,6 +2699,7 @@ textarea {
   flex-direction: column;
 }
 .terminal-pane {
+  position: relative;
   flex: 1 1 0;
   min-height: 0;
   min-width: 0;
@@ -2707,6 +2708,28 @@ textarea {
   border: 1px solid var(--bd-code);
   background: var(--term-bg);
   overflow: hidden;
+}
+/* Drop-zone highlight (#355): a rail session dragged over a pane previews the
+   half the mirrored split will occupy — VS Code style edge hit-testing picks
+   left/right (a row split) or top/bottom (a column split). */
+.terminal-pane-dropzone {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  background: rgba(88, 166, 255, 0.22);
+  border: 1px solid var(--accent);
+}
+.terminal-pane-dropzone.left {
+  inset: 0 50% 0 0;
+}
+.terminal-pane-dropzone.right {
+  inset: 0 0 0 50%;
+}
+.terminal-pane-dropzone.top {
+  inset: 0 0 50% 0;
+}
+.terminal-pane-dropzone.bottom {
+  inset: 50% 0 0 0;
 }
 .terminal-pane.active {
   border-color: var(--accent);
