@@ -208,6 +208,8 @@ jobs:
           # release stays reproducible from its own inputs alone.
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release,mode=max
+          build-args: |
+            PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 
       - name: the image runs
         env:
@@ -237,6 +239,8 @@ jobs:
           sbom: true
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release,mode=max
+          build-args: |
+            PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 
       - uses: sigstore/cosign-installer@v3
 
