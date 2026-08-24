@@ -402,6 +402,22 @@ step_forge_observed_pr() {
     fi
 }
 
+step_forge_writeback() {
+    # Arm the write-back policy so the upstream work-create below is permitted.
+    # A linked project defaults to policy 'none', which refuses upstream writes
+    # (FR-S11) — 'full' permits create/comment/label/close/reopen.
+    if [[ -z "$FORGE_PROJECT" ]]; then
+        fail "no linked project to arm write-back on"
+        return
+    fi
+    if api_post "forge/writeback" \
+        "{\"project\":\"${FORGE_PROJECT}\",\"policy\":\"full\",\"reason\":\"e2e stack smoke\"}" >/dev/null; then
+        pass "armed write-back policy 'full' on '${FORGE_PROJECT}'"
+    else
+        fail "POST /api/vogt/forge/writeback failed — cannot arm upstream writes"
+    fi
+}
+
 step_forge_upstream_work() {
     # Create a work item in the linked project. On a linked project this is a
     # write-through: the core calls provider.create_issue and the item's ref
@@ -465,6 +481,7 @@ if [[ -n "$FIXTURE_PAT" ]]; then
     run_step "forge: sweep" step_forge_sweep
     run_step "forge: backlog non-empty" step_forge_backlog
     run_step "forge: PR observed edge" step_forge_observed_pr
+    run_step "forge: arm write-back" step_forge_writeback
     run_step "forge: work appears upstream" step_forge_upstream_work
 else
     echo
