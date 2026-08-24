@@ -121,9 +121,24 @@ dependencies {
 
 apply from: 'capacitor.build.gradle'
 
+// #265: the real google-services.json is operator-supplied and git-ignored so
+// a live Firebase key never lands in the public tree again. A sanitized
+// placeholder ships as `google-services.json.example`; when no real file is
+// present (a fresh checkout, CI), copy the placeholder in so the build still
+// assembles and the google-services plugin can validate applicationId against
+// the client entries. Drop in a real config to enable FCM.
+def servicesFile = file('google-services.json')
+if (!servicesFile.exists()) {
+    def servicesExample = file('google-services.json.example')
+    if (servicesExample.exists()) {
+        servicesFile.text = servicesExample.text
+        logger.lifecycle("google-services.json not found; using sanitized placeholder google-services.json.example (#265). FCM needs a real operator-supplied file.")
+    }
+}
+
 try {
     def servicesJSON = file('google-services.json')
-    if (servicesJSON.text) {
+    if (servicesJSON.exists() && servicesJSON.text) {
         apply plugin: 'com.google.gms.google-services'
     }
 } catch(Exception e) {

@@ -33,7 +33,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MOBILE = REPO_ROOT / "mobile"
 GRADLE = MOBILE / "android" / "app" / "build.gradle"
 CAPACITOR = MOBILE / "capacitor.config.ts"
-SERVICES = MOBILE / "android" / "app" / "google-services.json"
+#: The real ``google-services.json`` is operator-supplied and git-ignored so a
+#: live Firebase key stays out of the public tree (#265); the committed,
+#: sanitized placeholder is ``google-services.json.example`` and carries the
+#: package_name client entries the build assembles under. Prefer the real file
+#: when an operator has dropped one in, and fall back to the placeholder — that
+#: is what CI and a fresh checkout assemble against.
+_SERVICES_REAL = MOBILE / "android" / "app" / "google-services.json"
+_SERVICES_EXAMPLE = MOBILE / "android" / "app" / "google-services.json.example"
+SERVICES = _SERVICES_REAL if _SERVICES_REAL.is_file() else _SERVICES_EXAMPLE
 #: Every workflow that can build an APK. Was `engine/.woodpecker/server.yml`
 #: until that vendored pipeline was deleted — it was inert here, since
 #: Woodpecker builds the pre-merge Forgejo repository and this one is on
