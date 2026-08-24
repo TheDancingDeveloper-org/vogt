@@ -115,11 +115,19 @@ known-local-folder = ["tests"]
 python_version = "3.11"
 strict = true
 files = ["src", "tests", "scripts"]
+# `scripts/` holds standalone modules, not a package; this lets a test import
+# one by its bare name (`import load`) resolve to `scripts/load.py`, the same
+# way `pythonpath` below makes it importable at runtime.
+mypy_path = "scripts"
 warn_unreachable = true
 enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `scripts/` is not a package, so its standalone modules are imported by bare
+# name in the tests that pin their contract (`import load`); this puts it on
+# the import path, matching `mypy_path` above.
+pythonpath = ["scripts"]
 addopts = [
   "--strict-markers",
   "--strict-config",
