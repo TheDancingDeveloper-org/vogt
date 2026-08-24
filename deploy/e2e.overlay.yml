@@ -1,76 +1,73 @@
 # The end-to-end stack smoke overlay (#295).
 #
-# Layers onto the two-container stack:
+# Layers onto the two-container stack (vogt.compose.yml + engine.overlay.yml).
+# Designed for CI where the runner's filesystem is NOT the docker daemon's, so
+# it uses NO host bind-mounts and NO Compose file-secrets — both fail there
+# ("bind source path does not exist"), and this Compose also rejects
+# `environment:` secrets ("file is the sole supported option"). Two
+# topology-independent mechanisms replace them:
 #
-#   docker compose \
-#     -f deploy/vogt.compose.yml \
-#     -f deploy/engine.overlay.yml \
-#     -f deploy/e2e.overlay.yml up --build -d
+#   * The synthetic agent CLI (#296) and the engine.toml preset are BAKED into a
+#     dedicated e2e engine image (deploy/e2e.engine.Dockerfile), not mounted.
+#   * The run-generated tokens are delivered through a NAMED VOLUME that a
+#     one-shot `token-init` service populates from environment variables; the
+#     core and engine then read them as ordinary files. A named volume lives on
+#     the daemon, so nothing depends on a host path.
 #
-# It knows nothing about any estate — it is the generic engine overlay plus the
-# one thing the agent-task step of `scripts/e2e_stack_smoke.sh` needs and the
-# published image deliberately does not carry: the synthetic agent CLI (#296).
-#
-# Two read-only mounts and one env var, all test-only:
-#
-#   * `scripts/` → `/opt/vogt-e2e/scripts` so the engine can spawn
-#     `scripts/fake-agent` the way it would a real `claude`/`codex`. It is
-#     mounted rather than baked in because it is a test artifact; the engine
-#     image keeps it out of `default_templates()` for the same reason.
-#   * `deploy/e2e.engine.toml` → `/opt/vogt-e2e/engine.toml`, named by
-#     `ENGINE_CONFIG`, which registers that CLI as the `Fake Agent (test)`
-#     session preset. Config precedence (CLI > env > file) leaves every other
-#     engine setting owned by the environment the base overlay sets.
-#
-# The forge half of the smoke reads and writes the fixture repository. It does
-# so with the FR-S7 *instance file token*, not a per-actor linked PAT: the core
-# reads `github.com`'s token from a file (`VOGT_GITHUB_TOKEN_FILE`), so import,
-# sweep, link and the upstream work-create all use it with no `forge_account_*`
-# key to configure. The token is a Compose secret whose file the CI job writes
-# from the `VOGT_FIXTURE_PAT` secret before `up`; left empty, the core simply
-# has no github.com provider and the smoke skips its forge steps (which it
-# already does whenever `VOGT_FIXTURE_PAT` is unset).
-#
-# Nothing here publishes a port, mounts an estate, or names a host: the smoke
-# runs entirely against the front door the base overlay already exposes.
+# The workflow builds vogt-core:local, vogt-engine:local, then
+# vogt-engine-e2e:local FROM the latter, and runs `up` WITHOUT `--build`.
 
 services:
-  # ── vogt-core: given the fixture token as its github.com file token ───────
-  vogt:
+  # One-shot: write the run's tokens into the shared named volume, then exit 0.
+  # Reuses the already-built core image (it has /bin/sh); no external pull. The
+  # core and engine wait for it via `service_completed_successfully`.
+  token-init:
+    image: ${VOGT_IMAGE:-vogt-core:local}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        umask 077
+        printf '%s' "${VOGT_CORE_TOKEN_VALUE:-}" > /tokens/vogt_core_token
+        printf '%s' "${VOGT_FIXTURE_PAT:-}" > /tokens/github_token
     environment:
-      # The general FR-S7 file token for github.com. Read from a file so it
-      # never appears in `docker inspect`. Empty file ⇒ no provider ⇒ the
-      # forge steps skip, matching the credential-free half.
-      VOGT_GITHUB_TOKEN_FILE: /run/secrets/github_token
-      # The bootstrap-adopted core token acts with these scopes, so it is the
-      # smoke's blast radius. `writeback` is added to the base overlay's default
-      # because the forge half links a project upstream (`forge.link`, scope
-      # `writeback`); without it the core refuses that step. Still no `admin`.
-      VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES: "read,work.write,project.write,writeback"
-    secrets:
-      - github_token
+      VOGT_CORE_TOKEN_VALUE: "${VOGT_CORE_TOKEN_VALUE:-}"
+      VOGT_FIXTURE_PAT: "${VOGT_FIXTURE_PAT:-}"
+    volumes:
+      - e2e_tokens:/tokens
+    restart: "no"
 
-  # ── the engine: the fake-agent preset and its script ─────────────────────
+  # vogt-core: reads its bootstrap + github.com tokens from the shared volume.
+  # `secrets: !override []` clears the file-secret the base engine.overlay wires
+  # in (it would bind-mount a host path the daemon can't see).
+  vogt:
+    depends_on:
+      token-init:
+        condition: service_completed_successfully
+    secrets: !override []
+    environment:
+      # Read from the shared named volume, not /run/secrets. Empty github token
+      # ⇒ no github.com provider ⇒ the forge half skips (credential-free run).
+      VOGT_BOOTSTRAP_CORE_TOKEN_FILE: /run/e2e-tokens/vogt_core_token
+      VOGT_GITHUB_TOKEN_FILE: /run/e2e-tokens/github_token
+      # `writeback` is added to the base default because the forge half links a
+      # project upstream (forge.link); still no `admin`.
+      VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES: "read,work.write,project.write,writeback"
+    volumes:
+      - e2e_tokens:/run/e2e-tokens:ro
+
+  # the engine: the baked fake-agent + preset, core token from the shared volume.
   engine:
+    image: vogt-engine-e2e:local
+    depends_on:
+      token-init:
+        condition: service_completed_successfully
+    secrets: !override []
     environment:
       ENGINE_CONFIG: /opt/vogt-e2e/engine.toml
+      VOGT_CORE_TOKEN_FILE: /run/e2e-tokens/vogt_core_token
     volumes:
-      # Read-only: the smoke never writes through these, and the fake-agent
-      # writes only inside the run's working tree, never back into the repo.
-      - ../scripts:/opt/vogt-e2e/scripts:ro
-      - ./e2e.engine.toml:/opt/vogt-e2e/engine.toml:ro
+      - e2e_tokens:/run/e2e-tokens:ro
 
-secrets:
-  # Injected from the ENVIRONMENT, not a host file: in CI the runner's
-  # filesystem is not the docker daemon's, so a bind-mounted file secret's
-  # source path does not exist for the daemon. `environment:` makes Compose read
-  # the value from the named env var and mount it at /run/secrets/<name> with no
-  # host path — topology-independent.
-  #
-  # github_token: empty VOGT_FIXTURE_PAT ⇒ no github.com provider ⇒ the forge
-  # half skips (the credential-free posture). vogt_core_token overrides the
-  # file-based definition in engine.overlay.yml for the same reason.
-  github_token:
-    environment: VOGT_FIXTURE_PAT
-  vogt_core_token: !override
-    environment: VOGT_CORE_TOKEN_VALUE
+volumes:
+  e2e_tokens:

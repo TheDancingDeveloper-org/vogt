@@ -35,15 +35,16 @@
 name: e2e
 
 on:
-  # TEMPORARILY dispatch-only (#295). The compose-up stack does not yet run on
-  # this self-hosted runner: the runner's filesystem is not the docker daemon's,
-  # so file-secrets and volume bind-mounts don't resolve, and this compose
-  # rejects `environment:` secrets ("file is the sole supported option"). Until
-  # the stack's token + fake-agent delivery is redesigned to avoid host
-  # bind-mounts (bake into an image / entrypoint-inject from env, or point the
-  # walk at a deployed instance), the `push: [dev]` and nightly `schedule`
-  # triggers are removed so it stops building the full stack and failing on
-  # every dev merge. Restore them once it goes green.
+  # `dev` merges (NFR-D12 makes dev a real environment), nightly to catch drift
+  # no merge would, and manual re-runs. Not `pull_request` — PRs keep the mocked
+  # suites. A docs-only push skips the expensive build.
+  push:
+    branches: [dev]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  schedule:
+    - cron: "0 3 * * *"
   workflow_dispatch:
 concurrency:
   # One live stack per ref at a time — two builds racing for the same loopback
@@ -106,21 +107,23 @@ jobs:
           if [ -n "${VOGT_FIXTURE_PAT:-}" ]; then echo "::add-mask::$VOGT_FIXTURE_PAT"; fi
           printf 'VOGT_FIXTURE_PAT=%s\n' "${VOGT_FIXTURE_PAT:-}" >> "$GITHUB_ENV"
 
-      - name: build the core image locally (no GHCR pull — #295 needs no registry creds)
+      - name: build the images locally (no GHCR pull — #295 needs no registry creds)
         run: |
           set -euo pipefail
-          # The core is pinned to a private GHCR image (#266) the runner has no
-          # credentials for; build it here from the repo's own Dockerfile and
-          # tag it `vogt-core:local`, which VOGT_IMAGE points both the core
-          # service and the engine build at. `--build` below then builds only
-          # the engine; the core is already present locally, so nothing pulls.
+          # The core is private on GHCR (#266) and the runner has no registry
+          # creds, so build everything from the repo's own Dockerfiles. VOGT_IMAGE
+          # points the core service and the engine build-arg at the local core.
+          # The e2e engine bakes in the fake-agent (#296) + preset, so nothing is
+          # host-bind-mounted (the runner's FS is not the docker daemon's).
           docker build -t vogt-core:local -f Dockerfile .
+          docker build -t vogt-engine:local -f engine/Dockerfile --build-arg CORE_IMAGE=vogt-core:local .
+          docker build -t vogt-engine-e2e:local -f deploy/e2e.engine.Dockerfile .
 
-      - name: build and start the stack (local build, no pull)
+      - name: start the stack (images prebuilt; no --build, no bind-mounts)
         run: |
           set -euo pipefail
           # shellcheck disable=SC2086  # COMPOSE_FILES is intentionally split
-          docker compose $COMPOSE_FILES up --build -d
+          docker compose $COMPOSE_FILES up -d
 
       - name: wait for /health/ready
         run: |
