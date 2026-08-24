@@ -150,6 +150,85 @@ describe("the server-side speech pipeline", () => {
     expect(errors).toEqual([]);
   });
 
+  // #335: the take is meant to auto-submit hands-free — ending it must call
+  // `send` exactly once, with the transcript put back through the domain
+  // repair pass first (FR-T13), and no manual "Send" tap in between.
+  it("auto-submits the repaired transcript exactly once when the take ends", async () => {
+    installMediaGlobals();
+    // The recognizer heard the ref as words; the repair pass is what turns it
+    // back into `WI-7` before it is sent.
+    fakeVogt({}, { ...engine(), "POST /api/assistant/stt": { body: { text: "open issue seven" } } });
+    const errors: string[] = [];
+    const { container } = render(() => <Assistant onError={(m) => errors.push(m)} />);
+    await settle();
+
+    const mic = container.querySelector('[data-testid="mic"]') as HTMLButtonElement;
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle();
+    // Ending the take (button release) is the only act — no Send tap follows.
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    await settle();
+
+    // Sent exactly once, and with the repaired text — not the raw transcript.
+    const messages = calls("/api/assistant/message");
+    expect(messages).toHaveLength(1);
+    const stub = globalThis.fetch as unknown as {
+      mock: { calls: [RequestInfo | URL, RequestInit?][] };
+    };
+    const sent = stub.mock.calls
+      .filter(([input]) => String(input).includes("/api/assistant/message"))
+      .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>)[0];
+    expect(sent?.text).toBe("open WI-7");
+    // The repair is shown, not applied silently.
+    expect(container.querySelector('[data-testid="voice-repair"]')?.textContent).toContain("WI-7");
+    expect(errors).toEqual([]);
+  });
+
+  // #335: an empty transcript is a take that heard nothing — it must send
+  // nothing rather than an empty turn, and surface no error.
+  it("sends nothing when the take transcribes to empty", async () => {
+    installMediaGlobals();
+    fakeVogt({}, { ...engine(), "POST /api/assistant/stt": { body: { text: "   " } } });
+    const errors: string[] = [];
+    const { container } = render(() => <Assistant onError={(m) => errors.push(m)} />);
+    await settle();
+
+    const mic = container.querySelector('[data-testid="mic"]') as HTMLButtonElement;
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle();
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    await settle();
+
+    // The audio was still posted, but the empty result sent no message.
+    expect(calls("/api/assistant/stt")).toHaveLength(1);
+    expect(calls("/api/assistant/message")).toHaveLength(0);
+    expect(errors).toEqual([]);
+  });
+
+  // #335: abandoning a take — leaving the surface mid-recording — must drop
+  // the audio, never transcribe it, and never send a half-spoken turn.
+  it("sends nothing when the take is abandoned by leaving the surface mid-recording", async () => {
+    installMediaGlobals();
+    fakeVogt({}, engine());
+    const errors: string[] = [];
+    const { container, unmount } = render(() => <Assistant onError={(m) => errors.push(m)} />);
+    await settle();
+
+    const mic = container.querySelector('[data-testid="mic"]') as HTMLButtonElement;
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle();
+    expect(mic.dataset.listening).toBe("yes");
+
+    // Leave the surface while still recording — no release. The recorder's
+    // `stop` must drop the audio rather than post it.
+    unmount();
+    await settle();
+
+    expect(calls("/api/assistant/stt")).toHaveLength(0);
+    expect(calls("/api/assistant/message")).toHaveLength(0);
+    expect(errors).toEqual([]);
+  });
+
   it("plays a spoken reply through the server TTS route when the browser cannot synthesize", async () => {
     installMediaGlobals();
     localStorage.setItem("vogt.assistant.tts", "1"); // TTS on from the start
