@@ -170,7 +170,7 @@ jobs:
           dc exec -T \
             -e VOGT_SMOKE_TOKEN="$VOGT_SMOKE_TOKEN" \
             -e VOGT_FIXTURE_PAT="${VOGT_FIXTURE_PAT:-}" \
-            engine sh /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
+            engine bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
 
       # TODO(#295): the live Playwright project must also run in-network — a
       # Playwright container on the compose network reaching http://engine:8910,
