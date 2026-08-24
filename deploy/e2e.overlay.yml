@@ -75,5 +75,27 @@ services:
     volumes:
       - e2e_tokens:/run/e2e-tokens:ro
 
+  # Live Playwright (#295, item 3): the SAME web/tests/browser/gui.spec.ts specs
+  # against the running stack — real API, no `installFixtures` — so mock/truth
+  # drift fails a test. It reaches the engine by service DNS on the compose
+  # network (http://engine:8910), because the runner cannot reach the stack over
+  # host loopback. Under the `live` profile so `up -d` never starts it; the
+  # workflow runs it explicitly with `docker compose run --profile live`. The
+  # image (deploy/e2e.playwright.Dockerfile) bakes web/ + browsers in.
+  playwright:
+    profiles: ["live"]
+    image: vogt-e2e-playwright:local
+    environment:
+      # The front door on the compose network. The `live` project registers
+      # only when this is set (web/playwright.config.ts).
+      PLAYWRIGHT_LIVE_BASE_URL: "http://engine:8910"
+      # The engine bearer, seeded into localStorage to pass the sign-in gate
+      # (gui.spec.ts). Supplied by the workflow run step.
+      PLAYWRIGHT_LIVE_TOKEN: "${ENGINE_TOKEN:-}"
+      CI: "1"
+    depends_on:
+      - engine
+    restart: "no"
+
 volumes:
   e2e_tokens:
