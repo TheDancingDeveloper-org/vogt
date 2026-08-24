@@ -7,6 +7,32 @@ are the source of truth for *what*; this file is the *order* and the *gates*.
 
 ---
 
+## ✅ Handover-items review — the two APK debug items (2026-08-24)
+
+Both debug-APK handover items below were reviewed and closed out this session.
+
+1. **"APK diagnostics — handover brief" (for the next agent)** — EXECUTED IN
+   FULL. All six steps done: (1) `VogtApplication` global uncaught-exception
+   handler → `filesDir/last-crash.txt` (version via PackageManager, not
+   BuildConfig); (2) `MainActivity` copyable monospace crash dialog, read-once;
+   (3) `createChannel()`/`acquireWakeLock()` try/catch; (4) version 0.2.0→0.2.1
+   (versionCode 2001). Steps 1–4 shipped in **PR #334, merged to `dev`
+   (`9283c37`)**, CI green incl. the Android-assembles job. (5) 0.2.1 APK built
+   on-host targeting vogt-dev; (6) served at the same URLs
+   (`192.168.1.75:18234` / `100.92.54.45:18234`, sha256 `e680e8ae…`).
+2. **"⚠ OPEN BUG — Assistant 'unmute' crashes the APK"** — RESOLVED. Operator
+   confirmed on 0.2.1 (2026-08-24): no crash, full voice round-trip (speak →
+   voice + text reply). #328's foreground-service fix was correct all along; the
+   earlier "still crashes" was the STALE build reinstalling over itself
+   (versionCode never changed until the 0.2.1 bump — the confounder this brief
+   was written to eliminate). The crash recorder now stands as a safety net.
+
+Follow-up raised by the operator: **GitHub #335** (auto-submit the transcribed
+utterance on voice-end; note `web/src/Assistant.tsx` already auto-sends at
+end-of-take, so likely deploy-lag or a native-path bug — parked, not urgent).
+
+---
+
 ## ▶ CURRENT INTENDED STATE — start here (2026-08-23)
 
 ### Three parallel streams running (dispatched 2026-08-23, operator-directed)
