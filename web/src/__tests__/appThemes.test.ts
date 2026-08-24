@@ -6,7 +6,9 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  APP_THEMES,
   APP_THEME_CHANGE_EVENT,
+  APP_THEME_ORDER,
   APP_THEME_STORAGE_KEY,
   SYSTEM_SELECTION,
   applyAppTheme,
@@ -15,6 +17,7 @@ import {
   resolveTheme,
   setAppTheme,
 } from "../appThemes";
+import { THEMES as TERMINAL_THEMES } from "../terminalThemes";
 
 const KEY = "vogt.appTheme.v1";
 const LEGACY_KEY = "mydevenv2.appTheme.v1";
@@ -118,6 +121,55 @@ describe("applying a theme", () => {
     setAppTheme("dark");
     window.removeEventListener("vogt:terminal-theme", spy);
     expect(spy).toHaveBeenCalled();
+  });
+});
+
+describe("theme catalogue (#333)", () => {
+  const MONACO = new Set(["vs", "vs-dark", "hc-black", "hc-light"]);
+
+  it("orders every catalogue entry exactly once", () => {
+    expect([...APP_THEME_ORDER].sort()).toEqual(Object.keys(APP_THEMES).sort());
+    expect(new Set(APP_THEME_ORDER).size).toBe(APP_THEME_ORDER.length);
+  });
+
+  it("gives each theme a coherent id, Monaco theme and existing terminal preset", () => {
+    for (const id of APP_THEME_ORDER) {
+      const theme = APP_THEMES[id]!;
+      expect(theme.id).toBe(id);
+      expect(theme.label.length).toBeGreaterThan(0);
+      expect(MONACO.has(theme.monaco)).toBe(true);
+      // The coupled terminal preset must actually exist in terminalThemes.
+      expect(TERMINAL_THEMES[theme.terminal]).toBeDefined();
+      // A named theme resolves to itself regardless of the OS preference.
+      expect(resolveTheme(id)).toBe(id);
+    }
+  });
+
+  it("adds the new light themes with a light base", () => {
+    for (const id of ["soft", "sepia", "rose"]) {
+      expect(APP_THEMES[id]).toBeDefined();
+      expect(APP_THEMES[id]!.base).toBe("light");
+      expect(APP_THEMES[id]!.monaco).toBe("vs");
+    }
+    // Sepia pairs with the Solarized Light preset introduced for it.
+    expect(APP_THEMES.sepia!.terminal).toBe("Solarized Light");
+    expect(TERMINAL_THEMES["Solarized Light"]).toBeDefined();
+  });
+
+  it("offers more than one non-HC light theme", () => {
+    const lightRegular = APP_THEME_ORDER.filter(
+      (id) => APP_THEMES[id]!.base === "light" && !id.startsWith("hc-"),
+    );
+    expect(lightRegular.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("persists and resolves each new light theme end-to-end", () => {
+    for (const id of ["soft", "sepia", "rose"]) {
+      setAppTheme(id);
+      expect(getAppThemeSelection()).toBe(id);
+      expect(applyAppTheme(id)).toBe(id);
+      expect(document.documentElement.getAttribute("data-theme")).toBe(id);
+    }
   });
 });
 

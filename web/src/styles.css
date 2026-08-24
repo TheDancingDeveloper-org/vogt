@@ -156,6 +156,122 @@
   --bd-code: #d0d7de;
 }
 
+/* Vogt Soft (#333) — a low-contrast neutral light. Soft grey surfaces and a
+   near-black (not pure-black) ink, for readers who find Vogt Light's white too
+   stark. State colours are Vogt Light's AA-checked set. */
+[data-theme="soft"] {
+  color-scheme: light;
+  accent-color: var(--accent);
+
+  --bg: #f4f5f7;
+  --bg-elev: #eceef1;
+  --bg-tab: #e3e6ea;
+  --bg-tab-active: #f4f5f7;
+  --bd: #d5dae0;
+  --bd-strong: #b3bbc4;
+  --fg: #3a424b;
+  --fg-muted: #5c6672;
+  --fg-bright: #1c2127;
+  --accent: #2f6bc0;
+  --accent-hover: #255aa6;
+  --on-accent: #ffffff;
+  --on-emphasis: #ffffff;
+  --activity-idle: #6e7781;
+  --activity-running: #9a6700;
+  --activity-waiting: #cf222e;
+  --activity-errored: #cf222e;
+  --activity-done: #1a7f37;
+  --activity-warning: #9a6700;
+  --danger: #cf222e;
+  --danger-soft: #a40e26;
+  --danger-strong: #cf222e;
+  --success: #1a7f37;
+  --green: #1a7f37;
+  --green-bright: #1a7f37;
+  --red: #cf222e;
+  --text-2: #5c6672;
+  --code-bg: #eceef1;
+  --term-bg: #ffffff;
+  --bd-code: #d5dae0;
+}
+
+/* Vogt Sepia (#333) — a warm Solarized-style light. Cream paper, brown ink and
+   a caramel accent; pairs with the Solarized Light terminal preset. State
+   colours are Vogt Light's AA-checked set, legible on the warm ground. */
+[data-theme="sepia"] {
+  color-scheme: light;
+  accent-color: var(--accent);
+
+  --bg: #fbf3e3;
+  --bg-elev: #f3e9d2;
+  --bg-tab: #ece0c4;
+  --bg-tab-active: #fbf3e3;
+  --bd: #e0d3b3;
+  --bd-strong: #c4b487;
+  --fg: #433422;
+  --fg-muted: #6f5b3e;
+  --fg-bright: #2b2113;
+  --accent: #9a5416;
+  --accent-hover: #7f4512;
+  --on-accent: #ffffff;
+  --on-emphasis: #ffffff;
+  --activity-idle: #6e7781;
+  --activity-running: #9a6700;
+  --activity-waiting: #cf222e;
+  --activity-errored: #cf222e;
+  --activity-done: #1a7f37;
+  --activity-warning: #9a6700;
+  --danger: #cf222e;
+  --danger-soft: #a40e26;
+  --danger-strong: #cf222e;
+  --success: #1a7f37;
+  --green: #1a7f37;
+  --green-bright: #1a7f37;
+  --red: #cf222e;
+  --text-2: #6f5b3e;
+  --code-bg: #f3e9d2;
+  --term-bg: #fdf6e3;
+  --bd-code: #e0d3b3;
+}
+
+/* Vogt Rosé (#333) — a warm rosy light. Blush surfaces, deep rose-brown ink and
+   a magenta accent. State colours are Vogt Light's AA-checked set. */
+[data-theme="rose"] {
+  color-scheme: light;
+  accent-color: var(--accent);
+
+  --bg: #fdf1f2;
+  --bg-elev: #f8e6e8;
+  --bg-tab: #f2dade;
+  --bg-tab-active: #fdf1f2;
+  --bd: #ecccd1;
+  --bd-strong: #d9a6ad;
+  --fg: #4a2c30;
+  --fg-muted: #7a505a;
+  --fg-bright: #331d20;
+  --accent: #b03a6f;
+  --accent-hover: #952f5d;
+  --on-accent: #ffffff;
+  --on-emphasis: #ffffff;
+  --activity-idle: #6e7781;
+  --activity-running: #9a6700;
+  --activity-waiting: #cf222e;
+  --activity-errored: #cf222e;
+  --activity-done: #1a7f37;
+  --activity-warning: #9a6700;
+  --danger: #cf222e;
+  --danger-soft: #a40e26;
+  --danger-strong: #cf222e;
+  --success: #1a7f37;
+  --green: #1a7f37;
+  --green-bright: #1a7f37;
+  --red: #cf222e;
+  --text-2: #7a505a;
+  --code-bg: #f8e6e8;
+  --term-bg: #ffffff;
+  --bd-code: #ecccd1;
+}
+
 /* High contrast (dark) — maximised separation for low-vision use: white text,
    bright borders, saturated state colours on true black. */
 [data-theme="hc-dark"] {

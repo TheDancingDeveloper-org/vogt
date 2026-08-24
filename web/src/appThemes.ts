@@ -35,6 +35,9 @@ export const APP_THEMES: Record<string, AppTheme> = {
   dark: { id: "dark", label: "Vogt Dark", base: "dark", monaco: "vs-dark", terminal: "GitHub Dark" },
   dim: { id: "dim", label: "Vogt Dim", base: "dark", monaco: "vs-dark", terminal: "One Dark" },
   light: { id: "light", label: "Vogt Light", base: "light", monaco: "vs", terminal: "GitHub Light" },
+  soft: { id: "soft", label: "Vogt Soft", base: "light", monaco: "vs", terminal: "GitHub Light" },
+  sepia: { id: "sepia", label: "Vogt Sepia", base: "light", monaco: "vs", terminal: "Solarized Light" },
+  rose: { id: "rose", label: "Vogt Rosé", base: "light", monaco: "vs", terminal: "GitHub Light" },
   "hc-dark": {
     id: "hc-dark", label: "High contrast (dark)", base: "dark",
     monaco: "hc-black", terminal: "GitHub Dark",
@@ -46,7 +49,10 @@ export const APP_THEMES: Record<string, AppTheme> = {
 };
 
 /** The order the picker lists them in: System first, then dark→light. */
-export const APP_THEME_ORDER = ["dark", "dim", "hc-dark", "light", "hc-light"] as const;
+export const APP_THEME_ORDER = [
+  "dark", "dim", "hc-dark",
+  "light", "soft", "sepia", "rose", "hc-light",
+] as const;
 
 const SELECTION_KEY = "vogt.appTheme.v1";
 const LEGACY_SELECTION_KEY = "mydevenv2.appTheme.v1";
