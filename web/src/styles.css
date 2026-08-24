@@ -7382,6 +7382,52 @@ textarea {
   line-height: 1;
 }
 
+/* The star that marks a saved lens as the load-on-empty default (#352). */
+.vogt-lens-default {
+  border: none;
+  border-left: 1px solid var(--bd-strong);
+  padding: 0 6px;
+  color: var(--fg-muted);
+  line-height: 1;
+}
+
+.vogt-lens--default {
+  border-color: var(--activity-running);
+}
+
+.vogt-lens--default .vogt-lens-default {
+  color: var(--activity-running);
+}
+
+.vogt-lens-default-tag {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+/* The exclusion builder (#351): one compact facet + value + add row, on both
+   Board and Backlog. */
+.board-exclude-builder,
+.vogt-backlog-exclude-builder {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.board-exclude-builder select,
+.vogt-backlog-exclude-builder select,
+.board-search,
+.vogt-backlog-search {
+  font-size: 12px;
+}
+
+/* The always-available "Clear all" control below the Inbox batch bar (#353). */
+.inbox-clearall {
+  display: flex;
+  justify-content: flex-end;
+  margin: 4px 0;
+}
+
 /* Quick-create, inline (FR-U15). Laid out like the toolbar above it rather
    than as a dialog: the requirement's words are "inline, without leaving the
    view", and a modal over the board is leaving the view. */
