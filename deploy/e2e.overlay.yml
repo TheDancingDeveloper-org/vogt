@@ -23,13 +23,19 @@ services:
   # core and engine wait for it via `service_completed_successfully`.
   token-init:
     image: ${VOGT_IMAGE:-vogt-core:local}
+    # As root: a fresh named volume is root-owned, and the core image runs as a
+    # non-root user that otherwise cannot write to /tokens. The files are made
+    # world-readable so the (non-root) core and engine can read them back — they
+    # are per-run test tokens in a throwaway stack, not production secrets.
+    user: "0:0"
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
-        umask 077
+        umask 022
         printf '%s' "${VOGT_CORE_TOKEN_VALUE:-}" > /tokens/vogt_core_token
         printf '%s' "${VOGT_FIXTURE_PAT:-}" > /tokens/github_token
+        chmod 0644 /tokens/vogt_core_token /tokens/github_token
     environment:
       VOGT_CORE_TOKEN_VALUE: "${VOGT_CORE_TOKEN_VALUE:-}"
       VOGT_FIXTURE_PAT: "${VOGT_FIXTURE_PAT:-}"
