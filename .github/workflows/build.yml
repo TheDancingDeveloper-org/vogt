@@ -372,27 +372,52 @@ jobs:
           CANDIDATE: ${{ env.DEMO_IMAGE }}:smoke-test
         run: |
           set -euo pipefail
+          # Probe from inside the container, not through a published host port.
+          # On the self-hosted runner the daemon publishes `-p 127.0.0.1::8910`
+          # onto its own loopback, which this step's process cannot reach, so the
+          # curl failed with an immediate connection-refused even though the
+          # container was serving. `docker exec ... node` runs in the container's
+          # own namespace — the same way the deployed healthcheck reaches it — so
+          # it is independent of the runner's docker networking topology. (The
+          # showcase links are hash-router fragments that never leave the browser,
+          # so on the wire every one of them is a request for `/`.)
           cid="$(docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges \
-            --tmpfs /tmp:rw,noexec,nosuid,size=16m -p 127.0.0.1::8910 "$CANDIDATE")"
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m "$CANDIDATE")"
           trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
-          port=""
+
+          # Fetch a path from inside the container; non-2xx or a transport error
+          # exits non-zero and (under set -e) fails the step.
+          get() {
+            docker exec "$cid" node -e '
+              fetch("http://127.0.0.1:8910/" + process.argv[1])
+                .then(async (r) => { if (!r.ok) process.exit(1); process.stdout.write(await r.text()); })
+                .catch(() => process.exit(1));
+            ' "$1"
+          }
+
           for _ in $(seq 1 30); do
-            port="$(docker port "$cid" 8910/tcp 2>/dev/null | sed 's/.*://' || true)"
-            [ -n "$port" ] || { sleep 1; continue; }
-            curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null && break
+            get healthz >/dev/null 2>&1 && break
             sleep 1
           done
-          manifest="$(curl -fsS "http://127.0.0.1:${port}/demo-manifest.json")"
-          build="$(curl -fsS "http://127.0.0.1:${port}/demo-build.json")"
+
+          manifest="$(get demo-manifest.json)"
+          build="$(get demo-build.json)"
           grep -F '"full-estate-v1"' <<<"$manifest"
           grep -F "\"source_sha\": \"${GITHUB_SHA}\"" <<<"$manifest"
           grep -F "\"source_sha\": \"${GITHUB_SHA}\"" <<<"$build"
-          for route in '#/board' '#/inbox' '#/t/demo-build' '#/t/demo-agent' '#/t/demo-logs'; do
-            curl -fsS "http://127.0.0.1:${port}/${route}" | grep -F 'id="root"'
-          done
-          test "$(curl -sS -o /tmp/demo-api-body -w '%{http_code}' \
-            -X POST "http://127.0.0.1:${port}/api/sessions")" = 404
-          grep -F 'no server-side API' /tmp/demo-api-body
+          get '' | grep -F 'id="root"'
+
+          # The origin has no server-side API: a write is refused with 404 and an
+          # explanatory body, checked from inside the container as well.
+          docker exec "$cid" node -e '
+            fetch("http://127.0.0.1:8910/api/sessions", { method: "POST" })
+              .then(async (r) => {
+                const body = await r.text();
+                if (r.status !== 404) { console.error("unexpected status", r.status); process.exit(1); }
+                if (!body.includes("no server-side API")) { console.error("unexpected body", body); process.exit(1); }
+              })
+              .catch((e) => { console.error(e.message); process.exit(1); });
+          '
 
       - name: scan the static demo image
         uses: aquasecurity/trivy-action@v0.33.1
