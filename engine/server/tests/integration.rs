@@ -3869,7 +3869,9 @@ async fn the_activity_state_is_announced_on_the_server_wide_event_stream() {
 
     let want_id = id.clone();
     let event = event_matching(&mut stream, move |event| {
-        event["type"] == "activity" && event["id"] == want_id.as_str()
+        event["type"] == "activity"
+            && event["id"] == want_id.as_str()
+            && event["state"] == "waiting-for-input"
     })
     .await;
     assert_eq!(
