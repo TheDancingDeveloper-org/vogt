@@ -45,6 +45,13 @@ jobs:
 
       - uses: sigstore/cosign-installer@v3
 
+      - name: authenticate to the dev registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: resolve and verify the signed dev image
         id: image
         env:
