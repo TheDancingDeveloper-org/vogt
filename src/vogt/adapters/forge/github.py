@@ -161,6 +161,10 @@ class GitHubProvider:
         """The token a clone should authenticate with, if any."""
         return self._client.token
 
+    def identity(self) -> tuple[str, str] | None:
+        identity = self._client.identity()
+        return None if identity is None else (identity.login, identity.scopes)
+
     # -- read surface ------------------------------------------------------
 
     def issues_updated_since(

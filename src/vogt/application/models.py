@@ -2161,7 +2161,10 @@ class ForgeAccountLinkParams(Params):
 
     host: str = Field(
         default="github.com",
-        description="The forge host to link. Only github.com is supported in v1.",
+        description=(
+            "The configured forge host to link, for example github.com or a "
+            "Forgejo host named under forge_token_files."
+        ),
     )
     token: str = Field(
         min_length=1,
@@ -2231,7 +2234,10 @@ class ForgeReposParams(Params):
 
     host: str = Field(
         default="github.com",
-        description="The forge host to enumerate. Only github.com is supported in v1.",
+        description=(
+            "The configured forge host to enumerate, for example github.com "
+            "or a Forgejo host named under forge_token_files."
+        ),
     )
 
 
@@ -2292,7 +2298,10 @@ class ForgeImportParams(Params):
     )
     host: str = Field(
         default="github.com",
-        description="The forge host. Only github.com is supported in v1.",
+        description=(
+            "The configured forge host, for example github.com or a Forgejo "
+            "host named under forge_token_files."
+        ),
     )
     display_name: str | None = Field(
         default=None,
@@ -2362,7 +2371,7 @@ class OnboardResult(Result):
 
 
 class ImportProjectParams(Params):
-    """Bring a repository that lives on GitHub into Vogt (FR-P6).
+    """Bring a repository that lives on a configured forge into Vogt (FR-P6).
 
     `repo` is named by the caller and is never chosen from a list: there is
     no listing operation, and adding one would be the registration-candidate
@@ -2370,7 +2379,10 @@ class ImportProjectParams(Params):
     """
 
     repo: str = Field(
-        description="Repository to import: `owner/name`, or any GitHub URL.",
+        description=(
+            "Repository to import: `owner/name`, `host/owner/name`, or an "
+            "HTTPS/SSH repository URL for GitHub or a configured Forgejo host."
+        ),
         min_length=1,
     )
     name: str | None = Field(

@@ -1,4 +1,4 @@
-"""Importing a repository that lives on GitHub (FR-P6, FR-P7).
+"""Importing a repository that lives on a configured forge (FR-P6, FR-P7).
 
 Registration assumes the working tree is authoritative for its own
 provenance. That is true of a folder and false of a checkout of somebody
@@ -18,10 +18,10 @@ import re
 from pathlib import Path
 
 from vogt.adapters.forge import (
-    GitHubProvider,
+    ForgeProvider,
     RepoRef,
-    github_identity,
-    github_provider,
+    identity_for,
+    provider_for_host,
 )
 from vogt.adapters.git import CloneRequest
 from vogt.application.context import AppContext
@@ -37,7 +37,7 @@ from vogt.core.entities import LifecycleState
 from vogt.core.ids import slugify
 from vogt.errors import Conflict, InvalidRequest, NotFound
 
-#: What GitHub permits in an owner or repository name. Strict on purpose:
+#: What a forge permits in an owner or repository name. Strict on purpose:
 #: without it `https://example.com` splits into two parts and is accepted as
 #: a repository called `example.com` owned by `https:`.
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -47,30 +47,34 @@ PROJECT_IMPORTED_EVENT = "project.imported"
 
 #: `forge.import` (#344) lands the same clone+register+consolidate as
 #: `project.import`, but the audit must say which act put the project there:
-#: "imported from GitHub by reference" and "imported from the forge picker
+#: "imported from a configured forge by reference" and "imported from the forge picker
 #: under my credential" are different provenance answers (FR-S1).
 FORGE_IMPORT = "forge.import"
 FORGE_IMPORTED_EVENT = "forge.imported"
-
-#: Import is GitHub-shaped in v1 (it clones from GitHub and consolidates its
-#: history). The pure identity operations — parsing a reference and building
-#: its URLs — need no credential, so they go through the registry's token-less
-#: identity provider rather than a client of import's own (D2).
-_GITHUB = github_identity()
 
 
 def import_project(ctx: AppContext, params: ImportProjectParams) -> ImportProjectResult:
     """Clone, register, and consolidate — one operation, one reason.
 
-    The caller names the repository by reference (`owner/name` or a URL), and
-    the clone runs under the instance file token (FR-S7). The clone, register
+    The caller names the repository by reference (`owner/name`, a
+    `host/owner/name`, or a URL), and the clone runs under the instance file
+    token when one is configured (FR-S7). Public repositories can clone
+    without a token. The clone, register
     and consolidate themselves are `import_from_ref`, which `forge.import`
     (#344) shares — the only difference between the two verbs is how the
     repository is named and whose credential the clone runs under.
     """
-    owner, repo = _resolve_repo(params.repo)
-    ref = RepoRef(host="github.com", owner=owner, repo=repo)
-    provider = github_provider(ctx.config, transport=ctx.forge_transport)
+    resolved = identity_for(
+        _normalise_reference(params.repo), ctx.config, transport=ctx.forge_transport
+    )
+    if resolved is None:
+        msg = (
+            f"{params.repo!r} does not name a GitHub repository or a configured "
+            "Forgejo repository; give owner/name, host/owner/name, or a repository URL"
+        )
+        raise InvalidRequest(msg)
+    _, ref = resolved
+    provider = provider_for_host(ref.host, ctx.config, transport=ctx.forge_transport)
     return import_from_ref(
         ctx,
         ref=ref,
@@ -89,7 +93,7 @@ def import_from_ref(
     ctx: AppContext,
     *,
     ref: RepoRef,
-    provider: GitHubProvider | None,
+    provider: ForgeProvider | None,
     display_name: str | None,
     root_path: str | None,
     lifecycle_state: LifecycleState,
@@ -112,7 +116,19 @@ def import_from_ref(
     registered rather than a project pointing at nothing. `project create`
     scaffolds in the same order, for the same reason.
     """
-    remote = _GITHUB.clone_url(ref)
+    # The identity provider owns canonical URLs. A configured credential is
+    # optional for public cloning, but required for consolidation; this keeps
+    # the core usable without an upstream token while never claiming that a
+    # missing Forgejo baseline is empty.
+    identity = identity_for(
+        f"https://{ref.host}/{ref.owner}/{ref.repo}",
+        ctx.config,
+        transport=ctx.forge_transport,
+    )
+    if identity is None:
+        raise InvalidRequest(f"no forge provider is registered for {ref.host}")
+    identity_provider, _ = identity
+    remote = identity_provider.clone_url(ref)
     name = display_name or ref.repo
     slug = slugify(name)
     if not slug:
@@ -151,7 +167,7 @@ def import_from_ref(
         RegisterProjectParams(
             name=name,
             root_path=str(outcome.destination),
-            repo_url=_GITHUB.web_url(ref),
+            repo_url=identity_provider.web_url(ref),
             lifecycle_state=lifecycle_state,
             reason=reason,
         ),
@@ -197,25 +213,18 @@ def import_from_ref(
     )
 
 
-def _resolve_repo(reference: str) -> tuple[str, str]:
+def _normalise_reference(reference: str) -> str:
     """Accept the ways a person names a repository, and only those.
 
-    `owner/name`, an HTTPS URL, an SSH URL. Not a search term and not a
-    bare name: a repository this instance cannot address unambiguously is a
-    request to go looking for it, and nothing here looks.
+    `owner/name` remains the GitHub shorthand. Configured Forgejo imports use
+    `host/owner/name` so a host is never guessed, while HTTPS/SSH URLs retain
+    their explicit host. Not a search term and not a bare name.
     """
     candidate = reference.strip()
-    parsed = _GITHUB.parse(candidate)
-    if parsed is not None:
-        return parsed.owner, parsed.repo
     parts = [part for part in candidate.strip("/").split("/") if part]
     if len(parts) == 2 and all(_NAME.fullmatch(part) for part in parts):
-        return parts[0], parts[1].removesuffix(".git")
-    msg = (
-        f"{reference!r} does not name a GitHub repository; "
-        "give owner/name or a repository URL"
-    )
-    raise InvalidRequest(msg)
+        return f"https://github.com/{parts[0]}/{parts[1].removesuffix('.git')}"
+    return candidate
 
 
 def _text(value: object) -> str | None:
@@ -223,7 +232,7 @@ def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _describe(provider: GitHubProvider | None, ref: RepoRef) -> dict[str, object]:
+def _describe(provider: ForgeProvider | None, ref: RepoRef) -> dict[str, object]:
     """Confirm the repository exists and is visible to this token.
 
     Unconfigured is not an error — a public repository clones perfectly well

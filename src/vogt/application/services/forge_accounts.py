@@ -18,9 +18,8 @@ nowhere safe to keep a recoverable secret without it, so the honest answer is
 
 from __future__ import annotations
 
+from vogt.adapters.forge import provider_for_token, supported_hosts
 from vogt.adapters.forge.accounts import load_cipher
-from vogt.adapters.forge.github import HOST as GITHUB_HOST
-from vogt.adapters.github.client import GitHubClient
 from vogt.application.context import AppContext
 from vogt.application.models import (
     ForgeAccountLinkParams,
@@ -40,13 +39,12 @@ FORGE_ACCOUNT_UNLINKED_EVENT = "forge.account_unlinked"
 
 
 def _require_supported_host(host: str) -> None:
-    """Only github.com in v1 — the same ceiling the rest of the forge holds."""
-    if host != GITHUB_HOST:
-        msg = (
-            f"account linking supports {GITHUB_HOST} only in v1; "
-            f"{host!r} has no provider to validate a token against"
-        )
-        raise InvalidRequest(msg)
+    """Only configured provider hosts can validate a linked token."""
+    msg = (
+        f"{host!r} has no provider to validate a token against; configure "
+        "the host under forge_token_files first"
+    )
+    raise InvalidRequest(msg)
 
 
 def link_forge_account(
@@ -59,18 +57,29 @@ def link_forge_account(
     forge (so an invalid paste is refused before anything is stored), and only
     then is the ciphertext written. The plaintext never leaves this function.
     """
-    _require_supported_host(params.host)
+    if params.host not in supported_hosts(ctx.config):
+        _require_supported_host(params.host)
     # Refuse early when linking is not configured — before touching the token.
     cipher = load_cipher(ctx.config)
 
-    client = GitHubClient(token=params.token, transport=ctx.forge_transport)
-    identity = client.identity()
-    if identity is None:
+    provider = provider_for_token(
+        params.host,
+        params.token,
+        config=ctx.config,
+        transport=ctx.forge_transport,
+    )
+    if provider is None:
         msg = (
             "the forge did not accept this token; it may be invalid, expired, "
             "or lack the scope to read its own identity"
         )
         raise InvalidRequest(msg)
+    resolved_identity = provider.identity()
+    if resolved_identity is None:
+        raise InvalidRequest(
+            "the forge did not accept this token; it did not return an identity"
+        )
+    login, scopes = resolved_identity
 
     encrypted = cipher.encrypt(params.token)
 
@@ -78,15 +87,15 @@ def link_forge_account(
         txn.upsert_forge_account(
             actor_id=actor.id,
             host=params.host,
-            login=identity.login,
-            scopes=identity.scopes,
+            login=str(login),
+            scopes=scopes,
             encrypted_token=encrypted,
             at=ctx.clock(),
         )
         result = ForgeAccountResult(
             host=params.host,
-            login=identity.login,
-            scopes=identity.scopes,
+            login=login,
+            scopes=scopes,
             linked=True,
         )
         return WriteOutcome(
@@ -94,9 +103,9 @@ def link_forge_account(
             entity_kind="forge_account",
             entity_id=f"{actor.id}:{params.host}",
             # The digest covers who and where, never the token.
-            payload={"host": params.host, "login": identity.login},
+            payload={"host": params.host, "login": str(login)},
             event_kind=FORGE_ACCOUNT_LINKED_EVENT,
-            summary={"host": params.host, "login": identity.login},
+            summary={"host": params.host, "login": str(login)},
         )
 
     return audited_write(
@@ -141,7 +150,8 @@ def unlink_forge_account(
     file-token fallback. It does not — cannot — revoke the token upstream; the
     forge is the only place that can, so a caller who wants it dead revokes it
     there too."""
-    _require_supported_host(params.host)
+    if params.host not in supported_hosts(ctx.config):
+        _require_supported_host(params.host)
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[ForgeAccountResult]:
         existing = txn.forge_account(actor_id=actor.id, host=params.host)

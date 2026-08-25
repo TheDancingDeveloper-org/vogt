@@ -1,4 +1,5 @@
-"""`forge.import` — turn a picker-listed repository into a project (#344).
+"""`forge.import` — turn a picker-listed configured-forge repository into a
+project (#344).
 
 `forge.repos` lists the repositories the acting credential can see, with
 `already_registered: false` for the ones no project holds — but nothing turned
@@ -20,8 +21,8 @@ under, and the instance file token may not be able to reach it at all.
 
 from __future__ import annotations
 
-from vogt.adapters.forge.github import HOST as GITHUB_HOST
 from vogt.adapters.forge.models import RepoRef
+from vogt.adapters.forge.registry import identity_for, supported_hosts
 from vogt.application.context import AppContext
 from vogt.application.models import ForgeImportParams, ImportProjectResult
 from vogt.application.services.forge_repos import _reader_provider
@@ -37,12 +38,11 @@ def import_forge_repo(
     ctx: AppContext, params: ForgeImportParams
 ) -> ImportProjectResult:
     """Clone + register + consolidate a repository the picker listed (#344)."""
-    if params.host != GITHUB_HOST:
-        msg = (
-            f"forge import supports {GITHUB_HOST} only in v1; "
-            f"{params.host!r} has no provider to import from"
+    if params.host not in supported_hosts(ctx.config):
+        raise InvalidRequest(
+            f"{params.host!r} is not a configured forge host; add it to "
+            "forge_token_files before importing by host"
         )
-        raise InvalidRequest(msg)
 
     # The same credential resolution the picker uses (#179): the acting actor's
     # linked PAT when they have one — which reaches their private repos even
@@ -54,11 +54,19 @@ def import_forge_repo(
             "no forge credential is available for this host — neither a linked "
             "account (`forge account link`) nor the instance file token "
             "(FR-S7) — so there is nothing to clone "
-            f"{params.owner}/{params.name} with"
+            f"{params.host}/{params.owner}/{params.name} with"
         )
         raise InvalidRequest(msg)
-
     ref = RepoRef(host=params.host, owner=params.owner, repo=params.name)
+    identity = identity_for(
+        f"https://{params.host}/{params.owner}/{params.name}",
+        ctx.config,
+        transport=ctx.forge_transport,
+    )
+    if identity is None:
+        raise InvalidRequest(
+            f"could not resolve {params.host}/{params.owner}/{params.name}"
+        )
     return import_from_ref(
         ctx,
         ref=ref,

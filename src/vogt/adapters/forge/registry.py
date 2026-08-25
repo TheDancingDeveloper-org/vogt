@@ -49,6 +49,8 @@ class _Spec:
     hosts: Callable[[VogtConfig | None], tuple[str, ...]]
     match: Callable[[str | None, VogtConfig | None], RepoRef | None]
     build: Callable[[str, Path | None, Transport | None], ForgeProvider | None]
+    identity: Callable[[str, Transport | None], ForgeProvider]
+    build_token: Callable[[str, str, Transport | None], ForgeProvider]
 
 
 def _build_github(
@@ -64,6 +66,28 @@ def _build_forgejo(
 ) -> ForgeProvider | None:
     client = ForgejoClient.from_token_file(host, token_file, transport=transport)
     return None if client is None else ForgejoProvider(client)
+
+
+def _identity_github(_host: str, _transport: Transport | None) -> ForgeProvider:
+    """The token-less GitHub provider used for URL identity and cloning."""
+    return _GITHUB_MATCHER
+
+
+def _identity_forgejo(host: str, transport: Transport | None) -> ForgeProvider:
+    """A token-less Forgejo provider used to import public repositories."""
+    return ForgejoProvider(ForgejoClient(host=host, transport=transport))
+
+
+def _build_github_token(
+    _host: str, token: str, transport: Transport | None
+) -> ForgeProvider:
+    return GitHubProvider(GitHubClient(token=token, transport=transport))
+
+
+def _build_forgejo_token(
+    host: str, token: str, transport: Transport | None
+) -> ForgeProvider:
+    return ForgejoProvider(ForgejoClient(host=host, token=token, transport=transport))
 
 
 #: A token-less instance used only for its pure `parse` — matching a URL to a
@@ -91,11 +115,15 @@ _SPECS: tuple[_Spec, ...] = (
         hosts=lambda config: (GITHUB_HOST,),
         match=lambda repo_url, config: _GITHUB_MATCHER.parse(repo_url),
         build=_build_github,
+        identity=_identity_github,
+        build_token=_build_github_token,
     ),
     _Spec(
         hosts=_forgejo_hosts,
         match=lambda repo_url, config: parse_repo_url(repo_url, _forgejo_hosts(config)),
         build=_build_forgejo,
+        identity=_identity_forgejo,
+        build_token=_build_forgejo_token,
     ),
 )
 
@@ -153,6 +181,62 @@ def provider_for(
     spec, ref = matched
     token_file = token_file_for(config, ref.host)
     return spec.build(ref.host, token_file, transport)
+
+
+def provider_for_host(
+    host: str,
+    config: VogtConfig,
+    *,
+    transport: Transport | None = None,
+) -> ForgeProvider | None:
+    """Resolve a configured host to its credentialed provider, if available.
+
+    This is the host-shaped counterpart to :func:`provider_for`: picker and
+    import operations already have a host field, so they should not invent a
+    dummy repository merely to resolve its token. A host named in
+    ``forge_token_files`` is supported even when its token file is absent;
+    ``None`` then means ``not configured`` rather than ``unsupported``.
+    """
+    for spec in _SPECS:
+        if host not in spec.hosts(config):
+            continue
+        return spec.build(host, token_file_for(config, host), transport)
+    return None
+
+
+def provider_for_token(
+    host: str,
+    token: str,
+    *,
+    config: VogtConfig | None = None,
+    transport: Transport | None = None,
+) -> ForgeProvider | None:
+    """Build a provider from an explicitly resolved actor token."""
+    for spec in _SPECS:
+        if host not in spec.hosts(config):
+            continue
+        return spec.build_token(host, token, transport)
+    return None
+
+
+def identity_for(
+    repo_url: str | None,
+    config: VogtConfig,
+    *,
+    transport: Transport | None = None,
+) -> tuple[ForgeProvider, RepoRef] | None:
+    """Resolve repository identity without requiring a forge token.
+
+    GitHub is always an identity host. Forgejo identities are available for
+    hosts explicitly declared in ``forge_token_files``; the resulting
+    token-less provider can build canonical URLs and clone public repositories
+    while the credentialed provider remains the gate for consolidation.
+    """
+    matched = _spec_for(repo_url, config)
+    if matched is None:
+        return None
+    spec, ref = matched
+    return spec.identity(ref.host, transport), ref
 
 
 def unsupported_reason(
@@ -231,7 +315,10 @@ __all__ = [
     "github_identity",
     "github_provider",
     "has_configured_forge",
+    "identity_for",
     "provider_for",
+    "provider_for_host",
+    "provider_for_token",
     "supported_hosts",
     "token_file_for",
     "unsupported_reason",

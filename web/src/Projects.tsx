@@ -1177,6 +1177,7 @@ const Projects: Component<Props> = (props) => {
   // crawls — the token is the scope. Select-all imports each as clone + full
   // sync, skipping what is already registered.
   const [pickerRepos, setPickerRepos] = createSignal<ForgeRepoView[]>([]);
+  const [pickerHost, setPickerHost] = createSignal("github.com");
   const [pickerLogin, setPickerLogin] = createSignal<string | null>(null);
   const [pickerDetail, setPickerDetail] = createSignal<string | null>(null);
   const [pickerLoading, setPickerLoading] = createSignal(false);
@@ -1202,7 +1203,7 @@ const Projects: Component<Props> = (props) => {
     setPickerError(null);
     setBatchDone(null);
     try {
-      const result = await listForgeRepos();
+      const result = await listForgeRepos(pickerHost().trim() || "github.com");
       setPickerRepos(result.repos);
       setPickerLogin(result.login);
       setPickerDetail(result.detail);
@@ -2092,6 +2093,15 @@ const Projects: Component<Props> = (props) => {
 
           {/* -- the repo picker ------------------------------------------- */}
           <div class="vogt-projects-picker" aria-label="Repository picker">
+            <label>
+              <span>Forge host</span>
+              <input
+                type="text"
+                value={pickerHost()}
+                placeholder="github.com or repo.example.com"
+                onInput={(event) => setPickerHost(event.currentTarget.value)}
+              />
+            </label>
             <div class="vogt-projects-resolve-actions">
               <button type="button" onClick={() => void loadRepos()} disabled={pickerLoading()}>
                 {pickerLoading()

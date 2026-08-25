@@ -511,12 +511,14 @@ both turn it off.
 
 ## M7 — Onboarding & inbox (post-v1)
 
-**Objective**: getting a GitHub repository into Vogt should be one act, and
-what GitHub is trying to tell you about it should be visible here.
+**Objective**: getting a repository from GitHub or a configured Forgejo host
+into Vogt should be one act, and what its forge is trying to tell you about it
+should be visible here.
 
 Deliverables:
-- **Import** (FR-P6, FR-P7): `project.import` takes a repository the caller
-  names, clones it into `import_root`, registers it with `repo_url` set, and
+- **Import** (FR-P6, FR-P7): `project.import` takes a GitHub or configured
+  Forgejo repository the caller names, clones it into `import_root`, registers
+  it with `repo_url` set, and
   runs the FR-B3 consolidation — one operation, one reason, one audit trail.
   Clone before declared write, so the failure mode is a stray checkout rather
   than a project pointing at nothing.

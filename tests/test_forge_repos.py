@@ -209,7 +209,7 @@ def test_no_credential_lists_nothing_and_says_why(tmp_path: Path) -> None:
     assert result.detail is not None and "not collected" in result.detail
 
 
-def test_only_github_is_supported_in_v1(tmp_path: Path) -> None:
+def test_unknown_forge_host_is_rejected(tmp_path: Path) -> None:
     ctx = _instance(tmp_path, forge_transport=ReposForge())
     with pytest.raises(InvalidRequest):
         list_forge_repos(ctx, ForgeReposParams(host="gitlab.com"))

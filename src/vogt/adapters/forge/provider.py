@@ -110,6 +110,21 @@ class ForgeProvider(Protocol):
     def number_of(self, subject_key: str | None) -> int | None:
         """The issue/PR number a subject key names, or `None`."""
 
+    def clone_url(self, ref: RepoRef) -> str:
+        """The credential-free canonical clone URL for ``ref``."""
+
+    def web_url(self, ref: RepoRef) -> str:
+        """The canonical browser URL registered for ``ref``."""
+
+    def describe(self, ref: RepoRef) -> dict[str, object] | None:
+        """Repository metadata, or ``None`` when it is not visible."""
+
+    def clone_token(self) -> str | None:
+        """The token a git clone should use, if one is configured."""
+
+    def identity(self) -> tuple[str, str] | None:
+        """The token owner and reported scopes, or ``None`` when invalid."""
+
     # -- read surface ------------------------------------------------------
 
     def issues_updated_since(

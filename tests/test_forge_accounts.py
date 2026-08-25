@@ -65,6 +65,11 @@ class RecordingForge:
         method: str = "GET",
     ) -> tuple[int, bytes]:
         self.calls.append((method, url, headers.get("Authorization")))
+        if "repo.indexarr.net/api/v1/user" in url:
+            if method == "GET" and url.endswith("/user"):
+                return 200, json.dumps({"login": self.login}).encode("utf-8")
+            if method == "GET":
+                return 200, b"[]"
         if method == "GET" and url.endswith("/user"):
             return 200, json.dumps({"login": self.login}).encode("utf-8")
         if method != "GET":
@@ -89,6 +94,7 @@ def _instance(
     *,
     key_file: Path | None,
     github_token_file: Path | None = None,
+    forge_token_files: dict[str, Path] | None = None,
     forge_transport: Any = None,
 ) -> AppContext:
     config = VogtConfig(
@@ -96,6 +102,7 @@ def _instance(
         sqlite_synchronous="off",
         forge_account_key_file=key_file,
         github_token_file=github_token_file,
+        forge_token_files=forge_token_files or {},
     )
     ctx = build_context(
         config=config,
@@ -201,7 +208,31 @@ def test_an_invalid_token_is_refused_and_stores_nothing(tmp_path: Path) -> None:
     assert status_forge_account(ctx, ForgeAccountStatusParams()).accounts == []
 
 
-def test_only_github_is_supported_in_v1(tmp_path: Path) -> None:
+def test_a_forgejo_account_is_validated_and_stored_for_its_host(
+    tmp_path: Path,
+) -> None:
+    host = "repo.indexarr.net"
+    forge = RecordingForge(login="indexarr")
+    token_file = tmp_path / "forgejo-token"
+    token_file.write_text("frg_instance", encoding="utf-8")
+    ctx = _instance(
+        tmp_path,
+        key_file=_key_file(tmp_path),
+        forge_token_files={host: token_file},
+        forge_transport=forge,
+    )
+
+    linked = link_forge_account(
+        ctx,
+        ForgeAccountLinkParams(host=host, token="frg_actor", reason=WHY),
+    )
+
+    assert linked.host == host
+    assert linked.login == "indexarr"
+    assert forge.calls[0][2] == "token frg_actor"
+
+
+def test_an_unconfigured_forge_host_is_rejected(tmp_path: Path) -> None:
     ctx = _instance(
         tmp_path, key_file=_key_file(tmp_path), forge_transport=RecordingForge()
     )
