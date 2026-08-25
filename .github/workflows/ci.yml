@@ -645,11 +645,11 @@ jobs:
 #
 #   * `komodo-deploy` / `komodo-deploy-dev`. Vogt has never deployed from CI
 #     and does not start here: publishing is not deploying (NFR-D10).
-#     Production moves when a digest pinned in `indexarr/ops` changes.
+#     Production moves when the approved estate workflow pins a digest.
 #
 #   * `mobile-apk` / `mobile-apk-dev` *release signing and publishing* — four
 #     `MYDEVENV2_ANDROID_*` keystore secrets, and upload to the Forgejo
-#     `apk-latest` / `apk-dev-latest` release tags through `indexarr/ops`'s
+#     release tags through the approved estate workflow's
 #     `forgejo-api.sh`. The keystore and the registry both live in the forge
 #     the merge left behind. The `android` job above still *builds* the APK
 #     (NFR-C6), unsigned, so a broken shell is caught; where a signed APK

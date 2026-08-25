@@ -1,9 +1,10 @@
 name: deploy production
 
 # Publishing a release never changes production. This separately dispatched
-# workflow makes the cross-repository handoff explicit, records its exact
-# digest, and requires an explicit live-change confirmation before it can
-# modify estate desired state or call Node B's Komodo deployment API.
+# workflow verifies the signed release and hands an immutable release receipt
+# to the estate deployment repository. That repository owns desired state,
+# deployment credentials, rollback, and the live smoke; Vogt has no broad
+# long-lived Komodo credential.
 
 "on":
   workflow_dispatch:
@@ -13,7 +14,7 @@ name: deploy production
         required: true
         type: string
       confirm:
-        description: Type DEPLOY to confirm the live Node B production change
+        description: Type DEPLOY to confirm the live production change
         required: true
         type: string
 
@@ -21,9 +22,12 @@ permissions:
   contents: read
   packages: read
 
+# The GitHub App token is scoped to the configured deployment repository, but
+# the environment approval remains the human change-control gate.
+
 jobs:
   deploy:
-    name: pin and deploy the approved release
+    name: verify and hand off the approved release
     runs-on: [self-hosted, tailnet]
     environment: vogt-prod
     steps:
@@ -41,7 +45,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: validate the release tag
+      - name: validate the release tag ancestry
+        id: release
         env:
           TAG: ${{ inputs.tag }}
         run: |
@@ -53,6 +58,7 @@ jobs:
             echo "::error::$TAG ($tag_sha) is not reachable from origin/prod"
             exit 1
           }
+          echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
 
       - name: authenticate to the release registry
         uses: docker/login-action@v3
@@ -84,82 +90,93 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "ghcr.io/thedancingdeveloper-org/vogt-stack@${DIGEST}"
 
-      - name: pin the production stack's desired state
+      - name: mint the scoped deployment-app token
+        id: deployment-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.VOGT_DEPLOYMENT_APP_ID }}
+          private-key: ${{ secrets.VOGT_DEPLOYMENT_APP_PRIVATE_KEY }}
+          owner: ${{ vars.VOGT_DEPLOYMENT_OWNER }}
+          repositories: ${{ vars.VOGT_DEPLOYMENT_REPOSITORY_NAME }}
+          permission-actions: write
+          permission-contents: read
+
+      - name: hand the signed release to the estate repository
         env:
+          GH_TOKEN: ${{ steps.deployment-token.outputs.token }}
+          DEPLOY_REPOSITORY: ${{ vars.VOGT_DEPLOYMENT_REPOSITORY }}
+          DEPLOY_WORKFLOW: ${{ vars.VOGT_DEPLOYMENT_WORKFLOW }}
+          DEPLOY_REF: ${{ vars.VOGT_DEPLOYMENT_REF }}
           DIGEST: ${{ steps.image.outputs.digest }}
-          KOMODO_API_KEY: ${{ secrets.VOGT_KOMODO_API_KEY }}
-          KOMODO_API_SECRET: ${{ secrets.VOGT_KOMODO_API_SECRET }}
-          KOMODO_URL: ${{ vars.VOGT_KOMODO_URL || 'http://100.92.54.45:3011' }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          TAG: ${{ inputs.tag }}
+          RECEIPT_RUN: "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
         run: |
           set -euo pipefail
-          : "${KOMODO_API_KEY:?Configure VOGT_KOMODO_API_KEY in the vogt-prod environment}"
-          : "${KOMODO_API_SECRET:?Configure VOGT_KOMODO_API_SECRET in the vogt-prod environment}"
-          api() {
-            curl -fsS -X POST "$KOMODO_URL/$1" \
-              -H "X-Api-Key: $KOMODO_API_KEY" -H "X-Api-Secret: $KOMODO_API_SECRET" \
-              -H 'Content-Type: application/json' -d "$2"
-          }
-          # The compose source lives in indexarr/ops, but this stack's actual
-          # VOGT_STACK_IMAGE pin lives in Komodo's protected environment.
-          # Update only that field; do not print the environment because it
-          # intentionally contains deployment secrets.
-          stack="$(api read '{"type":"GetStack","params":{"stack":"vogt-prod"}}')"
-          payload="$(python3 -c '
-          import json, sys
-          from pathlib import Path
-          import importlib.util
-          spec = importlib.util.spec_from_file_location("pin", Path("scripts/pin_estate_image.py"))
-          module = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(module)
-          stack = json.load(sys.stdin)
-          environment, changed = module.pin_environment(stack["config"]["environment"], sys.argv[1])
-          if not changed:
-              print("")
-          else:
-              print(json.dumps({"type": "UpdateStack", "params": {"id": stack["_id"]["$oid"], "config": {"environment": environment}}}))
-          ' "$DIGEST" <<<"$stack")"
-          if [ -n "$payload" ]; then
-            api write "$payload" >/dev/null
-            echo "pinned vogt-prod to vogt-stack@$DIGEST"
-          else
-            echo "vogt-prod already pins vogt-stack@$DIGEST"
-          fi
-
-      - name: deploy Node B through Komodo
-        env:
-          KOMODO_API_KEY: ${{ secrets.VOGT_KOMODO_API_KEY }}
-          KOMODO_API_SECRET: ${{ secrets.VOGT_KOMODO_API_SECRET }}
-          KOMODO_URL: ${{ vars.VOGT_KOMODO_URL || 'http://100.92.54.45:3011' }}
-        run: |
-          set -euo pipefail
-          : "${KOMODO_API_KEY:?Configure VOGT_KOMODO_API_KEY in the vogt-prod environment}"
-          : "${KOMODO_API_SECRET:?Configure VOGT_KOMODO_API_SECRET in the vogt-prod environment}"
-          api() {
-            curl -fsS -X POST "$KOMODO_URL/$1" \
-              -H "X-Api-Key: $KOMODO_API_KEY" -H "X-Api-Secret: $KOMODO_API_SECRET" \
-              -H 'Content-Type: application/json' -d "$2"
-          }
-          update="$(api execute '{"type":"DeployStack","params":{"stack":"vogt-prod"}}')"
-          update_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["_id"]["$oid"])' <<<"$update")"
-          echo "Komodo update: $update_id"
-          for _ in $(seq 1 120); do
-            result="$(api read "{\"type\":\"GetUpdate\",\"params\":{\"id\":\"$update_id\"}}")"
-            status="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$result")"
-            [ "$status" = InProgress ] || break
-            sleep 3
+          : "${DEPLOY_REPOSITORY:?Configure VOGT_DEPLOYMENT_REPOSITORY in vogt-prod}"
+          : "${DEPLOY_WORKFLOW:?Configure VOGT_DEPLOYMENT_WORKFLOW in vogt-prod}"
+          : "${DEPLOY_REF:?Configure VOGT_DEPLOYMENT_REF in vogt-prod}"
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -n \
+            --arg ref "$DEPLOY_REF" \
+            --arg source_repository "$GITHUB_REPOSITORY" \
+            --arg source_sha "$RELEASE_SHA" \
+            --arg source_tag "$TAG" \
+            --arg image_digest "$DIGEST" \
+            --arg confirmation_run "$RECEIPT_RUN" \
+            '{ref: $ref, inputs: {source_repository: $source_repository, source_sha: $source_sha, source_tag: $source_tag, image_digest: $image_digest, confirmation_run: $confirmation_run}}' \
+            | gh api --method POST \
+            "repos/${DEPLOY_REPOSITORY}/actions/workflows/${DEPLOY_WORKFLOW}/dispatches" \
+            --input -
+          run_id=""
+          for _ in $(seq 1 60); do
+            run_id="$(gh api "repos/${DEPLOY_REPOSITORY}/actions/workflows/${DEPLOY_WORKFLOW}/runs?event=workflow_dispatch&per_page=20" --jq ".workflow_runs[] | select(.created_at >= \"$started_at\") | .id" | head -n 1 || true)"
+            [ -n "$run_id" ] && break
+            sleep 5
           done
-          python3 -c '
-          import json, sys
-          result = json.load(sys.stdin)
-          print("status:", result["status"], "success:", result["success"])
-          for log in result.get("logs", []): print(f"[{log[\"stage\"]}] success={log[\"success\"]}")
-          raise SystemExit(0 if result["success"] else 1)
-          ' <<<"$result"
+          : "${run_id:?deployment repository did not create a workflow run}"
+          for _ in $(seq 1 180); do
+            state="$(gh api "repos/${DEPLOY_REPOSITORY}/actions/runs/${run_id}" --jq .status)"
+            [ "$state" = completed ] && break
+            sleep 10
+          done
+          conclusion="$(gh api "repos/${DEPLOY_REPOSITORY}/actions/runs/${run_id}" --jq .conclusion)"
+          [ "$conclusion" = success ] || {
+            echo "::error::estate deployment run ${run_id} concluded ${conclusion}" >&2
+            exit 1
+          }
+          artifact_id="$(gh api "repos/${DEPLOY_REPOSITORY}/actions/runs/${run_id}/artifacts" --jq '.artifacts[] | select(.name == "vogt-deployment-receipt") | .id' | head -n 1 || true)"
+          : "${artifact_id:?estate deployment did not upload vogt-deployment-receipt}"
+          mkdir -p "$RUNNER_TEMP/vogt-receipt"
+          gh api "repos/${DEPLOY_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$RUNNER_TEMP/vogt-receipt/receipt.zip"
+          python3 - "$RUNNER_TEMP/vogt-receipt/receipt.zip" "$RUNNER_TEMP/vogt-receipt" <<'PY'
+          import sys
+          import zipfile
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              archive.extractall(sys.argv[2])
+          PY
+          receipt_path="$RUNNER_TEMP/vogt-receipt/receipt.json"
+          [ -f "$receipt_path" ] || {
+            echo "::error::receipt archive did not contain receipt.json" >&2
+            exit 1
+          }
+          python3 - "$receipt_path" "$RELEASE_SHA" "$TAG" "$DIGEST" <<'PY'
+          import json
+          import sys
+          receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+          expected = {"source_sha": sys.argv[2], "source_tag": sys.argv[3], "image_digest": sys.argv[4]}
+          for key, value in expected.items():
+              if receipt.get(key) != value:
+                  raise SystemExit(f"receipt {key} does not match the approved release")
+          required = ("desired_state_commit", "deployment_id", "live_smoke", "rollback_plan", "migration_limits")
+          missing = [key for key in required if not receipt.get(key)]
+          if missing:
+              raise SystemExit("receipt is missing: " + ", ".join(missing))
+          if receipt["live_smoke"].get("status") != "passed":
+              raise SystemExit("receipt live_smoke.status is not passed")
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+          echo "estate deployment ${run_id} verified; desired-state and live receipt accepted"
 
-      - name: verify the live front door
-        env:
-          VOGT_URL: ${{ vars.VOGT_PROD_URL }}
-        run: |
-          set -euo pipefail
-          : "${VOGT_URL:?Configure VOGT_PROD_URL in the vogt-prod environment}"
-          curl --fail --show-error --retry 12 --retry-delay 5 "$VOGT_URL/readyz"
+      - name: record the release receipt
+        run: echo "release ${{ inputs.tag }} (${{ steps.image.outputs.digest }}) handed to the approved estate deployment workflow"

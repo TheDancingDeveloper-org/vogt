@@ -226,9 +226,9 @@ FROM ${CORE_IMAGE} AS core
 FROM ${POD_BASE_IMAGE}
 
 # The agent CLIs stayed here rather than moving into the pod base, and that is a
-# deliberate exception to "the toolchain lives in the base". They are pinned as
-# ARGs and moved by Renovate (see the customManager in .github/renovate.json5,
-# which reads the annotations). `latest` here means a stranger's publish decides
+# deliberate exception to "the toolchain lives in the base". They are pinned in
+# `engine/agent-versions.env` and moved by Renovate (see the customManager in
+# `.github/renovate.json5`). `latest` here means a stranger's publish decides
 # what this image contains: 2.1.237 shipped `bin/claude.exe` as a shell stub and
 # turned a green build red with no change on our side. It also means two builds
 # of the same commit are different images, which defeats a commit-identified
@@ -245,6 +245,9 @@ FROM ${POD_BASE_IMAGE}
 # and anything placed below it inherits that rate.
 ARG INSTALL_AI_CLIENTS
 ARG INSTALL_THECLAWBAY
+ARG CODEX_VERSION
+ARG CLAUDE_CODE_VERSION
+ARG THECLAWBAY_VERSION
 # --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
 # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
 # mount — same reasoning as the system pnpm install in the base. The dev pod is
@@ -258,22 +261,25 @@ ARG INSTALL_THECLAWBAY
 # persisted $HOME, so binding `vogt-dev` to a different home volume took it
 # away and nothing was red.
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
-# renovate: datasource=npm depName=@openai/codex
-ARG CODEX_VERSION=0.148.0
-# renovate: datasource=npm depName=@anthropic-ai/claude-code
-ARG CLAUDE_CODE_VERSION=2.1.236
-# renovate: datasource=npm depName=theclawbay
-ARG THECLAWBAY_VERSION=0.6.13
+COPY engine/agent-versions.env /usr/local/share/vogt/agent-versions.env
 # One `npm install -g` for whichever packages are wanted, not one per package:
 # a second global install into the same prefix reconciles the whole tree for no
 # benefit. No `sudo`: the pod base hands this stage over as root.
-RUN pkgs=""; \
+RUN set -eu; \
+    . /usr/local/share/vogt/agent-versions.env; \
+    codex_version="${CODEX_VERSION:-${VOGT_CODEX_VERSION}}"; \
+    claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
+    theclawbay_version="${THECLAWBAY_VERSION:-${VOGT_THECLAWBAY_VERSION}}"; \
+    printf 'codex=%s\nclaude-code=%s\ntheclawbay=%s\n' \
+        "$codex_version" "$claude_code_version" "$theclawbay_version" \
+        > /usr/local/share/vogt/agent-versions.resolved; \
+    pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        pkgs="$pkgs @openai/codex@${CODEX_VERSION}"; \
-        pkgs="$pkgs @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
+        pkgs="$pkgs @openai/codex@${codex_version}"; \
+        pkgs="$pkgs @anthropic-ai/claude-code@${claude_code_version}"; \
     fi; \
     if [ "$INSTALL_THECLAWBAY" = "true" ]; then \
-        pkgs="$pkgs theclawbay@${THECLAWBAY_VERSION}"; \
+        pkgs="$pkgs theclawbay@${theclawbay_version}"; \
     fi; \
     if [ -n "$pkgs" ]; then \
         npm install -g --prefix=/usr/local $pkgs; \
@@ -355,7 +361,9 @@ RUN install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0750 /var/lib/vogt
 
 # Runtime scripts. Agent-specific CLIs are optional; these helpers only broker
 # credentials on demand for neutral tools already present in the image.
+COPY vogt-lifecycle.sh /usr/local/bin/vogt-lifecycle
 COPY engine/deploy/entrypoint.sh /usr/local/bin/mydevenv2-entrypoint
+COPY engine/deploy/verify-agent-clis.sh /usr/local/bin/vogt-verify-agent-clis
 COPY engine/deploy/agent-auth.sh /usr/local/bin/mydevenv2-agent-auth
 COPY engine/deploy/cadastre-mcp-auth.sh /usr/local/bin/mydevenv2-cadastre-mcp
 COPY engine/deploy/vogt-mcp-auth.sh /usr/local/bin/mydevenv2-vogt-mcp
@@ -363,7 +371,9 @@ COPY engine/deploy/mcp-bootstrap.sh /usr/local/bin/mydevenv2-mcp-bootstrap
 COPY engine/deploy/git-askpass.sh /usr/local/bin/mydevenv2-git-askpass
 COPY engine/deploy/rust-analyzer-mcp.sh /usr/local/bin/mydevenv2-rust-analyzer-mcp
 RUN chmod +x \
+    /usr/local/bin/vogt-lifecycle \
     /usr/local/bin/mydevenv2-entrypoint \
+    /usr/local/bin/vogt-verify-agent-clis \
     /usr/local/bin/mydevenv2-agent-auth \
     /usr/local/bin/mydevenv2-cadastre-mcp \
     /usr/local/bin/mydevenv2-vogt-mcp \
@@ -391,5 +401,5 @@ ENV VOGT_DATA_DIR=/var/lib/vogt
 # is an image that cannot be MyDevEnv2 on its own — which FR-E9 requires it to
 # stay. The compose file turns the core on; see deploy/entrypoint.sh.
 
-ENTRYPOINT ["/usr/local/bin/mydevenv2-entrypoint"]
-CMD []
+ENTRYPOINT ["/usr/local/bin/vogt-lifecycle"]
+CMD ["/usr/local/bin/mydevenv2-entrypoint"]

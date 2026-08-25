@@ -1204,21 +1204,42 @@ def test_production_deploy_is_approval_gated_and_pins_an_immutable_digest() -> N
     workflow = (WORKFLOWS / "deploy-production.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
     assert "environment: vogt-prod" in workflow
-    assert (
-        "description: Type DEPLOY to confirm the live Node B production change"
-        in workflow
-    )
+    assert "description: Type DEPLOY to confirm the live production change" in workflow
     assert '[ "$CONFIRM" = DEPLOY ]' in workflow
     assert "git merge-base --is-ancestor" in workflow
     assert "docker buildx imagetools inspect" in workflow
-    assert '"type":"GetStack"' in workflow
-    assert '"type": "UpdateStack"' in workflow
-    assert "module.pin_environment" in workflow
-    assert '"stack":"vogt-prod"' in workflow
-    assert '"type":"DeployStack"' in workflow
-    assert '"$VOGT_URL/readyz"' in workflow
+    assert "actions/create-github-app-token@v2" in workflow
+    assert "VOGT_DEPLOYMENT_REPOSITORY" in workflow
+    assert "actions/workflows/${DEPLOY_WORKFLOW}/dispatches" in workflow
+    assert "image_digest" in workflow
+    assert "vogt-deployment-receipt" in workflow
+    assert "desired_state_commit" in workflow
+    assert "migration_limits" in workflow
+    assert "KOMODO_API" not in workflow
     assert "sigstore/cosign-installer@v3" in workflow
     assert "cosign verify" in workflow
+
+
+def test_deployment_receipt_schema_carries_the_full_handoff_evidence() -> None:
+    schema = json.loads(
+        (REPO_ROOT / "deploy/vogt-deployment-receipt.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert {
+        "source_repository",
+        "source_sha",
+        "source_tag",
+        "image_digest",
+        "desired_state_commit",
+        "deployment_id",
+        "live_smoke",
+        "rollback_plan",
+        "migration_limits",
+    } <= set(schema["required"])
+    assert (
+        schema["properties"]["live_smoke"]["properties"]["status"]["const"] == "passed"
+    )
 
 
 def test_promotion_is_fast_forward_only_and_never_pushes_a_branch() -> None:
@@ -1284,6 +1305,8 @@ def test_the_engine_pins_every_npm_global_it_installs() -> None:
     different images, which defeats a commit-identified `dev-<sha>` (NFR-C3).
     """
     text = ENGINE_DOCKERFILE.read_text("utf-8")
+    assert "engine/agent-versions.env" in text
+    assert "agent-versions.resolved" in text
     installs = [
         line for line in text.splitlines() if "pkgs=" in line and "$pkgs" in line
     ]
@@ -1294,6 +1317,34 @@ def test_the_engine_pins_every_npm_global_it_installs() -> None:
                 assert "@${" in token or re.search(r"@\d", token), (
                     f"unpinned npm global: {token}"
                 )
+
+
+@pytest.mark.skipif(
+    not ENGINE_DOCKERFILE.exists(),
+    reason="the core-alone job (NFR-Q6) deletes engine/; this reads its Dockerfile",
+)
+def test_agent_cli_smoke_checks_the_resolved_image_versions() -> None:
+    for workflow in ("build.yml", "release.yml"):
+        text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+        assert "--entrypoint vogt-verify-agent-clis" in text
+    verifier = (REPO_ROOT / "engine" / "deploy" / "verify-agent-clis.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "agent-versions.resolved" in verifier
+    assert "npm list --global" in verifier
+
+
+def test_lifecycle_contract_is_image_neutral_and_deployment_owned() -> None:
+    runner = (REPO_ROOT / "vogt-lifecycle.sh").read_text(encoding="utf-8")
+    assert "/run/vogt/hooks" in runner
+    assert "pre-start" in runner and "post-start" in runner and "post-health" in runner
+    assert "VOGT_LIFECYCLE_FIRST_START" in runner
+    assert "VOGT_HOOKS_REQUIRED" in runner
+    sample = (REPO_ROOT / "deploy/lifecycle-hooks/restore-and-verify.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "dirty" in sample
+    assert "refusing to overwrite" in sample
 
 
 @pytest.mark.skipif(

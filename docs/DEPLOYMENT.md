@@ -210,10 +210,33 @@ editing `engine/Dockerfile.pod`**, not `engine/Dockerfile`. The base image and
 its toolchain build args are also covered in [`ENGINE.md`](ENGINE.md) §3, which
 covers running the engine from `cargo` without a container.
 
+The overlay exposes `VOGT_INSTALL_AI_CLIENTS`. When enabled, Codex and Claude
+are installed from the Renovate-managed `engine/agent-versions.env` manifest;
+`VOGT_CODEX_VERSION` and `VOGT_CLAUDE_CODE_VERSION` are explicit build-time
+overrides. The image records the resolved versions and refuses to start when a
+persisted home volume would shadow an image-managed CLI (set
+`VOGT_AGENT_SHADOW_POLICY=warn` only for a deliberate user-local override).
+
 Be aware before you run it: the engine image is a **development pod**, not a
 hardened service image — it carries a writable home, `sudo`, optional agent
 CLIs, and an entrypoint that supports integrations this repository's
 maintainer uses. It cannot be run `read_only` the way the core can.
+
+#### Deployment-owned lifecycle hooks
+
+Both images contain the neutral `/usr/local/bin/vogt-lifecycle` runner, but no
+operator scripts or credentials. A private Compose overlay may mount a
+read-only hook bundle at `/run/vogt/hooks` with `pre-start.d`, `post-start.d`,
+and `post-health.d` directories. Executable files run in lexical order with
+`VOGT_LIFECYCLE_PHASE`, `VOGT_LIFECYCLE_HOOK_DIR`,
+`VOGT_LIFECYCLE_WORKDIR`, and `VOGT_LIFECYCLE_FIRST_START` set. A non-zero
+pre/post-start hook stops startup; a non-zero post-health hook fails health.
+Post-health runs on each probe and must be idempotent. Set
+`VOGT_HOOKS_REQUIRED=true` when the bundle is mandatory; otherwise the public
+base remains functional without a mount. Put lifecycle state on the data/home
+volume to distinguish first restore from restart. The generic sample
+`deploy/lifecycle-hooks/restore-and-verify.sh` refuses dirty checkouts and
+verifies a required asset; provide its paths only in your private overlay.
 
 ## 4. Configuration
 
@@ -382,11 +405,18 @@ sanitized checked-in example.
    create and push the matching `v<version>` tag. The tagged release publishes
    signed, immutable core and merged-stack image digests. It also builds the
    signed APK when its release prerequisites are configured.
-3. In the estate deployment repository, change the production stack's image
-   pin to the exact merged-stack digest from the release summary, review that
-   change under the estate's approval policy, and run its `DeployStack` for
-   `personal-vogt`. That repository and Node B are operator infrastructure;
-   public/self-hosted deployments remain independent of this handoff.
+3. Configure the `vogt-prod` environment with a narrowly scoped GitHub App
+   (`VOGT_DEPLOYMENT_APP_ID`, `VOGT_DEPLOYMENT_APP_PRIVATE_KEY`) and the
+   deployment repository variables `VOGT_DEPLOYMENT_REPOSITORY`,
+   `VOGT_DEPLOYMENT_REPOSITORY_NAME`, `VOGT_DEPLOYMENT_OWNER`,
+   `VOGT_DEPLOYMENT_WORKFLOW`, and `VOGT_DEPLOYMENT_REF`. Dispatch
+   `deploy-production.yml`. It verifies ancestry, the signed digest, and then
+   sends the release receipt to that workflow. The estate workflow owns the
+   desired-state commit, approval, `DeployStack`, live smoke, rollback plan,
+   and migration limits, and must upload `vogt-deployment-receipt/receipt.json`,
+   validated against [`deploy/vogt-deployment-receipt.schema.json`](../deploy/vogt-deployment-receipt.schema.json).
+   The source workflow rejects a green handoff without that receipt. This
+   replaces a long-lived broad Komodo credential in the Vogt repository.
 4. Check the production front door's `/health/ready`, the engine's `/readyz`
    when deployed, authentication, and one representative read/write workflow.
    Keep the former digest and the pre-release backup until those checks pass.
@@ -503,7 +533,7 @@ The `demo-image` job in `build.yml` runs only for `dev`, smoke-tests that APIs
 are refused, emits an SBOM and signs the digest. It **does not deploy**.
 Deployment follows the same NFR-D10 path as every other Vogt image: pin the
 reported `ghcr.io/thedancingdeveloper-org/vogt-demo@sha256:…` reference in the
-operator's `indexarr/ops` stack and let Komodo apply it. The repository-local
+operator's deployment stack and let its approved workflow apply it. The repository-local
 [`deploy/demo.overlay.yml`](../deploy/demo.overlay.yml) documents the hardened
 runtime and safe allocation defaults; it is not an alternate deployment path.
 

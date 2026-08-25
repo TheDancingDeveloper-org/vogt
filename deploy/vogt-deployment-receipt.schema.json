@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Vogt estate deployment receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "source_repository", "source_sha", "source_tag", "image_digest",
+    "desired_state_commit", "deployment_id", "live_smoke",
+    "rollback_plan", "migration_limits"
+  ],
+  "properties": {
+    "source_repository": {"type": "string", "minLength": 1},
+    "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "source_tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+"},
+    "image_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "desired_state_commit": {"type": "string", "minLength": 1},
+    "deployment_id": {"type": "string", "minLength": 1},
+    "live_smoke": {
+      "type": "object", "required": ["status"],
+      "properties": {"status": {"const": "passed"}},
+      "additionalProperties": true
+    },
+    "rollback_plan": {"type": "string", "minLength": 1},
+    "migration_limits": {"type": "string", "minLength": 1}
+  }
+}

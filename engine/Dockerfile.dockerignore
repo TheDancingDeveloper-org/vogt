@@ -71,6 +71,10 @@ scripts
 !web/scripts/**
 mobile
 deploy
+!vogt-lifecycle.sh
+!engine/
+!engine/deploy/
+!engine/deploy/**
 **/*.md
 # The one exception: `uv sync` reads it, because pyproject names it as the
 # project's readme and a missing one fails the build.

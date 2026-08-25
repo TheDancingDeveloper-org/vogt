@@ -105,12 +105,17 @@ services:
       # The cargo cache lives on the home bind mount; point sccache at a Redis
       # you run, or leave it unset — an absent sccache costs build speed only.
       SCCACHE_REDIS: "${SCCACHE_REDIS:-}"
+      VOGT_LIFECYCLE_STATE_DIR: /home/sprooty/.vogt-lifecycle
+      VOGT_LIFECYCLE_WORKDIR: /home/sprooty/Working
+      VOGT_LIFECYCLE_HEALTHCHECK_URL: http://127.0.0.1:8910/readyz
+      VOGT_HOOK_DIR: /run/vogt/hooks
+      VOGT_HOOKS_REQUIRED: "${VOGT_HOOKS_REQUIRED:-false}"
 
     # Host Docker access is intentionally NOT enabled here. Add an explicit
     # docker-socket overlay when you want host-daemon access from a session.
 
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8910/readyz"]
+      test: ["CMD", "/usr/local/bin/vogt-lifecycle", "health"]
       interval: 30s
       timeout: 5s
       retries: 3

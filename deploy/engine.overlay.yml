@@ -60,12 +60,19 @@ services:
         # base would run, so the embedded core matches it; pin a digest for a
         # real deployment. The Dockerfile already carries a public default too.
         CORE_IMAGE: "${VOGT_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt:v0.2.0}"
+        # Optional image-managed agent CLIs. When enabled, versions come from
+        # engine/agent-versions.env unless an operator deliberately overrides
+        # one with a reproducible build arg.
+        INSTALL_AI_CLIENTS: "${VOGT_INSTALL_AI_CLIENTS:-false}"
+        CODEX_VERSION: "${VOGT_CODEX_VERSION:-}"
+        CLAUDE_CODE_VERSION: "${VOGT_CLAUDE_CODE_VERSION:-}"
     image: vogt-engine:local
     restart: unless-stopped
     # tini as PID 1 reaps the processes agent sessions leave behind.
     init: true
     depends_on:
-      - vogt
+      vogt:
+        condition: service_healthy
 
     # The engine is the front door, and like the base it publishes to loopback
     # unless told otherwise: `ENGINE_BIND` is the host interface, and defaults
@@ -120,6 +127,11 @@ services:
       ENGINE_ASSISTANT_TTS_API_KEY: "${ENGINE_ASSISTANT_TTS_API_KEY:-}"
       ENGINE_ASSISTANT_TTS_MODEL: "${ENGINE_ASSISTANT_TTS_MODEL:-tts-1-hd}"
       ENGINE_ASSISTANT_TTS_VOICE: "${ENGINE_ASSISTANT_TTS_VOICE:-nova}"
+      VOGT_LIFECYCLE_STATE_DIR: /home/sprooty/.vogt-lifecycle
+      VOGT_LIFECYCLE_WORKDIR: /home/sprooty/Working
+      VOGT_LIFECYCLE_HEALTHCHECK_URL: http://127.0.0.1:8910/readyz
+      VOGT_HOOK_DIR: /run/vogt/hooks
+      VOGT_HOOKS_REQUIRED: "${VOGT_HOOKS_REQUIRED:-false}"
 
     secrets:
       - vogt_core_token
@@ -136,7 +148,7 @@ services:
     # stays ready when the core is absent — restarting the engine would not
     # revive a core and would kill every live terminal.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8910/readyz"]
+      test: ["CMD", "/usr/local/bin/vogt-lifecycle", "health"]
       interval: 30s
       timeout: 10s
       retries: 3

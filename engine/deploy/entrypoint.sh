@@ -67,6 +67,12 @@
 
 set -euo pipefail
 
+# Image-managed agent CLIs are checked before any optional service starts.
+# This catches a stale persisted-home copy before it can be used by a session.
+if [[ -x /usr/local/bin/vogt-verify-agent-clis ]]; then
+    /usr/local/bin/vogt-verify-agent-clis
+fi
+
 if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
     # Kernel networking (real TUN) so an exit node can transparently capture
     # this pod's egress. The compose must pass --device=/dev/net/tun and

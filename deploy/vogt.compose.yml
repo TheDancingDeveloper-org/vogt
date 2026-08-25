@@ -45,8 +45,10 @@ services:
     # so the folded-scalar form of this silently becomes `["vogt", "init"]`
     # and the server never starts. A single-element list is passed through
     # verbatim to `sh -c`.
-    entrypoint: ["/bin/sh", "-c"]
+    entrypoint: ["/usr/local/bin/vogt-lifecycle"]
     command:
+      - /bin/sh
+      - -c
       - vogt init && exec vogt serve --host 0.0.0.0 --port 8000
 
     # `0.0.0.0` above is the *container's* namespace. Host exposure is
@@ -62,6 +64,9 @@ services:
       # it at, so it is asked for rather than guessed (NFR-D2, FR-A8).
       VOGT_PUBLIC_URL: "${VOGT_PUBLIC_URL:?Set VOGT_PUBLIC_URL in .env}"
       VOGT_LOG_LEVEL: "${VOGT_LOG_LEVEL:-info}"
+      VOGT_LIFECYCLE_STATE_DIR: /var/lib/vogt/.lifecycle
+      VOGT_LIFECYCLE_WORKDIR: /var/lib/vogt
+      VOGT_LIFECYCLE_HEALTHCHECK_URL: http://127.0.0.1:8000/health/ready
 
     # `import_root` is deliberately left at its default of
     # `<data_dir>/repos`, which lives on this volume and is writable by the
@@ -87,12 +92,8 @@ services:
     healthcheck:
       test:
         - CMD
-        - python
-        - -c
-        - >-
-          import urllib.request;
-          response = urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5);
-          raise SystemExit(0 if response.status == 200 else 1)
+        - /usr/local/bin/vogt-lifecycle
+        - health
       interval: 30s
       timeout: 10s
       retries: 3

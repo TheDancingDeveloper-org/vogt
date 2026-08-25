@@ -132,7 +132,8 @@ core-only image at the repository root still exists and is the one to use
 when you do not want sessions at all.
 
 Build arguments worth knowing, all off by default: `INSTALL_AI_CLIENTS=true`
-bakes in the `codex` and `claude` CLIs at Renovate-pinned versions (otherwise
+bakes in the `codex` and `claude` CLIs at the Renovate-pinned versions in
+`engine/agent-versions.env` (otherwise
 agents are user-managed inside the pod); `INSTALL_CADASTRE_MCP=true` installs
 the optional Cadastre MCP bridge (§4); a further provider-specific agent CLI
 has its own build arg in the same block. `POD_BASE_IMAGE` selects the pod

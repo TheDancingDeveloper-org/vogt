@@ -84,6 +84,14 @@ def test_public_compose_healthcheck_is_plain_http() -> None:
     assert "protocolVersion" not in text
 
 
+def test_public_compose_exposes_the_generic_lifecycle_contract() -> None:
+    text = _without_comments(PUBLIC_COMPOSE.read_text(encoding="utf-8"))
+    assert "/usr/local/bin/vogt-lifecycle" in text
+    assert "VOGT_LIFECYCLE_STATE_DIR" in text
+    assert "VOGT_LIFECYCLE_HEALTHCHECK_URL" in text
+    assert "health" in text
+
+
 def test_public_compose_requires_only_the_public_url() -> None:
     text = _without_comments(PUBLIC_COMPOSE.read_text(encoding="utf-8"))
     required = set(re.findall(r"\$\{([A-Z_]+):\?", text))
@@ -164,6 +172,7 @@ def test_public_dockerignore_excludes_private_toolchains() -> None:
     assert all(line.startswith("!") for line in reincluded)
     for path in ("engine", "web", "mobile", "docs", "tests", "deploy"):
         assert not any(entry.lstrip("!").rstrip("/*") == path for entry in reincluded)
+    assert "!vogt-lifecycle.sh" in reincluded
 
 
 # ── The generic engine overlay (#202) ───────────────────────────────────────
@@ -207,6 +216,8 @@ def test_the_engine_overlay_builds_the_engine_and_fronts_the_core() -> None:
     assert "engine:" in overlay
     assert "dockerfile: engine/Dockerfile" in overlay
     assert "CORE_IMAGE:" in overlay
+    assert "INSTALL_AI_CLIENTS:" in overlay
+    assert "CODEX_VERSION:" in overlay
     assert 'VOGT_CORE_URL: "http://vogt:8000"' in overlay
     assert "VOGT_CORE_TOKEN_FILE:" in overlay
     # The engine's own token is the one required operator value (>=16 chars),
@@ -260,6 +271,7 @@ def test_the_engine_overlay_uses_named_volumes_not_host_binds() -> None:
         )
     # The declared named volume must exist under the top-level `volumes:` key.
     assert re.search(r"^volumes:\n(?:  .+\n)*  engine-home:", overlay, re.MULTILINE)
+    assert ":/run/vogt/hooks" not in overlay
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not present")
