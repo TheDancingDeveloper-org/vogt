@@ -264,6 +264,7 @@ jobs:
               if [ -z "$src_digest" ] \
                 && docker buildx imagetools inspect "$dst_tagged" >/dev/null 2>&1; then
                 echo "$src is unavailable; using the existing verified mirror $dst_tagged"
+                src_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$dst_tagged")"
                 copied=yes
                 break
               fi
