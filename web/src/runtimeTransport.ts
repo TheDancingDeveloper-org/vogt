@@ -20,6 +20,7 @@ export interface DemoManifest {
   source_ref: string;
   source_sha: string;
   scenario: string;
+  product_version: string;
 }
 
 interface DemoBuildManifest {
@@ -27,6 +28,7 @@ interface DemoBuildManifest {
   source_ref: string;
   source_sha: string;
   assets: Record<string, string>;
+  product_version: string;
 }
 
 const networkTransport: RuntimeTransport = {
@@ -60,6 +62,7 @@ function validManifest(value: unknown): value is DemoManifest {
     && typeof row.source_ref === "string" && row.source_ref.length > 0
     && typeof row.source_sha === "string" && /^[0-9a-f]{40}$/i.test(row.source_sha)
     && row.source_sha !== "0".repeat(40)
+    && typeof row.product_version === "string" && row.product_version.length > 0
     && typeof row.scenario === "string" && row.scenario.length > 0;
 }
 
@@ -69,6 +72,7 @@ function validBuildManifest(value: unknown, runtime: DemoManifest): value is Dem
   const assets = row.assets;
   return row.schema === 1 && row.source_ref === runtime.source_ref
     && row.source_sha === runtime.source_sha && assets !== null
+    && row.product_version === runtime.product_version
     && typeof assets === "object" && Object.keys(assets as object).length > 0
     && Object.entries(assets as Record<string, unknown>).every(
       ([name, digest]) => name.length > 0 && typeof digest === "string" && /^[0-9a-f]{64}$/i.test(digest),

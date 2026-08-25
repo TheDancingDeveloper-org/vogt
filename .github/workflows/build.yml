@@ -217,8 +217,8 @@ jobs:
           # never carries a version, so nothing following releases sees it.
           tags: |
             type=sha,enable=${{ github.ref == 'refs/heads/main' }}
-            type=sha,prefix=prod-,enable=${{ github.ref == 'refs/heads/prod' }}
-            type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=sha,format=long,prefix=prod-,enable=${{ github.ref == 'refs/heads/prod' }}
+            type=sha,format=long,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
           flavor: |
             latest=false
@@ -345,7 +345,7 @@ jobs:
         with:
           images: ${{ env.DEMO_IMAGE }}
           tags: |
-            type=sha,prefix=dev-
+            type=sha,format=long,prefix=dev-
             type=raw,value=dev
           flavor: |
             latest=false
@@ -362,6 +362,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=dev
             VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=0.2.2
           cache-from: |
             type=registry,ref=${{ env.CACHE_IMAGE }}:stack-dev
             type=registry,ref=${{ env.CACHE_IMAGE }}:demo-dev
@@ -449,6 +450,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=dev
             VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=0.2.2
           provenance: true
           sbom: true
           cache-from: |
@@ -579,8 +581,8 @@ jobs:
           images: ${{ env.STACK_IMAGE }}
           tags: |
             type=sha,enable=${{ github.ref == 'refs/heads/main' }}
-            type=sha,prefix=prod-,enable=${{ github.ref == 'refs/heads/prod' }}
-            type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=sha,format=long,prefix=prod-,enable=${{ github.ref == 'refs/heads/prod' }}
+            type=sha,format=long,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
           flavor: |
             latest=false
@@ -614,6 +616,7 @@ jobs:
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=0.2.2
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
@@ -678,6 +681,7 @@ jobs:
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=0.2.2
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}

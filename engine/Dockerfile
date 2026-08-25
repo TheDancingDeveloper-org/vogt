@@ -94,6 +94,7 @@ ARG POD_BASE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-pod-base:lean
 ARG CORE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt:latest
 ARG VOGT_SOURCE_REF=local
 ARG VOGT_SOURCE_SHA=0000000000000000000000000000000000000000
+ARG VOGT_PRODUCT_VERSION=local/dev
 # Off by default (prod). `.github/workflows/build.yml` passes
 # INSTALL_AI_CLIENTS=true when the ref is the `dev` branch — the branch that
 # also produces the `:dev` and `dev-<sha>` tags — to bake in codex + claude
@@ -122,11 +123,17 @@ ARG INSTALL_THECLAWBAY=false
 FROM ${NODE_IMAGE} AS web-build
 ARG VOGT_SOURCE_REF
 ARG VOGT_SOURCE_SHA
+ARG VOGT_PRODUCT_VERSION
 WORKDIR /app/web
 COPY web/package.json web/pnpm-lock.yaml ./
 RUN npm install -g pnpm && pnpm install --frozen-lockfile
 COPY web/ ./
-RUN VOGT_SOURCE_REF="$VOGT_SOURCE_REF" VOGT_SOURCE_SHA="$VOGT_SOURCE_SHA" pnpm build
+RUN set -eu; \
+    product_version="${VOGT_PRODUCT_VERSION#v}"; \
+    export VOGT_SOURCE_REF="$VOGT_SOURCE_REF" \
+        VOGT_SOURCE_SHA="$VOGT_SOURCE_SHA" \
+        VOGT_PRODUCT_VERSION="$product_version"; \
+    pnpm build
 
 # ─── Public demo target ────────────────────────────────────────────────────
 # `demo-runtime` branches from the exact `web-build` stage the normal engine
@@ -137,7 +144,13 @@ RUN VOGT_SOURCE_REF="$VOGT_SOURCE_REF" VOGT_SOURCE_SHA="$VOGT_SOURCE_SHA" pnpm b
 FROM web-build AS demo-web
 ARG VOGT_SOURCE_REF
 ARG VOGT_SOURCE_SHA
-RUN VOGT_SOURCE_REF="$VOGT_SOURCE_REF" VOGT_SOURCE_SHA="$VOGT_SOURCE_SHA" pnpm demo:augment
+ARG VOGT_PRODUCT_VERSION
+RUN set -eu; \
+    product_version="${VOGT_PRODUCT_VERSION#v}"; \
+    export VOGT_SOURCE_REF="$VOGT_SOURCE_REF" \
+        VOGT_SOURCE_SHA="$VOGT_SOURCE_SHA" \
+        VOGT_PRODUCT_VERSION="$product_version"; \
+    pnpm demo:augment
 
 FROM ${NODE_IMAGE} AS demo-runtime
 WORKDIR /app
@@ -155,6 +168,9 @@ ENTRYPOINT ["node", "/app/demo-server.mjs"]
 
 # ─── Stage 2: rust binary with embedded web/ ────────────────────────────────
 FROM ${RUST_IMAGE} AS server-build
+ARG VOGT_SOURCE_REF
+ARG VOGT_SOURCE_SHA
+ARG VOGT_PRODUCT_VERSION
 # The layout inside this stage mirrors the repository's, because rust-embed
 # resolves `../../web/dist/` against the *crate* directory. Build the workspace
 # at /app/engine and the bundle lands where the macro already looks: put the
@@ -175,6 +191,9 @@ COPY --from=web-build /app/web/dist /app/web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/engine/target \
+    VOGT_SOURCE_REF="$VOGT_SOURCE_REF" \
+    VOGT_SOURCE_SHA="$VOGT_SOURCE_SHA" \
+    VOGT_PRODUCT_VERSION="${VOGT_PRODUCT_VERSION#v}" \
     cargo build --release -p vogt-engine-server \
     && cp target/release/vogt-engine /usr/local/bin/vogt-engine \
     && strip /usr/local/bin/vogt-engine

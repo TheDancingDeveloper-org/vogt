@@ -262,6 +262,12 @@ async fn config_endpoint_is_public_and_returns_shape() {
         "unverified test config must withdraw the GUI surface"
     );
     assert!(body["version"].as_str().is_some(), "missing version");
+    assert!(
+        body["product_version"].as_str().is_some(),
+        "missing product version"
+    );
+    assert!(body["source_ref"].as_str().is_some(), "missing source ref");
+    assert!(body["source_sha"].as_str().is_some(), "missing source sha");
 }
 
 #[tokio::test]
@@ -285,6 +291,10 @@ async fn status_endpoint_requires_auth_and_returns_shape() {
         .unwrap();
 
     assert!(body["version"].as_str().is_some(), "missing version");
+    assert!(
+        body["product_version"].as_str().is_some(),
+        "missing product version"
+    );
     assert!(
         body["session_count"].as_u64().is_some(),
         "missing session_count"

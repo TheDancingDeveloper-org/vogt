@@ -357,7 +357,16 @@ not change production by itself.
 
 ### 7.1 Promote `dev` to production
 
-Promotion is two explicit, fast-forward-only pull requests. Run **Actions →
+Promotion is two explicit, fast-forward-only pull requests. First deploy the
+exact `dev-<sha>` merged-stack image and obtain the verified receipt; the
+promotion workflow refuses to open `dev → main` without that receipt. Run
+**Actions → deploy dev**, provide the current full `dev` SHA, type
+`DEPLOY-DEV`, and keep the receipt URL and artifact with the change record.
+The receipt must cover readiness, authentication, a representative core
+read/write path, the engine/PWA front door, and the visible canonical product
+version/provenance. A failed or stale receipt is not a promotion approval.
+
+Then promotion is two explicit, fast-forward-only pull requests. Run **Actions →
 promote**, choose `dev-to-main`, type `PROMOTE`, and confirm the generated PR
 gets its required review and checks. The workflow checks that the source branch
 is green (`ci` and `runner-policy`) and opens `dev → main`; it never pushes a
@@ -401,11 +410,16 @@ sanitized checked-in example.
      vogt backup --reason "pre-production release"
    ```
 
-2. Increase the package version if a new Android artifact is needed, then
-   create and push the matching `v<version>` tag. The tagged release publishes
+2. Update `pyproject.toml` to the next product version; the version check keeps
+   the Python core, PWA, mobile manifest, engine build metadata, and release
+   workflow aligned. Create and push the matching `v<version>` tag. The tagged release publishes
    signed, immutable core and merged-stack image digests. It also builds the
    signed APK when its release prerequisites are configured.
-3. Configure the `vogt-prod` environment with a narrowly scoped GitHub App
+3. A tag also creates one durable GitHub Release after the distribution, signed
+   images, and signed APK succeed. The Release contains the wheel, sdist, APK,
+   and `vogt-release-manifest.json` with the source SHA, image digests,
+   provenance, and #377 handoff. Publishing still does not deploy.
+4. Configure the `vogt-prod` environment with a narrowly scoped GitHub App
    (`VOGT_DEPLOYMENT_APP_ID`, `VOGT_DEPLOYMENT_APP_PRIVATE_KEY`) and the
    deployment repository variables `VOGT_DEPLOYMENT_REPOSITORY`,
    `VOGT_DEPLOYMENT_REPOSITORY_NAME`, `VOGT_DEPLOYMENT_OWNER`,
@@ -417,7 +431,7 @@ sanitized checked-in example.
    validated against [`deploy/vogt-deployment-receipt.schema.json`](../deploy/vogt-deployment-receipt.schema.json).
    The source workflow rejects a green handoff without that receipt. This
    replaces a long-lived broad Komodo credential in the Vogt repository.
-4. Check the production front door's `/health/ready`, the engine's `/readyz`
+5. Check the production front door's `/health/ready`, the engine's `/readyz`
    when deployed, authentication, and one representative read/write workflow.
    Keep the former digest and the pre-release backup until those checks pass.
 
@@ -435,9 +449,9 @@ For a production APK, before tagging:
   `MYDEVENV2_ANDROID_KEYSTORE_*`, `..._PASSWORD`, `..._KEY_ALIAS`, and
   `..._KEY_PASSWORD` GitHub secrets; replacing the key cannot update devices
   carrying the previous app.
-- Increase `mobile/package.json`'s SemVer version. Gradle derives the Android
-  `versionCode` from it, so each published upgrade must be greater than the
-  last.
+- `mobile/package.json` is checked against the canonical `pyproject.toml`
+  version. Gradle derives the Android `versionCode` from it, so each published
+  upgrade must be greater than the last.
 - Supply the real production `google-services.json` in the release environment
   if Firebase Cloud Messaging is required. The committed example deliberately
   cannot deliver real notifications.

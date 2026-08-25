@@ -212,6 +212,9 @@ jobs:
       # `--locked` fails on any manifest/lockfile mismatch (NFR-Q5).
       - run: uv sync --locked
 
+      - name: canonical product version is aligned
+        run: uv run --no-sync python scripts/check_product_version.py 0.2.2
+
       - name: ruff (lint)
         run: uv run --no-sync ruff check .
 

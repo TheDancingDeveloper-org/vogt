@@ -403,10 +403,16 @@ def test_the_three_streams_are_kept_apart(name: str) -> None:
     rest = raw[start + 1 :]
     end = re.search(r"\n  [a-z][a-z-]*:\n", rest)
     job = rest[: end.start()] if end else rest
-    assert "type=sha,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}" in job
+    assert (
+        "type=sha,format=long,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}"
+        in job
+    )
     assert "type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}" in job
     assert "type=sha,enable=${{ github.ref == 'refs/heads/main' }}" in job
-    assert "type=sha,prefix=prod-,enable=${{ github.ref == 'refs/heads/prod' }}" in job
+    assert (
+        "type=sha,format=long,prefix=prod-,enable=${{ github.ref == "
+        "'refs/heads/prod' }}" in job
+    )
     assert "github.ref !=" not in job, (
         "tag rules name the ref they belong to; a negation silently captures "
         "the next branch somebody adds"
@@ -1218,6 +1224,34 @@ def test_production_deploy_is_approval_gated_and_pins_an_immutable_digest() -> N
     assert "KOMODO_API" not in workflow
     assert "sigstore/cosign-installer@v3" in workflow
     assert "cosign verify" in workflow
+
+
+def test_dev_deploy_is_immutable_and_receipt_gated() -> None:
+    workflow = (WORKFLOWS / "deploy-dev.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in workflow
+    assert "DEPLOY-DEV" in workflow
+    assert "dev-${SOURCE_SHA}" in workflow
+    assert "cosign verify" in workflow
+    assert "vogt-dev-deployment-receipt" in workflow
+    assert "product_version" in workflow
+    promote = (WORKFLOWS / "promote.yml").read_text(encoding="utf-8")
+    assert "deploy-dev.yml" in promote
+    assert "verified dev deployment receipt" in promote
+
+
+def test_github_release_collects_and_publishes_the_complete_release() -> None:
+    workflow = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    job = workflow[workflow.index("\n  github-release:") :]
+    assert "needs: [validate-release, distribution, image, stack-image, android]" in job
+    assert "vogt-dist-${{ github.ref_name }}" in job
+    assert "vogt-android-release-${{ github.ref_name }}" in job
+    assert "wheel and sdist are required" in job
+    assert "signed APK is required" in job
+    assert "CORE_DIGEST" in job and "STACK_DIGEST" in job
+    assert "vogt-release-manifest.json" in job
+    assert "production_deployment_handoff" in job
+    assert "gh release upload" in job
+    assert "--clobber" in job
 
 
 def test_deployment_receipt_schema_carries_the_full_handoff_evidence() -> None:

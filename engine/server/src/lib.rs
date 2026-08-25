@@ -19,6 +19,7 @@ pub mod gui;
 pub mod history;
 pub mod history_api;
 pub mod observability;
+pub mod product;
 pub mod prompt_files;
 pub mod pty;
 pub mod push;
