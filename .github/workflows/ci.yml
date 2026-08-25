@@ -449,6 +449,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.mobile == 'true'
     runs-on: [self-hosted]
+    # Pull requests, including fork pull requests, must not receive the
+    # Infisical machine identity. They build against the sanitized example.
     steps:
       - uses: actions/checkout@v7
 
@@ -472,6 +474,26 @@ jobs:
       - name: install the shell's dependencies
         working-directory: mobile
         run: pnpm install --frozen-lockfile
+
+      - name: fetch the dev Firebase config
+        if: github.event_name != 'pull_request'
+        env:
+          INFISICAL_API_URL: ${{ vars.INFISICAL_API_URL }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          INFISICAL_PROJECT_ID: ${{ vars.INFISICAL_PROJECT_ID }}
+          INFISICAL_ENV: prod
+          VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_DEV_JSON
+          VOGT_FIREBASE_OUTPUT: mobile/android/app/google-services.json
+          VOGT_ANDROID_EXPECTED_PACKAGE: com.sprooty.vogt.dev
+        run: bash scripts/fetch_infisical_secret.sh
+
+      - name: verify the dev Firebase config is available
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          test -f mobile/android/app/google-services.json.example
+          echo "Pull request build: using sanitized Firebase placeholder"
 
       # `android/settings.gradle` includes `:capacitor-cordova-android-plugins`,
       # which `cap sync` generates — the Gradle build cannot configure without
@@ -529,6 +551,10 @@ jobs:
           name: vogt-android-debug-${{ github.sha }}
           path: mobile/android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: remove Firebase config
+        if: always()
+        run: rm -f mobile/android/app/google-services.json
 
   ci:
     name: ci
