@@ -41,6 +41,18 @@ describe("public demo contracts", () => {
     expect(JSON.parse(sessionStorage.getItem("vogt.demo.state.v1") ?? "{}").work[0].state).toBe("in_progress");
   });
 
+  it("serves the same release provenance as the demo manifest", async () => {
+    const store = new DemoStore({
+      product_version: "0.2.2",
+      source_ref: "v0.2.2",
+      source_sha: "a".repeat(40),
+    });
+    const status = await (await store.request("/api/status", "GET", new URLSearchParams())).json();
+    const config = await (await store.request("/api/config", "GET", new URLSearchParams())).json();
+    expect(status).toMatchObject({ product_version: "0.2.2", source_ref: "v0.2.2", source_sha: "a".repeat(40) });
+    expect(config.release_url).toBe("https://github.com/TheDancingDeveloper-org/vogt/releases/tag/v0.2.2");
+  });
+
   it("refuses effects that would cross the browser boundary", async () => {
     const store = new DemoStore();
     const cases = [

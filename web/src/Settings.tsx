@@ -9,6 +9,7 @@ import {
   signOut,
   validateCredentials,
   type OperationalStatus,
+  type PublicConfig,
   type PushPreferences,
   type PushSubscriptionEntry,
 } from "./api";
@@ -82,6 +83,7 @@ interface Props {
    * bare mount (a test, a future embed) still functions, defaulting to "yes".
    */
   confirmAction?: (title: string, body?: string) => Promise<boolean>;
+  publicConfig?: PublicConfig | null;
 }
 
 const SETTINGS_SECTIONS = [
@@ -1702,6 +1704,30 @@ const Settings: Component<Props> = (props) => {
                   </Show>
                 </div>
               )}
+            </Show>
+            <Show when={props.publicConfig}>
+              {(config) => {
+                const version = config().product_version ?? config().version;
+                const sourceSha = config().source_sha;
+                return (
+                  <div style={opsCardStyle} aria-label="Product version">
+                    <div style={opsLabelStyle}>Vogt product</div>
+                    <div style={opsValueStyle}>Vogt v{version}</div>
+                    <div style={opsMetaStyle}>
+                      {config().source_ref ?? "local/dev"}
+                      {sourceSha ? `@${sourceSha.slice(0, 12)}` : ""}
+                      <Show when={config().release_url}>
+                        {(url) => (
+                          <>
+                            {" · "}
+                            <a href={url()} target="_blank" rel="noreferrer">Release</a>
+                          </>
+                        )}
+                      </Show>
+                    </div>
+                  </div>
+                );
+              }}
             </Show>
             <Show when={opsStatus()}>
               {(status) => (

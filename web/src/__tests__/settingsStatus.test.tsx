@@ -34,4 +34,25 @@ describe("#247 — Settings status divs are announced", () => {
     });
     expect(status).toHaveTextContent('Saved profile "work"');
   });
+
+  it("shows the public product version and provenance in Settings", () => {
+    render(() => (
+      <Settings
+        open={true}
+        onClose={() => {}}
+        publicConfig={{
+          version: "0.2.2",
+          product_version: "0.2.2",
+          source_ref: "v0.2.2",
+          source_sha: "a".repeat(40),
+          release_url: "https://example.test/release",
+          gui_stream_url: null,
+        }}
+      />
+    ));
+    const card = screen.getByLabelText("Product version");
+    expect(card).toHaveTextContent("Vogt v0.2.2");
+    expect(card).toHaveTextContent("v0.2.2@aaaaaaaaaaaa");
+    expect(card.querySelector('a[href="https://example.test/release"]')).toBeTruthy();
+  });
 });

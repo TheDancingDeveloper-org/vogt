@@ -12,6 +12,10 @@ const demo = process.argv.includes("--demo");
 const zeros = "0".repeat(40);
 const sourceSha = process.env.VOGT_SOURCE_SHA ?? process.env.GITHUB_SHA ?? zeros;
 const sourceRef = process.env.VOGT_SOURCE_REF ?? process.env.GITHUB_REF_NAME ?? "local";
+const rawProductVersion = process.env.VOGT_PRODUCT_VERSION ?? "local/dev";
+const productVersion = rawProductVersion.startsWith("v")
+  ? rawProductVersion.slice(1)
+  : rawProductVersion;
 
 function validSha(value) {
   return /^[0-9a-f]{40}$/i.test(value) && value !== zeros;
@@ -45,6 +49,7 @@ if (!demo) {
   }
   await writeFile(buildPath, `${JSON.stringify({
     schema: 1,
+    product_version: productVersion,
     source_ref: sourceRef,
     source_sha: sourceSha,
     assets,
@@ -58,7 +63,7 @@ if (!validSha(sourceSha)) {
 }
 
 const built = JSON.parse(await readFile(buildPath, "utf8"));
-if (built.source_sha !== sourceSha || built.source_ref !== sourceRef) {
+if (built.source_sha !== sourceSha || built.source_ref !== sourceRef || built.product_version !== productVersion) {
   throw new Error("demo provenance does not match the PWA build; rebuild once with the same source ref and SHA");
 }
 for (const [name, expected] of Object.entries(built.assets)) {
@@ -72,6 +77,7 @@ await cp(join(root, "src/demo/gui-stream.html"), join(dist, "demo-gui.html"));
 await writeFile(join(dist, "demo-manifest.json"), `${JSON.stringify({
   schema: 1,
   enabled: true,
+  product_version: productVersion,
   source_ref: sourceRef,
   source_sha: sourceSha,
   scenario: "full-estate-v1",

@@ -976,6 +976,10 @@ export interface PublicConfig {
   /** Server-owned proof that the configured stream is safe to advertise. */
   gui_stream_available?: boolean;
   version: string;
+  product_version?: string;
+  source_ref?: string;
+  source_sha?: string;
+  release_url?: string | null;
   /** Build-time feature availability, e.g. `{ selkies: "1.6.2" | null }`. */
   features?: Record<string, string | null | undefined>;
   session_templates?: SessionTemplate[];
@@ -1063,6 +1067,10 @@ export interface AssistantHistory {
 
 export interface OperationalStatus {
   version: string;
+  product_version?: string;
+  source_ref?: string;
+  source_sha?: string;
+  release_url?: string | null;
   session_count: number;
   push_subscription_count: number;
   gui_process_count: number;

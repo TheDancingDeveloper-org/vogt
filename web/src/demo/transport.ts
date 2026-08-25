@@ -3,9 +3,11 @@ import { DemoSocket } from "./socket";
 import { DemoStore } from "./store";
 
 export class DemoTransport implements RuntimeTransport {
-  readonly store = new DemoStore();
+  readonly store: DemoStore;
 
-  constructor(readonly manifest: DemoManifest) {}
+  constructor(readonly manifest: DemoManifest) {
+    this.store = new DemoStore(manifest);
+  }
 
   bootstrapPresentation(): void {
     localStorage.setItem("vogt.token", "public-demo-sentinel");

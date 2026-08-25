@@ -95,6 +95,7 @@ jobs:
             echo "tag $TAG does not match vogt.__version__ ($version)"
             exit 1
           fi
+          uv run --no-sync python scripts/check_product_version.py "${TAG#v}"
 
       - run: uv build
 
@@ -289,6 +290,8 @@ jobs:
   stack-image:
     name: build, sign and publish the merged image
     needs: [distribution, base-images, pod-base, image]
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     runs-on: [self-hosted, publish]
     permissions:
       contents: read
@@ -380,6 +383,7 @@ jobs:
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=${{ github.ref_name }}
             INSTALL_CADASTRE_MCP=true
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release,mode=max
@@ -407,6 +411,7 @@ jobs:
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=${{ github.ref_name }}
             INSTALL_CADASTRE_MCP=true
           provenance: true
           sbom: true
@@ -563,3 +568,84 @@ jobs:
       - name: remove Firebase config
         if: always()
         run: rm -f mobile/android/app/google-services.json
+
+  github-release:
+    name: create the durable GitHub Release
+    needs: [validate-release, distribution, image, stack-image, android]
+    runs-on: [self-hosted]
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: vogt-dist-${{ github.ref_name }}
+          path: release-assets/dist
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: vogt-android-release-${{ github.ref_name }}
+          path: release-assets/android
+
+      - name: assemble release manifest and fail closed on missing assets
+        env:
+          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+          CORE_DIGEST: ${{ needs.image.outputs.digest }}
+          STACK_DIGEST: ${{ needs.stack-image.outputs.digest }}
+          CORE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt
+          STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+        run: |
+          set -euo pipefail
+          wheel_count="$(find release-assets/dist -type f \( -name '*.whl' -o -name '*.tar.gz' \) | wc -l)"
+          apk_count="$(find release-assets/android -type f -name '*.apk' | wc -l)"
+          [ "$wheel_count" -ge 2 ] || { echo "wheel and sdist are required" >&2; exit 1; }
+          [ "$apk_count" -ge 1 ] || { echo "signed APK is required" >&2; exit 1; }
+          case "$CORE_DIGEST:$STACK_DIGEST" in
+            sha256:*:sha256:*) ;;
+            *) echo "release image digests are missing" >&2; exit 1;;
+          esac
+          mkdir -p release-assets/final
+          find release-assets/dist -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp {} release-assets/final/ \;
+          find release-assets/android -type f -name '*.apk' -exec cp {} release-assets/final/ \;
+          jq -n \
+            --arg schema "vogt-release-manifest.v1" \
+            --arg tag "$TAG" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg core "${CORE_IMAGE}@${CORE_DIGEST}" \
+            --arg stack "${STACK_IMAGE}@${STACK_DIGEST}" \
+            --arg handoff "https://github.com/TheDancingDeveloper-org/vogt/issues/377" \
+            '{schema: $schema, product: "Vogt", product_version: ($tag | ltrimstr("v")), source_tag: $tag, source_sha: $source_sha, images: {core: $core, merged_stack: $stack}, provenance: {cosign: "keyless signature from .github/workflows/release.yml", sbom: "GitHub Actions SBOM attestation for the published image digests"}, production_deployment_handoff: $handoff, assets: {python: "wheel and sdist", android: "signed APK"}}' \
+            > release-assets/final/vogt-release-manifest.json
+          jq empty release-assets/final/vogt-release-manifest.json
+          jq -r . release-assets/final/vogt-release-manifest.json > release-assets/release-notes.json
+
+      - name: create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          trap 'rm -f "$notes"' EXIT
+          {
+            echo "Release metadata (machine-readable copy is attached as \\`vogt-release-manifest.json\\`):"
+            echo
+            echo '```json'
+            cat release-assets/release-notes.json
+            echo '```'
+            echo
+            echo "Publishing does not deploy production. The approved production handoff is #377."
+          } > "$notes"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --notes-file "$notes"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" \
+              --title "Vogt ${TAG#v}" --generate-notes --notes-file "$notes"
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" release-assets/final/* --clobber

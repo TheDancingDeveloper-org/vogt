@@ -167,6 +167,11 @@ pub struct PublicConfig {
     /// streamer and an operator's recorded end-to-end verification.
     pub gui_stream_available: bool,
     pub version: &'static str,
+    pub product_version: &'static str,
+    pub source_ref: &'static str,
+    pub source_sha: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_url: Option<String>,
     /// Build-time feature availability, read from `/etc/mydevenv2/features.json`.
     /// `{"selkies": "1.6.2"}` when present, `{"selkies": null}` when the image
     /// was built without Selkies. UI hides the GUI tab when selkies is null.
@@ -218,7 +223,11 @@ pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicCon
     Json(PublicConfig {
         gui_stream_url: state.config.gui_stream_url.clone(),
         gui_stream_available,
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::product::VERSION,
+        product_version: crate::product::VERSION,
+        source_ref: crate::product::SOURCE_REF,
+        source_sha: crate::product::SOURCE_SHA,
+        release_url: crate::product::release_url(),
         features,
         session_templates: state.config.session_templates.clone(),
         vogt: crate::vogt_core::public_status(&state),

@@ -86,6 +86,22 @@ jobs:
             }
           done
 
+          if [ "$SOURCE" = dev ]; then
+            receipt_name="vogt-dev-deployment-receipt-${source_sha}"
+            receipt_run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy-dev.yml --json databaseId,headSha,status,conclusion --limit 50 \
+              --jq ".[] | select(.headSha == \"$source_sha\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId" | head -n 1)"
+            [ -n "$receipt_run" ] || {
+              echo "::error::dev@$source_sha has no successful verified dev deployment receipt ($receipt_name)."
+              exit 1
+            }
+            artifact_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$receipt_run/artifacts" --jq ".artifacts[] | select(.name == \"$receipt_name\") | .id" | head -n 1)"
+            [ -n "$artifact_id" ] || {
+              echo "::error::successful dev deployment has no matching receipt artifact."
+              exit 1
+            }
+            echo "verified_dev_receipt_run=$receipt_run" >> "$GITHUB_OUTPUT"
+          fi
+
           {
             echo "source=$SOURCE"
             echo "target=$TARGET"
@@ -125,6 +141,7 @@ jobs:
           - target before promotion: `$TARGET@$TARGET_SHA`
           - ancestry: fast-forward only
           - required source checks: `ci`, `runner-policy`
+          - verified dev deployment receipt: `${{ steps.refs.outputs.verified_dev_receipt_run || 'not applicable' }}`
 
           Merge only after the target branch checks and normal review policy
           pass. The subsequent stage must be dispatched separately; no workflow

@@ -183,6 +183,10 @@ pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Rea
 #[derive(Debug, Serialize)]
 pub struct OperationalStatus {
     pub version: &'static str,
+    pub product_version: &'static str,
+    pub source_ref: &'static str,
+    pub source_sha: &'static str,
+    pub release_url: Option<String>,
     pub session_count: usize,
     pub push_subscription_count: usize,
     pub gui_process_count: usize,
@@ -236,7 +240,11 @@ pub async fn operational_status(
     let task_artifacts = state.agent_tasks.prompt_artifact_stats()?;
 
     Ok(Json(OperationalStatus {
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::product::VERSION,
+        product_version: crate::product::VERSION,
+        source_ref: crate::product::SOURCE_REF,
+        source_sha: crate::product::SOURCE_SHA,
+        release_url: crate::product::release_url(),
         session_count: state.sessions.list().len(),
         push_subscription_count: state.push.list().len(),
         gui_process_count: state.gui.count_alive(),

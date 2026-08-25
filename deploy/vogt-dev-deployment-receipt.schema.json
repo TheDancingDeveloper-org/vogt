@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Vogt verified development deployment receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source_repository", "source_sha", "environment", "image_digest", "deployment_id", "timestamp", "live_smoke"],
+  "properties": {
+    "source_repository": {"type": "string", "minLength": 1},
+    "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "environment": {"const": "dev"},
+    "image_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "deployment_id": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "minLength": 1},
+    "live_smoke": {
+      "type": "object",
+      "required": ["status", "readiness", "authentication", "core_write", "engine_front_door", "product_version"],
+      "properties": {
+        "status": {"const": "passed"},
+        "readiness": {"const": "passed"},
+        "authentication": {"const": "passed"},
+        "core_write": {"const": "passed"},
+        "engine_front_door": {"const": "passed"},
+        "product_version": {"const": "passed"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

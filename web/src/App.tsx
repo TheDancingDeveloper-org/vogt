@@ -1980,6 +1980,7 @@ const App: Component = () => {
         onRestoreWorkspaceLayout={(layoutId) => onRestoreWorkspaceLayout(layoutId)}
         onDeleteWorkspaceLayout={(layoutId) => onDeleteWorkspaceLayout(layoutId)}
         confirmAction={confirmUser}
+        publicConfig={publicCfg()}
       />
       </Show>
 
