@@ -352,6 +352,24 @@ dedicated token is required because a pull request created with the default
 Actions token does not start another workflow run; without it, the required
 promotion checks would remain pending.
 
+The Android jobs read their Firebase client configuration from Infisical at
+build time. Configure these repository-level GitHub values before a push to
+`dev` or a release tag:
+
+- variable `INFISICAL_API_URL`: the self-hosted Infisical API URL (including
+  `/api` when that is how the runner's CLI is configured);
+- variable `INFISICAL_PROJECT_ID`: the Infisical `apps` project id;
+- secrets `INFISICAL_CLIENT_ID` and `INFISICAL_CLIENT_SECRET`: a machine
+  identity with read access to the `prod` environment.
+
+The CI Android job fetches `VOGT_FIREBASE_DEV_JSON` and builds
+`com.sprooty.vogt.dev`; the tagged release job fetches
+`VOGT_FIREBASE_PROD_JSON` and builds `com.sprooty.vogt`. The fetcher validates
+the package entry before Gradle runs and removes the generated
+`mobile/android/app/google-services.json` even when the job fails. Pull
+requests do not receive the Infisical credentials and continue to use the
+sanitized checked-in example.
+
 1. Back up the running instance and copy the resulting backup directory off
    its data volume:
 

@@ -50,6 +50,9 @@ SERVICES = _SERVICES_REAL if _SERVICES_REAL.is_file() else _SERVICES_EXAMPLE
 #: being dropped: whatever CI builds an APK under has to be an identity FCM
 #: knows.
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+CI_WORKFLOW = WORKFLOWS / "ci.yml"
+RELEASE_WORKFLOW = WORKFLOWS / "release.yml"
+FIREBASE_FETCH = REPO_ROOT / "scripts" / "fetch_infisical_secret.sh"
 
 #: The variable both build files read. Named once here so a rename shows up as
 #: one failure rather than as a silent divergence.
@@ -157,6 +160,45 @@ def test_the_dev_stream_builds_under_its_own_id() -> None:
         "every APK CI builds carries the prod application id, so a dev build "
         "still cannot install beside prod"
     )
+
+
+def test_android_workflows_fetch_the_matching_infisical_firebase_config() -> None:
+    """The APK build must use the Firebase project for the id it assembles.
+
+    The JSON files are intentionally not GitHub secrets or repository files:
+    Infisical is the source of truth and the runner removes the material after
+    Gradle has consumed it. Keeping these assertions here prevents a release
+    job from silently reverting to a stale local copy or the dev project.
+    """
+    ci = CI_WORKFLOW.read_text(encoding="utf-8")
+    release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_DEV_JSON" in ci
+    assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.sprooty.vogt.dev" in ci
+    assert "VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_PROD_JSON" in release
+    assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.sprooty.vogt" in release
+    assert "scripts/fetch_infisical_secret.sh" in ci
+    assert "scripts/fetch_infisical_secret.sh" in release
+    assert "vars.INFISICAL_API_URL" in ci
+    assert "vars.INFISICAL_PROJECT_ID" in ci
+    assert "secrets.INFISICAL_CLIENT_ID" in ci
+    assert "secrets.INFISICAL_CLIENT_SECRET" in ci
+    assert "vars.INFISICAL_API_URL" in release
+    assert "vars.INFISICAL_PROJECT_ID" in release
+    assert "secrets.INFISICAL_CLIENT_ID" in release
+    assert "secrets.INFISICAL_CLIENT_SECRET" in release
+    assert ci.count("remove Firebase config") == 1
+    assert release.count("remove Firebase config") == 1
+    assert "secrets.VOGT_FIREBASE_DEV_JSON" not in ci
+    assert "secrets.VOGT_FIREBASE_PROD_JSON" not in release
+
+
+def test_firebase_fetcher_never_prints_the_secret_and_checks_package() -> None:
+    script = FIREBASE_FETCH.read_text(encoding="utf-8")
+    assert '--plain --silent >"$temp_output"' in script
+    assert "json.loads" in script
+    assert "VOGT_ANDROID_EXPECTED_PACKAGE" in script
+    assert 'mv -- "$temp_output" "$VOGT_FIREBASE_OUTPUT"' in script
 
 
 def test_namespace_matches_the_source_package() -> None:
