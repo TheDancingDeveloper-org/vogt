@@ -7,12 +7,12 @@ async function installDemo(page: Page) {
   await page.route("**/demo-manifest.json", (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
-    body: JSON.stringify({ schema: 1, enabled: true, source_ref: "dev", source_sha: sha, scenario: "full-estate-v1" }),
+    body: JSON.stringify({ schema: 1, enabled: true, product_version: "local/dev", source_ref: "dev", source_sha: sha, scenario: "full-estate-v1" }),
   }));
   await page.route("**/demo-build.json", (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
-    body: JSON.stringify({ schema: 1, source_ref: "dev", source_sha: sha, assets: { "index.html": "a".repeat(64) } }),
+    body: JSON.stringify({ schema: 1, product_version: "local/dev", source_ref: "dev", source_sha: sha, assets: { "index.html": "a".repeat(64) } }),
   }));
   // If the in-browser seam misses one request, fail rather than silently using
   // the Vite proxy or a developer's running engine.
@@ -85,12 +85,12 @@ test("stale provenance cannot activate demo mode", async ({ page }) => {
   await page.route("**/demo-manifest.json", (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
-    body: JSON.stringify({ schema: 1, enabled: true, source_ref: "dev", source_sha: sha, scenario: "full-estate-v1" }),
+    body: JSON.stringify({ schema: 1, enabled: true, product_version: "local/dev", source_ref: "dev", source_sha: sha, scenario: "full-estate-v1" }),
   }));
   await page.route("**/demo-build.json", (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
-    body: JSON.stringify({ schema: 1, source_ref: "dev", source_sha: "f".repeat(40), assets: { "index.html": "a".repeat(64) } }),
+    body: JSON.stringify({ schema: 1, product_version: "local/dev", source_ref: "dev", source_sha: "f".repeat(40), assets: { "index.html": "a".repeat(64) } }),
   }));
   await page.goto("/#/board");
   await expect(page.getByLabel("Public demo information")).toHaveCount(0);
