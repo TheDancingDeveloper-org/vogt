@@ -2,8 +2,8 @@ name: release
 
 # Tag-triggered only (NFR-C3): a push to main can never publish. And
 # publishing is not deploying (NFR-D10): this workflow produces a signed
-# image; production moves only when the pinned digest in `indexarr/ops`
-# changes and `DeployStack` runs.
+# image; production moves only when the approved estate workflow commits and
+# applies the pinned digest.
 
 on:
   push:
@@ -268,8 +268,8 @@ jobs:
             echo '```'
             echo
             echo "Nothing has been deployed. Production moves when this digest"
-            echo "is pinned in \`indexarr/ops\` at \`personal/vogt/docker-compose.yml\`"
-            echo "and \`DeployStack\` runs for \`personal-vogt\` (NFR-D10)."
+            echo "is handed to the approved estate deployment workflow, which"
+            echo "owns the desired-state pin and \`DeployStack\` (NFR-D10)."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The dev-pod toolchain base, built (or reused) before the merged image that
@@ -391,6 +391,7 @@ jobs:
           set -euo pipefail
           docker run --rm --entrypoint vogt "$CANDIDATE" --version
           docker run --rm --entrypoint vogt-engine "$CANDIDATE" --help >/dev/null
+          docker run --rm --entrypoint vogt-verify-agent-clis "$CANDIDATE"
           echo "both halves are present and start"
 
       - uses: docker/build-push-action@v6

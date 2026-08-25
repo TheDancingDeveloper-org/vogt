@@ -94,6 +94,18 @@ overlay in your own repository beside the rest of your deployment
 configuration — publishing an image and moving a deployment stay separate
 acts, and a digest or configuration change is what moves one.
 
+### Deployment-owned lifecycle hooks
+
+Mount an executable bundle from your deployment repository at
+`/run/vogt/hooks:ro`, using `pre-start.d`, `post-start.d`, and/or
+`post-health.d` directories. The image's generic runner provides phase,
+working-directory, hook-root, and first-start environment variables; it never
+copies or discovers scripts from the image. Hooks run in lexical order, fail
+the service on non-zero status, and must be safe to rerun. Set
+`VOGT_HOOKS_REQUIRED=true` for a required bundle and pass credentials through
+Compose secret/config mounts rather than the image or Git. The public base
+needs no hook mount and remains functional unchanged.
+
 ### Observing an estate on a host path
 
 Vogt's collectors read the repositories you register, so a deployment that

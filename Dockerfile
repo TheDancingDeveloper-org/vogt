@@ -129,6 +129,7 @@ RUN groupadd --gid 1000 vogt \
 # The whole of /opt/vogt, not just the venv: the interpreter lives alongside
 # it now and the two only work together.
 COPY --from=build --chown=root:root /opt/vogt /opt/vogt
+COPY --chmod=755 vogt-lifecycle.sh /usr/local/bin/vogt-lifecycle
 
 ENV PATH="/opt/vogt/.venv/bin:$PATH" \
     VOGT_DATA_DIR=/var/lib/vogt \
@@ -142,5 +143,5 @@ USER 1000:0
 # exposure, and the compose file is what is allowed to know the answer for a
 # particular host. The image therefore has no CMD that would silently bind
 # something — `serve` refuses to start without being told where to listen.
-ENTRYPOINT ["vogt"]
+ENTRYPOINT ["/usr/local/bin/vogt-lifecycle"]
 CMD ["--help"]

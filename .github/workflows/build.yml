@@ -16,7 +16,7 @@ name: build
 #   * merging still cannot cut a release — no semver tag, no `latest`, no
 #     wheel, and nothing here writes a GitHub Release
 #   * merging still cannot deploy anything (NFR-D10) — production moves when
-#     the digest pinned in `indexarr/ops` changes and `DeployStack` runs
+#     the approved estate workflow pins and deploys the digest
 #
 # Images are signed here as they are in a release. A build that reaches
 # production unsigned would be a worse hole than the one this closes.
@@ -65,8 +65,8 @@ env:
   # with two kinds of tag in it is how somebody eventually pins the wrong one.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
   # Static public-demo image. It contains neither the engine nor the core and
-  # is published only from dev; deployment remains a separate digest bump in
-  # indexarr/ops through Komodo.
+  # is published only from dev; deployment remains a separate approved digest
+  # handoff.
   DEMO_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-demo
   # Where BuildKit's layer cache lives (#184, superseding #55's GHCR backend).
   #
@@ -96,8 +96,8 @@ concurrency:
   # and a p90 of 41. Every build was therefore superseded before it finished:
   # 12 of the last 13 main builds were cancelled, 36% of the repository's
   # entire CI compute was spent on runs that were thrown away, and main
-  # frequently had no `sha-` image at all. Nothing was left for
-  # `indexarr/ops` to pin, so shipping a fix meant waiting for a quiet window.
+  # frequently had no `sha-` image at all. Nothing was left for the estate
+  # workflow to pin, so shipping a fix meant waiting for a quiet window.
   #
   # Keying by SHA means no two commits share a group and none can supersede
   # another — the same reasoning `ci.yml` already records, and for the same
@@ -116,7 +116,7 @@ concurrency:
   #
   # Each stream builds its own images (`dev-`, `sha-`, `prod-`), so a build
   # cancelled by a sibling ref is an image that never exists — which for
-  # `prod` means nothing for `indexarr/ops` to pin.
+  # `prod` means nothing for the estate workflow to pin.
   group: build-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
@@ -301,8 +301,8 @@ jobs:
           {
             echo "### Built from \`${GITHUB_SHA:0:7}\`"
             echo
-            echo "Nothing has been deployed. To move ${stack}, pin this in"
-            echo "\`indexarr/ops\` and run \`DeployStack\`:"
+            echo "Nothing has been deployed. To move ${stack}, dispatch the"
+            echo "approved estate deployment workflow with this digest:"
             echo
             echo '```yaml'
             echo "    image: ${IMAGE}@${DIGEST}"
@@ -463,15 +463,15 @@ jobs:
           DIGEST: ${{ steps.demo-push.outputs.digest }}
         run: cosign sign --yes "${DEMO_IMAGE}@${DIGEST}"
 
-      - name: report the digest for the Komodo-managed ops stack
+      - name: report the digest for the approved estate deployment workflow
         env:
           DIGEST: ${{ steps.demo-push.outputs.digest }}
         run: |
           {
             echo "### Static public demo from \`${GITHUB_SHA:0:7}\`"
             echo
-            echo "Nothing has been deployed. Pin this signed digest in"
-            echo "\`indexarr/ops\`, then let Komodo apply that stack:"
+            echo "Nothing has been deployed. Hand this signed digest to the"
+            echo "approved estate deployment workflow:"
             echo
             echo '```yaml'
             echo "image: ${DEMO_IMAGE}@${DIGEST}"
@@ -649,6 +649,7 @@ jobs:
           # replacing the home volume took it away and, again, nothing was red.
           # A tool nothing executes is a tool nothing knows it has lost.
           if [ "${ESTATE_IMAGE}" = "true" ]; then
+            docker run --rm --entrypoint vogt-verify-agent-clis "$CANDIDATE"
             for tool in claude codex flutter theclawbay; do
               docker run --rm --entrypoint "$tool" "$CANDIDATE" --version >/dev/null \
                 || { echo "the estate image is missing $tool" >&2; exit 1; }
@@ -701,8 +702,8 @@ jobs:
           {
             echo "### Merged stack image from \`${GITHUB_SHA:0:7}\`"
             echo
-            echo "Nothing has been deployed. \`deploy/vogt-stack.compose.yml\`"
-            echo "pins this line:"
+            echo "Nothing has been deployed. The approved estate deployment"
+            echo "workflow must receive and pin this immutable digest:"
             echo
             echo '```yaml'
             echo "    image: ${STACK_IMAGE}@${DIGEST}"

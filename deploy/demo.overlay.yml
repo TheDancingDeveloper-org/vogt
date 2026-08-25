@@ -1,5 +1,5 @@
-# Public-demo service for an operator-managed Komodo stack. Publishing this
-# image never deploys it; production pins the signed digest in indexarr/ops.
+# Public-demo service for an operator-managed stack. Publishing this image
+# never deploys it; an approved estate workflow pins its signed digest.
 services:
   vogt-demo:
     image: ${VOGT_DEMO_IMAGE:?Set VOGT_DEMO_IMAGE to ghcr.io/thedancingdeveloper-org/vogt-demo@sha256:...}
