@@ -31,7 +31,7 @@ check_package() {
     [ -n "$expected" ] || return 0
     [ -x /usr/local/bin/"$3" ] || return 0
     actual="$(npm list --global --prefix=/usr/local --depth=0 --json "$package" 2>/dev/null \
-        | python -c 'import json,sys; data=json.load(sys.stdin); package=sys.argv[1]; print(data.get("dependencies",{}).get(package,{}).get("version", ""))' "$package" \
+        | python3 -c 'import json,sys; data=json.load(sys.stdin); package=sys.argv[1]; print(data.get("dependencies",{}).get(package,{}).get("version", ""))' "$package" \
         || true)"
     [ "$actual" = "$expected" ] || report "$package is $actual, expected image pin $expected"
 }
