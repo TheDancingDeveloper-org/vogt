@@ -690,7 +690,6 @@ jobs:
           # Same cache ref as the candidate: every layer is a hit, so the push
           # is a re-tag of the smoke-tested bytes rather than a recompile.
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }},mode=max
 
       - uses: sigstore/cosign-installer@v3
 
