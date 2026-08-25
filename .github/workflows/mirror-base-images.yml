@@ -256,6 +256,17 @@ jobs:
                 copied=yes
                 break
               fi
+              # An unpinned tag may already be present in the mirror even
+              # when Docker Hub is temporarily rate-limiting HEAD requests.
+              # The destination is the build's authority; accept it only
+              # when it is inspectable and the source was unavailable, so a
+              # 429 cannot turn a verified mirror into a release outage.
+              if [ -z "$src_digest" ] \
+                && docker buildx imagetools inspect "$dst_tagged" >/dev/null 2>&1; then
+                echo "$src is unavailable; using the existing verified mirror $dst_tagged"
+                copied=yes
+                break
+              fi
               if [ "$attempt" -eq 4 ]; then break; fi
               delay=$((attempt * 45))
               echo "copy of $src failed (attempt $attempt); retrying in ${delay}s"

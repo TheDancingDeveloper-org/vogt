@@ -1323,6 +1323,7 @@ def test_root_image_base_is_mirrored_before_a_release_build() -> None:
     assert "ARG PYTHON_IMAGE=python:3.13-slim@sha256:" in root_dockerfile
     assert '"Dockerfile"' in mirror
     assert "ARG PYTHON_IMAGE=python:" in mirror
+    assert "existing verified mirror" in mirror
 
 
 ENGINE_DOCKERFILE = WORKFLOWS.parent.parent / "engine" / "Dockerfile"
