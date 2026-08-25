@@ -83,9 +83,13 @@ def writer_for(ctx: AppContext) -> ForgeProvider | None:
     per-action provider is resolved from the project's own `repo_url`; this
     only answers "is any forge configured to write at all".
     """
-    from vogt.adapters.forge import github_provider
+    from vogt.adapters.forge.registry import provider_for_host
 
-    return github_provider(ctx.config)
+    for host in ctx.config.forge_token_files:
+        provider = provider_for_host(host, ctx.config, transport=ctx.forge_transport)
+        if provider is not None:
+            return provider
+    return provider_for_host("github.com", ctx.config, transport=ctx.forge_transport)
 
 
 def attempt(
@@ -211,22 +215,27 @@ def _writer_provider(
     either, so the file token is the honest answer for them.
     """
     # A token-less parse to learn the host, so the actor's PAT can be found even
-    # with no file token to build a provider from. GitHub-only in v1, which is
-    # the same ceiling the whole write path already holds.
-    from vogt.adapters.forge import github_identity
+    # with no file token to build a provider from. The registry owns the host
+    # set, so a configured Forgejo repository follows the same attribution path.
     from vogt.adapters.forge.accounts import account_linking_enabled, load_cipher
-    from vogt.adapters.forge.github import GitHubProvider
-    from vogt.adapters.github.client import GitHubClient
+    from vogt.adapters.forge.registry import identity_for, provider_for_token
 
-    gh_ref = None if repo_url is None else github_identity().parse(repo_url)
-    if actor is not None and gh_ref is not None and account_linking_enabled(ctx.config):
+    resolved = identity_for(repo_url, ctx.config) if repo_url is not None else None
+    ref = None if resolved is None else resolved[1]
+    if actor is not None and ref is not None and account_linking_enabled(ctx.config):
         with ctx.declared.read() as view:
-            secret = view.forge_account_secret(actor_id=actor.id, host=gh_ref.host)
-            account = view.forge_account(actor_id=actor.id, host=gh_ref.host)
+            secret = view.forge_account_secret(actor_id=actor.id, host=ref.host)
+            account = view.forge_account(actor_id=actor.id, host=ref.host)
         if secret is not None and account is not None:
             pat = load_cipher(ctx.config).decrypt(secret)
-            client = GitHubClient(token=pat, transport=ctx.forge_transport)
-            return GitHubProvider(client), account.login
+            provider = provider_for_token(
+                ref.host,
+                pat,
+                config=ctx.config,
+                transport=ctx.forge_transport,
+            )
+            if provider is not None:
+                return provider, account.login
 
     file_provider = provider_for(repo_url, ctx.config, transport=ctx.forge_transport)
     return file_provider, _FILE_TOKEN_IDENTITY

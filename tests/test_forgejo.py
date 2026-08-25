@@ -94,6 +94,8 @@ def _config(tmp_path: Path, **overrides: Any) -> VogtConfig:
         (REPO, True),
         (f"{REPO}.git", True),
         (f"git@{HOST}:indexarr/Indexarr.git", True),
+        (f"ssh://git@{HOST}/indexarr/Indexarr.git", True),
+        (f"git@{HOST}/indexarr/Indexarr.git", True),
         (f"git+https://{HOST}/indexarr/Indexarr", True),
         ("https://github.com/o/r", True),  # still github's, not forgejo's
         ("https://gitlab.com/group/project", False),

@@ -10,11 +10,12 @@ it. The properties under test:
 - it registers the project linked and consolidates its forge state, so the
   imported project arrives as upstream-truth;
 - it composes with `project.import` (the clone/register/consolidate is shared);
-- no credential, or a non-github host, is a typed refusal rather than a lie.
+- no credential, or an unsupported host, is a typed refusal rather than a lie.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -27,14 +28,18 @@ from vogt.application.context import AppContext, build_context
 from vogt.application.models import (
     ForgeAccountLinkParams,
     ForgeImportParams,
+    ForgeReposParams,
+    ImportProjectParams,
     InitParams,
     ListProjectsParams,
     SetWriteBackParams,
 )
 from vogt.application.services import (
     import_forge_repo,
+    import_project,
     init_instance,
     link_forge_account,
+    list_forge_repos,
     list_projects,
     set_write_back,
 )
@@ -127,6 +132,137 @@ class RecordingCloner:
         return CloneOutcome(
             destination=request.destination, revision="c" * 40, default_branch="main"
         )
+
+
+class ForgejoImport:
+    """A configured Forgejo API for the end-to-end import path."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        body: bytes = b"",
+        method: str = "GET",
+    ) -> tuple[int, bytes]:
+        del body
+        self.calls.append((method, url, headers.get("Authorization")))
+        if url.endswith("/user"):
+            return 200, json.dumps({"login": "indexarr"}).encode()
+        if "/user/repos" in url:
+            return 200, json.dumps(
+                [
+                    {
+                        "name": "fuelwatchx",
+                        "owner": {"login": "indexarr"},
+                        "default_branch": "main",
+                        "private": False,
+                        "html_url": ("https://repo.indexarr.net/indexarr/fuelwatchx"),
+                    }
+                ]
+            ).encode()
+        if "/repos/indexarr/fuelwatchx" in url and url.endswith("fuelwatchx"):
+            return 200, json.dumps({"default_branch": "main"}).encode()
+        if "/issues" in url and "/comments" not in url:
+            return 200, json.dumps(
+                [{"number": 7, "title": "a Forgejo issue", "state": "open"}]
+            ).encode()
+        return 200, b"[]"
+
+
+def test_forgejo_import_uses_configured_provider_and_host_qualified_url(
+    tmp_path: Path,
+) -> None:
+    forge = ForgejoImport()
+    cloner = RecordingCloner()
+    token = tmp_path / "forgejo-token"
+    token.write_text("frg_file_token", encoding="utf-8")
+    ctx = _instance(
+        tmp_path,
+        cloner=cloner,
+        forge_transport=forge,
+    )
+    ctx = dataclasses.replace(
+        ctx,
+        config=ctx.config.model_copy(
+            update={"forge_token_files": {"repo.indexarr.net": token}}
+        ),
+    )
+
+    result = import_forge_repo(
+        ctx,
+        ForgeImportParams(
+            host="repo.indexarr.net",
+            owner="indexarr",
+            name="fuelwatchx",
+            reason=WHY,
+        ),
+    )
+
+    assert result.project.repo_url == "https://repo.indexarr.net/indexarr/fuelwatchx"
+    assert (
+        cloner.requests[0].remote == "https://repo.indexarr.net/indexarr/fuelwatchx.git"
+    )
+    assert cloner.requests[0].token == "frg_file_token"
+    assert result.consolidated is not None
+
+
+def test_project_import_clones_a_public_configured_forgejo_repo_without_token(
+    tmp_path: Path,
+) -> None:
+    """A configured host may import public code even without a file token."""
+    cloner = RecordingCloner()
+    ctx = _instance(tmp_path, cloner=cloner, forge_transport=ForgejoImport())
+    ctx = dataclasses.replace(
+        ctx,
+        config=ctx.config.model_copy(
+            update={
+                "forge_token_files": {"repo.indexarr.net": tmp_path / "missing-token"}
+            }
+        ),
+    )
+
+    result = import_project(
+        ctx,
+        ImportProjectParams(
+            repo="https://repo.indexarr.net/indexarr/fuelwatchx",
+            reason=WHY,
+        ),
+    )
+
+    assert result.project.repo_url == "https://repo.indexarr.net/indexarr/fuelwatchx"
+    assert cloner.requests[0].remote == (
+        "https://repo.indexarr.net/indexarr/fuelwatchx.git"
+    )
+    assert cloner.requests[0].token is None
+    assert result.consolidated is None
+    assert result.detail is not None and "not collected" in result.detail
+
+
+def test_forgejo_picker_lists_host_qualified_repositories(tmp_path: Path) -> None:
+    forge = ForgejoImport()
+    token = tmp_path / "forgejo-token"
+    token.write_text("frg_file_token", encoding="utf-8")
+    ctx = _instance(tmp_path, cloner=RecordingCloner(), forge_transport=forge)
+    ctx = dataclasses.replace(
+        ctx,
+        config=ctx.config.model_copy(
+            update={"forge_token_files": {"repo.indexarr.net": token}}
+        ),
+    )
+
+    result = list_forge_repos(ctx, ForgeReposParams(host="repo.indexarr.net"))
+
+    assert [(repo.owner, repo.name, repo.url) for repo in result.repos] == [
+        (
+            "indexarr",
+            "fuelwatchx",
+            "https://repo.indexarr.net/indexarr/fuelwatchx",
+        )
+    ]
+    assert forge.calls[-1][2] == "token frg_file_token"
 
 
 def _key_file(tmp_path: Path) -> Path:
@@ -307,7 +443,7 @@ def test_forge_import_without_a_credential_is_refused(tmp_path: Path) -> None:
     assert cloner.requests == [], "nothing was cloned when there was no credential"
 
 
-def test_forge_import_rejects_a_non_github_host(tmp_path: Path) -> None:
+def test_forge_import_rejects_an_unconfigured_host(tmp_path: Path) -> None:
     cloner = RecordingCloner()
     ctx = _instance(
         tmp_path,
@@ -316,7 +452,7 @@ def test_forge_import_rejects_a_non_github_host(tmp_path: Path) -> None:
         forge_transport=ImportForge(),
     )
 
-    with pytest.raises(InvalidRequest, match="only in v1"):
+    with pytest.raises(InvalidRequest, match="not a configured forge host"):
         import_forge_repo(
             ctx,
             ForgeImportParams(

@@ -196,18 +196,27 @@ def parse_repo_url(repo_url: str | None, hosts: tuple[str, ...]) -> RepoRef | No
     if not repo_url or not hosts:
         return None
     candidate = repo_url.strip().removeprefix("git+")
-    for prefix in ("https://", "http://", "ssh://"):
-        candidate = candidate.removeprefix(prefix)
-    for host in hosts:
-        candidate = candidate.replace(f"git@{host}:", f"{host}/")
-    candidate = candidate.removesuffix(".git").strip("/")
-    named = candidate.split("/", 1)[0]
-    if named not in hosts:
+    host: str | None = None
+    path: str
+    if candidate.startswith("git@"):  # scp form: git@forge.example:o/r
+        login_host, separator, path = candidate[4:].partition(":")
+        if not separator:
+            login_host, _, path = candidate[4:].partition("/")
+        host = login_host
+    elif "://" in candidate:
+        parsed = urllib.parse.urlsplit(candidate)
+        host = parsed.hostname
+        path = parsed.path
+    else:
+        host, _, path = candidate.partition("/")
+    host_lookup = {configured.lower(): configured for configured in hosts}
+    canonical_host = host_lookup.get(host.lower()) if host else None
+    if canonical_host is None:
         return None
-    parts = candidate[len(named) :].strip("/").split("/")
+    parts = path.removesuffix(".git").strip("/").split("/")
     if len(parts) < 2 or not parts[0] or not parts[1]:
         return None
-    return RepoRef(host=named, owner=parts[0], repo=parts[1])
+    return RepoRef(host=canonical_host, owner=parts[0], repo=parts[1])
 
 
 #: Task states Forgejo reports that are terminal — usable as a conclusion.
@@ -311,6 +320,12 @@ class ForgejoProvider:
     def clone_token(self) -> str | None:
         """The token a clone should authenticate with, if any."""
         return self._client.token
+
+    def identity(self) -> tuple[str, str] | None:
+        payload = self._client.get("/user")
+        if not isinstance(payload, dict) or not payload.get("login"):
+            return None
+        return str(payload["login"]), ""
 
     # -- read surface ------------------------------------------------------
 

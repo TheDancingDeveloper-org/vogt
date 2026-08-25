@@ -80,11 +80,13 @@ Two different operations, and the choice is not cosmetic:
 
 | | `project register` | `project import` |
 |---|---|---|
-| What it does | records an existing path as a project | clones the GitHub repo into `import_root`, registers *that*, then consolidates |
+| What it does | records an existing path as a project | clones the named GitHub or configured Forgejo repo into `import_root`, registers *that*, then consolidates |
 | Working tree | the one you already have | a new one, server-side |
-| Use when | the local tree is the tree people work in | the repo lives on GitHub and there is no local tree of known ancestry |
+| Use when | the local tree is the tree people work in | the repo lives on a configured forge and there is no local tree of known ancestry |
 
-`project import` deliberately creates its own checkout so that later divergence
+`project import` accepts `owner/name` for GitHub, `host/owner/name` for a
+configured Forgejo host, or an explicit HTTPS/SSH repository URL. It
+deliberately creates its own checkout so that later divergence
 is news rather than ambiguity. That is right for a repo you have never had
 locally — and wrong for a repo the user actively develops in, because it
 manufactures the second copy you were trying to eliminate.
@@ -169,7 +171,7 @@ In this order, each with its own reason:
 
 ```
 vogt sweep --project rustnzb --reason "First sweep after onboarding rustnzb."
-vogt forge onboard --project rustnzb --reason "Consolidate existing GitHub issues, PRs, labels and releases for rustnzb."
+vogt forge onboard --project rustnzb --reason "Consolidate existing forge issues, PRs, labels and releases for rustnzb."
 vogt contract check --project rustnzb --reason "Record rustnzb's contract status at onboarding."
 vogt drift detect --reason "First drift pass after onboarding rustnzb."
 ```
@@ -193,12 +195,14 @@ vogt drift list --project rustnzb
 ```
 
 A brief that shows `observed_version` matching the repo's actual release, and a
-`ci_status` matching what GitHub Actions says, is the signal the import landed.
+`ci_status` matching what the configured forge says, is the signal the import landed.
 `gh-posture` reporting `partial` for one project is a known collector wart, not
-an import failure — read its `detail` before treating it as one. If no
-`VOGT_GITHUB_TOKEN_FILE` is configured, `forge onboard` and the GitHub
+an import failure — read its `detail` before treating it as one. If no forge
+token is configured for the project's host, `forge onboard` and the forge
 collectors report "not collected" rather than an empty upstream; that is the
-optional integration being absent, not a finding.
+optional integration being absent, not a finding. Public repositories can
+still be cloned by `project import` without a token, but consolidation waits
+until the corresponding host credential is configured.
 
 ## 6. Write-back policy — the last decision, made explicitly
 

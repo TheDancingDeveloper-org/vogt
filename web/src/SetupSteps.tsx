@@ -62,6 +62,7 @@ const SetupSteps: Component<SetupStepsProps> = (props) => {
   const [projectDetail, setProjectDetail] = createSignal<string | null>(null);
   const [mode, setMode] = createSignal<"import" | "path">("import");
   const [repos, setRepos] = createSignal<ForgeRepoView[] | null>(null);
+  const [forgeHost, setForgeHost] = createSignal("github.com");
   const [reposDetail, setReposDetail] = createSignal<string | null>(null);
   const [reposLoading, setReposLoading] = createSignal(false);
   const [pickedRepo, setPickedRepo] = createSignal<string>("");
@@ -105,6 +106,7 @@ const SetupSteps: Component<SetupStepsProps> = (props) => {
     setLinking(true);
     try {
       const result = await linkForgeAccount({
+        host: forgeHost().trim() || "github.com",
         token: pat().trim(),
         reason: linkReason().trim(),
       });
@@ -127,7 +129,7 @@ const SetupSteps: Component<SetupStepsProps> = (props) => {
     setReposLoading(true);
     setReposDetail(null);
     try {
-      const result = await listForgeRepos();
+      const result = await listForgeRepos(forgeHost().trim() || "github.com");
       setRepos(result.repos);
       if (result.repos.length === 0) {
         setReposDetail(
@@ -282,9 +284,10 @@ const SetupSteps: Component<SetupStepsProps> = (props) => {
         <article class="vogt-setup-panel" aria-label="Forge step">
           <h2>Link your forge account {stepBadge(forgeState())}</h2>
           <p>
-            Paste a GitHub Personal Access Token and upstream writes are
-            attributed to you (#179). It is validated against the forge, then
-            stored encrypted — no surface ever returns it.
+            Paste a Personal Access Token for the configured forge host and
+            upstream writes are attributed to you (#179). It is validated
+            against the forge, then stored encrypted — no surface ever returns
+            it.
           </p>
           <Show when={forgeDetail()}>
             {(detail) => (
@@ -301,6 +304,15 @@ const SetupSteps: Component<SetupStepsProps> = (props) => {
             )}
           </Show>
           <form class="vogt-setup-form" onSubmit={(event) => void link(event)}>
+            <label>
+              Forge host
+              <input
+                type="text"
+                value={forgeHost()}
+                placeholder="github.com or repo.example.com"
+                onInput={(event) => setForgeHost(event.currentTarget.value)}
+              />
+            </label>
             <label>
               Personal Access Token
               <input
@@ -370,6 +382,15 @@ const SetupSteps: Component<SetupStepsProps> = (props) => {
             onSubmit={(event) => void claimProject(event)}
           >
             <Show when={mode() === "import"}>
+              <label>
+                Forge host
+                <input
+                  type="text"
+                  value={forgeHost()}
+                  placeholder="github.com or repo.example.com"
+                  onInput={(event) => setForgeHost(event.currentTarget.value)}
+                />
+              </label>
               <div class="vogt-setup-actions">
                 <button
                   type="button"
