@@ -85,6 +85,8 @@ def _reader_provider(
     writes it leads to speak upstream as the same identity.
     """
     if account_linking_enabled(ctx.config):
+        secret = None
+        account = None
         with ctx.declared.read() as view:
             actor = view.actor_by_identity(ctx.principal.identity_ref)
             if actor is not None:
