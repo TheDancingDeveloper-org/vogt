@@ -512,6 +512,23 @@ jobs:
         working-directory: mobile
         run: pnpm install --frozen-lockfile
 
+      - name: install Infisical CLI
+        run: |
+          set -euo pipefail
+          if command -v infisical >/dev/null 2>&1; then
+            exit 0
+          fi
+          install -m 0755 -d /usr/share/keyrings
+          curl -1sLf https://artifacts-cli.infisical.com/infisical.gpg \
+            | gpg --dearmor -o /usr/share/keyrings/infisical-archive-keyring.gpg
+          chmod 0644 /usr/share/keyrings/infisical-archive-keyring.gpg
+          printf '%s\n' \
+            'deb [arch=amd64 signed-by=/usr/share/keyrings/infisical-archive-keyring.gpg] https://artifacts-cli.infisical.com/deb stable main' \
+            > /etc/apt/sources.list.d/infisical.list
+          apt-get update
+          apt-get install -y --no-install-recommends infisical
+          rm -rf /var/lib/apt/lists/*
+
       - name: fetch the production Firebase config
         env:
           INFISICAL_API_URL: ${{ vars.INFISICAL_API_URL }}

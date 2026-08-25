@@ -183,10 +183,12 @@ def test_android_workflows_fetch_the_matching_infisical_firebase_config() -> Non
     assert "vars.INFISICAL_PROJECT_ID" in ci
     assert "secrets.INFISICAL_CLIENT_ID" in ci
     assert "secrets.INFISICAL_CLIENT_SECRET" in ci
+    assert "install Infisical CLI" in ci
     assert "vars.INFISICAL_API_URL" in release
     assert "vars.INFISICAL_PROJECT_ID" in release
     assert "secrets.INFISICAL_CLIENT_ID" in release
     assert "secrets.INFISICAL_CLIENT_SECRET" in release
+    assert "install Infisical CLI" in release
     assert ci.count("remove Firebase config") == 1
     assert release.count("remove Firebase config") == 1
     assert "secrets.VOGT_FIREBASE_DEV_JSON" not in ci
