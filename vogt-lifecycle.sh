@@ -95,11 +95,14 @@ child=$!
 terminate() { kill -TERM "$child" 2>/dev/null || true; }
 trap terminate TERM INT
 
-if ! run_phase post-start; then
-    echo "vogt lifecycle: post-start failed; stopping service" >&2
+if run_phase post-start; then
+    :
+else
+    status=$?
+    echo "vogt lifecycle: post-start failed; stopping service (status=$status)" >&2
     kill -TERM "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true
-    exit 1
+    exit "$status"
 fi
 
 # Only successful startup hooks mark the persistent start. A failed restore or
