@@ -1255,6 +1255,8 @@ def test_github_release_collects_and_publishes_the_complete_release() -> None:
     assert "CORE_DIGEST" in job and "STACK_DIGEST" in job
     assert "vogt-release-manifest.json" in job
     assert "production_deployment_handoff" in job
+    assert "name: install GitHub CLI" in job
+    assert "command -v gh" in job
     assert "gh release upload" in job
     assert "--clobber" in job
 
