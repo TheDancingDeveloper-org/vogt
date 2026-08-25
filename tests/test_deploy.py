@@ -1160,6 +1160,7 @@ def test_a_release_apk_is_signed_or_the_job_stops() -> None:
 
     assert "MYDEVENV2_ANDROID_KEYSTORE_B64" in job, "the keystore is a secret"
     assert "actions/setup-java@v4" in job, "the release runner needs a JDK"
+    assert "android-actions/setup-android@v3" in job, "the release runner needs the Android SDK"
     assert "exit 1" in job, "a missing keystore stops the job"
     assert "pnpm/action-setup@v4" in job, "the self-hosted runner must install pnpm"
     assert "assembleRelease" in job, "a release build, not a debug one"
