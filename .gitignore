@@ -33,12 +33,15 @@ mobile/android/build/
 mobile/android/.gradle/
 mobile/dist/
 
-# Agent worktrees (this repo's own, not a product artifact).
-# Matched at any depth: `git worktree add` resolves a relative path against
-# the shell's cwd, so one created from `web/` lands at `web/.claude/...` and
-# is otherwise committed as an embedded repository.
+# Claude project source may be committed deliberately. Runtime state remains
+# local: settings, caches, logs, transcripts, and worktrees are never source.
 **/.claude/worktrees/
-.claude/
+**/.claude/settings.local.json
+**/.claude/settings.json
+**/.claude/*.log
+**/.claude/logs/
+**/.claude/transcripts/
+**/.claude/cache/
 
 # Editor / OS
 .DS_Store
