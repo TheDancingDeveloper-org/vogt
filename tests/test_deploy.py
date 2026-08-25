@@ -1365,6 +1365,9 @@ def test_agent_cli_smoke_checks_the_resolved_image_versions() -> None:
         encoding="utf-8"
     )
     assert "agent-versions.resolved" in verifier
+    assert "python3 -c" in verifier, (
+        "the pod image provides python3, not the core venv's python alias"
+    )
     assert "npm list --global" in verifier
 
 
