@@ -1732,10 +1732,16 @@ Vogt reports no fabricated checkpoint for them. Canonical billing, diff
 summary, final commit and terminal status are retained when Fabro returns them.
 A failed or unreachable optional
 provider records the workflow run as errored and does not break the engine.
-The manifest path was live-smoked against Fabro 0.254 on 2026-08-26; the
-repository also carries an ignored Rust test for repeating that smoke with
-`FABRO_LIVE_URL`, `FABRO_LIVE_TOKEN`, `FABRO_LIVE_FOLDER`, and
-`FABRO_LIVE_WORKFLOW_SOURCE`.
+The manifest path was live-smoked against Fabro 0.254 on 2026-08-26. The
+immutable workflow-intent Git path was also live-smoked against Fabro
+0.337.0-nightly.1 on 2026-08-26, targeting Vogt's public `dev` branch: version
+creation, Git clone, run start, durable `fabro/run/<run-id>` and `start@1`
+timeline checkpoint projection, attach SSE replay, and successful terminal
+diff projection all completed. That smoke used no model, so Fabro correctly
+returned no charge; the adapter retains `total_usd_micros` when supplied, as
+covered by its wire-shape tests. The repository also carries an ignored Rust
+test for repeating the manifest smoke with `FABRO_LIVE_URL`,
+`FABRO_LIVE_TOKEN`, `FABRO_LIVE_FOLDER`, and `FABRO_LIVE_WORKFLOW_SOURCE`.
 
 ### Approval gates and mid-run steering (#289)
 
