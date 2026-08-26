@@ -102,4 +102,42 @@ describe("fetchWithRetry (#198 dropped-connection retry)", () => {
     );
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+
+  it("aborts a hung attempt at its deadline and reports a recoverable transport error", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const expectation = expect(fetchWithRetry(
+      "/x",
+      { method: "GET" },
+      { deadlineMs: 25, retries: 0, backoffMs: 0 },
+    )).rejects.toBeInstanceOf(TransportError);
+    await vi.advanceTimersByTimeAsync(25);
+    await expectation;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("aborts a retry backoff when the caller supersedes the read", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const fetchMock = vi.fn().mockRejectedValue(netError());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = fetchWithRetry(
+      "/x",
+      { method: "GET", signal: controller.signal },
+      { backoffMs: 1_000 },
+    );
+    await Promise.resolve();
+    controller.abort();
+    await expect(promise).rejects.toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
 });

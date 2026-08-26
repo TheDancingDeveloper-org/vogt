@@ -9,6 +9,7 @@
 
 import { getBase } from "./api";
 import { fetchWithRetry } from "./transport";
+import { DEADLINE_MS } from "./deadlines";
 import { isDemoMode } from "./runtimeTransport";
 
 /** Set by the identity wizard once the bootstrap has minted the first token,
@@ -41,7 +42,9 @@ export interface InstallBootstrapResult {
 export async function fetchInstallStatus(): Promise<InstallStatus | null> {
   if (isDemoMode()) return { install_mode: false };
   try {
-    const res = await fetchWithRetry(`${getBase()}/api/install/status`);
+    const res = await fetchWithRetry(`${getBase()}/api/install/status`, {}, {
+      deadlineMs: DEADLINE_MS.metadata,
+    });
     if (!res.ok) return null;
     const body = (await res.json()) as Partial<InstallStatus>;
     if (typeof body.install_mode !== "boolean") return null;

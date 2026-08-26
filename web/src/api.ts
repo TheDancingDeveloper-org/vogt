@@ -1,6 +1,7 @@
 // Thin typed wrapper over the Vogt HTTP+SSE+WS API.
 
 import { fetchWithRetry } from "./transport";
+import { DEADLINE_MS, type OpClass } from "./deadlines";
 import { isDemoMode, runtimeTransport, type RuntimeSocket } from "./runtimeTransport";
 
 export type ActivityState =
@@ -311,6 +312,7 @@ async function req<T>(
   path: string,
   body?: unknown,
   signal?: AbortSignal,
+  opClass: OpClass = method === "GET" ? "list" : "detail",
 ): Promise<T> {
   const res = await fetchWithRetry(`${getBase()}${path}`, {
     method,
@@ -319,7 +321,7 @@ async function req<T>(
     ),
     body: body !== undefined ? JSON.stringify(body) : undefined,
     signal,
-  });
+  }, { deadlineMs: DEADLINE_MS[opClass] });
   const text = await res.text();
   if (!res.ok) throw refused(res.status, text);
   return text ? (JSON.parse(text) as T) : (undefined as T);
@@ -338,12 +340,16 @@ export async function validateCredentials(
   const candidateBase = base.trim().replace(/\/+$/, "");
   if (!candidateToken) throw new ApiError(401, "Bearer token is required");
 
-  const res = await runtimeTransport().request(`${candidateBase}/api/auth/check`, {
+  const candidateInit: RequestInit = {
     method: "GET",
     headers: {
       Authorization: `Bearer ${candidateToken}`,
       Accept: "application/json",
     },
+  };
+  const res = await fetchWithRetry(`${candidateBase}/api/auth/check`, candidateInit, {
+    deadlineMs: DEADLINE_MS.auth,
+    retries: 1,
   });
   const text = await res.text();
   // Deliberately not `refused()`: this asks about a *candidate* credential
@@ -351,12 +357,9 @@ export async function validateCredentials(
   // statement about the session. Reporting it would sign the reader out of a
   // working session for mistyping a token into Settings.
   if (res.status === 404) {
-    const fallback = await runtimeTransport().request(`${candidateBase}/api/status`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${candidateToken}`,
-        Accept: "application/json",
-      },
+    const fallback = await fetchWithRetry(`${candidateBase}/api/status`, candidateInit, {
+      deadlineMs: DEADLINE_MS.auth,
+      retries: 1,
     });
     const fallbackText = await fallback.text();
     if (!fallback.ok) throw new ApiError(fallback.status, fallbackText);
@@ -696,28 +699,35 @@ export interface AgentTaskUpsertRequest {
 }
 
 export const api = {
-  listSessions: () => req<SessionSummary[]>("GET", "/api/sessions"),
+  listSessions: (signal?: AbortSignal) =>
+    req<SessionSummary[]>("GET", "/api/sessions", undefined, signal),
   createSession: (s: CreateSessionRequest) =>
     req<SessionSummary>("POST", "/api/sessions", s),
-  getSession: (id: string) => req<SessionDetail>("GET", `/api/sessions/${id}`),
+  getSession: (id: string, signal?: AbortSignal) =>
+    req<SessionDetail>("GET", `/api/sessions/${id}`, undefined, signal, "detail"),
   renameSession: (id: string, name: string) =>
     req<OkResponse>("PATCH", `/api/sessions/${id}`, { name }),
   killSession: (id: string) =>
     req<OkResponse>("POST", `/api/sessions/${id}/kill`),
   deleteSession: (id: string) =>
     req<OkResponse>("DELETE", `/api/sessions/${id}`),
-  health: () => req<OkResponse>("GET", "/healthz"),
-  authCheck: () => req<AuthCheck>("GET", "/api/auth/check"),
+  health: (signal?: AbortSignal) =>
+    req<OkResponse>("GET", "/healthz", undefined, signal, "metadata"),
+  authCheck: (signal?: AbortSignal) =>
+    req<AuthCheck>("GET", "/api/auth/check", undefined, signal, "auth"),
 
-  listDir: (path = "") =>
-    req<FileEntry[]>("GET", `/api/dir?path=${encodeURIComponent(path)}`),
-  tree: (path = "", depth = 1) =>
+  listDir: (path = "", signal?: AbortSignal) =>
+    req<FileEntry[]>("GET", `/api/dir?path=${encodeURIComponent(path)}`, undefined, signal, "list"),
+  tree: (path = "", depth = 1, signal?: AbortSignal) =>
     req<TreeNode[]>(
       "GET",
       `/api/tree?path=${encodeURIComponent(path)}&depth=${depth}`,
+      undefined,
+      signal,
+      "list",
     ),
   readFile: (path: string, signal?: AbortSignal) =>
-    req<FileRead>("GET", `/api/files?path=${encodeURIComponent(path)}`, undefined, signal),
+    req<FileRead>("GET", `/api/files?path=${encodeURIComponent(path)}`, undefined, signal, "long"),
   writeFile: (
     path: string,
     content: string,
@@ -761,10 +771,13 @@ export const api = {
     document.body.removeChild(a);
     URL.revokeObjectURL(objUrl);
   },
-  search: (q: string, path = "") =>
+  search: (q: string, path = "", signal?: AbortSignal) =>
     req<SearchHit[]>(
       "GET",
       `/api/search?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`,
+      undefined,
+      signal,
+      "long",
     ),
   searchFiles: (q: string, path = "", max?: number, signal?: AbortSignal) =>
     req<FileSearchResult[]>(
@@ -774,6 +787,7 @@ export const api = {
       }`,
       undefined,
       signal,
+      "long",
     ),
 
   listAgentTasks: (signal?: AbortSignal) =>
@@ -817,22 +831,31 @@ export const api = {
       keep_latest_runs_per_task: keepLatestRunsPerTask,
     }),
 
-  listHistorySessions: (limit = 50, offset = 0) =>
+  listHistorySessions: (limit = 50, offset = 0, signal?: AbortSignal) =>
     req<HistorySessionMetadata[]>(
       "GET",
       `/api/history/sessions?limit=${limit}&offset=${offset}`,
+      undefined,
+      signal,
+      "list",
     ),
-  searchHistory: (query: string, limit = 20) =>
+  searchHistory: (query: string, limit = 20, signal?: AbortSignal) =>
     req<HistorySearchResult[]>(
       "GET",
       `/api/history/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+      undefined,
+      signal,
+      "long",
     ),
-  getHistorySession: (id: string) =>
-    req<HistorySessionMetadata>("GET", `/api/history/${id}`),
-  getHistorySessionLog: (id: string, tailBytes = 64 * 1024) =>
+  getHistorySession: (id: string, signal?: AbortSignal) =>
+    req<HistorySessionMetadata>("GET", `/api/history/${id}`, undefined, signal, "detail"),
+  getHistorySessionLog: (id: string, tailBytes = 64 * 1024, signal?: AbortSignal) =>
     req<HistoryLogPreview>(
       "GET",
       `/api/history/${id}/log?tail_bytes=${tailBytes}`,
+      undefined,
+      signal,
+      "long",
     ),
   deleteHistorySession: (id: string) =>
     req<OkResponse>("DELETE", `/api/history/${id}`),
@@ -881,9 +904,12 @@ export const api = {
     req<GitOpResponse>("POST", "/api/git/op", request),
 
   // Public — no token required.
-  publicConfig: () =>
-    runtimeTransport().request(`${getBase()}/api/config`).then((r) => r.json() as Promise<PublicConfig>),
-  operationalStatus: () => req<OperationalStatus>("GET", "/api/status"),
+  publicConfig: (signal?: AbortSignal) =>
+    fetchWithRetry(`${getBase()}/api/config`, { signal }, {
+      deadlineMs: DEADLINE_MS.metadata,
+    }).then((r) => r.json() as Promise<PublicConfig>),
+  operationalStatus: (signal?: AbortSignal) =>
+    req<OperationalStatus>("GET", "/api/status", undefined, signal, "metadata"),
 
   guiLaunch: (command: string[], via_sway = true) =>
     req<GuiProc>("POST", "/api/gui/launch", { command, via_sway }),
