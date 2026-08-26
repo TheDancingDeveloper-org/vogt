@@ -521,6 +521,7 @@ impl HttpWorkflowProvider {
             .map_err(|e| classify_reqwest(&e))?;
         let parsed: FabroRunResp = parse_json_success(resp).await?;
         let state = fabro_state(&parsed.lifecycle.status)?;
+        let checkpoints = self.poll_fabro_checkpoints(run_id).await?;
         let gates = self.poll_fabro_questions(run_id).await?;
         let conclusion = if state.is_terminal() {
             self.fabro_conclusion(run_id, &parsed).await?
@@ -529,10 +530,72 @@ impl HttpWorkflowProvider {
         };
         Ok(ProviderRunStatus {
             state,
-            checkpoints: vec![],
+            checkpoints,
             gates,
             conclusion,
         })
+    }
+
+    /// Read Fabro's durable checkpoint timeline and associate it with the
+    /// provider's run branch. The timeline is authoritative for which stages
+    /// checkpointed; the branch comes from the run projection's `start` record.
+    /// Folder runs have no run branch by contract, so they deliberately produce
+    /// no Vogt checkpoint observations.
+    async fn poll_fabro_checkpoints(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<ProviderCheckpoint>, WorkflowEngineError> {
+        let state_url = format!("{}/api/v1/runs/{run_id}/state", self.base_url);
+        let state_response = match self.auth(self.client.get(&state_url)).send().await {
+            Ok(response) => response,
+            Err(_) => return Ok(vec![]),
+        };
+        if !state_response.status().is_success() {
+            return Ok(vec![]);
+        }
+        let state: FabroStateResp = match state_response.json().await {
+            Ok(state) => state,
+            Err(_) => return Ok(vec![]),
+        };
+        let Some(branch) = state
+            .start
+            .and_then(|start| start.run_branch)
+            .filter(|branch| !branch.trim().is_empty())
+        else {
+            return Ok(vec![]);
+        };
+
+        let timeline_url = format!("{}/api/v1/runs/{run_id}/timeline", self.base_url);
+        let timeline_response = match self.auth(self.client.get(&timeline_url)).send().await {
+            Ok(response) => response,
+            Err(_) => return Ok(vec![]),
+        };
+        if !timeline_response.status().is_success() {
+            return Ok(vec![]);
+        }
+        let timeline: Vec<FabroTimelineEntry> = match timeline_response.json().await {
+            Ok(timeline) => timeline,
+            Err(_) => return Ok(vec![]),
+        };
+        Ok(timeline
+            .into_iter()
+            .filter_map(|entry| {
+                let node_name = entry.node_name.trim();
+                if node_name.is_empty() {
+                    return None;
+                }
+                let step_id = if entry.visit > 0 {
+                    format!("{node_name}@{}", entry.visit)
+                } else {
+                    node_name.to_string()
+                };
+                Some(ProviderCheckpoint {
+                    branch: branch.clone(),
+                    step_id: Some(step_id),
+                    at: None,
+                })
+            })
+            .collect())
     }
 
     async fn fabro_conclusion(
@@ -864,7 +927,22 @@ struct FabroRunResp {
 #[derive(Deserialize)]
 struct FabroStateResp {
     #[serde(default)]
+    start: Option<FabroStartRecord>,
+    #[serde(default)]
     conclusion: Option<FabroStateConclusion>,
+}
+
+#[derive(Deserialize)]
+struct FabroStartRecord {
+    #[serde(default)]
+    run_branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FabroTimelineEntry {
+    node_name: String,
+    #[serde(default)]
+    visit: u32,
 }
 
 #[derive(Deserialize)]
@@ -2144,6 +2222,71 @@ mod tests {
                 insertions: 7,
                 deletions: 1,
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn fabro_poll_collects_timeline_entries_on_the_run_branch() {
+        let app = Router::new()
+            .route(
+                "/api/v1/runs/{id}",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!({
+                        "lifecycle": {"status": {"kind": "running"}}
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/runs/{id}/state",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!({
+                        "start": {"run_branch": "fabro/run-1"}
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/runs/{id}/timeline",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!([
+                        {"ordinal": 1, "node_name": "start", "visit": 1, "checkpoint_seq": 14},
+                        {"ordinal": 2, "node_name": "implement", "visit": 1, "checkpoint_seq": 18}
+                    ]))
+                }),
+            )
+            .route(
+                "/api/v1/runs/{id}/questions",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!({"data": [], "meta": {"total": 0}}))
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let cfg = WorkflowEngineConfig {
+            engine_url: format!("http://{addr}"),
+            workflow: "nightly".into(),
+            token_file: None,
+            repo_ref: None,
+            fabro: Some(fabro_config(FabroTarget::Git {
+                repo: "acme/project".into(),
+                branch: "main".into(),
+                sha: None,
+            })),
+        };
+        let provider = HttpWorkflowProvider::from_config(&cfg, None);
+        let status = provider
+            .poll("fabro-run-1")
+            .await
+            .expect("Fabro poll succeeds");
+        assert_eq!(status.state, ProviderRunState::Running);
+        assert_eq!(status.checkpoints.len(), 2);
+        assert_eq!(status.checkpoints[0].branch, "fabro/run-1");
+        assert_eq!(status.checkpoints[0].step_id.as_deref(), Some("start@1"));
+        assert_eq!(
+            status.checkpoints[1].step_id.as_deref(),
+            Some("implement@1")
         );
     }
 

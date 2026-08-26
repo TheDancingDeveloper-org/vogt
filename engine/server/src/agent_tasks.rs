@@ -3696,6 +3696,7 @@ async fn finalize_workflow_run(
     let finished = OffsetDateTime::now_utc();
     let (outcome, conclusion, provider_summary) = match provider.poll(provider_run_id).await {
         Ok(status) if status.state.is_terminal() => {
+            record_workflow_checkpoints(registry, task_id, run_id, &status.checkpoints);
             record_workflow_gates(registry, run_id, &status.gates);
             if status.state == ProviderRunState::Blocked {
                 registry.block_open_gates(run_id, "workflow engine blocked the run");

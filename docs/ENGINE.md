@@ -1725,10 +1725,12 @@ ordered `GET /api/v1/runs/:id/attach?since_seq=1` SSE stream. Pending
 questions are read from `/questions` and answered using Fabro's keyed answer
 forms; steering is sent to `/steer`. Git targets require `repo` and
 `branch`; folder targets require an absolute existing server-side directory;
-`none` is an empty target. Fabro folder runs execute in place and therefore
-do not provide git checkpoint branches; Vogt reports no fabricated checkpoint
-for them. Canonical billing, diff summary, final commit and terminal status
-are retained when Fabro returns them. A failed or unreachable optional
+`none` is an empty target. Git-target polling reads Fabro’s durable timeline
+and records its stage entries against the provider run branch. Fabro folder
+runs execute in place and therefore do not provide git checkpoint branches;
+Vogt reports no fabricated checkpoint for them. Canonical billing, diff
+summary, final commit and terminal status are retained when Fabro returns them.
+A failed or unreachable optional
 provider records the workflow run as errored and does not break the engine.
 The manifest path was live-smoked against Fabro 0.254 on 2026-08-26; the
 repository also carries an ignored Rust test for repeating that smoke with
