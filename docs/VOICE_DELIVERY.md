@@ -1,6 +1,6 @@
 # Voice assistant — delivery status and remaining scope
 
-*2026-08-21. Companion to [`VOICE_POC.md`](VOICE_POC.md) (the POC's design
+*2026-08-26. Companion to [`VOICE_POC.md`](VOICE_POC.md) (the POC's design
 and findings) and [`ENGINE.md`](ENGINE.md) §6 (the assistant's reference,
 including **Configuring the assistant provider**). The `FR-Txx` / `FR-Mxx`
 ids are stable requirement identifiers; each rule they label is stated in
@@ -85,7 +85,7 @@ one before anyone relies on it.
 |---|---|---|---|
 | [#189](https://github.com/TheDancingDeveloper-org/vogt/issues/189) | Checkpoint B: desktop mic via Web Speech `webkitSpeechRecognition`, then the spoken five-utterance pass with findings into `VOICE_POC.md` §6 | `VOICE_POC.md` §3.4, §4–5; FR-T13 | — |
 | [#190](https://github.com/TheDancingDeveloper-org/vogt/issues/190) | Checkpoint C: engine `POST /api/assistant/stt` / `tts` proxying OpenAI-compatible audio endpoints; MediaRecorder capture and `<audio>` playback; 404-and-fall-back when unconfigured | `VOICE_POC.md` §3.5; FR-T12; voicemode | — |
-| [#191](https://github.com/TheDancingDeveloper-org/vogt/issues/191) | FR-M4: FCM client entry for the dev application id, so a dev APK installs beside prod and registers for push | FR-M4 | — |
+| [#191](https://github.com/TheDancingDeveloper-org/vogt/issues/191) | FR-M4: dev/prod package identity, Firebase config handling, and an APK that can install beside prod | FR-M4 | repository/configuration work complete; device delivery remains in #192 |
 | [#192](https://github.com/TheDancingDeveloper-org/vogt/issues/192) | Checkpoint D: foreground service for active conversations, speak-the-push, the battery number, and the phone half of FR-T13 (first hardware validation of mobile voice at all) | `VOICE_POC.md` §3.6; FR-M6 | #191 |
 | [#193](https://github.com/TheDancingDeveloper-org/vogt/issues/193) | FR-T14: durable, attributable, both-directions interaction log — built (`engine/server/src/assistant_log.rs`); see the issue for what remains | FR-T14 (r18) | — |
 | [#194](https://github.com/TheDancingDeveloper-org/vogt/issues/194) | Ops: validate the enabled assistant end-to-end in the GUI; a dedicated, raised-limit provider key; record the env facts | this file §2 | — |
