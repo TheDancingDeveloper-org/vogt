@@ -30,7 +30,7 @@ import {
   setFileTreeSearch,
 } from "./fileTreeState";
 import { workspaceVersion } from "./workspaceVersion";
-import { registerFileTreeRevalidator } from "./fileTreeRevalidate";
+import { onWake } from "./wakeCoordinator";
 
 interface Props {
   /** Whether this mounted tree belongs to the currently visible surface. */
@@ -359,14 +359,15 @@ const FileTree: Component<Props> = (props) => {
   });
 
   // Coming back to the tab is a moment the tree may be stale (an agent wrote
-  // files, a terminal ran git). The module coordinator combines focus and
-  // visibility into one debounced wake and ignores inactive surfaces (#415).
+  // files, a terminal ran git). The shared wake coordinator combines focus
+  // and visibility into one debounced wake (#410).
   const revalidate = () => {
-    if (!isActive()) return;
     void refetch();
     void refetchGitStatus();
   };
-  onCleanup(registerFileTreeRevalidator(isActive, revalidate));
+  onCleanup(onWake(() => {
+    if (isActive()) revalidate();
+  }));
 
   createEffect(() => {
     const query = searchQuery();

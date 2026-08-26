@@ -40,6 +40,7 @@ import {
   ReconnectTracker,
 } from "./terminalReconnect";
 import { applyStickyMods } from "./terminalModifiers";
+import { onWake } from "./wakeCoordinator";
 
 export interface TerminalActions {
   /** Copy the current xterm selection to the system clipboard. Returns true on success. */
@@ -139,7 +140,7 @@ const TerminalView: Component<Props> = (props) => {
   const reconnect = new ReconnectTracker();
   let destroyed = false;
   let sessionGone = false;
-  let visibilityHandler: (() => void) | null = null;
+  let wakeCleanup: (() => void) | null = null;
   let viewportHandler: (() => void) | null = null;
   let fontSizeHandler: ((event: Event) => void) | null = null;
   let themeHandler: (() => void) | null = null;
@@ -688,10 +689,9 @@ const TerminalView: Component<Props> = (props) => {
 
     props.registerSend?.(sendToPty);
 
-    // On mobile the OS kills the WebSocket when the app is backgrounded.
-    // Reconnect immediately when the page becomes visible again.
-    visibilityHandler = () => {
-      if (document.visibilityState !== "visible") return;
+    // On mobile the OS kills the WebSocket when the app is backgrounded. The
+    // shared wake gives every retained pane one debounced return-to-front.
+    wakeCleanup = onWake(() => {
       scheduleFit();
       term?.scrollToBottom();
       if (!readyToConnect) return;
@@ -700,8 +700,7 @@ const TerminalView: Component<Props> = (props) => {
         clearCountdown();
         connect();
       }
-    };
-    document.addEventListener("visibilitychange", visibilityHandler);
+    });
 
     void loadTerminalCache(props.sessionId).then((cached) => {
       if (destroyed) return;
@@ -911,10 +910,8 @@ const TerminalView: Component<Props> = (props) => {
       cancelAnimationFrame(fitFrame);
       fitFrame = null;
     }
-    if (visibilityHandler) {
-      document.removeEventListener("visibilitychange", visibilityHandler);
-      visibilityHandler = null;
-    }
+    wakeCleanup?.();
+    wakeCleanup = null;
     if (viewportHandler) {
       window.removeEventListener("resize", viewportHandler);
       window.removeEventListener("orientationchange", viewportHandler);
