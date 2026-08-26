@@ -135,7 +135,7 @@ const TerminalView: Component<Props> = (props) => {
   let cacheBytes = 0;
   let cacheTimer: ReturnType<typeof setTimeout> | null = null;
   let replay: ReplayHandle | null = null;
-  let readyToConnect = false;
+  const [readyToConnect, setReadyToConnect] = createSignal(false);
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let countdownTimer: ReturnType<typeof setInterval> | null = null;
   let reconnectAt = 0;
@@ -737,7 +737,7 @@ const TerminalView: Component<Props> = (props) => {
     wakeCleanup = onWake(() => {
       scheduleFit();
       term?.scrollToBottom();
-      if (!readyToConnect) return;
+      if (!readyToConnect()) return;
       if (isParked()) return;
       if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
         if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -766,7 +766,7 @@ const TerminalView: Component<Props> = (props) => {
     void loadTerminalCache(props.sessionId).then((cached) => {
       if (destroyed) return;
       if (!cached || cached.data.byteLength === 0) {
-        readyToConnect = true;
+        setReadyToConnect(true);
         if (!isParked()) connect();
         return;
       }
@@ -795,7 +795,7 @@ const TerminalView: Component<Props> = (props) => {
         if (destroyed) return;
         outputPosition = prepared.outputPosition;
         term?.scrollToBottom();
-        readyToConnect = true;
+        setReadyToConnect(true);
         if (!isParked()) connect();
       });
     });
@@ -931,7 +931,7 @@ const TerminalView: Component<Props> = (props) => {
             scheduleReconnect(100);
           } else if (ctrl.type === "pong") {
             if (watchdog.notePong(ctrl.id, ctrl.pos, outputPosition ?? 0) === "recycle") {
-              checkWatchdog();
+              recycleSocket("server output is ahead of the rendered cursor");
             }
           }
         } catch {
@@ -971,6 +971,17 @@ const TerminalView: Component<Props> = (props) => {
     });
   }
 
+  function recycleSocket(reason: string) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    console.debug("[vogt] terminal socket recovery", {
+      sessionId: props.sessionId,
+      reason,
+    });
+    watchdog.reset();
+    ws.close();
+    scheduleReconnect(100);
+  }
+
   function parkSocket() {
     if (socketParked) return;
     socketParked = true;
@@ -991,13 +1002,13 @@ const TerminalView: Component<Props> = (props) => {
   function resumeSocket() {
     if (!socketParked) return;
     socketParked = false;
-    if (destroyed || !readyToConnect || isParked()) return;
+    if (destroyed || !readyToConnect() || isParked()) return;
     setStatusText("Loading terminal...");
     connect();
   }
 
   createEffect(() => {
-    if (!readyToConnect) return;
+    if (!readyToConnect()) return;
     if (isParked()) parkSocket();
     else resumeSocket();
   });
