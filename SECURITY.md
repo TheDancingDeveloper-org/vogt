@@ -65,3 +65,35 @@ leak a token (file-based or linked) to an unintended party, or a way to
 escalate scopes. Missing rate limiting on a self-hosted single-operator
 service, or the debug-signed dev/CI build artifacts being unsigned, are known
 and out of scope unless you can show real impact.
+
+## Mobile Firebase configuration
+
+`mobile/android/app/google-services.json` is operator-supplied and must never
+be committed. It is ignored by Git. The tracked
+`mobile/android/app/google-services.json.example` is a sanitized fixture for
+forks and pull requests; it does not provide working Firebase or FCM access.
+
+Trusted Android builds fetch their real configuration from Infisical and remove
+the working file after Gradle finishes. Pull-request builds use the sanitized
+fixture and do not receive the Infisical credentials.
+
+The CI `tracked secret hygiene` job checks every reviewed tree for the live
+configuration filename and Firebase-looking API keys. It intentionally checks
+the current tree only: removing a credential from history requires an
+operator-coordinated rewrite and cannot be performed by an ordinary pull
+request.
+
+## If a credential is exposed
+
+1. Revoke or rotate it in Google Cloud/Firebase immediately. Restrict any
+   replacement to the intended Android package names and signing certificates.
+2. Decide whether the repository history must be rewritten. Rotation makes the
+   old value unusable; it does not remove old commits from clones, tags, or
+   hosting caches.
+3. Provision the replacement configuration outside Git and store it in the
+   configured secret manager.
+4. Run a full-history secret scan after the operator action and confirm that
+   current-tree CI remains green.
+
+Do not paste credentials into issues or pull requests. Report a suspected new
+exposure privately to the repository maintainers.
