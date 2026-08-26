@@ -2,7 +2,7 @@ import { Route, Router } from "@solidjs/router";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import FileTree from "../FileTree";
+import FileTree, { buildStatusMap, statusForPath } from "../FileTree";
 
 vi.mock("../store", async () => {
   const actual = await vi.importActual<typeof import("../store")>("../store");
@@ -11,6 +11,16 @@ vi.mock("../store", async () => {
 
 describe("FileTree", () => {
   afterEach(() => vi.restoreAllMocks());
+
+  it("indexes Git status once so node rendering uses constant-time lookups", () => {
+    const entries = Array.from({ length: 2_000 }, (_unused, index) => ({
+      path: `src/file-${index}.ts`, index: " ", worktree: "M", kind: "modified" as const,
+    }));
+    const statuses = buildStatusMap(entries);
+    expect(statuses.size).toBe(entries.length);
+    expect(statusForPath(statuses, "src/file-1999.ts")).toMatchObject({ kind: "modified", marker: "M" });
+    expect(statusForPath(statuses, "missing.ts")).toBeNull();
+  });
 
   it("puts the Files hierarchy first, keeps names dominant, and progressively discloses every secondary action", async () => {
     vi.spyOn(api, "tree").mockImplementation(async (path) => path === "source"

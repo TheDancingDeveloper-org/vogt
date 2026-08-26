@@ -67,3 +67,23 @@ tool for the nightly job, deliberately **not** wired into `pytest`: a
 wall-clock latency gate on a shared runner would be flaky, exactly the mistake
 `tests/test_benchmark.py` documents avoiding. The pure comparison logic
 (`compare_to_baseline`) is unit-tested instead.
+
+## Browser rendering profile (#422)
+
+`web/tests/browser/perf.spec.ts` is a documented release check using the
+production PWA and demo transport. `?demoScale=2000` creates 2,000 work items,
+5,000 files at depth 8, and 32 sessions, then measures board DOM size, cold
+first interaction, long tasks, retained nodes, heap usage when Chromium
+exposes it, and a visibility/focus wake cycle.
+
+Run it on a named release machine:
+
+```bash
+cd web
+VOGT_RUN_PERF=1 pnpm exec playwright test tests/browser/perf.spec.ts --project=desktop
+```
+
+`bench/web_perf_baseline.json` records the fixture sizes and actionable
+budgets. Timing values are deliberately not a CI assertion: the release
+check prints JSON for recording a comparable baseline without making shared
+runner tests flaky.

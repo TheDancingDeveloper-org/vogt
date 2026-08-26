@@ -1,6 +1,7 @@
 import type { ServerEvent } from "../api";
 import type { DemoManifest } from "../runtimeTransport";
 import { createDemoState, DEMO_NOW, type DemoState } from "./fixtures";
+import { scaleDemoState } from "./scale";
 
 const STORAGE_KEY = "vogt.demo.state.v1";
 const LOGICAL_TICK_MS = 1_000;
@@ -39,12 +40,16 @@ function workflowFor(kind: string): Record<string, unknown> {
 
 export class DemoStore {
   private state: DemoState;
-  constructor(private readonly provenance: Pick<DemoManifest, "product_version" | "source_ref" | "source_sha"> = {
-    product_version: "local/dev",
-    source_ref: "local/dev",
-    source_sha: "local/dev",
-  }) {
-    this.state = this.read();
+  constructor(
+    private readonly provenance: Pick<DemoManifest, "product_version" | "source_ref" | "source_sha"> = {
+      product_version: "local/dev",
+      source_ref: "local/dev",
+      source_sha: "local/dev",
+    },
+    private readonly scale = 0,
+  ) {
+    this.state = scaleDemoState(this.read(), this.scale);
+    this.write();
   }
   private listeners = new Set<(event: ServerEvent) => void>();
 
@@ -84,7 +89,7 @@ export class DemoStore {
       "vogt.places.v1", "vogt.recentPlaces.v1", "vogt.inbox.seen.v1",
       "vogt.demo.presentation.v1",
     ]) localStorage.removeItem(key);
-    this.state = createDemoState();
+    this.state = scaleDemoState(createDemoState(), this.scale);
     this.seedPresentation();
   }
 
