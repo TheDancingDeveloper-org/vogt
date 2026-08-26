@@ -27,8 +27,9 @@ use crate::{
     push::{NotificationKind, PushManager},
     sessions::SessionRegistry,
     workflow_engine::{
-        map_conclusion, HttpWorkflowProvider, ProviderCheckpoint, ProviderGate, ProviderRunState,
-        WorkflowEngineConfig, WorkflowProvider,
+        map_conclusion, HttpWorkflowProvider, ProviderCheckpoint, ProviderEvent,
+        ProviderEventStream, ProviderGate, ProviderRunState, WorkflowEngineConfig,
+        WorkflowEngineError, WorkflowProvider,
     },
 };
 use futures_util::StreamExt;
@@ -3332,9 +3333,8 @@ fn clean_workflow_engine(value: Option<WorkflowEngineConfig>) -> Option<Workflow
     })
 }
 
-/// How often a workflow run is polled for a terminal state (#293). A steer/gate
-/// bridge that would let the engine push instead is increment-2 work; until
-/// then a fixed interval is the whole tracking mechanism.
+/// How often a workflow run is polled for a terminal state after event-stream
+/// tracking has exhausted its bounded retry budget (#293).
 const WORKFLOW_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// How many consecutive poll errors are tolerated before a workflow run is
 /// given up on as errored — a transient blip is ridden out, a persistently
@@ -3349,6 +3349,11 @@ const WORKFLOW_POLL_DEADLINE: Duration = Duration::hours(6);
 /// keep-alives well inside this; a stream that has gone quiet is treated as
 /// broken rather than blocking the run's tracking indefinitely.
 const WORKFLOW_SSE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How many times a broken workflow-event subscription may be re-established
+/// before the tracker settles on polling. This is a total budget for the run,
+/// not a budget reset after each successful stream, so a flapping provider
+/// cannot turn one run into an unbounded stream of HTTP connections.
+const WORKFLOW_SSE_MAX_RESUBSCRIPTIONS: u32 = 1;
 
 /// Read the workflow engine's bearer token from `path`, following the
 /// token-from-file pattern in `config.rs` (`read_token_path`). `None` when no
@@ -3399,6 +3404,141 @@ fn workflow_outcome_summary(
     }
 }
 
+/// The result of consuming one workflow-event subscription.
+#[derive(Debug)]
+enum WorkflowStreamAttempt {
+    /// The stream reported a terminal event.
+    Terminal(ProviderEvent),
+    /// The stream ended, went idle, or failed at the transport layer. The
+    /// caller may spend one of its bounded re-subscription attempts.
+    Retryable { error: Option<WorkflowEngineError> },
+    /// The run deadline elapsed while this subscription was active. This is
+    /// distinct from EOF/idle so it can never trigger another subscription.
+    Deadline,
+}
+
+/// The result of consuming one or more bounded workflow-event subscriptions.
+#[derive(Debug)]
+enum WorkflowStreamExit {
+    /// A stream reported a terminal event; the caller still polls once to
+    /// enrich the provisional event with the durable conclusion fields.
+    Terminal(ProviderEvent),
+    /// The subscription budget was exhausted. The caller must use polling.
+    Fallback {
+        last_error: Option<WorkflowEngineError>,
+        resubscriptions: u32,
+    },
+    /// The overall run deadline elapsed while a stream was active.
+    Deadline,
+}
+
+/// Consume a workflow-event stream and invoke `on_event` for every parsed event.
+/// A stream that ends, errors, or stays idle is a retryable transport failure;
+/// the caller owns the bounded resubscription budget.
+async fn consume_workflow_stream<F>(
+    mut stream: ProviderEventStream,
+    started: OffsetDateTime,
+    mut on_event: F,
+) -> WorkflowStreamAttempt
+where
+    F: FnMut(&ProviderEvent) + Send,
+{
+    loop {
+        // Honour the overall deadline even while the stream is open, so a run
+        // the engine never finishes cannot stay `running` forever.
+        let remaining_ms =
+            (WORKFLOW_POLL_DEADLINE - (OffsetDateTime::now_utc() - started)).whole_milliseconds();
+        if remaining_ms <= 0 {
+            return WorkflowStreamAttempt::Deadline;
+        }
+        let idle_ms = WORKFLOW_SSE_IDLE_TIMEOUT.as_millis() as i128;
+        let wait_ms = remaining_ms.min(idle_ms) as u64;
+        let deadline_limited = remaining_ms < idle_ms;
+        match tokio::time::timeout(std::time::Duration::from_millis(wait_ms), stream.next()).await {
+            Ok(Some(Ok(event))) => {
+                let terminal = event.terminal_state.is_some();
+                on_event(&event);
+                if terminal {
+                    return WorkflowStreamAttempt::Terminal(event);
+                }
+            }
+            Ok(Some(Err(error))) => {
+                return WorkflowStreamAttempt::Retryable { error: Some(error) };
+            }
+            Ok(None) => return WorkflowStreamAttempt::Retryable { error: None },
+            Err(_elapsed) if deadline_limited => return WorkflowStreamAttempt::Deadline,
+            Err(_elapsed) => return WorkflowStreamAttempt::Retryable { error: None },
+        }
+    }
+}
+
+fn workflow_deadline_remaining(started: OffsetDateTime) -> Option<std::time::Duration> {
+    let remaining_ms =
+        (WORKFLOW_POLL_DEADLINE - (OffsetDateTime::now_utc() - started)).whole_milliseconds();
+    (remaining_ms > 0).then(|| std::time::Duration::from_millis(remaining_ms as u64))
+}
+
+/// Subscribe to workflow events, allowing one bounded re-subscription before
+/// handing tracking to polling. The closure form keeps the retry policy
+/// testable without coupling it to a particular HTTP server or provider.
+async fn stream_workflow_with_retry<F, Fut, H>(
+    mut subscribe: F,
+    started: OffsetDateTime,
+    on_event: H,
+) -> WorkflowStreamExit
+where
+    F: FnMut() -> Fut + Send,
+    Fut: std::future::Future<Output = std::result::Result<ProviderEventStream, WorkflowEngineError>>
+        + Send,
+    H: FnMut(&ProviderEvent) + Send,
+{
+    let mut on_event = on_event;
+    let mut resubscriptions = 0;
+    let mut last_error = None;
+    loop {
+        let Some(remaining) = workflow_deadline_remaining(started) else {
+            return WorkflowStreamExit::Deadline;
+        };
+        let subscription = match tokio::time::timeout(remaining, subscribe()).await {
+            Ok(subscription) => subscription,
+            Err(_elapsed) => return WorkflowStreamExit::Deadline,
+        };
+        match subscription {
+            Ok(stream) => match consume_workflow_stream(stream, started, &mut on_event).await {
+                WorkflowStreamAttempt::Terminal(event) => {
+                    return WorkflowStreamExit::Terminal(event);
+                }
+                WorkflowStreamAttempt::Retryable { error } => {
+                    if error.is_some() {
+                        last_error = error;
+                    }
+                }
+                WorkflowStreamAttempt::Deadline => return WorkflowStreamExit::Deadline,
+            },
+            Err(err) => last_error = Some(err),
+        }
+
+        // Do not spend a retry once the overall run deadline has elapsed, even
+        // when the subscription failed exactly at the deadline boundary.
+        if workflow_deadline_remaining(started).is_none() {
+            return WorkflowStreamExit::Deadline;
+        }
+
+        if resubscriptions >= WORKFLOW_SSE_MAX_RESUBSCRIPTIONS {
+            return WorkflowStreamExit::Fallback {
+                last_error,
+                resubscriptions,
+            };
+        }
+        resubscriptions += 1;
+        tracing::info!(
+            resubscriptions,
+            max_resubscriptions = WORKFLOW_SSE_MAX_RESUBSCRIPTIONS,
+            "retrying workflow event stream subscription"
+        );
+    }
+}
+
 /// Track a workflow run off its live SSE event stream, degrading to polling
 /// (#293, increment 2).
 ///
@@ -3422,105 +3562,102 @@ fn spawn_workflow_tracker(
     started: OffsetDateTime,
 ) {
     tokio::spawn(async move {
-        match provider.stream_events(&provider_run_id).await {
-            Ok(mut stream) => loop {
-                // Honour the overall deadline even while the stream is open, so a
-                // run the engine never finishes cannot stay `running` forever.
-                if OffsetDateTime::now_utc() - started > WORKFLOW_POLL_DEADLINE {
-                    registry.record_workflow_errored(
-                        task_id,
-                        run_id,
-                        session_id,
-                        started,
-                        OffsetDateTime::now_utc(),
-                        "workflow engine run did not reach a terminal state before the deadline",
-                    );
-                    return;
-                }
-                match tokio::time::timeout(WORKFLOW_SSE_IDLE_TIMEOUT, stream.next()).await {
-                    Ok(Some(Ok(event))) => {
-                        // Mirror the progress line onto the engine's log — the
-                        // observability surface a workflow run has, since it owns
-                        // no PTY whose output would otherwise carry progress.
-                        tracing::info!(
-                            target: "workflow_engine",
-                            run = %run_id,
-                            provider_run = %provider_run_id,
-                            kind = %event.kind,
-                            step = event.step_id.as_deref().unwrap_or("-"),
-                            message = event.message.as_deref().unwrap_or(""),
-                            "workflow run event",
-                        );
-                        // Collect before the terminal check so a terminal event
-                        // that also names a checkpoint still contributes one.
-                        if let Some(branch) = event.checkpoint_branch.as_deref() {
-                            registry.record_workflow_checkpoint(
-                                task_id,
-                                run_id,
-                                event.step_id.as_deref(),
-                                branch,
-                                event.at.unwrap_or_else(OffsetDateTime::now_utc),
-                            );
-                        }
-                        if let Some(gate) = event.gate.as_ref() {
-                            if let Err(err) = registry.open_workflow_gate(run_id, gate) {
-                                tracing::warn!(
-                                    run = %run_id,
-                                    error = %err,
-                                    "failed to mirror workflow gate"
-                                );
-                            }
-                        }
-                        if let Some(state) = event.terminal_state {
-                            finalize_workflow_run(
-                                &registry,
-                                &provider,
-                                &provider_run_id,
-                                task_id,
-                                run_id,
-                                session_id,
-                                started,
-                                state,
-                                event.message,
-                            )
-                            .await;
-                            return;
-                        }
-                    }
-                    Ok(Some(Err(err))) => {
-                        tracing::warn!(
-                            target: "workflow_engine",
-                            run = %run_id,
-                            error = %err,
-                            "workflow event stream errored; falling back to polling",
-                        );
-                        break;
-                    }
-                    Ok(None) => {
-                        tracing::info!(
-                            target: "workflow_engine",
-                            run = %run_id,
-                            "workflow event stream ended without a terminal event; polling",
-                        );
-                        break;
-                    }
-                    Err(_elapsed) => {
-                        tracing::info!(
-                            target: "workflow_engine",
-                            run = %run_id,
-                            "workflow event stream idle; falling back to polling",
-                        );
-                        break;
-                    }
-                }
+        let stream_provider = provider.clone();
+        let stream_run_id = provider_run_id.clone();
+        let stream_exit = stream_workflow_with_retry(
+            move || {
+                let provider = stream_provider.clone();
+                let run_id = stream_run_id.clone();
+                async move { provider.stream_events(&run_id).await }
             },
-            Err(err) => {
+            started,
+            |event| {
+                // Mirror the progress line onto the engine's log — the
+                // observability surface a workflow run has, since it owns
+                // no PTY whose output would otherwise carry progress.
                 tracing::info!(
                     target: "workflow_engine",
                     run = %run_id,
-                    error = %err,
-                    "workflow event stream unavailable; tracking by polling",
+                    provider_run = %provider_run_id,
+                    kind = %event.kind,
+                    step = event.step_id.as_deref().unwrap_or("-"),
+                    message = event.message.as_deref().unwrap_or(""),
+                    "workflow run event",
                 );
+                // Collect before the terminal check so a terminal event that
+                // also names a checkpoint still contributes one.
+                if let Some(branch) = event.checkpoint_branch.as_deref() {
+                    registry.record_workflow_checkpoint(
+                        task_id,
+                        run_id,
+                        event.step_id.as_deref(),
+                        branch,
+                        event.at.unwrap_or_else(OffsetDateTime::now_utc),
+                    );
+                }
+                if let Some(gate) = event.gate.as_ref() {
+                    if let Err(err) = registry.open_workflow_gate(run_id, gate) {
+                        tracing::warn!(
+                            run = %run_id,
+                            error = %err,
+                            "failed to mirror workflow gate"
+                        );
+                    }
+                }
+            },
+        )
+        .await;
+
+        match stream_exit {
+            WorkflowStreamExit::Terminal(event) => {
+                let state = event
+                    .terminal_state
+                    .expect("a terminal stream exit carries a terminal state");
+                finalize_workflow_run(
+                    &registry,
+                    &provider,
+                    &provider_run_id,
+                    task_id,
+                    run_id,
+                    session_id,
+                    started,
+                    state,
+                    event.message,
+                )
+                .await;
+                return;
+            }
+            WorkflowStreamExit::Deadline => {
+                registry.record_workflow_errored(
+                    task_id,
+                    run_id,
+                    session_id,
+                    started,
+                    OffsetDateTime::now_utc(),
+                    "workflow engine run did not reach a terminal state before the deadline",
+                );
+                return;
+            }
+            WorkflowStreamExit::Fallback {
+                last_error,
+                resubscriptions,
+            } => {
+                if let Some(err) = last_error {
+                    tracing::warn!(
+                        target: "workflow_engine",
+                        run = %run_id,
+                        resubscriptions,
+                        error = %err,
+                        "workflow event stream unavailable after bounded retry; polling",
+                    );
+                } else {
+                    tracing::info!(
+                        target: "workflow_engine",
+                        run = %run_id,
+                        resubscriptions,
+                        "workflow event stream ended after bounded retry; polling",
+                    );
+                }
             }
         }
         // Fallback: track the run to terminal by polling (increment-1 path).
@@ -4547,6 +4684,8 @@ fn read_output_file(cwd: &str, rel: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     #[test]
     fn parses_daily_time() {
         assert!(parse_hhmm("09:30").is_ok());
@@ -5138,6 +5277,49 @@ mod tests {
         let stored = registry.get(task.id).unwrap();
         assert_eq!(stored.runs.len(), 1);
         assert_eq!(stored.runs[0].status, AgentTaskRunStatus::Errored);
+    }
+
+    #[tokio::test]
+    async fn workflow_stream_retries_once_then_falls_back_to_polling() {
+        let subscriptions = Arc::new(AtomicU32::new(0));
+        let subscription_count = subscriptions.clone();
+        let exit = stream_workflow_with_retry(
+            move || {
+                subscription_count.fetch_add(1, Ordering::SeqCst);
+                async { Ok(Box::pin(futures_util::stream::empty()) as ProviderEventStream) }
+            },
+            OffsetDateTime::now_utc(),
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(subscriptions.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            exit,
+            WorkflowStreamExit::Fallback {
+                resubscriptions: 1,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_expired_workflow_stream_does_not_subscribe_or_retry() {
+        let subscriptions = Arc::new(AtomicU32::new(0));
+        let subscription_count = subscriptions.clone();
+        let started = OffsetDateTime::now_utc() - WORKFLOW_POLL_DEADLINE - Duration::seconds(1);
+        let exit = stream_workflow_with_retry(
+            move || {
+                subscription_count.fetch_add(1, Ordering::SeqCst);
+                async { Ok(Box::pin(futures_util::stream::empty()) as ProviderEventStream) }
+            },
+            started,
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(subscriptions.load(Ordering::SeqCst), 0);
+        assert!(matches!(exit, WorkflowStreamExit::Deadline));
     }
 
     /// Seed a `Running` workflow run into a task and return its id, so a test

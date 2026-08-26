@@ -956,7 +956,11 @@ routes remain the client contract. Provider SSE or poll responses are mirrored
 into local `GateRecord`s, preserving the provider gate id privately; an answer
 is sent upstream first and is only then recorded locally. The generic REST/SSE
 field names are provisional until a live engine smoke test validates them, and
-an unavailable provider remains a failed run rather than a core outage.
+an unavailable provider remains a failed run rather than a core outage. A
+broken, ended, or idle SSE subscription gets one bounded re-subscription; after
+that budget, tracking settles on the poll fallback. The six-hour run deadline
+applies across both transports, so an expired stream cannot start another
+subscription.
 
 **Typed outcomes and the conclusion record (#291).** When a run ends the engine
 records a typed `outcome` on it — one of `succeeded`, `failed`,
