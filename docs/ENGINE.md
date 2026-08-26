@@ -472,6 +472,11 @@ section that documents it.
   `GUI_STREAM_VERIFIED=1` are all present. The latter is an operator
   attestation set only after a launched process has rendered through the
   configured stream.
+- `GET /api/auth/check` -> `{ok, version?, product_version?, storage?}` — a
+  cheap authenticated credential probe. It deliberately does not perform the
+  operational checks reported by `/api/status`, so Settings can distinguish a
+  valid token from a temporarily unavailable engine without starting a full
+  status read.
 - `GET /api/push/public-key` -> `{vapid_public_key, fcm_enabled}` — needed to
   call `PushManager.subscribe`, so it must be reachable before a token exists.
 
