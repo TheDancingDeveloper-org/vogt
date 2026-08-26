@@ -1,6 +1,7 @@
 //! End-to-end integration tests: start the real Axum server on an OS-assigned
 //! port, talk to it over HTTP + WebSocket the same way a client would.
 
+use flate2::read::GzDecoder;
 use std::{
     os::unix::fs::PermissionsExt,
     sync::{Arc, Mutex},
@@ -268,6 +269,110 @@ async fn config_endpoint_is_public_and_returns_shape() {
     );
     assert!(body["source_ref"].as_str().is_some(), "missing source ref");
     assert!(body["source_sha"].as_str().is_some(), "missing source sha");
+}
+
+#[tokio::test]
+async fn finite_pwa_and_api_responses_negotiate_gzip_without_changing_cache_policy() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .build()
+        .unwrap();
+
+    let identity = client
+        .get(format!("{base}/"))
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .send()
+        .await
+        .unwrap();
+    let identity_body = identity.bytes().await.unwrap();
+
+    let compressed = client
+        .get(format!("{base}/"))
+        .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        compressed.headers()[reqwest::header::CONTENT_ENCODING],
+        "gzip"
+    );
+    assert_eq!(
+        compressed.headers()[reqwest::header::VARY]
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase(),
+        "accept-encoding"
+    );
+    assert_eq!(
+        compressed.headers()[reqwest::header::CACHE_CONTROL],
+        "no-store, must-revalidate"
+    );
+    let compressed_body = compressed.bytes().await.unwrap();
+    let mut decoder = GzDecoder::new(&compressed_body[..]);
+    let mut decoded = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+    assert_eq!(decoded, identity_body);
+
+    let api = client
+        .get(format!("{base}/api/config"))
+        .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(api.headers()[reqwest::header::CONTENT_ENCODING], "gzip");
+    assert_eq!(
+        api.headers()[reqwest::header::VARY]
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase(),
+        "accept-encoding"
+    );
+    let api_body = api.bytes().await.unwrap();
+    let mut decoder = GzDecoder::new(&api_body[..]);
+    let mut decoded = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+    serde_json::from_slice::<Value>(&decoded).unwrap();
+}
+
+#[tokio::test]
+async fn compression_does_not_modify_sse_or_identity_responses() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .build()
+        .unwrap();
+
+    let sse = client
+        .get(format!("{base}/api/events"))
+        .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {TEST_TOKEN}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse.status(), StatusCode::OK);
+    assert!(!sse
+        .headers()
+        .contains_key(reqwest::header::CONTENT_ENCODING));
+    assert_eq!(
+        sse.headers()[reqwest::header::CONTENT_TYPE],
+        "text/event-stream"
+    );
+
+    let identity = client
+        .get(format!("{base}/api/config"))
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .send()
+        .await
+        .unwrap();
+    assert!(!identity
+        .headers()
+        .contains_key(reqwest::header::CONTENT_ENCODING));
 }
 
 #[tokio::test]
