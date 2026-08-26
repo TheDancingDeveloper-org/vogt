@@ -1,0 +1,215 @@
+{
+  "title": "Git target SSE smoke",
+  "spec": {
+    "run_id": "01M0ZSN2WT5H37FKQP30M2YQGT",
+    "settings": {
+      "project": {
+        "name": null,
+        "description": null,
+        "metadata": {}
+      },
+      "workflow": {
+        "name": null,
+        "description": null,
+        "graph": "workflow.fabro",
+        "metadata": {}
+      },
+      "run": {
+        "goal": {
+          "type": "inline",
+          "value": "exercise git target"
+        },
+        "working_dir": null,
+        "metadata": {},
+        "inputs": {},
+        "model": {
+          "provider": "gemini",
+          "name": "gemini-3.5-flash",
+          "fallbacks": {},
+          "controls": {
+            "reasoning_effort": null,
+            "speed": null
+          }
+        },
+        "git": {
+          "author": null
+        },
+        "prepare": {
+          "steps": [],
+          "timeout_ms": 300000
+        },
+        "execution": {
+          "mode": "normal",
+          "approval": "prompt"
+        },
+        "checkpoint": {
+          "exclude_globs": [],
+          "skip_git_hooks": false,
+          "commit_timeout_ms": 30000
+        },
+        "clone": {
+          "enabled": true,
+          "depth": 100
+        },
+        "run_branch": {
+          "enabled": true,
+          "push": true
+        },
+        "meta_branch": {
+          "enabled": true,
+          "push": true
+        },
+        "environment": {
+          "id": "smoke-docker",
+          "provider": "docker",
+          "image": {
+            "docker": "buildpack-deps:noble",
+            "dockerfile": null
+          },
+          "resources": {
+            "cpu": null,
+            "memory": null,
+            "disk": null
+          },
+          "network": {
+            "mode": "allow_all",
+            "allow": []
+          },
+          "lifecycle": {
+            "preserve": false,
+            "stop_on_terminal": true,
+            "auto_stop": null
+          },
+          "labels": {},
+          "env": {}
+        },
+        "notifications": {},
+        "interviews": {
+          "provider": null,
+          "slack": null
+        },
+        "agent": {
+          "fabro_tools": false,
+          "mcps": {}
+        },
+        "hooks": [],
+        "scm": {
+          "provider": null,
+          "owner": null,
+          "repository": null,
+          "github": null
+        },
+        "pull_request": null,
+        "artifacts": {
+          "include": []
+        },
+        "integrations": {
+          "github": {
+            "permissions": {}
+          }
+        }
+      }
+    },
+    "graph": {
+      "name": "W",
+      "nodes": {
+        "exit": {
+          "id": "exit",
+          "attrs": {
+            "shape": {
+              "String": "Msquare"
+            }
+          }
+        },
+        "start": {
+          "id": "start",
+          "attrs": {
+            "shape": {
+              "String": "Mdiamond"
+            }
+          }
+        }
+      },
+      "edges": [
+        {
+          "from": "start",
+          "to": "exit",
+          "attrs": {}
+        }
+      ],
+      "attrs": {
+        "goal": {
+          "String": "exercise git target"
+        }
+      }
+    },
+    "graph_source": "digraph W { start [shape=Mdiamond] exit [shape=Msquare] start -> exit }",
+    "workflow_slug": "workflow",
+    "workflow_version_id": "72cb923eccb04079ef4fb4121286f2d9e03bdc6283b73f58bd718ef3ccc1dd49",
+    "target": {
+      "kind": "git",
+      "repo": "TheDancingDeveloper-org/vogt",
+      "branch": "dev"
+    },
+    "source_directory": "/workspace",
+    "provenance": {
+      "server": {
+        "version": "0.337.0-nightly.1"
+      },
+      "client": {
+        "user_agent": "curl/8.18.0"
+      },
+      "subject": {
+        "kind": "user",
+        "identity": {
+          "issuer": "fabro:dev",
+          "subject": "dev"
+        },
+        "login": "dev",
+        "auth_method": "dev_token"
+      }
+    },
+    "definition_blob": "77876976d0f61a60019e8b847b4594d004766acbaf58406ffa631282fe152786",
+    "spec_blob": "bacfd326034801b1a0b0cb6602aa36074d6001f3753af6c48a8082a54c2a0a38",
+    "git": {
+      "origin_url": "https://github.com/TheDancingDeveloper-org/vogt",
+      "branch": "dev",
+      "dirty": "clean"
+    }
+  },
+  "start": null,
+  "status": {
+    "kind": "starting"
+  },
+  "status_updated_at": "2026-08-26T19:44:48.113530313Z",
+  "last_event_at": "2026-08-26T19:44:50.406302222Z",
+  "pending_control": null,
+  "checkpoints": [],
+  "conclusion": null,
+  "sandbox": {
+    "kind": "ready",
+    "plan": {
+      "provider": "docker",
+      "image": "buildpack-deps:noble"
+    },
+    "instance": {
+      "provider": "docker",
+      "image": "buildpack-deps:noble",
+      "runtime": {
+        "id": "12e0dde7c47a476f9f49b0d796143b0d7901b170c50812b2bb8474832cdea504",
+        "working_directory": "/workspace/vogt",
+        "repo_cloned": true,
+        "clone_origin_url": "https://github.com/TheDancingDeveloper-org/vogt",
+        "clone_branch": "dev",
+        "workspace_root": "/workspace",
+        "repos_root": "/repos",
+        "primary_repo_path": "/repos/TheDancingDeveloper-org/vogt",
+        "primary_repo_link": "/workspace/vogt"
+      }
+    }
+  },
+  "pull_request": null,
+  "superseded_by": null,
+  "pending_interviews": {},
+  "stages": {}
+}
