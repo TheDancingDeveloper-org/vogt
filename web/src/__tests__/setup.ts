@@ -70,16 +70,6 @@ afterEach(() => {
   clearPendingAction();
   resetRailSections();
   resetFileTreeState();
-});
-afterEach(() => {
-  cleanup();
-  localStorage.clear();
-  invalidate();
-  clearEditorDrafts();
-  clearToolDrafts();
-  clearPendingAction();
-  resetRailSections();
-  resetFileTreeState();
   invalidateAssistantSnapshot();
   clearTaxonomyCache();
 });

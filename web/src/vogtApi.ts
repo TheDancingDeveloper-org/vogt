@@ -107,6 +107,7 @@ async function call<T>(
   params: Record<string, unknown> = {},
   method: "GET" | "POST" = "GET",
   signal?: AbortSignal,
+  options: { cache?: boolean } = {},
 ): Promise<T> {
   const path = ROUTES[operation];
   if (!path) throw new Error(`no route for ${operation}`);
@@ -169,7 +170,7 @@ async function call<T>(
     };
   };
 
-  if (method === "GET" && STABLE_READ_OPERATIONS.has(operation)) {
+  if (method === "GET" && options.cache !== false && STABLE_READ_OPERATIONS.has(operation)) {
     return cachedReadWithValidator(
       cacheKey(cacheIdentity(getBase(), token), operation, params),
       (etag, requestSignal) => read(requestSignal, etag),
@@ -716,8 +717,8 @@ export interface ComplianceResult {
 
 // -- reads ------------------------------------------------------------------
 
-export const listWorkflows = () =>
-  call<{ workflows: Workflow[] }>("workflow.list");
+export const listWorkflows = (options: { cache?: boolean } = {}) =>
+  call<{ workflows: Workflow[] }>("workflow.list", {}, "GET", undefined, options);
 
 export const placeMetrics = () => call<PlaceMetricsResult>("place.metrics");
 
@@ -754,26 +755,42 @@ export interface ProjectListEntry {
 export const listProjects = (
   params: Record<string, unknown> = {},
   signal?: AbortSignal,
+  options: { cache?: boolean } = {},
 ) => call<{ projects: ProjectListEntry[]; total: number }>(
   "project.list",
   params,
   "GET",
   signal,
+  options,
 );
 
-export const listLabels = () =>
-  call<{ labels: { name: string; color?: string }[] }>("label.list");
+export const listLabels = (options: { cache?: boolean } = {}) =>
+  call<{ labels: { name: string; color?: string }[] }>(
+    "label.list",
+    {},
+    "GET",
+    undefined,
+    options,
+  );
 
-export const listInitiatives = () =>
+export const listInitiatives = (options: { cache?: boolean } = {}) =>
   // `id` is not decoration: work items carry `initiative_id`, so a swimlane
   // cannot be labelled from the slug alone.
   call<{ initiatives: { id: string; slug: string; title: string }[] }>(
     "initiative.list",
+    {},
+    "GET",
+    undefined,
+    options,
   );
 
-export const listActors = () =>
+export const listActors = (options: { cache?: boolean } = {}) =>
   call<{ actors: { identity_ref: string; display_name: string }[] }>(
     "actor.list",
+    {},
+    "GET",
+    undefined,
+    options,
   );
 
 export const notifications = (params: Record<string, unknown> = {}) =>
