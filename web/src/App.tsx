@@ -1545,6 +1545,7 @@ const App: Component = () => {
             </div>
           </Show>
           <FileTree
+            active={() => railSections.files}
             onOpen={() => navigate("/sessions")}
             promptPath={promptUser}
             confirmAction={confirmUser}
