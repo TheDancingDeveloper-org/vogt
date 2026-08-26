@@ -1,0 +1,7 @@
+# The voice image is built with `voice/` as its context. Keep local build
+# products, editor state, and source-control metadata out of the image build.
+target
+.git
+.gitignore
+Dockerfile
+README.md

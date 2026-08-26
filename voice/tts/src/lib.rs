@@ -1,9 +1,16 @@
 //! The provider seam for OpenAI-compatible text-to-speech backends.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use piper_rs::from_config_path;
+use piper_rs::synth::{AudioOutputConfig, SonataSpeechSynthesizer};
+use tempfile::NamedTempFile;
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, process::Command};
 
@@ -30,6 +37,110 @@ pub enum SpeechError {
     UnsupportedModel(String),
     #[error("text-to-speech provider failed: {0}")]
     Provider(String),
+}
+
+/// A real in-process Piper/ONNX synthesizer.
+///
+/// The JSON model configuration and its neighboring ONNX file are loaded once
+/// at startup. Synthesis executes through piper-rs in this process and emits a
+/// valid PCM WAV response. WAV is intentionally the only native output format
+/// until an explicit, bounded encoder is added; requests for another format
+/// are rejected rather than mislabeled.
+pub struct PiperSynthesizer {
+    synthesizer: Arc<SonataSpeechSynthesizer>,
+    model_id: String,
+}
+
+impl std::fmt::Debug for PiperSynthesizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PiperSynthesizer")
+            .field("model_id", &self.model_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PiperSynthesizer {
+    pub fn new(
+        config_path: impl Into<PathBuf>,
+        model_id: impl Into<String>,
+    ) -> Result<Self, SpeechError> {
+        let config_path = config_path.into();
+        if !config_path.is_file() {
+            return Err(SpeechError::Provider(format!(
+                "Piper model config does not exist: {}",
+                config_path.display()
+            )));
+        }
+        let model = from_config_path(Path::new(&config_path))
+            .map_err(|error| SpeechError::Provider(format!("load Piper model: {error}")))?;
+        let synthesizer = SonataSpeechSynthesizer::new(model)
+            .map_err(|error| SpeechError::Provider(format!("create Piper synthesizer: {error}")))?;
+        Ok(Self {
+            synthesizer: Arc::new(synthesizer),
+            model_id: model_id.into(),
+        })
+    }
+}
+
+#[async_trait]
+impl SpeechBackend for PiperSynthesizer {
+    async fn synthesize(&self, request: SpeechRequest) -> Result<SpeechResponse, SpeechError> {
+        if request.model != self.model_id {
+            return Err(SpeechError::UnsupportedModel(request.model));
+        }
+        if !request.response_format.eq_ignore_ascii_case("wav") {
+            return Err(SpeechError::UnsupportedModel(format!(
+                "response format {}; in-process Piper supports wav",
+                request.response_format
+            )));
+        }
+        let output_config = output_config(request.speed)?;
+        let synthesizer = Arc::clone(&self.synthesizer);
+        tokio::task::spawn_blocking(move || {
+            let output = NamedTempFile::new().map_err(|error| {
+                SpeechError::Provider(format!("create Piper output file: {error}"))
+            })?;
+            synthesizer
+                .synthesize_to_file(output.path(), request.input, output_config)
+                .map_err(|error| SpeechError::Provider(format!("Piper inference: {error}")))?;
+            let audio = std::fs::read(output.path())
+                .map_err(|error| SpeechError::Provider(format!("read Piper output: {error}")))?;
+            if audio.is_empty() {
+                return Err(SpeechError::Provider("Piper returned no audio".into()));
+            }
+            Ok(SpeechResponse {
+                audio: Bytes::from(audio),
+                content_type: "audio/wav".into(),
+            })
+        })
+        .await
+        .map_err(|error| SpeechError::Provider(format!("Piper worker failed: {error}")))?
+    }
+
+    fn name(&self) -> &'static str {
+        "piper-rs"
+    }
+}
+
+fn output_config(speed: Option<f32>) -> Result<Option<AudioOutputConfig>, SpeechError> {
+    let Some(speed) = speed else {
+        return Ok(None);
+    };
+    if !speed.is_finite() || !(0.25..=4.0).contains(&speed) {
+        return Err(SpeechError::UnsupportedModel(format!(
+            "speed {speed} is outside the supported range 0.25..=4.0"
+        )));
+    }
+    // piper-rs exposes its speed post-processing as a 0..=100 percentage for
+    // the underlying Sonic range 0.5..=5.5. Keep the OpenAI-compatible speed
+    // field meaningful without changing the voice model itself.
+    let rate = (((speed - 0.5) / 5.0) * 100.0).round().clamp(0.0, 100.0) as u8;
+    Ok(Some(AudioOutputConfig {
+        rate: Some(rate),
+        volume: None,
+        pitch: None,
+        appended_silence_ms: None,
+    }))
 }
 
 /// A text-to-speech implementation. Audio encoding and model execution stay
@@ -212,6 +323,22 @@ mod tests {
         assert_eq!(content_type("mp3").unwrap(), "audio/mpeg");
         assert_eq!(content_type("wav").unwrap(), "audio/wav");
         assert!(content_type("text").is_err());
+    }
+
+    #[test]
+    fn native_speed_is_validated_and_mapped_to_piper_post_processing() {
+        assert!(output_config(Some(0.24)).is_err());
+        assert!(output_config(Some(4.01)).is_err());
+        assert_eq!(output_config(Some(0.5)).unwrap().unwrap().rate, Some(0));
+        assert_eq!(output_config(Some(4.0)).unwrap().unwrap().rate, Some(70));
+    }
+
+    #[test]
+    fn native_constructor_reports_missing_model_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let error =
+            PiperSynthesizer::new(directory.path().join("missing.json"), "tts-1").unwrap_err();
+        assert!(error.to_string().contains("does not exist"));
     }
 
     #[cfg(unix)]

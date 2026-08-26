@@ -1,0 +1,58 @@
+# First-party self-hosted voice overlay.
+#
+#   cp deploy/.env.example deploy/.env
+#   # Put the selected Whisper and Piper files in VOGT_VOICE_MODEL_DIR.
+#   docker compose \
+#     -f deploy/vogt.compose.yml \
+#     -f deploy/engine.overlay.yml \
+#     -f deploy/voice.firstparty.overlay.yml up --build -d
+#
+# This is the Vogt-owned alternative to voice.overlay.yml. It adds one Rust
+# sidecar containing the inference runtimes and mounts only operator-provided
+# model files. The model directory is required deliberately: a missing weight
+# is a deployment error, not a network download hidden in the first request.
+# The mount is read-only and the sidecar is not published to the host; the
+# engine remains the only front door.
+
+services:
+  engine:
+    environment:
+      ENGINE_ASSISTANT_STT_BASE_URLS: "${ENGINE_ASSISTANT_STT_BASE_URLS:-http://voice:8000/v1}"
+      ENGINE_ASSISTANT_STT_MODEL: "${ENGINE_ASSISTANT_STT_MODEL:-whisper-1}"
+      ENGINE_ASSISTANT_TTS_BASE_URLS: "${ENGINE_ASSISTANT_TTS_BASE_URLS:-http://voice:8000/v1}"
+      ENGINE_ASSISTANT_TTS_MODEL: "${ENGINE_ASSISTANT_TTS_MODEL:-tts-1}"
+      ENGINE_ASSISTANT_TTS_VOICE: "${ENGINE_ASSISTANT_TTS_VOICE:-alloy}"
+    depends_on:
+      voice:
+        condition: service_healthy
+
+  voice:
+    build:
+      context: ../voice
+      dockerfile: Dockerfile
+    image: vogt-voice:local
+    restart: unless-stopped
+    environment:
+      VOGT_VOICE_BIND: "0.0.0.0:8000"
+      VOGT_VOICE_MODEL_CACHE_DIR: /models
+      VOGT_VOICE_STT_MODEL: "${ENGINE_ASSISTANT_STT_MODEL:-whisper-1}"
+      VOGT_VOICE_TTS_MODEL: "${ENGINE_ASSISTANT_TTS_MODEL:-tts-1}"
+      VOGT_VOICE_TTS_VOICE: "${ENGINE_ASSISTANT_TTS_VOICE:-alloy}"
+      VOGT_VOICE_STT_MODEL_PATH: "/models/${VOGT_VOICE_STT_MODEL_FILE:?Set VOGT_VOICE_STT_MODEL_FILE in deploy/.env}"
+      VOGT_VOICE_TTS_MODEL_CONFIG_PATH: "/models/${VOGT_VOICE_TTS_MODEL_CONFIG_FILE:?Set VOGT_VOICE_TTS_MODEL_CONFIG_FILE in deploy/.env}"
+      VOGT_VOICE_THREADS: "${VOGT_VOICE_THREADS:-2}"
+    volumes:
+      - "${VOGT_VOICE_MODEL_DIR:?Set VOGT_VOICE_MODEL_DIR in deploy/.env}:/models:ro"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

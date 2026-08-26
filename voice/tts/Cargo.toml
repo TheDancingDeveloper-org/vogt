@@ -9,5 +9,22 @@ rust-version.workspace = true
 [dependencies]
 async-trait = "0.1"
 bytes = "1"
-tokio = { version = "1", features = ["io-util", "process", "time"] }
+# piper-rs 0.1.2 was written against this runtime API; pinning it prevents
+# Cargo from selecting a newer pre-release with incompatible ndarray types.
+ort = "=2.0.0-rc.9"
+# piper-rs's ort dependency is a caret requirement; constrain the transitive
+# sys crate too, otherwise Cargo may unify it with a newer incompatible rc.
+ort-sys = "=2.0.0-rc.9"
+piper-rs = "=0.1.2"
+# Keep the legacy inference stack buildable with the workspace's Rust 1.80
+# MSRV. These are transitive build dependencies of ort-sys/bindgen; newer
+# releases moved to edition 2024.
+home = "=0.5.9"
+half = "=2.4.1"
+rustls-pki-types = "=1.12.0"
+zeroize = "=1.8.1"
+ureq = "=2.9.7"
+url = "=2.4.1"
+tempfile = "=3.23.0"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "time"] }
 thiserror = "2"
