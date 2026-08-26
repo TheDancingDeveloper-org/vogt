@@ -1719,7 +1719,7 @@ impl AgentTaskRegistry {
                     None => format!("workflow engine run {}", provider_run.run_id),
                 });
                 self.record_workflow_run(id, trigger, &origin.detail, &run, now)?;
-                // Track the run off its live SSE event stream (#293 inc-2),
+                // Track the run off its live SSE event stream (#293),
                 // degrading to the poller when the stream is absent or breaks.
                 // The tracker also collects each per-stage checkpoint branch the
                 // stream or poll fallback reports as a run observation (#284).
@@ -3540,7 +3540,7 @@ where
 }
 
 /// Track a workflow run off its live SSE event stream, degrading to polling
-/// (#293, increment 2).
+/// (#293).
 ///
 /// Spawned once per workflow run. It first subscribes to the engine's event
 /// stream ([`WorkflowProvider::stream_events`]): each event is mirrored onto the
