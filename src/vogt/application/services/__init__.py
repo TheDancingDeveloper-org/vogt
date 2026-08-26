@@ -71,6 +71,7 @@ from vogt.application.services.observed_first import (
     revoke_suppression,
     suppress,
 )
+from vogt.application.services.place import place_metrics
 from vogt.application.services.projects import (
     brief_project,
     create_project,
@@ -172,6 +173,7 @@ __all__ = [
     "migrate_instance",
     "observations",
     "onboard",
+    "place_metrics",
     "prune",
     "publish_initiative",
     "publish_project",

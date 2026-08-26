@@ -297,6 +297,15 @@ export class DemoStore {
   private async vogt(path: string, method: string, query: URLSearchParams, body: Record<string, unknown>): Promise<Response> {
     const params = method === "GET" ? Object.fromEntries(query.entries()) : body;
     if (path === "/status") return json({ ok: true });
+    if (path === "/place/metrics") return json({
+      inbox_active: this.state.inbox.filter((row) => row.triage_state === "active").length,
+      projects_total: this.projects().length,
+      work_total: this.filterWork({}).length,
+      backlog_total_considered: this.filterWork({}).length + 2,
+      drift_present: this.state.drift.some((row) => row.status === "open"),
+      revision: this.state.revision,
+      generated_at: DEMO_NOW,
+    });
     if (path === "/workflows") return json({ workflows: [workflowFor("feature"), workflowFor("bug"), workflowFor("chore"), workflowFor("question")] });
     if (path === "/work" && method === "GET") return json({ items: this.filterWork(params), total: this.filterWork(params).length, link_state: "linked" });
     if (path === "/work" && method === "POST") { const ref = `WI-${this.state.next_id++}`; const row = { ...this.state.work[0]!, ...body, id: `work-${this.state.next_id}`, ref, state: "open", created_at: this.now(), updated_at: this.now() }; this.state.work.unshift(row); this.audit("work.create", "work_item", row.id, String(body.reason)); this.changed("work.created", "work_item", row.id); return json({ item: row, comments: [], sessions: [] }); }

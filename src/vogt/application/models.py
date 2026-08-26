@@ -252,6 +252,26 @@ class StatusResult(Result):
     counts: StoreCounts
 
 
+class PlaceMetricsParams(Params):
+    """The shell's bounded, aggregate navigation counts."""
+
+
+class PlaceMetricsResult(Result):
+    """One read for the shell's glanceable place badges.
+
+    A nullable field means that only that provider failed; it never turns an
+    unavailable answer into a misleading zero.
+    """
+
+    inbox_active: int | None = None
+    projects_total: int | None = None
+    work_total: int | None = None
+    backlog_total_considered: int | None = None
+    drift_present: bool | None = None
+    revision: int
+    generated_at: datetime
+
+
 # -- projects --------------------------------------------------------------
 
 
