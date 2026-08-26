@@ -1342,6 +1342,17 @@ ENGINE_ASSISTANT_STT_API_KEY=sk-...   # used only by the entry that needs it
 ENGINE_ASSISTANT_TTS_API_KEY=sk-...
 ```
 
+An optional first-party alternative is the Rust `voice/` sidecar. Its default
+providers are still unconfigured; when `VOGT_VOICE_STT_COMMAND` and/or
+`VOGT_VOICE_TTS_COMMAND` is set, it runs the operator's configured inference
+executable directly (JSON argv, never a shell), forwarding STT audio through
+a temporary file and TTS text through stdin. The executable must provide the
+real transcription or audio bytes on stdout. No command, model runtime, or
+weights are included by default, so this path is opt-in and requires an
+operator-built image or mounted runtime/model files. See [`voice/README.md`](../voice/README.md)
+for the exact placeholders and contract. The existing `deploy/voice.overlay.yml`
+third-party overlay is independent and unchanged.
+
 #### Provider profiles (FR-T9, r16)
 
 A **profile** is one named OpenAI-compatible route:
