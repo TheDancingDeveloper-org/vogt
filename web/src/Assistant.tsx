@@ -417,48 +417,8 @@ export default function Assistant(props: AssistantProps) {
     setServerTtsEnabled(cfg.assistant_tts_enabled ?? false);
   };
 
-  const hydrate = async () => {
-    if (props.assistantEnabled === false) return;
-    try {
-      const snapshot = await readAssistantSnapshot(true);
-      if (!snapshot) return;
-      setTranscript(snapshot.transcript);
-      setPendingAction(snapshot.pendingAction);
-      setSlugs(snapshot.projects.map((project) => project.slug));
-    } catch (e) {
-      props.onError(`assistant history: ${String(e)}`);
-    }
-
-    // Standalone component consumers predate the shell config prop. Preserve
-    // that compatibility path, but never duplicate the shell's config read.
-    if (props.publicConfig === undefined && props.assistantEnabled === undefined) {
-      try {
-        applyConfig(await api.publicConfig());
-      } catch {
-        // No profile list means no choice to offer, not a broken assistant.
-      }
-    }
-  };
-
-  onMount(async () => {
-    voiceEndedCleanup = onVoiceServiceEnded(endFromNotification);
-    // Speak-the-push (FR-M6 / FR-M2): an FCM message that arrives while a voice
-    // conversation is active is spoken as well as shown. Outside an active
-    // conversation the gate is false, so nothing is spoken and FR-M2's shown/
-    // handled behaviour is exactly as before. No-op off a native platform.
-    pushSpeakerCleanup = await registerPushSpeaker((text) => {
-      if (ttsOn()) speak(text);
-    });
-    applyConfig(props.publicConfig);
-    const cancelHydration = deferAssistantHydration(() => void hydrate());
-    onCleanup(cancelHydration);
-    // STT backend, in preference order: the Capacitor native plugin inside the
-    // APK, then the browser's Web Speech recognizer on the desktop (FR-T13,
-    // VOICE_POC §3.4), then the server-side pipeline (FR-T12, §3.5) for a
-    // client with neither — a desktop without Web Speech that can still capture
-    // audio and let the engine transcribe it. Absent all three — no recognizer,
-    // no server route, no MediaRecorder — is a working state that degrades to
-    // typed input with no error (FR-T6).
+  const configureSpeechInput = async () => {
+    if (sttBackend || sttAvailable()) return;
     if (Capacitor.isPluginAvailable("SpeechRecognition")) {
       try {
         const { SpeechRecognition } = await import(
@@ -479,6 +439,57 @@ export default function Assistant(props: AssistantProps) {
       sttBackend = "server";
       setSttAvailable(true);
     }
+  };
+
+  const hydrate = async () => {
+    if (props.assistantEnabled === false) return;
+    try {
+      const snapshot = await readAssistantSnapshot(true);
+      if (!snapshot) return;
+      setTranscript(snapshot.transcript);
+      setPendingAction(snapshot.pendingAction);
+      setSlugs(snapshot.projects.map((project) => project.slug));
+    } catch (e) {
+      props.onError(`assistant history: ${String(e)}`);
+    }
+
+    await configureSpeechInput();
+  };
+
+  onMount(async () => {
+    voiceEndedCleanup = onVoiceServiceEnded(endFromNotification);
+    // Speak-the-push (FR-M6 / FR-M2): an FCM message that arrives while a voice
+    // conversation is active is spoken as well as shown. Outside an active
+    // conversation the gate is false, so nothing is spoken and FR-M2's shown/
+    // handled behaviour is exactly as before. No-op off a native platform.
+    pushSpeakerCleanup = await registerPushSpeaker((text) => {
+      if (ttsOn()) speak(text);
+    });
+    applyConfig(props.publicConfig);
+    // Standalone consumers predate the shell config prop. Read their config
+    // before deferred history hydration so capability-gated controls are
+    // ready on the same mount turn as they were before #416.
+    if (props.publicConfig === undefined && props.assistantEnabled === undefined) {
+      void api.publicConfig()
+        .then((cfg) => {
+          applyConfig(cfg);
+          void configureSpeechInput();
+        })
+        .catch(() => {
+          void configureSpeechInput();
+        });
+    } else {
+      void configureSpeechInput();
+    }
+    const cancelHydration = deferAssistantHydration(() => void hydrate());
+    onCleanup(cancelHydration);
+    // STT backend, in preference order: the Capacitor native plugin inside the
+    // APK, then the browser's Web Speech recognizer on the desktop (FR-T13,
+    // VOICE_POC §3.4), then the server-side pipeline (FR-T12, §3.5) for a
+    // client with neither — a desktop without Web Speech that can still capture
+    // audio and let the engine transcribe it. Absent all three — no recognizer,
+    // no server route, no MediaRecorder — is a working state that degrades to
+    // typed input with no error (FR-T6).
   });
 
   onCleanup(() => {

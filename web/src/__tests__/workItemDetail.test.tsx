@@ -1093,7 +1093,7 @@ describe("#213 — a work item's state is changed from its own page", () => {
     const { container } = detail();
     await waitFor(() => expect(stateChip(container)).toBe("open"));
 
-    const form = moveForm(container);
+    const form = await waitFor(() => moveForm(container));
     fireEvent.input(field(form, "Move to"), { target: { value: "in_progress" } });
     fireEvent.input(field(form, "Reason"), { target: { value: "picked it up" } });
     fireEvent.submit(form.querySelector("form")!);
@@ -1114,7 +1114,7 @@ describe("#213 — a work item's state is changed from its own page", () => {
     const { container } = detail();
     await waitFor(() => expect(stateChip(container)).toBe("open"));
 
-    const form = moveForm(container);
+    const form = await waitFor(() => moveForm(container));
     fireEvent.input(field(form, "Move to"), { target: { value: "in_progress" } });
     fireEvent.input(field(form, "Reason"), { target: { value: "starting it" } });
     fireEvent.submit(form.querySelector("form")!);
@@ -1142,7 +1142,7 @@ describe("#213 — a work item's state is changed from its own page", () => {
     const { container } = detail();
     await waitFor(() => expect(stateChip(container)).toBe("open"));
 
-    const form = moveForm(container);
+    const form = await waitFor(() => moveForm(container));
     fireEvent.input(field(form, "Move to"), { target: { value: "in_progress" } });
     fireEvent.input(field(form, "Reason"), { target: { value: "starting it" } });
     fireEvent.submit(form.querySelector("form")!);
