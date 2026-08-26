@@ -24,7 +24,7 @@ def test_status_is_readable(client: TestClient) -> None:
     assert response.json()["revision"] == 0
 
 
- def test_place_metrics_are_one_bounded_read(client: TestClient) -> None:
+def test_place_metrics_are_one_bounded_read(client: TestClient) -> None:
     response = client.get(f"{API_PREFIX}/place/metrics")
     assert response.status_code == 200
     assert response.json() == {
@@ -36,6 +36,7 @@ def test_status_is_readable(client: TestClient) -> None:
         "revision": 0,
         "generated_at": response.json()["generated_at"],
     }
+
 
 def test_whitelisted_metadata_reads_carry_the_declared_revision_etag(
     client: TestClient,
@@ -87,9 +88,9 @@ def test_non_whitelisted_reads_do_not_emit_or_honor_an_etag(
     response = client.get(f"{API_PREFIX}/status", headers={"If-None-Match": 'W/"0"'})
     assert response.status_code == 200
     assert "etag" not in response.headers
- 
- 
- def test_authentication_precedes_a_conditional_304(instance: AppContext) -> None:
+
+
+def test_authentication_precedes_a_conditional_304(instance: AppContext) -> None:
     def refuse(_request: object) -> tuple[AppContext, Authenticated]:
         raise Unauthenticated("no bearer token presented")
 
@@ -103,7 +104,7 @@ def test_non_whitelisted_reads_do_not_emit_or_honor_an_etag(
             f"{API_PREFIX}/projects", headers={"If-None-Match": 'W/"0"'}
         )
     assert response.status_code == 401
-     assert "etag" not in response.headers
+    assert "etag" not in response.headers
 
 
 def test_registering_a_project_returns_it(client: TestClient) -> None:
