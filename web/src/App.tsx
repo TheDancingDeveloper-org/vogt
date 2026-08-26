@@ -1855,6 +1855,8 @@ const App: Component = () => {
                   </Show>
                   <Show when={t.kind === "assistant"}>
                     <Assistant
+                      assistantEnabled={Boolean(publicCfg()?.assistant_enabled)}
+                      publicConfig={publicCfg()}
                       pendingHosted
                       onError={(msg) => showToast(msg, { kind: "error" })}
                       confirmAction={confirmUser}

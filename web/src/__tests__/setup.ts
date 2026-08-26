@@ -15,6 +15,7 @@ import { resetRailSections } from "../railSections";
 import { resetFileTreeState } from "../fileTreeState";
 import { invalidate } from "../swr";
 import { clearTaxonomyCache } from "../taxonomyCache";
+import { invalidateAssistantSnapshot } from "../assistantCache";
 
 class StubResizeObserver implements ResizeObserver {
   observe(): void {}
@@ -67,6 +68,7 @@ afterEach(() => {
   clearEditorDrafts();
   clearToolDrafts();
   clearPendingAction();
+  invalidateAssistantSnapshot();
   resetRailSections();
   resetFileTreeState();
   clearTaxonomyCache();

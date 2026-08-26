@@ -28,7 +28,9 @@ describe("Sessions approval presentation", () => {
       },
       "POST /api/assistant/actions/act-1": { body: { reply: null } },
     });
-    const mounted = mountAt("/sessions", "/sessions?approval=act-1", () => <Sessions />);
+    const mounted = mountAt("/sessions", "/sessions?approval=act-1", () => (
+      <Sessions assistantEnabled />
+    ));
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "work.transition · WI-7 → done" })).toBeInTheDocument());
     expect(screen.getByText(pending.payload)).toBeInTheDocument();
@@ -62,7 +64,9 @@ describe("Sessions approval presentation", () => {
         body: { transcript: [], pending_action: input },
       },
     });
-    const mounted = mountAt("/sessions", "/sessions", () => <Sessions />);
+    const mounted = mountAt("/sessions", "/sessions?approval=act-input", () => (
+      <Sessions assistantEnabled />
+    ));
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "Input · waiting-agent" })).toBeInTheDocument());
     expect(screen.getByText("y\\r")).toBeInTheDocument();
@@ -74,7 +78,7 @@ describe("Sessions approval presentation", () => {
       "GET /api/assistant/history": { body: { transcript: [] } },
     });
     const mounted = mountAt("/sessions", "/sessions", () => (
-      <Sessions hasActiveWorkspace currentTool="history">
+      <Sessions assistantEnabled={false} hasActiveWorkspace currentTool="history">
         <div data-testid="machine-tool">tool workspace</div>
       </Sessions>
     ));
@@ -95,8 +99,13 @@ describe("Sessions approval presentation", () => {
       "GET /api/config": { body: { assistant_profiles: [] } },
     });
     const mounted = mountAt("/assistant", "/assistant", () => (
-      <Sessions hasActiveWorkspace currentTool="assistant">
-        <Assistant pendingHosted onError={() => undefined} />
+      <Sessions assistantEnabled hasActiveWorkspace currentTool="assistant">
+        <Assistant
+          assistantEnabled
+          publicConfig={{ assistant_enabled: true, assistant_profiles: [] } as never}
+          pendingHosted
+          onError={() => undefined}
+        />
       </Sessions>
     ));
 

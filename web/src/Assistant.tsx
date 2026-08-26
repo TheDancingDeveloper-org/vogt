@@ -21,6 +21,7 @@ import {
   type AssistantReply,
   type AssistantSendInputAction,
   type AssistantVogtWriteAction,
+  type PublicConfig,
 } from "./api";
 import { taxonomy } from "./taxonomyCache";
 import { renderMarkdown } from "./markdown";
@@ -28,6 +29,11 @@ import { writeClipboardText } from "./clipboard";
 import { describeRepairs, repairUtterance } from "./voiceRepair";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { pendingAction, setPendingAction } from "./pendingAction";
+import {
+  deferAssistantHydration,
+  invalidateAssistantSnapshot,
+  readAssistantSnapshot,
+} from "./assistantCache";
 import {
   onVoiceServiceEnded,
   registerPushSpeaker,
@@ -130,6 +136,10 @@ interface AssistantDraft {
 
 interface AssistantProps {
   onError: (message: string) => void;
+  /** Capability gate already fetched by the application shell. */
+  assistantEnabled?: boolean;
+  /** Reuse the shell's config instead of fetching it for every instance. */
+  publicConfig?: PublicConfig | null;
   /** Sessions renders the shared action card when composed in its workspace. */
   pendingHosted?: boolean;
   /** Clearing the conversation is destructive, so it is confirmed before it
@@ -401,6 +411,36 @@ export default function Assistant(props: AssistantProps) {
     haltSpeech();
   };
 
+  const applyConfig = (cfg: PublicConfig | null | undefined) => {
+    if (!cfg) return;
+    setProfiles(cfg.assistant_profiles ?? []);
+    setServerSttEnabled(cfg.assistant_stt_enabled ?? false);
+    setServerTtsEnabled(cfg.assistant_tts_enabled ?? false);
+  };
+
+  const hydrate = async () => {
+    if (props.assistantEnabled === false) return;
+    try {
+      const snapshot = await readAssistantSnapshot(true);
+      if (!snapshot) return;
+      setTranscript(snapshot.transcript);
+      setPendingAction(snapshot.pendingAction);
+      setSlugs(snapshot.projects.map((project) => project.slug));
+    } catch (e) {
+      props.onError(`assistant history: ${String(e)}`);
+    }
+
+    // Standalone component consumers predate the shell config prop. Preserve
+    // that compatibility path, but never duplicate the shell's config read.
+    if (props.publicConfig === undefined && props.assistantEnabled === undefined) {
+      try {
+        applyConfig(await api.publicConfig());
+      } catch {
+        // No profile list means no choice to offer, not a broken assistant.
+      }
+    }
+  };
+
   onMount(async () => {
     voiceEndedCleanup = onVoiceServiceEnded(endFromNotification);
     // Speak-the-push (FR-M6 / FR-M2): an FCM message that arrives while a voice
@@ -410,30 +450,9 @@ export default function Assistant(props: AssistantProps) {
     pushSpeakerCleanup = await registerPushSpeaker((text) => {
       if (ttsOn()) speak(text);
     });
-    try {
-      const history = await api.assistantHistory();
-      setTranscript(history.transcript);
-      setPendingAction(history.pending_action ?? null);
-    } catch (e) {
-      props.onError(`assistant history: ${String(e)}`);
-    }
-    try {
-      const cfg = await api.publicConfig();
-      setProfiles(cfg.assistant_profiles ?? []);
-      setServerSttEnabled(cfg.assistant_stt_enabled ?? false);
-      setServerTtsEnabled(cfg.assistant_tts_enabled ?? false);
-    } catch {
-      // No profile list means no choice to offer, not a broken assistant:
-      // every request then runs on the deployment's default. Server speech
-      // stays off, which is the safe absent state.
-    }
-    try {
-      const listed = await taxonomy.projects();
-      setSlugs(listed.projects.map((project) => project.slug));
-    } catch {
-      // A core that cannot be asked costs slug repair and nothing else: the
-      // composer, the work-item repair and typed input all keep working.
-    }
+    applyConfig(props.publicConfig);
+    const cancelHydration = deferAssistantHydration(() => void hydrate());
+    onCleanup(cancelHydration);
     // STT backend, in preference order: the Capacitor native plugin inside the
     // APK, then the browser's Web Speech recognizer on the desktop (FR-T13,
     // VOICE_POC §3.4), then the server-side pipeline (FR-T12, §3.5) for a
@@ -510,6 +529,7 @@ export default function Assistant(props: AssistantProps) {
       applyReply(
         await api.assistantMessage(trimmed, profile() || undefined, controller.signal),
       );
+      invalidateAssistantSnapshot();
     } catch (e) {
       // Restore the message either way — a failed or cancelled send must not
       // eat what was typed (#242).
@@ -554,6 +574,10 @@ export default function Assistant(props: AssistantProps) {
     if (!action || busy()) return;
     setBusy(true);
     setPendingAction(null);
+    // The action was consumed locally before the network round-trip. Any
+    // other assistant instance must not resurrect the old card on a failed
+    // approval attempt.
+    invalidateAssistantSnapshot();
     try {
       applyReply(await api.assistantAction(action.id, approve));
     } catch (e) {
@@ -569,6 +593,7 @@ export default function Assistant(props: AssistantProps) {
     setReasonBusy(true);
     try {
       setPendingAction(await api.assistantReplaceReason(action.id, reason));
+      invalidateAssistantSnapshot();
     } catch (e) {
       props.onError(`assistant reason: ${String(e)}`);
     } finally {
@@ -591,6 +616,7 @@ export default function Assistant(props: AssistantProps) {
       await api.assistantReset();
       setTranscript([]);
       setPendingAction(null);
+      invalidateAssistantSnapshot();
     } catch (e) {
       props.onError(`assistant reset: ${String(e)}`);
     }
