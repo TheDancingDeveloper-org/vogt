@@ -22,6 +22,7 @@
 import { ApiError, getBase, getToken, reportAuthResponse } from "./api";
 import { fetchWithRetry } from "./transport";
 import { DEADLINE_MS } from "./deadlines";
+import { invalidateTaxonomy } from "./taxonomyInvalidation";
 
 /** Where the front door mounts vogt-core. */
 export const VOGT_PREFIX = "/api/vogt";
@@ -147,7 +148,14 @@ async function call<T>(
     reportAuthResponse(res.status, message);
     throw new ApiError(res.status, message);
   }
-  return text ? (JSON.parse(text) as T) : (undefined as T);
+  const result = text ? (JSON.parse(text) as T) : (undefined as T);
+  switch (operation) {
+    case "project.register":
+    case "project.import":
+      invalidateTaxonomy("projects");
+      break;
+  }
+  return result;
 }
 
 // -- the shapes the surfaces read ------------------------------------------

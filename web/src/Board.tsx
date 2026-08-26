@@ -103,18 +103,14 @@ import { actorName as resolveActorName, projectName as resolveProjectName } from
 import {
   VogtUnavailable,
   createWork,
-  listActors,
   listBoard,
-  listInitiatives,
-  listLabels,
-  listProjects,
-  listWorkflows,
   transitionWork,
   type BoardCellPage,
   type WorkItem,
   type Workflow,
   type WorkflowState,
 } from "./vogtApi";
+import { taxonomy } from "./taxonomyCache";
 
 interface Props {
   onError?: (message: string) => void;
@@ -1136,7 +1132,7 @@ const Board: Component<Props> = (props) => {
 
   const loadWorkflows = async () => {
     try {
-      const answer = await listWorkflows();
+      const answer = await taxonomy.workflows();
       setWorkflows(answer.workflows ?? []);
       setOutage(null);
     } catch (e) {
@@ -1148,10 +1144,10 @@ const Board: Component<Props> = (props) => {
    *  URL, it just cannot be picked from a list. */
   const loadTaxonomy = async () => {
     const settle = await Promise.allSettled([
-      listProjects(),
-      listInitiatives(),
-      listLabels(),
-      listActors(),
+      taxonomy.projects(),
+      taxonomy.initiatives(),
+      taxonomy.labels(),
+      taxonomy.actors(),
     ]);
     const [byProject, byInitiative, byLabel, byActor] = settle;
     if (byProject.status === "fulfilled") {

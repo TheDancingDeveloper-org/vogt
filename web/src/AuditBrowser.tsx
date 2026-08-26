@@ -53,14 +53,13 @@ import { useLocation, useSearchParams } from "@solidjs/router";
 import {
   VogtUnavailable,
   getWork,
-  listActors,
   listAudit,
-  listProjects,
   notifications,
   type AuditRecord,
   type FreshnessSummary,
 } from "./vogtApi";
 import SurfaceHeader from "./SurfaceHeader";
+import { taxonomy } from "./taxonomyCache";
 import { ViewAgeBadge, createLoadStamp, createViewAge, honestyToneClass, onVogtLive } from "./viewAge";
 
 interface Props {
@@ -560,8 +559,8 @@ const AuditBrowser: Component<Props> = (props) => {
   // than widening it (see `unpushable`). The project picker is only a picker:
   // the server takes the slug, so a project filter survives the list failing.
 
-  const [actors] = createResource(() => attempt(() => listActors()));
-  const [projects] = createResource(() => attempt(() => listProjects({ limit: 200 })));
+  const [actors] = createResource(() => attempt(() => taxonomy.actors()));
+  const [projects] = createResource(() => attempt(() => taxonomy.projects()));
 
   const actorRows = createMemo<ActorRow[]>(() => {
     const result = actors();

@@ -22,7 +22,7 @@ import {
   type AssistantSendInputAction,
   type AssistantVogtWriteAction,
 } from "./api";
-import { listProjects } from "./vogtApi";
+import { taxonomy } from "./taxonomyCache";
 import { renderMarkdown } from "./markdown";
 import { writeClipboardText } from "./clipboard";
 import { describeRepairs, repairUtterance } from "./voiceRepair";
@@ -428,7 +428,7 @@ export default function Assistant(props: AssistantProps) {
       // stays off, which is the safe absent state.
     }
     try {
-      const listed = await listProjects();
+      const listed = await taxonomy.projects();
       setSlugs(listed.projects.map((project) => project.slug));
     } catch {
       // A core that cannot be asked costs slug repair and nothing else: the
