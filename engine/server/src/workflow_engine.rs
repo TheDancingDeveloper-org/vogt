@@ -4,9 +4,10 @@
 //! [`WorkflowEngineConfig`] instead hands its run to an external **workflow
 //! engine** — a service that owns the agent loop, sandboxes, checkpoints and
 //! gates — and Vogt tracks the run as an observation with a typed conclusion.
-//! The first concrete provider is a generic HTTP client ([`HttpWorkflowProvider`])
-//! speaking a REST + SSE contract; Vogt integrates such an engine rather than
-//! re-building its execution features (sandboxes, checkpoints, gates, billing).
+//! The provider supports the vendor-neutral REST + SSE contract used by the
+//! original seam and an explicit Fabro-compatible backend. Vogt integrates
+//! these engines rather than re-building their execution features (sandboxes,
+//! checkpoints, gates, billing).
 //!
 //! ## Scope
 //!
@@ -16,12 +17,13 @@
 //! progress, checkpoints, and approval gates, forwards gate answers and steering,
 //! and preserves checkpoint/gate evidence when SSE falls back to polling.
 //!
-//! No live engine instance is available in the repository test environment, so
-//! the REST/SSE field names and routes remain explicitly **assumed** below. A
-//! live-provider smoke is still required before this integration can be called
-//! wire-verified or promoted beyond its experimental status.
+//! The generic contract below remains provisional. Fabro's concrete manifest
+//! routes and payloads are documented in [`FabroConfig`], covered by wire-shape
+//! tests, and live-smoked against Fabro 0.254. The newer immutable workflow
+//! intent lane is retained for servers that expose it and shares the same
+//! lifecycle, question, steering, and SSE mappings.
 //!
-//! ## ASSUMED workflow-engine REST contract
+//! ## PROVISIONAL generic workflow-engine REST contract
 //!
 //! The shapes below are **assumed** from a reference workflow engine exposing
 //! REST + SSE: its runs end `succeeded | failed | partially_succeeded | skipped | blocked`
@@ -74,12 +76,32 @@
 //! [`WorkflowEngineError::Unreachable`] — the "engine is absent" case, which the
 //! caller treats as non-fatal (the run is recorded errored, never a panic).
 
+//! ## Verified Fabro 0.254 manifest contract
+//!
+//! The compatibility lane sends a self-contained manifest to
+//! `POST {base}/api/v1/runs`, then starts it with
+//! `POST {base}/api/v1/runs/{id}/start`. The manifest contains the explicit
+//! `workflow_source`, `workflow_path`, folder target, goal, model/provider,
+//! environment, and optional dry-run flag. Lifecycle polling uses
+//! `GET {base}/api/v1/runs/{id}` and terminal diff enrichment may read the
+//! documented state projection at `/state`; the ordered event stream is
+//! `GET {base}/api/v1/runs/{id}/attach?since_seq=1`. Questions and steering use
+//! the corresponding `/questions` and `/steer` routes. This path was exercised
+//! with a local Fabro 0.254 server on 2026-08-26; the ignored live test below
+//! documents the required environment variables for repeating that smoke. A
+//! folder target is intentionally reported without checkpoint branches: the
+//! Fabro 0.254 contract executes it in place and explicitly does not create
+//! Fabro Git checkpoints.
+
 use std::future::Future;
 use std::pin::Pin;
 
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{DeserializeOwned, Deserializer},
+    Deserialize, Serialize,
+};
 
 use crate::agent_tasks::{AgentTaskRunConclusion, AgentTaskRunOutcome, DiffStat, RunCost};
 use time::OffsetDateTime;
@@ -104,6 +126,63 @@ pub struct WorkflowEngineConfig {
     /// through as `repo_ref`. When unset the engine uses its own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_ref: Option<String>,
+    /// An explicit Fabro-compatible provider configuration. When present the
+    /// provider uses Fabro's versioned workflow-intent API; when absent the
+    /// original vendor-neutral REST/SSE contract remains in force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabro: Option<FabroConfig>,
+}
+
+/// Configuration required by the Fabro run API. The workflow version and
+/// target are deliberately separate: a caller cannot accidentally turn a
+/// branch/ref string into an implicit workflow source or target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FabroConfig {
+    /// SHA-256 identity of an immutable workflow version stored by Fabro.
+    /// When omitted, `workflow_source` selects the compatible manifest lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_version_id: Option<String>,
+    /// Inline Graphviz workflow source for Fabro servers that expose the
+    /// self-contained manifest create API (including Fabro 0.254).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_source: Option<String>,
+    /// Relative workflow path used by the manifest lane. If omitted, the
+    /// provider uses `.fabro/workflows/<workflow>/workflow.fabro`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_path: Option<String>,
+    /// Workspace target on the Fabro server.
+    pub target: FabroTarget,
+    /// Optional Fabro environment catalog id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_id: Option<String>,
+    /// Optional model override passed in the run intent args.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Optional model-provider override passed in the run intent args.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Manifest-lane execution mode. Keep this false for real runs; the
+    /// opt-in live smoke sets it true so no external model is contacted.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// A target understood by Fabro's `RunIntent` API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind")]
+#[serde(rename_all = "snake_case")]
+pub enum FabroTarget {
+    /// A public GitHub repository and required branch.
+    Git {
+        repo: String,
+        branch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha: Option<String>,
+    },
+    /// An existing absolute directory on the Fabro server.
+    Folder { path: String },
+    /// An empty workspace target.
+    None,
 }
 
 /// What can go wrong talking to a workflow engine.
@@ -210,6 +289,10 @@ pub struct ProviderGateOption {
     pub label: String,
     pub input: String,
     pub approve: bool,
+    /// Provider-native option key, used by providers whose answer API is
+    /// key-based rather than index-based. It is not exposed as a Vogt gate
+    /// option field; the provider id/key mapping stays inside this seam.
+    pub key: Option<String>,
 }
 
 /// One event mirrored off the engine's live SSE stream (#293, increment 2).
@@ -328,6 +411,7 @@ pub struct HttpWorkflowProvider {
     workflow: String,
     token: Option<String>,
     client: reqwest::Client,
+    fabro: Option<FabroConfig>,
 }
 
 impl HttpWorkflowProvider {
@@ -341,7 +425,9 @@ impl HttpWorkflowProvider {
     /// Build a provider from a [`WorkflowEngineConfig`] and an already-resolved
     /// token (read from the config's `token_file` by the caller).
     pub fn from_config(cfg: &WorkflowEngineConfig, token: Option<String>) -> Self {
-        Self::new(&cfg.engine_url, &cfg.workflow, token)
+        let mut provider = Self::new(&cfg.engine_url, &cfg.workflow, token);
+        provider.fabro = cfg.fabro.clone();
+        provider
     }
 
     /// Build a provider with a caller-supplied [`reqwest::Client`] — the seam
@@ -357,6 +443,7 @@ impl HttpWorkflowProvider {
             workflow: workflow.to_string(),
             token: token.filter(|t| !t.trim().is_empty()),
             client,
+            fabro: None,
         }
     }
 
@@ -366,6 +453,201 @@ impl HttpWorkflowProvider {
             Some(token) => req.bearer_auth(token),
             None => req,
         }
+    }
+
+    fn is_fabro(&self) -> bool {
+        self.fabro.is_some()
+    }
+
+    async fn create_fabro_run(
+        &self,
+        cfg: &FabroConfig,
+        goal: &str,
+    ) -> Result<ProviderRun, WorkflowEngineError> {
+        validate_fabro_config(cfg)?;
+        let url = format!("{}/api/v1/runs", self.base_url);
+        let resp = if let Some(workflow_version_id) = &cfg.workflow_version_id {
+            let body = FabroRunIntent {
+                workflow_version_id: workflow_version_id.clone(),
+                target: cfg.target.clone(),
+                args: FabroRunArgs {
+                    model: cfg.model.clone(),
+                    provider: cfg.provider.clone(),
+                },
+                goal: goal.to_string(),
+                title: (!self.workflow.trim().is_empty()).then(|| self.workflow.clone()),
+                environment_id: cfg.environment_id.clone(),
+            };
+            self.auth(self.client.post(&url))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| classify_reqwest(&e))?
+        } else {
+            let body = fabro_manifest(cfg, &self.workflow, goal)?;
+            self.auth(self.client.post(&url))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| classify_reqwest(&e))?
+        };
+        let created: FabroCreateRunResp = parse_json_success(resp).await?;
+        if created.id.trim().is_empty() {
+            return Err(WorkflowEngineError::Config(
+                "Fabro create response contained an empty run id".into(),
+            ));
+        }
+
+        let start_url = format!("{}/api/v1/runs/{}/start", self.base_url, created.id);
+        let response = self
+            .auth(self.client.post(&start_url))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|e| classify_reqwest(&e))?;
+        ensure_success(response).await?;
+        Ok(ProviderRun {
+            run_id: created.id,
+            url: created.links.web,
+        })
+    }
+
+    async fn poll_fabro_run(&self, run_id: &str) -> Result<ProviderRunStatus, WorkflowEngineError> {
+        let url = format!("{}/api/v1/runs/{run_id}", self.base_url);
+        let resp = self
+            .auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| classify_reqwest(&e))?;
+        let parsed: FabroRunResp = parse_json_success(resp).await?;
+        let state = fabro_state(&parsed.lifecycle.status)?;
+        let gates = self.poll_fabro_questions(run_id).await?;
+        let conclusion = if state.is_terminal() {
+            self.fabro_conclusion(run_id, &parsed).await?
+        } else {
+            fabro_conclusion(&parsed)
+        };
+        Ok(ProviderRunStatus {
+            state,
+            checkpoints: vec![],
+            gates,
+            conclusion,
+        })
+    }
+
+    async fn fabro_conclusion(
+        &self,
+        run_id: &str,
+        run: &FabroRunResp,
+    ) -> Result<Option<ProviderConclusion>, WorkflowEngineError> {
+        let mut conclusion = fabro_conclusion(run);
+        let needs_state_diff = conclusion
+            .as_ref()
+            .map(|value| value.diff.is_none())
+            .unwrap_or(true);
+        if needs_state_diff {
+            let url = format!("{}/api/v1/runs/{run_id}/state", self.base_url);
+            let response = self
+                .auth(self.client.get(&url))
+                .send()
+                .await
+                .map_err(|e| classify_reqwest(&e))?;
+            if response.status().is_success() {
+                let state: FabroStateResp = response
+                    .json()
+                    .await
+                    .map_err(|e| WorkflowEngineError::Config(e.to_string()))?;
+                if let Some(state_conclusion) = state.conclusion {
+                    let diff = state_conclusion
+                        .diff
+                        .as_ref()
+                        .and_then(FabroDiffPayload::as_stat)
+                        .filter(|diff| diff.files > 0 || diff.insertions > 0 || diff.deletions > 0);
+                    let state_sha = state_conclusion.final_git_commit_sha;
+                    let state_cost = state_conclusion
+                        .billing
+                        .and_then(|value| value.total_usd_micros);
+                    if diff.is_none() && state_sha.is_none() && state_cost.is_none() {
+                        return Ok(conclusion);
+                    }
+                    let value = conclusion.get_or_insert_with(|| ProviderConclusion {
+                        summary: run
+                            .lifecycle
+                            .status
+                            .reason
+                            .as_ref()
+                            .map(|reason| format!("Fabro run {reason}")),
+                        ..ProviderConclusion::default()
+                    });
+                    if let Some(diff) = diff {
+                        value.diff = Some(diff);
+                    }
+                    if value.final_sha.is_none() {
+                        value.final_sha = state_sha;
+                    }
+                    if value.cost_usd_micros.is_none() {
+                        value.cost_usd_micros = state_cost;
+                    }
+                }
+            }
+        }
+        Ok(conclusion)
+    }
+
+    async fn poll_fabro_questions(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<ProviderGate>, WorkflowEngineError> {
+        let url = format!("{}/api/v1/runs/{run_id}/questions", self.base_url);
+        let resp = self
+            .auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| classify_reqwest(&e))?;
+        let parsed: FabroQuestionList = parse_json_success(resp).await?;
+        Ok(parsed
+            .data
+            .into_iter()
+            .filter_map(FabroQuestion::into_provider)
+            .collect())
+    }
+
+    async fn answer_fabro_question(
+        &self,
+        run_id: &str,
+        question_id: &str,
+        option_index: usize,
+    ) -> Result<(), WorkflowEngineError> {
+        let questions = self.poll_fabro_questions(run_id).await?;
+        let question = questions
+            .into_iter()
+            .find(|question| question.id == question_id)
+            .ok_or_else(|| {
+                WorkflowEngineError::Config(format!(
+                    "Fabro question {question_id:?} is not pending"
+                ))
+            })?;
+        let option = question.options.get(option_index).ok_or_else(|| {
+            WorkflowEngineError::Config(format!(
+                "Fabro question {question_id:?} has no option {option_index}"
+            ))
+        })?;
+        let body = if matches!(option.key.as_deref(), Some("yes" | "no")) {
+            serde_json::json!({ "kind": option.key })
+        } else {
+            serde_json::json!({ "kind": "selected", "option_key": option.key })
+        };
+        let url = format!(
+            "{}/api/v1/runs/{run_id}/questions/{question_id}/answer",
+            self.base_url
+        );
+        let response = self
+            .auth(self.client.post(&url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| classify_reqwest(&e))?;
+        ensure_success(response).await
     }
 }
 
@@ -378,6 +660,144 @@ fn classify_reqwest(err: &reqwest::Error) -> WorkflowEngineError {
     } else {
         WorkflowEngineError::Config(err.to_string())
     }
+}
+
+fn validate_fabro_config(cfg: &FabroConfig) -> Result<(), WorkflowEngineError> {
+    match (&cfg.workflow_version_id, &cfg.workflow_source) {
+        (Some(id), None) if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) => {}
+        (Some(_), None) => {
+            return Err(WorkflowEngineError::Config(
+                "Fabro workflow_version_id must be a 64-character hexadecimal SHA-256 id".into(),
+            ));
+        }
+        (None, Some(source)) if !source.trim().is_empty() => {}
+        (None, Some(_)) => {
+            return Err(WorkflowEngineError::Config(
+                "Fabro workflow_source must not be empty".into(),
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(WorkflowEngineError::Config(
+                "Fabro configuration must choose workflow_version_id or workflow_source, not both"
+                    .into(),
+            ));
+        }
+        (None, None) => {
+            return Err(WorkflowEngineError::Config(
+                "Fabro configuration requires workflow_version_id or workflow_source".into(),
+            ));
+        }
+    }
+    if cfg.workflow_version_id.is_none() && !matches!(cfg.target, FabroTarget::Folder { .. }) {
+        return Err(WorkflowEngineError::Config(
+            "Fabro manifest mode requires a folder target; git and none targets require workflow_version_id".into(),
+        ));
+    }
+    match &cfg.target {
+        FabroTarget::Git { repo, branch, sha } => {
+            if repo.trim().is_empty() || branch.trim().is_empty() {
+                return Err(WorkflowEngineError::Config(
+                    "Fabro git target requires repo and branch".into(),
+                ));
+            }
+            if let Some(sha) = sha {
+                if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(WorkflowEngineError::Config(
+                        "Fabro git target sha must be a 40-character hexadecimal commit".into(),
+                    ));
+                }
+            }
+        }
+        FabroTarget::Folder { path } if path.trim().is_empty() => {
+            return Err(WorkflowEngineError::Config(
+                "Fabro folder target path must not be empty".into(),
+            ));
+        }
+        FabroTarget::Folder { path } if !path.starts_with('/') => {
+            return Err(WorkflowEngineError::Config(
+                "Fabro folder target path must be absolute".into(),
+            ));
+        }
+        FabroTarget::Folder { .. } | FabroTarget::None => {}
+    }
+    Ok(())
+}
+
+fn fabro_manifest(
+    cfg: &FabroConfig,
+    workflow: &str,
+    goal: &str,
+) -> Result<serde_json::Value, WorkflowEngineError> {
+    let source = cfg.workflow_source.as_deref().ok_or_else(|| {
+        WorkflowEngineError::Config("Fabro manifest mode requires workflow_source".into())
+    })?;
+    let workflow_name = workflow.trim();
+    if workflow_name.is_empty() {
+        return Err(WorkflowEngineError::Config(
+            "Fabro manifest mode requires a workflow label".into(),
+        ));
+    }
+    let workflow_path = cfg
+        .workflow_path
+        .clone()
+        .unwrap_or_else(|| format!(".fabro/workflows/{workflow_name}/workflow.fabro"));
+    let target_identifier = workflow_name.to_string();
+    let mut args = serde_json::Map::new();
+    if let Some(model) = &cfg.model {
+        args.insert("model".into(), serde_json::Value::String(model.clone()));
+    }
+    if let Some(provider) = &cfg.provider {
+        args.insert(
+            "provider".into(),
+            serde_json::Value::String(provider.clone()),
+        );
+    }
+    if let Some(environment_id) = &cfg.environment_id {
+        args.insert(
+            "environment".into(),
+            serde_json::Value::String(environment_id.clone()),
+        );
+    }
+    if cfg.dry_run {
+        args.insert("dry_run".into(), serde_json::Value::Bool(true));
+    }
+    let mut workflows = serde_json::Map::new();
+    workflows.insert(
+        workflow_path.clone(),
+        serde_json::json!({
+            "source": source,
+            "files": {}
+        }),
+    );
+    Ok(serde_json::json!({
+        "version": 1,
+        "cwd": match &cfg.target {
+            FabroTarget::Folder { path } => path,
+            _ => "/",
+        },
+        "title": workflow_name,
+        "goal": {"type": "value", "text": goal},
+        "args": serde_json::Value::Object(args),
+        "target": {"identifier": target_identifier, "path": workflow_path},
+        "workflows": serde_json::Value::Object(workflows)
+    }))
+}
+
+async fn parse_json_success<T: DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, WorkflowEngineError> {
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(WorkflowEngineError::Api {
+            status: status.as_u16(),
+            body,
+        });
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| WorkflowEngineError::Config(error.to_string()))
 }
 
 #[derive(Serialize)]
@@ -393,6 +813,344 @@ struct CreateRunResp {
     id: String,
     #[serde(default)]
     url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FabroRunArgs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FabroRunIntent {
+    workflow_version_id: String,
+    target: FabroTarget,
+    args: FabroRunArgs,
+    goal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    environment_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FabroCreateRunResp {
+    id: String,
+    #[serde(default)]
+    links: FabroLinks,
+}
+
+#[derive(Deserialize, Default)]
+struct FabroLinks {
+    #[serde(default)]
+    web: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FabroRunResp {
+    lifecycle: FabroLifecycle,
+    #[serde(default)]
+    billing: Option<FabroBilling>,
+    #[serde(default)]
+    diff: Option<FabroDiffPayload>,
+    #[serde(default)]
+    conclusion: Option<FabroConclusion>,
+    #[serde(default)]
+    final_git_commit_sha: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FabroStateResp {
+    #[serde(default)]
+    conclusion: Option<FabroStateConclusion>,
+}
+
+#[derive(Deserialize)]
+struct FabroStateConclusion {
+    #[serde(default)]
+    diff: Option<FabroDiffPayload>,
+    #[serde(default)]
+    billing: Option<FabroBilling>,
+    #[serde(default)]
+    final_git_commit_sha: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FabroLifecycle {
+    status: FabroStatus,
+}
+
+#[derive(Deserialize)]
+struct FabroStatus {
+    kind: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FabroBilling {
+    #[serde(default)]
+    total_usd_micros: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct FabroDiff {
+    #[serde(default)]
+    summary: Option<FabroDiffSummary>,
+}
+
+enum FabroDiffPayload {
+    /// Canonical run responses expose the summary directly.
+    Summary(FabroDiffSummary),
+    /// State/conclusion projections wrap it in `summary`.
+    Detailed(FabroDiff),
+}
+
+impl<'de> Deserialize<'de> for FabroDiffPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("summary").is_some() {
+            serde_json::from_value::<FabroDiff>(value)
+                .map(Self::Detailed)
+                .map_err(serde::de::Error::custom)
+        } else {
+            serde_json::from_value::<FabroDiffSummary>(value)
+                .map(Self::Summary)
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+impl FabroDiffPayload {
+    fn as_stat(&self) -> Option<DiffStat> {
+        match self {
+            Self::Summary(summary) => Some(DiffStat {
+                files: summary.files_changed,
+                insertions: summary.additions,
+                deletions: summary.deletions,
+            }),
+            Self::Detailed(diff) => diff.summary.as_ref().map(|summary| DiffStat {
+                files: summary.files_changed,
+                insertions: summary.additions,
+                deletions: summary.deletions,
+            }),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct FabroDiffSummary {
+    #[serde(default)]
+    files_changed: u32,
+    #[serde(default)]
+    additions: u64,
+    #[serde(default)]
+    deletions: u64,
+}
+
+#[derive(Deserialize)]
+struct FabroConclusion {
+    #[serde(default)]
+    final_git_commit_sha: Option<String>,
+    #[serde(default)]
+    final_sha: Option<String>,
+    #[serde(default)]
+    billing: Option<FabroBilling>,
+    #[serde(default)]
+    diff: Option<FabroDiffPayload>,
+}
+
+#[derive(Deserialize)]
+struct FabroQuestionList {
+    #[serde(default)]
+    data: Vec<FabroQuestion>,
+}
+
+#[derive(Deserialize)]
+struct FabroQuestion {
+    id: String,
+    text: String,
+    #[serde(default)]
+    question_type: String,
+    #[serde(default)]
+    options: Vec<FabroQuestionOption>,
+}
+
+#[derive(Deserialize)]
+struct FabroQuestionOption {
+    key: String,
+    label: String,
+}
+
+impl FabroQuestion {
+    fn into_provider(self) -> Option<ProviderGate> {
+        let question = self.text.trim().to_string();
+        if self.id.trim().is_empty() || question.is_empty() {
+            return None;
+        }
+        let mut options = self
+            .options
+            .into_iter()
+            .filter_map(|option| {
+                let key = option.key.trim().to_string();
+                let label = option.label.trim().to_string();
+                if key.is_empty() || label.is_empty() {
+                    return None;
+                }
+                Some(ProviderGateOption {
+                    approve: matches!(key.as_str(), "yes" | "approve" | "accept"),
+                    input: key.clone(),
+                    label,
+                    key: Some(key),
+                })
+            })
+            .collect::<Vec<_>>();
+        if options.is_empty() && matches!(self.question_type.as_str(), "yes_no" | "confirmation") {
+            options = vec![
+                ProviderGateOption {
+                    label: "Yes".into(),
+                    input: "yes".into(),
+                    approve: true,
+                    key: Some("yes".into()),
+                },
+                ProviderGateOption {
+                    label: "No".into(),
+                    input: "no".into(),
+                    approve: false,
+                    key: Some("no".into()),
+                },
+            ];
+        }
+        (!options.is_empty()).then_some(ProviderGate {
+            id: self.id,
+            question,
+            options,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct FabroSseEnvelope {
+    #[serde(default)]
+    event: Option<String>,
+    #[serde(default)]
+    ts: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    properties: serde_json::Value,
+}
+
+fn fabro_state(status: &FabroStatus) -> Result<ProviderRunState, WorkflowEngineError> {
+    match status.kind.as_str() {
+        "submitted" | "pending" | "runnable" | "starting" | "running" | "paused" | "removing" => {
+            Ok(ProviderRunState::Running)
+        }
+        "blocked" => Ok(ProviderRunState::Blocked),
+        "succeeded" => match status.reason.as_deref() {
+            Some("partial_success") => Ok(ProviderRunState::PartiallySucceeded),
+            _ => Ok(ProviderRunState::Succeeded),
+        },
+        "failed" | "dead" => Ok(ProviderRunState::Failed),
+        other => Err(WorkflowEngineError::Config(format!(
+            "unknown Fabro run status {other:?}"
+        ))),
+    }
+}
+
+fn fabro_conclusion(run: &FabroRunResp) -> Option<ProviderConclusion> {
+    let conclusion = run.conclusion.as_ref();
+    let diff = run.diff.as_ref().and_then(FabroDiffPayload::as_stat);
+    let diff = diff.or_else(|| {
+        conclusion.and_then(|value| value.diff.as_ref().and_then(FabroDiffPayload::as_stat))
+    });
+    let final_sha = conclusion
+        .and_then(|c| {
+            c.final_git_commit_sha
+                .clone()
+                .or_else(|| c.final_sha.clone())
+        })
+        .or_else(|| run.final_git_commit_sha.clone());
+    let cost_usd_micros = run
+        .billing
+        .as_ref()
+        .and_then(|b| b.total_usd_micros)
+        .or_else(|| conclusion.and_then(|c| c.billing.as_ref()?.total_usd_micros));
+    (diff.is_some()
+        || final_sha.is_some()
+        || cost_usd_micros.is_some()
+        || run.lifecycle.status.reason.is_some())
+    .then_some(ProviderConclusion {
+        final_sha,
+        diff,
+        cost_usd_micros,
+        summary: run
+            .lifecycle
+            .status
+            .reason
+            .as_ref()
+            .map(|reason| format!("Fabro run {reason}")),
+    })
+}
+
+fn fabro_sse_state(properties: &serde_json::Value) -> Option<ProviderRunState> {
+    let status = properties
+        .get("status")
+        .and_then(serde_json::Value::as_str)?;
+    match status {
+        "succeeded" | "completed" => Some(ProviderRunState::Succeeded),
+        "partial_success" | "partially_succeeded" => Some(ProviderRunState::PartiallySucceeded),
+        "failed" | "dead" => Some(ProviderRunState::Failed),
+        "blocked" => Some(ProviderRunState::Blocked),
+        "skipped" => Some(ProviderRunState::Skipped),
+        _ => None,
+    }
+}
+
+fn parse_fabro_sse_record(data: &str) -> ProviderEvent {
+    let trimmed = data.trim();
+    let Some(envelope) = serde_json::from_str::<FabroSseEnvelope>(trimmed).ok() else {
+        return ProviderEvent {
+            kind: "message".into(),
+            message: (!trimmed.is_empty()).then(|| trimmed.to_string()),
+            step_id: None,
+            at: None,
+            terminal_state: None,
+            checkpoint_branch: None,
+            gate: None,
+        };
+    };
+    let properties = &envelope.properties;
+    let message = properties
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| properties.get("reason").and_then(serde_json::Value::as_str))
+        .map(str::to_string);
+    let at = envelope.ts.as_deref().and_then(|ts| {
+        OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339).ok()
+    });
+    let kind = envelope.event.unwrap_or_else(|| "message".into());
+    let terminal_state = (kind == "run.completed")
+        .then(|| fabro_sse_state(properties))
+        .flatten();
+    ProviderEvent {
+        kind,
+        message,
+        step_id: envelope.node_id,
+        at,
+        terminal_state,
+        checkpoint_branch: None,
+        gate: None,
+    }
+}
+
+fn parse_fabro_sse_dispatch(_event_name: Option<&str>, data: &str) -> ProviderEvent {
+    parse_fabro_sse_record(data)
 }
 
 #[derive(Deserialize)]
@@ -442,6 +1200,7 @@ impl PollGate {
                     input: label.clone(),
                     label,
                     approve: false,
+                    key: None,
                 },
                 PollGateOption::Detail {
                     label,
@@ -451,6 +1210,7 @@ impl PollGate {
                     label,
                     input,
                     approve,
+                    key: None,
                 },
             })
             .filter(|option| !option.label.trim().is_empty())
@@ -700,6 +1460,7 @@ fn parse_sse_record(event_name: Option<&str>, data: &str) -> ProviderEvent {
 /// degrades to polling.
 fn sse_event_stream(
     body: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
+    fabro: bool,
 ) -> impl Stream<Item = Result<ProviderEvent, WorkflowEngineError>> + Send {
     struct SseState {
         body: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
@@ -717,11 +1478,15 @@ fn sse_event_stream(
 
     // Consume one whole line, updating the in-progress event; on a blank line,
     // dispatch it into `pending`.
-    fn feed_line(st: &mut SseState, line: &str) {
+    fn feed_line(st: &mut SseState, line: &str, fabro: bool) {
         if line.is_empty() {
             if st.have_fields {
                 let data = st.data_lines.join("\n");
-                let ev = parse_sse_record(st.event_name.as_deref(), &data);
+                let ev = if fabro {
+                    parse_fabro_sse_dispatch(st.event_name.as_deref(), &data)
+                } else {
+                    parse_sse_record(st.event_name.as_deref(), &data)
+                };
                 st.pending.push_back(ev);
             }
             st.event_name = None;
@@ -753,7 +1518,7 @@ fn sse_event_stream(
     }
 
     // Split whole lines (terminated by `\n`) out of the buffer, feeding each.
-    fn drain_lines(st: &mut SseState) {
+    fn drain_lines(st: &mut SseState, fabro: bool) {
         while let Some(pos) = st.line_buf.iter().position(|&b| b == b'\n') {
             let mut line: Vec<u8> = st.line_buf.drain(..=pos).collect();
             line.pop(); // drop the '\n'
@@ -761,7 +1526,7 @@ fn sse_event_stream(
                 line.pop(); // drop a CR from a CRLF terminator
             }
             let line = String::from_utf8_lossy(&line).into_owned();
-            feed_line(st, &line);
+            feed_line(st, &line, fabro);
         }
     }
 
@@ -775,7 +1540,7 @@ fn sse_event_stream(
         done: false,
     };
 
-    futures_util::stream::try_unfold(state, |mut st| async move {
+    futures_util::stream::try_unfold(state, move |mut st| async move {
         loop {
             if let Some(ev) = st.pending.pop_front() {
                 return Ok(Some((ev, st)));
@@ -786,7 +1551,7 @@ fn sse_event_stream(
             match st.body.next().await {
                 Some(Ok(chunk)) => {
                     st.line_buf.extend_from_slice(&chunk);
-                    drain_lines(&mut st);
+                    drain_lines(&mut st, fabro);
                 }
                 Some(Err(e)) => return Err(classify_reqwest(&e)),
                 None => {
@@ -795,11 +1560,15 @@ fn sse_event_stream(
                         let line: Vec<u8> = std::mem::take(&mut st.line_buf);
                         let line = String::from_utf8_lossy(&line).into_owned();
                         let line = line.strip_suffix('\r').unwrap_or(&line).to_string();
-                        feed_line(&mut st, &line);
+                        feed_line(&mut st, &line, fabro);
                     }
                     if st.have_fields {
                         let data = st.data_lines.join("\n");
-                        let ev = parse_sse_record(st.event_name.as_deref(), &data);
+                        let ev = if fabro {
+                            parse_fabro_sse_dispatch(st.event_name.as_deref(), &data)
+                        } else {
+                            parse_sse_record(st.event_name.as_deref(), &data)
+                        };
                         st.pending.push_back(ev);
                         st.have_fields = false;
                     }
@@ -816,6 +1585,9 @@ impl WorkflowProvider for HttpWorkflowProvider {
         goal: &str,
         repo_ref: Option<&str>,
     ) -> Result<ProviderRun, WorkflowEngineError> {
+        if let Some(fabro) = &self.fabro {
+            return self.create_fabro_run(fabro, goal).await;
+        }
         let url = format!("{}/api/runs", self.base_url);
         let body = CreateRunBody {
             workflow: &self.workflow,
@@ -844,6 +1616,9 @@ impl WorkflowProvider for HttpWorkflowProvider {
     }
 
     async fn poll(&self, run_id: &str) -> Result<ProviderRunStatus, WorkflowEngineError> {
+        if self.is_fabro() {
+            return self.poll_fabro_run(run_id).await;
+        }
         let url = format!("{}/api/runs/{run_id}", self.base_url);
         let resp = self
             .auth(self.client.get(&url))
@@ -892,6 +1667,26 @@ impl WorkflowProvider for HttpWorkflowProvider {
         &self,
         run_id: &str,
     ) -> Result<ProviderEventStream, WorkflowEngineError> {
+        if self.is_fabro() {
+            let url = format!("{}/api/v1/runs/{run_id}/attach?since_seq=1", self.base_url);
+            let resp = self
+                .auth(self.client.get(&url))
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .send()
+                .await
+                .map_err(|e| classify_reqwest(&e))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(WorkflowEngineError::Api {
+                    status: status.as_u16(),
+                    body,
+                });
+            }
+            let body: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>> =
+                Box::pin(resp.bytes_stream());
+            return Ok(Box::pin(sse_event_stream(body, true)));
+        }
         let url = format!("{}/api/runs/{run_id}/events", self.base_url);
         let resp = self
             .auth(self.client.get(&url))
@@ -911,7 +1706,7 @@ impl WorkflowProvider for HttpWorkflowProvider {
         // parser's state) and hand it to the manual SSE parser.
         let body: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>> =
             Box::pin(resp.bytes_stream());
-        Ok(Box::pin(sse_event_stream(body)))
+        Ok(Box::pin(sse_event_stream(body, false)))
     }
 
     async fn answer_gate(
@@ -920,6 +1715,11 @@ impl WorkflowProvider for HttpWorkflowProvider {
         gate_id: &str,
         option_index: usize,
     ) -> Result<(), WorkflowEngineError> {
+        if self.is_fabro() {
+            return self
+                .answer_fabro_question(run_id, gate_id, option_index)
+                .await;
+        }
         let url = format!("{}/api/runs/{run_id}/gates/{gate_id}/answer", self.base_url);
         let response = self
             .auth(self.client.post(&url))
@@ -936,6 +1736,16 @@ impl WorkflowProvider for HttpWorkflowProvider {
         text: &str,
         interrupt: bool,
     ) -> Result<(), WorkflowEngineError> {
+        if self.is_fabro() {
+            let url = format!("{}/api/v1/runs/{run_id}/steer", self.base_url);
+            let response = self
+                .auth(self.client.post(&url))
+                .json(&serde_json::json!({ "text": text, "interrupt": interrupt }))
+                .send()
+                .await
+                .map_err(|e| classify_reqwest(&e))?;
+            return ensure_success(response).await;
+        }
         let url = format!("{}/api/runs/{run_id}/steer", self.base_url);
         let response = self
             .auth(self.client.post(&url))
@@ -1020,6 +1830,7 @@ mod tests {
     };
     use serde_json::{json, Value};
     use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
 
     /// Spin up a fake engine on `127.0.0.1:0` that answers create-run with a
@@ -1081,6 +1892,476 @@ mod tests {
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .unwrap()
+    }
+
+    fn fabro_config(target: FabroTarget) -> FabroConfig {
+        FabroConfig {
+            workflow_version_id: Some("a".repeat(64)),
+            workflow_source: None,
+            workflow_path: None,
+            target,
+            environment_id: Some("local".into()),
+            model: Some("test-model".into()),
+            provider: Some("test-provider".into()),
+            dry_run: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn fabro_create_sends_intent_then_starts_run() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let create_calls = Arc::clone(&calls);
+        let start_calls = Arc::clone(&calls);
+        let app = Router::new()
+            .route(
+                "/api/v1/runs",
+                post(move |Json(body): Json<Value>| {
+                    let calls = Arc::clone(&create_calls);
+                    async move {
+                        calls.lock().unwrap().push(body.to_string());
+                        Json(json!({
+                            "id": "fabro-run-1",
+                            "links": {"web": "http://fabro.test/runs/fabro-run-1"}
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/runs/{id}/start",
+                post(move |Path(_id): Path<String>, Json(body): Json<Value>| {
+                    let calls = Arc::clone(&start_calls);
+                    async move {
+                        calls.lock().unwrap().push(body.to_string());
+                        StatusCode::OK
+                    }
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let cfg = fabro_config(FabroTarget::Git {
+            repo: "acme/project".into(),
+            branch: "feature/fix".into(),
+            sha: Some("b".repeat(40)),
+        });
+        let full_cfg = WorkflowEngineConfig {
+            engine_url: format!("http://{addr}"),
+            workflow: "nightly".into(),
+            token_file: None,
+            repo_ref: None,
+            fabro: Some(cfg.clone()),
+        };
+        let provider = HttpWorkflowProvider::from_config(&full_cfg, None);
+        let created = provider
+            .create_run("repair the issue", None)
+            .await
+            .expect("Fabro create/start succeeds");
+        assert_eq!(created.run_id, "fabro-run-1");
+        assert_eq!(
+            created.url.as_deref(),
+            Some("http://fabro.test/runs/fabro-run-1")
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0]).unwrap(),
+            json!({
+                "workflow_version_id": "a".repeat(64),
+                "target": {
+                    "kind": "git",
+                    "repo": "acme/project",
+                    "branch": "feature/fix",
+                    "sha": "b".repeat(40)
+                },
+                "args": {"model": "test-model", "provider": "test-provider"},
+                "goal": "repair the issue",
+                "title": "nightly",
+                "environment_id": "local"
+            })
+        );
+        assert_eq!(serde_json::from_str::<Value>(&calls[1]).unwrap(), json!({}));
+
+        // Keep this assertion here so the fixture also covers serde's optional
+        // provider configuration path used by task submissions.
+        assert!(serde_json::to_value(full_cfg)
+            .unwrap()
+            .get("fabro")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn fabro_poll_maps_status_conclusion_and_questions() {
+        let app = Router::new()
+            .route(
+                "/api/v1/runs/{id}",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!({
+                        "lifecycle": {"status": {"kind": "succeeded", "reason": "completed"}},
+                        "billing": {"total_usd_micros": 1250000},
+                        "diff": {"summary": {"files_changed": 4, "additions": 18, "deletions": 3}},
+                        "conclusion": {"final_git_commit_sha": "c".repeat(40)}
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/runs/{id}/questions",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!({"data": [], "meta": {"total": 0}}))
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let cfg = WorkflowEngineConfig {
+            engine_url: format!("http://{addr}"),
+            workflow: "nightly".into(),
+            token_file: None,
+            repo_ref: None,
+            fabro: Some(fabro_config(FabroTarget::None)),
+        };
+        let provider = HttpWorkflowProvider::from_config(&cfg, None);
+        let status = provider
+            .poll("fabro-run-1")
+            .await
+            .expect("Fabro poll succeeds");
+        assert_eq!(status.state, ProviderRunState::Succeeded);
+        assert!(status.gates.is_empty());
+        let conclusion = status.conclusion.expect("terminal conclusion");
+        assert_eq!(conclusion.final_sha, Some("c".repeat(40)));
+        assert_eq!(conclusion.cost_usd_micros, Some(1_250_000));
+        assert_eq!(
+            conclusion.diff,
+            Some(DiffStat {
+                files: 4,
+                insertions: 18,
+                deletions: 3,
+            })
+        );
+        assert_eq!(conclusion.summary.as_deref(), Some("Fabro run completed"));
+    }
+
+    #[tokio::test]
+    async fn fabro_poll_retains_a_terminal_conclusion_when_optional_fields_are_absent() {
+        let app = Router::new()
+            .route(
+                "/api/v1/runs/{id}",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!({
+                        "lifecycle": {"status": {"kind": "succeeded", "reason": "completed"}}
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/runs/{id}/questions",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!({"data": [], "meta": {"total": 0}}))
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let cfg = WorkflowEngineConfig {
+            engine_url: format!("http://{addr}"),
+            workflow: "nightly".into(),
+            token_file: None,
+            repo_ref: None,
+            fabro: Some(fabro_config(FabroTarget::None)),
+        };
+        let provider = HttpWorkflowProvider::from_config(&cfg, None);
+        let status = provider
+            .poll("fabro-run-1")
+            .await
+            .expect("Fabro poll succeeds");
+        assert_eq!(status.state, ProviderRunState::Succeeded);
+        assert_eq!(
+            status.conclusion.and_then(|value| value.summary),
+            Some("Fabro run completed".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn fabro_poll_enriches_conclusion_from_state_projection() {
+        let app = Router::new()
+            .route(
+                "/api/v1/runs/{id}",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!({
+                        "lifecycle": {"status": {"kind": "succeeded", "reason": "completed"}}
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/runs/{id}/questions",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!({"data": [], "meta": {"total": 0}}))
+                }),
+            )
+            .route(
+                "/api/v1/runs/{id}/state",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!({
+                        "conclusion": {
+                            "final_git_commit_sha": "d".repeat(40),
+                            "billing": {"total_usd_micros": 750000},
+                            "diff": {"summary": {"files_changed": 2, "additions": 7, "deletions": 1}}
+                        }
+                    }))
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let cfg = WorkflowEngineConfig {
+            engine_url: format!("http://{addr}"),
+            workflow: "nightly".into(),
+            token_file: None,
+            repo_ref: None,
+            fabro: Some(fabro_config(FabroTarget::None)),
+        };
+        let provider = HttpWorkflowProvider::from_config(&cfg, None);
+        let conclusion = provider
+            .poll("fabro-run-1")
+            .await
+            .expect("Fabro poll succeeds")
+            .conclusion
+            .expect("state projection enriches conclusion");
+        assert_eq!(conclusion.final_sha, Some("d".repeat(40)));
+        assert_eq!(conclusion.cost_usd_micros, Some(750_000));
+        assert_eq!(
+            conclusion.diff,
+            Some(DiffStat {
+                files: 2,
+                insertions: 7,
+                deletions: 1,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn fabro_stream_parses_events_and_terminal_state() {
+        let body = concat!(
+            "event: run.started\n",
+            "data: {\"event\":\"run.started\",\"ts\":\"2026-08-26T12:00:00Z\",\"properties\":{\"message\":\"started\"}}\n\n",
+            "data: {\"event\":\"run.completed\",\"node_id\":\"finish\",\"properties\":{\"status\":\"succeeded\",\"reason\":\"completed\"}}\n\n"
+        );
+        let app = Router::new().route(
+            "/api/v1/runs/{id}/attach",
+            get(move |Path(_id): Path<String>| async move {
+                let chunks = body
+                    .as_bytes()
+                    .chunks(13)
+                    .map(|chunk| Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(chunk)));
+                axum::response::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(futures_util::stream::iter(chunks)))
+                    .unwrap()
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let cfg = WorkflowEngineConfig {
+            engine_url: format!("http://{addr}"),
+            workflow: "nightly".into(),
+            token_file: None,
+            repo_ref: None,
+            fabro: Some(fabro_config(FabroTarget::None)),
+        };
+        let provider = HttpWorkflowProvider::from_config(&cfg, None);
+        let events = collect_events(provider.stream_events("fabro-run-1").await.unwrap()).await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "run.started");
+        assert_eq!(events[0].message.as_deref(), Some("started"));
+        assert_eq!(
+            events[0].at,
+            Some(
+                OffsetDateTime::parse(
+                    "2026-08-26T12:00:00Z",
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(events[1].kind, "run.completed");
+        assert_eq!(events[1].step_id.as_deref(), Some("finish"));
+        assert_eq!(events[1].terminal_state, Some(ProviderRunState::Succeeded));
+    }
+
+    #[tokio::test]
+    async fn fabro_answers_questions_by_provider_option_key() {
+        let answer = Arc::new(Mutex::new(None::<Value>));
+        let answer_capture = Arc::clone(&answer);
+        let app = Router::new()
+            .route(
+                "/api/v1/runs/{id}/questions",
+                get(|Path(_id): Path<String>| async {
+                    Json(json!({
+                        "data": [{
+                            "id": "q-1",
+                            "text": "Continue?",
+                            "question_type": "multiple_choice",
+                            "options": [
+                                {"key": "accept", "label": "Continue"},
+                                {"key": "reject", "label": "Stop"}
+                            ],
+                            "allow_freeform": false
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/runs/{id}/questions/{qid}/answer",
+                post(move |Json(body): Json<Value>| {
+                    let answer = Arc::clone(&answer_capture);
+                    async move {
+                        *answer.lock().unwrap() = Some(body);
+                        StatusCode::NO_CONTENT
+                    }
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let cfg = WorkflowEngineConfig {
+            engine_url: format!("http://{addr}"),
+            workflow: "nightly".into(),
+            token_file: None,
+            repo_ref: None,
+            fabro: Some(fabro_config(FabroTarget::None)),
+        };
+        let provider = HttpWorkflowProvider::from_config(&cfg, None);
+        provider
+            .answer_gate("fabro-run-1", "q-1", 0)
+            .await
+            .expect("answer accepted");
+        let expected = json!({
+            "kind": "selected",
+            "option_key": "accept"
+        });
+        assert_eq!(answer.lock().unwrap().clone(), Some(expected));
+    }
+
+    #[test]
+    fn fabro_config_rejects_invalid_version_id() {
+        let cfg = FabroConfig {
+            workflow_version_id: Some("not-a-sha".into()),
+            workflow_source: None,
+            workflow_path: None,
+            target: FabroTarget::None,
+            environment_id: None,
+            model: None,
+            provider: None,
+            dry_run: false,
+        };
+        let err = validate_fabro_config(&cfg).expect_err("invalid id must fail closed");
+        assert!(
+            matches!(err, WorkflowEngineError::Config(message) if message.contains("workflow_version_id"))
+        );
+    }
+
+    #[test]
+    fn fabro_manifest_mode_emits_the_0254_compatible_shape() {
+        let cfg = FabroConfig {
+            workflow_version_id: None,
+            workflow_source: Some("digraph Smoke { start -> exit }".into()),
+            workflow_path: Some(".fabro/workflows/smoke/workflow.fabro".into()),
+            target: FabroTarget::Folder {
+                path: "/srv/workspaces/project".into(),
+            },
+            environment_id: Some("local".into()),
+            model: Some("gemini-test".into()),
+            provider: Some("gemini".into()),
+            dry_run: true,
+        };
+        validate_fabro_config(&cfg).expect("manifest configuration is valid");
+        let manifest = fabro_manifest(&cfg, "smoke", "run a smoke").unwrap();
+        assert_eq!(manifest["version"], 1);
+        assert_eq!(manifest["cwd"], "/srv/workspaces/project");
+        assert_eq!(manifest["target"]["identifier"], "smoke");
+        assert_eq!(
+            manifest["target"]["path"],
+            ".fabro/workflows/smoke/workflow.fabro"
+        );
+        assert_eq!(
+            manifest["workflows"][".fabro/workflows/smoke/workflow.fabro"]["source"],
+            "digraph Smoke { start -> exit }"
+        );
+        assert_eq!(manifest["args"]["environment"], "local");
+        assert_eq!(manifest["args"]["model"], "gemini-test");
+        assert_eq!(manifest["args"]["provider"], "gemini");
+        assert_eq!(manifest["args"]["dry_run"], true);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires FABRO_LIVE_URL, FABRO_LIVE_TOKEN, FABRO_LIVE_FOLDER, and FABRO_LIVE_WORKFLOW_SOURCE"]
+    async fn fabro_live_smoke_create_poll_and_sse() {
+        let url = std::env::var("FABRO_LIVE_URL").expect("FABRO_LIVE_URL");
+        let token = std::env::var("FABRO_LIVE_TOKEN").expect("FABRO_LIVE_TOKEN");
+        let folder = std::env::var("FABRO_LIVE_FOLDER").expect("FABRO_LIVE_FOLDER");
+        let source =
+            std::env::var("FABRO_LIVE_WORKFLOW_SOURCE").expect("FABRO_LIVE_WORKFLOW_SOURCE");
+        let cfg = WorkflowEngineConfig {
+            engine_url: url,
+            workflow: "vogt-live-smoke".into(),
+            token_file: None,
+            repo_ref: None,
+            fabro: Some(FabroConfig {
+                workflow_version_id: None,
+                workflow_source: Some(source),
+                workflow_path: Some(".fabro/workflows/smoke/workflow.fabro".into()),
+                target: FabroTarget::Folder { path: folder },
+                environment_id: Some("local".into()),
+                model: None,
+                provider: None,
+                dry_run: true,
+            }),
+        };
+        let provider = HttpWorkflowProvider::from_config(&cfg, Some(token));
+        let run = provider
+            .create_run("Vogt live Fabro adapter smoke", None)
+            .await
+            .expect("Fabro create/start succeeds");
+        let mut status = provider
+            .poll(&run.run_id)
+            .await
+            .expect("Fabro poll succeeds");
+        for _ in 0..30 {
+            if status.state.is_terminal() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            status = provider
+                .poll(&run.run_id)
+                .await
+                .expect("Fabro poll succeeds");
+        }
+        assert!(status.state.is_terminal());
+        assert!(status.conclusion.is_some());
+        let events = collect_events(
+            provider
+                .stream_events(&run.run_id)
+                .await
+                .expect("Fabro attach succeeds"),
+        )
+        .await;
+        assert!(events.iter().any(|event| event.kind == "run.completed"));
+        assert!(events.iter().any(|event| event.terminal_state.is_some()));
     }
 
     #[tokio::test]
@@ -1242,6 +2523,7 @@ mod tests {
             workflow: "nightly-audit".into(),
             token_file: Some("/run/secrets/workflow-engine".into()),
             repo_ref: Some("main".into()),
+            fabro: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: WorkflowEngineConfig = serde_json::from_str(&json).unwrap();
@@ -1249,12 +2531,14 @@ mod tests {
         assert_eq!(back.workflow, cfg.workflow);
         assert_eq!(back.token_file, cfg.token_file);
         assert_eq!(back.repo_ref, cfg.repo_ref);
+        assert_eq!(back.fabro, cfg.fabro);
 
         // The optional fields drop out of the wire form when unset.
         let minimal: WorkflowEngineConfig =
             serde_json::from_str(r#"{"engine_url":"http://e","workflow":"w"}"#).unwrap();
         assert!(minimal.token_file.is_none());
         assert!(minimal.repo_ref.is_none());
+        assert!(minimal.fabro.is_none());
         let wire = serde_json::to_value(&minimal).unwrap();
         assert!(wire.get("token_file").is_none());
         assert!(wire.get("repo_ref").is_none());
