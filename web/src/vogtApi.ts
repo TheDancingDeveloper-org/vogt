@@ -22,7 +22,14 @@
 import { ApiError, getBase, getToken, reportAuthResponse } from "./api";
 import { fetchWithRetry } from "./transport";
 import { DEADLINE_MS } from "./deadlines";
-import { cacheIdentity, cacheKey, cachedRead, invalidate, STABLE_READ_POLICY } from "./swr";
+import {
+  cacheIdentity,
+  cacheKey,
+  cachedReadWithValidator,
+  invalidate,
+  STABLE_READ_POLICY,
+  type CacheFetchResult,
+} from "./swr";
 
 /** Where the front door mounts vogt-core. */
 export const VOGT_PREFIX = "/api/vogt";
@@ -124,12 +131,18 @@ async function call<T>(
     body = JSON.stringify(params);
   }
 
-  const read = async (requestSignal?: AbortSignal): Promise<T> => {
+  const read = async (
+    requestSignal?: AbortSignal,
+    etag?: string | null,
+  ): Promise<CacheFetchResult<T> | "not-modified"> => {
+    const requestHeaders = { ...headers };
+    if (etag) requestHeaders["If-None-Match"] = etag;
     const res = await fetchWithRetry(
       url,
-      { method, headers, body, signal: requestSignal },
+      { method, headers: requestHeaders, body, signal: requestSignal },
       { deadlineMs: DEADLINE_MS[method === "GET" ? "list" : "detail"] },
     );
+    if (res.status === 304) return "not-modified";
     const text = await res.text();
     if (!res.ok) {
       let message = text;
@@ -149,13 +162,16 @@ async function call<T>(
       reportAuthResponse(res.status, message);
       throw new ApiError(res.status, message);
     }
-    return text ? (JSON.parse(text) as T) : (undefined as T);
+    return {
+      value: text ? (JSON.parse(text) as T) : (undefined as T),
+      etag: res.headers.get("etag"),
+    };
   };
 
   if (method === "GET" && STABLE_READ_OPERATIONS.has(operation)) {
-    return cachedRead(
+    return cachedReadWithValidator(
       cacheKey(cacheIdentity(getBase(), token), operation, params),
-      read,
+      (etag, requestSignal) => read(requestSignal, etag),
       STABLE_READ_POLICY,
       signal,
     );
@@ -163,7 +179,10 @@ async function call<T>(
 
   const result = await read(signal);
   if (method !== "GET") invalidate();
-  return result;
+  if (result === "not-modified") {
+    throw new Error("unexpected conditional response for uncached read");
+  }
+  return result.value;
 }
 
 const STABLE_READ_OPERATIONS = new Set<VogtOperation>([

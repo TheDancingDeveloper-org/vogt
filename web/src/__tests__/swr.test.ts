@@ -6,6 +6,7 @@ import {
   cacheIdentity,
   cacheKey,
   cachedRead,
+  cachedReadWithValidator,
   invalidate,
   STABLE_READ_POLICY,
 } from "../swr";
@@ -119,6 +120,50 @@ describe("cache wiring", () => {
     await expect(api.publicConfig()).resolves.toEqual({ version: "cached" });
     await expect(api.publicConfig()).resolves.toEqual({ version: "cached" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends a stable-read validator and reuses the cached body on 304", async () => {
+    setToken("token-a");
+    let calls = 0;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({ labels: [{ name: "bug" }] }), {
+          status: 200,
+          headers: { ETag: 'W/"7"' },
+        });
+      }
+      expect(new Headers(init?.headers).get("If-None-Match")).toBe('W/"7"');
+      return new Response(null, { status: 304, headers: { ETag: 'W/"7"' } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const policy = { ttlMs: 0, swrMs: 0 };
+
+    // The public helper uses the production policy; exercise the generic
+    // validator path directly so the 304 behavior is deterministic here.
+    const validatorKey = cacheKey(
+      cacheIdentity("https://engine.test", "token-a"),
+      "validator",
+    );
+    const loader = (etag: string | null) =>
+      fetchMock("/validator", { headers: etag ? { "If-None-Match": etag } : {} }).then(
+        async (response) => {
+          if (response.status === 304) return "not-modified" as const;
+          return {
+            value: (await response.json()) as { labels: { name: string }[] },
+            etag: response.headers.get("etag"),
+          };
+        },
+      );
+    await expect(cachedReadWithValidator(validatorKey, loader, policy)).resolves.toEqual({
+      labels: [{ name: "bug" }],
+    });
+    // With a zero TTL/SWR window the second read must revalidate the retained
+    // entry immediately, without deleting the validator first.
+    await expect(cachedReadWithValidator(validatorKey, loader, policy)).resolves.toEqual({
+      labels: [{ name: "bug" }],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("invalidates metadata after a successful mutation and on identity change", async () => {
