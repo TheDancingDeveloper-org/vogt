@@ -7,6 +7,7 @@ import {
   subscribeAuthState,
 } from "./api";
 import { onVogtChangedEvent, type VogtChangedEvent } from "./store";
+import { invalidate as invalidateStableReads } from "./swr";
 import {
   registerTaxonomyInvalidator,
   type TaxonomyKind,
@@ -92,16 +93,33 @@ function cacheKey(kind: TaxonomyKind, params: Record<string, unknown>): string {
   return `${identity()}\u0000${kind}\u0000${canonical(params)}`;
 }
 
+function operationFor(kind: TaxonomyKind): string {
+  switch (kind) {
+    case "projects":
+      return "project.list";
+    case "actors":
+      return "actor.list";
+    case "workflows":
+      return "workflow.list";
+    case "labels":
+      return "label.list";
+    case "initiatives":
+      return "initiative.list";
+  }
+}
+
 function invalidate(kind?: TaxonomyKind): void {
   if (kind === undefined) {
     for (const one of TAXONOMY_KINDS) generations.set(one, generation(one) + 1);
     entries.clear();
+    invalidateStableReads();
     return;
   }
   generations.set(kind, generation(kind) + 1);
   for (const key of entries.keys()) {
     if (key.includes(`\u0000${kind}\u0000`)) entries.delete(key);
   }
+  invalidateStableReads(operationFor(kind));
 }
 
 /** Explicit invalidation used by successful taxonomy/project mutations. */
@@ -119,7 +137,10 @@ export function clearTaxonomyCache(): void {
 export function noteTaxonomyChange(entityKind: string, sequence: number): void {
   const kind = ENTITY_KIND_TO_TAXONOMY[entityKind];
   if (!kind) return;
-  latestSequence.set(kind, Math.max(latestSequence.get(kind) ?? 0, sequence));
+  const previous = latestSequence.get(kind) ?? 0;
+  if (sequence <= previous) return;
+  latestSequence.set(kind, sequence);
+  invalidateStableReads(operationFor(kind));
 }
 
 function read<K extends TaxonomyKind>(
@@ -174,11 +195,11 @@ function read<K extends TaxonomyKind>(
 
 export const taxonomy = {
   projects: (params: Record<string, unknown> = { limit: 200 }) =>
-    read("projects", params, () => listProjects(params)),
-  actors: () => read("actors", {}, () => listActors()),
-  workflows: () => read("workflows", {}, () => listWorkflows()),
-  labels: () => read("labels", {}, () => listLabels()),
-  initiatives: () => read("initiatives", {}, () => listInitiatives()),
+    read("projects", params, () => listProjects(params, undefined, { cache: false })),
+  actors: () => read("actors", {}, () => listActors({ cache: false })),
+  workflows: () => read("workflows", {}, () => listWorkflows({ cache: false })),
+  labels: () => read("labels", {}, () => listLabels({ cache: false })),
+  initiatives: () => read("initiatives", {}, () => listInitiatives({ cache: false })),
 };
 
 // One process-wide cache, not one cache per mounted surface.
