@@ -23,7 +23,15 @@ public class ExampleInstrumentedTest {
         // Context of the app under test.
         Context appContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
 
-        assertEquals("com.sprooty.vogt", appContext.getPackageName());
+        // The same instrumentation suite runs against both the production
+        // package and the side-by-side dev package (#191). The Java namespace
+        // is intentionally shared, so use the runtime application context
+        // rather than a generated BuildConfig (which is not available to this
+        // instrumentation source set in every Android Gradle configuration).
+        assertTrue(
+                "unexpected Vogt application id: " + appContext.getPackageName(),
+                "com.sprooty.vogt".equals(appContext.getPackageName())
+                        || "com.sprooty.vogt.dev".equals(appContext.getPackageName()));
     }
 
     @Test
