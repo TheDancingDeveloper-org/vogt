@@ -1795,6 +1795,7 @@ const App: Component = () => {
                         sessionId={
                           (tab() as Extract<Tab, { kind: "terminal" }>).sessionId
                         }
+                        parked={tabsStore.active !== t.id}
                         registerSend={(fn) => {
                           if (fn) senders.set(t.id, fn);
                           else senders.delete(t.id);

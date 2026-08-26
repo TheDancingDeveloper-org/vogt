@@ -9,7 +9,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{broadcast::error::RecvError, mpsc};
 use uuid::Uuid;
 use vogt_engine_contract::{ClientControl, ServerControl};
 
@@ -153,6 +153,7 @@ async fn handle_socket(
     };
 
     let (mut sink, mut stream) = socket.split();
+    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<ServerControl>();
 
     // Subscribe BEFORE snapshotting so no broadcast chunks are missed in the gap.
     let mut rx = session.subscribe();
@@ -215,7 +216,12 @@ async fn handle_socket(
                         Ok(ClientControl::Resize { cols, rows }) => {
                             let _ = writer_session.resize(cols, rows);
                         }
-                        Ok(ClientControl::Ping) => {}
+                        Ok(ClientControl::Ping { id }) => {
+                            let _ = control_tx.send(ServerControl::Pong {
+                                id,
+                                pos: writer_session.scrollback_position(),
+                            });
+                        }
                         Ok(ClientControl::Auth { .. }) => {
                             // Already authenticated; ignore further auth frames.
                         }
@@ -239,7 +245,17 @@ async fn handle_socket(
     // Outbound: broadcast chunks → client, skipping anything already in the snapshot.
     let outbound = tokio::spawn(async move {
         loop {
-            match rx.recv().await {
+            tokio::select! {
+                Some(control) = control_rx.recv() => {
+                    if sink
+                        .send(Message::Text(serde_json::to_string(&control).unwrap().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                result = rx.recv() => match result {
                 Ok(chunk) => {
                     // Skip anything already delivered in the replayed snapshot;
                     // for a chunk straddling the snapshot boundary, send only
@@ -270,6 +286,7 @@ async fn handle_socket(
                     break;
                 }
                 Err(RecvError::Closed) => break,
+                },
             }
         }
     });

@@ -134,6 +134,12 @@ impl Session {
         self.output_tx.subscribe()
     }
 
+    /// Current absolute output position, used by the WebSocket liveness probe
+    /// to detect a socket that is open but no longer delivering output.
+    pub fn scrollback_position(&self) -> u64 {
+        self.scrollback.lock().total_written()
+    }
+
     pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
         let mut w = self.writer.lock();
         w.write_all(data)?;

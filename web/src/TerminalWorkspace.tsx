@@ -64,10 +64,12 @@ import {
   TERMINAL_THEME_EVENT,
 } from "./terminalThemes";
 import { autoSplitName } from "./terminalNaming";
+import { terminalPaneParked } from "./tabLifecycle";
 
 interface Props {
   tabId: string;
   sessionId: string;
+  parked?: boolean;
   registerSend?: (fn: ((data: string | ArrayBuffer) => void) | null) => void;
   registerActions?: (actions: TerminalActions | null) => void;
   confirmClosePane?: (session: SessionSummary | null) => Promise<boolean>;
@@ -137,6 +139,7 @@ function activityClass(session: SessionSummary | undefined): string {
 interface LayoutNodeProps {
   node: TerminalLayoutNode;
   activePaneId: string;
+  parked: boolean;
   /** Whether to draw a per-pane header with its session dropdown (#212). Only
    *  meaningful in a split; a lone pane keeps its whole height for the shell. */
   withHeaders: boolean;
@@ -218,6 +221,7 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
               </div>
             </Show>
             <Terminal
+              parked={terminalPaneParked(!props.parked, props.activePaneId === paneId)}
               interceptInput={(data) => props.interceptPaneInput(paneId, data)}
               sessionId={node.sessionId}
               registerSend={(fn) => props.registerPaneSend(paneId, fn)}
@@ -242,6 +246,7 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
               <LayoutNodeView
                 node={child}
                 activePaneId={props.activePaneId}
+                parked={props.parked}
                 withHeaders={props.withHeaders}
                 sessions={props.sessions}
                 onFocusPane={props.onFocusPane}
@@ -1018,6 +1023,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
         <LayoutNodeView
           node={root()}
           activePaneId={activePaneId()}
+          parked={Boolean(props.parked)}
           withHeaders={panes().length > 1}
           sessions={allSessions()}
           onFocusPane={setActivePaneId}

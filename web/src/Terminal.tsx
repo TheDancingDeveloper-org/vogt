@@ -1,4 +1,4 @@
-import { Component, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { Component, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { listSessions } from "./vogtApi";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -40,7 +40,8 @@ import {
   ReconnectTracker,
 } from "./terminalReconnect";
 import { applyStickyMods } from "./terminalModifiers";
-import { onWake } from "./wakeCoordinator";
+import { onPageVisibility, onWake } from "./wakeCoordinator";
+import { SocketWatchdog } from "./terminalWatchdog";
 
 export interface TerminalActions {
   /** Copy the current xterm selection to the system clipboard. Returns true on success. */
@@ -71,6 +72,8 @@ const SEARCH_DECORATIONS = {
 
 interface Props {
   sessionId: string;
+  /** Keep xterm mounted while parking the live socket for an inactive pane. */
+  parked?: boolean;
   /** Exposed so the parent can inject mobile-modkey input straight into the PTY. */
   registerSend?: (fn: ((data: string | ArrayBuffer) => void) | null) => void;
   /** Exposed so the parent (modkey row, etc.) can drive copy/paste. */
@@ -138,6 +141,12 @@ const TerminalView: Component<Props> = (props) => {
   let reconnectAt = 0;
   let fitFrame: number | null = null;
   const reconnect = new ReconnectTracker();
+  const watchdog = new SocketWatchdog();
+  let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  let hiddenTimer: ReturnType<typeof setTimeout> | null = null;
+  const [hiddenParked, setHiddenParked] = createSignal(false);
+  let socketParked = false;
+  let pingId = 0;
   let destroyed = false;
   let sessionGone = false;
   let wakeCleanup: (() => void) | null = null;
@@ -165,6 +174,9 @@ const TerminalView: Component<Props> = (props) => {
   const [showCopyChip, setShowCopyChip] = createSignal(false);
   let runCopyChip: () => void = () => {};
   let pasteResolve: ((v: string | null) => void) | null = null;
+
+  const isParked = () => Boolean(props.parked) || hiddenParked();
+
 
   const syncQueuedBytes = () => setQueuedBytes(pendingInputBytes);
 
@@ -308,6 +320,37 @@ const TerminalView: Component<Props> = (props) => {
         rows: term.rows,
       }),
     );
+  };
+
+  const checkWatchdog = (forceProbe = false) => {
+    if (isParked() || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const result = watchdog.check(Date.now(), forceProbe);
+    if (result === "probe") {
+      const id = ++pingId;
+      watchdog.notePingSent(id, Date.now());
+      ws.send(JSON.stringify({ type: "ping", id }));
+    } else if (result === "recycle") {
+      console.debug("[vogt] terminal socket recovery", {
+        sessionId: props.sessionId,
+        reason: "silent-or-behind",
+      });
+      watchdog.reset();
+      ws.close();
+      scheduleReconnect(100);
+    }
+  };
+
+  const startWatchdog = () => {
+    if (watchdogTimer === null) {
+      watchdogTimer = setInterval(() => checkWatchdog(), 1_000);
+    }
+  };
+
+  const stopWatchdog = () => {
+    if (watchdogTimer !== null) {
+      clearInterval(watchdogTimer);
+      watchdogTimer = null;
+    }
   };
 
   const fitAndResize = () => {
@@ -695,10 +738,28 @@ const TerminalView: Component<Props> = (props) => {
       scheduleFit();
       term?.scrollToBottom();
       if (!readyToConnect) return;
+      if (isParked()) return;
       if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
         if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         clearCountdown();
         connect();
+      } else {
+        checkWatchdog(true);
+      }
+    });
+
+    const visibilityCleanup = onPageVisibility((visible) => {
+      if (visible) {
+        if (hiddenTimer !== null) clearTimeout(hiddenTimer);
+        hiddenTimer = null;
+        setHiddenParked(false);
+        return;
+      }
+      if (hiddenTimer === null) {
+        hiddenTimer = setTimeout(() => {
+          hiddenTimer = null;
+          setHiddenParked(true);
+        }, 30_000);
       }
     });
 
@@ -706,7 +767,7 @@ const TerminalView: Component<Props> = (props) => {
       if (destroyed) return;
       if (!cached || cached.data.byteLength === 0) {
         readyToConnect = true;
-        connect();
+        if (!isParked()) connect();
         return;
       }
       const bytes = new Uint8Array(cached.data);
@@ -735,12 +796,13 @@ const TerminalView: Component<Props> = (props) => {
         outputPosition = prepared.outputPosition;
         term?.scrollToBottom();
         readyToConnect = true;
-        connect();
+        if (!isParked()) connect();
       });
     });
 
     onCleanup(() => {
       cleanupTouchGestures();
+      visibilityCleanup();
     });
   });
 
@@ -777,7 +839,7 @@ const TerminalView: Component<Props> = (props) => {
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       clearCountdown();
-      if (!destroyed) connect();
+      if (!destroyed && !isParked()) connect();
     }, delay);
   }
 
@@ -790,6 +852,7 @@ const TerminalView: Component<Props> = (props) => {
   }
 
   function connect() {
+    if (isParked()) return;
     if (isSessionGone()) { markSessionGone(); return; }
     replay?.cancel();
     inSnapshot = true;
@@ -800,8 +863,11 @@ const TerminalView: Component<Props> = (props) => {
     ws = openAttach(props.sessionId, outputPosition);
     ws.addEventListener("open", () => {
       reconnect.recover();
+      watchdog.reset();
+      startWatchdog();
       sendResize();
       flushPendingInput();
+      checkWatchdog(true);
     });
     ws.addEventListener("message", (ev) => {
       if (typeof ev.data === "string") {
@@ -814,6 +880,7 @@ const TerminalView: Component<Props> = (props) => {
                 reset?: boolean;
               }
             | { type: "snapshot-done" }
+            | { type: "pong"; id: number; pos: number }
             | { type: "lag"; note?: string };
           if (ctrl.type === "snapshot-start") {
             replay?.cancel();
@@ -862,6 +929,10 @@ const TerminalView: Component<Props> = (props) => {
             if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
             ws?.close();
             scheduleReconnect(100);
+          } else if (ctrl.type === "pong") {
+            if (watchdog.notePong(ctrl.id, ctrl.pos, outputPosition ?? 0) === "recycle") {
+              checkWatchdog();
+            }
           }
         } catch {
           /* ignore non-JSON text frames */
@@ -869,6 +940,7 @@ const TerminalView: Component<Props> = (props) => {
         return;
       }
       const buf = new Uint8Array(ev.data as ArrayBuffer);
+      watchdog.noteOutput(Date.now());
       outputPosition = (outputPosition ?? 0) + buf.byteLength;
       appendToCache(buf);
       if (inSnapshot) {
@@ -881,6 +953,8 @@ const TerminalView: Component<Props> = (props) => {
       }
     });
     ws.addEventListener("close", () => {
+      stopWatchdog();
+      if (socketParked || isParked()) return;
       // Write the [disconnected] marker once at the start of the outage, not on
       // every retry, and never through appendToCache — it is a live hint, not
       // part of the replayable scrollback.
@@ -897,6 +971,37 @@ const TerminalView: Component<Props> = (props) => {
     });
   }
 
+  function parkSocket() {
+    if (socketParked) return;
+    socketParked = true;
+    persistCache();
+    replay?.cancel();
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    clearCountdown();
+    stopWatchdog();
+    setReconnectView(null);
+    setStatusText("Suspended");
+    ws?.close(1000, "inactive pane");
+    ws = null;
+  }
+
+  function resumeSocket() {
+    if (!socketParked) return;
+    socketParked = false;
+    if (destroyed || !readyToConnect || isParked()) return;
+    setStatusText("Loading terminal...");
+    connect();
+  }
+
+  createEffect(() => {
+    if (!readyToConnect) return;
+    if (isParked()) parkSocket();
+    else resumeSocket();
+  });
+
   onCleanup(() => {
     destroyed = true;
     replay?.cancel();
@@ -904,6 +1009,8 @@ const TerminalView: Component<Props> = (props) => {
     pendingInputBytes = 0;
     if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     clearCountdown();
+    stopWatchdog();
+    if (hiddenTimer !== null) clearTimeout(hiddenTimer);
     if (cacheTimer !== null) { clearTimeout(cacheTimer); cacheTimer = null; }
     persistCache();
     if (fitFrame !== null) {
