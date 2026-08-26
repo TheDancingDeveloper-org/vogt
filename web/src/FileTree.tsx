@@ -3,6 +3,7 @@ import {
   For,
   Show,
   createEffect,
+  createMemo,
   createResource,
   createSignal,
   createUniqueId,
@@ -56,7 +57,7 @@ interface NodeProps {
   onDuplicate: (node: TreeNode) => void;
   onDelete: (node: TreeNode) => void;
   onUploadHere: (path: string) => void;
-  statusEntries: GitStatusEntry[];
+  statusEntries: ReadonlyMap<string, FileStatus>;
 }
 
 // Only one node's actions picker is open at a time. The picker behaves like a
@@ -75,13 +76,26 @@ const FILE_STATUS: Record<GitStatusKind, { marker: string; label: string }> = {
   deleted: { marker: "D", label: "Deleted" },
 };
 
-function statusForPath(
-  entries: GitStatusEntry[],
+export interface FileStatus {
+  marker: string;
+  label: string;
+  kind: GitStatusKind;
+}
+
+/** Build once per Git response; each rendered node then does one map lookup. */
+export function buildStatusMap(entries: GitStatusEntry[]): ReadonlyMap<string, FileStatus> {
+  const result = new Map<string, FileStatus>();
+  for (const entry of entries) {
+    result.set(entry.path, { ...FILE_STATUS[entry.kind], kind: entry.kind });
+  }
+  return result;
+}
+
+export function statusForPath(
+  entries: ReadonlyMap<string, FileStatus>,
   path: string,
-): { marker: string; label: string; kind: GitStatusKind } | null {
-  const entry = entries.find((candidate) => candidate.path === path);
-  if (!entry) return null;
-  return { ...FILE_STATUS[entry.kind], kind: entry.kind };
+): FileStatus | null {
+  return entries.get(path) ?? null;
 }
 
 function joinPath(dir: string, name: string): string {
@@ -302,7 +316,8 @@ const FileTree: Component<Props> = (props) => {
       return [];
     }
     },
-  );
+  });
+  const statusMap = createMemo(() => buildStatusMap(gitStatus() ?? []));
   // Search query is hoisted to the module store so it survives a tab switch.
   const searchQuery = fileTreeSearch;
   const setSearchQuery = setFileTreeSearch;
@@ -627,7 +642,7 @@ const FileTree: Component<Props> = (props) => {
                   onDuplicate={(entry) => void duplicateNode(entry)}
                   onDelete={(entry) => void deleteNode(entry)}
                   onUploadHere={triggerUpload}
-                  statusEntries={gitStatus() ?? []}
+                  statusEntries={statusMap()}
                 />
               )}
             </For>
@@ -655,7 +670,7 @@ const FileTree: Component<Props> = (props) => {
                       <span class="tree-search-name">{file.name}</span>
                       <span class="tree-search-path">{file.path}</span>
                     </span>
-                    <Show when={statusForPath(gitStatus() ?? [], file.path)}>
+                    <Show when={statusForPath(statusMap(), file.path)}>
                       {(value) => (
                         <span
                           class={`tree-status tree-status-${value().kind}`}

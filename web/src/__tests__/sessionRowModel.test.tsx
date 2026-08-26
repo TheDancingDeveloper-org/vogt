@@ -10,6 +10,7 @@ import {
   activityLabel,
   attentionRank,
   sessionStateWord,
+  sortSessionsForRail,
   sortSessionsByAttention,
 } from "../sessionRowModel";
 
@@ -77,5 +78,15 @@ describe("attention order", () => {
     expect(sorted.map((s) => s.id)).toEqual(["waiting", "idle-new", "idle-old"]);
     // A copy: the caller's array is left in place.
     expect(input.map((s) => s.id)).toEqual(["idle-old", "idle-new", "waiting"]);
+  });
+
+  it("partitions bookmarks without rebuilding bookmark state per comparison", () => {
+    const rows = [
+      session({ id: "idle-old", activity: "idle", activity_changed_at: "2026-08-18T08:00:00Z" }),
+      session({ id: "waiting", activity: "waiting-for-input" }),
+      session({ id: "idle-new", activity: "idle", activity_changed_at: "2026-08-18T09:00:00Z" }),
+    ];
+    expect(sortSessionsForRail(rows, new Set(["idle-old"])).map((row) => row.id))
+      .toEqual(["idle-old", "waiting", "idle-new"]);
   });
 });

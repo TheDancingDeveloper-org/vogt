@@ -77,3 +77,13 @@ export function sortSessionsByAttention(sessions: SessionSummary[]): SessionSumm
       - Date.parse(left.activity_changed_at || left.created_at);
   });
 }
+
+/** Attention order plus one stable bookmark partition for the Places rail. */
+export function sortSessionsForRail(
+  sessions: SessionSummary[],
+  bookmarked: ReadonlySet<string>,
+): SessionSummary[] {
+  return sortSessionsByAttention(sessions).sort(
+    (left, right) => Number(bookmarked.has(right.id)) - Number(bookmarked.has(left.id)),
+  );
+}

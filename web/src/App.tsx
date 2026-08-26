@@ -4,6 +4,7 @@ import {
   For,
   Show,
   createEffect,
+  createMemo,
   createSignal,
   lazy,
   onCleanup,
@@ -115,7 +116,7 @@ import {
   activityLabel,
   sessionActivityAge,
   sessionStateWord,
-  sortSessionsByAttention,
+  sortSessionsForRail,
 } from "./sessionRowModel";
 import { railSections, setRailSection } from "./railSections";
 import { setExpanded } from "./fileTreeState";
@@ -369,7 +370,13 @@ const App: Component = () => {
         ? "unavailable"
         : "loading",
   });
-  const railNow = createNow();
+  const railNow = createNow(30_000);
+  const railSessions = createMemo(() => {
+    const sessions = sessionsStore.order
+      .map((id) => sessionsStore.sessions[id])
+      .filter((s): s is SessionSummary => Boolean(s));
+    return sortSessionsForRail(sessions, new Set(bookmarks()));
+  });
   const [openMenuId, setOpenMenuId] = createSignal<string | null>(null);
   const waitingSessionList = () =>
     sessionsStore.ready
@@ -1375,18 +1382,7 @@ const App: Component = () => {
             </button>
             <div hidden={!railSections.running}>
             <For
-              each={sortSessionsByAttention(
-                sessionsStore.order
-                  .map((id) => sessionsStore.sessions[id])
-                  .filter((s): s is SessionSummary => Boolean(s)),
-              )
-                // Attention order is the shared spine (matches Sessions); a
-                // stable partition then floats bookmarks to the top without
-                // disturbing the attention order within each group.
-                .sort((a, b) => {
-                  const set = new Set(bookmarks());
-                  return (set.has(a.id) ? 0 : 1) - (set.has(b.id) ? 0 : 1);
-                })}
+              each={railSessions()}
               fallback={<div class="empty">No sessions yet.</div>}
             >
               {(s) => (

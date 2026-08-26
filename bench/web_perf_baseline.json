@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "kind": "web-rendering",
+  "issue": 422,
+  "profile": {
+    "work_items": 2000,
+    "files": 5000,
+    "file_depth": 8,
+    "sessions": 32
+  },
+  "budgets": {
+    "first_interaction_ms": 1000,
+    "longest_task_ms": 200,
+    "retained_nodes_delta_per_wake": 100,
+    "board_cards_dom_max": 200
+  },
+  "baseline": null,
+  "target": "Record named-machine measurements with VOGT_RUN_PERF=1 after the first release-check run; budgets are the regression envelope until then.",
+  "produced_by": "web/tests/browser/perf.spec.ts"
+}
