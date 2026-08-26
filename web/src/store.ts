@@ -25,9 +25,10 @@ export const sessionsStore = store;
 export const sessionsError = error;
 export const isConnected = connected;
 
-export async function refreshSessions(): Promise<void> {
+export async function refreshSessions(signal?: AbortSignal): Promise<void> {
   try {
-    const list = await api.listSessions();
+    const list = await api.listSessions(signal);
+    if (signal?.aborted) return;
     setStore(
       produce((s) => {
         s.sessions = {};
@@ -42,6 +43,7 @@ export async function refreshSessions(): Promise<void> {
     setError(null);
     setConnected(true);
   } catch (e) {
+    if (signal?.aborted) return;
     setError((e as Error).message);
     setConnected(false);
   }
@@ -256,5 +258,5 @@ export function forceReconnectEventStream(): void {
 onWake(() => forceReconnectEventStream());
 onWake((wake: Wake) => {
   if (wake.reason === "boot" && sessionsStore.ready) return;
-  void reconcile("sessions", wake, () => refreshSessions());
+  void reconcile("sessions", wake, (signal) => refreshSessions(signal));
 });
