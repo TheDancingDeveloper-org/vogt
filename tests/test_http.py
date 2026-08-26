@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from vogt.adapters.http.app import API_PREFIX, build_app
 from vogt.application.context import AppContext
+from vogt.application.services.auth import Authenticated, Unauthenticated
 
 
 @pytest.fixture
@@ -23,7 +24,7 @@ def test_status_is_readable(client: TestClient) -> None:
     assert response.json()["revision"] == 0
 
 
-def test_place_metrics_are_one_bounded_read(client: TestClient) -> None:
+ def test_place_metrics_are_one_bounded_read(client: TestClient) -> None:
     response = client.get(f"{API_PREFIX}/place/metrics")
     assert response.status_code == 200
     assert response.json() == {
@@ -35,6 +36,74 @@ def test_place_metrics_are_one_bounded_read(client: TestClient) -> None:
         "revision": 0,
         "generated_at": response.json()["generated_at"],
     }
+
+def test_whitelisted_metadata_reads_carry_the_declared_revision_etag(
+    client: TestClient,
+) -> None:
+    response = client.get(f"{API_PREFIX}/projects")
+    assert response.status_code == 200
+    assert response.headers["etag"] == 'W/"0"'
+
+
+def test_a_matching_metadata_etag_returns_304_without_a_body(
+    client: TestClient,
+) -> None:
+    first = client.get(f"{API_PREFIX}/projects")
+    second = client.get(
+        f"{API_PREFIX}/projects",
+        headers={"If-None-Match": first.headers["etag"]},
+    )
+    assert second.status_code == 304
+    assert second.headers["etag"] == first.headers["etag"]
+    assert second.content == b""
+
+
+def test_a_declared_write_changes_the_metadata_validator(client: TestClient) -> None:
+    before = client.get(f"{API_PREFIX}/projects")
+    assert before.headers["etag"] == 'W/"0"'
+
+    created = client.post(
+        f"{API_PREFIX}/projects",
+        json={
+            "name": "Revision change",
+            "root_path": "/srv/revision-change",
+            "reason": "test the conditional read validator",
+        },
+    )
+    assert created.status_code == 200
+    assert "etag" not in created.headers
+
+    after = client.get(
+        f"{API_PREFIX}/projects",
+        headers={"If-None-Match": before.headers["etag"]},
+    )
+    assert after.status_code == 200
+    assert after.headers["etag"] == 'W/"1"'
+
+
+def test_non_whitelisted_reads_do_not_emit_or_honor_an_etag(
+    client: TestClient,
+) -> None:
+    response = client.get(f"{API_PREFIX}/status", headers={"If-None-Match": 'W/"0"'})
+    assert response.status_code == 200
+    assert "etag" not in response.headers
+ 
+ 
+ def test_authentication_precedes_a_conditional_304(instance: AppContext) -> None:
+    def refuse(_request: object) -> tuple[AppContext, Authenticated]:
+        raise Unauthenticated("no bearer token presented")
+
+    with TestClient(
+        build_app(
+            context_factory=lambda: instance,
+            authorize_request=refuse,
+        )
+    ) as client:
+        response = client.get(
+            f"{API_PREFIX}/projects", headers={"If-None-Match": 'W/"0"'}
+        )
+    assert response.status_code == 401
+     assert "etag" not in response.headers
 
 
 def test_registering_a_project_returns_it(client: TestClient) -> None:
