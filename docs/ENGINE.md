@@ -140,7 +140,9 @@ has its own build arg in the same block. `POD_BASE_IMAGE` selects the pod
 base; CI passes it by digest.
 
 The image's entrypoint (`engine/deploy/entrypoint.sh`) supervises the
-container: it optionally joins a VPN (`TAILSCALE_AUTH_KEY`), optionally starts
+container: it optionally joins a VPN (`TAILSCALE_AUTH_KEY`, or
+`TAILSCALE_AUTH_KEY_FILE` for a compose-secret mount; a node with persisted
+tailscaled state rejoins with neither), optionally starts
 a headless compositor for the GUI surface (`START_SWAY=1`), starts the Python
 core on loopback when `VOGT_CORE_URL` names a loopback address, then execs the
 engine as PID 1's child. With `VOGT_CORE_URL` unset the container runs the
@@ -454,7 +456,8 @@ section that documents it.
 - `GET /readyz` -> `{"ok": bool, "checks": [{"name","ok","detail","fatal"}]}`
   — seven checks: `workspace_root` (readable directory), `state_dir`
   (writable, proved by writing and removing a probe file), `tailscale`
-  (the image's optional VPN join; skipped unless `TAILSCALE_AUTH_KEY` is set),
+  (the image's optional VPN join; skipped unless an auth key is provided or
+  persisted tailscaled state exists),
   `gui` (skipped unless `START_SWAY`), `vogt_core`, `workspace_agreement` (the core imports inside
   this server's workspace root — FR-E3) and `backup_agreement` (`vogt backup`
   would cover this server's `state_dir` — NFR-I6). `200` when every *fatal*

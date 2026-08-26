@@ -2,7 +2,8 @@
 # Vogt pod entrypoint — the supervisor of the merged container (NFR-D11).
 #
 # Responsibilities (in order):
-#   1. Optionally join the tailnet (if TAILSCALE_AUTH_KEY is set).
+#   1. Optionally join the tailnet (if an auth key is provided, or persisted
+#      tailscaled state already holds a node identity).
 #   2. Optionally start sway headless in the background (if START_SWAY=1).
 #   3. Optionally start and supervise vogt-core on loopback (if VOGT_CORE_URL
 #      names a loopback address).
@@ -12,6 +13,11 @@
 #   MYDEVENV2_TOKEN              required
 #   MYDEVENV2_BIND               default 0.0.0.0:8910
 #   TAILSCALE_AUTH_KEY           if set, runs `tailscale up` with --hostname=mydevenv2
+#   TAILSCALE_AUTH_KEY_FILE      file to read the auth key from (compose
+#                                `secrets:`), consulted only when the env var
+#                                is unset — mirrors VOGT_CORE_TOKEN_FILE. With
+#                                persisted state neither is needed: a
+#                                registered node rejoins without a key.
 #   TAILSCALE_HOSTNAME           default mydevenv2
 #   TAILSCALE_EXIT_NODE          if set, routes all egress via this exit node
 #                                (kernel mode; requires /dev/net/tun + NET_ADMIN
@@ -73,7 +79,20 @@ if [[ -x /usr/local/bin/vogt-verify-agent-clis ]]; then
     /usr/local/bin/vogt-verify-agent-clis
 fi
 
-if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
+# The auth key can arrive as a file instead of an environment variable, so a
+# deployment can mount it via compose `secrets:` and keep it out of
+# `docker inspect` output. The env var wins when both are set, because an
+# explicit value should never be silently shadowed by a mount.
+if [[ -z "${TAILSCALE_AUTH_KEY:-}" && -n "${TAILSCALE_AUTH_KEY_FILE:-}" && -s "${TAILSCALE_AUTH_KEY_FILE}" ]]; then
+    TAILSCALE_AUTH_KEY="$(tr -d '[:space:]' < "${TAILSCALE_AUTH_KEY_FILE}")"
+fi
+
+# Persisted state is a join credential in its own right: a node that has
+# registered before rejoins from tailscaled.state without any auth key. Gating
+# tailscaled on the key alone would take an already-registered pod off the
+# tailnet the moment the key is rotated out of the environment.
+tailscale_state=/var/lib/tailscale/tailscaled.state
+if [[ -n "${TAILSCALE_AUTH_KEY:-}" || -s "${tailscale_state}" ]]; then
     # Kernel networking (real TUN) so an exit node can transparently capture
     # this pod's egress. The compose must pass --device=/dev/net/tun and
     # cap_add NET_ADMIN; without them tailscaled falls back and the exit node
@@ -96,11 +115,17 @@ if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
     # through tailnet DNS. Keep this enabled by default; disabling it without
     # an equivalent resolver makes native MCP clients fail before auth.
     tailscale_accept_dns="${MYDEVENV2_TAILSCALE_ACCEPT_DNS:-1}"
-    sudo tailscale up \
-        --authkey="${TAILSCALE_AUTH_KEY}" \
-        --hostname="${TAILSCALE_HOSTNAME:-mydevenv2}" \
-        --accept-routes \
-        --accept-dns="${tailscale_accept_dns}" || echo "tailscale up failed (continuing)"
+    tailscale_up_args=(
+        --hostname="${TAILSCALE_HOSTNAME:-mydevenv2}"
+        --accept-routes
+        --accept-dns="${tailscale_accept_dns}"
+    )
+    # Only pass a key that exists — `up` with an empty --authkey= is an error,
+    # and a state-only rejoin has no key to pass.
+    if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
+        tailscale_up_args+=(--authkey="${TAILSCALE_AUTH_KEY}")
+    fi
+    sudo tailscale up "${tailscale_up_args[@]}" || echo "tailscale up failed (continuing)"
 
     # `tailscale up` may retain state from an earlier boot. Apply the setting
     # explicitly so a restarted container converges on the configured policy.

@@ -83,6 +83,10 @@ services:
 
       # ── Tailnet (optional) ─────────────────────────────────────────────────
       # Set an auth key to auto-join; leave empty to run without Tailscale.
+      # Prefer TAILSCALE_AUTH_KEY_FILE pointing at a compose `secrets:` mount —
+      # a key in the environment is visible to anything that can
+      # `docker inspect` the container. Once the node has registered (state
+      # persisted under /var/lib/tailscale) no key is needed at all.
       TAILSCALE_AUTH_KEY: "${TAILSCALE_AUTH_KEY:-}"
       TAILSCALE_HOSTNAME: "${TAILSCALE_HOSTNAME:-vogt-engine}"
       MYDEVENV2_TAILSCALE_ACCEPT_DNS: "${ENGINE_TAILSCALE_ACCEPT_DNS:-1}"
