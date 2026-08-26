@@ -440,6 +440,15 @@ fn spawn_exit_waiter(
         let new_state = compute_activity(&session, code != 0);
         update_activity_if_changed(&session, new_state, &bus);
         wake_activity_watcher(&session);
+
+        // The child can exit before the PTY reader has consumed the final
+        // bytes.  Publish the terminal event only after that reader has
+        // drained its stream; agent-task conclusions inspect scrollback when
+        // they receive `SessionKilled` (including VOGT_SKIP and VOGT_COST
+        // sentinels printed immediately before exit).
+        while !session.reader_done.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         bus.publish(ServerEvent::SessionKilled {
             id: session.id,
             exit_code: Some(code),
