@@ -243,26 +243,30 @@ Four things this checkpoint found that the plan did not anticipate:
    answer that hides that best. Only `inbox.list` is curated, and the prompt
    now says an uncollected source is not an empty one.
 
-Two things deliberately **not** done at this checkpoint, and why:
+Two things deliberately remain outside this implementation checkpoint, and why:
 
 - **No session-outcome plumbing for `model`/`effort` beyond what was asked
   for.** The column records the request, not what the agent is using now — an
   operator who types `/model` at the prompt has moved on and no column here
   will know. That is the same line FR-E2 draws around activity state.
-- **No server-side speech (§3.5) and no phone work (§3.6).** Checkpoint B
-  (desktop microphone) is next and needs no new server code; §3.6 is still
-  blocked on FR-M4's dev build alongside prod.
+- **Server-side speech (§3.5) and phone work (§3.6) are implementation
+  complete.** Checkpoint B's desktop microphone path is also shipped and needs
+  no new server code. The remaining work in this POC is validation: the
+  spoken desktop pass, the configured-provider speech comparison, and the
+  on-device pass are observations that cannot be inferred from a build. The
+  phone pass remains blocked on FR-M4's dev build alongside prod.
 
 ### Checkpoint B — desktop microphone
 
-*Not run. Needs a person and a laptop microphone; everything it needs is
-built* — the Web Speech path shipped with #189. What is owed is the five utterances spoken three times each,
-with the recognizer misses and the U3/U4 approval-tap counts written here.
+*Implementation shipped; validation not run here.* It needs a person and a
+laptop microphone: the Web Speech path shipped with #189. What is owed is the
+five utterances spoken three times each, with the recognizer misses and the
+U3/U4 approval-tap counts written here.
 
 ### Checkpoint C — server-side STT/TTS *(2026-08-21)*
 
-**Code half reached; human spoken pass still owed.** §3.5 is built (#190,
-FR-T12). The engine fronts two routes — `POST /api/assistant/stt` (multipart
+**Implementation shipped; human spoken pass still owed.** §3.5 is built
+(#190, FR-T12). The engine fronts two routes — `POST /api/assistant/stt` (multipart
 audio → `{text}`) and `POST /api/assistant/tts` (`{text}` → an audio stream) —
 proxied to OpenAI-compatible audio endpoints configured **independently of the
 chat profile**, which is the whole point of FR-T12: a chat profile on a
@@ -312,10 +316,10 @@ desktop with no Web Speech to record that verdict.
 
 ### Checkpoint D — phone background + speak-the-push *(2026-08-21)*
 
-**Code half staged; battery number and spoken U1–U5 pass still owed on a
-device.** §3.6 is built (#192, FR-M6). Device validation is deliberately *not*
-in this pass — the code is landable and compiles so a later on-device run is
-pure validation.
+**Implementation shipped; battery number and spoken U1–U5 pass are still owed
+on a device.** §3.6 is built (#192, FR-M6). Device validation is deliberately
+not represented by the implementation tests — a later on-device run is pure
+validation.
 
 What is built:
 
@@ -366,4 +370,5 @@ of a 30-minute held conversation and whether the socket survives screen-off
 (the two numbers §3.6 exists to read) are device measurements this pass does
 not and cannot produce, and the spoken **U1–U5** pass on the phone remains a
 device task. The dev build alongside prod (FR-M4) is the standing blocker for
-running any of it on hardware.
+running the FCM coexistence portion on hardware; the implementation itself is
+already delivered.
