@@ -24,15 +24,16 @@
 //! per-stage git checkpoint branch is surfaced on [`ProviderEvent`] as
 //! `checkpoint_branch`, and the tracker records each as a run observation with
 //! provenance and age (see `agent_tasks::AgentTaskRegistry::record_workflow_checkpoint`).
-//! Gate bridging (#289) and a live-engine smoke of the wire field names remain
-//! deferred to a later slice. Poll responses may carry checkpoint observations
-//! too, so the poll fallback now preserves the same checkpoint evidence as the
-//! stream path.
+//! Gate and steering bridging (#289) is deliberately provider-pluggable too:
+//! external approval events become Vogt gate records, and answers/steers are
+//! forwarded to the external run before Vogt records the local resolution.
+//! Poll responses may carry checkpoint and gate observations too, so fallback
+//! preserves the same evidence and controls as the stream path.
 //!
 //! ## ASSUMED workflow-engine REST contract
 //!
 //! The shapes below are **assumed** from a reference workflow engine exposing
-//! REST + SSE: its runs end `succeeded | failed | partially_succeeded | skipped`
+//! REST + SSE: its runs end `succeeded | failed | partially_succeeded | skipped | blocked`
 //! with a terminal `Conclusion` carrying timing, billing in `usd_micros`, final
 //! sha and diff. They are **not yet verified against a live engine** — that
 //! verification is deferred to a live smoke, and the exact routes/field names
@@ -46,7 +47,7 @@
 //!   ```json
 //!   {
 //!     "state": "running" | "succeeded" | "failed"
-//!            | "partially_succeeded" | "skipped",
+//!            | "partially_succeeded" | "skipped" | "blocked",
 //!     "conclusion": {
 //!       "final_sha": "<sha>?",
 //!       "diff": { "files": <u32>, "insertions": <u64>, "deletions": <u64> }?,
@@ -73,6 +74,10 @@
 //!     "ts_ms": <u64>?                    // event time, Unix epoch milliseconds
 //!   }
 //!   ```
+//! * **answer gate** — `POST {base}/api/runs/{id}/gates/{gate_id}/answer`
+//!   request `{ "option": <zero-based option index> }`
+//! * **steer run** — `POST {base}/api/runs/{id}/steer`
+//!   request `{ "text": <text>, "interrupt": <bool> }`
 //!
 //! A `Bearer` token is sent when configured. Connection/timeout failures map to
 //! [`WorkflowEngineError::Unreachable`] — the "engine is absent" case, which the
@@ -160,6 +165,7 @@ pub enum ProviderRunState {
     Failed,
     PartiallySucceeded,
     Skipped,
+    Blocked,
 }
 
 impl ProviderRunState {
@@ -194,7 +200,25 @@ pub struct ProviderCheckpoint {
 pub struct ProviderRunStatus {
     pub state: ProviderRunState,
     pub checkpoints: Vec<ProviderCheckpoint>,
+    pub gates: Vec<ProviderGate>,
     pub conclusion: Option<ProviderConclusion>,
+}
+
+/// An approval gate reported by a workflow engine. The provider id is kept
+/// separately from Vogt's UUID so an engine may use any stable string while
+/// the existing `/gates/{uuid}/answer` route remains unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderGate {
+    pub id: String,
+    pub question: String,
+    pub options: Vec<ProviderGateOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderGateOption {
+    pub label: String,
+    pub input: String,
+    pub approve: bool,
 }
 
 /// One event mirrored off the engine's live SSE stream (#293, increment 2).
@@ -229,6 +253,10 @@ pub struct ProviderEvent {
     /// `None` for an event that reports no checkpoint — most events — which is
     /// the ordinary, non-fatal case.
     pub checkpoint_branch: Option<String>,
+    /// An approval gate opened by this event, when the engine supplied a
+    /// complete gate payload. Malformed/incomplete gate payloads remain plain
+    /// progress events rather than creating an unanswerable local gate.
+    pub gate: Option<ProviderGate>,
 }
 
 /// A live stream of a run's [`ProviderEvent`]s. Boxed (rather than an
@@ -274,6 +302,25 @@ pub trait WorkflowProvider {
         &self,
         run_id: &str,
     ) -> impl Future<Output = Result<ProviderEventStream, WorkflowEngineError>> + Send;
+
+    /// Answer an approval gate in the external run. Vogt records its local
+    /// gate only after this succeeds, so a failed upstream request cannot make
+    /// the PWA display a decision the provider never received.
+    fn answer_gate(
+        &self,
+        run_id: &str,
+        gate_id: &str,
+        option_index: usize,
+    ) -> impl Future<Output = Result<(), WorkflowEngineError>> + Send;
+
+    /// Queue steering text in the external run. `interrupt` has provider
+    /// semantics equivalent to Vogt's PTY Ctrl-C-before-text operation.
+    fn steer(
+        &self,
+        run_id: &str,
+        text: &str,
+        interrupt: bool,
+    ) -> impl Future<Output = Result<(), WorkflowEngineError>> + Send;
 }
 
 /// The HTTP workflow-engine provider — a thin REST client for the assumed contract documented
@@ -284,6 +331,7 @@ pub trait WorkflowProvider {
 /// property of *this* configured backend, not of each run), so the provider
 /// holds it and puts it in the create body. It is built from a
 /// [`WorkflowEngineConfig`] once per run.
+#[derive(Clone)]
 pub struct HttpWorkflowProvider {
     base_url: String,
     workflow: String,
@@ -364,8 +412,66 @@ struct PollResp {
     /// tolerant without inventing a second provider API.
     #[serde(default, alias = "checkpoint_branches")]
     checkpoints: Vec<PollCheckpoint>,
+    #[serde(default, alias = "approval_gates", alias = "pending_gates")]
+    gates: Vec<PollGate>,
     #[serde(default)]
     conclusion: Option<PollConclusion>,
+}
+
+#[derive(Deserialize)]
+struct PollGate {
+    id: String,
+    #[serde(default, alias = "prompt", alias = "question")]
+    question: String,
+    #[serde(default)]
+    options: Vec<PollGateOption>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PollGateOption {
+    Label(String),
+    Detail {
+        label: String,
+        #[serde(default)]
+        input: String,
+        #[serde(default)]
+        approve: bool,
+    },
+}
+
+impl PollGate {
+    fn into_provider(self) -> Option<ProviderGate> {
+        let question = self.question.trim().to_string();
+        let options = self
+            .options
+            .into_iter()
+            .map(|option| match option {
+                PollGateOption::Label(label) => ProviderGateOption {
+                    input: label.clone(),
+                    label,
+                    approve: false,
+                },
+                PollGateOption::Detail {
+                    label,
+                    input,
+                    approve,
+                } => ProviderGateOption {
+                    label,
+                    input,
+                    approve,
+                },
+            })
+            .filter(|option| !option.label.trim().is_empty())
+            .collect::<Vec<_>>();
+        (!self.id.trim().is_empty() && !question.is_empty() && !options.is_empty()).then_some(
+            ProviderGate {
+                id: self.id,
+                question,
+                options,
+            },
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -456,9 +562,62 @@ struct SseEnvelope {
     /// majority of events, which is expected — collection is non-fatal.
     #[serde(default, alias = "checkpoint")]
     checkpoint_branch: Option<String>,
+    /// Approval gate payload. Aliases cover the common `gate`, `approval`,
+    /// and `approval_gate` envelope names without widening the provider API.
+    #[serde(default, alias = "approval", alias = "approval_gate")]
+    gate: Option<SseGate>,
     /// The event time as Unix epoch milliseconds, when present.
     #[serde(default)]
     ts_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct SseGate {
+    #[serde(alias = "gate_id")]
+    id: String,
+    #[serde(default, alias = "prompt", alias = "question")]
+    question: String,
+    #[serde(default)]
+    options: Vec<SseGateOption>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SseGateOption {
+    Label(String),
+    Detail {
+        label: String,
+        #[serde(default)]
+        input: String,
+        #[serde(default)]
+        approve: bool,
+    },
+}
+
+impl SseGate {
+    fn into_provider(self) -> Option<ProviderGate> {
+        PollGate {
+            id: self.id,
+            question: self.question,
+            options: self
+                .options
+                .into_iter()
+                .map(|option| match option {
+                    SseGateOption::Label(label) => PollGateOption::Label(label),
+                    SseGateOption::Detail {
+                        label,
+                        input,
+                        approve,
+                    } => PollGateOption::Detail {
+                        label,
+                        input,
+                        approve,
+                    },
+                })
+                .collect(),
+        }
+        .into_provider()
+    }
 }
 
 /// Parse the wire state token into a [`ProviderRunState`]. An unknown token is
@@ -471,6 +630,7 @@ fn parse_state(raw: &str) -> Result<ProviderRunState, WorkflowEngineError> {
         "failed" => Ok(ProviderRunState::Failed),
         "partially_succeeded" => Ok(ProviderRunState::PartiallySucceeded),
         "skipped" => Ok(ProviderRunState::Skipped),
+        "blocked" => Ok(ProviderRunState::Blocked),
         other => Err(WorkflowEngineError::Config(format!(
             "unknown workflow-engine run state {other:?}"
         ))),
@@ -511,6 +671,7 @@ fn parse_sse_record(event_name: Option<&str>, data: &str) -> ProviderEvent {
                 .checkpoint_branch
                 .map(|b| b.trim().to_string())
                 .filter(|b| !b.is_empty());
+            let gate = env.gate.and_then(SseGate::into_provider);
             ProviderEvent {
                 kind,
                 message: env.message,
@@ -518,6 +679,7 @@ fn parse_sse_record(event_name: Option<&str>, data: &str) -> ProviderEvent {
                 at,
                 terminal_state,
                 checkpoint_branch,
+                gate,
             }
         }
         None => ProviderEvent {
@@ -527,6 +689,7 @@ fn parse_sse_record(event_name: Option<&str>, data: &str) -> ProviderEvent {
             at: None,
             terminal_state: None,
             checkpoint_branch: None,
+            gate: None,
         },
     }
 }
@@ -711,6 +874,11 @@ impl WorkflowProvider for HttpWorkflowProvider {
             .into_iter()
             .filter_map(PollCheckpoint::into_provider)
             .collect();
+        let gates = parsed
+            .gates
+            .into_iter()
+            .filter_map(PollGate::into_provider)
+            .collect();
         let conclusion = parsed.conclusion.map(|c| ProviderConclusion {
             final_sha: c.final_sha,
             diff: c.diff.map(|d| DiffStat {
@@ -724,6 +892,7 @@ impl WorkflowProvider for HttpWorkflowProvider {
         Ok(ProviderRunStatus {
             state,
             checkpoints,
+            gates,
             conclusion,
         })
     }
@@ -753,18 +922,60 @@ impl WorkflowProvider for HttpWorkflowProvider {
             Box::pin(resp.bytes_stream());
         Ok(Box::pin(sse_event_stream(body)))
     }
+
+    async fn answer_gate(
+        &self,
+        run_id: &str,
+        gate_id: &str,
+        option_index: usize,
+    ) -> Result<(), WorkflowEngineError> {
+        let url = format!("{}/api/runs/{run_id}/gates/{gate_id}/answer", self.base_url);
+        let response = self
+            .auth(self.client.post(&url))
+            .json(&serde_json::json!({ "option": option_index }))
+            .send()
+            .await
+            .map_err(|e| classify_reqwest(&e))?;
+        ensure_success(response).await
+    }
+
+    async fn steer(
+        &self,
+        run_id: &str,
+        text: &str,
+        interrupt: bool,
+    ) -> Result<(), WorkflowEngineError> {
+        let url = format!("{}/api/runs/{run_id}/steer", self.base_url);
+        let response = self
+            .auth(self.client.post(&url))
+            .json(&serde_json::json!({ "text": text, "interrupt": interrupt }))
+            .send()
+            .await
+            .map_err(|e| classify_reqwest(&e))?;
+        ensure_success(response).await
+    }
+}
+
+async fn ensure_success(response: reqwest::Response) -> Result<(), WorkflowEngineError> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    Err(WorkflowEngineError::Api {
+        status: status.as_u16(),
+        body,
+    })
 }
 
 /// Map a terminal provider state and its conclusion onto Vogt's own
 /// [`AgentTaskRunOutcome`] and a durable [`AgentTaskRunConclusion`] (#291).
 ///
-/// The four terminal engine states line up one-to-one with existing outcome
+/// The terminal engine states line up one-to-one with existing outcome
 /// variants — `succeeded → Succeeded`, `failed → Failed`,
 /// `partially_succeeded → PartiallySucceeded`, `skipped → Skipped` — so nothing
-/// is invented here. Vogt's `Blocked` outcome has no counterpart in the engine's
-/// terminal states in this increment (engine gates would map to it once gate
-/// bridging lands in #289) and
-/// is simply never produced by this provider. A non-terminal `Running` state is
+/// is invented here. `blocked` maps to Vogt's `Blocked` outcome. A non-terminal
+/// `Running` state is
 /// a caller bug and is mapped to `Failed` with a note rather than panicking.
 pub fn map_conclusion(
     state: ProviderRunState,
@@ -777,6 +988,7 @@ pub fn map_conclusion(
         ProviderRunState::Failed => AgentTaskRunOutcome::Failed,
         ProviderRunState::PartiallySucceeded => AgentTaskRunOutcome::PartiallySucceeded,
         ProviderRunState::Skipped => AgentTaskRunOutcome::Skipped,
+        ProviderRunState::Blocked => AgentTaskRunOutcome::Blocked,
         // Not terminal — the poller only calls this on a terminal state; treat a
         // stray `Running` as a failure with the conclusion we have.
         ProviderRunState::Running => AgentTaskRunOutcome::Failed,
@@ -811,6 +1023,7 @@ mod tests {
     use axum::{
         body::Body,
         extract::Path,
+        http::StatusCode,
         routing::{get, post},
         Json, Router,
     };
@@ -847,6 +1060,30 @@ mod tests {
         addr
     }
 
+    async fn fake_engine_controls() -> SocketAddr {
+        let app = Router::new()
+            .route(
+                "/api/runs/{id}/gates/{gate_id}/answer",
+                post(|Json(body): Json<Value>| async move {
+                    assert_eq!(body, json!({ "option": 1 }));
+                    StatusCode::NO_CONTENT
+                }),
+            )
+            .route(
+                "/api/runs/{id}/steer",
+                post(|Json(body): Json<Value>| async move {
+                    assert_eq!(body, json!({ "text": "focus here", "interrupt": true }));
+                    StatusCode::NO_CONTENT
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
     fn short_client() -> reqwest::Client {
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_millis(300))
@@ -868,7 +1105,12 @@ mod tests {
             "checkpoints": [
                 "workflow/run-123/stage-1",
                 { "checkpoint_branch": "workflow/run-123/stage-2", "node_id": "n2", "ts_ms": 2000 }
-            ]
+            ],
+            "gates": [{
+                "id": "approval-1",
+                "question": "Deploy?",
+                "options": [{"label": "Approve", "input": "yes", "approve": true}, "Hold"]
+            }]
         }))
         .await;
         let base = format!("http://{addr}");
@@ -902,6 +1144,10 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(status.gates.len(), 1);
+        assert_eq!(status.gates[0].id, "approval-1");
+        assert_eq!(status.gates[0].options[0].input, "yes");
+        assert_eq!(status.gates[0].options[1].label, "Hold");
 
         let started = OffsetDateTime::UNIX_EPOCH;
         let finished = started + time::Duration::seconds(42);
@@ -975,6 +1221,27 @@ mod tests {
         assert_eq!(partial, AgentTaskRunOutcome::PartiallySucceeded);
         let (skipped, _) = map_conclusion(ProviderRunState::Skipped, None, started, started);
         assert_eq!(skipped, AgentTaskRunOutcome::Skipped);
+        let (blocked, _) = map_conclusion(ProviderRunState::Blocked, None, started, started);
+        assert_eq!(blocked, AgentTaskRunOutcome::Blocked);
+    }
+
+    #[tokio::test]
+    async fn provider_controls_forward_gate_answers_and_steers() {
+        let addr = fake_engine_controls().await;
+        let provider = HttpWorkflowProvider::with_client(
+            &format!("http://{addr}"),
+            "nightly",
+            None,
+            short_client(),
+        );
+        provider
+            .answer_gate("run-1", "approval-1", 1)
+            .await
+            .expect("gate answer accepted");
+        provider
+            .steer("run-1", "focus here", true)
+            .await
+            .expect("steer accepted");
     }
 
     #[test]
@@ -1131,6 +1398,28 @@ data: {\"message\":\"stage 3 running\",\"node_id\":\"n3\"}\n\
 
         // An event that names no checkpoint carries none — the ordinary case.
         assert!(events[2].checkpoint_branch.is_none());
+    }
+
+    #[tokio::test]
+    async fn sse_events_surface_provider_gates() {
+        let body = "event: gate.opened\n\\
+data: {\"type\":\"gate.opened\",\"gate\":{\"gate_id\":\"approval-2\",\"question\":\"Deploy?\",\"options\":[{\"label\":\"Approve\",\"input\":\"yes\",\"approve\":true},\"Hold\"]}}\n\\
+\n\\
+";
+        let addr = fake_engine_events(body).await;
+        let provider = HttpWorkflowProvider::with_client(
+            &format!("http://{addr}"),
+            "nightly",
+            None,
+            short_client(),
+        );
+        let events = collect_events(provider.stream_events("run-1").await.unwrap()).await;
+        let gate = events[0].gate.as_ref().expect("provider gate");
+        assert_eq!(gate.id, "approval-2");
+        assert_eq!(gate.question, "Deploy?");
+        assert_eq!(gate.options[0].input, "yes");
+        assert!(gate.options[0].approve);
+        assert_eq!(gate.options[1].label, "Hold");
     }
 
     #[tokio::test]

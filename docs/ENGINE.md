@@ -854,14 +854,17 @@ Every non-GET route in this group requires `agent-tasks-write`.
 - `POST /api/agent-tasks/:id/steer` `{text, interrupt?, actor?, reason?}` ->
   `{"ok": true}` — queue a line of steering for the task's in-flight run,
   delivered to its PTY at the next prompt boundary (the idle / waiting-for-input
-  state the activity heuristics detect). `interrupt: true` sends the CLI's
-  cancel (Ctrl-C) before the text. Refused with `409` when the task has no run
-  in flight — there is nothing to deliver to. Each delivery emits `task.steered`
-  on the event stream, carrying the actor and reason.
+  state the activity heuristics detect), or forwarded to the configured
+  workflow-engine run. `interrupt: true` sends the CLI's cancel (Ctrl-C) before
+  the text. Refused with `409` when the task has no run in flight — there is
+  nothing to deliver to. Each accepted delivery emits `task.steered` on the
+  event stream, carrying the actor and reason.
 - `POST /api/agent-tasks/:id/gates/:gate_id/answer` `{option, actor?, reason?}`
   -> `GateRecord` — answer a currently-open approval gate by the index of the
-  chosen option. Delivers that option's input to the PTY. This is the only path
-  that resolves a gate to *approved*; see §7 for the fail-closed rule.
+  chosen option. Delivers that option's input to the PTY, or forwards the
+  provider-owned gate answer to the configured workflow engine before recording
+  the local resolution. This is the only path that resolves a gate to
+  *approved*; see §7 for the fail-closed rule.
 - `POST /api/agent-tasks/artifacts/cleanup`
   `{"keep_latest_runs_per_task": 10}` -> `PromptArtifactCleanup`
   `{removed_task_dir_count, removed_prompt_file_count,
@@ -947,6 +950,13 @@ option still fails closed under it. The events `task.gate.opened`,
 `task.gate.answered` (with `outcome` `approved`/`blocked`) and `task.steered`
 report gate and steer activity on the event stream (see Events and status
 above). See §7 for the fail-closed rule and the `--auto-approve` bypass.
+
+When a task uses the optional workflow-engine backend, the same gate and steer
+routes remain the client contract. Provider SSE or poll responses are mirrored
+into local `GateRecord`s, preserving the provider gate id privately; an answer
+is sent upstream first and is only then recorded locally. The generic REST/SSE
+field names are provisional until a live engine smoke test validates them, and
+an unavailable provider remains a failed run rather than a core outage.
 
 **Typed outcomes and the conclusion record (#291).** When a run ends the engine
 records a typed `outcome` on it — one of `succeeded`, `failed`,

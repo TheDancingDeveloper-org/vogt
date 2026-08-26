@@ -1,8 +1,9 @@
 name: ci
 
-# One pipeline for a product with four halves (NFR-C6): the Python core, the
-# Rust engine that fronts it, the Solid PWA the engine embeds, and the
-# Capacitor shell that points at it. Everything the engine's Woodpecker
+# One pipeline for a product with five halves (NFR-C6): the Python core, the
+# Rust engine that fronts it, the Solid PWA the engine embeds, the optional
+# first-party voice sidecar, and the Capacitor shell that points at it.
+# Everything the engine's Woodpecker
 # pipeline guaranteed is guaranteed here — see "What did not come over" at
 # the bottom of this file for the parts that deliberately did not.
 #
@@ -94,6 +95,7 @@ jobs:
     outputs:
       python: ${{ steps.classify.outputs.python }}
       engine: ${{ steps.classify.outputs.engine }}
+      voice: ${{ steps.classify.outputs.voice }}
       mobile: ${{ steps.classify.outputs.mobile }}
       any: ${{ steps.classify.outputs.any }}
     steps:
@@ -117,6 +119,7 @@ jobs:
             {
               echo "python=true"
               echo "engine=true"
+              echo "voice=true"
               echo "mobile=true"
               echo "any=true"
             } >> "$GITHUB_OUTPUT"
@@ -155,6 +158,7 @@ jobs:
 
           python=false
           engine=false
+          voice=false
           mobile=false
 
           # `config.example.toml` is generated from the config schema and the
@@ -168,6 +172,7 @@ jobs:
           # than a neighbour of it: a web-only change changes what the engine
           # serves, and is checked by rebuilding the engine.
           matches '^(engine/|web/)' && engine=true
+          matches '^voice/' && voice=true
           # The shell wraps a remote URL, not the PWA bundle — `webDir` is
           # `mobile/web/`, a one-file offline fallback — so a `web/` change
           # does not imply an APK rebuild.
@@ -176,10 +181,11 @@ jobs:
           {
             echo "python=$python"
             echo "engine=$engine"
+            echo "voice=$voice"
             echo "mobile=$mobile"
           } >> "$GITHUB_OUTPUT"
 
-          if [ "$python" = false ] && [ "$engine" = false ] && [ "$mobile" = false ]; then
+          if [ "$python" = false ] && [ "$engine" = false ] && [ "$voice" = false ] && [ "$mobile" = false ]; then
             echo "any=false" >> "$GITHUB_OUTPUT"
           else
             echo "any=true" >> "$GITHUB_OUTPUT"
@@ -447,6 +453,34 @@ jobs:
         working-directory: engine
         run: cargo test --workspace
 
+  voice:
+    name: fmt, clippy, test (voice sidecar foundation)
+    needs: changes
+    if: needs.changes.outputs.voice == 'true'
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: voice
+
+      - name: cargo fmt
+        working-directory: voice
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        working-directory: voice
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        working-directory: voice
+        run: cargo test --locked --workspace
+
   android:
     name: the Android shell assembles
     needs: changes
@@ -579,7 +613,7 @@ jobs:
 
   ci:
     name: ci
-    needs: [changes, build, core, engine, android]
+    needs: [changes, build, core, engine, voice, android]
     if: always()
     runs-on: [self-hosted]
     steps:
@@ -589,6 +623,7 @@ jobs:
           PYTHON: ${{ needs.build.result }}
           CORE: ${{ needs.core.result }}
           ENGINE: ${{ needs.engine.result }}
+          VOICE: ${{ needs.voice.result }}
           ANDROID: ${{ needs.android.result }}
         run: |
           set -euo pipefail
@@ -602,6 +637,7 @@ jobs:
             "python:$PYTHON" \
             "core-alone:$CORE" \
             "engine:$ENGINE" \
+            "voice:$VOICE" \
             "android:$ANDROID"
           do
             name="${half%%:*}"
