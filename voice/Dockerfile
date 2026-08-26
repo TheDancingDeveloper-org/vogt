@@ -1,5 +1,6 @@
-# Optional first-party voice sidecar foundation.
-# Inference backends and model weights are intentionally not included yet.
+# Optional first-party voice sidecar.
+# Inference executables and model weights are intentionally not included: use
+# VOGT_VOICE_*_COMMAND with an operator-built image or mounted runtime.
 FROM rust:1.80-bookworm AS build
 WORKDIR /src
 COPY voice/Cargo.toml voice/Cargo.lock* ./voice/

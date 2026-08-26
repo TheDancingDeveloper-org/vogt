@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     extract::{Multipart, State},
@@ -12,9 +12,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use vogt_voice_models::{ConfiguredModelCache, ModelCache, ModelInfo};
 use vogt_voice_stt::{
-    TranscriptionBackend, TranscriptionError, TranscriptionRequest, UnconfiguredTranscriber,
+    SubprocessTranscriber, TranscriptionBackend, TranscriptionError, TranscriptionRequest,
+    UnconfiguredTranscriber,
 };
-use vogt_voice_tts::{SpeechBackend, SpeechError, SpeechRequest, UnconfiguredSynthesizer};
+use vogt_voice_tts::{
+    SpeechBackend, SpeechError, SpeechRequest, SubprocessSynthesizer, UnconfiguredSynthesizer,
+};
 
 use crate::{error::ApiError, Config};
 
@@ -27,18 +30,43 @@ pub struct AppState {
 
 impl AppState {
     pub fn from_config(config: Config) -> Self {
+        let timeout = Duration::from_millis(config.command_timeout_ms);
         let models = vec![
             ModelInfo::new(config.stt_model.clone(), "vogt-voice-stt"),
             ModelInfo::new(config.tts_model.clone(), "vogt-voice-tts"),
         ];
+        let stt: Arc<dyn TranscriptionBackend> = config
+            .stt_command
+            .as_deref()
+            .and_then(parse_command)
+            .and_then(|command| match SubprocessTranscriber::new(command, timeout) {
+                Ok(backend) => Some(Arc::new(backend) as Arc<dyn TranscriptionBackend>),
+                Err(error) => {
+                    tracing::error!(%error, "invalid configured STT command; provider disabled");
+                    None
+                }
+            })
+            .unwrap_or_else(|| Arc::new(UnconfiguredTranscriber));
+        let tts: Arc<dyn SpeechBackend> = config
+            .tts_command
+            .as_deref()
+            .and_then(parse_command)
+            .and_then(|command| match SubprocessSynthesizer::new(command, timeout) {
+                Ok(backend) => Some(Arc::new(backend) as Arc<dyn SpeechBackend>),
+                Err(error) => {
+                    tracing::error!(%error, "invalid configured TTS command; provider disabled");
+                    None
+                }
+            })
+            .unwrap_or_else(|| Arc::new(UnconfiguredSynthesizer));
         Self {
             models: Arc::new(ConfiguredModelCache::new(
                 config.model_cache_dir.clone(),
                 deduplicate_models(models),
             )),
             config,
-            stt: Arc::new(UnconfiguredTranscriber),
-            tts: Arc::new(UnconfiguredSynthesizer),
+            stt,
+            tts,
         }
     }
 
@@ -53,6 +81,10 @@ impl AppState {
         state.tts = tts;
         state
     }
+}
+
+fn parse_command(value: &str) -> Option<Vec<String>> {
+    serde_json::from_str(value).ok()
 }
 
 fn deduplicate_models(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
@@ -334,6 +366,62 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["error"]["code"], "provider_unconfigured");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_subprocess_backends_are_wired_to_the_http_contract() {
+        let app = router(AppState::from_config(Config::parse_from([
+            "vogt-voice",
+            "--stt-command",
+            r#"["/bin/sh","-c","printf 'configured transcript'"]"#,
+            "--tts-command",
+            r#"["/bin/sh","-c","cat >/dev/null; printf 'audio bytes'"]"#,
+        ])));
+
+        let boundary = "configured-voice-boundary";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"sample.wav\"\r\nContent-Type: audio/wav\r\n\r\nreal audio\r\n--{boundary}--\r\n"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/audio/transcriptions")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["text"], "configured transcript");
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/audio/speech")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"tts-1","voice":"alloy","input":"hello","response_format":"wav"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("content-type").unwrap(), "audio/wav");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+            Bytes::from_static(b"audio bytes")
+        );
     }
 
     #[tokio::test]
