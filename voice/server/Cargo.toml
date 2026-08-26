@@ -1,0 +1,33 @@
+[package]
+name = "vogt-voice-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "vogt-voice"
+path = "src/main.rs"
+
+[lib]
+name = "vogt_voice_server"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", features = ["multipart"] }
+bytes = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+vogt-voice-models = { path = "../models" }
+vogt-voice-stt = { path = "../stt" }
+vogt-voice-tts = { path = "../tts" }
+
+[dev-dependencies]
+tower = "0.5"
