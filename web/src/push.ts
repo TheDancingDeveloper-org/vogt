@@ -333,7 +333,11 @@ function navigateFromPushUrl(url: string) {
   }
 }
 
-let nativeHandlersRegistered = false;
+// Keep the setup promise, rather than only a boolean, because Capacitor's
+// `addListener` is asynchronous. A subscription that starts while the boot
+// registration is still installing its action listener must wait for that
+// setup to finish before it installs its own FCM listeners.
+let nativeHandlersSetup: Promise<void> | null = null;
 let nativeChannelCreated = false;
 
 async function ensureNativeNotificationChannel() {
@@ -359,11 +363,10 @@ async function ensureNativeNotificationChannel() {
   nativeChannelCreated = true;
 }
 
-async function registerNativePushHandlers() {
-  if (nativeHandlersRegistered) return;
-  nativeHandlersRegistered = true;
+function registerNativePushHandlers(): Promise<void> {
+  if (nativeHandlersSetup) return nativeHandlersSetup;
 
-  try {
+  const setup = (async () => {
     const { PushNotifications } = await import("@capacitor/push-notifications");
     // Create the channel on every native boot as well as during subscription.
     // This covers APKs that already have a stored FCM token from before the
@@ -375,9 +378,14 @@ async function registerNativePushHandlers() {
         navigateFromPushUrl(url);
       }
     });
-  } catch {
-    nativeHandlersRegistered = false;
-  }
+  })();
+  // The action listener is best-effort, as it was before this became
+  // awaitable. A failed setup may be retried by a later subscription, while
+  // concurrent callers still share the same in-flight attempt.
+  nativeHandlersSetup = setup.catch(() => {
+    nativeHandlersSetup = null;
+  });
+  return nativeHandlersSetup;
 }
 
 // Subscribe via Capacitor's native FCM plugin. Resolves with the server-side
@@ -399,50 +407,59 @@ export async function subscribeNativeFcm(label?: string): Promise<{ id: string }
 
   // Wait once for the `registration` event to fire with our FCM token. Attach
   // listeners before register() so a fast native callback cannot be missed.
-  let cleanupTokenListeners: (() => void) | undefined;
-  const tokenPromise: Promise<string> = new Promise((resolve, reject) => {
-    let registrationHandle: { remove: () => Promise<void> } | undefined;
-    let errorHandle: { remove: () => Promise<void> } | undefined;
-    let settled = false;
-    const cleanup = () => {
-      clearTimeout(timer);
-      void registrationHandle?.remove();
-      void errorHandle?.remove();
-    };
-    cleanupTokenListeners = cleanup;
-    const settle = (fn: () => void) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      fn();
-    };
-    const timer = setTimeout(
-      () => settle(() => reject(new Error("FCM registration timed out"))),
-      15_000,
-    );
-    void PushNotifications.addListener("registration", (t) =>
-      settle(() => resolve(t.value)),
-    )
-      .then((h) => {
-        registrationHandle = h;
-      })
-      .catch((err) =>
-        settle(() => reject(new Error(`FCM listener error: ${JSON.stringify(err)}`))),
-      );
-    void PushNotifications.addListener("registrationError", (err) =>
-      settle(() => reject(new Error(`FCM registration error: ${JSON.stringify(err)}`))),
-    )
-      .then((h) => {
-        errorHandle = h;
-      })
-      .catch((err) =>
-        settle(() => reject(new Error(`FCM error-listener error: ${JSON.stringify(err)}`))),
-      );
+  let registrationHandle: { remove: () => Promise<void> } | undefined;
+  let errorHandle: { remove: () => Promise<void> } | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+  let resolveToken: (token: string) => void = () => {};
+  let rejectToken: (error: Error) => void = () => {};
+  const tokenPromise = new Promise<string>((resolve, reject) => {
+    resolveToken = resolve;
+    rejectToken = reject;
   });
+  const cleanup = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    void registrationHandle?.remove();
+    void errorHandle?.remove();
+  };
+  const settle = (fn: () => void) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    fn();
+  };
+  // Do not call `register()` until both listener-registration promises have
+  // resolved. Capacitor can deliver a fast token/error callback as soon as
+  // register starts; firing it before these promises resolve loses that
+  // callback and leaves the subscription waiting until its timeout.
+  const listenersReady = Promise.all([
+    // Start both registrations before awaiting either one. The important
+    // ordering guarantee is that `register()` waits for both handles; doing
+    // this concurrently also avoids making the second listener depend on an
+    // implementation detail of the first one.
+    PushNotifications.addListener("registration", (t) =>
+      settle(() => resolveToken(t.value)),
+    ).then((handle) => {
+      registrationHandle = handle;
+    }),
+    PushNotifications.addListener("registrationError", (err) =>
+      settle(() => rejectToken(new Error(`FCM registration error: ${JSON.stringify(err)}`))),
+    ).then((handle) => {
+      errorHandle = handle;
+    }),
+  ]).catch((err: unknown) => {
+    settle(() => rejectToken(new Error(`FCM listener error: ${JSON.stringify(err)}`)));
+    throw err;
+  });
+  timer = setTimeout(
+    () => settle(() => rejectToken(new Error("FCM registration timed out"))),
+    15_000,
+  );
   try {
+    await listenersReady;
     await PushNotifications.register();
   } catch (e) {
-    cleanupTokenListeners?.();
+    cleanup();
     throw e;
   }
   const token = await tokenPromise;
