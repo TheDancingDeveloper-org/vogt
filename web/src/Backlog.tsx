@@ -610,16 +610,6 @@ const Backlog: Component<Props> = (props) => {
   const [query, setQuery] = useSearchParams<Query>();
   const location = useLocation();
 
-  // Start facet reads before the ranked result so a loaded filter control can
-  // immediately reflect the URL and user edits while the list settles.
-  const [projects] = createResource(() =>
-    attempt(() => listProjects({ limit: 200 })),
-  );
-  const [labels] = createResource(() => attempt(() => listLabels()));
-  const [initiatives] = createResource(() => attempt(() => listInitiatives()));
-  const [actors] = createResource(() => attempt(() => listActors()));
-  const [workflows] = createResource(() => attempt(() => listWorkflows()));
-
   // The URL is read once here and written from the signal afterwards. It has
   // to be this way round in this shell: activating a tab navigates to the
   // tab's bare path (`App.tsx`'s `pathFor`), which drops the query — if the
@@ -865,6 +855,12 @@ const Backlog: Component<Props> = (props) => {
   // Loaded once. A facet list that fails is a smaller picker and a named
   // note, not a broken surface — the ranked view is the thing the reader came
   // for, and it has its own outage state.
+
+  const [projects] = createResource(() => attempt(() => taxonomy.projects()));
+  const [labels] = createResource(() => attempt(() => taxonomy.labels()));
+  const [initiatives] = createResource(() => attempt(() => taxonomy.initiatives()));
+  const [actors] = createResource(() => attempt(() => taxonomy.actors()));
+  const [workflows] = createResource(() => attempt(() => taxonomy.workflows()));
 
   const projectOptions = createMemo(() => {
     const result = projects();
