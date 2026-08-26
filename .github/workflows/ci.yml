@@ -611,9 +611,40 @@ jobs:
         if: always()
         run: rm -f mobile/android/app/google-services.json
 
+  security:
+    name: tracked secret hygiene
+    needs: changes
+    runs-on: [self-hosted]
+    # Check the reviewed tree, not full history: the known pre-#265 exposure
+    # still needs an operator-coordinated rewrite decision.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: reject live Firebase config and API keys in tracked files
+        run: |
+          set -euo pipefail
+
+          tracked_configs="$(git ls-files -- '*google-services.json')"
+          if [ -n "$tracked_configs" ]; then
+            echo "A live Firebase config must not be tracked:"
+            echo "$tracked_configs"
+            exit 1
+          fi
+
+          # The example is a structurally valid, non-live fixture. Print paths
+          # only so a future failure cannot echo a credential into the log.
+          key_paths="$(git grep -l -I -E 'AIzaSy[A-Za-z0-9_-]{20,}' -- ':!mobile/android/app/google-services.json.example' || true)"
+          if [ -n "$key_paths" ]; then
+            echo "Firebase-looking API keys found in tracked files:"
+            echo "$key_paths"
+            exit 1
+          fi
+
+          echo "No live Firebase config or Firebase-looking API key is tracked"
+
   ci:
     name: ci
-    needs: [changes, build, core, engine, voice, android]
+    needs: [changes, build, core, engine, voice, android, security]
     if: always()
     runs-on: [self-hosted]
     steps:
@@ -625,6 +656,7 @@ jobs:
           ENGINE: ${{ needs.engine.result }}
           VOICE: ${{ needs.voice.result }}
           ANDROID: ${{ needs.android.result }}
+          SECURITY: ${{ needs.security.result }}
         run: |
           set -euo pipefail
           if [ "$CHANGES" != "success" ]; then
@@ -638,7 +670,8 @@ jobs:
             "core-alone:$CORE" \
             "engine:$ENGINE" \
             "voice:$VOICE" \
-            "android:$ANDROID"
+            "android:$ANDROID" \
+            "security:$SECURITY"
           do
             name="${half%%:*}"
             result="${half#*:}"
