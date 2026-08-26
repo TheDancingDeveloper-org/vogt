@@ -24,8 +24,10 @@
 //! per-stage git checkpoint branch is surfaced on [`ProviderEvent`] as
 //! `checkpoint_branch`, and the tracker records each as a run observation with
 //! provenance and age (see `agent_tasks::AgentTaskRegistry::record_workflow_checkpoint`).
-//! Gate bridging (#289), poll-fallback checkpoint collection, and a live-engine
-//! smoke of the wire field names all remain deferred to a later slice.
+//! Gate bridging (#289) and a live-engine smoke of the wire field names remain
+//! deferred to a later slice. Poll responses may carry checkpoint observations
+//! too, so the poll fallback now preserves the same checkpoint evidence as the
+//! stream path.
 //!
 //! ## ASSUMED workflow-engine REST contract
 //!
@@ -176,10 +178,22 @@ pub struct ProviderConclusion {
     pub summary: Option<String>,
 }
 
-/// A poll result: the current state and, for a terminal state, its conclusion.
+/// One checkpoint observation reported by a poll response. The timestamp is
+/// optional because an engine may only expose the branch name in its summary;
+/// the tracker supplies its receipt time in that case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCheckpoint {
+    pub branch: String,
+    pub step_id: Option<String>,
+    pub at: Option<OffsetDateTime>,
+}
+
+/// A poll result: the current state, any checkpoint observations, and, for a
+/// terminal state, its conclusion.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderRunStatus {
     pub state: ProviderRunState,
+    pub checkpoints: Vec<ProviderCheckpoint>,
     pub conclusion: Option<ProviderConclusion>,
 }
 
@@ -345,8 +359,50 @@ struct CreateRunResp {
 #[derive(Deserialize)]
 struct PollResp {
     state: String,
+    /// Engines commonly call these either `checkpoints` or
+    /// `checkpoint_branches`; accepting both keeps this provisional seam
+    /// tolerant without inventing a second provider API.
+    #[serde(default, alias = "checkpoint_branches")]
+    checkpoints: Vec<PollCheckpoint>,
     #[serde(default)]
     conclusion: Option<PollConclusion>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PollCheckpoint {
+    Branch(String),
+    Detail(PollCheckpointDetail),
+}
+
+#[derive(Deserialize)]
+struct PollCheckpointDetail {
+    #[serde(default, alias = "checkpoint_branch", alias = "checkpoint")]
+    branch: Option<String>,
+    #[serde(default, alias = "node_id")]
+    step_id: Option<String>,
+    #[serde(default)]
+    ts_ms: Option<i64>,
+}
+
+impl PollCheckpoint {
+    fn into_provider(self) -> Option<ProviderCheckpoint> {
+        let (branch, step_id, at) = match self {
+            Self::Branch(branch) => (branch, None, None),
+            Self::Detail(detail) => {
+                let at = detail.ts_ms.and_then(|ms| {
+                    OffsetDateTime::from_unix_timestamp_nanos((ms as i128) * 1_000_000).ok()
+                });
+                (detail.branch?, detail.step_id, at)
+            }
+        };
+        let branch = branch.trim().to_string();
+        (!branch.is_empty()).then_some(ProviderCheckpoint {
+            branch,
+            step_id,
+            at,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -650,6 +706,11 @@ impl WorkflowProvider for HttpWorkflowProvider {
         }
         let parsed: PollResp = resp.json().await.map_err(|e| classify_reqwest(&e))?;
         let state = parse_state(&parsed.state)?;
+        let checkpoints = parsed
+            .checkpoints
+            .into_iter()
+            .filter_map(PollCheckpoint::into_provider)
+            .collect();
         let conclusion = parsed.conclusion.map(|c| ProviderConclusion {
             final_sha: c.final_sha,
             diff: c.diff.map(|d| DiffStat {
@@ -660,7 +721,11 @@ impl WorkflowProvider for HttpWorkflowProvider {
             cost_usd_micros: c.cost_usd_micros,
             summary: c.summary,
         });
-        Ok(ProviderRunStatus { state, conclusion })
+        Ok(ProviderRunStatus {
+            state,
+            checkpoints,
+            conclusion,
+        })
     }
 
     async fn stream_events(
@@ -799,7 +864,11 @@ mod tests {
                 "diff": { "files": 3, "insertions": 40, "deletions": 5 },
                 "cost_usd_micros": 250_000,
                 "summary": "did the thing"
-            }
+            },
+            "checkpoints": [
+                "workflow/run-123/stage-1",
+                { "checkpoint_branch": "workflow/run-123/stage-2", "node_id": "n2", "ts_ms": 2000 }
+            ]
         }))
         .await;
         let base = format!("http://{addr}");
@@ -818,6 +887,21 @@ mod tests {
         let status = provider.poll(&created.run_id).await.expect("poll ok");
         assert_eq!(status.state, ProviderRunState::Succeeded);
         assert!(status.state.is_terminal());
+        assert_eq!(
+            status.checkpoints,
+            vec![
+                ProviderCheckpoint {
+                    branch: "workflow/run-123/stage-1".into(),
+                    step_id: None,
+                    at: None,
+                },
+                ProviderCheckpoint {
+                    branch: "workflow/run-123/stage-2".into(),
+                    step_id: Some("n2".into()),
+                    at: Some(OffsetDateTime::from_unix_timestamp(2).unwrap()),
+                },
+            ]
+        );
 
         let started = OffsetDateTime::UNIX_EPOCH;
         let finished = started + time::Duration::seconds(42);

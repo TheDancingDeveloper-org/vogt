@@ -27,8 +27,8 @@ use crate::{
     push::{NotificationKind, PushManager},
     sessions::SessionRegistry,
     workflow_engine::{
-        map_conclusion, HttpWorkflowProvider, ProviderRunState, WorkflowEngineConfig,
-        WorkflowProvider,
+        map_conclusion, HttpWorkflowProvider, ProviderCheckpoint, ProviderRunState,
+        WorkflowEngineConfig, WorkflowProvider,
     },
 };
 use futures_util::StreamExt;
@@ -1712,10 +1712,9 @@ impl AgentTaskRegistry {
                 // Track the run off its live SSE event stream (#293 inc-2),
                 // degrading to the poller when the stream is absent or breaks.
                 // The tracker also collects each per-stage checkpoint branch the
-                // stream reports as a run observation (#284). DEFERRED to a later
-                // slice: bridging #289 gates onto the engine's own gates,
-                // collecting checkpoints on the poll-only fallback path, and a
-                // live-engine smoke of the provisional wire field names.
+                // stream or poll fallback reports as a run observation (#284).
+                // Gate forwarding (#289) and a live smoke of the provisional
+                // wire field names remain external follow-up work.
                 spawn_workflow_tracker(
                     Arc::clone(self),
                     provider,
@@ -3342,11 +3341,8 @@ fn spawn_workflow_tracker(
                             message = event.message.as_deref().unwrap_or(""),
                             "workflow run event",
                         );
-                        // Collect a per-stage checkpoint branch the event
-                        // reported as a run observation (#284), stamped with its
-                        // provenance and age. Done before the terminal check so
-                        // a terminal event that also names a checkpoint still
-                        // contributes one. Non-fatal: absence records nothing.
+                        // Collect before the terminal check so a terminal event
+                        // that also names a checkpoint still contributes one.
                         if let Some(branch) = event.checkpoint_branch.as_deref() {
                             registry.record_workflow_checkpoint(
                                 task_id,
@@ -3495,6 +3491,7 @@ async fn poll_workflow_to_terminal(
         match provider.poll(&provider_run_id).await {
             Ok(status) => {
                 consecutive_errors = 0;
+                record_workflow_checkpoints(&registry, task_id, run_id, &status.checkpoints);
                 if status.state.is_terminal() {
                     let finished = OffsetDateTime::now_utc();
                     let provider_summary =
@@ -3524,6 +3521,26 @@ async fn poll_workflow_to_terminal(
                 }
             }
         }
+    }
+}
+
+/// Preserve checkpoint observations when SSE is unavailable. Polling is a
+/// fallback transport, not a weaker evidence path: repeated snapshots are
+/// safe because the registry deduplicates `(branch, step)` pairs.
+fn record_workflow_checkpoints(
+    registry: &AgentTaskRegistry,
+    task_id: Uuid,
+    run_id: Uuid,
+    checkpoints: &[ProviderCheckpoint],
+) {
+    for checkpoint in checkpoints {
+        registry.record_workflow_checkpoint(
+            task_id,
+            run_id,
+            checkpoint.step_id.as_deref(),
+            &checkpoint.branch,
+            checkpoint.at.unwrap_or_else(OffsetDateTime::now_utc),
+        );
     }
 }
 
@@ -5091,6 +5108,68 @@ mod tests {
         assert_eq!(back.checkpoints.len(), 2);
         assert_eq!(back.checkpoints[0].provenance, "workflow-engine");
         assert_eq!(back.checkpoints[0].observed_at, t1);
+    }
+
+    #[test]
+    fn poll_fallback_records_checkpoint_snapshots_idempotently() {
+        let registry = test_registry();
+        let task = registry
+            .create(AgentTaskCreate {
+                name: "polled workflow".into(),
+                prompt: "collect stages".into(),
+                schedule: Some(AgentTaskSchedule::Manual),
+                triggers: None,
+                concurrency: None,
+                command: None,
+                cwd: Some("/tmp".into()),
+                env: Some(vec![]),
+                context: None,
+                vogt_project: Some("vogt".into()),
+                vogt_work_item: Some("WI-7".into()),
+                gates: None,
+                auto_approve: None,
+                output_schema: None,
+                output_file: None,
+                output_schema_max_retries: None,
+                branch: None,
+                workflow_engine: None,
+                enabled: None,
+                notify_on_start: None,
+                notify_on_phrase: None,
+                auto_retry_on_rate_limit: None,
+            })
+            .expect("task created");
+        let run_id = seed_running_run(&registry, task.id);
+        let observed = OffsetDateTime::from_unix_timestamp(3_000).unwrap();
+        let checkpoints = vec![
+            ProviderCheckpoint {
+                branch: "wf/run-1/stage-1".into(),
+                step_id: Some("n1".into()),
+                at: None,
+            },
+            ProviderCheckpoint {
+                branch: "wf/run-1/stage-2".into(),
+                step_id: None,
+                at: Some(observed),
+            },
+            // A repeated poll snapshot must not create another observation.
+            ProviderCheckpoint {
+                branch: "wf/run-1/stage-1".into(),
+                step_id: Some("n1".into()),
+                at: None,
+            },
+        ];
+
+        let before = OffsetDateTime::now_utc();
+        record_workflow_checkpoints(&registry, task.id, run_id, &checkpoints);
+        let after = OffsetDateTime::now_utc();
+
+        let stored = registry.get(task.id).unwrap();
+        let run = stored.runs.iter().find(|r| r.id == run_id).unwrap();
+        assert_eq!(run.checkpoints.len(), 2);
+        assert!(run.checkpoints[0].observed_at >= before);
+        assert!(run.checkpoints[0].observed_at <= after);
+        assert_eq!(run.checkpoints[1].observed_at, observed);
     }
 
     /// #284 non-fatal absence: recording a checkpoint against a run the registry
