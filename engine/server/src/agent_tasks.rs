@@ -3330,6 +3330,7 @@ fn clean_workflow_engine(value: Option<WorkflowEngineConfig>) -> Option<Workflow
         workflow,
         token_file: clean_optional(cfg.token_file),
         repo_ref: clean_optional(cfg.repo_ref),
+        fabro: cfg.fabro,
     })
 }
 
@@ -5247,6 +5248,7 @@ mod tests {
                     workflow: "nightly".into(),
                     token_file: None,
                     repo_ref: None,
+                    fabro: None,
                 }),
                 enabled: None,
                 notify_on_start: None,
@@ -5546,6 +5548,7 @@ mod tests {
             workflow: "nightly-audit".into(),
             token_file: Some("/run/secrets/workflow-engine".into()),
             repo_ref: Some("main".into()),
+            fabro: None,
         });
         let json = serde_json::to_string(&task).unwrap();
         let back: AgentTask = serde_json::from_str(&json).unwrap();
