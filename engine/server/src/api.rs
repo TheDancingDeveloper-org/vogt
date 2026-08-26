@@ -127,6 +127,28 @@ pub async fn healthz() -> Json<OkResponse> {
 }
 
 #[derive(Debug, Serialize)]
+pub struct AuthCheckResponse {
+    pub ok: bool,
+    pub version: &'static str,
+    pub product_version: &'static str,
+    pub storage: ServerStorageStatus,
+}
+
+/// Cheap authenticated identity check. Keep this handler limited to values
+/// already held in memory: `/api/status` owns the operational scans.
+pub async fn auth_check(State(state): State<Arc<AppState>>) -> Json<AuthCheckResponse> {
+    Json(AuthCheckResponse {
+        ok: true,
+        version: crate::product::VERSION,
+        product_version: crate::product::VERSION,
+        storage: ServerStorageStatus {
+            state_dir: state.config.state_dir.display().to_string(),
+            workspace_root: state.config.workspace_root.display().to_string(),
+        },
+    })
+}
+
+#[derive(Debug, Serialize)]
 pub struct ReadinessResponse {
     pub ok: bool,
     pub checks: Vec<ReadinessCheck>,

@@ -376,6 +376,35 @@ async fn compression_does_not_modify_sse_or_identity_responses() {
 }
 
 #[tokio::test]
+async fn auth_check_is_cheap_and_requires_auth() {
+    let (base, _h) = boot().await;
+
+    let unauth = reqwest::get(format!("{base}/api/auth/check"))
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let body: Value = client
+        .get(format!("{base}/api/auth/check"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(body["ok"], true);
+    assert!(body["version"].as_str().is_some(), "missing version");
+    assert!(body["storage"]["workspace_root"].as_str().is_some());
+    assert!(body.get("history").is_none());
+    assert!(body.get("agent_tasks").is_none());
+}
+
+#[tokio::test]
 async fn status_endpoint_requires_auth_and_returns_shape() {
     let (base, _h) = boot().await;
 
