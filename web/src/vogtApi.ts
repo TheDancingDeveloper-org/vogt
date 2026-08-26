@@ -21,6 +21,7 @@
 
 import { ApiError, getBase, getToken, reportAuthResponse } from "./api";
 import { fetchWithRetry } from "./transport";
+import { DEADLINE_MS } from "./deadlines";
 
 /** Where the front door mounts vogt-core. */
 export const VOGT_PREFIX = "/api/vogt";
@@ -121,7 +122,11 @@ async function call<T>(
     body = JSON.stringify(params);
   }
 
-  const res = await fetchWithRetry(url, { method, headers, body, signal });
+  const res = await fetchWithRetry(
+    url,
+    { method, headers, body, signal },
+    { deadlineMs: DEADLINE_MS[method === "GET" ? "list" : "detail"] },
+  );
   const text = await res.text();
   if (!res.ok) {
     let message = text;
@@ -822,10 +827,15 @@ export const listEvents = (
   params: { after?: number; limit?: number; entity_id?: string } = {},
 ) => call<EventListResult>("events.list", params);
 
-export const listSessions = (params: Record<string, unknown> = {}) =>
+export const listSessions = (
+  params: Record<string, unknown> = {},
+  signal?: AbortSignal,
+) =>
   call<{ sessions: SessionSummary[]; engine?: string | null }>(
     "session.list",
     params,
+    "GET",
+    signal,
   );
 
 // -- writes, each carrying the reason its view collected --------------------

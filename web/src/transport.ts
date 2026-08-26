@@ -36,8 +36,15 @@ const RETRYABLE_METHODS = new Set(["GET", "HEAD"]);
 
 /** True when a rejection is a deliberate cancellation rather than a wire
  *  failure — either an already-aborted signal or an `AbortError`. */
-function isAbort(err: unknown, signal?: AbortSignal | null): boolean {
-  if (signal?.aborted) return true;
+function isAbort(
+  err: unknown,
+  callerSignal?: AbortSignal | null,
+  attemptSignal?: AbortSignal | null,
+): boolean {
+  if (callerSignal?.aborted) return true;
+  if (attemptSignal?.aborted && attemptSignal.reason?.name === "TimeoutError") {
+    return false;
+  }
   return (err as { name?: string } | null)?.name === "AbortError";
 }
 
@@ -47,8 +54,25 @@ function jitter(baseMs: number): number {
   return baseMs + Math.random() * baseMs;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout>;
+    const done = () => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export interface RetryOptions {
@@ -56,6 +80,8 @@ export interface RetryOptions {
   retries?: number;
   /** Base backoff before the first retry, growing linearly. Default 150ms. */
   backoffMs?: number;
+  /** Deadline applied independently to each attempt. */
+  deadlineMs?: number;
 }
 
 /**
@@ -74,21 +100,67 @@ export async function fetchWithRetry(
   const method = (init.method ?? "GET").toUpperCase();
   const attempts = RETRYABLE_METHODS.has(method) ? (opts.retries ?? 2) + 1 : 1;
   const backoffMs = opts.backoffMs ?? 150;
-  const signal = init.signal ?? undefined;
+  const callerSignal = init.signal ?? undefined;
 
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const attemptController = opts.deadlineMs === undefined ? null : new AbortController();
+    let onCallerAbort: (() => void) | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const attemptSignal = attemptController?.signal ?? callerSignal;
+    if (attemptController) {
+      onCallerAbort = () =>
+        attemptController.abort(
+          callerSignal?.reason ?? new DOMException("Aborted", "AbortError"),
+        );
+      if (callerSignal?.aborted) onCallerAbort();
+      else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+      timeout = setTimeout(
+        () =>
+          attemptController.abort(
+            new DOMException(
+              `request exceeded its ${opts.deadlineMs}ms deadline`,
+              "TimeoutError",
+            ),
+          ),
+        opts.deadlineMs,
+      );
+    }
     try {
-      return await runtimeTransport().request(url, init);
+      const request = runtimeTransport().request(url, {
+        ...init,
+        ...(attemptSignal ? { signal: attemptSignal } : {}),
+      });
+      if (!attemptController) return await request;
+      // Native fetch rejects when the signal is aborted. The race also makes
+      // the contract hold for embedded/demo transports and test doubles that
+      // forget to observe AbortSignal themselves.
+      const aborted = new Promise<Response>((_, reject) => {
+        const rejectOnAbort = () =>
+          reject(
+            attemptSignal?.reason ??
+              new DOMException("The operation was aborted.", "AbortError"),
+          );
+        if (attemptSignal?.aborted) rejectOnAbort();
+        else attemptSignal?.addEventListener("abort", rejectOnAbort, { once: true });
+      });
+      return await Promise.race([request, aborted]);
     } catch (err) {
-      if (isAbort(err, signal)) throw err;
+      if (isAbort(err, callerSignal, attemptSignal)) throw err;
       lastError = err;
       const isLast = attempt === attempts - 1;
       if (isLast) break;
-      await sleep(jitter(backoffMs * (attempt + 1)));
+      await sleep(jitter(backoffMs * (attempt + 1)), callerSignal);
       // The caller may have given up during the backoff; honour it rather than
       // firing another request into a signal that is now aborted.
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      if (callerSignal?.aborted) {
+        throw callerSignal.reason ?? new DOMException("Aborted", "AbortError");
+      }
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      if (onCallerAbort && callerSignal) {
+        callerSignal.removeEventListener("abort", onCallerAbort);
+      }
     }
   }
   throw new TransportError(lastError);
