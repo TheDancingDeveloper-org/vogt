@@ -340,7 +340,7 @@ The published image is built to be a base:
   to it.
 
 ```dockerfile
-FROM ghcr.io/thedancingdeveloper-org/vogt:v0.2.0
+FROM ghcr.io/thedancingdeveloper-org/vogt:0.2.2
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ripgrep \

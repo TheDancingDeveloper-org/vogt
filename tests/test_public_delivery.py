@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,23 @@ BUILD_OVERLAY = REPO_ROOT / "deploy" / "vogt.build.yml"
 ENGINE_OVERLAY = REPO_ROOT / "deploy" / "engine.overlay.yml"
 PUBLIC_ENV = REPO_ROOT / "deploy" / ".env.example"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
+
+
+def test_public_delivery_defaults_to_the_current_product_release() -> None:
+    """The first pull after publication must name an existing current release."""
+    with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        version = tomllib.load(handle)["project"]["version"]
+    image = f"ghcr.io/thedancingdeveloper-org/vogt:{version}"
+    for path in (
+        PUBLIC_COMPOSE,
+        PUBLIC_ENV,
+        ENGINE_OVERLAY,
+        REPO_ROOT / "docs" / "CUSTOMISATION.md",
+        REPO_ROOT / "docs" / "DEPLOYMENT.md",
+    ):
+        assert image in path.read_text(encoding="utf-8"), (
+            f"{path.relative_to(REPO_ROOT)} must name the current release {image}"
+        )
 
 
 def _without_comments(text: str) -> str:
