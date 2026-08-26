@@ -135,8 +135,17 @@ async function load<T>(
 
   const stamp = stampFor(key);
   const previous = entries.get(key) as CacheEntry<T> | undefined;
-  const request = Promise.resolve()
-    .then(() => loader(previous?.etag ?? null, signal))
+  let loaded: Promise<CacheFetchResult<T> | "not-modified">;
+  try {
+    // Start the transport in the same turn as the read. Keeping the loader
+    // behind Promise.resolve().then() lets dependent UI render before a
+    // metadata request has even been issued, which is observable by callers
+    // that read the primary entity and its workflow together.
+    loaded = Promise.resolve(loader(previous?.etag ?? null, signal));
+  } catch (error) {
+    loaded = Promise.reject(error);
+  }
+  const request = loaded
     .then((result) => {
       const value = result === "not-modified" ? previous?.value : result.value;
       if (value === undefined) {
@@ -177,7 +186,7 @@ async function load<T>(
  * immediately and share one background refresh. Once the bounded stale
  * window ends, the refresh must succeed before a value is returned.
  */
-export async function cachedRead<T>(
+export function cachedRead<T>(
   key: string,
   loader: (signal?: AbortSignal) => Promise<T>,
   policy: CachePolicy,
@@ -193,7 +202,7 @@ export async function cachedRead<T>(
 }
 
 /** Read through the cache while retaining and revalidating an HTTP validator. */
-export async function cachedReadWithValidator<T>(
+export function cachedReadWithValidator<T>(
   key: string,
   loader: ConditionalCacheLoader<T>,
   policy: CachePolicy,
@@ -202,20 +211,22 @@ export async function cachedReadWithValidator<T>(
   return cachedReadWithLoader(key, loader, policy, signal);
 }
 
-async function cachedReadWithLoader<T>(
+function cachedReadWithLoader<T>(
   key: string,
   loader: ConditionalCacheLoader<T>,
   policy: CachePolicy,
   signal?: AbortSignal,
 ): Promise<T> {
   if (signal?.aborted) {
-    throw signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+    return Promise.reject(
+      signal.reason ?? new DOMException("The operation was aborted.", "AbortError"),
+    );
   }
   const entry = entries.get(key) as CacheEntry<T> | undefined;
   if (!entry) return load(key, loader, signal);
 
   const age = Math.max(0, Date.now() - entry.fetchedAt);
-  if (age < policy.ttlMs) return entry.value;
+  if (age < policy.ttlMs) return Promise.resolve(entry.value);
 
   if (age < policy.ttlMs + policy.swrMs) {
     const now = Date.now();
@@ -234,7 +245,7 @@ async function cachedReadWithLoader<T>(
             : null;
       });
     }
-    return entry.value;
+    return Promise.resolve(entry.value);
   }
 
   return load(key, loader, signal);

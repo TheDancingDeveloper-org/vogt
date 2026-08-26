@@ -60,6 +60,7 @@ if (!window.matchMedia) {
 }
 
 afterEach(() => {
+  cleanup();
   localStorage.clear();
   invalidate();
   clearEditorDrafts();
@@ -67,17 +68,4 @@ afterEach(() => {
   clearPendingAction();
   resetRailSections();
   resetFileTreeState();
-});
-
-// Unmount what the last test mounted.
-//
-// `@solidjs/testing-library` registers this itself — but only when `afterEach`
-// is a global, and this suite deliberately does not run with Vitest's globals.
-// So it never registered, and every surface a test file mounted stayed mounted
-// and reactive for the rest of the file: a second board answering the first
-// board's event, an old drift inbox refetching into the next test's call log.
-// Harmless while the assertions were about one container; not harmless at all
-// now that FR-U10's tests count the calls a surface makes.
-afterEach(() => {
-  cleanup();
 });
