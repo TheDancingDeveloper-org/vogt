@@ -23,7 +23,6 @@ import {
   type AssistantVogtWriteAction,
   type PublicConfig,
 } from "./api";
-import { taxonomy } from "./taxonomyCache";
 import { renderMarkdown } from "./markdown";
 import { writeClipboardText } from "./clipboard";
 import { describeRepairs, repairUtterance } from "./voiceRepair";
