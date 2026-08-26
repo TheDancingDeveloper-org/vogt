@@ -1,5 +1,4 @@
-//! Provider-pluggable *workflow-engine* backend for agent tasks (#293,
-//! increment 1).
+//! Provider-pluggable *workflow-engine* backend for agent tasks (#293).
 //!
 //! An agent task normally drives a vendor CLI in a PTY. A task that carries a
 //! [`WorkflowEngineConfig`] instead hands its run to an external **workflow
@@ -9,26 +8,18 @@
 //! speaking a REST + SSE contract; Vogt integrates such an engine rather than
 //! re-building its execution features (sandboxes, checkpoints, gates, billing).
 //!
-//! ## Scope of this increment
+//! ## Scope
 //!
 //! This module is the **seam plus a concrete HTTP client**, fully unit/integration
 //! tested against a *fake* HTTP server whose responses match the assumed
-//! contract below. No live engine instance is available here, so live
-//! end-to-end validation is deliberately **deferred**. Increment 1 tracked a
-//! run purely by polling; **increment 2 (this slice)** adds SSE event
-//! mirroring: [`WorkflowProvider::stream_events`] subscribes to the engine's
-//! live event stream, yields typed [`ProviderEvent`]s, and drives a run to its
-//! terminal conclusion the moment the stream reports one — falling back to the
-//! poller when the stream is absent or breaks. **Increment 3 (this slice)**
-//! adds #284 checkpoint-branch collection: a stream event that names a
-//! per-stage git checkpoint branch is surfaced on [`ProviderEvent`] as
-//! `checkpoint_branch`, and the tracker records each as a run observation with
-//! provenance and age (see `agent_tasks::AgentTaskRegistry::record_workflow_checkpoint`).
-//! Gate and steering bridging (#289) is deliberately provider-pluggable too:
-//! external approval events become Vogt gate records, and answers/steers are
-//! forwarded to the external run before Vogt records the local resolution.
-//! Poll responses may carry checkpoint and gate observations too, so fallback
-//! preserves the same evidence and controls as the stream path.
+//! contract below. The implementation tracks runs over polling or SSE, mirrors
+//! progress, checkpoints, and approval gates, forwards gate answers and steering,
+//! and preserves checkpoint/gate evidence when SSE falls back to polling.
+//!
+//! No live engine instance is available in the repository test environment, so
+//! the REST/SSE field names and routes remain explicitly **assumed** below. A
+//! live-provider smoke is still required before this integration can be called
+//! wire-verified or promoted beyond its experimental status.
 //!
 //! ## ASSUMED workflow-engine REST contract
 //!
