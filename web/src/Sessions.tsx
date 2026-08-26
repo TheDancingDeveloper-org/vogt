@@ -5,6 +5,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  onCleanup,
   onMount,
   type JSX,
 } from "solid-js";
@@ -14,6 +15,11 @@ import { sessionsStore, sessionsError, isConnected } from "./store";
 import type { SessionSummary } from "./api";
 import type { SessionTool } from "./routeModel";
 import { pendingAction, setPendingAction } from "./pendingAction";
+import {
+  deferAssistantHydration,
+  invalidateAssistantSnapshot,
+  readAssistantSnapshot,
+} from "./assistantCache";
 import SurfaceHeader from "./SurfaceHeader";
 import WaitingSessionCard from "./WaitingSession";
 import SessionList from "./SessionList";
@@ -85,9 +91,9 @@ const Sessions: Component<Props> = (props) => {
 
   const readPending = async () => {
     try {
-      const history = await api.assistantHistory();
-      const action = history.pending_action ?? null;
-      setPendingAction(action);
+      const snapshot = await readAssistantSnapshot(props.assistantEnabled === true);
+      if (!snapshot) return;
+      setPendingAction(snapshot.pendingAction);
       setPendingError(null);
     } catch {
       // Assistant routes are absent when the feature is not provisioned.
@@ -102,6 +108,7 @@ const Sessions: Component<Props> = (props) => {
     setPendingError(null);
     try {
       setPendingAction(await api.assistantReplaceReason(action.id, reason));
+      invalidateAssistantSnapshot();
       setReasonDraft(reason);
     } catch (error) {
       setPendingError(error instanceof Error ? error.message : String(error));
@@ -109,7 +116,16 @@ const Sessions: Component<Props> = (props) => {
       setReasonBusy(false);
     }
   };
-  onMount(() => void readPending());
+  onMount(() => {
+    // Sessions is mounted around the terminal workspace. Only an explicit
+    // approval deep-link needs the pending card; ordinary shell and terminal
+    // mounts do not wake the assistant at all.
+    if (props.assistantEnabled !== true) return;
+    const explicitApproval = new URLSearchParams(location.search).has("approval");
+    if (!explicitApproval) return;
+    const cancel = deferAssistantHydration(() => void readPending());
+    onCleanup(cancel);
+  });
 
   createEffect(() => {
     const action = pendingAction();
@@ -121,8 +137,9 @@ const Sessions: Component<Props> = (props) => {
     if (!action || pendingBusy()) return;
     setPendingBusy(true);
     try {
-      await api.assistantAction(action.id, approve);
-      await readPending();
+      const reply = await api.assistantAction(action.id, approve);
+      setPendingAction(reply.pending_action ?? null);
+      invalidateAssistantSnapshot();
     } catch (error) {
       setPendingError(error instanceof Error ? error.message : String(error));
     } finally {

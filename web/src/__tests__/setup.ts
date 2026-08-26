@@ -13,6 +13,7 @@ import { clearToolDrafts } from "../toolDrafts";
 import { clearPendingAction } from "../pendingAction";
 import { resetRailSections } from "../railSections";
 import { resetFileTreeState } from "../fileTreeState";
+import { invalidateAssistantSnapshot } from "../assistantCache";
 
 class StubResizeObserver implements ResizeObserver {
   observe(): void {}
@@ -63,6 +64,7 @@ afterEach(() => {
   clearEditorDrafts();
   clearToolDrafts();
   clearPendingAction();
+  invalidateAssistantSnapshot();
   resetRailSections();
   resetFileTreeState();
 });
