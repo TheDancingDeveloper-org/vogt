@@ -21,13 +21,13 @@ use crate::{
     app::AppState,
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
-    gates::{self, GateRecord, GateSpec, GateState, SteerItem, AUTO_APPROVE_ACTOR},
+    gates::{self, GateOption, GateRecord, GateSpec, GateState, SteerItem, AUTO_APPROVE_ACTOR},
     prompt_files,
     pty::{Session, SessionSpec},
     push::{NotificationKind, PushManager},
     sessions::SessionRegistry,
     workflow_engine::{
-        map_conclusion, HttpWorkflowProvider, ProviderCheckpoint, ProviderRunState,
+        map_conclusion, HttpWorkflowProvider, ProviderCheckpoint, ProviderGate, ProviderRunState,
         WorkflowEngineConfig, WorkflowProvider,
     },
 };
@@ -792,12 +792,20 @@ impl RunOrigin {
 /// queued for a run whose engine restarted has nothing to be delivered to, and
 /// a gate left open by a restart fails closed on reconcile.
 struct RunControl {
-    session: Arc<Session>,
+    session: Option<Arc<Session>>,
     /// Text queued to reach the PTY at the next prompt boundary, in order.
     steer: Mutex<VecDeque<SteerItem>>,
     /// Woken when a steer is queued or a gate is answered, so the orchestrator
     /// acts at once rather than on its next poll tick.
     notify: Arc<Notify>,
+    /// Controls for external workflow-engine runs have no PTY, but retain the
+    /// provider and opaque run id so UI answers and steers use the same routes.
+    workflow: Option<WorkflowControl>,
+}
+
+struct WorkflowControl {
+    provider: HttpWorkflowProvider,
+    provider_run_id: String,
 }
 
 pub struct AgentTaskRegistry {
@@ -1394,9 +1402,9 @@ impl AgentTaskRegistry {
         {
             return Ok(None);
         }
-        // The per-task concurrency cap (#290). Counting live sessions, not the
-        // `executing` guard above, so a cap of two genuinely allows two runs in
-        // flight while a cap of one preserves the old one-at-a-time behaviour.
+        // The per-task concurrency cap (#290). Counting live controls as well
+        // as PTY sessions means a workflow-engine run occupies a slot even
+        // though it deliberately has no local session.
         let cap = task.concurrency.max(1) as usize;
         if self.running_run_count(&task) >= cap {
             return self.defer_or_conflict(id, trigger, "task is at its concurrency cap");
@@ -1411,7 +1419,7 @@ impl AgentTaskRegistry {
 
         // A task with a workflow-engine backend (#293) takes an entirely
         // separate path: no prompt expansion, no PTY, no session. The run is
-        // handed to the engine and tracked by polling. Everything below — the
+        // handed to the engine and tracked by SSE with polling fallback. Everything below — the
         // command build, the session spawn, the orchestrator — is the PTY path
         // and stays untouched when `workflow_engine` is None.
         if let Some(we) = task.workflow_engine.clone() {
@@ -1595,9 +1603,10 @@ impl AgentTaskRegistry {
         // moment it exists — a task with no gates can still be redirected
         // mid-flight.
         let control = Arc::new(RunControl {
-            session: Arc::clone(&session),
+            session: Some(Arc::clone(&session)),
             steer: Mutex::new(VecDeque::new()),
             notify: Arc::new(Notify::new()),
+            workflow: None,
         });
         self.runs.lock().insert(run.id, Arc::clone(&control));
         spawn_run_orchestrator(
@@ -1628,7 +1637,7 @@ impl AgentTaskRegistry {
     }
 
     /// The workflow-engine path (#293): hand a run to an external engine and
-    /// track it by polling, instead of spawning a PTY. Reached only when the
+    /// track it by SSE with polling fallback, instead of spawning a PTY. Reached only when the
     /// task carries a [`WorkflowEngineConfig`]; the PTY path above is untouched.
     ///
     /// Every provider failure — an unreadable token file, an unreachable engine,
@@ -1713,8 +1722,18 @@ impl AgentTaskRegistry {
                 // degrading to the poller when the stream is absent or breaks.
                 // The tracker also collects each per-stage checkpoint branch the
                 // stream or poll fallback reports as a run observation (#284).
-                // Gate forwarding (#289) and a live smoke of the provisional
-                // wire field names remain external follow-up work.
+                // Keep a provider control beside the persisted run so gate
+                // answers and steering can be forwarded without a PTY.
+                let control = Arc::new(RunControl {
+                    session: None,
+                    steer: Mutex::new(VecDeque::new()),
+                    notify: Arc::new(Notify::new()),
+                    workflow: Some(WorkflowControl {
+                        provider: provider.clone(),
+                        provider_run_id: provider_run.run_id.clone(),
+                    }),
+                });
+                self.runs.lock().insert(run.id, control);
                 spawn_workflow_tracker(
                     Arc::clone(self),
                     provider,
@@ -1832,6 +1851,7 @@ impl AgentTaskRegistry {
             task.updated_at = finished;
             let _ = self.save_locked(&tasks);
         }
+        self.remove_run_control(run_id);
         self.bus.publish(ServerEvent::TaskRunConcluded {
             task_id,
             run_id,
@@ -1949,13 +1969,21 @@ impl AgentTaskRegistry {
             .cloned()
     }
 
-    /// How many of a task's runs still have a live session — the number the
-    /// concurrency cap (#290) is compared against.
+    /// How many of a task's runs still have a live PTY or workflow control —
+    /// the number the concurrency cap (#290) is compared against.
     fn running_run_count(&self, task: &AgentTask) -> usize {
+        let controls = self.runs.lock();
         task.runs
             .iter()
-            .filter_map(|run| self.sessions.get(run.session_id).ok())
-            .filter(|session| session.exit_code().is_none())
+            .filter(|run| {
+                controls.get(&run.id).is_some_and(|control| {
+                    control.workflow.is_some()
+                        || control
+                            .session
+                            .as_ref()
+                            .is_some_and(|session| session.exit_code().is_none())
+                })
+            })
             .count()
     }
 
@@ -2193,7 +2221,7 @@ impl AgentTaskRegistry {
     /// this run happens to be. Refused when the task has no run in flight —
     /// there is nothing to steer, and queuing for a run that will never read it
     /// would be a silent no-op dressed as a success.
-    pub fn steer(
+    pub async fn steer(
         &self,
         task_id: Uuid,
         text: String,
@@ -2207,13 +2235,23 @@ impl AgentTaskRegistry {
                 "steer needs text, or interrupt=true".into(),
             ));
         }
-        let (_run_id, control) = self.live_run(task_id)?;
-        control.steer.lock().push_back(SteerItem {
+        let (run_id, control) = self.live_run(task_id)?;
+        let item = SteerItem {
             text,
             interrupt,
             actor,
             reason,
-        });
+        };
+        if let Some(workflow) = control.workflow.as_ref() {
+            workflow
+                .provider
+                .steer(&workflow.provider_run_id, &item.text, item.interrupt)
+                .await
+                .map_err(|err| ApiError::BadGateway(err.to_string()))?;
+            self.emit_steered(run_id, &item);
+            return Ok(());
+        }
+        control.steer.lock().push_back(item);
         control.notify.notify_one();
         Ok(())
     }
@@ -2222,7 +2260,7 @@ impl AgentTaskRegistry {
     /// input is delivered to the PTY by the orchestrator; this only records the
     /// resolution and wakes it. Fail-closed lives elsewhere — this is the human
     /// path, and the only path that can produce an approval.
-    pub fn answer_gate(
+    pub async fn answer_gate(
         &self,
         task_id: Uuid,
         gate_id: Uuid,
@@ -2231,6 +2269,22 @@ impl AgentTaskRegistry {
         reason: Option<String>,
     ) -> Result<GateRecord> {
         let (run_id, control) = self.live_run(task_id)?;
+        if let Some(workflow) = control.workflow.as_ref() {
+            let gate = self
+                .gate_record(run_id, gate_id)
+                .ok_or(ApiError::NotFound)?;
+            if option_index >= gate.options.len() {
+                return Err(ApiError::BadRequest("no such gate option".into()));
+            }
+            let provider_id = gate.provider_id.ok_or_else(|| {
+                ApiError::BadRequest("gate is not owned by the workflow engine".into())
+            })?;
+            workflow
+                .provider
+                .answer_gate(&workflow.provider_run_id, &provider_id, option_index)
+                .await
+                .map_err(|err| ApiError::BadGateway(err.to_string()))?;
+        }
         let record =
             self.resolve_gate_answer(run_id, gate_id, option_index, &actor, false, reason)?;
         control.notify.notify_one();
@@ -2251,7 +2305,12 @@ impl AgentTaskRegistry {
         let controls = self.runs.lock();
         for run_id in run_ids {
             if let Some(control) = controls.get(&run_id) {
-                if control.session.exit_code().is_none() {
+                if control.workflow.is_some()
+                    || control
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.exit_code().is_none())
+                {
                     return Ok((run_id, Arc::clone(control)));
                 }
             }
@@ -2334,6 +2393,54 @@ impl AgentTaskRegistry {
     fn open_gate(&self, run_id: Uuid, spec: &GateSpec) -> Result<()> {
         let now = OffsetDateTime::now_utc();
         let record = GateRecord::open(spec, now);
+        self.persist_open_gate(run_id, record)
+    }
+
+    /// Mirror a provider-owned gate into the existing local gate API. The
+    /// provider id remains internal: callers answer with Vogt's UUID and the
+    /// registry translates it back before forwarding the decision upstream.
+    fn open_workflow_gate(&self, run_id: Uuid, provider_gate: &ProviderGate) -> Result<()> {
+        {
+            let tasks = self.tasks.lock();
+            if tasks
+                .iter()
+                .flat_map(|task| &task.runs)
+                .find(|run| run.id == run_id)
+                .is_some_and(|run| {
+                    run.gates
+                        .iter()
+                        .any(|gate| gate.provider_id.as_deref() == Some(provider_gate.id.as_str()))
+                })
+            {
+                return Ok(());
+            }
+        }
+        let spec = GateSpec {
+            id: Uuid::new_v4(),
+            question: provider_gate.question.clone(),
+            options: provider_gate
+                .options
+                .iter()
+                .map(|option| GateOption {
+                    label: option.label.clone(),
+                    input: option.input.clone(),
+                    approve: option.approve,
+                })
+                .collect(),
+            timeout_ms: None,
+        };
+        spec.validate()
+            .map_err(|error| ApiError::BadGateway(format!("invalid workflow gate: {error}")))?;
+        let record = GateRecord::open_with_provider(
+            &spec,
+            OffsetDateTime::now_utc(),
+            Some(provider_gate.id.clone()),
+        );
+        self.persist_open_gate(run_id, record)
+    }
+
+    fn persist_open_gate(&self, run_id: Uuid, record: GateRecord) -> Result<()> {
+        let now = OffsetDateTime::now_utc();
         let (task_id, task_name, session_id) = {
             let mut tasks = self.tasks.lock();
             let task = task_with_run_mut(&mut tasks, run_id).ok_or(ApiError::NotFound)?;
@@ -2353,21 +2460,21 @@ impl AgentTaskRegistry {
             task_id,
             run_id,
             session_id,
-            gate_id: spec.id,
-            question: spec.question.clone(),
-            options: spec.options.iter().map(|o| o.label.clone()).collect(),
+            gate_id: record.id,
+            question: record.question.clone(),
+            options: record.options.iter().map(|o| o.label.clone()).collect(),
         });
         let data = json!({
             "kind": "agent-task-gate",
             "task_id": task_id.to_string(),
             "run_id": run_id.to_string(),
-            "gate_id": spec.id.to_string(),
+            "gate_id": record.id.to_string(),
             "session_id": session_id.to_string(),
             "url": format!("/#/t/{session_id}"),
         });
         let title = format!("{task_name} needs approval");
         let push = Arc::clone(&self.push);
-        let question = spec.question.clone();
+        let question = record.question.clone();
         tokio::spawn(async move {
             let _ = push
                 .notify(NotificationKind::AgentTaskNotify, &title, &question, data)
@@ -2737,13 +2844,16 @@ pub async fn steer(
     Json(req): Json<SteerReq>,
 ) -> Result<Json<serde_json::Value>> {
     let actor = clean_optional(req.actor).unwrap_or_else(|| "operator".to_string());
-    state.agent_tasks.steer(
-        id,
-        req.text,
-        req.interrupt,
-        actor,
-        clean_optional(req.reason),
-    )?;
+    state
+        .agent_tasks
+        .steer(
+            id,
+            req.text,
+            req.interrupt,
+            actor,
+            clean_optional(req.reason),
+        )
+        .await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2764,13 +2874,10 @@ pub async fn answer_gate(
     Json(req): Json<GateAnswerReq>,
 ) -> Result<Json<GateRecord>> {
     let actor = clean_optional(req.actor).unwrap_or_else(|| "operator".to_string());
-    let record = state.agent_tasks.answer_gate(
-        id,
-        gate_id,
-        req.option,
-        actor,
-        clean_optional(req.reason),
-    )?;
+    let record = state
+        .agent_tasks
+        .answer_gate(id, gate_id, req.option, actor, clean_optional(req.reason))
+        .await?;
     Ok(Json(record))
 }
 
@@ -3352,6 +3459,15 @@ fn spawn_workflow_tracker(
                                 event.at.unwrap_or_else(OffsetDateTime::now_utc),
                             );
                         }
+                        if let Some(gate) = event.gate.as_ref() {
+                            if let Err(err) = registry.open_workflow_gate(run_id, gate) {
+                                tracing::warn!(
+                                    run = %run_id,
+                                    error = %err,
+                                    "failed to mirror workflow gate"
+                                );
+                            }
+                        }
                         if let Some(state) = event.terminal_state {
                             finalize_workflow_run(
                                 &registry,
@@ -3439,6 +3555,10 @@ async fn finalize_workflow_run(
     let finished = OffsetDateTime::now_utc();
     let (outcome, conclusion, provider_summary) = match provider.poll(provider_run_id).await {
         Ok(status) if status.state.is_terminal() => {
+            record_workflow_gates(registry, run_id, &status.gates);
+            if status.state == ProviderRunState::Blocked {
+                registry.block_open_gates(run_id, "workflow engine blocked the run");
+            }
             let summary = status.conclusion.as_ref().and_then(|c| c.summary.clone());
             let (outcome, conclusion) =
                 map_conclusion(status.state, status.conclusion, started, finished);
@@ -3492,7 +3612,11 @@ async fn poll_workflow_to_terminal(
             Ok(status) => {
                 consecutive_errors = 0;
                 record_workflow_checkpoints(&registry, task_id, run_id, &status.checkpoints);
+                record_workflow_gates(&registry, run_id, &status.gates);
                 if status.state.is_terminal() {
+                    if status.state == ProviderRunState::Blocked {
+                        registry.block_open_gates(run_id, "workflow engine blocked the run");
+                    }
                     let finished = OffsetDateTime::now_utc();
                     let provider_summary =
                         status.conclusion.as_ref().and_then(|c| c.summary.clone());
@@ -3541,6 +3665,14 @@ fn record_workflow_checkpoints(
             &checkpoint.branch,
             checkpoint.at.unwrap_or_else(OffsetDateTime::now_utc),
         );
+    }
+}
+
+fn record_workflow_gates(registry: &AgentTaskRegistry, run_id: Uuid, gates: &[ProviderGate]) {
+    for gate in gates {
+        if let Err(err) = registry.open_workflow_gate(run_id, gate) {
+            tracing::warn!(run = %run_id, error = %err, "failed to mirror workflow gate");
+        }
     }
 }
 
@@ -3744,7 +3876,9 @@ fn spawn_run_orchestrator(
     auto_approve: bool,
 ) {
     tokio::spawn(async move {
-        let session = Arc::clone(&control.session);
+        let Some(session) = control.session.clone() else {
+            return;
+        };
         let mut pending: VecDeque<GateSpec> = gates.into();
         // The gate this loop is currently holding, if any. Held as its spec so
         // its deadline is known without another lookup; its live state is read

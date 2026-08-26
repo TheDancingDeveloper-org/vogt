@@ -151,6 +151,12 @@ impl GateState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateRecord {
     pub id: Uuid,
+    /// Provider-owned identity when this gate came from an external workflow
+    /// engine. Local PTY gates leave it absent; it lets an answer route map the
+    /// stable Vogt UUID back to the provider without exposing provider ids as
+    /// API ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
     pub question: String,
     pub options: Vec<GateOption>,
     #[serde(flatten)]
@@ -165,8 +171,18 @@ impl GateRecord {
     /// Open a gate from its spec at `now`. The record starts [`GateState::Open`]
     /// — the only state anything may transition *out* of.
     pub fn open(spec: &GateSpec, now: OffsetDateTime) -> Self {
+        Self::open_with_provider(spec, now, None)
+    }
+
+    /// Open a gate whose identity is owned by an external provider.
+    pub fn open_with_provider(
+        spec: &GateSpec,
+        now: OffsetDateTime,
+        provider_id: Option<String>,
+    ) -> Self {
         Self {
             id: spec.id,
+            provider_id,
             question: spec.question.clone(),
             options: spec.options.clone(),
             state: GateState::Open,
