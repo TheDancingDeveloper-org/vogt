@@ -30,8 +30,11 @@ import {
   setFileTreeSearch,
 } from "./fileTreeState";
 import { workspaceVersion } from "./workspaceVersion";
+import { registerFileTreeRevalidator } from "./fileTreeRevalidate";
 
 interface Props {
+  /** Whether this mounted tree belongs to the currently visible surface. */
+  active?: () => boolean;
   onOpen?: () => void;
   onCreatePresetHere?: (path: string) => void;
   promptPath?: (
@@ -282,8 +285,14 @@ const TreeNodeView: Component<NodeProps> = (props) => {
 };
 
 const FileTree: Component<Props> = (props) => {
-  const [tree, { refetch }] = createResource(() => api.tree("", 0));
-  const [gitStatus, { refetch: refetchGitStatus }] = createResource(async () => {
+  const isActive = () => props.active?.() ?? true;
+  const [tree, { refetch }] = createResource(
+    () => (isActive() ? "active" : undefined),
+    () => api.tree("", 0),
+  );
+  const [gitStatus, { refetch: refetchGitStatus }] = createResource(
+    () => (isActive() ? "active" : undefined),
+    async () => {
     try {
       const status = await api.gitStatus("");
       return status.is_repo === false ? [] : status.entries;
@@ -292,7 +301,8 @@ const FileTree: Component<Props> = (props) => {
       // local Git read failure removes optional markers, never the file tree.
       return [];
     }
-  });
+    },
+  );
   // Search query is hoisted to the module store so it survives a tab switch.
   const searchQuery = fileTreeSearch;
   const setSearchQuery = setFileTreeSearch;
@@ -339,6 +349,7 @@ const FileTree: Component<Props> = (props) => {
   let firstVersion = true;
   createEffect(() => {
     workspaceVersion();
+    if (!isActive()) return;
     if (firstVersion) {
       firstVersion = false;
       return;
@@ -348,20 +359,14 @@ const FileTree: Component<Props> = (props) => {
   });
 
   // Coming back to the tab is a moment the tree may be stale (an agent wrote
-  // files, a terminal ran git). Reconcile on focus and on becoming visible.
+  // files, a terminal ran git). The module coordinator combines focus and
+  // visibility into one debounced wake and ignores inactive surfaces (#415).
   const revalidate = () => {
+    if (!isActive()) return;
     void refetch();
     void refetchGitStatus();
   };
-  const onVisibility = () => {
-    if (document.visibilityState === "visible") revalidate();
-  };
-  window.addEventListener("focus", revalidate);
-  document.addEventListener("visibilitychange", onVisibility);
-  onCleanup(() => {
-    window.removeEventListener("focus", revalidate);
-    document.removeEventListener("visibilitychange", onVisibility);
-  });
+  onCleanup(registerFileTreeRevalidator(isActive, revalidate));
 
   createEffect(() => {
     const query = searchQuery();
