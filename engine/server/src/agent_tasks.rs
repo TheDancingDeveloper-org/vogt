@@ -2273,6 +2273,9 @@ impl AgentTaskRegistry {
             let gate = self
                 .gate_record(run_id, gate_id)
                 .ok_or(ApiError::NotFound)?;
+            if !gate.state.is_open() {
+                return Err(ApiError::Conflict("gate is already resolved".into()));
+            }
             if option_index >= gate.options.len() {
                 return Err(ApiError::BadRequest("no such gate option".into()));
             }
