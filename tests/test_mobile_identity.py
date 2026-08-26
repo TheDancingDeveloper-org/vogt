@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -201,6 +202,23 @@ def test_firebase_fetcher_never_prints_the_secret_and_checks_package() -> None:
     assert "json.loads" in script
     assert "VOGT_ANDROID_EXPECTED_PACKAGE" in script
     assert 'mv -- "$temp_output" "$VOGT_FIREBASE_OUTPUT"' in script
+
+
+def test_live_firebase_config_is_not_tracked_and_docs_do_not_claim_it_is() -> None:
+    """Firebase credentials stay operator/CI supplied, not repository state."""
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", str(_SERVICES_REAL.relative_to(REPO_ROOT))],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert not tracked
+
+    poc = (REPO_ROOT / "docs" / "VOICE_POC.md").read_text(encoding="utf-8")
+    assert "checked-in `google-services.json`" not in poc
+    assert "sanitized example" in poc
+    assert "com.sprooty.vogt.dev" in poc
 
 
 def test_namespace_matches_the_source_package() -> None:

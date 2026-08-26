@@ -111,13 +111,15 @@ Ordered so each step is demonstrable on its own and the hardware step is last.
 
 ### 3.6 Phone: background + speak-the-push (FR-M6) — *needs the dev APK, FR-M4*
 
-> **FR-M4's blocker is cleared on the configuration side (2026-08-21).** The
-> Firebase project behind the checked-in `google-services.json` carries an
-> Android app for the dev application id — verified against the console, not
-> inferred from the file. Nothing needs creating in Firebase. What is left is
-> the on-device pass: install the dev APK beside prod, confirm both register
-> for push and route correctly. The Checkpoint D code (#192) is built and
-> compiles; it has never run on hardware.
+> **FR-M4's repository/configuration work is complete; hardware is not.** The
+> dev build uses `com.sprooty.vogt.dev` and the production build uses
+> `com.sprooty.vogt`. CI fetches the matching Firebase client configuration
+> from Infisical and validates its package name before Gradle consumes it;
+> the repository only carries a sanitized example. This proves identity,
+> package/config handling, and APK assembly — not Firebase console state or
+> delivery. What is left is the on-device pass: install the dev APK beside
+> prod, confirm both register for push and route correctly. The Checkpoint D
+> code (#192) is built and compiles; it has never run on hardware.
 
 
 - Capacitor foreground-service plugin held only while a conversation is
