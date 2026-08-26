@@ -840,12 +840,6 @@ const ReasonForm: Component<{
 };
 
 const WorkItemDetail: Component<Props> = (props) => {
-  // Start the workflow read before the item read. The item page can render
-  // its current state without workflow metadata, but when both answers are
-  // available together the transition control is present on the first
-  // settled item render instead of appearing one reactive turn later.
-  const [workflows] = createResource(() => attempt(() => listWorkflows()));
-
   const [work, { refetch: refetchWork }] = createResource(
     () => props.itemRef,
     (ref) => attempt(() => getWork(ref)),
@@ -956,6 +950,12 @@ const WorkItemDetail: Component<Props> = (props) => {
         ),
       ),
   );
+
+  // Start the workflow read before the item read. The item page can render
+  // its current state without workflow metadata, but when both answers are
+  // available together the transition control is present on the first
+  // settled item render instead of appearing one reactive turn later.
+  const [workflows] = createResource(() => attempt(() => taxonomy.workflows()));
 
   // The actors an item can be assigned to, for the editor's assignee picker.
   // Read once: the roster is not per-item, and an empty answer is a real one —
