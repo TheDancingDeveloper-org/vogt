@@ -68,8 +68,18 @@ afterEach(() => {
   clearEditorDrafts();
   clearToolDrafts();
   clearPendingAction();
-  invalidateAssistantSnapshot();
   resetRailSections();
   resetFileTreeState();
+});
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+  invalidate();
+  clearEditorDrafts();
+  clearToolDrafts();
+  clearPendingAction();
+  resetRailSections();
+  resetFileTreeState();
+  invalidateAssistantSnapshot();
   clearTaxonomyCache();
 });

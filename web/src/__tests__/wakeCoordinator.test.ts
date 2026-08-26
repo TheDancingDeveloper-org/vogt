@@ -27,8 +27,11 @@ describe("foreground wake coordinator", () => {
     let release!: (value: string) => void;
     const pending = new Promise<string>((resolve) => { release = resolve; });
     const run = vi.fn(() => pending);
-    const first = reconcile("sessions", wake, async () => run());
-    const second = reconcile("sessions", wake, async () => run());
+    // The shared taxonomy test setup imports the production session store,
+    // which also reconciles the real "sessions" resource on each wake. Keep
+    // this unit test's synthetic resource separate from that listener.
+    const first = reconcile("wake-test-sessions", wake, async () => run());
+    const second = reconcile("wake-test-sessions", wake, async () => run());
     expect(second).toBe(first);
     expect(run).toHaveBeenCalledTimes(1);
     release("ready");
