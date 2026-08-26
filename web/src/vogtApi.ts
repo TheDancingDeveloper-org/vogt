@@ -29,6 +29,7 @@ export const VOGT_PREFIX = "/api/vogt";
 /** One entry per operation the PWA reads or writes. Names match the registry. */
 export const ROUTES = {
   status: "/status",
+  "place.metrics": "/place/metrics",
   "project.list": "/projects",
   "project.get": "/projects/get",
   "project.brief": "/projects/brief",
@@ -220,6 +221,16 @@ export interface InboxListResult {
   engine_available?: boolean;
   engine_status?: "not_configured" | "available" | "unreachable" | string;
   engine_detail?: string | null;
+}
+
+export interface PlaceMetricsResult {
+  inbox_active?: number | null;
+  projects_total?: number | null;
+  work_total?: number | null;
+  backlog_total_considered?: number | null;
+  drift_present?: boolean | null;
+  revision?: number;
+  generated_at?: string;
 }
 
 export interface WorkItem {
@@ -659,6 +670,8 @@ export interface ComplianceResult {
 
 export const listWorkflows = () =>
   call<{ workflows: Workflow[] }>("workflow.list");
+
+export const placeMetrics = () => call<PlaceMetricsResult>("place.metrics");
 
 export const listWork = (
   params: Record<string, unknown> = {},

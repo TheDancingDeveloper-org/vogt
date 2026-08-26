@@ -1,5 +1,13 @@
 import { createStore } from "solid-js/store";
-import { backlog, listDrift, listInbox, listProjects, listWork } from "./vogtApi";
+import { ApiError } from "./api";
+import {
+  backlog,
+  listDrift,
+  listInbox,
+  listProjects,
+  listWork,
+  placeMetrics as readPlaceMetrics,
+} from "./vogtApi";
 
 export type PlaceMetricState = "loading" | "ready" | "stale" | "unavailable";
 
@@ -27,6 +35,10 @@ const initial = (): PlaceMetric => ({ value: null, state: "loading" });
 function requiredCount(value: number | undefined, source: string): number {
   if (typeof value !== "number") throw new Error(`${source} did not report a total`);
   return value;
+}
+
+function metricValue(value: number | null | undefined): number | null {
+  return typeof value === "number" ? value : null;
 }
 
 export interface PlaceMetricsController {
@@ -71,6 +83,7 @@ export function createPlaceMetrics(): PlaceMetricsController {
     drift: initial(),
   });
   let generation = 0;
+  let aggregateSupported: boolean | null = null;
 
   const load = async (
     name: keyof PlaceMetrics,
@@ -92,6 +105,47 @@ export function createPlaceMetrics(): PlaceMetricsController {
     for (const name of ["inbox", "projects", "board", "backlog", "drift"] as const) {
       setMetrics(name, "state", metrics[name].value === null ? "loading" : "stale");
     }
+    if (aggregateSupported !== false) {
+      try {
+        const result = await readPlaceMetrics();
+        aggregateSupported = true;
+        if (generation !== currentGeneration) return;
+        setMetrics("inbox", {
+          value: metricValue(result.inbox_active),
+          state: result.inbox_active === null || result.inbox_active === undefined ? "unavailable" : "ready",
+        });
+        setMetrics("projects", {
+          value: metricValue(result.projects_total),
+          state: result.projects_total === null || result.projects_total === undefined ? "unavailable" : "ready",
+        });
+        setMetrics("board", {
+          value: metricValue(result.work_total),
+          state: result.work_total === null || result.work_total === undefined ? "unavailable" : "ready",
+        });
+        setMetrics("backlog", {
+          value: metricValue(result.backlog_total_considered),
+          state: result.backlog_total_considered === null || result.backlog_total_considered === undefined ? "unavailable" : "ready",
+        });
+        setMetrics("drift", {
+          value: result.drift_present === null || result.drift_present === undefined ? null : result.drift_present ? 1 : 0,
+          state: result.drift_present === null || result.drift_present === undefined ? "unavailable" : "ready",
+        });
+        return;
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.status !== 404) {
+          if (generation !== currentGeneration) return;
+          for (const name of ["inbox", "projects", "board", "backlog", "drift"] as const) {
+            setMetrics(name, "state", "unavailable");
+          }
+          return;
+        }
+        // Mixed deployments may have an older core. Detect that once, then
+        // keep using the compatible legacy path without retrying the missing
+        // operation on every nudge.
+        aggregateSupported = false;
+      }
+    }
+
     await Promise.all([
       load(
         "inbox",

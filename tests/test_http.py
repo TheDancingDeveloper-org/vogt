@@ -23,6 +23,20 @@ def test_status_is_readable(client: TestClient) -> None:
     assert response.json()["revision"] == 0
 
 
+def test_place_metrics_are_one_bounded_read(client: TestClient) -> None:
+    response = client.get(f"{API_PREFIX}/place/metrics")
+    assert response.status_code == 200
+    assert response.json() == {
+        "inbox_active": 0,
+        "projects_total": 0,
+        "work_total": 0,
+        "backlog_total_considered": 0,
+        "drift_present": False,
+        "revision": 0,
+        "generated_at": response.json()["generated_at"],
+    }
+
+
 def test_registering_a_project_returns_it(client: TestClient) -> None:
     response = client.post(
         f"{API_PREFIX}/projects",
