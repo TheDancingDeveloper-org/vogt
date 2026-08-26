@@ -15,6 +15,7 @@ import { sessionsStore, sessionsError, isConnected } from "./store";
 import type { SessionSummary } from "./api";
 import type { SessionTool } from "./routeModel";
 import { pendingAction, setPendingAction } from "./pendingAction";
+import { isDemoMode } from "./runtimeTransport";
 import {
   deferAssistantHydration,
   invalidateAssistantSnapshot,
@@ -122,7 +123,7 @@ const Sessions: Component<Props> = (props) => {
     // mounts do not wake the assistant at all.
     if (props.assistantEnabled !== true) return;
     const explicitApproval = new URLSearchParams(location.search).has("approval");
-    if (!explicitApproval) return;
+    if (!explicitApproval && !isDemoMode()) return;
     const cancel = deferAssistantHydration(() => void readPending());
     onCleanup(cancel);
   });

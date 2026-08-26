@@ -1,10 +1,11 @@
 // Request-count coverage for the assistant's lazy, shared hydration (#416).
 import { render } from "@solidjs/testing-library";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import Assistant from "../Assistant";
 import { invalidateAssistantSnapshot, readAssistantSnapshot } from "../assistantCache";
 import Sessions from "../Sessions";
+import * as runtimeTransport from "../runtimeTransport";
 import { fakeVogt, mountAt, settle } from "./harness";
 
 const config = {
@@ -27,6 +28,7 @@ function assistantCalls(engine: ReturnType<typeof fakeVogt>): string[] {
 
 afterEach(() => {
   invalidateAssistantSnapshot();
+  vi.restoreAllMocks();
 });
 
 describe("assistant hydration request gates", () => {
@@ -53,6 +55,20 @@ describe("assistant hydration request gates", () => {
 
     await settle();
     expect(assistantCalls(engine)).toEqual([]);
+    mounted.unmount();
+  });
+
+  it("reads the demo pending action without an approval deep-link", async () => {
+    vi.spyOn(runtimeTransport, "isDemoMode").mockReturnValue(true);
+    const engine = fakeVogt({}, {
+      "GET /api/assistant/history": { body: history },
+    });
+    const mounted = mountAt("/t/demo-agent", "/t/demo-agent", () => (
+      <Sessions assistantEnabled />
+    ));
+
+    await settle();
+    expect(assistantCalls(engine)).toEqual(["GET /api/assistant/history"]);
     mounted.unmount();
   });
 
